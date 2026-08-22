@@ -23,6 +23,7 @@ mod model_credentials_and_tool_batches;
 mod outbox_dispatch_and_process_read;
 mod restart_recovery_and_submit;
 mod session_creation_and_submit;
+mod session_live;
 mod session_plan;
 mod session_timeline;
 mod tool_round_lifecycle;

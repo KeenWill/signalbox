@@ -9,7 +9,9 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Value, json};
-use signalbox_application::{max_timeline_window_bytes, max_timeline_window_items};
+use signalbox_application::{
+    max_session_live_queued_turns, max_timeline_window_bytes, max_timeline_window_items,
+};
 
 /// Exact browser HTTP contract version served by this daemon build.
 pub const WEB_CONTRACT_VERSION: &str = "1";
@@ -43,6 +45,8 @@ pub struct WebContractCapabilities {
     pub ndjson_streaming: bool,
     /// Stable bounded session descriptors and historical windows are available.
     pub bounded_session_timeline: bool,
+    /// Bounded current snapshots and snapshot-first live follow are available.
+    pub bounded_session_live: bool,
 }
 
 /// Effective hard limits clients must honor for this contract version.
@@ -57,6 +61,8 @@ pub struct WebContractLimits {
     pub max_timeline_window_items: u32,
     /// Maximum projected structured item bytes in one timeline window.
     pub max_timeline_window_bytes: u32,
+    /// Maximum queued turn identities retained in one live snapshot.
+    pub max_session_live_queued_turns: u32,
 }
 
 /// Response from the contract bootstrap endpoint.
@@ -85,12 +91,14 @@ impl WebContractBootstrap {
                 same_origin_json_mutations: true,
                 ndjson_streaming: true,
                 bounded_session_timeline: true,
+                bounded_session_live: true,
             },
             limits: WebContractLimits {
                 max_json_body_bytes: MAX_JSON_BODY_BYTES as u32,
                 max_ndjson_item_bytes: MAX_NDJSON_ITEM_BYTES as u32,
                 max_timeline_window_items: u32::from(max_timeline_window_items()),
                 max_timeline_window_bytes: max_timeline_window_bytes(),
+                max_session_live_queued_turns: u32::from(max_session_live_queued_turns()),
             },
         }
     }
@@ -263,6 +271,117 @@ pub struct WebSessionTimelineWindow {
     pub projected_structured_bytes: u32,
     pub continuation_before: Option<WebTimelineAddress>,
     pub continuation_after: Option<WebTimelineAddress>,
+}
+
+/// Current durable state of one active turn.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WebSessionLiveActiveState {
+    Running {
+        model_call_id: Option<String>,
+    },
+    AwaitingModelCallRecovery {
+        model_call_id: String,
+    },
+    AwaitingToolApproval {
+        tool_request_id: String,
+    },
+    AwaitingChild {
+        tool_request_id: String,
+        child_session_id: String,
+    },
+    AwaitingToolRecovery {
+        tool_attempt_id: String,
+    },
+    AwaitingRunnerRecovery {
+        runner_id: String,
+        placement_revision: WebU64,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionLiveActiveTurn {
+    pub turn_id: String,
+    pub state: WebSessionLiveActiveState,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WebSessionLiveReconciliation {
+    ModelCall {
+        turn_id: String,
+        model_call_id: String,
+    },
+    ToolAttempt {
+        turn_id: String,
+        tool_attempt_id: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSessionLiveRunnerState {
+    Unpinned,
+    Pinned,
+    RunnerLostBeforePin,
+    RunnerLost,
+    RunnerAbandoned,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSessionLiveRunnerConnectionHealth {
+    Connected,
+    Suspect,
+    Shutdown,
+    Lost,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionLiveRunner {
+    pub runner_id: Option<String>,
+    pub placement_revision: WebU64,
+    pub state: WebSessionLiveRunnerState,
+    pub connection_health: Option<WebSessionLiveRunnerConnectionHealth>,
+}
+
+/// Bounded repeatable-read current projection for one open workspace.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionLiveSnapshot {
+    pub session_id: String,
+    pub observed_through: WebU64,
+    pub active: Option<WebSessionLiveActiveTurn>,
+    pub queued_turn_count: WebU64,
+    #[schemars(length(max = 32))]
+    pub queued_turn_ids: Vec<String>,
+    pub reconciliation: Option<WebSessionLiveReconciliation>,
+    pub runner: Option<WebSessionLiveRunner>,
+}
+
+/// Snapshot-first event stream for one open workspace.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WebSessionLiveStreamEvent {
+    Snapshot {
+        snapshot: Box<WebSessionLiveSnapshot>,
+    },
+    Durable {
+        cursor: WebU64,
+        address: WebTimelineAddress,
+        event_kind: WebSessionTimelineEventKind,
+    },
+    ProviderTextDelta {
+        turn_id: String,
+        model_call_id: String,
+        part_index: u32,
+        content: String,
+    },
+    ResyncRequired {
+        cursor: WebU64,
+    },
 }
 
 /// Layer that owns one browser API failure.
@@ -461,6 +580,17 @@ impl fmt::Display for GenerateWebContractError {
 
 impl Error for GenerateWebContractError {}
 
+struct GeneratedSchemas {
+    bootstrap: Value,
+    example: Value,
+    error: Value,
+    descriptor: Value,
+    window: Value,
+    attention_snapshot: Value,
+    attention_event: Value,
+    live_event: Value,
+}
+
 /// Produces all checked-in browser contract artifacts.
 ///
 /// # Errors
@@ -468,17 +598,22 @@ impl Error for GenerateWebContractError {}
 /// Returns a closed build-time error when serde cannot encode a generated value
 /// or a DTO schema grows beyond the generator's focused supported shapes.
 pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContractError> {
-    let bootstrap_schema = canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value());
-    let example_schema = canonical_schema(schemars::schema_for!(WebContractExample).to_value());
-    let error_schema = canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value());
-    let descriptor_schema =
-        canonical_schema(schemars::schema_for!(WebSessionTimelineDescriptor).to_value());
-    let window_schema =
-        canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
-    let attention_snapshot_schema =
-        canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value());
-    let attention_event_schema =
-        canonical_schema(schemars::schema_for!(WebAttentionStreamEvent).to_value());
+    let schemas = GeneratedSchemas {
+        bootstrap: canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value()),
+        example: canonical_schema(schemars::schema_for!(WebContractExample).to_value()),
+        error: canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value()),
+        descriptor: canonical_schema(
+            schemars::schema_for!(WebSessionTimelineDescriptor).to_value(),
+        ),
+        window: canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value()),
+        attention_snapshot: canonical_schema(
+            schemars::schema_for!(WebAttentionSnapshot).to_value(),
+        ),
+        attention_event: canonical_schema(
+            schemars::schema_for!(WebAttentionStreamEvent).to_value(),
+        ),
+        live_event: canonical_schema(schemars::schema_for!(WebSessionLiveStreamEvent).to_value()),
+    };
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -490,27 +625,11 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     Ok(vec![
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.mjs",
-            contents: runtime_module(
-                &bootstrap_schema,
-                &example_schema,
-                &error_schema,
-                &descriptor_schema,
-                &window_schema,
-                &attention_snapshot_schema,
-                &attention_event_schema,
-            )?,
+            contents: runtime_module(&schemas)?,
         },
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.d.mts",
-            contents: declaration_module(
-                &bootstrap_schema,
-                &example_schema,
-                &error_schema,
-                &descriptor_schema,
-                &window_schema,
-                &attention_snapshot_schema,
-                &attention_event_schema,
-            )?,
+            contents: declaration_module(&schemas)?,
         },
         GeneratedArtifact {
             path: "crates/web-contract/tests/fixtures/example.json",
@@ -527,23 +646,16 @@ fn canonical_schema(mut schema: Value) -> Value {
     schema
 }
 
-fn runtime_module(
-    bootstrap_schema: &Value,
-    example_schema: &Value,
-    error_schema: &Value,
-    descriptor_schema: &Value,
-    window_schema: &Value,
-    attention_snapshot_schema: &Value,
-    attention_event_schema: &Value,
-) -> Result<String, GenerateWebContractError> {
+fn runtime_module(schemas: &GeneratedSchemas) -> Result<String, GenerateWebContractError> {
     let mut schemas = json!({
-        "WebContractBootstrap": bootstrap_schema,
-        "WebContractExample": example_schema,
-        "WebApiErrorResponse": error_schema,
-        "WebSessionTimelineDescriptor": descriptor_schema,
-        "WebSessionTimelineWindow": window_schema,
-        "WebAttentionSnapshot": attention_snapshot_schema,
-        "WebAttentionStreamEvent": attention_event_schema,
+        "WebContractBootstrap": schemas.bootstrap,
+        "WebContractExample": schemas.example,
+        "WebApiErrorResponse": schemas.error,
+        "WebSessionTimelineDescriptor": schemas.descriptor,
+        "WebSessionTimelineWindow": schemas.window,
+        "WebAttentionSnapshot": schemas.attention_snapshot,
+        "WebAttentionStreamEvent": schemas.attention_event,
+        "WebSessionLiveStreamEvent": schemas.live_event,
     });
     schemas.sort_all_objects();
     let schemas = serde_json::to_string_pretty(&schemas)
@@ -661,6 +773,9 @@ function assertSchema(root, schema, value, path) {{
     if (!Array.isArray(value)) {{
       fail(path, "an array");
     }}
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {{
+      fail(path, `at most ${{schema.maxItems}} items`);
+    }}
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${{path}}[${{index}}]`));
     return;
   }}
@@ -737,37 +852,50 @@ export function decodeWebAttentionStreamEvent(value) {{
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
   return value;
 }}
+
+export function decodeWebSessionLiveSnapshot(value) {{
+  const root = schemas.WebSessionLiveStreamEvent;
+  assertSchema(root, root.$defs.WebSessionLiveSnapshot, value, "session_live_snapshot");
+  return value;
+}}
+
+export function decodeWebSessionLiveStreamEvent(value) {{
+  assertSchema(schemas.WebSessionLiveStreamEvent, schemas.WebSessionLiveStreamEvent, value, "session_live_event");
+  return value;
+}}
 "##,
         contract_name = WEB_CONTRACT_NAME,
         contract_version = WEB_CONTRACT_VERSION,
     ))
 }
 
-fn declaration_module(
-    bootstrap_schema: &Value,
-    example_schema: &Value,
-    error_schema: &Value,
-    descriptor_schema: &Value,
-    window_schema: &Value,
-    attention_snapshot_schema: &Value,
-    attention_event_schema: &Value,
-) -> Result<String, GenerateWebContractError> {
+fn declaration_module(schemas: &GeneratedSchemas) -> Result<String, GenerateWebContractError> {
     let mut definitions = BTreeMap::new();
-    let bootstrap = typescript_type(bootstrap_schema, bootstrap_schema, &mut definitions)?;
-    let example = typescript_type(example_schema, example_schema, &mut definitions)?;
-    let error = typescript_type(error_schema, error_schema, &mut definitions)?;
-    let descriptor = typescript_type(descriptor_schema, descriptor_schema, &mut definitions)?;
-    let window = typescript_type(window_schema, window_schema, &mut definitions)?;
+    let bootstrap = typescript_type(&schemas.bootstrap, &schemas.bootstrap, &mut definitions)?;
+    let example = typescript_type(&schemas.example, &schemas.example, &mut definitions)?;
+    let error = typescript_type(&schemas.error, &schemas.error, &mut definitions)?;
+    let descriptor = typescript_type(&schemas.descriptor, &schemas.descriptor, &mut definitions)?;
+    let window = typescript_type(&schemas.window, &schemas.window, &mut definitions)?;
     let attention_snapshot = typescript_type(
-        attention_snapshot_schema,
-        attention_snapshot_schema,
+        &schemas.attention_snapshot,
+        &schemas.attention_snapshot,
         &mut definitions,
     )?;
     let attention_event = typescript_type(
-        attention_event_schema,
-        attention_event_schema,
+        &schemas.attention_event,
+        &schemas.attention_event,
         &mut definitions,
     )?;
+    let live_snapshot_definition = schemas
+        .live_event
+        .pointer("/$defs/WebSessionLiveSnapshot")
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    let live_snapshot = typescript_type(
+        &schemas.live_event,
+        live_snapshot_definition,
+        &mut definitions,
+    )?;
+    let live_event = typescript_type(&schemas.live_event, &schemas.live_event, &mut definitions)?;
     let mut output = String::from(
         "// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.\n// Do not edit by hand.\n\n",
     );
@@ -791,8 +919,14 @@ fn declaration_module(
     output.push_str(&format!(
         "export type WebAttentionStreamEvent = {attention_event};\n\n"
     ));
+    output.push_str(&format!(
+        "export type WebSessionLiveSnapshot = {live_snapshot};\n\n"
+    ));
+    output.push_str(&format!(
+        "export type WebSessionLiveStreamEvent = {live_event};\n\n"
+    ));
     output.push_str(
-        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\nexport function decodeWebAttentionSnapshot(value: unknown): WebAttentionSnapshot;\nexport function decodeWebAttentionStreamEvent(value: unknown): WebAttentionStreamEvent;\n",
+        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\nexport function decodeWebAttentionSnapshot(value: unknown): WebAttentionSnapshot;\nexport function decodeWebAttentionStreamEvent(value: unknown): WebAttentionStreamEvent;\nexport function decodeWebSessionLiveSnapshot(value: unknown): WebSessionLiveSnapshot;\nexport function decodeWebSessionLiveStreamEvent(value: unknown): WebSessionLiveStreamEvent;\n",
     );
     Ok(output)
 }

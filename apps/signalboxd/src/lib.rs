@@ -92,7 +92,10 @@ pub use daemon_tools::{
 pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
 pub use goal_mode::{PostgresGoalPassDisposition, PostgresGoalPassDispositionError};
 pub use local_socket::{LocalProcessListener, LocalSocketError};
-pub use process_runtime::{ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError};
+pub use process_runtime::{
+    ProcessMonitor, ProcessMonitorReceiveError, ProcessMonitorSubscription, ProcessMonitorUpdate,
+    ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError,
+};
 pub use repo_watch_runtime::{
     RepositoryWatchRuntime, RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError,
 };

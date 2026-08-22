@@ -3,7 +3,9 @@
 The bounded browser session descriptor and historical timeline foundation are
 verified against this PR (`agent/web-session-timeline`). The bounded browser
 session catalog is verified against this PR
-(`agent/web-session-catalog-follow`).
+(`agent/web-session-catalog-follow`). The bounded live snapshot and follow
+projection are verified against this PR
+(`agent/web-session-catalog-follow-live`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -668,6 +670,35 @@ session-state classifier. Runner loss, recovery ambiguity, reconciliation,
 approval wait, blocked goal, active, queued, and idle remain distinct. Page and
 change reads derive them from the same durable facts and fail closed on unknown
 states or inconsistent shapes.
+
+## Bounded browser live session projection
+
+`GET /api/sessions/{session_id}/live` reads one current projection in a
+read-only repeatable-read transaction. It carries the global durable outbox
+cursor, at most one active turn with its current running, approval, child,
+model-call recovery, tool recovery, or runner recovery state, the exact queued
+turn count, the earliest 32 queued turn identities, any current terminal
+reconciliation operation, and current runner placement and connection health.
+The queue count and preview are distinct, so a large queue never makes snapshot
+memory proportional to retained work. The read uses existing lifecycle,
+timeline-fact, runner, and outbox records and adds no durable projection.
+
+`GET /api/sessions/{session_id}/follow` subscribes to the daemon's single
+64-record browser monitor fanout before reading that snapshot, then emits the
+snapshot as its first NDJSON item. Durable updates above the snapshot cursor are
+observed in global sequence order and an update for the selected session is
+emitted as its stable timeline address and closed event category. Updates for
+other sessions advance the observed cursor without opening another stream. Thus
+the catalog never follows every listed session; only the open workspace uses
+this route.
+
+Already-redacted provider text deltas are ephemeral presentation, carry no
+durable cursor, and are split at UTF-8 boundaries below the NDJSON item ceiling.
+Deltas already queued when the repeatable-read snapshot completes are discarded.
+Falling behind the monitor emits one `resync_required` item and ends the
+response. A client resynchronizes by replacing all transient presentation with a
+fresh bounded live snapshot and resumes durable history above its cursor; it
+does not reload the historical transcript.
 
 ## Bounded browser session timeline
 

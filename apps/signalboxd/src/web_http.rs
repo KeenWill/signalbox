@@ -5,6 +5,7 @@
 //! authentication.
 
 use std::{
+    collections::VecDeque,
     env,
     error::Error,
     ffi::OsString,
@@ -31,12 +32,15 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
     AttentionAction, AttentionActivityKind, AttentionBlockedReason, AttentionChanges,
     AttentionContinuation, AttentionQuery, AttentionSnapshot, AttentionSort, AttentionState,
-    AttentionSummary, SessionTimelineDescriptor, SessionTimelineEventKind, SessionTimelineWindow,
-    TimelineAddress, TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits,
+    AttentionSummary, SessionLiveActiveState, SessionLiveReconciliation,
+    SessionLiveRunnerConnectionHealth, SessionLiveRunnerState, SessionLiveSnapshot,
+    SessionTimelineDescriptor, SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress,
+    TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits,
     max_attention_goal_summary_characters, max_attention_title_characters,
 };
 use signalbox_domain::SessionId;
 use signalbox_persistence::attention::{AttentionRepository, AttentionRepositoryError};
+use signalbox_persistence::session_live::{SessionLiveRepository, SessionLiveRepositoryError};
 use signalbox_persistence::session_timeline::{
     SessionTimelineRepository, SessionTimelineRepositoryError,
 };
@@ -45,15 +49,19 @@ use signalbox_web_contract::{
     WebAttentionAction, WebAttentionActivity, WebAttentionActivityKind, WebAttentionBlockedReason,
     WebAttentionContinuation, WebAttentionGoalBlock, WebAttentionJudgeFacts, WebAttentionSnapshot,
     WebAttentionSort, WebAttentionState, WebAttentionStreamEvent, WebAttentionSummary,
-    WebContractBootstrap, WebContractExample, WebSessionTimelineDescriptor,
-    WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
-    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence,
-    WebU64,
+    WebContractBootstrap, WebContractExample, WebSessionLiveActiveState, WebSessionLiveActiveTurn,
+    WebSessionLiveReconciliation, WebSessionLiveRunner, WebSessionLiveRunnerConnectionHealth,
+    WebSessionLiveRunnerState, WebSessionLiveSnapshot, WebSessionLiveStreamEvent,
+    WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
+    WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
+    WebTimelineEventSequence, WebU64,
 };
 use sqlx::{PgPool, types::Uuid};
 use tokio::{net::TcpListener, sync::watch};
 use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
+
+use crate::{ProcessMonitor, ProcessMonitorReceiveError, ProcessMonitorUpdate};
 
 /// Optional deployment override for the browser listener.
 pub const WEB_BIND_ENVIRONMENT: &str = "SIGNALBOX_WEB_BIND";
@@ -66,6 +74,8 @@ pub const DEFAULT_WEB_BIND_ADDRESS: SocketAddr =
 const JSON_CONTENT_TYPE: &str = "application/json";
 const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
 const HTTP_DEFAULT_PORT: u16 = 80;
+// numeric-bound: hard safety - leaves room for worst-case JSON escaping and the event envelope
+const MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES: usize = 8_192;
 
 /// Deployment-owned browser listener and production assets configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -210,8 +220,10 @@ impl WebHttpRuntime {
     pub async fn bind(
         configuration: WebHttpConfiguration,
         pool: PgPool,
+        monitor: ProcessMonitor,
     ) -> Result<Self, WebHttpRuntimeError> {
-        let router = production_router(configuration.asset_root, Some(pool));
+        let router =
+            production_router_with_monitor(configuration.asset_root, Some(pool), Some(monitor));
         Self::bind_router(configuration.bind_address, router).await
     }
 
@@ -254,9 +266,19 @@ impl WebHttpRuntime {
 
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
 pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> Router {
+    production_router_with_monitor(asset_root, pool, None)
+}
+
+fn production_router_with_monitor(
+    asset_root: Option<PathBuf>,
+    pool: Option<PgPool>,
+    monitor: Option<ProcessMonitor>,
+) -> Router {
     let state = WebApiState {
         timeline: pool.clone().map(SessionTimelineRepository::new),
+        live: pool.clone().map(SessionLiveRepository::new),
         attention: pool.map(AttentionRepository::new),
+        monitor,
     };
     let session_reads = Router::new()
         .route("/sessions/{session_id}", get(session_descriptor))
@@ -264,6 +286,8 @@ pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> R
             "/sessions/{session_id}/timeline",
             get(session_timeline_window),
         )
+        .route("/sessions/{session_id}/live", get(session_live_snapshot))
+        .route("/sessions/{session_id}/follow", get(session_live_follow))
         .route("/sessions", get(attention_snapshot))
         .route("/attention/follow", get(attention_follow))
         .route_layer(middleware::from_fn(validate_loopback_host));
@@ -286,7 +310,9 @@ pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> R
 #[derive(Clone, Debug)]
 struct WebApiState {
     timeline: Option<SessionTimelineRepository>,
+    live: Option<SessionLiveRepository>,
     attention: Option<AttentionRepository>,
+    monitor: Option<ProcessMonitor>,
 }
 
 async fn validate_loopback_host(request: Request, next: Next) -> Response {
@@ -597,6 +623,310 @@ fn event_kind_dto(kind: SessionTimelineEventKind) -> WebSessionTimelineEventKind
         SessionTimelineEventKind::DelegationUpdate => WebSessionTimelineEventKind::DelegationUpdate,
         SessionTimelineEventKind::DelegationWake => WebSessionTimelineEventKind::DelegationWake,
     }
+}
+
+async fn session_live_snapshot(
+    State(state): State<WebApiState>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let session = match parse_session_id(&session_id) {
+        Ok(session) => session,
+        Err(error) => return error.into_response(),
+    };
+    let Some(repository) = state.live else {
+        return live_projection_unavailable();
+    };
+    match repository.read_live_snapshot(session).await {
+        Ok(Some(snapshot)) => Json(live_snapshot_dto(snapshot)).into_response(),
+        Ok(None) => application_error(
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+            "the requested session does not exist",
+        ),
+        Err(error) => live_projection_error(error),
+    }
+}
+
+async fn session_live_follow(
+    State(state): State<WebApiState>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let session = match parse_session_id(&session_id) {
+        Ok(session) => session,
+        Err(error) => return error.into_response(),
+    };
+    let Some(repository) = state.live else {
+        return live_projection_unavailable();
+    };
+    let Some(monitor) = state.monitor else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session_monitor_unavailable",
+            "the live session monitor is not configured",
+        );
+    };
+    // Subscribe before the repeatable-read snapshot so every update after its
+    // cursor is either observed or converted into an explicit resync.
+    let subscription = monitor.subscribe();
+    let snapshot = match repository.read_live_snapshot(session).await {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => {
+            return application_error(
+                StatusCode::NOT_FOUND,
+                "session_not_found",
+                "the requested session does not exist",
+            );
+        }
+        Err(error) => return live_projection_error(error),
+    };
+    let observed_through = snapshot.observed_through;
+    let queued_at_snapshot = subscription.queued_len();
+    let mut pending = VecDeque::new();
+    pending.push_back(WebSessionLiveStreamEvent::Snapshot {
+        snapshot: Box::new(live_snapshot_dto(snapshot)),
+    });
+    let source = stream::unfold(
+        LiveFollowState {
+            subscription,
+            session,
+            observed_through,
+            queued_at_snapshot,
+            pending,
+            ended: false,
+        },
+        live_follow_next,
+    );
+    ndjson_response(source)
+}
+
+struct LiveFollowState {
+    subscription: crate::ProcessMonitorSubscription,
+    session: SessionId,
+    observed_through: u64,
+    queued_at_snapshot: usize,
+    pending: VecDeque<WebSessionLiveStreamEvent>,
+    ended: bool,
+}
+
+async fn live_follow_next(
+    mut state: LiveFollowState,
+) -> Option<(WebSessionLiveStreamEvent, LiveFollowState)> {
+    if let Some(event) = state.pending.pop_front() {
+        return Some((event, state));
+    }
+    if state.ended {
+        return None;
+    }
+    loop {
+        let update = match state.subscription.recv().await {
+            Ok(update) => update,
+            Err(ProcessMonitorReceiveError::Lagged) => {
+                state.ended = true;
+                return Some((
+                    WebSessionLiveStreamEvent::ResyncRequired {
+                        cursor: WebU64::from_u64(state.observed_through),
+                    },
+                    state,
+                ));
+            }
+            Err(ProcessMonitorReceiveError::Closed) => return None,
+        };
+        let queued_at_snapshot = if state.queued_at_snapshot == 0 {
+            false
+        } else {
+            state.queued_at_snapshot -= 1;
+            true
+        };
+        match update {
+            ProcessMonitorUpdate::Durable {
+                cursor,
+                session,
+                kind,
+            } => {
+                if cursor <= state.observed_through {
+                    continue;
+                }
+                state.observed_through = cursor;
+                if session != state.session {
+                    continue;
+                }
+                let Some(sequence) = std::num::NonZeroU64::new(cursor) else {
+                    state.ended = true;
+                    return Some((
+                        WebSessionLiveStreamEvent::ResyncRequired {
+                            cursor: WebU64::from_u64(state.observed_through),
+                        },
+                        state,
+                    ));
+                };
+                return Some((
+                    WebSessionLiveStreamEvent::Durable {
+                        cursor: WebU64::from_u64(cursor),
+                        address: address_dto(TimelineAddress::new(sequence)),
+                        event_kind: event_kind_dto(kind),
+                    },
+                    state,
+                ));
+            }
+            ProcessMonitorUpdate::ProviderTextDelta {
+                session,
+                turn,
+                call,
+                part_index,
+                text,
+            } => {
+                if queued_at_snapshot || session != state.session {
+                    continue;
+                }
+                state
+                    .pending
+                    .extend(web_text_fragments(&text).map(|content| {
+                        WebSessionLiveStreamEvent::ProviderTextDelta {
+                            turn_id: turn.into_uuid().to_string(),
+                            model_call_id: call.into_uuid().to_string(),
+                            part_index,
+                            content,
+                        }
+                    }));
+                let event = state.pending.pop_front()?;
+                return Some((event, state));
+            }
+        }
+    }
+}
+
+fn web_text_fragments(value: &str) -> impl Iterator<Item = String> + '_ {
+    let mut remaining = value;
+    let mut emitted_empty = !value.is_empty();
+    std::iter::from_fn(move || {
+        if remaining.is_empty() {
+            if emitted_empty {
+                return None;
+            }
+            emitted_empty = true;
+            return Some(String::new());
+        }
+        let mut end = remaining.len().min(MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES);
+        while !remaining.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (fragment, rest) = remaining.split_at(end);
+        remaining = rest;
+        Some(fragment.to_owned())
+    })
+}
+
+fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
+    WebSessionLiveSnapshot {
+        session_id: snapshot.session.into_uuid().to_string(),
+        observed_through: WebU64::from_u64(snapshot.observed_through),
+        active: snapshot.active.map(|active| WebSessionLiveActiveTurn {
+            turn_id: active.turn.into_uuid().to_string(),
+            state: match active.state {
+                SessionLiveActiveState::Running { model_call } => {
+                    WebSessionLiveActiveState::Running {
+                        model_call_id: model_call.map(|call| call.into_uuid().to_string()),
+                    }
+                }
+                SessionLiveActiveState::AwaitingModelCallRecovery { call } => {
+                    WebSessionLiveActiveState::AwaitingModelCallRecovery {
+                        model_call_id: call.into_uuid().to_string(),
+                    }
+                }
+                SessionLiveActiveState::AwaitingToolApproval { request } => {
+                    WebSessionLiveActiveState::AwaitingToolApproval {
+                        tool_request_id: request.into_uuid().to_string(),
+                    }
+                }
+                SessionLiveActiveState::AwaitingChild { request, child } => {
+                    WebSessionLiveActiveState::AwaitingChild {
+                        tool_request_id: request.into_uuid().to_string(),
+                        child_session_id: child.into_uuid().to_string(),
+                    }
+                }
+                SessionLiveActiveState::AwaitingToolRecovery { attempt } => {
+                    WebSessionLiveActiveState::AwaitingToolRecovery {
+                        tool_attempt_id: attempt.into_uuid().to_string(),
+                    }
+                }
+                SessionLiveActiveState::AwaitingRunnerRecovery {
+                    runner,
+                    placement_revision,
+                } => WebSessionLiveActiveState::AwaitingRunnerRecovery {
+                    runner_id: runner.into_uuid().to_string(),
+                    placement_revision: WebU64::from_u64(placement_revision),
+                },
+            },
+        }),
+        queued_turn_count: WebU64::from_u64(snapshot.queued_turn_count),
+        queued_turn_ids: snapshot
+            .queued_turns
+            .into_iter()
+            .map(|turn| turn.into_uuid().to_string())
+            .collect(),
+        reconciliation: snapshot
+            .reconciliation
+            .map(|reconciliation| match reconciliation {
+                SessionLiveReconciliation::ModelCall { turn, call } => {
+                    WebSessionLiveReconciliation::ModelCall {
+                        turn_id: turn.into_uuid().to_string(),
+                        model_call_id: call.into_uuid().to_string(),
+                    }
+                }
+                SessionLiveReconciliation::ToolAttempt { turn, attempt } => {
+                    WebSessionLiveReconciliation::ToolAttempt {
+                        turn_id: turn.into_uuid().to_string(),
+                        tool_attempt_id: attempt.into_uuid().to_string(),
+                    }
+                }
+            }),
+        runner: snapshot.runner.map(|runner| WebSessionLiveRunner {
+            runner_id: runner.runner.map(|runner| runner.into_uuid().to_string()),
+            placement_revision: WebU64::from_u64(runner.placement_revision),
+            state: match runner.state {
+                SessionLiveRunnerState::Unpinned => WebSessionLiveRunnerState::Unpinned,
+                SessionLiveRunnerState::Pinned => WebSessionLiveRunnerState::Pinned,
+                SessionLiveRunnerState::RunnerLostBeforePin => {
+                    WebSessionLiveRunnerState::RunnerLostBeforePin
+                }
+                SessionLiveRunnerState::RunnerLost => WebSessionLiveRunnerState::RunnerLost,
+                SessionLiveRunnerState::RunnerAbandoned => {
+                    WebSessionLiveRunnerState::RunnerAbandoned
+                }
+            },
+            connection_health: runner.connection_health.map(|health| match health {
+                SessionLiveRunnerConnectionHealth::Connected => {
+                    WebSessionLiveRunnerConnectionHealth::Connected
+                }
+                SessionLiveRunnerConnectionHealth::Suspect => {
+                    WebSessionLiveRunnerConnectionHealth::Suspect
+                }
+                SessionLiveRunnerConnectionHealth::Shutdown => {
+                    WebSessionLiveRunnerConnectionHealth::Shutdown
+                }
+                SessionLiveRunnerConnectionHealth::Lost => {
+                    WebSessionLiveRunnerConnectionHealth::Lost
+                }
+            }),
+        }),
+    }
+}
+
+fn live_projection_unavailable() -> Response {
+    application_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "session_live_projection_unavailable",
+        "the live session projection is not configured",
+    )
+}
+
+fn live_projection_error(error: SessionLiveRepositoryError) -> Response {
+    tracing::error!(cause = %error, "session live projection read failed");
+    application_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "session_live_projection_failed",
+        "the durable live session projection could not be read",
+    )
 }
 
 #[derive(Debug, Default)]
@@ -1261,10 +1591,11 @@ mod tests {
         max_attention_goal_summary_characters, max_attention_snapshot_items,
         max_attention_title_characters,
     };
-    use signalbox_domain::{SessionId, TurnId};
+    use signalbox_domain::{ModelCallId, SessionId, TurnId};
     use signalbox_web_contract::{
         MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebAttentionStreamEvent, WebContractBootstrap,
-        WebContractExample,
+        WebContractExample, WebSessionLiveStreamEvent, WebSessionTimelineEventKind,
+        WebTimelineAddress, WebTimelineEventSequence, WebU64,
     };
     use sqlx::types::Uuid;
     use tokio::sync::{mpsc, watch};
@@ -1272,9 +1603,11 @@ mod tests {
     use url::Url;
 
     use super::{
-        DEFAULT_WEB_BIND_ADDRESS, WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime,
-        attention_snapshot_dto, deterministic_test_router, ndjson_response, production_router,
+        DEFAULT_WEB_BIND_ADDRESS, LiveFollowState, WebHttpConfiguration, WebHttpConfigurationError,
+        WebHttpRuntime, attention_snapshot_dto, deterministic_test_router, live_follow_next,
+        ndjson_response, production_router, web_text_fragments,
     };
+    use crate::{ProcessMonitor, ProcessMonitorUpdate};
 
     fn loopback_ephemeral() -> SocketAddr {
         "127.0.0.1:0"
@@ -1287,6 +1620,152 @@ mod tests {
             request_id: "transport-test".to_owned(),
             message: "bounded payload".to_owned(),
         }
+    }
+
+    fn live_session() -> SessionId {
+        SessionId::from_uuid(Uuid::from_u128(0x991))
+    }
+
+    fn live_turn() -> TurnId {
+        TurnId::from_uuid(Uuid::from_u128(0x992))
+    }
+
+    fn live_call() -> ModelCallId {
+        ModelCallId::from_uuid(Uuid::from_u128(0x993))
+    }
+
+    fn live_follow_state(
+        monitor: &ProcessMonitor,
+        observed_through: u64,
+        queued_at_snapshot: usize,
+    ) -> LiveFollowState {
+        LiveFollowState {
+            subscription: monitor.subscribe(),
+            session: live_session(),
+            observed_through,
+            queued_at_snapshot,
+            pending: std::collections::VecDeque::new(),
+            ended: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn live_follow_orders_provider_draft_before_later_durable_header() {
+        let monitor = ProcessMonitor::test_channel();
+        let state = live_follow_state(&monitor, 7, 0);
+        monitor.publish_for_test(ProcessMonitorUpdate::ProviderTextDelta {
+            session: live_session(),
+            turn: live_turn(),
+            call: live_call(),
+            part_index: 2,
+            text: "draft".to_owned(),
+        });
+        let (draft, state) = live_follow_next(state)
+            .await
+            .expect("the provider draft is delivered");
+        monitor.publish_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::ModelCallTransition,
+        });
+        let (durable, _) = live_follow_next(state)
+            .await
+            .expect("the durable header follows the draft");
+
+        assert_eq!(
+            draft,
+            WebSessionLiveStreamEvent::ProviderTextDelta {
+                turn_id: live_turn().into_uuid().to_string(),
+                model_call_id: live_call().into_uuid().to_string(),
+                part_index: 2,
+                content: "draft".to_owned(),
+            }
+        );
+        assert_eq!(
+            durable,
+            WebSessionLiveStreamEvent::Durable {
+                cursor: WebU64::from_u64(8),
+                address: WebTimelineAddress {
+                    event_sequence: WebTimelineEventSequence::from_nonzero(
+                        std::num::NonZeroU64::new(8).expect("the fixture cursor is positive"),
+                    ),
+                },
+                event_kind: WebSessionTimelineEventKind::ModelCallTransition,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn live_follow_discards_provider_draft_queued_before_snapshot() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        monitor.publish_for_test(ProcessMonitorUpdate::ProviderTextDelta {
+            session: live_session(),
+            turn: live_turn(),
+            call: live_call(),
+            part_index: 0,
+            text: "stale draft".to_owned(),
+        });
+        state.queued_at_snapshot = state.subscription.queued_len();
+        monitor.publish_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::TurnCompleted,
+        });
+        let (event, _) = live_follow_next(state)
+            .await
+            .expect("the post-snapshot durable event is delivered");
+
+        assert_eq!(
+            event,
+            WebSessionLiveStreamEvent::Durable {
+                cursor: WebU64::from_u64(8),
+                address: WebTimelineAddress {
+                    event_sequence: WebTimelineEventSequence::from_nonzero(
+                        std::num::NonZeroU64::new(8).expect("the fixture cursor is positive"),
+                    ),
+                },
+                event_kind: WebSessionTimelineEventKind::TurnCompleted,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn live_follow_lag_requires_transient_presentation_resync() {
+        let monitor = ProcessMonitor::test_channel();
+        let state = live_follow_state(&monitor, 7, 0);
+        monitor.fill_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::TurnActivated,
+        });
+        let (event, _) = live_follow_next(state)
+            .await
+            .expect("lag produces one explicit terminal event");
+
+        assert_eq!(
+            event,
+            WebSessionLiveStreamEvent::ResyncRequired {
+                cursor: WebU64::from_u64(7),
+            }
+        );
+    }
+
+    #[test]
+    fn provider_text_fragment_fits_after_worst_case_json_escaping() {
+        let source = "\u{0001}".repeat(super::MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES);
+        let content = web_text_fragments(&source)
+            .next()
+            .expect("nonempty provider text has a first fragment");
+        let encoded = super::encode_ndjson_item(WebSessionLiveStreamEvent::ProviderTextDelta {
+            turn_id: live_turn().into_uuid().to_string(),
+            model_call_id: live_call().into_uuid().to_string(),
+            part_index: u32::MAX,
+            content,
+        })
+        .expect("the worst-case escaped fragment remains below the NDJSON ceiling");
+
+        assert!(encoded.len() <= MAX_NDJSON_ITEM_BYTES + 1);
     }
 
     const STATIC_INDEX: &str = "signalbox-static-build";

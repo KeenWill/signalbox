@@ -652,6 +652,10 @@ const schemas = {
             "description": "Ordinary bounded JSON responses are available under `/api/`.",
             "type": "boolean"
           },
+          "bounded_session_live": {
+            "description": "Bounded current snapshots and snapshot-first live follow are available.",
+            "type": "boolean"
+          },
           "bounded_session_timeline": {
             "description": "Stable bounded session descriptors and historical windows are available.",
             "type": "boolean"
@@ -669,7 +673,8 @@ const schemas = {
           "bounded_json",
           "same_origin_json_mutations",
           "ndjson_streaming",
-          "bounded_session_timeline"
+          "bounded_session_timeline",
+          "bounded_session_live"
         ],
         "type": "object"
       },
@@ -708,6 +713,12 @@ const schemas = {
             "minimum": 0,
             "type": "integer"
           },
+          "max_session_live_queued_turns": {
+            "description": "Maximum queued turn identities retained in one live snapshot.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "max_timeline_window_bytes": {
             "description": "Maximum projected structured item bytes in one timeline window.",
             "format": "uint32",
@@ -725,7 +736,8 @@ const schemas = {
           "max_json_body_bytes",
           "max_ndjson_item_bytes",
           "max_timeline_window_items",
-          "max_timeline_window_bytes"
+          "max_timeline_window_bytes",
+          "max_session_live_queued_turns"
         ],
         "type": "object"
       }
@@ -775,6 +787,430 @@ const schemas = {
     ],
     "title": "WebContractExample",
     "type": "object"
+  },
+  "WebSessionLiveStreamEvent": {
+    "$defs": {
+      "WebSessionLiveActiveState": {
+        "description": "Current durable state of one active turn.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "running",
+                "type": "string"
+              },
+              "model_call_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "awaiting_model_call_recovery",
+                "type": "string"
+              },
+              "model_call_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "model_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "awaiting_tool_approval",
+                "type": "string"
+              },
+              "tool_request_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_request_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "child_session_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "awaiting_child",
+                "type": "string"
+              },
+              "tool_request_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_request_id",
+              "child_session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "awaiting_tool_recovery",
+                "type": "string"
+              },
+              "tool_attempt_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_attempt_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "awaiting_runner_recovery",
+                "type": "string"
+              },
+              "placement_revision": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "runner_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "runner_id",
+              "placement_revision"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebSessionLiveActiveTurn": {
+        "additionalProperties": false,
+        "properties": {
+          "state": {
+            "$ref": "#/$defs/WebSessionLiveActiveState"
+          },
+          "turn_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "turn_id",
+          "state"
+        ],
+        "type": "object"
+      },
+      "WebSessionLiveReconciliation": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "model_call",
+                "type": "string"
+              },
+              "model_call_id": {
+                "type": "string"
+              },
+              "turn_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "turn_id",
+              "model_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "tool_attempt",
+                "type": "string"
+              },
+              "tool_attempt_id": {
+                "type": "string"
+              },
+              "turn_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "turn_id",
+              "tool_attempt_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebSessionLiveRunner": {
+        "additionalProperties": false,
+        "properties": {
+          "connection_health": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebSessionLiveRunnerConnectionHealth"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "placement_revision": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "runner_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "$ref": "#/$defs/WebSessionLiveRunnerState"
+          }
+        },
+        "required": [
+          "placement_revision",
+          "state"
+        ],
+        "type": "object"
+      },
+      "WebSessionLiveRunnerConnectionHealth": {
+        "enum": [
+          "connected",
+          "suspect",
+          "shutdown",
+          "lost"
+        ],
+        "type": "string"
+      },
+      "WebSessionLiveRunnerState": {
+        "enum": [
+          "unpinned",
+          "pinned",
+          "runner_lost_before_pin",
+          "runner_lost",
+          "runner_abandoned"
+        ],
+        "type": "string"
+      },
+      "WebSessionLiveSnapshot": {
+        "additionalProperties": false,
+        "description": "Bounded repeatable-read current projection for one open workspace.",
+        "properties": {
+          "active": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebSessionLiveActiveTurn"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_through": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "queued_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "queued_turn_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "reconciliation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebSessionLiveReconciliation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "runner": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebSessionLiveRunner"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "observed_through",
+          "queued_turn_count",
+          "queued_turn_ids"
+        ],
+        "type": "object"
+      },
+      "WebSessionTimelineEventKind": {
+        "description": "Closed durable event categories in the browser timeline foundation.",
+        "enum": [
+          "session_created",
+          "session_model_settings_changed",
+          "turn_model_settings_resolved",
+          "input_accepted",
+          "goal_turn_retired",
+          "turn_activated",
+          "turn_failed",
+          "model_call_transition",
+          "tool_batch_transition",
+          "tool_approval_decided",
+          "context_compacted",
+          "turn_completed",
+          "turn_refused",
+          "turn_cancelled",
+          "turn_reconciliation_required",
+          "runner_state_transition",
+          "delegation_update",
+          "delegation_wake"
+        ],
+        "type": "string"
+      },
+      "WebTimelineAddress": {
+        "additionalProperties": false,
+        "description": "Stable browser-visible location of one durable session event.",
+        "properties": {
+          "event_sequence": {
+            "$ref": "#/$defs/WebTimelineEventSequence",
+            "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+          }
+        },
+        "required": [
+          "event_sequence"
+        ],
+        "type": "object"
+      },
+      "WebTimelineEventSequence": {
+        "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Snapshot-first event stream for one open workspace.",
+    "oneOf": [
+      {
+        "properties": {
+          "kind": {
+            "const": "snapshot",
+            "type": "string"
+          },
+          "snapshot": {
+            "$ref": "#/$defs/WebSessionLiveSnapshot"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshot"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/WebTimelineAddress"
+          },
+          "cursor": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "event_kind": {
+            "$ref": "#/$defs/WebSessionTimelineEventKind"
+          },
+          "kind": {
+            "const": "durable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "cursor",
+          "address",
+          "event_kind"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "provider_text_delta",
+            "type": "string"
+          },
+          "model_call_id": {
+            "type": "string"
+          },
+          "part_index": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "turn_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "turn_id",
+          "model_call_id",
+          "part_index",
+          "content"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "cursor": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "kind": {
+            "const": "resync_required",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "cursor"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WebSessionLiveStreamEvent"
   },
   "WebSessionTimelineDescriptor": {
     "$defs": {
@@ -1108,6 +1544,9 @@ function assertSchema(root, schema, value, path) {
     if (!Array.isArray(value)) {
       fail(path, "an array");
     }
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+      fail(path, `at most ${schema.maxItems} items`);
+    }
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${path}[${index}]`));
     return;
   }
@@ -1182,5 +1621,16 @@ export function decodeWebAttentionSnapshot(value) {
 
 export function decodeWebAttentionStreamEvent(value) {
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
+  return value;
+}
+
+export function decodeWebSessionLiveSnapshot(value) {
+  const root = schemas.WebSessionLiveStreamEvent;
+  assertSchema(root, root.$defs.WebSessionLiveSnapshot, value, "session_live_snapshot");
+  return value;
+}
+
+export function decodeWebSessionLiveStreamEvent(value) {
+  assertSchema(schemas.WebSessionLiveStreamEvent, schemas.WebSessionLiveStreamEvent, value, "session_live_event");
   return value;
 }

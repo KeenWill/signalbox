@@ -6,6 +6,7 @@ import {
   decodeWebApiErrorResponse,
   decodeWebContractBootstrap,
   decodeWebContractExample,
+  decodeWebSessionLiveSnapshot,
   decodeWebSessionTimelineDescriptor,
   decodeWebSessionTimelineWindow,
 } from "../../../clients/web/src/generated/web-contract.mjs";
@@ -39,6 +40,7 @@ test("generated bootstrap decoder rejects another contract version", () => {
         contract: { name: "signalbox.web-http", version: "2" },
         capabilities: {
           bounded_json: true,
+          bounded_session_live: true,
           bounded_session_timeline: true,
           same_origin_json_mutations: true,
           ndjson_streaming: true,
@@ -46,11 +48,28 @@ test("generated bootstrap decoder rejects another contract version", () => {
         limits: {
           max_json_body_bytes: 65536,
           max_ndjson_item_bytes: 65536,
+          max_session_live_queued_turns: 32,
           max_timeline_window_items: 256,
           max_timeline_window_bytes: 65536,
         },
       }),
     /incompatible web contract/,
+  );
+});
+
+test("generated live decoder bounds retained queued turns", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "33",
+        queued_turn_ids: Array.from({ length: 33 }, (_, index) => `${index}`),
+        reconciliation: null,
+        runner: null,
+      }),
+    /at most 32 items/,
   );
 });
 
