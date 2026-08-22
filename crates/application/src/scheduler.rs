@@ -976,6 +976,19 @@ enum PassTaskOutcome<PassError> {
     OccupancyExpired { bound: SchedulerPassOccupancyBound },
 }
 
+type ErasedPassExecution<PassError> =
+    Pin<Box<dyn Future<Output = Result<(), PassError>> + Send + 'static>>;
+
+fn erased_pass_execution<Pass>(
+    pass: &mut Pass,
+    session: SessionId,
+) -> ErasedPassExecution<Pass::Error>
+where
+    Pass: EligibilityPass,
+{
+    Box::pin(pass.run(session))
+}
+
 fn spawn_pass<Pass>(
     passes: &mut JoinSet<PassTaskOutcome<Pass::Error>>,
     pass: &mut Pass,
@@ -989,7 +1002,10 @@ fn spawn_pass<Pass>(
     Pass::Error: Send + 'static,
 {
     let expiry_handler = pass.occupancy_expiry_handler();
-    let execution = pass.run(session);
+    // Heap-erasing the adapter future before composing the task keeps the
+    // scheduler's deeply nested concrete adapter type off Tokio's worker
+    // stack at the spawn boundary.
+    let execution = erased_pass_execution(pass, session);
     let task = passes.spawn(
         async move {
             match bound.get() {
@@ -1184,7 +1200,7 @@ mod tests {
         EligibilitySweep, EligibilitySweepBatch, EligibilityWorkSource, GoalAwareEligibilityPass,
         GoalAwareEligibilityPassError, GoalPassDisposition, InProcessEligibilityWorkSource,
         InvalidReconciliationSweepInterval, ReconciliationSweepInterval, SchedulerLoop,
-        SchedulerLoopExit, SchedulerPassOccupancyBound,
+        SchedulerLoopExit, SchedulerPassOccupancyBound, erased_pass_execution,
     };
     use crate::{
         OperatorFailureClass, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
@@ -1689,6 +1705,15 @@ mod tests {
             }
             ready(response)
         }
+    }
+
+    #[tokio::test]
+    async fn scheduler_heap_erases_pass_execution_before_task_construction() {
+        let admitted = session(57);
+        let (shutdown, _shutdown_receiver) = oneshot::channel();
+        let mut pass = FakePass::failing_once(session(58), 1, shutdown);
+
+        assert_eq!(erased_pass_execution(&mut pass, admitted).await, Ok(()));
     }
 
     #[derive(Clone, Copy, Debug)]
