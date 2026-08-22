@@ -981,9 +981,14 @@ async fn project_tool_batch(
                         WHEN 'ambient' THEN 'unsandboxed'
                         WHEN 'workspace_restricted' THEN 'sandboxed'
                     END
-                      FROM runner_session_placement_record AS placement
-                     WHERE placement.session_id = request.session_id
-                     ORDER BY placement.event_ordinal DESC
+                      FROM runner_tool_request_lease_binding AS binding
+                      JOIN runner_lease_generation AS lease
+                        ON lease.lease_id = binding.lease_id
+                      JOIN runner_session_placement_record AS placement
+                        ON placement.session_id = lease.session_id
+                       AND placement.event_ordinal = lease.placement_event_ordinal
+                     WHERE binding.request_id = request.request_id
+                     ORDER BY lease.generation DESC
                      LIMIT 1
                 ) AS sandbox_posture,
                 EXISTS (

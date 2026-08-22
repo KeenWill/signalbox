@@ -7,7 +7,7 @@
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Value, json};
 use signalbox_application::{
     max_timeline_detail_bytes, max_timeline_detail_items, max_timeline_window_bytes,
@@ -118,12 +118,53 @@ pub struct WebContractExample {
     pub message: String,
 }
 
+/// Checked positive durable-event sequence encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebTimelineEventSequence(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
+
+impl WebTimelineEventSequence {
+    /// Encodes one already-validated positive durable-event sequence.
+    #[must_use]
+    pub fn from_nonzero(sequence: std::num::NonZeroU64) -> Self {
+        Self(sequence.get().to_string())
+    }
+
+    /// Returns the canonical positive decimal wire spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebTimelineEventSequence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let canonical = !value.is_empty()
+            && value.bytes().all(|byte| byte.is_ascii_digit())
+            && !value.starts_with('0');
+        let positive = value
+            .parse::<u64>()
+            .ok()
+            .and_then(std::num::NonZeroU64::new);
+        if !canonical || positive.is_none() {
+            return Err(de::Error::custom(
+                "timeline event sequence must be a canonical positive u64",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
 /// Stable browser-visible location of one durable session event.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineAddress {
     /// Positive global durable event sequence encoded losslessly for JavaScript.
-    pub event_sequence: String,
+    pub event_sequence: WebTimelineEventSequence,
 }
 
 /// Explicit lifetime size facts used only for browser loading policy.
@@ -741,6 +782,9 @@ function assertSchema(root, schema, value, path) {{
   if (typeof value !== schema.type) {{
     fail(path, schema.type);
   }}
+  if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {{
+    fail(path, `a string matching ${{schema.pattern}}`);
+  }}
 }}
 
 export function decodeWebContractBootstrap(value) {{
@@ -927,7 +971,9 @@ fn typescript_object(
 mod tests {
     use std::{fs, path::Path};
 
-    use super::{WebContractBootstrap, WebContractExample, generated_artifacts};
+    use super::{
+        WebContractBootstrap, WebContractExample, WebTimelineEventSequence, generated_artifacts,
+    };
 
     #[track_caller]
     fn assert_generated_artifact_current(path: &str) {
@@ -978,5 +1024,16 @@ mod tests {
             serde_json::from_str(fixture).expect("generated fixture is JSON");
 
         assert_eq!(encoded, fixture_value);
+    }
+
+    #[test]
+    fn timeline_event_sequence_rejects_invalid_wire_spellings() {
+        assert!(serde_json::from_str::<WebTimelineEventSequence>(r#""0""#).is_err());
+        assert!(serde_json::from_str::<WebTimelineEventSequence>(r#""+1""#).is_err());
+        assert!(serde_json::from_str::<WebTimelineEventSequence>(r#""01""#).is_err());
+        assert!(
+            serde_json::from_str::<WebTimelineEventSequence>(r#""18446744073709551616""#).is_err()
+        );
+        assert!(serde_json::from_str::<WebTimelineEventSequence>(r#""1""#).is_ok());
     }
 }

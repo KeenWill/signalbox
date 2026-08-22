@@ -141,7 +141,7 @@ type WebSessionWorkFacts = {
 };
 
 type WebTimelineAddress = {
-  readonly event_sequence: string;
+  readonly event_sequence: WebTimelineEventSequence;
 };
 
 type WebTimelineApprovalSource = "policy" | "delegate" | "user";
@@ -168,6 +168,8 @@ type WebTimelineDetailContinuation = {
   readonly body: WebTimelineBodyContinuation;
   readonly type: "more_body";
 };
+
+type WebTimelineEventSequence = string;
 
 type WebTimelineGoalEvent = {
   readonly event_kind: string;
