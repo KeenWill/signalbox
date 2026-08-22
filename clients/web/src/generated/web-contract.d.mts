@@ -31,6 +31,8 @@ type WebContractLimits = {
   readonly max_timeline_window_items: number;
 };
 
+type WebSessionId = string;
+
 type WebSessionTimelineDetail = {
   readonly address: WebTimelineAddress;
   readonly body: WebSessionTimelineDetailBody;
@@ -162,7 +164,7 @@ export type WebSessionTimelineDescriptor = {
   readonly first_address: WebTimelineAddress;
   readonly latest_address: WebTimelineAddress;
   readonly observed_through: WebU64;
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
   readonly sizes: WebSessionTimelineSizeFacts;
   readonly work: WebSessionWorkFacts;
 };
@@ -172,7 +174,7 @@ export type WebSessionTimelineWindow = {
   readonly continuation_before?: WebTimelineAddress | null;
   readonly items: ReadonlyArray<WebSessionTimelineItem>;
   readonly projected_structured_bytes: number;
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
 };
 
 export type WebSessionTimelineDetailPage = {
