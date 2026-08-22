@@ -69,11 +69,16 @@ const boundedLimits = (
 
 const canonicalSessionId = (value: string): string => {
   const lowered = value.toLowerCase()
-  const unwrapped = lowered.startsWith('urn:uuid:')
-    ? lowered.slice('urn:uuid:'.length)
-    : lowered.startsWith('{') && lowered.endsWith('}')
-      ? lowered.slice(1, -1)
-      : lowered
+  const simple = /^[0-9a-f]{32}$/
+  const hyphenated = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+  const unwrapped =
+    lowered.startsWith('urn:uuid:') && hyphenated.test(lowered.slice('urn:uuid:'.length))
+      ? lowered.slice('urn:uuid:'.length)
+      : lowered.startsWith('{') && lowered.endsWith('}') && hyphenated.test(lowered.slice(1, -1))
+        ? lowered.slice(1, -1)
+        : simple.test(lowered) || hyphenated.test(lowered)
+          ? lowered
+          : ''
   const compact = unwrapped.replaceAll('-', '')
   if (!/^[0-9a-f]{32}$/.test(compact)) throw new TypeError('session id must be a UUID')
   return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`
@@ -210,7 +215,8 @@ export class BoundedSessionHistory {
     limits: SessionWindowLimits,
     signal?: AbortSignal,
   ): Promise<WebSessionTimelineWindow> {
-    if ('eventSequence' in anchor) decimalAddress(anchor.eventSequence)
+    const anchorAddress =
+      'eventSequence' in anchor ? decimalAddress(anchor.eventSequence) : undefined
     const bounded = boundedLimits(limits, this.source.limits)
     const window = await this.source.readWindow(this.sessionId, anchor, bounded, signal)
     if (canonicalSessionId(window.session_id) !== this.sessionId)
@@ -224,6 +230,20 @@ export class BoundedSessionHistory {
     for (const item of window.items) {
       const address = item.address.event_sequence
       const parsedAddress = decimalAddress(address)
+      if (
+        anchor.kind === 'after' &&
+        anchorAddress !== undefined &&
+        parsedAddress <= anchorAddress
+      ) {
+        throw new TypeError('timeline window item is not strictly after its anchor')
+      }
+      if (
+        anchor.kind === 'before' &&
+        anchorAddress !== undefined &&
+        parsedAddress >= anchorAddress
+      ) {
+        throw new TypeError('timeline window item is not strictly before its anchor')
+      }
       if (previousAddress !== undefined && parsedAddress <= previousAddress) {
         throw new TypeError('timeline window addresses must be strictly increasing')
       }
