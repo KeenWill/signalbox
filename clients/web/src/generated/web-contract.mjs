@@ -818,6 +818,12 @@ export function decodeWebBlobDescriptor(value) {
       if (view.kind === "download" && view.media_type !== value.declared_media_type) {
         fail(`blob_descriptor.available_views[${index}].media_type`, "the descriptor declared media type for the download representation");
       }
+      if (
+        view.kind === "browser_native" &&
+        value.declared_media_type.split(";", 1)[0].trim().toLowerCase() !== contentRoute.mediaType
+      ) {
+        fail(contentPath, "an original-image route matching the descriptor declared media type");
+      }
     } else {
       if (contentRoute.kind !== "content/image-png") {
         fail(contentPath, "an image-content route for a derivative view");
@@ -872,6 +878,10 @@ export function decodeWebBlobDescriptor(value) {
   const downloadViews = value.available_views.filter((view) => view.kind === "download");
   if (downloadViews.length !== 1) {
     fail("blob_descriptor.available_views", "exactly one download view");
+  }
+  const representationKinds = value.available_views.map((view) => view.kind);
+  if (new Set(representationKinds).size !== representationKinds.length) {
+    fail("blob_descriptor.available_views", "at most one view of each representation kind");
   }
   return value;
 }

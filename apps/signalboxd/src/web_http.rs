@@ -661,38 +661,33 @@ async fn serve_blob(
                 "blob read capacity is busy",
             );
         };
-        if length.get() <= MAX_BLOB_RANGE_BYTES {
-            let reader =
-                match open_recorded_blob_range(runtime.registry(), &entry, offset, length).await {
-                    Ok(reader) => reader,
-                    Err(error) => return blob_read_error_response(error),
-                };
-            reader_body(reader, length.get(), permit)
-        } else {
-            let mut reader = match open_recorded_blob_verified(runtime.registry(), &entry).await {
-                Ok(reader) => reader,
-                Err(error) => return blob_read_error_response(error),
-            };
-            let skipped = match tokio::io::copy(
-                &mut (&mut reader).take(offset),
-                &mut tokio::io::sink(),
-            )
-            .await
-            {
-                Ok(skipped) => skipped,
-                Err(_) => {
-                    return blob_read_error_response(
-                        crate::blob_read_runtime::BlobReadError::Unavailable,
-                    );
+        let deadline = Instant::now() + Duration::from_secs(BLOB_RESPONSE_TIMEOUT_SECONDS);
+        let opened = timeout_at(deadline, async {
+            if length.get() <= MAX_BLOB_RANGE_BYTES {
+                open_recorded_blob_range(runtime.registry(), &entry, offset, length).await
+            } else {
+                let mut reader = open_recorded_blob_verified(runtime.registry(), &entry).await?;
+                let skipped =
+                    tokio::io::copy(&mut (&mut reader).take(offset), &mut tokio::io::sink())
+                        .await
+                        .map_err(|_| crate::blob_read_runtime::BlobReadError::Unavailable)?;
+                if skipped != offset {
+                    return Err(crate::blob_read_runtime::BlobReadError::Integrity);
                 }
-            };
-            if skipped != offset {
+                Ok(reader)
+            }
+        })
+        .await;
+        let reader = match opened {
+            Ok(Ok(reader)) => reader,
+            Ok(Err(error)) => return blob_read_error_response(error),
+            Err(_) => {
                 return blob_read_error_response(
-                    crate::blob_read_runtime::BlobReadError::Integrity,
+                    crate::blob_read_runtime::BlobReadError::Unavailable,
                 );
             }
-            reader_body(reader, length.get(), permit)
-        }
+        };
+        reader_body_until(reader, length.get(), permit, deadline)
     };
     let mut response = Response::new(body);
     *response.status_mut() = if partial {
@@ -720,29 +715,15 @@ fn try_acquire_web_blob_read_permit(budget: Arc<Semaphore>) -> Option<OwnedSemap
     budget.try_acquire_owned().ok()
 }
 
-fn reader_body(
-    reader: signalbox_blob_store::BlobReader,
-    length: u64,
-    permit: OwnedSemaphorePermit,
-) -> Body {
-    reader_body_with_timeout(
-        reader,
-        length,
-        permit,
-        Duration::from_secs(BLOB_RESPONSE_TIMEOUT_SECONDS),
-    )
-}
-
-fn reader_body_with_timeout(
+fn reader_body_until(
     mut reader: signalbox_blob_store::BlobReader,
     length: u64,
     permit: OwnedSemaphorePermit,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Body {
     let (sender, receiver) = mpsc::channel(1);
     tokio::spawn(async move {
         let _permit = permit;
-        let deadline = Instant::now() + timeout;
         let produce = async move {
             let mut remaining = length;
             while remaining > 0 {
@@ -1280,8 +1261,8 @@ mod tests {
     use super::{
         DEFAULT_WEB_BIND_ADDRESS, MAX_CONCURRENT_WEB_BLOB_READS, WebHttpConfiguration,
         WebHttpConfigurationError, WebHttpRuntime, content_disposition, deterministic_test_router,
-        if_none_match, ndjson_response, parse_byte_range, production_router,
-        reader_body_with_timeout, single_range_header, try_acquire_web_blob_read_permit,
+        if_none_match, ndjson_response, parse_byte_range, production_router, reader_body_until,
+        single_range_header, try_acquire_web_blob_read_permit,
     };
 
     fn loopback_ephemeral() -> SocketAddr {
@@ -1415,11 +1396,11 @@ mod tests {
             .try_acquire_owned()
             .expect("the fixture acquires the read permit");
         let reader: signalbox_blob_store::BlobReader = Box::new(tokio::io::repeat(1));
-        let _body = reader_body_with_timeout(
+        let _body = reader_body_until(
             reader,
             u64::try_from(super::BLOB_STREAM_CHUNK_BYTES * 3).expect("the fixture length fits u64"),
             permit,
-            Duration::from_millis(10),
+            tokio::time::Instant::now() + Duration::from_millis(10),
         );
 
         tokio::time::timeout(Duration::from_secs(1), async {

@@ -814,6 +814,68 @@ test("generated blob decoder binds original metadata to the descriptor", () => {
   );
 });
 
+test("generated blob decoder binds browser-native routes to the declared image type", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+
+  assert.throws(
+    () => decodeWebBlobDescriptor({
+      digest,
+      byte_length: "1",
+      declared_media_type: "image/jpeg",
+      display_filename: [],
+      available_views: [
+        {
+          kind: "download",
+          content_url: `/api/blobs/${digest}/download?media_type=image%2Fjpeg`,
+          media_type: "image/jpeg",
+          byte_length: "1",
+          derivations: [],
+        },
+        {
+          kind: "browser_native",
+          content_url: `/api/blobs/${digest}/content/image-png`,
+          media_type: "image/png",
+          byte_length: "1",
+          derivations: [],
+        },
+      ],
+    }),
+    /content_url must be an original-image route matching the descriptor declared media type/,
+  );
+});
+
+test("generated blob decoder rejects duplicate representation kinds", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const browserNative = {
+    kind: "browser_native",
+    content_url: `/api/blobs/${digest}/content/image-png`,
+    media_type: "image/png",
+    byte_length: "1",
+    derivations: [],
+  };
+
+  assert.throws(
+    () => decodeWebBlobDescriptor({
+      digest,
+      byte_length: "1",
+      declared_media_type: "image/png",
+      display_filename: [],
+      available_views: [
+        {
+          kind: "download",
+          content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
+          media_type: "image/png",
+          byte_length: "1",
+          derivations: [],
+        },
+        browserNative,
+        { ...browserNative },
+      ],
+    }),
+    /available_views must be at most one view of each representation kind/,
+  );
+});
+
 test("generated blob decoder binds view kinds to exact image transformations", () => {
   const digest = `sha256:${"a1".repeat(32)}`;
   const outputDigest = `sha256:${"b2".repeat(32)}`;
