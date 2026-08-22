@@ -10269,10 +10269,6 @@ mod tests {
         let execution = projection
             .active_turn_execution()
             .expect("the active execution retains its complete steering inventory");
-        assert_eq!(
-            projection.active_rendered_frontier_origins(),
-            Some(vec![active.accepted_input()])
-        );
         assert_eq!(execution.pending_steering().len(), 1);
         assert_eq!(
             execution.pending_steering()[0].accepted_input(),
@@ -10291,6 +10287,44 @@ mod tests {
             AcceptedInputTurnFailureFailure::PendingSteering {
                 accepted_input: pending.accepted_input(),
             }
+        );
+    }
+
+    /// INV-061: pending steering remains outside the active rendered frontier
+    /// until a safe-point continuation incorporates it.
+    #[test]
+    fn inv061_pending_steering_is_not_an_active_rendered_frontier_origin() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let pending = accepted_origin(2);
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        let tail = facts
+            .acceptance_tail
+            .as_mut()
+            .expect("matching facts contain the active tail");
+        tail.observed_last_position = pending.position();
+        tail.entries
+            .push(SessionAcceptanceTailEntryReconstitutionInput::new(
+                session.id(),
+                AcceptedInputLifecycle::new(
+                    pending.accepted_input(),
+                    AcceptedInputDisposition::PendingSteering {
+                        binding: crate::SteeringBinding::new(active.turn()),
+                    },
+                ),
+                pending.position(),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: active.turn(),
+                },
+            ));
+        let projection = facts
+            .input()
+            .reconstitute()
+            .expect("the pending-steering tail is complete");
+
+        assert_eq!(
+            projection.active_rendered_frontier_origins(),
+            Some(vec![active.accepted_input()])
         );
     }
 

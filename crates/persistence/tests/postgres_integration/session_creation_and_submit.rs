@@ -3199,7 +3199,12 @@ async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(),
 async fn inv012_multipart_command_and_accepted_satellites_are_identical()
 -> Result<(), Box<dyn Error>> {
     let fixture = multipart_replay_fixture().await?;
-    let mirrored: (Value, Value) = sqlx::query_as(
+    #[derive(sqlx::FromRow)]
+    struct MultipartProjectionFacts {
+        command_projection: Value,
+        accepted_input_projection: Value,
+    }
+    let mirrored = sqlx::query_as::<_, MultipartProjectionFacts>(
         "SELECT
             (SELECT jsonb_agg(
                 jsonb_build_array(position, part_kind, text_value,
@@ -3207,7 +3212,7 @@ async fn inv012_multipart_command_and_accepted_satellites_are_identical()
                     declared_media_type, display_filename)
                 ORDER BY position)
                FROM submit_input_command_content_part
-              WHERE command_id = $1),
+              WHERE command_id = $1) AS command_projection,
             (SELECT jsonb_agg(
                 jsonb_build_array(position, part_kind, text_value,
                     encode(blob_digest, 'hex'), attachment_kind,
@@ -3216,12 +3221,16 @@ async fn inv012_multipart_command_and_accepted_satellites_are_identical()
                FROM accepted_input_content_part AS part
                JOIN accepted_input AS accepted
                  ON accepted.accepted_input_id = part.accepted_input_id
-              WHERE accepted.accepting_command_id = $1)",
+              WHERE accepted.accepting_command_id = $1)
+                    AS accepted_input_projection",
     )
     .bind(fixture.command.command_id().as_uuid())
     .fetch_one(&fixture.pool)
     .await?;
-    assert_eq!(mirrored.0, mirrored.1);
+    assert_eq!(
+        mirrored.command_projection,
+        mirrored.accepted_input_projection
+    );
 
     fixture.finish().await;
     Ok(())
