@@ -328,6 +328,19 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     if (projectedBodyBytes > bounded.maxBytes) {
       throw new TypeError('timeline detail exceeds the requested byte ceiling')
     }
+    if (!cursor) {
+      for (const item of page.items) {
+        const excerpt =
+          item.body.type === 'user_input'
+            ? item.body.text
+            : item.body.type === 'model_call'
+              ? item.body.response
+              : undefined
+        if (excerpt && decimalU64(excerpt.offset_bytes) !== 0n) {
+          throw new TypeError('initial timeline detail text excerpt must start at byte zero')
+        }
+      }
+    }
     if (cursor?.type === 'more_at') {
       if (page.items[0]?.address.event_sequence !== cursor.address.event_sequence) {
         throw new TypeError('timeline detail page does not match its requested cursor')
@@ -474,6 +487,20 @@ export class BoundedSessionHistory {
     }
     const firstItemAddress = window.items[0]?.address.event_sequence
     const lastItemAddress = window.items.at(-1)?.address.event_sequence
+    if (
+      anchor.kind === 'first' &&
+      this.descriptorValue &&
+      firstItemAddress !== this.descriptorValue.first_address.event_sequence
+    ) {
+      throw new TypeError('first timeline window does not match the descriptor boundary')
+    }
+    if (
+      anchor.kind === 'latest' &&
+      this.descriptorValue &&
+      lastItemAddress !== this.descriptorValue.latest_address.event_sequence
+    ) {
+      throw new TypeError('latest timeline window does not match the descriptor boundary')
+    }
     if (anchor.kind === 'first' && window.continuation_before) {
       throw new TypeError('first timeline window cannot continue before its anchor')
     }

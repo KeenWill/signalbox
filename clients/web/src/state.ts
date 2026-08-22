@@ -5,7 +5,6 @@ import {
   createDefaultBrowserPreferences,
   loadBrowserPreferences,
   MAX_SAVED_LOGICAL_POSITIONS,
-  type RemoteMediaPolicy,
   saveBrowserPreferences,
 } from './preferences'
 
@@ -70,10 +69,6 @@ const appSlice = createSlice({
       state.paneSizes = action.payload
       state.activitySequence += 1
     },
-    remoteMediaSet(state, action: { payload: RemoteMediaPolicy }) {
-      state.remoteMedia = action.payload
-      state.activitySequence += 1
-    },
     preferencesReset(state) {
       Object.assign(state, createDefaultBrowserPreferences())
       state.activitySequence += 1
@@ -124,7 +119,6 @@ const preferenceActionTypes = new Set<string>([
   appSlice.actions.detailSet.type,
   appSlice.actions.themeSet.type,
   appSlice.actions.paneSizesSet.type,
-  appSlice.actions.remoteMediaSet.type,
   appSlice.actions.preferencesReset.type,
   appSlice.actions.logicalPositionRecorded.type,
 ])
@@ -143,7 +137,6 @@ const preferenceMiddleware: Middleware = (api) => (next) => (action) => {
       detail: app.detail,
       theme: app.theme,
       paneSizes: app.paneSizes,
-      remoteMedia: app.remoteMedia,
       lastLogicalPositions: app.lastLogicalPositions,
       keyOverrides: app.keyOverrides,
     })

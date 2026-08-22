@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
-import { type FormEvent, useEffect, useMemo, useState } from 'react'
+import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import type { WebContractBootstrap, WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import { SessionItemDetail } from './SessionItemDetail'
 import {
@@ -29,6 +29,7 @@ export const visibleSessionItems = (
           'turn_failed',
           'turn_refused',
           'turn_cancelled',
+          'turn_reconciliation_required',
         ].includes(item.kind),
       )
     : items
@@ -76,10 +77,17 @@ export function SessionWorkspaceSurface({
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
+  const navigateTimelineWindow = useCallback(
+    (anchor: 'first' | 'latest') => {
+      dispatch(actions.timelineSelected(null))
+      setManualAnchor({ kind: anchor })
+    },
+    [dispatch],
+  )
   useEffect(() => {
-    onTimelineWindowNavigation((anchor) => setManualAnchor({ kind: anchor }))
+    onTimelineWindowNavigation(navigateTimelineWindow)
     return () => onTimelineWindowNavigation(() => {})
-  }, [onTimelineWindowNavigation])
+  }, [navigateTimelineWindow, onTimelineWindowNavigation])
 
   const openSession = (event: FormEvent) => {
     event.preventDefault()
@@ -99,6 +107,11 @@ export function SessionWorkspaceSurface({
   const select = (eventSequence: string) => {
     dispatch(actions.timelineSelected(eventSequence))
   }
+  useEffect(() => {
+    if (selected !== null || timelineIds.length === 0 || !session.data) return
+    const next = session.data.anchor.kind === 'latest' ? timelineIds.at(-1) : timelineIds[0]
+    if (next) dispatch(actions.timelineSelected(next))
+  }, [dispatch, selected, session.data, timelineIds])
   useEffect(() => {
     if (sessionId !== null && selected !== null && timelineIds.includes(selected)) {
       dispatch(actions.logicalPositionRecorded({ sessionId, position: selected }))
@@ -196,10 +209,10 @@ export function SessionWorkspaceSurface({
             </dl>
           </header>
           <div className="session-window-controls" role="toolbar" aria-label="Timeline window">
-            <button type="button" onClick={() => setManualAnchor({ kind: 'first' })}>
+            <button type="button" onClick={() => navigateTimelineWindow('first')}>
               <SkipBack aria-hidden="true" /> First <kbd>gg</kbd>
             </button>
-            <button type="button" onClick={() => setManualAnchor({ kind: 'latest' })}>
+            <button type="button" onClick={() => navigateTimelineWindow('latest')}>
               <SkipForward aria-hidden="true" /> Latest <kbd>G</kbd>
             </button>
             <span>

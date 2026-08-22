@@ -123,36 +123,6 @@ export function SettingsSurface() {
           </label>
         </PreferenceGroup>
 
-        <PreferenceGroup legend="Remote media">
-          <label>
-            <input
-              type="radio"
-              name="remote-media"
-              checked={app.remoteMedia === 'ask'}
-              onChange={() => dispatch(actions.remoteMediaSet('ask'))}
-            />
-            <span>Ask before loading</span>
-          </label>
-          <label>
-            <input
-              type="radio"
-              name="remote-media"
-              checked={app.remoteMedia === 'block'}
-              onChange={() => dispatch(actions.remoteMediaSet('block'))}
-            />
-            <span>Block</span>
-          </label>
-          <label>
-            <input
-              type="radio"
-              name="remote-media"
-              checked={app.remoteMedia === 'allow'}
-              onChange={() => dispatch(actions.remoteMediaSet('allow'))}
-            />
-            <span>Allow</span>
-          </label>
-        </PreferenceGroup>
-
         <fieldset className="preference-group pane-preferences">
           <legend>Workbench panes</legend>
           <label>

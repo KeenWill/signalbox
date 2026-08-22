@@ -45,6 +45,29 @@ describe('timeline detail body correlation', () => {
     expect(detailBodyMatchesKind(detail('turn_completed', lifecycle))).toBe(false)
     expect(
       detailBodyMatchesKind(
+        detail('turn_activated', { ...lifecycle, cause_code: 'unexpected_activation' }),
+      ),
+    ).toBe(false)
+    expect(
+      detailBodyMatchesKind(
+        detail('turn_completed', {
+          ...lifecycle,
+          lifecycle: 'terminalized',
+          cause_code: 'failed',
+        }),
+      ),
+    ).toBe(false)
+    expect(
+      detailBodyMatchesKind(
+        detail('turn_completed', {
+          ...lifecycle,
+          lifecycle: 'terminalized',
+          cause_code: 'completed',
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      detailBodyMatchesKind(
         detail('turn_reconciliation_required', {
           ...lifecycle,
           lifecycle: 'terminalized',

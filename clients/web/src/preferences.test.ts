@@ -20,14 +20,12 @@ describe('browser preferences', () => {
       layout: 'dashboard',
       density: 'comfortable',
       paneSizes: { navigation: -50, inspector: 50_000 },
-      remoteMedia: 'proxy',
     } as const
     const decoded = decodeBrowserPreferences(stored)
 
     expect(decoded.layout).toBe(defaultBrowserPreferences.layout)
     expect(decoded.density).toBe(stored.density)
     expect(decoded.paneSizes).toEqual({ navigation: 160, inspector: 480 })
-    expect(decoded.remoteMedia).toBe(defaultBrowserPreferences.remoteMedia)
   })
 
   it('bounds retained positions and future key overrides', () => {

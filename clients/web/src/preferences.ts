@@ -1,14 +1,11 @@
 import type { DensityMode, DetailMode, LayoutMode, ThemeMode } from './state'
 
-export type RemoteMediaPolicy = 'ask' | 'block' | 'allow'
-
 export interface BrowserPreferences {
   layout: LayoutMode
   density: DensityMode
   detail: DetailMode
   theme: ThemeMode
   paneSizes: { navigation: number; inspector: number }
-  remoteMedia: RemoteMediaPolicy
   lastLogicalPositions: Record<string, string>
   keyOverrides: Record<string, string>
 }
@@ -19,7 +16,6 @@ export const defaultBrowserPreferences: BrowserPreferences = {
   detail: 'condensed',
   theme: 'dark',
   paneSizes: { navigation: 218, inspector: 252 },
-  remoteMedia: 'ask',
   lastLogicalPositions: {},
   keyOverrides: {},
 }
@@ -88,11 +84,6 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
         480,
       ),
     },
-    remoteMedia: oneOf(
-      candidate.remoteMedia,
-      ['ask', 'block', 'allow'],
-      defaultBrowserPreferences.remoteMedia,
-    ),
     lastLogicalPositions: boundedRecord(
       candidate.lastLogicalPositions,
       MAX_SAVED_LOGICAL_POSITIONS,

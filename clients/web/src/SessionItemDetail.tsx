@@ -34,14 +34,17 @@ export const detailBodyMatchesKind = (detail: DetailItem): boolean => {
       ].includes(detail.kind)
     )
   }
-  if (body.lifecycle === 'activated') return detail.kind === 'turn_activated'
-  return [
-    'turn_completed',
-    'turn_failed',
-    'turn_refused',
-    'turn_cancelled',
-    'turn_reconciliation_required',
-  ].includes(detail.kind)
+  if (body.lifecycle === 'activated') {
+    return detail.kind === 'turn_activated' && body.cause_code === 'activated'
+  }
+  const terminalCauseByKind: Partial<Record<DetailItem['kind'], string>> = {
+    turn_completed: 'completed',
+    turn_failed: 'failed',
+    turn_refused: 'refused',
+    turn_cancelled: 'cancelled',
+    turn_reconciliation_required: 'reconciliation_required',
+  }
+  return terminalCauseByKind[detail.kind] === body.cause_code
 }
 
 const modelCallState = (state: ModelCallBody['state']): string =>
@@ -93,6 +96,14 @@ const DetailRecord = ({ detail }: { detail: DetailItem }) => {
       <>
         <dl className="session-detail-facts">
           <div>
+            <dt>Turn</dt>
+            <dd>{body.turn_id}</dd>
+          </div>
+          <div>
+            <dt>Model call</dt>
+            <dd>{body.model_call_id}</dd>
+          </div>
+          <div>
             <dt>Model</dt>
             <dd>{body.model_identity_id}</dd>
           </div>
@@ -101,12 +112,28 @@ const DetailRecord = ({ detail }: { detail: DetailItem }) => {
             <dd>{modelCallState(body.state)}</dd>
           </div>
           <div>
+            <dt>Cause</dt>
+            <dd>{body.cause_code ?? 'not reported'}</dd>
+          </div>
+          <div>
+            <dt>Request context items</dt>
+            <dd>{body.request_context_items}</dd>
+          </div>
+          <div>
             <dt>Input tokens</dt>
             <dd>{body.usage.input_tokens ?? 'not reported'}</dd>
           </div>
           <div>
             <dt>Output tokens</dt>
             <dd>{body.usage.output_tokens ?? 'not reported'}</dd>
+          </div>
+          <div>
+            <dt>Cache creation input tokens</dt>
+            <dd>{body.usage.cache_creation_input_tokens ?? 'not reported'}</dd>
+          </div>
+          <div>
+            <dt>Cache read input tokens</dt>
+            <dd>{body.usage.cache_read_input_tokens ?? 'not reported'}</dd>
           </div>
         </dl>
         {body.response ? (
@@ -176,9 +203,12 @@ export function SessionItemDetail({
 
   if (detail.isError) {
     return (
-      <p className="session-detail-state" role="alert">
-        Detail unavailable: {detail.error.message}
-      </p>
+      <div className="session-detail-state" role="alert">
+        <p>Detail unavailable: {detail.error.message}</p>
+        <button type="button" onClick={() => void detail.refetch()}>
+          Retry typed detail
+        </button>
+      </div>
     )
   }
   if (!detail.data) return <p className="session-detail-state">Loading typed detail…</p>
