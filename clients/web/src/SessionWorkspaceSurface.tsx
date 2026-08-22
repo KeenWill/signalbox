@@ -139,9 +139,10 @@ export function SessionWorkspaceSurface({
     enabled: sessionId !== null && timelineCapability === 'available',
   })
   const refetchSession = session.refetch
+  const displayedSession = session.isSuccess ? session.data : undefined
   const items = useMemo(
-    () => visibleSessionItems(session.data?.window.items ?? [], app.detail),
-    [app.detail, session.data?.window.items],
+    () => visibleSessionItems(displayedSession?.window.items ?? [], app.detail),
+    [app.detail, displayedSession?.window.items],
   )
   const timelineIds = useMemo(() => items.map((item) => item.address.event_sequence), [items])
   const loadWindow = useCallback(
@@ -166,7 +167,7 @@ export function SessionWorkspaceSurface({
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   useEffect(() => {
     const preferred =
-      session.data?.anchor.kind === 'around' ? session.data.anchor.eventSequence : null
+      displayedSession?.anchor.kind === 'around' ? displayedSession.anchor.eventSequence : null
     const reconciled = reconcileVisibleSessionSelection(
       app.selectedTimeline,
       timelineIds,
@@ -175,9 +176,9 @@ export function SessionWorkspaceSurface({
     if (reconciled !== app.selectedTimeline) {
       dispatch(actions.timelineSelected(reconciled))
     }
-  }, [app.selectedTimeline, dispatch, session.data?.anchor, timelineIds])
+  }, [app.selectedTimeline, dispatch, displayedSession?.anchor, timelineIds])
   useEffect(() => {
-    const selectedItem = session.data?.window.items.find(
+    const selectedItem = displayedSession?.window.items.find(
       (item) => item.address.event_sequence === app.selectedTimeline,
     )
     onSelectionEvidence(
@@ -190,15 +191,19 @@ export function SessionWorkspaceSurface({
           }
         : null,
     )
-  }, [app.selectedTimeline, onSelectionEvidence, session.data?.window.items, sessionId])
+  }, [app.selectedTimeline, displayedSession?.window.items, onSelectionEvidence, sessionId])
   useEffect(() => () => onSelectionEvidence(null), [onSelectionEvidence])
   useEffect(() => {
-    setExpanded((current) => pruneExpandedSessionItems(current, session.data?.window.items ?? []))
-  }, [session.data?.window.items])
+    setExpanded((current) =>
+      pruneExpandedSessionItems(current, displayedSession?.window.items ?? []),
+    )
+  }, [displayedSession?.window.items])
   useEffect(
     () =>
-      onTimelineWindowAvailable(timelineCapability === 'available' && session.data !== undefined),
-    [onTimelineWindowAvailable, session.data, timelineCapability],
+      onTimelineWindowAvailable(
+        timelineCapability === 'available' && displayedSession !== undefined,
+      ),
+    [displayedSession, onTimelineWindowAvailable, timelineCapability],
   )
   useEffect(() => () => onTimelineWindowAvailable(false), [onTimelineWindowAvailable])
   useEffect(() => {
@@ -278,7 +283,7 @@ export function SessionWorkspaceSurface({
       dispatch,
       getState: store.getState,
       timelineIds,
-      timelineWindowAvailable: session.data !== undefined,
+      timelineWindowAvailable: displayedSession !== undefined,
       focusTimeline: () => timelineRef.current?.focus(),
       loadTimelineWindow: loadWindow,
     })

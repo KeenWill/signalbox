@@ -34,9 +34,15 @@ const settingsPreferenceFixture = {
 const useDeterministicBootstrap = (page: Page) =>
   page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
 
-const useDeterministicSession = async (page: Page) => {
+const useDeterministicSession = async (
+  page: Page,
+  shouldFailTimeline: () => boolean = () => false,
+) => {
   await page.route('**/api/sessions/**', (route) => {
     if (new URL(route.request().url()).pathname.endsWith('/timeline')) {
+      if (shouldFailTimeline()) {
+        return route.fulfill({ status: 503, body: 'temporarily unavailable' })
+      }
       return route.fulfill({
         json: {
           session_id: sessionWorkspaceFixture.id,
@@ -312,6 +318,34 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
 
   await expect(page.locator('.session-item-summary small').first()).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('clears cached Session projections after a refetch error', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let failTimeline = false
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page, () => failTimeline)
+  await page.goto('/sessions')
+
+  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  await sessionId.fill(sessionWorkspaceFixture.id)
+  await sessionId.press('Enter')
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+
+  failTimeline = true
+  await page.getByRole('button', { name: /Latest/ }).click()
+
+  await expect(page.getByRole('alert')).toContainText(
+    'The daemon could not provide this bounded session window',
+  )
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toHaveCount(0)
+  await expect(page.getByLabel('Inspector').getByText(sessionWorkspaceFixture.id)).toHaveCount(0)
+  expect(problems.pageErrors).toEqual([])
+  expect(
+    problems.consoleErrors.every((message) =>
+      message.includes('Failed to load resource: the server responded with a status of 503'),
+    ),
+  ).toBe(true)
 })
 
 test('keeps maximum pane widths inside the viewport', async ({ page }) => {
