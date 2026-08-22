@@ -16,7 +16,7 @@ postgres-integration = [
 
 [dependencies]
 deno_core = "=0.410.0"
-deno_error = "=0.7.1"
+deno_error = "=0.7.3"
 serde = { version = "1.0.219", features = ["derive"] }
 signalbox-domain = { path = "../domain" }
 signalbox-persistence = { path = "../persistence" }
