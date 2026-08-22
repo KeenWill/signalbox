@@ -55,7 +55,7 @@ const secondPage = {
     {
       action: null,
       active_turn_count: '0',
-      archived: true,
+      archived: false,
       current_turn_id: null,
       goal_block: null,
       judge: { actionable: '0', completed: '0', escalated: '0', failed: '0' },
@@ -230,7 +230,21 @@ test('focuses a deep-linked mobile inspector after data arrives', async ({ page 
 
   const inspector = page.getByRole('dialog', { name: firstPage.summaries[0].title_summary })
   await expect(inspector).toHaveAttribute('aria-modal', 'true')
-  await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeFocused()
+  const close = page.getByRole('button', { name: 'Close session inspector' })
+  await expect(close).toBeFocused()
+  await close.click()
+  await expect(
+    page.getByRole('button', { name: firstPage.summaries[0].title_summary }),
+  ).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('exposes the server-owned blocked-goal reason in the inspector', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+  await page.getByRole('button', { name: firstPage.summaries[1].title_summary }).click()
+  await expect(page.getByText('Reason: user input required')).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

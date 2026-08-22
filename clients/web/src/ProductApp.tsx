@@ -322,7 +322,11 @@ export function ProductApp({
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
-      callback: () => invokeCommand(binding.commandId, context),
+      callback: () => {
+        if (binding.commandId === 'surface.escape' || store.getState().app.overlay === null) {
+          invokeCommand(binding.commandId, context)
+        }
+      },
     })),
   )
   useHotkeySequences(
@@ -342,6 +346,10 @@ export function ProductApp({
   useEffect(() => {
     if (!search.session) sessionOpenedHere.current = false
   }, [search.session])
+
+  useEffect(() => {
+    if (app.overlay === 'help') dispatch(actions.overlaySet(null))
+  }, [app.overlay, dispatch])
 
   const copy = surfaceCopy[surface]
   const content =

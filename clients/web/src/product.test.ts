@@ -257,6 +257,114 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('rows contradict session_identity_ascending')
   })
 
+  it('rejects identity pages that precede the exclusive request cursor', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              sort: 'session_identity_ascending',
+              continuation: null,
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'identity',
+        includeArchived: false,
+        afterSession: sessionId,
+      }),
+    ).rejects.toThrow('precedes its identity continuation')
+  })
+
+  it('rejects archived rows when the request excludes them', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              summaries: [{ ...sessionPageFixture.summaries[0], archived: true }],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('excluded archived session')
+  })
+
+  it('rejects malformed or contradictory catalog totals', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () => new Response(JSON.stringify({ ...sessionPageFixture, total: 'not-a-number' })),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('contradictory total')
+  })
+
+  it('rejects contradictory state and action pairs', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              summaries: [
+                { ...sessionPageFixture.summaries[0], state: 'idle', action: 'restore_runner' },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('contradictory state and action')
+  })
+
+  it('rejects summaries beyond the daemon scalar ceilings', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              summaries: [{ ...sessionPageFixture.summaries[0], title_summary: '🦀'.repeat(129) }],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('summary scalar ceiling')
+  })
+
   it('rejects a response beyond the catalog page ceiling', async () => {
     const oversizedSummaries = Array.from(
       { length: MAX_SESSION_PAGE_ITEMS + 1 },

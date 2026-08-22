@@ -33,6 +33,7 @@ export function SessionCatalogSurface({
   onStateChange: (state: ProductSessionState, mode?: 'push' | 'close') => void
 }) {
   const returnFocus = useRef<HTMLButtonElement>(null)
+  const sessionButtons = useRef(new Map<string, HTMLButtonElement>())
   const closeFocus = useRef<HTMLButtonElement>(null)
   const pageHeading = useRef<HTMLHeadingElement>(null)
   const restorePageFocus = useRef(false)
@@ -72,6 +73,9 @@ export function SessionCatalogSurface({
   }, [])
 
   useEffect(() => {
+    if (selectedSessionId) {
+      returnFocus.current = sessionButtons.current.get(selectedSessionId) ?? null
+    }
     const focusTarget = selectedSessionId ? closeFocus : returnFocus
     const frame = requestAnimationFrame(() => focusTarget.current?.focus())
     return () => cancelAnimationFrame(frame)
@@ -191,6 +195,10 @@ export function SessionCatalogSurface({
                 {sessions.data.summaries.map((summary) => (
                   <li key={summary.session_id}>
                     <button
+                      ref={(button) => {
+                        if (button) sessionButtons.current.set(summary.session_id, button)
+                        else sessionButtons.current.delete(summary.session_id)
+                      }}
                       type="button"
                       aria-pressed={state.session === summary.session_id}
                       onClick={(event) => openSession(summary, event.currentTarget)}
@@ -281,6 +289,7 @@ export function SessionCatalogSurface({
               {selected.goal_block && (
                 <section>
                   <span className="eyebrow">Blocked goal</span>
+                  <p>Reason: {label(selected.goal_block.reason)}</p>
                   <p>{selected.goal_block.need_summary}</p>
                 </section>
               )}

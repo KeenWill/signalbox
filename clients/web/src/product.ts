@@ -75,6 +75,26 @@ export interface ProductTransport {
 export const MAX_SESSION_PAGE_ITEMS = 32
 export const MAX_PRODUCT_HTTP_RESPONSE_BYTES = 64 * 1024
 export const MAX_SESSION_SEARCH_BYTES = 1024
+const MAX_SESSION_SUMMARY_SCALARS = 128
+const PRODUCT_CONTRACT_NAME = 'signalbox.web-http'
+const PRODUCT_CONTRACT_VERSION = '1'
+
+const isCanonicalUnsigned64 = (value: string) =>
+  CANONICAL_UNSIGNED_INTEGER.test(value) && BigInt(value) <= MAX_UNSIGNED_64
+
+const expectedActionByState: Record<
+  WebAttentionSnapshot['summaries'][number]['state'],
+  WebAttentionSnapshot['summaries'][number]['action']
+> = {
+  active: null,
+  queued: null,
+  blocked: 'provide_goal_need',
+  awaiting_approval: 'decide_approval',
+  ambiguous: 'reconcile_turn',
+  awaiting_reconciliation: 'reconcile_turn',
+  runner_lost: 'restore_runner',
+  idle: null,
+}
 
 const admittedSessionSearch = (value: unknown) => {
   if (typeof value === 'string' && value.indexOf(String.fromCharCode(0)) !== -1) {
@@ -126,9 +146,27 @@ const validateSessionPage = (
   if (page.summaries.length > MAX_SESSION_PAGE_ITEMS) {
     throw new Error(`session catalog response exceeds ${MAX_SESSION_PAGE_ITEMS} summaries`)
   }
+  if (!isCanonicalUnsigned64(page.total) || BigInt(page.total) < BigInt(page.summaries.length)) {
+    throw new Error('session catalog response contains a contradictory total')
+  }
   for (const summary of page.summaries) {
     if (!CANONICAL_UUID.test(summary.session_id)) {
       throw new Error('session catalog response contains a non-canonical session identity')
+    }
+    if (!request.includeArchived && summary.archived) {
+      throw new Error('session catalog response contains an excluded archived session')
+    }
+    if (summary.action !== expectedActionByState[summary.state]) {
+      throw new Error('session catalog response contains a contradictory state and action')
+    }
+    if (
+      (typeof summary.title_summary === 'string' &&
+        Array.from(summary.title_summary).length > MAX_SESSION_SUMMARY_SCALARS) ||
+      (summary.goal_block !== null &&
+        summary.goal_block !== undefined &&
+        Array.from(summary.goal_block.need_summary).length > MAX_SESSION_SUMMARY_SCALARS)
+    ) {
+      throw new Error('session catalog response exceeds a summary scalar ceiling')
     }
     const milliseconds = summary.last_activity.unix_milliseconds
     const numericMilliseconds = Number(milliseconds)
@@ -139,6 +177,15 @@ const validateSessionPage = (
     ) {
       throw new Error('session catalog activity timestamp is outside the JavaScript Date range')
     }
+  }
+  const first = page.summaries[0]
+  if (
+    request.sort === 'identity' &&
+    request.afterSession !== undefined &&
+    first !== undefined &&
+    first.session_id <= request.afterSession
+  ) {
+    throw new Error('session catalog response precedes its identity continuation')
   }
   for (let index = 1; index < page.summaries.length; index += 1) {
     const previous = page.summaries[index - 1]
@@ -193,6 +240,12 @@ export class SameOriginProductTransport implements ProductTransport {
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
     const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
+    if (
+      bootstrap.contract.name !== PRODUCT_CONTRACT_NAME ||
+      bootstrap.contract.version !== PRODUCT_CONTRACT_VERSION
+    ) {
+      throw new Error('bootstrap carries an incompatible web contract')
+    }
     if (!bootstrap.capabilities.bounded_json) {
       throw new Error('bootstrap does not provide bounded JSON responses')
     }
