@@ -300,6 +300,13 @@ test('pages a 101-delivery burst and preserves semantic session evidence', async
   await expect(page.getByText('stale seal', { exact: false })).toBeVisible()
   await expect(page.getByText('non converged', { exact: false })).toBeVisible()
   await expect(page.getByText('105 loaded in browser window')).toBeVisible()
+  const historyViewport = page.getByRole('rowgroup', {
+    name: 'Scrollable repository activity rows',
+  })
+  await historyViewport.focus()
+  await expect(historyViewport).toBeFocused()
+  await historyViewport.press('End')
+  await expect(page.getByText('delivery 2', { exact: true })).toBeVisible()
 
   await page.getByRole('button', { name: /#103 Non-converged checks/ }).click()
   await expect(page.getByText(sessionOne)).toBeVisible()

@@ -7,13 +7,13 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
+    Router,
     extract::{Query, State, rejection::QueryRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use signalbox_application::{
     RepoWatchActivityPage, RepoWatchAutomationStatus, RepoWatchChecksStatus, RepoWatchDraftStatus,
     RepoWatchEventCursor, RepoWatchHeldCursor, RepoWatchHeldSlot, RepoWatchHeldSlotBlocker,
@@ -34,17 +34,17 @@ use signalbox_persistence::repo_watch_operations::{
     PostgresRepoWatchOperations, RepoWatchOperationsError,
 };
 use signalbox_web_contract::{
-    WebRepoWatchActivityPage, WebRepoWatchAutomationStatus, WebRepoWatchChecksStatus,
-    WebRepoWatchDispatch, WebRepoWatchDraftStatus, WebRepoWatchEvent, WebRepoWatchEventCursor,
-    WebRepoWatchEventKind, WebRepoWatchEventKindCount, WebRepoWatchHeldCursor,
-    WebRepoWatchHeldSlot, WebRepoWatchHeldSlotBlocker, WebRepoWatchLatestWebhook,
-    WebRepoWatchLifecycle, WebRepoWatchMergeable, WebRepoWatchObligationCursor,
-    WebRepoWatchObligationReadiness, WebRepoWatchPullRequest, WebRepoWatchPullRequestPage,
-    WebRepoWatchPullRequestSession, WebRepoWatchPullRequestSessionPage,
-    WebRepoWatchQueuedObligation, WebRepoWatchRepositoryStatus, WebRepoWatchRepositoryStatusPage,
-    WebRepoWatchReviewDecision, WebRepoWatchSessionCursor, WebRepoWatchSessionPurpose,
-    WebRepoWatchSettlement, WebRepoWatchWebhookActivity, WebRepoWatchWebhookDisposition,
-    WebRepoWatchWebhookWindow, WebRepoWatchWorkPage,
+    MAX_JSON_BODY_BYTES, WebRepoWatchActivityPage, WebRepoWatchAutomationStatus,
+    WebRepoWatchChecksStatus, WebRepoWatchDispatch, WebRepoWatchDraftStatus, WebRepoWatchEvent,
+    WebRepoWatchEventCursor, WebRepoWatchEventKind, WebRepoWatchEventKindCount,
+    WebRepoWatchHeldCursor, WebRepoWatchHeldSlot, WebRepoWatchHeldSlotBlocker,
+    WebRepoWatchLatestWebhook, WebRepoWatchLifecycle, WebRepoWatchMergeable,
+    WebRepoWatchObligationCursor, WebRepoWatchObligationReadiness, WebRepoWatchPullRequest,
+    WebRepoWatchPullRequestPage, WebRepoWatchPullRequestSession,
+    WebRepoWatchPullRequestSessionPage, WebRepoWatchQueuedObligation, WebRepoWatchRepositoryStatus,
+    WebRepoWatchRepositoryStatusPage, WebRepoWatchReviewDecision, WebRepoWatchSessionCursor,
+    WebRepoWatchSessionPurpose, WebRepoWatchSettlement, WebRepoWatchWebhookActivity,
+    WebRepoWatchWebhookDisposition, WebRepoWatchWebhookWindow, WebRepoWatchWorkPage,
 };
 use sqlx::{
     PgPool,
@@ -156,7 +156,7 @@ async fn repository_statuses(
     };
     match operations.repository_statuses(after).await {
         Ok(page) => match repository_status_page_dto(page) {
-            Ok(page) => Json(page).into_response(),
+            Ok(page) => bounded_projection_response(page),
             Err(()) => projection_error(None),
         },
         Err(error) => projection_error(Some(error)),
@@ -192,7 +192,7 @@ async fn pull_requests(
     };
     match operations.pull_requests(repository, after).await {
         Ok(page) => match pull_request_page_dto(page) {
-            Ok(page) => Json(page).into_response(),
+            Ok(page) => bounded_projection_response(page),
             Err(()) => projection_error(None),
         },
         Err(error) => projection_error(Some(error)),
@@ -245,7 +245,7 @@ async fn work(
         .await
     {
         Ok(page) => match work_page_dto(page) {
-            Ok(page) => Json(page).into_response(),
+            Ok(page) => bounded_projection_response(page),
             Err(()) => projection_error(None),
         },
         Err(error) => projection_error(Some(error)),
@@ -286,7 +286,7 @@ async fn pull_request_sessions(
         .await
     {
         Ok(page) => match pull_request_session_page_dto(page) {
-            Ok(page) => Json(page).into_response(),
+            Ok(page) => bounded_projection_response(page),
             Err(()) => projection_error(None),
         },
         Err(error) => projection_error(Some(error)),
@@ -352,7 +352,7 @@ async fn activity(
         .await
     {
         Ok(page) => match activity_page_dto(page, include_events, include_webhooks) {
-            Ok(page) => Json(page).into_response(),
+            Ok(page) => bounded_projection_response(page),
             Err(()) => projection_error(None),
         },
         Err(error) => projection_error(Some(error)),
@@ -942,6 +942,20 @@ fn activity_page_dto(
     })
 }
 
+fn bounded_projection_response<T>(value: T) -> Response
+where
+    T: Serialize,
+{
+    match serde_json::to_vec(&value) {
+        Ok(encoded) if encoded.len() <= MAX_JSON_BODY_BYTES => (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            encoded,
+        )
+            .into_response(),
+        Ok(_) | Err(_) => projection_error(None),
+    }
+}
+
 fn unavailable() -> Response {
     application_error(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -977,13 +991,27 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request, StatusCode},
     };
-    use signalbox_web_contract::WebApiErrorResponse;
+    use signalbox_web_contract::{MAX_JSON_BODY_BYTES, WebApiErrorResponse};
     use tower::ServiceExt;
 
     use super::{
-        event_cursor, held_cursor, postgres_bigint, session_cursor, timestamp,
-        validate_activity_window,
+        bounded_projection_response, event_cursor, held_cursor, postgres_bigint, session_cursor,
+        timestamp, validate_activity_window,
     };
+
+    #[tokio::test]
+    async fn oversized_repository_projection_fails_closed_with_a_bounded_error() {
+        let response = bounded_projection_response(vec![b'x'; MAX_JSON_BODY_BYTES]);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), MAX_JSON_BODY_BYTES)
+            .await
+            .expect("the projection error remains within the contract ceiling");
+        let error: WebApiErrorResponse =
+            serde_json::from_slice(&body).expect("the failure follows the web API contract");
+        assert_eq!(error.error.code, "repository_watch_projection_failed");
+        assert!(body.len() <= MAX_JSON_BODY_BYTES);
+    }
 
     #[test]
     fn partial_composite_cursors_fail_closed() {

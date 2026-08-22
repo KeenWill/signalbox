@@ -21,6 +21,54 @@ import {
 // The version-one browser contract fixes both transport ceilings at 65,536 bytes.
 const MAX_JSON_BODY_BYTES = 65_536
 const MAX_ATTENTION_EVENT_BYTES = 65_536
+const MAX_POSTGRES_BIGINT = 9_223_372_036_854_775_807n
+const MAX_POSTGRES_INTEGER = 2_147_483_647
+
+const canonicalPositiveBigInt = (value: string, field: string): bigint => {
+  if (!/^[1-9][0-9]*$/.test(value)) throw new TypeError(`${field} is not canonical`)
+  const parsed = BigInt(value)
+  if (parsed > MAX_POSTGRES_BIGINT) throw new TypeError(`${field} exceeds its database range`)
+  return parsed
+}
+
+const validateActivityContinuations = (
+  window: RepoWatchActivityWindow | undefined,
+  page: WebRepoWatchActivityPage,
+): WebRepoWatchActivityPage => {
+  const event = page.event_continuation_before
+  if (event) {
+    const generation = canonicalPositiveBigInt(
+      event.cursor_generation,
+      'event continuation generation',
+    )
+    if (event.event_ordinal < 1 || event.event_ordinal > MAX_POSTGRES_INTEGER) {
+      throw new TypeError('event continuation ordinal exceeds its database range')
+    }
+    const requested = window?.eventBefore
+    if (requested) {
+      const requestedGeneration = canonicalPositiveBigInt(
+        requested.cursorGeneration,
+        'requested event generation',
+      )
+      if (
+        generation > requestedGeneration ||
+        (generation === requestedGeneration && event.event_ordinal >= requested.eventOrdinal)
+      ) {
+        throw new TypeError('event continuation does not advance to older history')
+      }
+    }
+  }
+
+  const webhook = page.webhook_continuation_before_receipt_sequence
+  if (webhook) {
+    const sequence = canonicalPositiveBigInt(webhook, 'webhook continuation')
+    const requested = window?.webhookBeforeReceiptSequence
+    if (requested && sequence >= canonicalPositiveBigInt(requested, 'requested webhook cursor')) {
+      throw new TypeError('webhook continuation does not advance to older history')
+    }
+  }
+  return page
+}
 
 const requireCompatibleBootstrap = (bootstrap: WebContractBootstrap): WebContractBootstrap => {
   if (
@@ -315,11 +363,12 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
     if (window?.webhookBeforeReceiptSequence) {
       query.set('webhook_before_receipt_sequence', window.webhookBeforeReceiptSequence)
     }
-    return this.readJson(
+    const page = await this.readJson(
       this.queryPath('/api/repository-watch/activity', query),
       decodeWebRepoWatchActivityPage,
       signal,
     )
+    return validateActivityContinuations(window, page)
   }
 
   private queryPath(path: string, query: URLSearchParams): string {

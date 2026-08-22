@@ -120,6 +120,9 @@ function HistoryTable({ rows }: { rows: ActivityRow[] }) {
         ref={parentRef}
         className="activity-history-scroll"
         role="rowgroup"
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: Native keyboard scrolling exposes virtualized rows beyond the mounted range.
+        tabIndex={0}
+        aria-label="Scrollable repository activity rows"
         data-mounted-rows={virtualRows.length}
         data-loaded-rows={rows.length}
       >
@@ -710,6 +713,20 @@ export function ActivitySurface() {
       )}
 
       {work.isError && <p role="alert">Work: {errorMessage(work.error)}</p>}
+      {(heldAfter || obligationAfter) && (
+        <div className="activity-page-controls">
+          {heldAfter && (
+            <button type="button" onClick={() => setHeldAfter(undefined)}>
+              First held page
+            </button>
+          )}
+          {obligationAfter && (
+            <button type="button" onClick={() => setObligationAfter(undefined)}>
+              First queued page
+            </button>
+          )}
+        </div>
+      )}
       {work.data && (
         <>
           <WorkTables page={work.data} />

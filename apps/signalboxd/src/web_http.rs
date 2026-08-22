@@ -363,6 +363,7 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
     };
     drop(snapshot_permit);
     let cursor = snapshot.cursor;
+    let live_page_has_capacity = snapshot.continuation_after.is_none();
     let visible_sessions = snapshot
         .summaries
         .iter()
@@ -378,10 +379,19 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
             Some(WebAttentionStreamEvent::Snapshot { snapshot }),
             cursor,
             visible_sessions,
+            live_page_has_capacity,
             budget,
             AttentionFollowDisposition::Continue,
         ),
-        |(repository, pending, cursor, visible_sessions, budget, disposition)| async move {
+        |(
+            repository,
+            pending,
+            cursor,
+            visible_sessions,
+            live_page_has_capacity,
+            budget,
+            disposition,
+        )| async move {
             if let Some(event) = pending {
                 return Some((
                     event,
@@ -390,6 +400,7 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                         None,
                         cursor,
                         visible_sessions,
+                        live_page_has_capacity,
                         budget,
                         AttentionFollowDisposition::Continue,
                     ),
@@ -420,6 +431,7 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                                 None,
                                 next,
                                 visible_sessions,
+                                live_page_has_capacity,
                                 budget,
                                 AttentionFollowDisposition::Continue,
                             ),
@@ -429,6 +441,26 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                         cursor: next,
                         summaries,
                     }) => {
+                        if attention_changes_require_resync(
+                            &summaries,
+                            &visible_sessions,
+                            live_page_has_capacity,
+                        ) {
+                            return Some((
+                                WebAttentionStreamEvent::ResyncRequired {
+                                    cursor: next.value().to_string(),
+                                },
+                                (
+                                    repository,
+                                    None,
+                                    next,
+                                    visible_sessions,
+                                    live_page_has_capacity,
+                                    budget,
+                                    AttentionFollowDisposition::End,
+                                ),
+                            ));
+                        }
                         let summaries =
                             page_scoped_attention_summaries(summaries, &visible_sessions)
                                 .into_iter()
@@ -449,6 +481,7 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                                 None,
                                 next,
                                 visible_sessions,
+                                live_page_has_capacity,
                                 budget,
                                 AttentionFollowDisposition::Continue,
                             ),
@@ -464,6 +497,7 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                                 None,
                                 next,
                                 visible_sessions,
+                                live_page_has_capacity,
                                 budget,
                                 AttentionFollowDisposition::End,
                             ),
@@ -488,6 +522,17 @@ fn page_scoped_attention_summaries(
         .into_iter()
         .filter(|summary| visible_sessions.contains(&summary.session))
         .collect()
+}
+
+fn attention_changes_require_resync(
+    summaries: &[AttentionSummary],
+    visible_sessions: &BTreeSet<SessionId>,
+    live_page_has_capacity: bool,
+) -> bool {
+    live_page_has_capacity
+        && summaries
+            .iter()
+            .any(|summary| !visible_sessions.contains(&summary.session))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1369,6 +1414,41 @@ mod tests {
 
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0].session, visible);
+    }
+
+    #[test]
+    fn attention_follow_resyncs_for_a_new_identity_on_a_partial_live_page() {
+        let visible = SessionId::from_uuid(Uuid::from_u128(1));
+        let new_session = SessionId::from_uuid(Uuid::from_u128(2));
+        let summary = AttentionSummary {
+            session: new_session,
+            current_turn: None,
+            state: AttentionState::Idle,
+            action: None,
+            goal_block: None,
+            judge: AttentionJudgeFacts {
+                actionable: 0,
+                completed: 0,
+                escalated: 0,
+                failed: 0,
+            },
+            last_activity: AttentionActivity {
+                recorded_at: UNIX_EPOCH,
+                kind: AttentionActivityKind::Session,
+            },
+        };
+        let visible_sessions = BTreeSet::from([visible]);
+
+        assert!(super::attention_changes_require_resync(
+            std::slice::from_ref(&summary),
+            &visible_sessions,
+            true,
+        ));
+        assert!(!super::attention_changes_require_resync(
+            &[summary],
+            &visible_sessions,
+            false,
+        ));
     }
 
     #[test]

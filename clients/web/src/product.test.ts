@@ -165,6 +165,31 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('rejects non-advancing activity continuations', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...activityFixture,
+              event_continuation_before: { cursor_generation: '9', event_ordinal: 42 },
+              webhook_continuation_before_receipt_sequence: '7',
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readRepoWatchActivity('example/repository', {
+        eventBefore: { cursorGeneration: '9', eventOrdinal: 42 },
+        webhookBeforeReceiptSequence: '7',
+        includeEvents: true,
+        includeWebhooks: true,
+      }),
+    ).rejects.toThrow('does not advance to older history')
+  })
+
   it('fails closed when a repository-watch response carries an unknown field', async () => {
     vi.stubGlobal(
       'fetch',
