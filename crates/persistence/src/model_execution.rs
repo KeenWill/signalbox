@@ -4428,6 +4428,7 @@ fn decode_delegated_active_phase(
                     revision,
                     row.try_get::<Option<Uuid>, _>("runner_recovery_tool_attempt_id")?
                         .map(signalbox_domain::ToolAttemptId::from_uuid),
+                    None,
                 ),
             )
         }

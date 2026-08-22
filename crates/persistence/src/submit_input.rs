@@ -3342,6 +3342,7 @@ pub(crate) async fn load_scheduling_projection(
                             RunnerId::from_uuid(runner),
                             revision,
                             runner_recovery_tool_attempt.map(ToolAttemptId::from_uuid),
+                            Some(source_snapshot.frontier().snapshot()),
                         )
                     }
                     Some("running") if recovery_model_call.is_none() => {
@@ -8474,6 +8475,9 @@ fn decode_complete(
                 || result_selected_defaults.is_some()
                 || result_last_position.is_some()
                 || result_existing_interrupt.is_some()
+                || result_blob_digest.is_some()
+                || result_maximum_attachment_bytes.is_some()
+                || result_observed_attachment_bytes.is_some()
             {
                 return Err(SubmitInputCorruption::Inconsistent("applied result fields").into());
             }

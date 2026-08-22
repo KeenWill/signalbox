@@ -3156,6 +3156,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
         runner: RunnerId,
         placement_revision: RunnerGeneration,
         interrupted_tool_attempt: Option<ToolAttemptId>,
+        source_frontier: Option<ContextFrontierId>,
     ) -> Self;
     // accessor: owning_turn()
 }

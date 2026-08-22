@@ -546,6 +546,7 @@ enum StoredActiveTurnPhase {
         runner: crate::RunnerId,
         placement_revision: crate::RunnerGeneration,
         interrupted_tool_attempt: Option<crate::ToolAttemptId>,
+        source_frontier: Option<ContextFrontierId>,
     },
 }
 
@@ -832,6 +833,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
         runner: crate::RunnerId,
         placement_revision: crate::RunnerGeneration,
         interrupted_tool_attempt: Option<crate::ToolAttemptId>,
+        source_frontier: Option<ContextFrontierId>,
     ) -> Self {
         Self {
             owning_turn,
@@ -840,6 +842,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                 runner,
                 placement_revision,
                 interrupted_tool_attempt,
+                source_frontier,
             },
             executing_tool_batch: None,
         }
@@ -868,6 +871,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
             runner,
             placement_revision,
             interrupted_tool_attempt,
+            ..
         } = self.state
         {
             return self.current_attempt.is_none().then_some(
@@ -5470,14 +5474,36 @@ fn reconstitute_inner(
                         }
                         ActiveTurnPhase::AwaitingChild { wait: *wait }
                     }
-                    StoredActiveTurnPhase::AwaitingRunnerRecovery { .. } => phase
-                        .canonical_evidence_free_phase()
-                        .ok_or(
-                        AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
-                            turn,
-                            accepted_input: record.accepted_input.id(),
-                        },
-                    )?,
+                    StoredActiveTurnPhase::AwaitingRunnerRecovery {
+                        source_frontier,
+                        ..
+                    } => {
+                        if let Some(source_frontier) = source_frontier {
+                            let source_snapshot = snapshots.get(source_frontier).ok_or(
+                                AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                    turn,
+                                    accepted_input: record.accepted_input.id(),
+                                },
+                            )?;
+                            if !snapshots[starting_frontier]
+                                .is_semantic_prefix_of(source_snapshot)
+                            {
+                                return Err(
+                                    AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                        turn,
+                                        accepted_input: record.accepted_input.id(),
+                                    },
+                                );
+                            }
+                            referenced_snapshots.insert(*source_frontier);
+                        }
+                        phase.canonical_evidence_free_phase().ok_or(
+                            AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                turn,
+                                accepted_input: record.accepted_input.id(),
+                            },
+                        )?
+                    }
                     StoredActiveTurnPhase::AwaitingToolRecovery { wait, attempt_end } => {
                         let Some(current_attempt) = phase.current_attempt else {
                             return Err(
@@ -17207,6 +17233,7 @@ mod tests {
             runner,
             revision,
             interrupted_tool_attempt,
+            None,
         );
 
         assert_eq!(
