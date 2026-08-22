@@ -13,10 +13,15 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
 import { Workspace } from './App'
+import { HttpImportApi } from './imports/api'
+import { ImportsWorkspace } from './imports/ImportsWorkspace'
+import { ScenarioImportApi } from './imports/scenario'
 import { store } from './state'
 import './app.css'
 
 const rootRoute = createRootRoute({ component: () => <Outlet /> })
+const httpImportApi = new HttpImportApi()
+const scenarioImportApi = new ScenarioImportApi()
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
@@ -27,9 +32,24 @@ const indexRoute = createRoute({
 const scenarioRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/scenario/$scenarioId',
-  component: () => <Workspace scenarioId={scenarioRoute.useParams().scenarioId} />,
+  component: ScenarioRoute,
 })
-const router = createRouter({ routeTree: rootRoute.addChildren([indexRoute, scenarioRoute]) })
+function ScenarioRoute() {
+  const { scenarioId } = scenarioRoute.useParams()
+  return scenarioId === 'imports' ? (
+    <ImportsWorkspace api={scenarioImportApi} scenario />
+  ) : (
+    <Workspace scenarioId={scenarioId} />
+  )
+}
+const importsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/imports',
+  component: () => <ImportsWorkspace api={httpImportApi} scenario={false} />,
+})
+const router = createRouter({
+  routeTree: rootRoute.addChildren([indexRoute, scenarioRoute, importsRoute]),
+})
 // Tunable effective ceiling: retain recently visited scenario projections without growing the
 // development cache for the lifetime of the page.
 const QUERY_CACHE_GC_TIME_MS = 5 * 60_000

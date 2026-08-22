@@ -16,4 +16,55 @@ describe('command registry', () => {
 
     expect(selectApp(store.getState()).selectedTimeline).toBe(timelineIds[0])
   })
+
+  it('selects the next immutable imported frontier through the command registry', () => {
+    const importEntryIds = ['import-entry-1', 'import-entry-2'] as const
+    let selectedImportEntry: (typeof importEntryIds)[number] = importEntryIds[0]
+
+    invokeCommand('imports.entry.next', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      importEntryIds,
+      selectedImportEntry,
+      selectImportEntry: (id) => {
+        selectedImportEntry = id as (typeof importEntryIds)[number]
+      },
+    })
+
+    expect(selectedImportEntry).toBe(importEntryIds[1])
+  })
+
+  it('runs available continuation actions through stable command identities', () => {
+    const relationships: Array<'resume' | 'fork'> = []
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      canContinueImport: true,
+      continueImport: (relationship: 'resume' | 'fork') => relationships.push(relationship),
+    }
+
+    invokeCommand('imports.continue.resume', context)
+    invokeCommand('imports.continue.fork', context)
+
+    expect(relationships).toEqual(['resume', 'fork'])
+  })
+
+  it('does not run an unavailable continuation command', () => {
+    const relationships: Array<'resume' | 'fork'> = []
+
+    invokeCommand('imports.continue.resume', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      canContinueImport: false,
+      continueImport: (relationship) => relationships.push(relationship),
+    })
+
+    expect(relationships).toEqual([])
+  })
 })

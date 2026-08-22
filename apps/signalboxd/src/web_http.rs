@@ -35,6 +35,8 @@ use tokio::{net::TcpListener, sync::watch};
 use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
 
+use crate::{HubModelConfiguration, web_imports};
+
 /// Optional deployment override for the browser listener.
 pub const WEB_BIND_ENVIRONMENT: &str = "SIGNALBOX_WEB_BIND";
 /// Optional production web-build root served outside `/api/`.
@@ -44,6 +46,7 @@ pub const DEFAULT_WEB_BIND_ADDRESS: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 37_231);
 
 const JSON_CONTENT_TYPE: &str = "application/json";
+const TEXT_CONTENT_TYPE: &str = "text/plain";
 const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
 const HTTP_DEFAULT_PORT: u16 = 80;
 
@@ -75,6 +78,7 @@ impl WebHttpConfiguration {
                 .parse()
                 .map_err(|_| WebHttpConfigurationError::InvalidBindAddress)?,
         };
+        validate_loopback_bind_address(bind_address)?;
         let asset_root = match asset_root {
             None => None,
             Some(value) if value.is_empty() => {
@@ -88,13 +92,16 @@ impl WebHttpConfiguration {
         })
     }
 
-    /// Creates explicit configuration for a deterministic or embedded server.
-    #[must_use]
-    pub fn new(bind_address: SocketAddr, asset_root: Option<PathBuf>) -> Self {
-        Self {
+    /// Creates explicit loopback-only configuration for a deterministic or embedded server.
+    pub fn new(
+        bind_address: SocketAddr,
+        asset_root: Option<PathBuf>,
+    ) -> Result<Self, WebHttpConfigurationError> {
+        validate_loopback_bind_address(bind_address)?;
+        Ok(Self {
             bind_address,
             asset_root,
-        }
+        })
     }
 
     /// Address the listener binds.
@@ -110,6 +117,16 @@ impl WebHttpConfiguration {
     }
 }
 
+fn validate_loopback_bind_address(
+    bind_address: SocketAddr,
+) -> Result<(), WebHttpConfigurationError> {
+    if bind_address.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(WebHttpConfigurationError::NonLoopbackBindUnsupported)
+    }
+}
+
 /// Closed configuration failures that never expose rejected values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WebHttpConfigurationError {
@@ -117,6 +134,8 @@ pub enum WebHttpConfigurationError {
     BindAddressNotUnicode,
     /// Explicit listener setting was not a socket address.
     InvalidBindAddress,
+    /// Explicit listener setting exposed the unauthenticated browser surface.
+    NonLoopbackBindUnsupported,
     /// Explicit production asset root was empty.
     EmptyAssetRoot,
 }
@@ -136,6 +155,10 @@ impl fmt::Display for WebHttpConfigurationError {
                     "setting {WEB_BIND_ENVIRONMENT} is not a socket address"
                 )
             }
+            Self::NonLoopbackBindUnsupported => write!(
+                formatter,
+                "setting {WEB_BIND_ENVIRONMENT} must use a loopback address"
+            ),
             Self::EmptyAssetRoot => {
                 write!(formatter, "setting {WEB_ASSET_ROOT_ENVIRONMENT} is empty")
             }
@@ -173,8 +196,12 @@ pub struct WebHttpRuntime {
 
 impl WebHttpRuntime {
     /// Binds the production same-origin router.
-    pub async fn bind(configuration: WebHttpConfiguration) -> Result<Self, WebHttpRuntimeError> {
-        let router = production_router(configuration.asset_root);
+    pub async fn bind(
+        configuration: WebHttpConfiguration,
+        pool: sqlx::PgPool,
+        model_configuration: HubModelConfiguration,
+    ) -> Result<Self, WebHttpRuntimeError> {
+        let router = production_router(configuration.asset_root, pool, model_configuration);
         Self::bind_router(configuration.bind_address, router).await
     }
 
@@ -216,19 +243,37 @@ impl WebHttpRuntime {
 }
 
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
-pub fn production_router(asset_root: Option<PathBuf>) -> Router {
+pub fn production_router(
+    asset_root: Option<PathBuf>,
+    pool: sqlx::PgPool,
+    model_configuration: HubModelConfiguration,
+) -> Router {
+    let api = Router::new()
+        .route("/bootstrap", get(contract_bootstrap))
+        .nest("/imports", web_imports::router(pool, model_configuration))
+        .fallback(api_not_found);
+    same_origin_router(asset_root, api)
+}
+
+#[cfg(test)]
+fn bootstrap_only_router(asset_root: Option<PathBuf>) -> Router {
     let api = Router::new()
         .route("/bootstrap", get(contract_bootstrap))
         .fallback(api_not_found);
+    same_origin_router(asset_root, api)
+}
+
+fn same_origin_router(asset_root: Option<PathBuf>, api: Router) -> Router {
     let router = Router::new().nest("/api", api);
-    match asset_root {
+    let router = match asset_root {
         Some(root) => router.fallback_service(
             ServeDir::new(root.clone())
                 .append_index_html_on_directories(true)
                 .fallback(ServeFile::new(root.join("index.html"))),
         ),
         None => router.fallback(static_assets_not_configured),
-    }
+    };
+    router.layer(middleware::from_fn(validate_loopback_host))
 }
 
 /// Builds an in-memory deterministic server with no persistence dependency.
@@ -334,6 +379,37 @@ where
     })
 }
 
+/// Decodes one UTF-8 request body after enforcing a caller-owned byte ceiling.
+pub(crate) async fn decode_bounded_utf8(
+    request: Request,
+    maximum_bytes: usize,
+) -> Result<String, Response> {
+    let bytes = to_bytes(request.into_body(), maximum_bytes)
+        .await
+        .map_err(|error| {
+            if error_chain_contains_length_limit(&error) {
+                transport_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "text_body_too_large",
+                    "text request body exceeds the configured import limit",
+                )
+            } else {
+                transport_error(
+                    StatusCode::BAD_REQUEST,
+                    "text_body_read_failed",
+                    "text request body could not be read",
+                )
+            }
+        })?;
+    String::from_utf8(bytes.to_vec()).map_err(|_| {
+        transport_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_utf8",
+            "request body is not valid UTF-8",
+        )
+    })
+}
+
 fn error_chain_contains_length_limit(error: &axum::Error) -> bool {
     let mut current: Option<&(dyn Error + 'static)> = Some(error);
     while let Some(error) = current {
@@ -414,7 +490,7 @@ impl io::Write for NdjsonItemWriter {
     }
 }
 
-async fn validate_json_mutation(request: Request, next: Next) -> Response {
+pub(crate) async fn validate_json_mutation(request: Request, next: Next) -> Response {
     if request.method() != Method::POST {
         return transport_error(
             StatusCode::METHOD_NOT_ALLOWED,
@@ -439,12 +515,72 @@ async fn validate_json_mutation(request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
+pub(crate) async fn validate_text_mutation(request: Request, next: Next) -> Response {
+    if request.method() != Method::POST {
+        return transport_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "mutation_method_not_allowed",
+            "browser mutations use POST",
+        );
+    }
+    if !has_content_type(request.headers(), TEXT_CONTENT_TYPE) {
+        return transport_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "text_content_type_required",
+            "exact import searches require text/plain",
+        );
+    }
+    if validate_supplied_origin(request.headers()).is_err() {
+        return transport_error(
+            StatusCode::FORBIDDEN,
+            "cross_origin_mutation_rejected",
+            "mutation origin does not match request authority",
+        );
+    }
+    next.run(request).await
+}
+
+async fn validate_loopback_host(request: Request, next: Next) -> Response {
+    if !has_loopback_host(request.headers(), request.uri()) {
+        return transport_error(
+            StatusCode::FORBIDDEN,
+            "loopback_host_required",
+            "browser requests require a loopback host",
+        );
+    }
+    next.run(request).await
+}
+
+fn has_loopback_host(headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
+    headers
+        .get(HOST)
+        .and_then(|host| host.to_str().ok())
+        .and_then(|host| host.parse::<axum::http::uri::Authority>().ok())
+        .or_else(|| uri.authority().cloned())
+        .is_some_and(|authority| is_loopback_authority(&authority))
+}
+
+fn is_loopback_authority(authority: &axum::http::uri::Authority) -> bool {
+    let host = authority
+        .host()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 fn has_json_content_type(headers: &HeaderMap) -> bool {
+    has_content_type(headers, JSON_CONTENT_TYPE)
+}
+
+fn has_content_type(headers: &HeaderMap, expected: &str) -> bool {
     headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case(JSON_CONTENT_TYPE))
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -482,10 +618,29 @@ fn validate_supplied_origin(headers: &HeaderMap) -> Result<(), OriginValidationE
     }
 }
 
-fn transport_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
+pub(crate) fn transport_error(
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+) -> Response {
     let body = Json(WebApiErrorResponse {
         error: WebApiError {
             kind: WebApiErrorKind::Transport,
+            code: code.to_owned(),
+            message: message.to_owned(),
+        },
+    });
+    (status, body).into_response()
+}
+
+pub(crate) fn application_error(
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+) -> Response {
+    let body = Json(WebApiErrorResponse {
+        error: WebApiError {
+            kind: WebApiErrorKind::Application,
             code: code.to_owned(),
             message: message.to_owned(),
         },
@@ -529,7 +684,7 @@ mod tests {
 
     use super::{
         DEFAULT_WEB_BIND_ADDRESS, WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime,
-        deterministic_test_router, ndjson_response, production_router,
+        bootstrap_only_router, deterministic_test_router, ndjson_response,
     };
 
     fn loopback_ephemeral() -> SocketAddr {
@@ -564,8 +719,8 @@ mod tests {
     }
 
     #[test]
-    fn explicit_deployment_configuration_is_admitted() {
-        let bind_address: SocketAddr = "0.0.0.0:8080"
+    fn explicit_loopback_deployment_configuration_is_admitted() {
+        let bind_address: SocketAddr = "127.0.0.1:8080"
             .parse()
             .expect("the fixture address is valid");
         let asset_root = PathBuf::from("web-dist");
@@ -577,6 +732,29 @@ mod tests {
 
         assert_eq!(configuration.bind_address(), bind_address);
         assert_eq!(configuration.asset_root(), Some(&asset_root));
+    }
+
+    #[test]
+    fn non_loopback_bind_fails_closed() {
+        let error = WebHttpConfiguration::from_values(Some(OsString::from("0.0.0.0:8080")), None)
+            .expect_err("the unauthenticated browser surface remains loopback-only");
+
+        assert_eq!(error, WebHttpConfigurationError::NonLoopbackBindUnsupported);
+        assert_eq!(
+            error.to_string(),
+            "setting SIGNALBOX_WEB_BIND must use a loopback address"
+        );
+    }
+
+    #[test]
+    fn explicit_constructor_rejects_non_loopback_bind() {
+        let bind_address: SocketAddr = "0.0.0.0:8080"
+            .parse()
+            .expect("the fixture address is valid");
+        let error = WebHttpConfiguration::new(bind_address, None)
+            .expect_err("every production configuration path remains loopback-only");
+
+        assert_eq!(error, WebHttpConfigurationError::NonLoopbackBindUnsupported);
     }
 
     #[test]
@@ -598,10 +776,10 @@ mod tests {
         let assets = tempfile::tempdir().expect("the static asset directory exists");
         std::fs::write(assets.path().join("index.html"), STATIC_INDEX)
             .expect("the static index exists");
-        let runtime = WebHttpRuntime::bind(WebHttpConfiguration::new(
+        let runtime = WebHttpRuntime::bind_router(
             loopback_ephemeral(),
-            Some(assets.path().to_path_buf()),
-        ))
+            bootstrap_only_router(Some(assets.path().to_path_buf())),
+        )
         .await
         .expect("the production test server binds");
         let address = runtime
@@ -818,9 +996,10 @@ mod tests {
         std::fs::write(assets.path().join("index.html"), "static fallback")
             .expect("the static index exists");
         let request = Request::get("/api/not-a-route")
+            .header(header::HOST, "127.0.0.1")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(Some(assets.path().to_path_buf()))
+        let response = bootstrap_only_router(Some(assets.path().to_path_buf()))
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -830,6 +1009,44 @@ mod tests {
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["error"]["code"], "api_route_not_found");
+    }
+
+    #[tokio::test]
+    async fn production_router_rejects_non_loopback_hostnames() {
+        let request = Request::get("/api/bootstrap")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = bootstrap_only_router(None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value =
+            serde_json::from_slice(&response_body(response).await).expect("the rejection is JSON");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "loopback_host_required");
+    }
+
+    #[test]
+    fn loopback_host_accepts_localhost_and_uri_authority() {
+        let localhost = Request::get("/api/bootstrap")
+            .header(header::HOST, "localhost:37231")
+            .body(Body::empty())
+            .expect("the localhost request is valid");
+        let authority = Request::get("http://127.0.0.1:37231/api/bootstrap")
+            .body(Body::empty())
+            .expect("the authority request is valid");
+
+        assert!(super::has_loopback_host(
+            localhost.headers(),
+            localhost.uri()
+        ));
+        assert!(super::has_loopback_host(
+            authority.headers(),
+            authority.uri()
+        ));
     }
 
     #[tokio::test]

@@ -84,14 +84,21 @@ function DialogFrame({
 export function OverlaySurfaces({
   context,
   activeId,
+  importsSurface = false,
+  navigationDisabled = false,
 }: {
   context: CommandContext
   activeId: string
+  importsSurface?: boolean
+  navigationDisabled?: boolean
 }) {
   const overlay = useAppSelector((state) => state.app.overlay)
   const close = () => invokeCommand('surface.escape', context)
   const availableCommands = commandRegistry.filter(
-    (command) => command.id !== 'surface.escape' && command.available(context),
+    (command) =>
+      command.id !== 'surface.escape' &&
+      command.available(context) &&
+      (!importsSurface || command.category === 'Surface' || command.category === 'Imports'),
   )
 
   return (
@@ -129,7 +136,13 @@ export function OverlaySurfaces({
       >
         <dl className="shortcut-list">
           {commandRegistry
-            .filter((command) => command.bindings.length > 0)
+            .filter(
+              (command) =>
+                command.bindings.length > 0 &&
+                (!importsSurface ||
+                  command.category === 'Surface' ||
+                  command.category === 'Imports'),
+            )
             .map((command) => (
               <div key={command.id}>
                 <dt>{command.title}</dt>
@@ -148,7 +161,7 @@ export function OverlaySurfaces({
         description="Deterministic projections exercise the real client shell."
         onClose={close}
       >
-        <ScenarioNavigation activeId={activeId} onSelect={close} />
+        <ScenarioNavigation activeId={activeId} onSelect={close} disabled={navigationDisabled} />
       </DialogFrame>
     </>
   )
@@ -218,6 +231,11 @@ export interface DiagnosticSnapshot {
   queryStates: string[]
   queryCacheSize: number
   recentActions: readonly string[]
+  loadedImports?: number
+  logicalImports?: number
+  loadedImportEntries?: number
+  selectedImport?: string | null
+  selectedImportPosition?: number | null
 }
 
 // Tunable effective ceiling: the inspector shows a concise recent action tail.

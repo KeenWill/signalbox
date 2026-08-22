@@ -1,7 +1,9 @@
 # Configuration and credentials
 
 The browser HTTP listener, same-origin static assets, and generated contract
-bootstrap are verified against this PR (`agent/web-http-transport`).
+bootstrap are verified against this PR (`agent/web-http-transport`). The
+version-two imports capabilities and production adapter are verified against
+this PR (`agent/web-discovery-reads`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -153,9 +155,11 @@ stated where each is owned.
   configuration failure. Otherwise the runner socket uses the same private-node
   discipline but has an independent lock, identity, vocabulary, and listener.
 - `SIGNALBOX_WEB_BIND` — optional browser HTTP socket address. Absence binds
-  `127.0.0.1:37231`, keeping the listener on loopback; an explicit valid socket
-  address is the deployment's opt-in override. An invalid or non-Unicode value
-  fails the `Configuration` phase without logging the value.
+  `127.0.0.1:37231`, keeping the listener on loopback; an explicit socket must
+  also use a loopback address because this browser surface has no application
+  authentication. A non-loopback value fails configuration. A valid loopback
+  socket address is the deployment's opt-in override. An invalid or non-Unicode
+  value fails the `Configuration` phase without logging the value.
 - `SIGNALBOX_WEB_ASSET_ROOT` — optional path to a static production web build.
   An explicitly empty path fails the `Configuration` phase. When absent, non-API
   paths return `404 Not Found`; when present, the daemon serves files from that
@@ -170,13 +174,15 @@ daemon does not emit permissive CORS headers and adds no account, login,
 bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. Those
 deployment boundaries remain outside Signalbox.
 
-`GET /api/bootstrap` is the production browser API in this foundation slice. It
-returns the exact contract family `signalbox.web-http`, version `1`, the
-`bounded_json`, `same_origin_json_mutations`, and `ndjson_streaming`
+`GET /api/bootstrap` returns the exact contract family `signalbox.web-http`,
+version `2`, the `bounded_json`, `same_origin_json_mutations`,
+`ndjson_streaming`, `import_discovery`, and `imported_continuations`
 capabilities, and the effective 65,536-byte JSON-body and NDJSON-item hard
-ceilings. The generated browser decoder rejects an unknown field, wrong shape,
-different family, or different version rather than interpreting it as the local
-process protocol. No process-protocol frame is a browser DTO.
+ceilings. Version two adds the bounded import DTOs and routes owned by
+[conversation import](conversation-import.md#bounded-browser-discovery-and-continuation).
+The generated browser decoder rejects an unknown field, wrong shape, different
+family, or different version rather than interpreting it as the local process
+protocol. No process-protocol frame is a browser DTO.
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
 authority. The checked-in `web-contract.mjs` runtime decoders and
