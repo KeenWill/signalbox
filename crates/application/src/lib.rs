@@ -32,6 +32,7 @@ mod tool_loop;
 mod tool_loop_ports;
 mod turn_liveness;
 mod update_session_placement;
+mod usage;
 
 pub use approval_judge::{
     ApprovalJudgeAuthorization, ApprovalJudgeBranchAuthority, ApprovalJudgeBranchAuthorityInput,
@@ -204,4 +205,12 @@ pub use turn_liveness::{
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,
     UpdateSessionPlacementTransaction,
+};
+pub use usage::{
+    UsageAggregateGroup, UsageAggregateKey, UsageAggregateReport, UsageCallCursor,
+    UsageCallEvidence, UsageCallKind, UsageCallOrder, UsageCallPage, UsageCallPageLimit,
+    UsageCallPageLimitError, UsageCallQuery, UsageInputTokenSemantics, UsageProvenance, UsageQuery,
+    UsageReader, UsageSelection, UsageService, UsageTimeRange, UsageTimeRangeError,
+    UsageTimestampError, UsageTimestampMicros, UsageTokenAxes, UsageTokenCoverage,
+    max_usage_aggregate_groups, max_usage_call_page_items,
 };
