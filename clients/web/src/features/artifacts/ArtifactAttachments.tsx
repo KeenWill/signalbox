@@ -1,7 +1,6 @@
 import { FileQuestion, Paperclip, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import type { CommandContext } from '../../commands'
-import { selectApp, useAppSelector } from '../../state'
 import { ArtifactRenderer } from './ArtifactRenderer'
 import { attachmentScenario } from './artifactScenario'
 import type { ArtifactItem } from './artifactTypes'
@@ -101,9 +100,9 @@ export function MissingAttachmentState({ placement }: { placement: 'composer' | 
 }
 
 export function AttachmentWorkbench({ commandContext }: { commandContext: CommandContext }) {
-  const remoteMedia = useAppSelector(selectApp).remoteMedia
-  const [composerItems, setComposerItems] =
-    useState<ReadonlyArray<ArtifactItem>>(attachmentScenario)
+  const [composerItems, setComposerItems] = useState<ReadonlyArray<ArtifactItem>>(() =>
+    attachmentScenario.map((artifact) => ({ ...artifact, id: `composer:${artifact.id}` })),
+  )
   const [selectedId, setSelectedId] = useState(attachmentScenario[0]?.id ?? null)
   const allItems = useMemo(() => [...attachmentScenario, ...composerItems], [composerItems])
   const selected = allItems.find((artifact) => artifact.id === selectedId) ?? null
@@ -145,11 +144,7 @@ export function AttachmentWorkbench({ commandContext }: { commandContext: Comman
             <strong>{selected?.displayName ?? 'No attachment selected'}</strong>
           </header>
           {selected ? (
-            <ArtifactRenderer
-              artifact={selected}
-              commandContext={commandContext}
-              remoteMediaPolicy={remoteMedia}
-            />
+            <ArtifactRenderer artifact={selected} commandContext={commandContext} />
           ) : (
             <p className="attachment-empty">Select an attachment to inspect its typed renderer.</p>
           )}

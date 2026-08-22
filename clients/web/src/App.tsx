@@ -10,6 +10,7 @@ import {
 import { FleetTable } from './FleetTable'
 import { AttachmentWorkbench } from './features/artifacts/ArtifactAttachments'
 import { ArtifactWorkbench } from './features/artifacts/ArtifactRenderer'
+import { artifactOriginalIds, artifactPreviewIds } from './features/artifacts/artifactScenario'
 import {
   SCENARIO_FLEET_WINDOW_ITEMS,
   SCENARIO_TIMELINE_WINDOW_ITEMS,
@@ -89,13 +90,15 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
       dispatch,
       getState: store.getState,
       timelineIds,
+      artifactPreviewIds: knownId === 'blobs' ? artifactPreviewIds : [],
+      artifactOriginalIds: knownId === 'blobs' ? artifactOriginalIds : [],
       focusTimeline: () => {
         const active = document.activeElement
         if (active instanceof HTMLElement) active.blur()
         document.querySelector<HTMLElement>('[aria-label="Session timeline"]')?.focus()
       },
     }),
-    [dispatch, timelineIds],
+    [dispatch, knownId, timelineIds],
   )
   useCommandHotkeys(commandContext)
 

@@ -50,13 +50,28 @@
   border-bottom: 1px solid var(--border);
 }
 
+.artifact-row[data-selected] {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
 .artifact-heading {
   display: flex;
+  width: 100%;
   align-items: flex-start;
   gap: 0.5rem;
   padding: 0.85rem 0.7rem;
+  border: 0;
   border-right: 1px solid var(--border);
+  color: inherit;
+  text-align: left;
   background: var(--surface-1);
+  cursor: pointer;
+}
+
+.artifact-heading:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
 }
 
 .artifact-heading > svg {
@@ -88,24 +103,36 @@
   min-width: 0;
 }
 
-.artifact-rendered pre {
+.artifact-scroll {
+  display: block;
+  width: 100%;
   max-height: 300px;
+  min-height: 300px;
   overflow: auto;
+  box-sizing: border-box;
   margin: 0;
   padding: 0.8rem;
+  border: 0;
+  border-radius: 0;
   color: var(--text);
   background: var(--canvas);
   font:
     0.66rem / 1.55 ui-monospace,
     monospace;
+  resize: none;
   tab-size: 2;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-.artifact-code pre {
+.artifact-code .artifact-scroll {
   color: var(--accent-strong);
   white-space: pre;
+}
+
+.artifact-scroll:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
 }
 
 .artifact-code-heading {

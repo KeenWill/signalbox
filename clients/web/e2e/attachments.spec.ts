@@ -9,7 +9,7 @@ interface BrowserProblems {
 
 const previewPath = `/api/blobs/sha256:${'2b'.repeat(32)}/content/image-png`
 const originalPath = `/api/blobs/sha256:${'1a'.repeat(32)}/content/image-png`
-const documentPath = `/api/blobs/sha256:${'6f'.repeat(32)}/content/application-pdf`
+const documentDownloadPath = `/api/blobs/sha256:${'6f'.repeat(32)}/download`
 const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.meta.url))
 const MOBILE_ATTACHMENT_RASTERIZATION_TOLERANCE = 0.08
 
@@ -35,21 +35,20 @@ test.beforeEach(async ({ page }) => {
   )
 })
 
-test('keeps document bytes behind exact open and download affordances', async ({ page }) => {
+test('keeps document bytes behind the admitted download-only affordance', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/attachments')
 
   const preview = page.getByRole('region', { name: 'Selected attachment preview' })
   await expect(preview.getByText('Document bytes stay unloaded')).toBeVisible()
-  await expect(preview.getByRole('link', { name: 'Open document' })).toHaveAttribute(
-    'href',
-    documentPath,
-  )
-  await expect(preview.getByRole('link', { name: 'Download' })).toHaveAttribute('download')
+  await expect(preview.getByRole('link', { name: 'Open document' })).toHaveCount(0)
+  const download = preview.getByRole('link', { name: 'Download' })
+  await expect(download).toHaveAttribute('download')
+  await expect(download).toHaveAttribute('href', new RegExp(`^${documentDownloadPath}`))
   expect(
     await page.evaluate(
       (path) => performance.getEntriesByName(new URL(path, location.href).href).length,
-      documentPath,
+      documentDownloadPath,
     ),
   ).toBe(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })

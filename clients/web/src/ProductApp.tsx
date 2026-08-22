@@ -332,6 +332,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       dispatch,
       getState: store.getState,
       timelineIds,
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => primaryRef.current?.focus(),
       openFirstTimelineWindow: () => firstTimelineWindowRef.current?.(),
       onTimelineSelected: (eventSequence) => {

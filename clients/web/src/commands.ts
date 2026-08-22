@@ -6,10 +6,11 @@ export interface CommandContext {
   dispatch: AppDispatch
   getState: () => RootState
   timelineIds: readonly string[]
+  artifactPreviewIds: readonly string[]
+  artifactOriginalIds: readonly string[]
   focusTimeline: () => void
   openFirstTimelineWindow?: () => void
   onTimelineSelected?: (eventSequence: string) => void
-  artifactAction?: () => void
 }
 
 export interface CommandBinding {
@@ -30,12 +31,15 @@ interface CommandDefinitionShape {
 }
 
 const always = () => true
-const hasArtifactAction = (context: CommandContext) => context.artifactAction !== undefined
-const runArtifactAction = (context: CommandContext) => context.artifactAction?.()
 const selectTimeline = (context: CommandContext, eventSequence: string | undefined): void => {
   const selected = eventSequence ?? null
   context.dispatch(actions.timelineSelected(selected))
   if (selected !== null) context.onTimelineSelected?.(selected)
+}
+const selectedArtifact = (context: CommandContext) => context.getState().app.selectedArtifact
+const hasSelectedArtifactPreview = (context: CommandContext) => {
+  const id = selectedArtifact(context)
+  return id !== null && context.artifactPreviewIds.includes(id)
 }
 export const commandRegistry = [
   {
@@ -44,8 +48,18 @@ export const commandRegistry = [
     description: 'Show the larger bounded projection of the selected artifact.',
     category: 'Artifact',
     bindings: [],
-    available: hasArtifactAction,
-    run: runArtifactAction,
+    available: (context) => {
+      const id = selectedArtifact(context)
+      return (
+        id !== null &&
+        hasSelectedArtifactPreview(context) &&
+        !context.getState().app.expandedArtifacts[id]
+      )
+    },
+    run: (context) => {
+      const id = selectedArtifact(context)
+      if (id !== null) context.dispatch(actions.artifactExpansionSet({ id, expanded: true }))
+    },
   },
   {
     id: 'artifact.preview.collapse',
@@ -53,8 +67,18 @@ export const commandRegistry = [
     description: 'Return the selected artifact to its initial bounded projection.',
     category: 'Artifact',
     bindings: [],
-    available: hasArtifactAction,
-    run: runArtifactAction,
+    available: (context) => {
+      const id = selectedArtifact(context)
+      return (
+        id !== null &&
+        hasSelectedArtifactPreview(context) &&
+        Boolean(context.getState().app.expandedArtifacts[id])
+      )
+    },
+    run: (context) => {
+      const id = selectedArtifact(context)
+      if (id !== null) context.dispatch(actions.artifactExpansionSet({ id, expanded: false }))
+    },
   },
   {
     id: 'artifact.original.load',
@@ -62,35 +86,18 @@ export const commandRegistry = [
     description: 'Request the admitted browser-native original for the selected artifact.',
     category: 'Artifact',
     bindings: [],
-    available: hasArtifactAction,
-    run: runArtifactAction,
-  },
-  {
-    id: 'artifact.remote-policy.ask',
-    title: 'Ask before remote media',
-    description: 'Require per-item approval if bounded remote delivery becomes available.',
-    category: 'Artifact',
-    bindings: [],
-    available: hasArtifactAction,
-    run: runArtifactAction,
-  },
-  {
-    id: 'artifact.remote-policy.block',
-    title: 'Block remote media',
-    description: 'Keep remote media unavailable.',
-    category: 'Artifact',
-    bindings: [],
-    available: hasArtifactAction,
-    run: runArtifactAction,
-  },
-  {
-    id: 'artifact.remote-policy.allow',
-    title: 'Allow bounded remote media',
-    description: 'Allow remote media only through an owning bounded delivery service.',
-    category: 'Artifact',
-    bindings: [],
-    available: hasArtifactAction,
-    run: runArtifactAction,
+    available: (context) => {
+      const id = selectedArtifact(context)
+      return (
+        id !== null &&
+        context.artifactOriginalIds.includes(id) &&
+        !context.getState().app.originalArtifacts[id]
+      )
+    },
+    run: (context) => {
+      const id = selectedArtifact(context)
+      if (id !== null) context.dispatch(actions.artifactOriginalRequested(id))
+    },
   },
   {
     id: 'palette.open',

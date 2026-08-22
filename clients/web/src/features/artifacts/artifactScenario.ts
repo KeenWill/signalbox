@@ -107,6 +107,22 @@ const videoDescriptor = decodeWebBlobDescriptor({
   ],
 })
 
+const fallbackDigest = `sha256:${'3c'.repeat(32)}`
+export const fallbackDownloadView: BlobView = {
+  kind: 'download',
+  media_type: 'application/octet-stream',
+  byte_length: '4096',
+  content_url: `/api/blobs/${fallbackDigest}/download?media_type=application%2Foctet-stream&display_filename=trace.bin`,
+  derivations: [],
+}
+export const fallbackDescriptor = decodeWebBlobDescriptor({
+  digest: fallbackDigest,
+  byte_length: '4096',
+  declared_media_type: 'application/octet-stream',
+  display_filename: ['trace.bin'],
+  available_views: [fallbackDownloadView],
+})
+
 const generatedText = Array.from(
   { length: 180 },
   (_, index) => `line ${String(index + 1).padStart(3, '0')} — bounded incident chronology`,
@@ -123,6 +139,7 @@ export const artifactScenario: ReadonlyArray<ArtifactItem> = [
     kind: 'text',
     displayName: 'incident-notes.txt',
     content: generatedText,
+    characterCount: Array.from(generatedText).length,
   },
   {
     id: 'renderer-source',
@@ -130,12 +147,19 @@ export const artifactScenario: ReadonlyArray<ArtifactItem> = [
     displayName: 'renderer.ts',
     language: 'TypeScript',
     content: generatedCode,
+    characterCount: Array.from(generatedCode).length,
   },
   {
     id: 'orbital-map',
     kind: 'image',
     displayName: 'orbital-map.png',
     source: { kind: 'signalbox_blob', descriptor: imageDescriptor },
+  },
+  {
+    id: 'descriptor-fallback',
+    kind: 'blob',
+    displayName: 'trace.bin',
+    descriptor: fallbackDescriptor,
   },
   {
     id: 'remote-diagram',
@@ -203,3 +227,7 @@ export const attachmentScenario: ReadonlyArray<ArtifactItem> = [
 ]
 
 export const imageArtifact = imageDescriptor
+export const artifactPreviewIds = artifactScenario
+  .filter((artifact) => artifact.kind === 'text' || artifact.kind === 'code')
+  .map((artifact) => artifact.id)
+export const artifactOriginalIds = ['orbital-map'] as const

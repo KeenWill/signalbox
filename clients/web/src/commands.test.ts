@@ -11,26 +11,27 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds,
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
     })
 
     expect(selectApp(store.getState()).selectedTimeline).toBe(timelineIds[0])
   })
 
-  it('routes artifact actions through a registered command', () => {
-    let invocations = 0
+  it('lets the registered artifact command own expansion state', () => {
+    store.dispatch(actions.artifactSelected('artifact-1'))
 
     invokeCommand('artifact.preview.expand', {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: ['artifact-1'],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
-      artifactAction: () => {
-        invocations += 1
-      },
     })
 
-    expect(invocations).toBe(1)
+    expect(selectApp(store.getState()).expandedArtifacts['artifact-1']).toBe(true)
   })
 
   it('persists timeline selections made by commands', () => {
@@ -40,6 +41,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: ['41', '42'],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
       onTimelineSelected: (eventSequence) => persisted.push(eventSequence),
     })
@@ -54,6 +57,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: ['41', '42'],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
       openFirstTimelineWindow: () => {
         firstWindowRequests += 1
