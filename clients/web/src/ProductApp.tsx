@@ -326,10 +326,26 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
+    retry: (failureCount, error) =>
+      !(error instanceof ProductContractAdmissionError) && failureCount < 2,
+    retryDelay: (attemptIndex) => 250 * (attemptIndex + 1),
     staleTime: Number.POSITIVE_INFINITY,
   })
   const focusDestination = useCallback(() => {
     requestAnimationFrame(() => primaryRef.current?.focus())
+  }, [])
+  const focusScenarioDestination = useCallback(() => {
+    let attempts = 0
+    const focusWhenReady = () => {
+      const destination = document.querySelector<HTMLElement>('main.workspace')
+      if (destination) {
+        destination.focus()
+        return
+      }
+      attempts += 1
+      if (attempts < 60) requestAnimationFrame(focusWhenReady)
+    }
+    requestAnimationFrame(focusWhenReady)
   }, [])
   useEffect(() => {
     if (app.overlay === 'navigation') restoreNavigationFocusRef.current = true
@@ -415,6 +431,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           disabled={navigationDisabled}
           onNavigate={(destination) => {
             if (destination === 'product') focusDestination()
+            else focusScenarioDestination()
           }}
         />
       </aside>
@@ -514,6 +531,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
                 restoreNavigationFocusRef.current = false
                 dispatch(actions.overlaySet(null))
                 if (destination === 'product') focusDestination()
+                else focusScenarioDestination()
               }}
             />
           </Dialog.Content>

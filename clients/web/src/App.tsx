@@ -167,7 +167,7 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
       <aside className="navigation-pane">
         <ScenarioNavigation activeId={knownId} />
       </aside>
-      <main className="workspace">
+      <main className="workspace" tabIndex={-1}>
         <header className="workspace-header">
           <div className="scenario-title">
             <span className={`connection connection-${transport.scenario.connection}`}>

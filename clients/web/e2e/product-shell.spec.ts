@@ -194,6 +194,20 @@ test('enters Scenario studio from the phone drawer without stale focus restorati
 
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
   await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeHidden()
+  await expect(page.locator('main.workspace')).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('moves focus after entering Scenario studio from desktop navigation', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('link', { name: /Scenario studio/ }).focus()
+  await page.keyboard.press('Enter')
+
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+  await expect(page.locator('main.workspace')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -283,6 +297,24 @@ test('withholds Imports until bootstrap admission succeeds', async ({ page }) =>
   await expect(inspector.getByText('Unavailable', { exact: true })).toBeVisible()
   await expect(inspector.getByText('None', { exact: true })).toBeVisible()
   expect(importRequests).toBe(0)
+  expect(problems.pageErrors).toEqual([])
+})
+
+test('retries a transient bootstrap transport failure', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let bootstrapRequests = 0
+  await page.route('**/api/bootstrap', (route) => {
+    bootstrapRequests += 1
+    return bootstrapRequests === 1
+      ? route.fulfill({ status: 503 })
+      : route.fulfill({ json: bootstrapFixture })
+  })
+  await useDeterministicImportApi(page)
+  await page.goto('/imports')
+
+  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  expect(bootstrapRequests).toBe(2)
   expect(problems.pageErrors).toEqual([])
 })
 
