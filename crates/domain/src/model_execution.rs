@@ -1380,6 +1380,41 @@ impl ModelCallExecution {
             reclassified_pending_steering,
         )
     }
+
+    /// Closes a resolved tool continuation before another call when durable
+    /// provider usage proves that call cannot retain configured output
+    /// headroom without compaction.
+    pub fn require_context_compaction_after_tool_results(
+        self,
+        producing_call: ModelCallId,
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> Result<ContextHeadroomExhaustedModelCallTurn, ModelCallClosureError> {
+        if self.current_call.is_some()
+            || !frontier_contains_tool_round(&self.starting_snapshot, &self.frontier_entries)
+        {
+            return Err(ModelCallClosureError::CallStateMismatch);
+        }
+        let reclassified_pending_steering = reclassify_pending_steering(
+            &self.active_turn,
+            &failure_identities.pending_steering_reclassifications,
+        )?;
+        let failed = close_failed_turn(
+            ModelCallTurnScope {
+                session: self.session,
+                turn: self.turn,
+            },
+            self.current_attempt,
+            None,
+            self.current_snapshot,
+            failure_identities,
+            UnstoppedAttemptDisposition::KnownFailure,
+            reclassified_pending_steering,
+        )?;
+        Ok(ContextHeadroomExhaustedModelCallTurn {
+            producing_call,
+            failed,
+        })
+    }
 }
 
 /// Why a fresh prepared checkpoint could not be derived.
@@ -3040,6 +3075,30 @@ impl FailedModelCallTurn {
 pub struct CredentialPoolExhaustedModelCallTurn {
     pool_name: String,
     failed: FailedModelCallTurn,
+}
+
+/// Typed terminal boundary that requires compaction before another model call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextHeadroomExhaustedModelCallTurn {
+    producing_call: ModelCallId,
+    failed: FailedModelCallTurn,
+}
+
+impl ContextHeadroomExhaustedModelCallTurn {
+    /// Returns the completed tool-producing call whose usage exhausted headroom.
+    pub const fn producing_call(&self) -> ModelCallId {
+        self.producing_call
+    }
+
+    /// Borrows the ordinary failed-turn projection committed for clients.
+    pub const fn failed(&self) -> &FailedModelCallTurn {
+        &self.failed
+    }
+
+    /// Consumes the typed boundary into its failed-turn persistence payload.
+    pub fn into_failed(self) -> FailedModelCallTurn {
+        self.failed
+    }
 }
 
 impl CredentialPoolExhaustedModelCallTurn {

@@ -4106,6 +4106,11 @@ impl ModelCallExecution {
         self,
         failure_identities: FailedModelCallTurnIdentities,
     ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
+    pub fn require_context_compaction_after_tool_results(
+        self,
+        producing_call: ModelCallId,
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> Result<ContextHeadroomExhaustedModelCallTurn, ModelCallClosureError>;
     // accessors: active_turn(), session(), turn(), configuration(), start(),
     // current_attempt(), current_call()
 }
@@ -4219,6 +4224,14 @@ pub struct CredentialPoolExhaustedModelCallTurn { /* private */ }
 // sealed: ModelCallExecution::fail_credential_pool_exhausted
 impl CredentialPoolExhaustedModelCallTurn {
     pub fn pool_name(&self) -> &str;
+    pub const fn failed(&self) -> &FailedModelCallTurn;
+    pub fn into_failed(self) -> FailedModelCallTurn;
+}
+
+pub struct ContextHeadroomExhaustedModelCallTurn { /* private */ }
+// sealed: ModelCallExecution::require_context_compaction_after_tool_results
+impl ContextHeadroomExhaustedModelCallTurn {
+    pub const fn producing_call(&self) -> ModelCallId;
     pub const fn failed(&self) -> &FailedModelCallTurn;
     pub fn into_failed(self) -> FailedModelCallTurn;
 }
@@ -7141,6 +7154,8 @@ pub enum ToolExecutionServiceOutcome {
     CrashClassified(Box<ToolAttemptCrashOutcome>),
     ContinuationCheckpointed(ModelCallId),
     ContinuationTargetUnavailable(Box<FailedModelCallTurn>),
+    ContinuationPoolExhausted(Box<CredentialPoolExhaustedModelCallTurn>),
+    ContinuationContextCompactionRequired(Box<ContextHeadroomExhaustedModelCallTurn>),
 }
 
 pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
@@ -9029,6 +9044,7 @@ pub enum PrepareToolContinuationOutcome {
     Checkpointed(ModelCallId),
     TargetUnavailable(Box<FailedModelCallTurn>),
     PoolExhausted(Box<CredentialPoolExhaustedModelCallTurn>),
+    ContextCompactionRequired(Box<ContextHeadroomExhaustedModelCallTurn>),
 }
 
 pub enum RetainedToolAttemptObservationStatus {
@@ -11324,7 +11340,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: turn_attempt                               | 13                               |
 | domain: model_call                                 | 12                               |
 | domain: context_compaction                         | 12                               |
-| domain: model_execution                            | 53                               |
+| domain: model_execution                            | 54                               |
 | domain: context_frontier                           | 6                                |
 | domain: semantic_entry                             | 4                                |
 | domain: tool                                       | 45                               |
@@ -11340,7 +11356,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                               |
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
-| **signalbox-domain total**                         | **808 (+12 free fn)**            |
+| **signalbox-domain total**                         | **809 (+12 free fn)**            |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |

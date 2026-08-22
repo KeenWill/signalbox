@@ -2154,7 +2154,8 @@ where
                         ToolExecutionServiceOutcome::ChildWaitParked(_)
                         | ToolExecutionServiceOutcome::AwaitingRecovery(_)
                         | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_)
-                        | ToolExecutionServiceOutcome::ContinuationPoolExhausted(_) => {
+                        | ToolExecutionServiceOutcome::ContinuationPoolExhausted(_)
+                        | ToolExecutionServiceOutcome::ContinuationContextCompactionRequired(_) => {
                             return Ok(());
                         }
                     }
