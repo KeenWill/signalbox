@@ -98,6 +98,33 @@ describe('SameOriginProductTransport', () => {
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow('status 503')
   })
 
+  it('rejects impossible advertised search ceilings', async () => {
+    for (const limits of [
+      { max_search_query_bytes: 0 },
+      { max_search_query_bytes: 513 },
+      { max_search_page_items: 0 },
+      { max_search_page_items: 101 },
+      { max_search_snippet_bytes: 0 },
+      { max_search_snippet_bytes: 513 },
+    ]) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          async () =>
+            new Response(
+              JSON.stringify({
+                ...bootstrapFixture,
+                limits: { ...bootstrapFixture.limits, ...limits },
+              }),
+            ),
+        ),
+      )
+      await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+        'invalid search',
+      )
+    }
+  })
+
   it('decodes a bounded search page and sends product vocabulary', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(searchPageFixture)))
     vi.stubGlobal('fetch', fetchMock)
@@ -217,6 +244,34 @@ describe('SameOriginProductTransport', () => {
         maxSnippetBytes: 512,
       }),
     ).rejects.toThrow('outside the requested session')
+  })
+
+  it('rejects session source identities that contradict the result session', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...searchPageFixture,
+              results: [
+                {
+                  ...searchPageFixture.results[0],
+                  source: { kind: 'session', session_id: 'wrong-session' },
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 1,
+        maxSnippetBytes: 512,
+      }),
+    ).rejects.toThrow('source contradicts its session')
   })
 
   it('rejects highlight offsets inside a UTF-8 character', async () => {

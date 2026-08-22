@@ -341,6 +341,7 @@ export function ProductApp({
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
       callback: (event) => {
+        if (app.overlay !== null && binding.commandId !== 'surface.escape') return
         if (binding.commandId === 'palette.open' && isEditableTarget(event.target)) return
         invokeCommand(binding.commandId, context)
       },
@@ -394,6 +395,9 @@ export function ProductApp({
           <p>{copy.question}</p>
           <span
             className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
           >
             {bootstrap.isSuccess
               ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`

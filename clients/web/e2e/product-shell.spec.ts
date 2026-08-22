@@ -134,6 +134,21 @@ test('suppresses product navigation sequences while an overlay owns input', asyn
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
 })
 
+test('suppresses ordinary view hotkeys while an overlay owns input', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.keyboard.press('Shift+D')
+  await page.keyboard.press('Shift+T')
+  await page.keyboard.press('Shift+W')
+  await expect(page.locator('html')).toHaveAttribute('data-density', 'compact')
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+  await expect(page.locator('.product-shell')).toHaveClass(/layout-workbench/)
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeHidden()
+})
+
 test('changes visible product spacing with the density control', async ({ page }) => {
   await useDeterministicBootstrap(page)
   await page.goto('/search')
@@ -161,6 +176,7 @@ test('retries an initial bootstrap failure', async ({ page }) => {
   })
   await page.goto('/attention')
 
+  await expect(page.getByRole('status')).toContainText('Transport unavailable')
   await page.getByRole('button', { name: 'Retry contract check' }).click()
   await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
   expect(problems.pageErrors).toEqual([])

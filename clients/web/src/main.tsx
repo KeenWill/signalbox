@@ -7,7 +7,9 @@ import {
   createRouter,
   Navigate,
   Outlet,
+  parseSearchWith,
   RouterProvider,
+  stringifySearchWith,
 } from '@tanstack/react-router'
 import { lazy, StrictMode, Suspense } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -50,6 +52,8 @@ const scenarioRoute = createRoute({
 })
 const router = createRouter({
   routeTree: rootRoute.addChildren([indexRoute, productRoute, scenarioRoute]),
+  parseSearch: parseSearchWith((value) => value),
+  stringifySearch: stringifySearchWith(String),
 })
 // Tunable effective ceiling: retain recently visited scenario projections without growing the
 // development cache for the lifetime of the page.

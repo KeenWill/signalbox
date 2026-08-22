@@ -110,6 +110,14 @@ test('does not announce query validation before bootstrap limits load', async ({
   await expect(page.getByRole('alert')).toHaveCount(0)
 })
 
+test('preserves JSON-shaped lexical text in deep-link URLs', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.goto('/search?q=%7B%22term%22%3A%22release%22%7D')
+
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toHaveValue('{"term":"release"}')
+  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+})
+
 test('replaces the bounded result page through its typed cursor', async ({ page }) => {
   const problems = watchBrowser(page)
   await useSearchFixture(page)

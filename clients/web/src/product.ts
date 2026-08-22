@@ -39,6 +39,9 @@ export interface ProductSearchRequest {
 const MAX_SEARCH_RESPONSE_BYTES = 1_048_576
 const MAX_BOOTSTRAP_RESPONSE_BYTES = 65_536
 const MAX_SEARCH_HIGHLIGHTS_PER_RESULT = 64
+const MAX_SEARCH_QUERY_BYTES = 512
+const MAX_SEARCH_PAGE_ITEMS = 100
+const MAX_SEARCH_SNIPPET_BYTES = 512
 const ERROR_RESPONSE_BYTES = 16_384
 const isUtf8ContinuationByte = (byte: number | undefined) =>
   byte !== undefined && (byte & 0xc0) === 0x80
@@ -91,6 +94,9 @@ const validateSearchPageBounds = (
   for (const result of page.results) {
     if (request.sessionId !== undefined && result.session_id !== request.sessionId) {
       throw new TypeError('search result falls outside the requested session')
+    }
+    if (result.source.kind === 'session' && result.source.session_id !== result.session_id) {
+      throw new TypeError('search result source contradicts its session')
     }
     const address = BigInt(result.address.event_sequence)
     if (previousAddress !== undefined && address > previousAddress) {
@@ -145,6 +151,23 @@ export const readProductSearchState = (value: Record<string, unknown>): ProductS
   }
 }
 
+const validateBootstrapSearchLimits = (bootstrap: WebContractBootstrap): WebContractBootstrap => {
+  const { limits } = bootstrap
+  if (limits.max_search_query_bytes < 1 || limits.max_search_query_bytes > MAX_SEARCH_QUERY_BYTES) {
+    throw new TypeError('bootstrap carries an invalid search query limit')
+  }
+  if (limits.max_search_page_items < 1 || limits.max_search_page_items > MAX_SEARCH_PAGE_ITEMS) {
+    throw new TypeError('bootstrap carries an invalid search page limit')
+  }
+  if (
+    limits.max_search_snippet_bytes < 1 ||
+    limits.max_search_snippet_bytes > MAX_SEARCH_SNIPPET_BYTES
+  ) {
+    throw new TypeError('bootstrap carries an invalid search snippet limit')
+  }
+  return bootstrap
+}
+
 export interface ProductTransport {
   readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap>
   search(request: ProductSearchRequest, signal?: AbortSignal): Promise<WebSearchPage>
@@ -175,7 +198,9 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    return decodeWebContractBootstrap(await readBoundedJson(response, MAX_BOOTSTRAP_RESPONSE_BYTES))
+    return validateBootstrapSearchLimits(
+      decodeWebContractBootstrap(await readBoundedJson(response, MAX_BOOTSTRAP_RESPONSE_BYTES)),
+    )
   }
 
   async search(request: ProductSearchRequest, signal?: AbortSignal): Promise<WebSearchPage> {
