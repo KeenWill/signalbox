@@ -207,7 +207,10 @@ export class SameOriginProductTransport implements ProductTransport {
       credentials: 'same-origin',
       signal,
     })
-    if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined)
+      throw new Error(`bootstrap request failed with status ${response.status}`)
+    }
     return validateBootstrap(
       decodeWebContractBootstrap(
         await readBoundedJson(response, MAX_BOOTSTRAP_BYTES, 'bootstrap response', signal),

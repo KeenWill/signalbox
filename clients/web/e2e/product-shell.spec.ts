@@ -98,6 +98,18 @@ test('completes route switching from the command palette without a mouse', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('does not offer the palette-opening command inside the palette', async ({ page }) => {
+  await useDeterministicProductTransport(page)
+  await page.goto('/attention')
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+
+  await expect(palette).toBeVisible()
+  await expect(palette.getByRole('button', { name: /Open command palette/ })).toHaveCount(0)
+})
+
 test('moves focus to the destination after sequence navigation', async ({ page }) => {
   await useDeterministicProductTransport(page)
   await page.goto('/attention')

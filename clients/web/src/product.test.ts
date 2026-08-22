@@ -111,6 +111,22 @@ describe('SameOriginProductTransport', () => {
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow('status 503')
   })
 
+  it('cancels an unsuccessful bootstrap response body', async () => {
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true
+      },
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body, { status: 503 })),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow('status 503')
+    expect(cancelled).toBe(true)
+  })
+
   it('decodes one bounded attention page and preserves its typed continuation', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(attentionFixture)))
     vi.stubGlobal('fetch', fetchMock)
