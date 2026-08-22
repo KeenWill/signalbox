@@ -11,6 +11,32 @@ import {
 } from './model'
 
 const sessionId = '00000000-0000-0000-0000-000000000991'
+const timelineBootstrap = {
+  contract: { name: 'signalbox.web-http', version: '1' },
+  capabilities: {
+    bounded_json: true,
+    same_origin_json_mutations: true,
+    ndjson_streaming: true,
+    bounded_session_timeline: true,
+    bounded_session_timeline_detail: true,
+  },
+  limits: {
+    max_json_body_bytes: 1024,
+    max_ndjson_item_bytes: 1024,
+    max_timeline_window_items: 256,
+    max_timeline_window_bytes: 64 * 1024,
+    max_timeline_detail_items: 128,
+    max_timeline_detail_bytes: 64 * 1024,
+  },
+}
+
+const detailSource = async (detail: unknown): Promise<HttpSessionTimelineSource> => {
+  const request = vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(new Response(JSON.stringify(timelineBootstrap)))
+    .mockResolvedValueOnce(new Response(JSON.stringify(detail)))
+  return HttpSessionTimelineSource.connect(request)
+}
 
 describe('BoundedSessionHistory', () => {
   it('navigates an enormous session without retaining lifetime history', async () => {
@@ -802,6 +828,162 @@ describe('BoundedSessionHistory', () => {
     await expect(
       source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
     ).rejects.toThrow('changed the stable address')
+  })
+
+  it('rejects an out-of-range model-call request context count', async () => {
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'model_call_transition',
+          body: {
+            type: 'model_call',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            model_call_id: '00000000-0000-0000-0000-000000000042',
+            state: { type: 'prepared' },
+            model_identity_id: 'anthropic:claude-sonnet',
+            request_context_items: '18446744073709551616',
+            usage: {},
+            cause_code: null,
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES,
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow()
+  })
+
+  it('rejects an incomplete excerpt without a continuation', async () => {
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: { text: 'hello', offset_bytes: '0', total_bytes: '11', continuation: null },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+      continuation: null,
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('requires a continuation')
+  })
+
+  it('computes continuation offsets from exact UTF-8 bytes', async () => {
+    const continuation = {
+      address: { event_sequence: '41' },
+      field: 'input_text',
+      member_index: 0,
+      offset_bytes: '1',
+    }
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: { text: 'é', offset_bytes: '0', total_bytes: '4', continuation },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 2,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 2,
+      continuation: { type: 'more_body', body: continuation },
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('does not follow its text')
+  })
+
+  it('rejects a page continuation with a different excerpt identity', async () => {
+    const excerptContinuation = {
+      address: { event_sequence: '41' },
+      field: 'input_text',
+      member_index: 0,
+      offset_bytes: '5',
+    }
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: {
+              text: 'hello',
+              offset_bytes: '0',
+              total_bytes: '11',
+              continuation: excerptContinuation,
+            },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+      continuation: {
+        type: 'more_body',
+        body: { ...excerptContinuation, member_index: 1 },
+      },
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('disagrees with its excerpt')
+  })
+
+  it('rejects a body-page continuation when no excerpt continues', async () => {
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: { text: 'hello', offset_bytes: '0', total_bytes: '5', continuation: null },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+      continuation: {
+        type: 'more_body',
+        body: {
+          address: { event_sequence: '41' },
+          field: 'input_text',
+          member_index: 0,
+          offset_bytes: '5',
+        },
+      },
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('disagrees with its excerpt')
   })
 
   it('rejects a detail item below the fixed body envelope charge', async () => {

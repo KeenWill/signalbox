@@ -9,25 +9,30 @@ const fixture = decodeWebSessionTimelineWindow({
     {
       address: { event_sequence: '41' },
       kind: 'input_accepted',
-      projected_structured_bytes: 96,
+      projected_structured_bytes: 78,
     },
     {
       address: { event_sequence: '42' },
       kind: 'turn_completed',
-      projected_structured_bytes: 96,
+      projected_structured_bytes: 78,
     },
     {
       address: { event_sequence: '43' },
       kind: 'turn_failed',
-      projected_structured_bytes: 96,
+      projected_structured_bytes: 75,
     },
     {
       address: { event_sequence: '44' },
       kind: 'turn_activated',
-      projected_structured_bytes: 96,
+      projected_structured_bytes: 78,
+    },
+    {
+      address: { event_sequence: '45' },
+      kind: 'model_call_transition',
+      projected_structured_bytes: 85,
     },
   ],
-  projected_structured_bytes: 384,
+  projected_structured_bytes: 394,
   continuation_before: { event_sequence: '41' },
   continuation_after: null,
 })
@@ -41,13 +46,23 @@ describe('Session Workspace projection', () => {
 
   it('uses a distinct condensed projection over the same bounded window', () => {
     expect(visibleSessionItems(fixture.items, 'full')).toBe(fixture.items)
-    expect(visibleSessionItems(fixture.items, 'condensed')).toEqual(fixture.items.slice(0, 3))
+    expect(visibleSessionItems(fixture.items, 'condensed')).toEqual([
+      fixture.items[0],
+      fixture.items[1],
+      fixture.items[2],
+      fixture.items[4],
+    ])
   })
 
   it('projects result mode without materializing another window', () => {
     const results = visibleSessionItems(fixture.items, 'results')
 
-    expect(results).toEqual([fixture.items[0], fixture.items[1], fixture.items[2]])
+    expect(results).toEqual([
+      fixture.items[0],
+      fixture.items[1],
+      fixture.items[2],
+      fixture.items[4],
+    ])
   })
 
   it('rejects detail bodies that do not belong to the advertised event kind', () => {
@@ -60,5 +75,22 @@ describe('Session Workspace projection', () => {
 
     expect(isCompatibleDetailBody('input_accepted', lifecycleBody)).toBe(false)
     expect(isCompatibleDetailBody('turn_completed', lifecycleBody)).toBe(true)
+    expect(isCompatibleDetailBody('turn_failed', lifecycleBody)).toBe(false)
+    expect(
+      isCompatibleDetailBody('turn_activated', {
+        ...lifecycleBody,
+        lifecycle: 'activated',
+        cause_code: 'activated',
+      }),
+    ).toBe(true)
+    expect(isCompatibleDetailBody('turn_failed', { ...lifecycleBody, cause_code: 'failed' })).toBe(
+      true,
+    )
+    expect(
+      isCompatibleDetailBody('turn_refused', { ...lifecycleBody, cause_code: 'refused' }),
+    ).toBe(true)
+    expect(
+      isCompatibleDetailBody('turn_cancelled', { ...lifecycleBody, cause_code: 'cancelled' }),
+    ).toBe(true)
   })
 })

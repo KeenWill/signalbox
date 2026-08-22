@@ -23,13 +23,19 @@ const toolArguments = '{"path":"docs/spec/sessions-and-transcript.md"}'
 const toolResult = 'bounded typed contract'
 const toolGoalText = 'advance the bounded session workspace'
 const toolAddress = '42'
+const encodedBytes = (value: string) => new TextEncoder().encode(value).byteLength
+const timelineHeaderBytes = (kind: string) => 64 + encodedBytes(kind)
+const timelineDetailBytes = (text = '') => 128 + encodedBytes(text)
 
 const sessionWorkspaceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
   firstAddress: '41',
   latestAddress: '43',
   itemCount: '1000000',
-  projectedBytes: 288,
+  projectedBytes:
+    timelineHeaderBytes('input_accepted') +
+    timelineHeaderBytes('tool_batch_transition') +
+    timelineHeaderBytes('turn_completed'),
   detail: {
     session_id: '00000000-0000-0000-0000-000000000991',
     items: [
@@ -42,10 +48,10 @@ const sessionWorkspaceFixture = {
           lifecycle: 'terminalized',
           cause_code: 'completed',
         },
-        projected_body_bytes: 192,
+        projected_body_bytes: timelineDetailBytes(),
       },
     ],
-    projected_body_bytes: 192,
+    projected_body_bytes: timelineDetailBytes(),
     continuation: null,
   },
   toolDetail: {
@@ -59,7 +65,7 @@ const sessionWorkspaceFixture = {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000042',
             producing_model_call_id: '00000000-0000-0000-0000-000000000142',
-            state: 'executing',
+            state: 'proposed',
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000242',
@@ -84,10 +90,10 @@ const sessionWorkspaceFixture = {
             ],
             goal_events: [],
           },
-          projected_body_bytes: 224,
+          projected_body_bytes: timelineDetailBytes(toolArguments),
         },
       ],
-      projected_body_bytes: 224,
+      projected_body_bytes: timelineDetailBytes(toolArguments),
       continuation: {
         type: 'more_body',
         body: {
@@ -108,7 +114,7 @@ const sessionWorkspaceFixture = {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000042',
             producing_model_call_id: '00000000-0000-0000-0000-000000000142',
-            state: 'executing',
+            state: 'results_projected',
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000242',
@@ -133,10 +139,10 @@ const sessionWorkspaceFixture = {
             ],
             goal_events: [],
           },
-          projected_body_bytes: 224,
+          projected_body_bytes: timelineDetailBytes(toolResult),
         },
       ],
-      projected_body_bytes: 224,
+      projected_body_bytes: timelineDetailBytes(toolResult),
       continuation: {
         type: 'more_body',
         body: {
@@ -157,7 +163,7 @@ const sessionWorkspaceFixture = {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000042',
             producing_model_call_id: '00000000-0000-0000-0000-000000000142',
-            state: 'executing',
+            state: 'results_projected',
             tools: [],
             goal_events: [
               {
@@ -173,10 +179,10 @@ const sessionWorkspaceFixture = {
               },
             ],
           },
-          projected_body_bytes: 224,
+          projected_body_bytes: timelineDetailBytes(toolGoalText),
         },
       ],
-      projected_body_bytes: 224,
+      projected_body_bytes: timelineDetailBytes(toolGoalText),
       continuation: null,
     },
   },
@@ -286,17 +292,17 @@ const useDeterministicSession = async (page: Page) => {
             {
               address: { event_sequence: '41' },
               kind: 'input_accepted',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: timelineHeaderBytes('input_accepted'),
             },
             {
               address: { event_sequence: toolAddress },
               kind: 'tool_batch_transition',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: timelineHeaderBytes('tool_batch_transition'),
             },
             {
               address: { event_sequence: '43' },
               kind: 'turn_completed',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: timelineHeaderBytes('turn_completed'),
             },
           ],
           projected_structured_bytes: sessionWorkspaceFixture.projectedBytes,

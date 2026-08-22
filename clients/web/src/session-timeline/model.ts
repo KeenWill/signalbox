@@ -166,6 +166,7 @@ const DETAIL_U64_KEYS = new Set([
   'offset_bytes',
   'output_tokens',
   'placement_revision',
+  'request_context_items',
   'through_position',
   'total_bytes',
 ])
@@ -197,8 +198,28 @@ const detailExcerptBytes = (value: unknown): number => {
     const offset = decimalU64(record.offset_bytes)
     const total = decimalU64(record.total_bytes)
     ownBytes = new TextEncoder().encode(record.text).byteLength
-    if (offset + BigInt(ownBytes) > total) {
+    const nextOffset = offset + BigInt(ownBytes)
+    if (nextOffset > total) {
       throw new TypeError('timeline detail excerpt exceeds its advertised total')
+    }
+    const continuation = record.continuation
+    if (nextOffset < total) {
+      if (
+        continuation === null ||
+        typeof continuation !== 'object' ||
+        Array.isArray(continuation)
+      ) {
+        throw new TypeError('incomplete timeline detail excerpt requires a continuation')
+      }
+      const candidate = continuation as Record<string, unknown>
+      if (
+        typeof candidate.offset_bytes !== 'string' ||
+        decimalU64(candidate.offset_bytes) !== nextOffset
+      ) {
+        throw new TypeError('timeline detail excerpt continuation offset does not follow its text')
+      }
+    } else if (continuation !== null) {
+      throw new TypeError('complete timeline detail excerpt cannot carry a continuation')
     }
   }
   return (
@@ -374,10 +395,7 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       if (page.continuation.type === 'more_body') {
         const continuation = page.continuation.body
         const excerpts = page.items.flatMap((item) => bodyContinuations(item.body))
-        if (
-          excerpts.length > 0 &&
-          !excerpts.some((entry) => sameBodyContinuation(entry, continuation))
-        ) {
+        if (!excerpts.some((entry) => sameBodyContinuation(entry, continuation))) {
           throw new TypeError('timeline detail continuation disagrees with its excerpt')
         }
       }

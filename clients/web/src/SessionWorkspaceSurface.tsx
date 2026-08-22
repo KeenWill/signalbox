@@ -35,6 +35,7 @@ export const visibleSessionItems = (
     return items.filter((item) =>
       [
         'input_accepted',
+        'model_call_transition',
         'turn_completed',
         'turn_failed',
         'turn_refused',

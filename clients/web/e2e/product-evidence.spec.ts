@@ -27,6 +27,9 @@ const bootstrapFixture = {
 
 const toolEvidenceArguments = '{"path":"docs/spec/sessions-and-transcript.md"}'
 const toolEvidenceResult = 'Read 64 bounded lines from the owning contract.'
+const encodedBytes = (value: string) => new TextEncoder().encode(value).byteLength
+const timelineHeaderBytes = (kind: string) => 64 + encodedBytes(kind)
+const timelineDetailBytes = (text = '') => 128 + encodedBytes(text)
 
 const sessionEvidenceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
@@ -42,7 +45,7 @@ const sessionEvidenceFixture = {
           type: 'tool_batch',
           turn_id: '00000000-0000-0000-0000-000000999998',
           producing_model_call_id: '00000000-0000-0000-0000-000000999898',
-          state: 'completed',
+          state: 'proposed',
           tools: [
             {
               request_id: '00000000-0000-0000-0000-000000999798',
@@ -67,10 +70,10 @@ const sessionEvidenceFixture = {
           ],
           goal_events: [],
         },
-        projected_body_bytes: 384,
+        projected_body_bytes: timelineDetailBytes(toolEvidenceArguments),
       },
     ],
-    projected_body_bytes: 384,
+    projected_body_bytes: timelineDetailBytes(toolEvidenceArguments),
     continuation: {
       type: 'more_body',
       body: {
@@ -91,7 +94,7 @@ const sessionEvidenceFixture = {
           type: 'tool_batch',
           turn_id: '00000000-0000-0000-0000-000000999998',
           producing_model_call_id: '00000000-0000-0000-0000-000000999898',
-          state: 'completed',
+          state: 'results_projected',
           tools: [
             {
               request_id: '00000000-0000-0000-0000-000000999798',
@@ -116,10 +119,10 @@ const sessionEvidenceFixture = {
           ],
           goal_events: [],
         },
-        projected_body_bytes: 384,
+        projected_body_bytes: timelineDetailBytes(toolEvidenceResult),
       },
     ],
-    projected_body_bytes: 384,
+    projected_body_bytes: timelineDetailBytes(toolEvidenceResult),
     continuation: {
       type: 'more_body',
       body: {
@@ -140,7 +143,7 @@ const sessionEvidenceFixture = {
           type: 'tool_batch',
           turn_id: '00000000-0000-0000-0000-000000999998',
           producing_model_call_id: '00000000-0000-0000-0000-000000999898',
-          state: 'completed',
+          state: 'results_projected',
           tools: [],
           goal_events: [
             {
@@ -151,10 +154,10 @@ const sessionEvidenceFixture = {
             },
           ],
         },
-        projected_body_bytes: 384,
+        projected_body_bytes: timelineDetailBytes(),
       },
     ],
-    projected_body_bytes: 384,
+    projected_body_bytes: timelineDetailBytes(),
     continuation: null,
   },
 } as const
@@ -210,20 +213,23 @@ const useDeterministicSession = (page: Page) =>
             {
               address: { event_sequence: '999998' },
               kind: sessionEvidenceFixture.detail.items[0].kind,
-              projected_structured_bytes: 96,
+              projected_structured_bytes: timelineHeaderBytes('tool_batch_transition'),
             },
             {
               address: { event_sequence: '999999' },
               kind: 'turn_activated',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: timelineHeaderBytes('turn_activated'),
             },
             {
               address: { event_sequence: '1000000' },
               kind: 'turn_completed',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: timelineHeaderBytes('turn_completed'),
             },
           ],
-          projected_structured_bytes: 288,
+          projected_structured_bytes:
+            timelineHeaderBytes('tool_batch_transition') +
+            timelineHeaderBytes('turn_activated') +
+            timelineHeaderBytes('turn_completed'),
           continuation_before: { event_sequence: '999998' },
           continuation_after: null,
         },

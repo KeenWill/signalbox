@@ -44,8 +44,20 @@ const compatibleKinds = {
   delegation: ['delegation_update', 'delegation_wake'],
 } as const satisfies Record<DetailBody['type'], readonly DetailKind[]>
 
-export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): boolean =>
-  (compatibleKinds[body.type] as readonly DetailKind[]).includes(kind)
+export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): boolean => {
+  if (body.type === 'turn_lifecycle') {
+    const lifecycleByKind = {
+      turn_activated: ['activated', 'activated'],
+      turn_failed: ['terminalized', 'failed'],
+      turn_completed: ['terminalized', 'completed'],
+      turn_refused: ['terminalized', 'refused'],
+      turn_cancelled: ['terminalized', 'cancelled'],
+    } as const
+    const expected = lifecycleByKind[kind as keyof typeof lifecycleByKind]
+    return expected?.[0] === body.lifecycle && expected[1] === body.cause_code
+  }
+  return (compatibleKinds[body.type] as readonly DetailKind[]).includes(kind)
+}
 
 const modelCallState = (state: ModelCallBody['state']): string =>
   state.type === 'terminal' ? `terminal · ${state.disposition}` : state.type.replaceAll('_', ' ')
@@ -179,11 +191,18 @@ const detailContent = (body: DetailBody): ReactNode => {
           <Facts
             facts={[
               ['Call', body.model_call_id],
+              ['Turn', body.turn_id],
               ['Model', body.model_identity_id],
+              ['Request context items', body.request_context_items],
               ['State', modelCallState(body.state)],
               ['Cause', body.cause_code ?? 'not recorded'],
               ['Input tokens', body.usage.input_tokens ?? 'not reported'],
               ['Output tokens', body.usage.output_tokens ?? 'not reported'],
+              [
+                'Cache creation input tokens',
+                body.usage.cache_creation_input_tokens ?? 'not reported',
+              ],
+              ['Cache read input tokens', body.usage.cache_read_input_tokens ?? 'not reported'],
             ]}
           />
           {body.response ? (
@@ -232,7 +251,14 @@ const detailContent = (body: DetailBody): ReactNode => {
         </>
       )
     }
-    case 'tool_approval_decision':
+    case 'tool_approval_decision': {
+      const deciderFacts: ReadonlyArray<readonly [string, ReactNode]> =
+        body.decider.type === 'user'
+          ? [['Command', body.decider.command_id]]
+          : [
+              ['Model selection', body.decider.model_selection_id],
+              ['Model call', body.decider.model_call_id],
+            ]
       return (
         <>
           <Facts
@@ -243,11 +269,13 @@ const detailContent = (body: DetailBody): ReactNode => {
               ['Decision', body.decision.replaceAll('_', ' ')],
               ['Source', body.source],
               ['Judge escalated', body.approval_judge_escalated ? 'yes' : 'no'],
+              ...deciderFacts,
             ]}
           />
           {body.rationale && <TextDetail label="Approval rationale" excerpt={body.rationale} />}
         </>
       )
+    }
     case 'goal_event':
       return (
         <>
