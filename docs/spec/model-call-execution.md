@@ -1062,10 +1062,10 @@ reconstructing the session while holding the guard. Prospective preparation
 takes neither guard nor allocator lock because it rolls back without appending
 or consuming actions. The in-process per-attempt dispatch gate is the only other
 ordering primitive; in this slice the execution service is its sole consumer.
-Interrupt application deliberately does not acquire it: once
-`InFlight` commits, the call is issued work, so a later interrupt durably
-requests cancellation and the runtime signal races any provider progress without
-claiming that acceptance was prevented.
+Interrupt application deliberately does not acquire it: once `InFlight` commits,
+the call is issued work, so a later interrupt durably requests cancellation and
+the runtime signal races any provider progress without claiming that acceptance
+was prevented.
 
 ## Crash, restart, and supervision
 

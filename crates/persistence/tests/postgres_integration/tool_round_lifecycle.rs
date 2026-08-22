@@ -168,6 +168,44 @@ async fn inv007_inv009_inv012_tool_continuation_guards_before_result_outbox()
     Ok(())
 }
 
+/// A turn-state check does not rescan immutable historical tool-round
+/// frontiers; the round-specific validator still owns that exact evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn deferred_turn_validation_skips_immutable_tool_round_frontiers()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7efa;
+    let (fixture, _, _, _) =
+        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+
+    let mut frontier_holder = pool.begin().await?;
+    sqlx::query("LOCK TABLE context_frontier_member IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *frontier_holder)
+        .await?;
+    sqlx::query("SELECT assert_turn_lifecycle_final_state($1)")
+        .bind(fixture.turn.into_uuid())
+        .execute(&pool)
+        .await?;
+
+    let round_validation = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            sqlx::query("SELECT assert_tool_round_final_state($1)")
+                .bind(fixture.call.into_uuid())
+                .execute(&pool)
+                .await
+        }
+    });
+    assert!(blocked_backends_reached(&pool, 1).await?);
+    frontier_holder.rollback().await?;
+    round_validation.await??;
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-014: provider usage plus newly projected result content that exhausts
 /// configured headroom preserves the results, closes the turn with typed
 /// evidence, and prepares no oversized continuation call. The daemon-owned
