@@ -40,6 +40,11 @@ export interface RemoteImageArtifact extends ArtifactIdentity {
   source: { kind: 'remote'; url: string; alt: string }
 }
 
+export interface GenericBlobArtifact extends ArtifactIdentity {
+  kind: 'blob'
+  descriptor: WebBlobDescriptor
+}
+
 export interface BlockedArtifact extends ArtifactIdentity {
   kind: 'blocked'
   attemptedKind: string
@@ -56,6 +61,7 @@ export type RenderableArtifact =
   | CodeArtifact
   | SignalboxImageArtifact
   | RemoteImageArtifact
+  | GenericBlobArtifact
 
 export type ArtifactItem = RenderableArtifact | BlockedArtifact | CommittedUnimplementedArtifact
 
@@ -65,11 +71,14 @@ export interface BoundedArtifactText {
   omittedLines: boolean
 }
 
+export type ArtifactTextMode = 'preview' | 'expanded'
+
 export const boundArtifactText = (
   content: string,
   totalCharacters: number,
-  expanded: boolean,
+  mode: ArtifactTextMode,
 ): BoundedArtifactText => {
+  const expanded = mode === 'expanded'
   const characterLimit = expanded ? ARTIFACT_EXPANDED_CHARACTERS : ARTIFACT_PREVIEW_CHARACTERS
   const lineLimit = expanded ? ARTIFACT_EXPANDED_LINES : ARTIFACT_PREVIEW_LINES
   let characterPrefix = ''

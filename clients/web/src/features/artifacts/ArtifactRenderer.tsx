@@ -20,6 +20,7 @@ import {
   type ArtifactItem,
   boundArtifactText,
   type CodeArtifact,
+  type GenericBlobArtifact,
   type RemoteImageArtifact,
   type RenderableArtifact,
   type SignalboxImageArtifact,
@@ -65,12 +66,21 @@ const invokeArtifactAction = (
 
 function TextBody({ artifact, commandContext }: RendererProps<TextArtifact>) {
   const expanded = useAppSelector((state) => Boolean(state.app.expandedArtifacts[artifact.id]))
-  const bounded = boundArtifactText(artifact.content, artifact.characterCount, expanded)
+  const bounded = boundArtifactText(
+    artifact.content,
+    artifact.characterCount,
+    expanded ? 'expanded' : 'preview',
+  )
   const canExpand = !expanded && bounded.omittedCharacters > 0
 
   return (
     <div className="artifact-rendered artifact-text">
-      <pre>{bounded.content}</pre>
+      <textarea
+        className="artifact-scroll"
+        aria-label={`Bounded preview of ${artifact.displayName}`}
+        readOnly
+        value={bounded.content}
+      />
       <BoundedFooter
         omittedCharacters={bounded.omittedCharacters}
         canExpand={canExpand}
@@ -89,7 +99,11 @@ function TextBody({ artifact, commandContext }: RendererProps<TextArtifact>) {
 
 function CodeBody({ artifact, commandContext }: RendererProps<CodeArtifact>) {
   const expanded = useAppSelector((state) => Boolean(state.app.expandedArtifacts[artifact.id]))
-  const bounded = boundArtifactText(artifact.content, artifact.characterCount, expanded)
+  const bounded = boundArtifactText(
+    artifact.content,
+    artifact.characterCount,
+    expanded ? 'expanded' : 'preview',
+  )
   const canExpand = !expanded && bounded.omittedCharacters > 0
 
   return (
@@ -98,9 +112,12 @@ function CodeBody({ artifact, commandContext }: RendererProps<CodeArtifact>) {
         <Braces aria-hidden="true" />
         <span>{artifact.language}</span>
       </div>
-      <pre>
-        <code>{bounded.content}</code>
-      </pre>
+      <textarea
+        className="artifact-scroll"
+        aria-label={`Bounded preview of ${artifact.displayName}`}
+        readOnly
+        value={bounded.content}
+      />
       <BoundedFooter
         omittedCharacters={bounded.omittedCharacters}
         canExpand={canExpand}
@@ -217,6 +234,29 @@ function RemoteImageBody({ artifact }: RendererProps<RemoteImageArtifact>) {
   )
 }
 
+function GenericBlobBody({ artifact }: RendererProps<GenericBlobArtifact>) {
+  const download = viewByKind(artifact.descriptor, 'download')
+
+  return (
+    <div className="artifact-image-layout">
+      <div className="artifact-visual">
+        <FileQuestion aria-label="No compatible inline renderer" />
+      </div>
+      <ArtifactMetadata
+        renderer="metadata fallback"
+        mediaType={artifact.descriptor.declared_media_type}
+        provenance="original bytes"
+      >
+        {download && (
+          <a href={download.content_url} download={artifact.displayName}>
+            <Download aria-hidden="true" /> Download
+          </a>
+        )}
+      </ArtifactMetadata>
+    </div>
+  )
+}
+
 const isSignalboxImage = (
   artifact: SignalboxImageArtifact | RemoteImageArtifact,
 ): artifact is SignalboxImageArtifact => artifact.source.kind === 'signalbox_blob'
@@ -272,6 +312,7 @@ const rendererRegistry: {
   text: TextBody,
   code: CodeBody,
   image: ImageBody,
+  blob: GenericBlobBody,
 }
 
 export const registeredArtifactKinds = Object.freeze(Object.keys(rendererRegistry).sort())
@@ -314,6 +355,7 @@ const artifactIcon = (artifact: ArtifactItem) => {
   if (artifact.kind === 'text') return <FileText aria-hidden="true" />
   if (artifact.kind === 'code') return <FileCode2 aria-hidden="true" />
   if (artifact.kind === 'image') return <ImageIcon aria-hidden="true" />
+  if (artifact.kind === 'blob') return <FileQuestion aria-hidden="true" />
   if (artifact.kind === 'blocked') return <ShieldAlert aria-hidden="true" />
   return <FileQuestion aria-hidden="true" />
 }
@@ -325,9 +367,19 @@ export function ArtifactRenderer({
   artifact: ArtifactItem
   commandContext: CommandContext
 }) {
+  const selected = useAppSelector((state) => state.app.selectedArtifact === artifact.id)
   return (
-    <article className="artifact-row" aria-label={`Artifact ${artifact.displayName}`}>
-      <header className="artifact-heading">
+    <article
+      className="artifact-row"
+      aria-label={`Artifact ${artifact.displayName}`}
+      data-selected={selected || undefined}
+    >
+      <button
+        type="button"
+        className="artifact-heading"
+        aria-pressed={selected}
+        onClick={() => commandContext.dispatch(actions.artifactSelected(artifact.id))}
+      >
         {artifactIcon(artifact)}
         <div>
           <strong>{artifact.displayName}</strong>
@@ -337,7 +389,7 @@ export function ArtifactRenderer({
               : artifact.kind}
           </small>
         </div>
-      </header>
+      </button>
       <RendererBoundary artifact={artifact} commandContext={commandContext} />
     </article>
   )

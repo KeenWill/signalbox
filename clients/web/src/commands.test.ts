@@ -11,7 +11,7 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds,
-      artifactIds: [],
+      artifactPreviewIds: [],
       artifactOriginalIds: [],
       focusTimeline: () => undefined,
     })
@@ -26,7 +26,7 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
-      artifactIds: ['artifact-1'],
+      artifactPreviewIds: ['artifact-1'],
       artifactOriginalIds: [],
       focusTimeline: () => undefined,
     })

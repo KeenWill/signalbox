@@ -101,9 +101,9 @@ export const artifactScenario: ReadonlyArray<ArtifactItem> = [
   },
   {
     id: 'descriptor-fallback',
-    kind: 'image',
+    kind: 'blob',
     displayName: 'trace.bin',
-    source: { kind: 'signalbox_blob', descriptor: fallbackDescriptor },
+    descriptor: fallbackDescriptor,
   },
   {
     id: 'remote-diagram',
@@ -131,4 +131,7 @@ export const artifactScenario: ReadonlyArray<ArtifactItem> = [
 ]
 
 export const imageArtifact = imageDescriptor
+export const artifactPreviewIds = artifactScenario
+  .filter((artifact) => artifact.kind === 'text' || artifact.kind === 'code')
+  .map((artifact) => artifact.id)
 export const artifactOriginalIds = ['orbital-map'] as const

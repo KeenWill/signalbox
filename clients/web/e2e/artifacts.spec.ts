@@ -98,6 +98,33 @@ test('expands text through a bounded keyboard action', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('selects artifacts independently and scopes preview commands', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/blobs')
+
+  await page.getByRole('button', { name: /incident-notes\.txt/ }).click()
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await expect(page.getByRole('button', { name: /Expand bounded artifact preview/ })).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  await page.getByRole('button', { name: /orbital-map\.png/ }).click()
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await expect(page.getByRole('button', { name: /Expand bounded artifact preview/ })).toHaveCount(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('keyboard-scrolls overflowing artifact content', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/blobs')
+
+  const preview = page.getByRole('textbox', { name: 'Bounded preview of renderer.ts' })
+  await preview.focus()
+  await expect(preview).toBeFocused()
+  await page.keyboard.press('PageDown')
+  await expect.poll(() => preview.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('keeps remote media unavailable without a bounded owning service', async ({ page }) => {
   const problems = watchBrowser(page)
   let requests = 0

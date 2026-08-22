@@ -9,7 +9,7 @@ import {
 } from './commands'
 import { FleetTable } from './FleetTable'
 import { ArtifactWorkbench } from './features/artifacts/ArtifactRenderer'
-import { artifactOriginalIds, artifactScenario } from './features/artifacts/artifactScenario'
+import { artifactOriginalIds, artifactPreviewIds } from './features/artifacts/artifactScenario'
 import {
   SCENARIO_FLEET_WINDOW_ITEMS,
   SCENARIO_TIMELINE_WINDOW_ITEMS,
@@ -89,7 +89,7 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
       dispatch,
       getState: store.getState,
       timelineIds,
-      artifactIds: knownId === 'blobs' ? artifactScenario.map((artifact) => artifact.id) : [],
+      artifactPreviewIds: knownId === 'blobs' ? artifactPreviewIds : [],
       artifactOriginalIds: knownId === 'blobs' ? artifactOriginalIds : [],
       focusTimeline: () => {
         const active = document.activeElement

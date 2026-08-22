@@ -6,7 +6,7 @@ export interface CommandContext {
   dispatch: AppDispatch
   getState: () => RootState
   timelineIds: readonly string[]
-  artifactIds: readonly string[]
+  artifactPreviewIds: readonly string[]
   artifactOriginalIds: readonly string[]
   focusTimeline: () => void
 }
@@ -30,9 +30,9 @@ interface CommandDefinitionShape {
 
 const always = () => true
 const selectedArtifact = (context: CommandContext) => context.getState().app.selectedArtifact
-const hasSelectedArtifact = (context: CommandContext) => {
+const hasSelectedArtifactPreview = (context: CommandContext) => {
   const id = selectedArtifact(context)
-  return id !== null && context.artifactIds.includes(id)
+  return id !== null && context.artifactPreviewIds.includes(id)
 }
 export const commandRegistry = [
   {
@@ -44,7 +44,9 @@ export const commandRegistry = [
     available: (context) => {
       const id = selectedArtifact(context)
       return (
-        id !== null && hasSelectedArtifact(context) && !context.getState().app.expandedArtifacts[id]
+        id !== null &&
+        hasSelectedArtifactPreview(context) &&
+        !context.getState().app.expandedArtifacts[id]
       )
     },
     run: (context) => {
@@ -62,7 +64,7 @@ export const commandRegistry = [
       const id = selectedArtifact(context)
       return (
         id !== null &&
-        hasSelectedArtifact(context) &&
+        hasSelectedArtifactPreview(context) &&
         Boolean(context.getState().app.expandedArtifacts[id])
       )
     },

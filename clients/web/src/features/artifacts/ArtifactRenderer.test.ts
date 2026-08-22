@@ -9,6 +9,7 @@ import {
 } from './artifactScenario'
 import {
   ARTIFACT_EXPANDED_CHARACTERS,
+  ARTIFACT_EXPANDED_LINES,
   ARTIFACT_PREVIEW_CHARACTERS,
   boundArtifactText,
 } from './artifactTypes'
@@ -16,7 +17,7 @@ import { admitRemoteMediaUrl, decodeRemoteMediaPolicy } from './remoteMediaPrefe
 
 describe('artifact renderer compatibility', () => {
   it('registers the closed text, code, and image renderer set', () => {
-    expect(registeredArtifactKinds).toEqual(['code', 'image', 'text'])
+    expect(registeredArtifactKinds).toEqual(['blob', 'code', 'image', 'text'])
   })
 
   it('selects the admitted view kind without interpreting its MIME string', () => {
@@ -60,16 +61,16 @@ describe('artifact renderer compatibility', () => {
   it('bounds the initial text projection by characters', () => {
     const content = 'x'.repeat(20_000)
 
-    const bounded = boundArtifactText(content, Array.from(content).length, false)
+    const bounded = boundArtifactText(content, Array.from(content).length, 'preview')
 
     expect(bounded.content).toHaveLength(ARTIFACT_PREVIEW_CHARACTERS)
     expect(bounded.omittedCharacters).toBe(content.length - ARTIFACT_PREVIEW_CHARACTERS)
   })
 
-  it('keeps expansion below the larger hard character ceiling', () => {
+  it('keeps expansion within the larger effective character ceiling', () => {
     const content = 'x'.repeat(20_000)
 
-    const bounded = boundArtifactText(content, Array.from(content).length, true)
+    const bounded = boundArtifactText(content, Array.from(content).length, 'expanded')
 
     expect(bounded.content).toHaveLength(ARTIFACT_EXPANDED_CHARACTERS)
     expect(bounded.omittedCharacters).toBe(content.length - ARTIFACT_EXPANDED_CHARACTERS)
@@ -78,11 +79,24 @@ describe('artifact renderer compatibility', () => {
   it('counts and truncates Unicode by code point without splitting surrogate pairs', () => {
     const content = `${'😀'.repeat(ARTIFACT_PREVIEW_CHARACTERS)}z`
 
-    const bounded = boundArtifactText(content, Array.from(content).length, false)
+    const bounded = boundArtifactText(content, Array.from(content).length, 'preview')
 
     expect(Array.from(bounded.content)).toHaveLength(ARTIFACT_PREVIEW_CHARACTERS)
     expect(bounded.content.endsWith('😀')).toBe(true)
     expect(bounded.omittedCharacters).toBe(1)
+  })
+
+  it('bounds the expanded projection by lines and reports the remainder', () => {
+    const content = Array.from(
+      { length: ARTIFACT_EXPANDED_LINES + 20 },
+      (_, index) => `line ${index + 1}`,
+    ).join('\n')
+
+    const bounded = boundArtifactText(content, Array.from(content).length, 'expanded')
+
+    expect(bounded.content.split('\n')).toHaveLength(ARTIFACT_EXPANDED_LINES)
+    expect(bounded.omittedLines).toBe(true)
+    expect(bounded.omittedCharacters).toBeGreaterThan(0)
   })
 
   it('fails an unknown remote-media preference closed to ask', () => {
