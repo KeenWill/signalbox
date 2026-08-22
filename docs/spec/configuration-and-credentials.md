@@ -3,9 +3,9 @@
 The browser HTTP listener, same-origin static assets, and generated contract
 bootstrap are verified against this PR (`agent/web-http-transport`). The
 composed bounded session descriptor and historical-window routes are verified
-against this PR (`agent/web-session-timeline`).
-The typed item, turn, and contiguous-region detail routes and their bootstrap
-advertisement are verified against this PR (`agent/web-timeline-detail`).
+against this PR (`agent/web-session-timeline`). The typed item, turn, and
+contiguous-region detail routes and their bootstrap advertisement are verified
+against this PR (`agent/web-timeline-detail`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -45,9 +45,9 @@ verified against this PR (`agent/mcp-bridge-wiring`).
 The rule binding one provider-model spelling to one adapter is verified against
 this PR (`agent/adapter-model-catalogs`).
 
-The blob catalog and input-modality grammar below are the foundation proposal from
-PR #553 (`agent/blob-storage-foundation`) and become verified with its implementing
-child stack.
+The blob catalog and input-modality grammar below are the foundation proposal
+from PR #553 (`agent/blob-storage-foundation`) and become verified with its
+implementing child stack.
 
 The runtime-bridge invalid-schema diagnostic fields and redaction boundary are
 verified against this PR (`agent/tool-evals-mcp`).
@@ -183,10 +183,10 @@ exact contract family `signalbox.web-http`, version `1`, the `bounded_json`,
 the effective 65,536-byte JSON-body and NDJSON-item hard ceilings, the 256-item
 and 65,536-projected-byte timeline-window ceilings, and the 128-item and
 65,536-projected-body-byte timeline-detail ceilings. The generated browser
-decoder rejects an unknown field, wrong shape,
-different family, or different version rather than interpreting it as the local
-process protocol. No process-protocol frame is a browser DTO. The descriptor and
-historical-window route shapes and semantics are owned by
+decoder rejects an unknown field, wrong shape, different family, or different
+version rather than interpreting it as the local process protocol. No
+process-protocol frame is a browser DTO. The descriptor and historical-window
+route shapes and semantics are owned by
 [Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline).
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
