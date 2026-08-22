@@ -3576,6 +3576,7 @@ async fn inv012_attachment_byte_bound_rejection_replays_exactly() -> Result<(), 
         SubmitInputRejectedResult::AttachmentBytesTooLarge {
             session: fixture.session,
             maximum_bytes: fixture.maximum,
+            observed_bytes: NonZeroU64::new(33).expect("the aggregate is positive"),
         },
     ));
     fixture
