@@ -47,6 +47,20 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/api/blobs/**/content/image-png', async (route) => {
     const path = new URL(route.request().url()).pathname
     const body = path === originalPath ? originalFixture : previewFixture
+    if (route.request().headers().range) {
+      const digest = path.split('/')[3]
+      await route.fulfill({
+        status: 206,
+        body,
+        contentType: 'image/png',
+        headers: {
+          etag: `"${digest}"`,
+          'content-range': `bytes 0-${body.byteLength - 1}/${body.byteLength}`,
+          'content-length': String(body.byteLength),
+        },
+      })
+      return
+    }
     await route.fulfill({ body, contentType: 'image/png' })
   })
 })

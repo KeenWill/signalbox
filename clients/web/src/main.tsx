@@ -9,7 +9,7 @@ import {
   Outlet,
   RouterProvider,
 } from '@tanstack/react-router'
-import { Component, lazy, type ReactNode, StrictMode, Suspense, useMemo, useState } from 'react'
+import { Component, lazy, type ReactNode, StrictMode, Suspense, useMemo } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
 import { ProductApp } from './ProductApp'
@@ -20,7 +20,7 @@ import './app.css'
 
 const rootRoute = createRootRoute({ component: () => <Outlet /> })
 
-const createScenarioWorkspace = (_attempt: number) =>
+const createScenarioWorkspace = () =>
   lazy(() => import('./App').then((module) => ({ default: module.Workspace })))
 
 class ScenarioChunkBoundary extends Component<
@@ -50,10 +50,9 @@ class ScenarioChunkBoundary extends Component<
 
 function ScenarioRoute() {
   const scenarioId = scenarioRoute.useParams().scenarioId
-  const [attempt, setAttempt] = useState(0)
-  const ScenarioWorkspace = useMemo(() => createScenarioWorkspace(attempt), [attempt])
+  const ScenarioWorkspace = useMemo(() => createScenarioWorkspace(), [])
   return (
-    <ScenarioChunkBoundary key={attempt} onRetry={() => setAttempt((value) => value + 1)}>
+    <ScenarioChunkBoundary onRetry={() => window.location.reload()}>
       <Suspense fallback={<main className="loading">Loading scenario studio…</main>}>
         <ScenarioWorkspace scenarioId={scenarioId} />
       </Suspense>

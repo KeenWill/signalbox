@@ -1,6 +1,7 @@
 import { Download, FileQuestion, Image as ImageIcon, Maximize2 } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
+import { productTransport } from '../../product'
 import { artifactScenario } from './artifactScenario'
 import './artifacts.css'
 
@@ -13,7 +14,7 @@ const IMAGE_VIEW_PRIORITY: ReadonlyArray<WebBlobViewKind> = ['preview', 'thumbna
 // browser to fetch and decode deployment-sized blob content.
 export const MAX_INLINE_ORIGINAL_BYTES = 16 * 1024 * 1024
 export const MAX_INLINE_ORIGINAL_PIXELS = 40_000_000
-const MAX_IMAGE_HEADER_BYTES = 64 * 1024
+const MAX_IMAGE_INSPECTION_BYTES = MAX_INLINE_ORIGINAL_BYTES
 
 export const isInlineOriginalByteLengthAdmitted = (byteLength: string): boolean =>
   BigInt(byteLength) <= BigInt(MAX_INLINE_ORIGINAL_BYTES)
@@ -45,34 +46,6 @@ const viewByKind = (
 
 const displayName = (descriptor: WebBlobDescriptor): string =>
   descriptor.display_filename[0] ?? descriptor.digest
-
-const readImageHeader = async (url: string): Promise<Uint8Array> => {
-  const response = await fetch(url, {
-    headers: { Range: `bytes=0-${MAX_IMAGE_HEADER_BYTES - 1}` },
-  })
-  if (!response.ok) throw new Error(`image header request failed with status ${response.status}`)
-  const reader = response.body?.getReader()
-  if (!reader) throw new Error('image header response had no body')
-  const chunks: Uint8Array[] = []
-  let received = 0
-  while (true) {
-    const result = await reader.read()
-    if (result.done) break
-    received += result.value.byteLength
-    if (received > MAX_IMAGE_HEADER_BYTES) {
-      await reader.cancel()
-      throw new Error('image dimensions were not available within the bounded header')
-    }
-    chunks.push(result.value)
-  }
-  const bytes = new Uint8Array(received)
-  let offset = 0
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return bytes
-}
 
 export const readImageDimensions = (
   bytes: Uint8Array,
@@ -123,21 +96,62 @@ export const readImageDimensions = (
         offset += 1
         continue
       }
-      const marker = view.getUint8(offset + 1)
-      const length = view.getUint16(offset + 2)
-      if (length < 2 || offset + length + 2 > bytes.length) return null
+      while (offset < bytes.length && bytes[offset] === 0xff) offset += 1
+      if (offset >= bytes.length) return null
+      const marker = view.getUint8(offset)
+      if (marker === 0x00) {
+        offset += 1
+        continue
+      }
+      if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) {
+        offset += 1
+        continue
+      }
+      const markerOffset = offset - 1
+      if (offset + 2 >= bytes.length) return null
+      const length = view.getUint16(offset + 1)
+      if (length < 2 || markerOffset + length + 2 > bytes.length) return null
       const startOfFrame =
         (marker >= 0xc0 && marker <= 0xc3) ||
         (marker >= 0xc5 && marker <= 0xc7) ||
         (marker >= 0xc9 && marker <= 0xcb) ||
         (marker >= 0xcd && marker <= 0xcf)
       if (startOfFrame) {
-        return { width: view.getUint16(offset + 7), height: view.getUint16(offset + 5) }
+        return {
+          width: view.getUint16(markerOffset + 7),
+          height: view.getUint16(markerOffset + 5),
+        }
       }
-      offset += length + 2
+      offset = markerOffset + length + 2
     }
   }
   return null
+}
+
+export const isAnimationSafeImageHeader = (bytes: Uint8Array): boolean => {
+  if (bytes.length < 12) return false
+  const text = new TextDecoder().decode(bytes)
+  if (text.startsWith('GIF8')) return false
+  if (text.slice(8, 12) === 'WEBP') {
+    const kind = text.slice(12, 16)
+    return (
+      kind === 'VP8 ' || kind === 'VP8L' || (kind === 'VP8X' && ((bytes[20] ?? 0) & 0x02) === 0)
+    )
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) return true
+  if (!(bytes[0] === 0x89 && text.slice(1, 4) === 'PNG')) return false
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  let offset = 8
+  while (offset + 12 <= bytes.length) {
+    const length = view.getUint32(offset)
+    const kind = text.slice(offset + 4, offset + 8)
+    if (kind === 'acTL') return false
+    if (kind === 'IDAT') return true
+    const end = offset + 12 + length
+    if (end > bytes.length) return false
+    offset = end
+  }
+  return false
 }
 
 export function ArtifactRenderer({
@@ -149,7 +163,7 @@ export function ArtifactRenderer({
   compact?: boolean
   descriptor: WebBlobDescriptor
   originalRequested?: boolean
-  onOriginalRequested?: () => void
+  onOriginalRequested?: (digest: string) => void
 }) {
   const automatic = selectImageView(descriptor)
   const original = viewByKind(descriptor, 'browser_native')
@@ -159,6 +173,7 @@ export function ArtifactRenderer({
   const [originalStatus, setOriginalStatus] = useState<
     'idle' | 'checking' | 'admitted' | 'rejected' | 'failed'
   >('idle')
+  const probeController = useRef<AbortController | null>(null)
   const originalAdmitted = originalStatus === 'admitted'
   const download = viewByKind(descriptor, 'download')
   const rendered = originalRequested && originalAdmitted ? original : automatic
@@ -166,12 +181,26 @@ export function ArtifactRenderer({
 
   const admitOriginal = useCallback(() => {
     if (!original || !originalWithinByteLimit || originalStatus === 'checking') return
+    probeController.current?.abort()
+    const controller = new AbortController()
+    probeController.current = controller
     setOriginalStatus('checking')
-    void readImageHeader(original.content_url)
+    void productTransport
+      .readBlobHeader(
+        {
+          contentUrl: original.content_url,
+          digest: descriptor.digest,
+          byteLength: descriptor.byte_length,
+          maxBytes: MAX_IMAGE_INSPECTION_BYTES,
+        },
+        controller.signal,
+      )
       .then((bytes) => {
+        if (controller.signal.aborted) return
         const dimensions = readImageDimensions(bytes)
         if (
           !dimensions ||
+          !isAnimationSafeImageHeader(bytes) ||
           dimensions.width <= 0 ||
           dimensions.height <= 0 ||
           dimensions.width * dimensions.height > MAX_INLINE_ORIGINAL_PIXELS
@@ -180,10 +209,23 @@ export function ArtifactRenderer({
           return
         }
         setOriginalStatus('admitted')
-        onOriginalRequested?.()
+        onOriginalRequested?.(descriptor.digest)
       })
-      .catch(() => setOriginalStatus('failed'))
-  }, [onOriginalRequested, original, originalStatus, originalWithinByteLimit])
+      .catch(() => {
+        if (!controller.signal.aborted) setOriginalStatus('failed')
+      })
+  }, [
+    descriptor.byte_length,
+    descriptor.digest,
+    onOriginalRequested,
+    original,
+    originalStatus,
+    originalWithinByteLimit,
+  ])
+
+  useEffect(() => {
+    return () => probeController.current?.abort()
+  }, [])
 
   useEffect(() => {
     if (originalRequested && originalWithinByteLimit && originalStatus === 'idle') {
@@ -240,7 +282,7 @@ export function ArtifactRenderer({
                 originalStatus === 'rejected'
               }
               onClick={() => {
-                if (originalAdmitted) onOriginalRequested?.()
+                if (originalAdmitted) onOriginalRequested?.(descriptor.digest)
                 else admitOriginal()
               }}
             >
@@ -250,7 +292,7 @@ export function ArtifactRenderer({
                 : originalStatus === 'checking'
                   ? 'Checking original dimensions…'
                   : originalStatus === 'rejected'
-                    ? 'Original exceeds safe pixel limit; download only'
+                    ? 'Original is not safe for inline rendering; download only'
                     : originalStatus === 'failed'
                       ? 'Retry original check'
                       : originalWithinByteLimit

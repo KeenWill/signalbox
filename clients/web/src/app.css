@@ -444,6 +444,12 @@ kbd {
   width: min(310px, 86vw);
   background: var(--surface-1);
 }
+.mobile-navigation-close {
+  position: absolute;
+  z-index: 1;
+  top: 0.55rem;
+  right: 0.55rem;
+}
 
 @media (max-width: 1080px) {
   .product-shell {

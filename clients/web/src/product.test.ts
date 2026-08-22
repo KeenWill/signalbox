@@ -5,6 +5,7 @@ import {
   MAX_DISPLAY_FILENAME_BYTES,
   MAX_PRODUCT_JSON_BYTES,
   ProductContractError,
+  ProductInputError,
   ProductTransportError,
   SameOriginProductTransport,
 } from './product'
@@ -230,6 +231,42 @@ describe('SameOriginProductTransport', () => {
       }),
     ).resolves.toEqual(descriptor)
     expect(fetchRequest).toHaveBeenCalledOnce()
+  })
+
+  it('classifies descriptor limits as input failures', async () => {
+    await expect(
+      new SameOriginProductTransport().readBlobDescriptor({
+        digest: imageArtifact.digest,
+        mediaType: 'x'.repeat(MAX_DECLARED_MEDIA_TYPE_BYTES + 1),
+      }),
+    ).rejects.toBeInstanceOf(ProductInputError)
+  })
+
+  it('correlates bounded blob headers with the immutable descriptor', async () => {
+    const bytes = new Uint8Array(24)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(bytes, {
+            status: 206,
+            headers: {
+              etag: `"${imageArtifact.digest}"`,
+              'content-range': `bytes 0-23/${imageArtifact.byte_length}`,
+              'content-length': '24',
+            },
+          }),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readBlobHeader({
+        contentUrl: '/api/blobs/example/content/image-png',
+        digest: imageArtifact.digest,
+        byteLength: imageArtifact.byte_length,
+        maxBytes: 24,
+      }),
+    ).resolves.toEqual(bytes)
   })
 
   it('bounds descriptor error payloads before decoding them', async () => {

@@ -24,12 +24,20 @@ export type ProductRouteId = (typeof productRoutes)[number]['id']
 export interface ProductTransport {
   readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap>
   readBlobDescriptor(input: BlobDescriptorInput, signal?: AbortSignal): Promise<WebBlobDescriptor>
+  readBlobHeader(input: BlobHeaderInput, signal?: AbortSignal): Promise<Uint8Array>
 }
 
 export interface BlobDescriptorInput {
   digest: string
   mediaType: string
   displayFilename?: string
+}
+
+export interface BlobHeaderInput {
+  contentUrl: string
+  digest: string
+  byteLength: string
+  maxBytes: number
 }
 
 export class ProductRequestError extends Error {
@@ -58,6 +66,13 @@ export class ProductContractError extends Error {
   }
 }
 
+export class ProductInputError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ProductInputError'
+  }
+}
+
 export const MAX_PRODUCT_JSON_BYTES = 65_536
 export const MAX_DECLARED_MEDIA_TYPE_BYTES = 255
 export const MAX_DISPLAY_FILENAME_BYTES = 1_024
@@ -66,14 +81,43 @@ const utf8Length = (value: string): number => new TextEncoder().encode(value).by
 
 const validateBlobDescriptorInput = (input: BlobDescriptorInput): void => {
   if (utf8Length(input.mediaType) > MAX_DECLARED_MEDIA_TYPE_BYTES) {
-    throw new Error('descriptor media type exceeded the 255-byte limit')
+    throw new ProductInputError('Descriptor media type exceeded the 255-byte limit.')
   }
   if (
     input.displayFilename !== undefined &&
     utf8Length(input.displayFilename) > MAX_DISPLAY_FILENAME_BYTES
   ) {
-    throw new Error('descriptor display filename exceeded the 1024-byte limit')
+    throw new ProductInputError('Descriptor display filename exceeded the 1024-byte limit.')
   }
+}
+
+const readBoundedBytes = async (response: Response, limit: number): Promise<Uint8Array> => {
+  const reader = response.body?.getReader()
+  if (!reader) throw new Error('response had no body')
+  const chunks: Uint8Array[] = []
+  let received = 0
+  while (true) {
+    let result: ReadableStreamReadResult<Uint8Array>
+    try {
+      result = await reader.read()
+    } catch (error) {
+      throw new ProductTransportError(error)
+    }
+    if (result.done) break
+    received += result.value.byteLength
+    if (received > limit) {
+      await reader.cancel()
+      throw new Error('response exceeded the bounded byte limit')
+    }
+    chunks.push(result.value)
+  }
+  const bytes = new Uint8Array(received)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return bytes
 }
 
 const readBoundedJson = async (response: Response): Promise<unknown> => {
@@ -170,6 +214,36 @@ export class SameOriginProductTransport implements ProductTransport {
       throw new Error('descriptor filename did not match the requested blob use')
     }
     return descriptor
+  }
+
+  async readBlobHeader(input: BlobHeaderInput, signal?: AbortSignal): Promise<Uint8Array> {
+    const total = BigInt(input.byteLength)
+    const requested = total < BigInt(input.maxBytes) ? Number(total) : input.maxBytes
+    if (requested <= 0) throw new Error('blob header request length was invalid')
+    const entityTag = `"${input.digest}"`
+
+    const response = await request(input.contentUrl, {
+      headers: {
+        Range: `bytes=0-${requested - 1}`,
+        'If-Range': entityTag,
+      },
+      signal,
+    })
+    const expectedRange = `bytes 0-${requested - 1}/${input.byteLength}`
+    if (
+      response.status !== 206 ||
+      response.headers.get('etag') !== entityTag ||
+      response.headers.get('content-range') !== expectedRange ||
+      response.headers.get('content-length') !== String(requested)
+    ) {
+      throw new Error('blob header response did not match the immutable descriptor')
+    }
+
+    const bytes = await readBoundedBytes(response, requested)
+    if (bytes.byteLength !== requested) {
+      throw new Error('blob header response ended before its declared range')
+    }
+    return bytes
   }
 }
 

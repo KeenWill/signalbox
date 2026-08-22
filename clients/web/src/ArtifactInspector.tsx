@@ -1,9 +1,10 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
-import type { FormEvent, RefObject } from 'react'
+import type { Dispatch, FormEvent, RefObject, SetStateAction } from 'react'
 import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
 import {
   type BlobDescriptorInput,
+  ProductInputError,
   ProductRequestError,
   ProductTransportError,
   productTransport,
@@ -32,6 +33,7 @@ export const emptyArtifactInspectorState: ArtifactInspectorState = {
 const descriptorQueryPrefix = ['production', 'blob-descriptor'] as const
 
 const errorMessage = (error: Error): string => {
+  if (error instanceof ProductInputError) return error.message
   if (error instanceof ProductRequestError) {
     return `${error.response.error.code}: ${error.message}`
   }
@@ -50,7 +52,7 @@ export function ArtifactInspector({
   digestInputRef?: RefObject<HTMLInputElement | null>
   onClose: () => void
   state: ArtifactInspectorState
-  onStateChange: (state: ArtifactInspectorState) => void
+  onStateChange: Dispatch<SetStateAction<ArtifactInspectorState>>
 }) {
   const queryClient = useQueryClient()
   const { digest, mediaType, displayFilename, request } = state
@@ -150,9 +152,11 @@ export function ArtifactInspector({
         <div className="artifact-request-error" role="alert">
           <strong>Artifact unavailable</strong>
           <span>{errorMessage(descriptor.error)}</span>
-          <button type="button" onClick={() => void descriptor.refetch()}>
-            Retry
-          </button>
+          {!(descriptor.error instanceof ProductInputError) && (
+            <button type="button" onClick={() => void descriptor.refetch()}>
+              Retry
+            </button>
+          )}
         </div>
       )}
       {descriptor.data && (
@@ -161,11 +165,18 @@ export function ArtifactInspector({
             Resolved artifact {descriptor.data.display_filename[0] ?? descriptor.data.digest}
           </span>
           <ArtifactRenderer
-            key={descriptor.data.digest}
+            key={`${request?.sequence ?? 0}:${descriptor.data.digest}`}
             descriptor={descriptor.data}
             compact
             originalRequested={state.originalRequested}
-            onOriginalRequested={() => onStateChange({ ...state, originalRequested: true })}
+            onOriginalRequested={(digest) =>
+              onStateChange((current) =>
+                current.request?.sequence === request?.sequence &&
+                current.request?.digest === digest
+                  ? { ...current, originalRequested: true }
+                  : current,
+              )
+            }
           />
         </>
       )}

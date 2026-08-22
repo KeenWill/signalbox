@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import {
   imageViewLabel,
+  isAnimationSafeImageHeader,
   isInlineOriginalByteLengthAdmitted,
   isInlineOriginalLengthAdmitted,
   MAX_INLINE_ORIGINAL_BYTES,
@@ -111,6 +112,25 @@ describe('artifact renderer compatibility', () => {
     ])
 
     expect(readImageDimensions(bytes)).toEqual({ width: 640, height: 480 })
+  })
+
+  it('skips legal JPEG marker fill bytes', () => {
+    const bytes = new Uint8Array([
+      0xff, 0xd8, 0xff, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, 0xff, 0xff, 0xc0, 0x00, 0x0b, 0x08,
+      0x01, 0xe0, 0x02, 0x80, 0x03, 0x01, 0x11, 0x00, 0xff, 0xd9,
+    ])
+
+    expect(readImageDimensions(bytes)).toEqual({ width: 640, height: 480 })
+  })
+
+  it('keeps animation-capable originals download-only', () => {
+    expect(isAnimationSafeImageHeader(new TextEncoder().encode('GIF89a fixture'))).toBe(false)
+    const animatedWebp = new Uint8Array(30)
+    animatedWebp.set(new TextEncoder().encode('RIFF'), 0)
+    animatedWebp.set(new TextEncoder().encode('WEBP'), 8)
+    animatedWebp.set(new TextEncoder().encode('VP8X'), 12)
+    animatedWebp[20] = 0x02
+    expect(isAnimationSafeImageHeader(animatedWebp)).toBe(false)
   })
 
   it('reads bounded extended WebP dimensions for pixel admission', () => {

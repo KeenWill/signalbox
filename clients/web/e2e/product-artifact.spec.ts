@@ -23,9 +23,11 @@ const incompatibleDescriptorMessage =
   'The descriptor response did not match the generated web contract.'
 const admittedOriginalArtifact = decodeWebBlobDescriptor({
   ...imageArtifact,
-  byte_length: '1048576',
+  byte_length: String(previewFixture.byteLength),
   available_views: imageArtifact.available_views.map((view) =>
-    view.kind === 'browser_native' ? { ...view, byte_length: '1048576' } : view,
+    view.kind === 'browser_native'
+      ? { ...view, byte_length: String(previewFixture.byteLength) }
+      : view,
   ),
 })
 const oversizedOriginalArtifact = decodeWebBlobDescriptor({
@@ -53,11 +55,16 @@ const useArtifactScenario = async (page: Page, descriptor = imageArtifact) => {
   await page.route('**/api/blobs/**/descriptor?*', (route) => route.fulfill({ json: descriptor }))
   await page.route('**/api/blobs/**/content/image-png', (route) => {
     if (route.request().headers().range) {
+      const requested = Number(descriptor.byte_length)
       return route.fulfill({
         status: 206,
-        body: previewFixture.subarray(0, 64 * 1024),
+        body: previewFixture.subarray(0, requested),
         contentType: 'image/png',
-        headers: { 'content-range': `bytes 0-${64 * 1024 - 1}/${previewFixture.byteLength}` },
+        headers: {
+          etag: `"${descriptor.digest}"`,
+          'content-range': `bytes 0-${requested - 1}/${descriptor.byte_length}`,
+          'content-length': String(requested),
+        },
       })
     }
     return route.fulfill({ body: previewFixture, contentType: 'image/png' })
@@ -263,8 +270,13 @@ test('retries a transient original header failure', async ({ page }) => {
       if (headerAttempts === 1) return route.fulfill({ status: 503 })
       return route.fulfill({
         status: 206,
-        body: previewFixture.subarray(0, 64 * 1024),
+        body: previewFixture,
         contentType: 'image/png',
+        headers: {
+          etag: `"${admittedOriginalArtifact.digest}"`,
+          'content-range': `bytes 0-${previewFixture.byteLength - 1}/${admittedOriginalArtifact.byte_length}`,
+          'content-length': String(previewFixture.byteLength),
+        },
       })
     }
     return route.fulfill({ body: previewFixture, contentType: 'image/png' })
@@ -300,8 +312,13 @@ test('does not steal focus when an original header probe completes', async ({ pa
       await headerBlocked
       return route.fulfill({
         status: 206,
-        body: previewFixture.subarray(0, 64 * 1024),
+        body: previewFixture,
         contentType: 'image/png',
+        headers: {
+          etag: `"${admittedOriginalArtifact.digest}"`,
+          'content-range': `bytes 0-${previewFixture.byteLength - 1}/${admittedOriginalArtifact.byte_length}`,
+          'content-length': String(previewFixture.byteLength),
+        },
       })
     }
     return route.fulfill({ body: previewFixture, contentType: 'image/png' })

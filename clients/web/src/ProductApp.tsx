@@ -408,7 +408,15 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       .map((binding) => ({
         hotkey: binding.hotkey,
         callback: () => {
-          if (store.getState().app.overlay === null) invokeCommand(binding.commandId, context)
+          if (store.getState().app.overlay === null && !(artifactOpen && inspectorInSheet)) {
+            if (
+              binding.commandId === 'layout.toggle' &&
+              document.activeElement?.closest('.product-navigation-pane')
+            ) {
+              primaryRef.current?.focus()
+            }
+            invokeCommand(binding.commandId, context)
+          }
         },
       })),
   )
@@ -416,7 +424,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     globalHotkeySequenceBindings.map((binding) => ({
       sequence: binding.sequence,
       callback: () => {
-        if (store.getState().app.overlay === null) invokeCommand(binding.commandId, context)
+        if (store.getState().app.overlay === null && !(artifactOpen && inspectorInSheet)) {
+          invokeCommand(binding.commandId, context)
+        }
       },
     })),
   )
@@ -561,6 +571,15 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <Dialog.Description id="mobile-navigation-description" className="sr-only">
               Choose a Signalbox surface.
             </Dialog.Description>
+            <Dialog.Close asChild>
+              <button
+                className="icon-button mobile-navigation-close"
+                type="button"
+                aria-label="Close navigation"
+              >
+                <X />
+              </button>
+            </Dialog.Close>
             <ProductNavigation
               active={surface}
               onNavigate={() => {

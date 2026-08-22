@@ -128,6 +128,34 @@ test('does not run product view hotkeys while a modal owns focus', async ({ page
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('does not run product view hotkeys while the artifact sheet owns focus', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+  const presentationBefore = await page.evaluate(() => ({
+    theme: document.documentElement.dataset.theme,
+    density: document.documentElement.dataset.density,
+  }))
+
+  await page.getByRole('button', { name: 'Open artifact inspector' }).click()
+  const sheet = page.getByRole('dialog', { name: 'Artifact inspector' })
+  await expect(sheet).toBeVisible()
+  await sheet.getByRole('button', { name: 'Close artifact inspector' }).focus()
+  await page.keyboard.press('Shift+T')
+  await page.keyboard.press('Shift+D')
+  await page.keyboard.press('Shift+W')
+
+  expect(
+    await page.evaluate(() => ({
+      theme: document.documentElement.dataset.theme,
+      density: document.documentElement.dataset.density,
+    })),
+  ).toEqual(presentationBefore)
+  await expect(sheet).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('uses a navigation sheet on a phone viewport and unwinds it with Escape', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
