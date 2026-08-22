@@ -1081,11 +1081,19 @@ prints the semantic transcript; it is deliberately not the client protocol.
 - Same-incarnation retained-evidence reconciliation gets exactly one production
   pass (`reconcile_retained_once`) before fatal escalation; repeated
   same-incarnation drains are exercised only by tests.
-- The one system-prompt source is the calling turn's frozen defaults epoch: the
-  prepare transaction loads that epoch's optional bounded prompt, rendering
-  binds it onto the prepared operation, and the bridge sets the runtime
-  operation's `ModelOperation::system` field from it on every call
-  (`crates/model-runtime/src/operation.rs`), exactly or `None`
-  ([sessions-and-transcript](sessions-and-transcript.md)). Composition from
-  additional sources remains deferred under the open
+- The daemon/session system prompt remains sourced only from the calling turn's
+  frozen defaults epoch: preparation loads that optional bounded prompt and the
+  bridge sets `ModelOperation::system` from it exactly or to `None`
+  ([sessions-and-transcript](sessions-and-transcript.md)). **Committed
+  unimplemented functionality — workspace-instruction region.** The
+  instruction-admission slice adds a separate optional typed
+  `WorkspaceInstructionRegion` to `PreparedModelOperation` and carries it
+  unchanged into `ModelOperation::workspace_instructions`. Preparation rebuilds
+  it from the exact manifest-backed admitted bytes, inserts it once after system
+  policy and before conversation history, and authenticates its manifest before
+  provider spawn. It is never concatenated into `system`, converted to a user or
+  tool message, or sourced from an adapter loader. The region's exact bytes and
+  subordinate authority are owned by
+  [workspace instructions](workspace-instructions.md); richer composition of
+  other system-prompt sources remains deferred under
   [configuration categories](../open-questions.md#configuration-categories).

@@ -36,6 +36,11 @@ The daemon blob-read declarations below are the foundation proposal from PR #553
 (`agent/blob-storage-foundation`) and become verified with its implementing
 child stack.
 
+The workspace-instruction addition to the continuation transaction is committed
+unimplemented functionality from PR #796 (`agent/agent-docs-skills-spec`). No
+present tool can create an instruction admission, and the current transaction
+therefore still has the four implemented effects named below.
+
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
@@ -117,7 +122,42 @@ All requests produced by one call are one batch. Approval decisions are resolved
 in proposal order, and the turn parks on the earliest undecided request.
 Execution does not begin until the batch has no undecided approval. The next
 model round does not begin until every request has one durable logical
-resolution: executed, denied, or closed by turn end.
+resolution: executed, denied, closed by turn end, or — for a family that
+declares the pre-approval admissibility check below — closed inadmissible.
+
+**Committed unimplemented functionality — pre-approval admissibility.** A family
+may declare that a request is inadmissible on evidence available before any
+approval decision, and where a family declares one it takes precedence over the
+ordinary path for the same condition: an argument-schema failure for such a
+family resolves here, request-level and with no attempt, rather than through the
+prepared-attempt `KnownFailed` route that families without the declaration use.
+The two cannot both run, and the declared check is the earlier of them. The
+instruction family declares two: arguments that do not decode to its schema, and
+a bundle outside the effective eligibility view, both specified by
+[workspace instructions](workspace-instructions.md#enumeration-preview-and-admission).
+Such a request resolves before approval through a request-level transition that
+mints no attempt: it records a fourth durable logical resolution,
+`closed_inadmissible`, carrying the family's typed reason on the request itself,
+and creates no approval state, no judge call, no attempt row, and no executor
+work. It must be request-level, because a tool attempt names its issuing turn
+attempt and a batch parked on an undecided approval has no current turn attempt
+to name — minting one here would either orphan the attempt or force a turn
+attempt into existence under the approval-wait constraints. Storing the reason
+on the request instead is sound because nothing executed: there is no attempt
+history to explain, only a request that was never admissible. The projection
+renders it through the same provider-visible error object as any other typed
+failure, so no new result shape reaches a provider. A request resolved this way
+is not undecided, so the batch is not parked behind it and proposal order
+continues at the next request. It is resolved for the continuation boundary too:
+it projects one `ToolInadmissible` result entry in proposal order, and it
+satisfies the batch-complete condition that creates the fresh continuation turn
+attempt. A batch whose only proposal is inadmissible therefore still prepares
+its next model call rather than stalling with nothing to project. Why this
+rather than deciding approval first: a delegated decision needs evidence the
+daemon can only build for a bundle the session may see, so asking a judge about
+an inadmissible request would mean either exposing metadata the session is not
+entitled to or sending an evidence-free prompt. No present family declares such
+a check.
 
 ## Approval policy and decision sources
 
@@ -512,6 +552,29 @@ execution and continuation. For each next approved request:
    moves lifecycle to `awaiting_tool_recovery` correlated with that exact
    attempt.
 
+**Committed unimplemented functionality — instruction admission effect.** For a
+successful fresh `instructions_read`, the commit-result transaction also locks
+the session's admitted-set head and atomically appends the
+`InstructionAdmission` specified by
+[workspace instructions](workspace-instructions.md#durable-admission-transition)
+with the receipt-only completed result. A stale head, failed read, or failed
+admission validation discards the admission, not the round: the transaction
+commits the terminal typed failure as this attempt's result and leaves the
+admitted-set head and every existing admission untouched. Rolling both back
+would discard a completed executor result and strand the attempt `InFlight`,
+which contradicts the monotonic terminal transition required above and would
+wedge the serialized batch behind an attempt that can never close. The
+distinction is that the executor work already happened outside any transaction;
+what this transaction decides is whether its evidence becomes an admission, and
+"no" is a result to record rather than a reason to forget the attempt. Replay of
+an already committed request returns the recorded receipt and admission link
+without appending either again; a conflicting receipt or link is corruption.
+That head lock's position in the repository-wide order and its mode belong to
+the [persistence lock protocol](persistence-protocol.md#lock-protocol), which
+carries it in the same inventory as this transaction's scheduler lock; this page
+states that the lock is taken, never where or how. No present tool supplies this
+effect until an implementing child advances the owning workspace contract.
+
 The runner durably spools a terminal evidence envelope until `result_recorded`.
 A process exit, timeout, supervisor loss, or channel loss after claim is not a
 known tool failure; it enters the effect-class loss and ambiguity law. A tool
@@ -599,7 +662,8 @@ scope.
 An interrupt against a tool recovery wait does not reinterpret or erase the
 ambiguous attempt. It materializes exactly one reference-only result per request
 in proposal order: completed or known-failed attempts use `ToolExecutionResult`,
-denials use `ToolDenied`, and the ambiguous request plus any request without an
+denials use `ToolDenied`, requests already resolved `closed_inadmissible` keep
+`ToolInadmissible`, and the ambiguous request plus any request without an
 ordinary result use `ToolClosed`. The turn then terminalizes as
 `ReconciliationRequired` on that prefix-extending frontier, with the exact tool
 attempt as its ambiguity set and the applied-interrupt proof. Logical closure
@@ -640,11 +704,18 @@ Semantic tool-result entries contain references only:
 - `ToolClosed { request }` references a request closed because its turn ended
   before it could complete ordinary execution, whether it remained undecided or
   was approved but not yet attempted. A crash-lost attempt has durable
-  `KnownFailed` evidence and therefore uses `ToolExecutionResult`.
+  `KnownFailed` evidence and therefore uses `ToolExecutionResult`. **Committed
+  unimplemented functionality.** A fourth entry, `ToolInadmissible { request }`,
+  references a request resolved `closed_inadmissible` by the pre-approval check
+  above. It references the request because that resolution mints no attempt,
+  exactly as `ToolDenied` does, and the request row already carries the family's
+  typed reason. No present family declares such a check, so no present
+  transaction emits this entry.
 
 No result entry copies output, error detail, or denial reason. Attempt evidence
 commits as soon as execution ends, independently of semantic projection. Once
-every request in the batch is executed or denied, one continuation transaction:
+every request in the batch is executed, denied, or closed inadmissible, one
+continuation transaction:
 
 1. appends exactly one result entry per request in proposal order;
 2. consumes every pending steering input in ascending acceptance position and
@@ -652,15 +723,26 @@ every request in the batch is executed or denied, one continuation transaction:
 3. derives the exact prefix-preserving frontier extension; and
 4. creates the next round's `Prepared` model call against that frontier.
 
+**Committed unimplemented functionality — instruction admission continuation.**
+When `instructions_read` is implemented, this transaction additionally folds the
+batch's fresh durable successful instruction-admission rows in request order and
+creates exactly one successor turn-instruction manifest authenticated by the new
+`Prepared` model call. An idempotent replay receipt or an `already_admitted`
+receipt contributes no row and cannot duplicate a bundle or alter the successor
+manifest digest. No present tool or transaction supplies this fifth effect; the
+compatibility constraint is that the four implemented effects and the successor
+manifest must eventually commit or roll back together.
+
 When at least one request entered execution, the continuation turn attempt
 already entered `Running` during tool authorization. It owns the new `Prepared`
 call without moving backward; send authorization advances only the call to
-`InFlight` and leaves the attempt `Running`. A denial-only batch never
-authorized an effect, so its continuation attempt remains `Prepared` while it
-owns the new `Prepared` call. Reconstitution and the deferred database assertion
-admit `(Running, Prepared)` or `(Prepared, Prepared)` only for a
-continuation-chain attempt whose exact call frontier contains the current
-batch's complete durable result evidence.
+`InFlight` and leaves the attempt `Running`. A batch that authorized no effect
+at all — denials only, inadmissible requests only, or any mixture of the two,
+since neither kind creates an attempt — leaves its continuation attempt
+`Prepared` while it owns the new `Prepared` call. Reconstitution and the
+deferred database assertion admit `(Running, Prepared)` or
+`(Prepared, Prepared)` only for a continuation-chain attempt whose exact call
+frontier contains the current batch's complete durable result evidence.
 
 Those effects commit or roll back together (INV-036). A newly prepared call ends
 the invocation and is reloaded before provider capability preparation,
@@ -683,17 +765,26 @@ and ensure one model-controlled response or chain cannot retain the progressing
 slot indefinitely.
 
 If an applied stop terminalizes before continuation, the same materialization
-algorithm appends results for executed and denied requests, closes every request
-that did not complete ordinary execution as `ToolClosed` in proposal order, then
-appends the proof-bearing terminal marker. The consumed result projection is
-bound to the interrupted turn: reusing this turn's current frontier identity is
-not sufficient, and a projection prepared for another turn cannot terminalize
-this turn with foreign request results even when the yielded source frontier
-matches. A prepared or effect-free crash loss that fails the turn uses that same
-proposal-ordered materialization before `TurnFailed`; the crash-lost
-`KnownFailed` attempt becomes `ToolExecutionResult`, while every other request
-without an ordinary result becomes `ToolClosed`. A request can therefore never
-remain an open logical dependency behind a terminal turn (INV-006).
+algorithm appends results for executed, denied, and already-inadmissible
+requests, closes every remaining request that did not complete ordinary
+execution as `ToolClosed` in proposal order, then appends the proof-bearing
+terminal marker. The consumed result projection is bound to the interrupted
+turn: reusing this turn's current frontier identity is not sufficient, and a
+projection prepared for another turn cannot terminalize this turn with foreign
+request results even when the yielded source frontier matches. A prepared or
+effect-free crash loss that fails the turn uses that same proposal-ordered
+materialization before `TurnFailed`; the crash-lost `KnownFailed` attempt
+becomes `ToolExecutionResult`, while every other request without an ordinary
+result becomes `ToolClosed`. A request can therefore never remain an open
+logical dependency behind a terminal turn (INV-006).
+
+**Committed unimplemented functionality.** A request already resolved
+`closed_inadmissible` is never reclassified by any of these paths. It has a
+durable resolution and a typed reason before the interrupt or crash arrives, and
+because it deliberately has no attempt it would otherwise fall into the
+`ToolClosed` fallback and lose both — reporting a request that was refused on
+its own terms as one the turn ran out of time for. Its result entry is
+`ToolInadmissible` wherever these algorithms name a materialization.
 
 ## Approval waits and restart
 
@@ -847,13 +938,19 @@ exactly `unknown_tool`, `invalid_arguments`, `execution_failed`,
 `result_too_large`, `crash_lost`, `denied`, or `closed_by_turn_end`. Execution
 failures select their stored error kind and detail, denial selects `denied` and
 its reason, and terminal closure selects `closed_by_turn_end` with null detail.
-OpenAI carries that JSON as ordinary tool-message content because its wire shape
-has no failure flag; Anthropic also receives the provider-neutral failure flag.
-Malformed proposal arguments remain exact after preparation-time credential
-scrubbing on the durable request but replay as the exact provider-neutral JSON
-object `{"signalbox_invalid_arguments":true}`, allowing the paired typed error
-result to reach either provider without pretending the placeholder is durable
-evidence.
+`K` stays closed as written; a family whose failures do not fit it maps into it
+rather than extending it, and may fix `D` to its own closed token vocabulary so
+the projection stays machine-readable. **Committed unimplemented
+functionality.** The instruction family is the one such mapping so far, fixed by
+[workspace instructions](workspace-instructions.md#enumeration-preview-and-admission):
+its admission and enumeration failures select `execution_failed` with `D` set to
+exactly one closed reason token and no other text. OpenAI carries that JSON as
+ordinary tool-message content because its wire shape has no failure flag;
+Anthropic also receives the provider-neutral failure flag. Malformed proposal
+arguments remain exact after preparation-time credential scrubbing on the
+durable request but replay as the exact provider-neutral JSON object
+`{"signalbox_invalid_arguments":true}`, allowing the paired typed error result
+to reach either provider without pretending the placeholder is durable evidence.
 
 The first compiled tool is `current_time`:
 
