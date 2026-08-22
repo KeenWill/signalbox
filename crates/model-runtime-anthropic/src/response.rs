@@ -490,6 +490,7 @@ mod tests {
         ExchangeFacts {
             provider_request_id: Some(ProviderRequestId::new("req_1")),
             http_status: Some(200),
+            retry_after: None,
         }
     }
 
@@ -660,7 +661,7 @@ mod tests {
                 "role": "assistant",
                 "model": "model-exact-1",
                 "content": [{"type": "text", "text": "partial"}],
-                "usage": {"input_tokens": 3}
+                "usage": {"input_tokens": 3, "output_tokens": 2}
             }"#,
         );
 
@@ -676,6 +677,36 @@ mod tests {
             Some(ProviderReportedModel::new("model-exact-1"))
         );
         assert_eq!(loss.usage.input_tokens, Some(3));
+        assert_eq!(loss.usage.output_tokens, Some(2));
+    }
+
+    #[test]
+    fn missing_output_tokens_is_boundary_loss_with_retained_input_usage() {
+        let (evidence, _) = decode(
+            r#"{
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "model-exact-1",
+                "content": [{"type": "text", "text": "partial"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 3}
+            }"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("a success body without output_tokens is not completion material");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::ResponseUnintelligible { .. }
+        ));
+        assert_eq!(
+            loss.reported_model,
+            Some(ProviderReportedModel::new("model-exact-1"))
+        );
+        assert_eq!(loss.usage.input_tokens, Some(3));
+        assert_eq!(loss.usage.output_tokens, None);
     }
 
     /// a decode that stopped part way through the content blocks does

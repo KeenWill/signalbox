@@ -1597,6 +1597,19 @@ pub struct SubmitInputInterruptedModelCallReconciliationConstructionInput {
     pub interrupt: crate::AppliedInterruptProof,
 }
 
+/// Named facts for an interrupted ambiguous tool-attempt reconciliation source.
+#[derive(Clone, Debug)]
+pub struct SubmitInputInterruptedToolReconciliationConstructionInput {
+    /// The canonical origin facts owned by the terminal source turn.
+    pub origin: SubmitInputTurnOriginReconstitutionInput,
+    /// The terminal source turn identity.
+    pub turn: TurnId,
+    /// The unresolved tool attempt requiring reconciliation.
+    pub ambiguous_attempt: crate::ToolAttemptId,
+    /// The applied interrupt proof that stopped the turn.
+    pub interrupt: crate::AppliedInterruptProof,
+}
+
 impl SubmitInputTerminalSourceReconstitutionInput {
     /// Supplies the source turn canonical origin facts, terminal-record owner,
     /// and disposition.
@@ -1626,6 +1639,32 @@ impl SubmitInputTerminalSourceReconstitutionInput {
         } = input;
         let ambiguous_operations = crate::NonEmptyIssuedOperationRefs::singleton(
             crate::IssuedOperationRef::ModelCall(ambiguous_call),
+        );
+        Self::new(SubmitInputTerminalSourceConstructionInput {
+            origin,
+            turn,
+            disposition: TurnDisposition::ReconciliationRequired {
+                marker: crate::ReconciliationMarker::from_interrupt_ambiguity(
+                    ambiguous_operations,
+                    interrupt,
+                ),
+            },
+        })
+    }
+
+    /// Supplies a terminal source whose exact ambiguous tool attempt remained
+    /// unresolved after an applied interrupt.
+    pub fn interrupted_tool_reconciliation(
+        input: SubmitInputInterruptedToolReconciliationConstructionInput,
+    ) -> Self {
+        let SubmitInputInterruptedToolReconciliationConstructionInput {
+            origin,
+            turn,
+            ambiguous_attempt,
+            interrupt,
+        } = input;
+        let ambiguous_operations = crate::NonEmptyIssuedOperationRefs::singleton(
+            crate::IssuedOperationRef::ToolAttempt(ambiguous_attempt),
         );
         Self::new(SubmitInputTerminalSourceConstructionInput {
             origin,
