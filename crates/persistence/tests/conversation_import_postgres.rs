@@ -753,6 +753,41 @@ async fn inv064_one_time_import_migration_installs_only_the_final_schema()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = postgres_before_import_blob_migration().await?;
     let mut transaction = pool.begin().await?;
+    // The synthetic delegated child omits its spawning tool round. Remove only
+    // those provenance FKs before inserting the fixture; they are reinstalled
+    // as NOT VALID after this transaction commits, so the migration still sees
+    // and exercises their real cascade shape.
+    sqlx::raw_sql(
+        "ALTER TABLE session
+             DROP CONSTRAINT session_spawning_request_fk;
+         ALTER TABLE session_delegation
+             DROP CONSTRAINT session_delegation_parent_request_fk;
+         ALTER TABLE session_delegation_event DISABLE TRIGGER USER;
+         ALTER TABLE session_delegation_initial_task DISABLE TRIGGER USER;
+         DO $$
+         DECLARE
+             foreign_key record;
+         BEGIN
+             FOR foreign_key IN
+                 SELECT conname
+                   FROM pg_constraint
+                  WHERE conrelid = 'session_delegation_event'::regclass
+                    AND contype = 'f'
+                    AND confrelid IN (
+                        'tool_request'::regclass,
+                        'turn_lifecycle'::regclass
+                    )
+             LOOP
+                 EXECUTE format(
+                     'ALTER TABLE session_delegation_event DROP CONSTRAINT %I',
+                     foreign_key.conname
+                 );
+             END LOOP;
+         END;
+         $$;",
+    )
+    .execute(&mut *transaction)
+    .await?;
     let imported = insert_pre_blob_imported_source_scaffolding(&mut transaction).await?;
     insert_imported_session_scaffolding(&mut transaction).await?;
     insert_imported_semantic_prefix(&mut transaction, imported).await?;
@@ -773,12 +808,12 @@ async fn inv064_one_time_import_migration_installs_only_the_final_schema()
                  'replace_session_metadata', 1, transaction_timestamp());
          INSERT INTO replace_session_metadata_command
             (command_id, command_kind, storage_version, session_id,
-             actor_kind, replacement_archived, result_kind, rejection_kind,
-             result_session_id)
+             actor_kind, issuer_kind, replacement_archived, result_kind,
+             rejection_kind, result_session_id)
          VALUES ('30000000-0000-4000-8000-000000000065',
                  'replace_session_metadata', 1,
                  '40000000-0000-4000-8000-000000000039',
-                 'user', false, 'rejected', 'session_not_found',
+                 'user', 'user', false, 'rejected', 'session_not_found',
                  '40000000-0000-4000-8000-000000000039');
          INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
@@ -809,7 +844,143 @@ async fn inv064_one_time_import_migration_installs_only_the_final_schema()
     )
     .execute(&mut *transaction)
     .await?;
+    // The synthetic delegated child needs only enough provenance for this
+    // migration regression.
+    sqlx::raw_sql(
+        "INSERT INTO session
+            (session_id, creation_cause, ancestry_kind, spawning_tool_request_id)
+         VALUES ('40000000-0000-4000-8000-000000000066',
+                 'delegated', 'none',
+                 '80000000-0000-4000-8000-000000000066');
+         INSERT INTO session_scheduler (session_id)
+         VALUES ('40000000-0000-4000-8000-000000000066');
+         INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind,
+             direct_model_selection_id, model_alias_id)
+         VALUES ('40000000-0000-4000-8000-000000000066', 1, 'direct',
+                 '50000000-0000-4000-8000-000000000066', NULL);
+         INSERT INTO session_current_defaults (session_id, current_version)
+         VALUES ('40000000-0000-4000-8000-000000000066', 1);
+         INSERT INTO session_placement_event
+            (session_id, version, prior_version, event_kind, placement_path,
+             root_global_read_intent, provenance_command_id, recorded_at)
+         SELECT '40000000-0000-4000-8000-000000000066', 1, NULL,
+                'created', placement_path, root_global_read_intent,
+                provenance_command_id, transaction_timestamp()
+           FROM session_placement_event
+          WHERE session_id = '40000000-0000-4000-8000-000000000039'
+            AND version = 1;
+         INSERT INTO session_current_placement (session_id, current_version)
+         VALUES ('40000000-0000-4000-8000-000000000066', 1);
+         INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind)
+         VALUES ('80000000-0000-4000-8000-000000000066',
+                 '40000000-0000-4000-8000-000000000039',
+                 '90000000-0000-4000-8000-000000000066',
+                 '40000000-0000-4000-8000-000000000066', 'background');
+         INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             provenance_kind, provenance_session_id, provenance_turn_id,
+             provenance_tool_request_id)
+         VALUES ('80000000-0000-4000-8000-000000000066', 1, 'spawned',
+                 'tool_request',
+                 '40000000-0000-4000-8000-000000000039',
+                 '90000000-0000-4000-8000-000000000066',
+                 '80000000-0000-4000-8000-000000000066');
+         INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_kind, origin_accepted_input_id,
+             acceptance_position, state_kind)
+         VALUES ('90000000-0000-4000-8000-000000000067',
+                 '40000000-0000-4000-8000-000000000066',
+                 'delegation', NULL, 1, 'queued');
+         INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             delegated_task_spawning_tool_request_id)
+         VALUES ('40000000-0000-4000-8000-000000000066',
+                 '60000000-0000-4000-8000-000000000066',
+                 'delegated_task',
+                 '80000000-0000-4000-8000-000000000066');
+         INSERT INTO session_delegation_initial_task
+            (spawning_tool_request_id, child_session_id, turn_id,
+             semantic_entry_id, admission_position, defaults_version,
+             requested_model_kind, requested_direct_model_selection_id,
+             frozen_model_kind, frozen_direct_model_selection_id, task_content)
+         VALUES ('80000000-0000-4000-8000-000000000066',
+                 '40000000-0000-4000-8000-000000000066',
+                 '90000000-0000-4000-8000-000000000067',
+                 '60000000-0000-4000-8000-000000000066',
+                 1, 1, 'direct',
+                 '50000000-0000-4000-8000-000000000066',
+                 'direct',
+                 '50000000-0000-4000-8000-000000000066',
+                 'delegated migration fixture task');
+         WITH header AS (
+             INSERT INTO delegation_outbox_event
+                (event_kind, storage_version, session_id)
+             VALUES ('delegation_update', 1,
+                     '40000000-0000-4000-8000-000000000039')
+             RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO delegation_update_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             update_kind, spawning_tool_request_id, child_session_id,
+             policy_kind, delegation_event_ordinal, delegation_event_kind)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                'child_spawned',
+                '80000000-0000-4000-8000-000000000066',
+                '40000000-0000-4000-8000-000000000066',
+                'background', 1, 'spawned'
+           FROM header;
+         INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ('30000000-0000-4000-8000-000000000066',
+                 'goal', 1, transaction_timestamp());
+         INSERT INTO goal_command
+            (command_id, command_kind, storage_version, session_id,
+             operation_kind, statement, result_kind, rejection_kind)
+         VALUES ('30000000-0000-4000-8000-000000000066',
+                 'goal', 1,
+                 '40000000-0000-4000-8000-000000000066',
+                 'attach', 'delegated fixture goal',
+                 'rejected', 'session_not_found');",
+    )
+    .execute(&mut *transaction)
+    .await?;
     transaction.commit().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation_event ENABLE TRIGGER USER;
+         ALTER TABLE session_delegation_initial_task ENABLE TRIGGER USER;
+         ALTER TABLE session
+             ADD CONSTRAINT session_spawning_request_fk
+             FOREIGN KEY (spawning_tool_request_id)
+             REFERENCES tool_request(request_id)
+             ON UPDATE RESTRICT ON DELETE RESTRICT
+             DEFERRABLE INITIALLY DEFERRED NOT VALID;
+         ALTER TABLE session_delegation
+             ADD CONSTRAINT session_delegation_parent_request_fk
+             FOREIGN KEY (spawning_tool_request_id, parent_turn_id, parent_session_id)
+             REFERENCES tool_request(request_id, turn_id, session_id)
+             ON UPDATE RESTRICT ON DELETE RESTRICT
+             DEFERRABLE INITIALLY DEFERRED NOT VALID;
+         ALTER TABLE session_delegation_event
+             ADD CONSTRAINT session_delegation_event_provenance_tool_request_fk
+             FOREIGN KEY (
+                 provenance_tool_request_id,
+                 provenance_turn_id,
+                 provenance_session_id
+             ) REFERENCES tool_request(request_id, turn_id, session_id)
+             ON UPDATE RESTRICT ON DELETE RESTRICT
+             DEFERRABLE INITIALLY DEFERRED NOT VALID;
+         ALTER TABLE session_delegation_event
+             ADD CONSTRAINT session_delegation_event_provenance_turn_fk
+             FOREIGN KEY (provenance_turn_id, provenance_session_id)
+             REFERENCES turn_lifecycle(turn_id, session_id)
+             ON UPDATE RESTRICT ON DELETE RESTRICT
+             DEFERRABLE INITIALLY DEFERRED NOT VALID;",
+    )
+    .execute(&pool)
+    .await?;
     let before: (i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM imported_conversation),
@@ -818,11 +989,23 @@ async fn inv064_one_time_import_migration_installs_only_the_final_schema()
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!(before, (1, 1, 2));
+    assert_eq!(before, (1, 1, 3));
 
     apply_exact_migration(&pool, 202608110019).await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session
+             VALIDATE CONSTRAINT session_spawning_request_fk;
+         ALTER TABLE session_delegation
+             VALIDATE CONSTRAINT session_delegation_parent_request_fk;
+         ALTER TABLE session_delegation_event
+             VALIDATE CONSTRAINT session_delegation_event_provenance_tool_request_fk;
+         ALTER TABLE session_delegation_event
+             VALIDATE CONSTRAINT session_delegation_event_provenance_turn_fk;",
+    )
+    .execute(&pool)
+    .await?;
 
-    let after: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+    let after: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM imported_conversation),
             (SELECT count(*) FROM imported_raw_source_record),
@@ -835,11 +1018,17 @@ async fn inv064_one_time_import_migration_installs_only_the_final_schema()
             (SELECT count(*) FROM replace_session_metadata_command
               WHERE command_id = '30000000-0000-4000-8000-000000000065'),
             (SELECT count(*) FROM durable_command
-              WHERE command_id = '30000000-0000-4000-8000-000000000065')",
+              WHERE command_id = '30000000-0000-4000-8000-000000000065'),
+            (SELECT count(*) FROM session
+              WHERE session_id = '40000000-0000-4000-8000-000000000066'),
+            (SELECT count(*) FROM goal_command
+              WHERE command_id = '30000000-0000-4000-8000-000000000066'),
+            (SELECT count(*) FROM durable_command
+              WHERE command_id = '30000000-0000-4000-8000-000000000066')",
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!(after, (0, 0, 0, 1, 1, 0, 0));
+    assert_eq!(after, (0, 0, 0, 1, 1, 0, 0, 0, 0, 0));
     let raw_bytes_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1

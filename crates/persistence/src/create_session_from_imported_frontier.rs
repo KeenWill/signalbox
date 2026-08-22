@@ -1,6 +1,6 @@
 //! Atomic PostgreSQL creation and checked loading for imported-seeded sessions.
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, sync::Arc};
 
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -267,6 +267,7 @@ pub struct ImportedSessionRepository {
     pool: PgPool,
     credential_pin: crate::SessionCredentialPin,
     imported_conversations: conversation_import::ImportedConversationRepository,
+    preloaded_conversation: Option<Arc<ImportedConversation>>,
 }
 
 impl ImportedSessionRepository {
@@ -280,7 +281,14 @@ impl ImportedSessionRepository {
             pool,
             credential_pin,
             imported_conversations,
+            preloaded_conversation: None,
         }
+    }
+
+    /// Reuses an imported conversation already loaded and verified by the caller.
+    pub fn with_preloaded_conversation(mut self, conversation: ImportedConversation) -> Self {
+        self.preloaded_conversation = Some(Arc::new(conversation));
+        self
     }
 
     /// Uses the deterministic integration-store fixture.
@@ -311,11 +319,17 @@ impl ImportedSessionRepository {
         }
         transaction.rollback().await?;
 
-        let conversation = self
-            .imported_conversations
-            .load(command.imported_conversation())
-            .await
-            .map_err(map_imported_conversation_error)?;
+        let conversation = match self.preloaded_conversation.as_ref() {
+            Some(conversation) if conversation.id() == command.imported_conversation() => {
+                Some(Arc::clone(conversation))
+            }
+            _ => self
+                .imported_conversations
+                .load(command.imported_conversation())
+                .await
+                .map_err(map_imported_conversation_error)?
+                .map(Arc::new),
+        };
         let mut transaction = self.pool.begin().await?;
         if let Some(kind) = inspect_registry(&mut transaction, command_id).await? {
             transaction.rollback().await?;
@@ -417,12 +431,17 @@ impl ImportedSessionRepository {
         ))?;
         drop(connection);
 
-        let conversation = self
-            .imported_conversations
-            .load(ImportedConversationId::from_uuid(conversation_id))
-            .await
-            .map_err(map_imported_conversation_error)?
-            .ok_or(ImportedSessionCorruption::Missing("imported conversation"))?;
+        let conversation_id = ImportedConversationId::from_uuid(conversation_id);
+        let conversation = match self.preloaded_conversation.as_ref() {
+            Some(conversation) if conversation.id() == conversation_id => Arc::clone(conversation),
+            _ => Arc::new(
+                self.imported_conversations
+                    .load(conversation_id)
+                    .await
+                    .map_err(map_imported_conversation_error)?
+                    .ok_or(ImportedSessionCorruption::Missing("imported conversation"))?,
+            ),
+        };
 
         let mut connection = self.pool.acquire().await?;
         load_creation_from_connection(&mut connection, command_id, &conversation).await

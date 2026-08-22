@@ -25,6 +25,24 @@ BEGIN
     CREATE TEMPORARY TABLE imported_reset_command (
         command_id uuid PRIMARY KEY
     ) ON COMMIT DROP;
+    CREATE TEMPORARY TABLE imported_reset_session (
+        session_id uuid PRIMARY KEY
+    ) ON COMMIT DROP;
+
+    -- Capture every session in the imported-rooted delegation graph before
+    -- temporary cascades remove the relationship rows used to discover it.
+    INSERT INTO imported_reset_session (session_id)
+    WITH RECURSIVE imported_rooted(session_id) AS (
+        SELECT session_id
+          FROM session
+         WHERE ancestry_kind = 'imported_conversation'
+        UNION
+        SELECT delegation.child_session_id
+          FROM imported_rooted AS parent
+          JOIN session_delegation AS delegation
+            ON delegation.parent_session_id = parent.session_id
+    )
+    SELECT session_id FROM imported_rooted;
 
     -- Follow only foreign keys whose referenced rows can be reached from an
     -- imported root. This includes all durable effects of imported sessions,
@@ -131,18 +149,14 @@ BEGIN
         EXECUTE format(
             'INSERT INTO imported_reset_command (command_id)
              SELECT command_id FROM %s
-              WHERE session_id IN (
-                    SELECT session_id FROM session
-                     WHERE ancestry_kind = %L
-              )
+              WHERE session_id IN (SELECT session_id FROM imported_reset_session)
              ON CONFLICT DO NOTHING',
-            table_record.relation_oid::regclass,
-            'imported_conversation'
+            table_record.relation_oid::regclass
         );
     END LOOP;
 
     DELETE FROM session
-     WHERE ancestry_kind = 'imported_conversation';
+     WHERE session_id IN (SELECT session_id FROM imported_reset_session);
     DELETE FROM durable_command
      WHERE command_kind = 'create_session_from_imported_frontier'
         OR command_id IN (SELECT command_id FROM imported_reset_command);

@@ -6430,6 +6430,7 @@ where
         .await;
     };
     let last_position = last_imported_position(&conversation);
+    let repository = repository.with_preloaded_conversation(conversation);
 
     let model_settings = match validate_session_model_settings(
         model_configuration,
