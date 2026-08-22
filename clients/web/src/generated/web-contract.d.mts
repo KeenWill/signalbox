@@ -51,38 +51,42 @@ type WebSearchResult = {
   readonly content_class: WebSearchContentClass;
   readonly highlights: ReadonlyArray<WebSearchHighlight>;
   readonly projection_id: WebSearchProjectionId;
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
   readonly snippet: string;
   readonly source: WebSearchResultSource;
 };
 
 type WebSearchResultSource = {
   readonly kind: "session";
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
 } | {
-  readonly accepted_input_id: string;
+  readonly accepted_input_id: WebUuid;
   readonly kind: "accepted_input";
-  readonly turn_id: string;
+  readonly turn_id: WebUuid;
+} | {
+  readonly accepted_input_id: WebUuid;
+  readonly kind: "steering_input";
+  readonly source_turn_id: WebUuid;
 } | {
   readonly kind: "turn_transcript_entry";
-  readonly semantic_entry_id: string;
-  readonly turn_id: string;
+  readonly semantic_entry_id: WebUuid;
+  readonly turn_id: WebUuid;
 } | {
   readonly kind: "session_transcript_entry";
-  readonly semantic_entry_id: string;
+  readonly semantic_entry_id: WebUuid;
 } | {
   readonly kind: "tool_request";
-  readonly tool_request_id: string;
-  readonly turn_id: string;
+  readonly tool_request_id: WebUuid;
+  readonly turn_id: WebUuid;
 } | {
   readonly kind: "tool_attempt";
-  readonly tool_attempt_id: string;
-  readonly turn_id: string;
+  readonly tool_attempt_id: WebUuid;
+  readonly turn_id: WebUuid;
 } | {
-  readonly attachment_id: string;
+  readonly attachment_id: WebUuid;
   readonly kind: "attachment";
 } | {
-  readonly artifact_id: string;
+  readonly artifact_id: WebUuid;
   readonly kind: "derived_artifact";
 };
 
@@ -116,6 +120,8 @@ type WebTimelineAddress = {
 type WebTimelineEventSequence = string;
 
 type WebU64 = string;
+
+type WebUuid = string;
 
 export type WebContractBootstrap = {
   readonly capabilities: WebContractCapabilities;

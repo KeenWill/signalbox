@@ -333,6 +333,10 @@ describe('SameOriginProductTransport', () => {
                 {
                   ...searchPageFixture.results[0],
                   session_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e',
+                  source: {
+                    kind: 'session',
+                    session_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e',
+                  },
                 },
               ],
             }),
@@ -394,7 +398,7 @@ describe('SameOriginProductTransport', () => {
         maxItems: 1,
         maxSnippetBytes: 512,
       }),
-    ).rejects.toThrow('source contradicts its session')
+    ).rejects.toThrow('source consistent with the result session and content class')
   })
 
   it('rejects a malformed result session UUID', async () => {
@@ -417,7 +421,7 @@ describe('SameOriginProductTransport', () => {
         maxItems: 1,
         maxSnippetBytes: 512,
       }),
-    ).rejects.toThrow('invalid UUID identity')
+    ).rejects.toThrow('session_id must be a string matching')
   })
 
   it('rejects a malformed typed source UUID', async () => {
@@ -445,7 +449,7 @@ describe('SameOriginProductTransport', () => {
         maxItems: 1,
         maxSnippetBytes: 512,
       }),
-    ).rejects.toThrow('invalid UUID identity')
+    ).rejects.toThrow('source must be one recognized variant')
   })
 
   it('rejects highlight offsets inside a UTF-8 character', async () => {
@@ -611,7 +615,7 @@ describe('SameOriginProductTransport', () => {
         maxItems: 1,
         maxSnippetBytes: 512,
       }),
-    ).rejects.toThrow('invalid continuation')
+    ).rejects.toThrow('last result ordering key')
   })
 })
 

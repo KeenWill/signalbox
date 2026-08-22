@@ -64,6 +64,8 @@ const sourceUuids = (source: WebSearchPage['results'][number]['source']): string
       return [source.session_id]
     case 'accepted_input':
       return [source.accepted_input_id, source.turn_id]
+    case 'steering_input':
+      return [source.accepted_input_id, source.source_turn_id]
     case 'turn_transcript_entry':
       return [source.semantic_entry_id, source.turn_id]
     case 'session_transcript_entry':

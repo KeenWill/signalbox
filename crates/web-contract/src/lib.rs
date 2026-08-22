@@ -152,6 +152,13 @@ pub struct WebSessionId(
 );
 
 impl WebSessionId {
+    /// Encodes an already-validated UUID in canonical lowercase form.
+    #[must_use]
+    pub fn from_validated_uuid(value: String) -> Self {
+        debug_assert!(canonical_session_id(&value));
+        Self(value)
+    }
+
     /// Constructs a session identity from its canonical lowercase UUID spelling.
     #[must_use]
     pub fn from_canonical(value: String) -> Option<Self> {
@@ -173,6 +180,42 @@ impl<'de> Deserialize<'de> for WebSessionId {
         let value = String::deserialize(deserializer)?;
         Self::from_canonical(value)
             .ok_or_else(|| de::Error::custom("session ID must be a canonical lowercase UUID"))
+    }
+}
+
+/// Checked canonical UUID used for browser-visible non-session identities.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebUuid(
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    String,
+);
+
+impl WebUuid {
+    /// Encodes an already-validated UUID in canonical lowercase form.
+    #[must_use]
+    pub fn from_validated_uuid(value: String) -> Self {
+        debug_assert!(canonical_session_id(&value));
+        Self(value)
+    }
+
+    /// Constructs an identity from its canonical lowercase UUID spelling.
+    #[must_use]
+    pub fn from_canonical(value: String) -> Option<Self> {
+        canonical_session_id(&value).then_some(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for WebUuid {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_canonical(value)
+            .ok_or_else(|| de::Error::custom("identity must be a canonical lowercase UUID"))
     }
 }
 
@@ -342,32 +385,36 @@ pub enum WebSearchContentClass {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebSearchResultSource {
     Session {
-        session_id: String,
+        session_id: WebSessionId,
     },
     AcceptedInput {
-        accepted_input_id: String,
-        turn_id: String,
+        accepted_input_id: WebUuid,
+        turn_id: WebUuid,
+    },
+    SteeringInput {
+        accepted_input_id: WebUuid,
+        source_turn_id: WebUuid,
     },
     TurnTranscriptEntry {
-        semantic_entry_id: String,
-        turn_id: String,
+        semantic_entry_id: WebUuid,
+        turn_id: WebUuid,
     },
     SessionTranscriptEntry {
-        semantic_entry_id: String,
+        semantic_entry_id: WebUuid,
     },
     ToolRequest {
-        tool_request_id: String,
-        turn_id: String,
+        tool_request_id: WebUuid,
+        turn_id: WebUuid,
     },
     ToolAttempt {
-        tool_attempt_id: String,
-        turn_id: String,
+        tool_attempt_id: WebUuid,
+        turn_id: WebUuid,
     },
     Attachment {
-        attachment_id: String,
+        attachment_id: WebUuid,
     },
     DerivedArtifact {
-        artifact_id: String,
+        artifact_id: WebUuid,
     },
 }
 
@@ -423,7 +470,7 @@ pub struct WebSearchCursor {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSearchResult {
-    pub session_id: String,
+    pub session_id: WebSessionId,
     pub address: WebTimelineAddress,
     pub projection_id: WebSearchProjectionId,
     pub source: WebSearchResultSource,
@@ -782,10 +829,41 @@ export function decodeWebSessionTimelineWindow(value) {{
   return value;
 }}
 
+function validSearchSourceCorrelation(result) {{
+  switch (result.source.kind) {{
+    case "session":
+      return result.source.session_id === result.session_id && result.content_class === "session_metadata";
+    case "accepted_input":
+    case "steering_input":
+      return result.content_class === "user_transcript";
+    case "turn_transcript_entry":
+      return result.content_class === "assistant_transcript";
+    case "session_transcript_entry":
+      return result.content_class === "derived_text_artifact";
+    case "tool_request":
+      return result.content_class === "tool_arguments";
+    case "tool_attempt":
+      return result.content_class === "tool_result";
+    case "attachment":
+      return result.content_class === "attachment_filename" ||
+        result.content_class === "attachment_media_metadata";
+    case "derived_artifact":
+      return result.content_class === "derived_text_artifact";
+    default:
+      return false;
+  }}
+}}
+
 export function decodeWebSearchPage(value) {{
   assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
   const encoder = new TextEncoder();
   value.results.forEach((result, resultIndex) => {{
+    if (!validSearchSourceCorrelation(result)) {{
+      fail(
+        `search_page.results[${{resultIndex}}].source`,
+        "a source consistent with the result session and content class",
+      );
+    }}
     const bytes = encoder.encode(result.snippet);
     if (bytes.length > {max_search_snippet_bytes}) {{
       fail(
@@ -812,9 +890,10 @@ export function decodeWebSearchPage(value) {{
       previousEnd = highlight.end_byte;
     }});
   }});
-  if (value.continuation !== null && value.results.length > 0) {{
+  if (value.continuation !== null) {{
     const last = value.results.at(-1);
     if (
+      last === undefined ||
       value.continuation.address.event_sequence !== last.address.event_sequence ||
       value.continuation.projection_id !== last.projection_id
     ) {{

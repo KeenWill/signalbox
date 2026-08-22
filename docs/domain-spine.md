@@ -6453,6 +6453,7 @@ pub struct SearchArtifactProjection {
 pub enum SearchResultSource {
     Session(SessionId),
     AcceptedInput { input: AcceptedInputId, turn: TurnId },
+    SteeringInput { input: AcceptedInputId, source_turn: TurnId },
     TurnTranscriptEntry { entry: SemanticTranscriptEntryId, turn: TurnId },
     SessionTranscriptEntry { entry: SemanticTranscriptEntryId },
     ToolRequest { request: ToolRequestId, turn: TurnId },

@@ -44,7 +44,7 @@ use signalbox_web_contract::{
     WebSearchHighlight, WebSearchPage, WebSearchProjectionId, WebSearchResult,
     WebSearchResultSource, WebSessionId, WebSessionTimelineDescriptor, WebSessionTimelineEventKind,
     WebSessionTimelineItem, WebSessionTimelineSizeFacts, WebSessionTimelineWindow,
-    WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence, WebU64,
+    WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence, WebU64, WebUuid,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -437,7 +437,7 @@ fn search_page_dto(page: signalbox_application::SearchPage) -> WebSearchPage {
 
 fn search_result_dto(result: signalbox_application::SearchResult) -> WebSearchResult {
     WebSearchResult {
-        session_id: result.session.into_uuid().to_string(),
+        session_id: WebSessionId::from_validated_uuid(result.session.into_uuid().to_string()),
         address: address_dto(result.address),
         projection_id: WebSearchProjectionId::from_nonzero(result.projection),
         source: search_source_dto(result.source),
@@ -457,40 +457,50 @@ fn search_result_dto(result: signalbox_application::SearchResult) -> WebSearchRe
 fn search_source_dto(source: SearchResultSource) -> WebSearchResultSource {
     match source {
         SearchResultSource::Session(session) => WebSearchResultSource::Session {
-            session_id: session.into_uuid().to_string(),
+            session_id: WebSessionId::from_validated_uuid(session.into_uuid().to_string()),
         },
         SearchResultSource::AcceptedInput { input, turn } => WebSearchResultSource::AcceptedInput {
-            accepted_input_id: input.into_uuid().to_string(),
-            turn_id: turn.into_uuid().to_string(),
+            accepted_input_id: web_uuid(input.into_uuid()),
+            turn_id: web_uuid(turn.into_uuid()),
         },
+        SearchResultSource::SteeringInput { input, source_turn } => {
+            WebSearchResultSource::SteeringInput {
+                accepted_input_id: web_uuid(input.into_uuid()),
+                source_turn_id: web_uuid(source_turn.into_uuid()),
+            }
+        }
         SearchResultSource::TurnTranscriptEntry { entry, turn } => {
             WebSearchResultSource::TurnTranscriptEntry {
-                semantic_entry_id: entry.into_uuid().to_string(),
-                turn_id: turn.into_uuid().to_string(),
+                semantic_entry_id: web_uuid(entry.into_uuid()),
+                turn_id: web_uuid(turn.into_uuid()),
             }
         }
         SearchResultSource::SessionTranscriptEntry { entry } => {
             WebSearchResultSource::SessionTranscriptEntry {
-                semantic_entry_id: entry.into_uuid().to_string(),
+                semantic_entry_id: web_uuid(entry.into_uuid()),
             }
         }
         SearchResultSource::ToolRequest { request, turn } => WebSearchResultSource::ToolRequest {
-            tool_request_id: request.into_uuid().to_string(),
-            turn_id: turn.into_uuid().to_string(),
+            tool_request_id: web_uuid(request.into_uuid()),
+            turn_id: web_uuid(turn.into_uuid()),
         },
         SearchResultSource::ToolAttempt { attempt, turn } => WebSearchResultSource::ToolAttempt {
-            tool_attempt_id: attempt.into_uuid().to_string(),
-            turn_id: turn.into_uuid().to_string(),
+            tool_attempt_id: web_uuid(attempt.into_uuid()),
+            turn_id: web_uuid(turn.into_uuid()),
         },
         SearchResultSource::Attachment { attachment } => WebSearchResultSource::Attachment {
-            attachment_id: attachment.into_uuid().to_string(),
+            attachment_id: web_uuid(attachment.into_uuid()),
         },
         SearchResultSource::DerivedArtifact { artifact } => {
             WebSearchResultSource::DerivedArtifact {
-                artifact_id: artifact.into_uuid().to_string(),
+                artifact_id: web_uuid(artifact.into_uuid()),
             }
         }
     }
+}
+
+fn web_uuid(value: uuid::Uuid) -> WebUuid {
+    WebUuid::from_validated_uuid(value.to_string())
 }
 
 fn search_content_class_dto(content: SearchContentClass) -> WebSearchContentClass {
@@ -700,8 +710,7 @@ fn descriptor_dto(
         return Err(SessionTimelineRequestError::MissingBounds);
     };
     Ok(WebSessionTimelineDescriptor {
-        session_id: WebSessionId::from_canonical(descriptor.session.into_uuid().to_string())
-            .expect("domain session UUID formats canonically"),
+        session_id: WebSessionId::from_validated_uuid(descriptor.session.into_uuid().to_string()),
         sizes: WebSessionTimelineSizeFacts {
             item_count: WebU64::from_u64(descriptor.sizes.item_count),
             projected_text_bytes: WebU64::from_u64(descriptor.sizes.projected_text_bytes),
@@ -731,8 +740,7 @@ fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
         TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
     };
     WebSessionTimelineWindow {
-        session_id: WebSessionId::from_canonical(window.session.into_uuid().to_string())
-            .expect("domain session UUID formats canonically"),
+        session_id: WebSessionId::from_validated_uuid(window.session.into_uuid().to_string()),
         items: window
             .items
             .into_iter()

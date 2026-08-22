@@ -224,6 +224,60 @@ test("generated search decoder rejects overlapping highlight ranges", () => {
   );
 });
 
+test("generated search decoder rejects too many highlight ranges", () => {
+  const page = searchPage();
+  page.results[0].snippet = "x".repeat(512);
+  page.results[0].highlights = Array.from({ length: 513 }, () => ({
+    start_byte: 0,
+    end_byte: 1,
+  }));
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /highlights must be at most 64 items/,
+  );
+});
+
+test("generated search decoder validates continuation against the final result", () => {
+  const empty = searchPage();
+  empty.results = [];
+  assert.throws(
+    () => decodeWebSearchPage(empty),
+    /continuation must be the last result ordering key/,
+  );
+
+  const mismatched = searchPage();
+  mismatched.continuation.address.event_sequence = "2";
+  assert.throws(
+    () => decodeWebSearchPage(mismatched),
+    /continuation must be the last result ordering key/,
+  );
+});
+
+test("generated search decoder rejects malformed result identities", () => {
+  const page = searchPage();
+  page.results[0].session_id = "not-a-uuid";
+
+  assert.throws(() => decodeWebSearchPage(page), /matching/);
+});
+
+test("generated search decoder rejects contradictory source correlations", () => {
+  const mismatchedSession = searchPage();
+  mismatchedSession.results[0].source.session_id =
+    "00000000-0000-0000-0000-000000000992";
+  assert.throws(
+    () => decodeWebSearchPage(mismatchedSession),
+    /source consistent with the result session and content class/,
+  );
+
+  const mismatchedContent = searchPage();
+  mismatchedContent.results[0].content_class = "tool_result";
+  assert.throws(
+    () => decodeWebSearchPage(mismatchedContent),
+    /source consistent with the result session and content class/,
+  );
+});
+
 test("generated descriptor decoder rejects an invalid session ID", () => {
   assert.throws(
     () =>
