@@ -608,6 +608,17 @@ impl PostgresGoalPassDisposition {
                 );
                 ResumeAttempt::Settled
             }
+            Ok(GoalCommandHandlingOutcome::TargetBusy {
+                session: blocking_session,
+            }) => {
+                tracing::info!(
+                    session = %session.into_uuid(),
+                    blocking_session = %blocking_session.into_uuid(),
+                    event_ordinal = blocked.get(),
+                    "automatic goal resumption deferred behind another commissioned session"
+                );
+                ResumeAttempt::Unsettled
+            }
             Ok(GoalCommandHandlingOutcome::ConflictingReuse { .. }) => {
                 tracing::error!(
                     session = %session.into_uuid(),

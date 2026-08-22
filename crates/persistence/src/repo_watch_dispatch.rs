@@ -852,7 +852,7 @@ impl PostgresRepoWatchDispatchStore {
                     crate::repo_watch_dispatch_obligation::record_dispatch_obligation(
                         &mut transaction,
                         dispatch_id,
-                        None,
+                        crate::repo_watch_dispatch_obligation::DispatchObligationBlocker::Existing,
                         &event,
                         &rule_id,
                         rule_version,
@@ -865,30 +865,89 @@ impl PostgresRepoWatchDispatchStore {
                 if let Some(blocking_dispatch) =
                     occupying_dispatch(&mut transaction, &rule_id, rule_version, &singleton).await?
                 {
-                    if matched_admission == MatchedAdmission::Fresh {
-                        insert_evaluation(
-                            &mut transaction,
-                            &event,
-                            &rule_id,
-                            rule_version,
-                            RepoWatchEvaluationOutcomeStorageKind::Occupied,
-                            None,
-                        )
-                        .await?;
-                        crate::repo_watch_dispatch_obligation::record_dispatch_obligation(
-                            &mut transaction,
-                            dispatch_id,
-                            Some(blocking_dispatch),
-                            &event,
-                            &rule_id,
-                            rule_version,
-                            &singleton,
-                        )
-                        .await?;
-                        commit(transaction).await?;
-                    } else {
-                        transaction.rollback().await?;
+                    match matched_admission {
+                        MatchedAdmission::Fresh => {
+                            insert_evaluation(
+                                &mut transaction,
+                                &event,
+                                &rule_id,
+                                rule_version,
+                                RepoWatchEvaluationOutcomeStorageKind::Occupied,
+                                None,
+                            )
+                            .await?;
+                            crate::repo_watch_dispatch_obligation::record_dispatch_obligation(
+                                &mut transaction,
+                                dispatch_id,
+                                crate::repo_watch_dispatch_obligation::DispatchObligationBlocker::RepoWatchDispatch(
+                                    blocking_dispatch,
+                                ),
+                                &event,
+                                &rule_id,
+                                rule_version,
+                                &singleton,
+                            )
+                            .await?;
+                        }
+                        MatchedAdmission::Obligation { obligation_id } => {
+                            crate::repo_watch_dispatch_obligation::replace_dispatch_obligation_blocker(
+                                &mut transaction,
+                                obligation_id,
+                                crate::repo_watch_dispatch_obligation::DispatchObligationBlocker::RepoWatchDispatch(
+                                    blocking_dispatch,
+                                ),
+                            )
+                            .await?;
+                        }
                     }
+                    commit(transaction).await?;
+                    return Ok(RepoWatchRuleEvaluationOutcome::Occupied);
+                }
+                if let RepoWatchEventTarget::PullRequest(context) = event.target()
+                    && let Some(blocking_session) =
+                        crate::commissioned_dispatch::lock_live_pull_request_target_identity(
+                            &mut transaction,
+                            event.repository(),
+                            context.number(),
+                        )
+                        .await?
+                {
+                    match matched_admission {
+                        MatchedAdmission::Fresh => {
+                            insert_evaluation(
+                                &mut transaction,
+                                &event,
+                                &rule_id,
+                                rule_version,
+                                RepoWatchEvaluationOutcomeStorageKind::Occupied,
+                                None,
+                            )
+                            .await?;
+                            crate::repo_watch_dispatch_obligation::record_dispatch_obligation(
+                                &mut transaction,
+                                dispatch_id,
+                                crate::repo_watch_dispatch_obligation::DispatchObligationBlocker::ExternalSession(
+                                    blocking_session,
+                                ),
+                                &event,
+                                &rule_id,
+                                rule_version,
+                                &singleton,
+                            )
+                            .await?;
+                        }
+                        MatchedAdmission::Obligation { obligation_id } => {
+                            crate::repo_watch_dispatch_obligation::replace_dispatch_obligation_blocker(
+                                &mut transaction,
+                                obligation_id,
+                                crate::repo_watch_dispatch_obligation::DispatchObligationBlocker::ExternalSession(
+                                    blocking_session,
+                                ),
+                            )
+                            .await?;
+                        }
+                    }
+                    commit(transaction).await?;
                     return Ok(RepoWatchRuleEvaluationOutcome::Occupied);
                 }
                 if singleton_is_cooling_down(&mut transaction, &rule_id, rule_version, &singleton)

@@ -49,7 +49,9 @@ of slow complete reconciliation is verified against this PR
 fence and unattended escalation release described below are verified against
 this PR (`agent/headless-approval-escalation`). The operator-commissioned
 dispatch fence and its unattended-escalation coverage are verified against this
-PR (`agent/commissioned-dispatch-fence`).
+PR (`agent/commissioned-dispatch-fence`). External commissioned-session
+obligation blocking and blocker replacement are verified against this PR
+(`agent/daemon-convergence-sweep`).
 
 ## Configuration and credential boundary
 
@@ -685,34 +687,39 @@ back the whole batch. Each record links the triggering event, rule identity and
 version, singleton key, action ordinal, session-template provenance, and newly
 created session. The action ordinal distinguishes sibling sessions without
 letting the first action suppress later actions from the same match. An occupied
-singleton refuses another match and atomically opens one durable delivery
-obligation for that singleton. Further matching facts join its latest-event
-projection and increment its count, including a match racing with release, so
-one singleton has at most one outstanding obligation. Their individual terminal
-evaluations remain append-only audit facts. The batch releases the singleton at
-the transition that makes every dispatched turn terminal or runtime-irrelevant,
-leaves no live runtime-relevant turn for its session, and leaves no pursuing
-goal. A goal-ending recheck is deferred to its transaction boundary so an active
-turn's stop cascade is visible. A blocked or user-stopped dispatch session, and
-an achieved session whose delivered state is no longer the pull request's latest
-durable head, opens the same latest-state obligation before release; sibling
-terminations and matching events collapse into that one obligation without
-regressing its latest event. A batch delivers its originating event when
-admission dispatched that event, and the target's collapsed current state when
-admission settled an obligation by replaying a still-matching earlier event.
-Achievement is terminal exactly when that delivered state is known and is still
-the pull request's latest durable head, so the successor that carried the newest
-head seals instead of owing another batch after every cooldown. A batch admitted
-before the delivered state was recorded has none, and achievement cannot seal
-it: reading its originating event as the delivered state would seal without
-delivery whenever a head returns to an earlier value. A branch target records no
-durable revision, only a workflow conclusion, so achievement is its own seal
-there. A batch owes at most one requeue, at its own release, and the terminal
-event deciding it is the one ending the generation the dispatch commissioned; a
-later goal generation its session accepts terminates without reopening one,
-including while a sibling action still holds the batch. Termination takes the
-singleton advisory key that admission takes, and locks the rule activation row
-that recording a deactivation shares, so a match racing a termination joins its
+singleton, or an independently commissioned live session owning the same pull
+request, refuses another match and atomically opens one durable delivery
+obligation for that singleton. The obligation records exactly one blocker: the
+occupying repository-watch dispatch or the external commissioned session. If an
+previous blocker terminates but another session is live at redispatch admission,
+the same obligation atomically replaces its blocker and remains non-ready.
+Further matching facts join its latest-event projection and increment its count,
+including a match racing with release, so one singleton has at most one
+outstanding obligation. Their individual terminal evaluations remain append-only
+audit facts. The batch releases the singleton at the transition that makes every
+dispatched turn terminal or runtime-irrelevant, leaves no live runtime-relevant
+turn for its session, and leaves no pursuing goal. A goal-ending recheck is
+deferred to its transaction boundary so an active turn's stop cascade is
+visible. A blocked or user-stopped dispatch session, and an achieved session
+whose delivered state is no longer the pull request's latest durable head, opens
+the same latest-state obligation before release; sibling terminations and
+matching events collapse into that one obligation without regressing its latest
+event. A batch delivers its originating event when admission dispatched that
+event, and the target's collapsed current state when admission settled an
+obligation by replaying a still-matching earlier event. Achievement is terminal
+exactly when that delivered state is known and is still the pull request's
+latest durable head, so the successor that carried the newest head seals instead
+of owing another batch after every cooldown. A batch admitted before the
+delivered state was recorded has none, and achievement cannot seal it: reading
+its originating event as the delivered state would seal without delivery
+whenever a head returns to an earlier value. A branch target records no durable
+revision, only a workflow conclusion, so achievement is its own seal there. A
+batch owes at most one requeue, at its own release, and the terminal event
+deciding it is the one ending the generation the dispatch commissioned; a later
+goal generation its session accepts terminates without reopening one, including
+while a sibling action still holds the batch. Termination takes the singleton
+advisory key that admission takes, and locks the rule activation row that
+recording a deactivation shares, so a match racing a termination joins its
 obligation and a racing deactivation cannot miss it. Termination does not take
 the repository key: it runs inside the transaction ending the goal, which holds
 that session row, and lifecycle-cutoff processing takes the repository key
@@ -911,11 +918,11 @@ release clause independently; and names every failing clause in `blockers`.
 `repo_watch_outstanding_dispatch_obligation` projection. Each row identifies the
 repository, rule, singleton and pull request or stack root, first and latest
 matched events, collapsed count and timestamps, any occupying dispatch and its
-sessions, cooldown eligibility, present readiness, failed-attempt count, and
-parking stamp. Rule deactivation settles an obligation without dispatch rather
-than leaving permanently owed work for semantics that are no longer configured;
-terminal-target settlement likewise records why the obligation no longer remains
-owed.
+sessions or external blocking session, cooldown eligibility, present readiness,
+failed-attempt count, and parking stamp. Rule deactivation settles an obligation
+without dispatch rather than leaving permanently owed work for semantics that
+are no longer configured; terminal-target settlement likewise records why the
+obligation no longer remains owed.
 
 **Implemented behavior.** A newly configured rule activates immediately after
 the repository's current durable event tail, before its task polls, and consumes

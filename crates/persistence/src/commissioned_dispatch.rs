@@ -7,7 +7,7 @@
 //! under. The approval judge consumes the fence through the same authority
 //! loading as the repository-watch source (`crate::approval_judge`).
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, time::Duration};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
@@ -18,7 +18,10 @@ use signalbox_domain::{
 };
 use sqlx::{PgPool, Row};
 
-use crate::{commit_failure_is_ambiguous, mapping::session_id_to_uuid};
+use crate::{
+    commit_failure_is_ambiguous,
+    mapping::{session_id_from_uuid, session_id_to_uuid},
+};
 
 /// Durable effect of one commission request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,6 +42,16 @@ pub enum CommissionDispatchOutcome {
     },
     /// The command identity already names a different commission.
     ConflictingReuse,
+    /// Another live commissioned session already owns this pull request.
+    TargetBusy {
+        /// The live session that prevents a racing dispatch.
+        session: SessionId,
+    },
+    /// A recent terminal session still holds the target cool-off.
+    TargetCoolingOff {
+        /// The recent session that established the cool-off.
+        session: SessionId,
+    },
 }
 
 /// Database or durable-shape failure while committing one commission.
@@ -176,6 +189,33 @@ impl PostgresCommissionedDispatchStore {
     where
         SelectDefinition: Fn(ModelAlias) -> Option<FrozenAliasDefinition> + Copy + Send,
     {
+        self.commission_with_cool_off(prepared, None, select_definition)
+            .await
+    }
+
+    /// Commits a commission only after the target's locked cool-off has elapsed.
+    pub async fn commission_after_cool_off<SelectDefinition>(
+        &self,
+        prepared: PreparedCommissionedDispatch,
+        cool_off: Duration,
+        select_definition: SelectDefinition,
+    ) -> Result<CommissionDispatchOutcome, CommissionedDispatchRepositoryError>
+    where
+        SelectDefinition: Fn(ModelAlias) -> Option<FrozenAliasDefinition> + Copy + Send,
+    {
+        self.commission_with_cool_off(prepared, Some(cool_off), select_definition)
+            .await
+    }
+
+    async fn commission_with_cool_off<SelectDefinition>(
+        &self,
+        prepared: PreparedCommissionedDispatch,
+        cool_off: Option<Duration>,
+        select_definition: SelectDefinition,
+    ) -> Result<CommissionDispatchOutcome, CommissionedDispatchRepositoryError>
+    where
+        SelectDefinition: Fn(ModelAlias) -> Option<FrozenAliasDefinition> + Copy + Send,
+    {
         let mut transaction = self.pool.begin().await?;
         let command = prepared.prepared_session().command();
         let command_id = command.command_id();
@@ -201,6 +241,30 @@ impl PostgresCommissionedDispatchStore {
                 &statement,
                 &content_digest,
             ));
+        }
+        let live_target = lock_live_pull_request_target(&mut transaction, prepared.fence()).await?;
+        // The target lock can have waited behind an equal commission. Re-read
+        // command identity before treating that winner as unrelated live work.
+        if let Some(recorded) = load_recorded_commission(&mut transaction, command_id).await? {
+            transaction.rollback().await?;
+            return Ok(replay_or_conflict(
+                &recorded,
+                &template_name,
+                prepared.fence(),
+                &statement,
+                &content_digest,
+            ));
+        }
+        if let Some(session) = live_target {
+            transaction.rollback().await?;
+            return Ok(CommissionDispatchOutcome::TargetBusy { session });
+        }
+        if let Some(cool_off) = cool_off
+            && let Some(session) =
+                recent_pull_request_session(&mut transaction, prepared.fence(), cool_off).await?
+        {
+            transaction.rollback().await?;
+            return Ok(CommissionDispatchOutcome::TargetCoolingOff { session });
         }
         let (
             dispatch_id,
@@ -293,6 +357,188 @@ impl PostgresCommissionedDispatchStore {
             session,
         })
     }
+}
+
+async fn recent_pull_request_session(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    fence: &CommissionedDispatchFence,
+    cool_off: Duration,
+) -> Result<Option<SessionId>, CommissionedDispatchRepositoryError> {
+    let CommissionedDispatchFence::PullRequest {
+        repository,
+        pull_request,
+        ..
+    } = fence
+    else {
+        return Ok(None);
+    };
+    let session: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT recent.session_id
+           FROM (
+                SELECT dispatch.session_id, dispatch.recorded_at, dispatch.dispatch_id
+                  FROM commissioned_dispatch AS dispatch
+                 WHERE dispatch.target_kind = 'pull_request'
+                   AND dispatch.repository = $1
+                   AND dispatch.pull_request_number = $2
+                UNION ALL
+                SELECT action.session_id, action.recorded_at, action.dispatch_id
+                  FROM repo_watch_dispatch_action AS action
+                  JOIN repo_watch_event AS event ON event.event_id = action.event_id
+                 WHERE event.target_kind = 'pull_request'
+                   AND event.repository = $1
+                   AND event.pull_request_number = $2
+           ) AS recent
+          WHERE recent.recorded_at > clock_timestamp() - $3 * interval '1 second'
+          ORDER BY recent.recorded_at DESC, recent.dispatch_id DESC, recent.session_id DESC
+          LIMIT 1",
+    )
+    .bind(repository.as_str())
+    .bind(Decimal::from(pull_request.get()))
+    .bind(i64::try_from(cool_off.as_secs()).unwrap_or(i64::MAX))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(session.map(session_id_from_uuid))
+}
+
+async fn lock_live_pull_request_target(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    fence: &CommissionedDispatchFence,
+) -> Result<Option<SessionId>, CommissionedDispatchRepositoryError> {
+    let CommissionedDispatchFence::PullRequest {
+        repository,
+        pull_request,
+        ..
+    } = fence
+    else {
+        return Ok(None);
+    };
+    let pull_request = Decimal::from(pull_request.get());
+    lock_pull_request_target(transaction, repository.as_str(), &pull_request).await?;
+    live_pull_request_session(transaction, repository.as_str(), &pull_request, None, None)
+        .await
+        .map_err(Into::into)
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct PullRequestTargetRow {
+    repository: String,
+    pull_request_number: Decimal,
+    repo_watch_dispatch_id: Option<uuid::Uuid>,
+}
+
+pub(crate) async fn lock_competing_pull_request_session(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session: SessionId,
+) -> Result<Option<SessionId>, sqlx::Error> {
+    let target: Option<PullRequestTargetRow> = sqlx::query_as(
+        "SELECT repository AS repository,
+                pull_request_number AS pull_request_number,
+                repo_watch_dispatch_id AS repo_watch_dispatch_id
+           FROM (
+                SELECT repository, pull_request_number, recorded_at,
+                       NULL::uuid AS repo_watch_dispatch_id
+                  FROM commissioned_dispatch
+                 WHERE session_id = $1 AND target_kind = 'pull_request'
+                UNION ALL
+                SELECT event.repository, event.pull_request_number, action.recorded_at,
+                       action.dispatch_id AS repo_watch_dispatch_id
+                  FROM repo_watch_dispatch_action AS action
+                  JOIN repo_watch_event AS event ON event.event_id = action.event_id
+                 WHERE action.session_id = $1
+                   AND event.target_kind = 'pull_request'
+           ) AS target
+          ORDER BY recorded_at DESC
+          LIMIT 1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(PullRequestTargetRow {
+        repository,
+        pull_request_number,
+        repo_watch_dispatch_id,
+    }) = target
+    else {
+        return Ok(None);
+    };
+    lock_pull_request_target(transaction, &repository, &pull_request_number).await?;
+    live_pull_request_session(
+        transaction,
+        &repository,
+        &pull_request_number,
+        Some(session),
+        repo_watch_dispatch_id,
+    )
+    .await
+}
+
+pub(crate) async fn lock_pull_request_target(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    repository: &str,
+    pull_request: &Decimal,
+) -> Result<(), sqlx::Error> {
+    let key = format!("commissioned-dispatch:{repository}:{pull_request}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(key)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
+async fn live_pull_request_session(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    repository: &str,
+    pull_request: &Decimal,
+    excluded_session: Option<SessionId>,
+    excluded_repo_watch_dispatch: Option<uuid::Uuid>,
+) -> Result<Option<SessionId>, sqlx::Error> {
+    let session: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT target.session_id
+           FROM (
+                SELECT dispatch.session_id, dispatch.recorded_at,
+                       NULL::uuid AS repo_watch_dispatch_id
+                  FROM commissioned_dispatch AS dispatch
+                 WHERE dispatch.target_kind = 'pull_request'
+                   AND dispatch.repository = $1
+                   AND dispatch.pull_request_number = $2
+                UNION ALL
+                SELECT action.session_id, action.recorded_at,
+                       action.dispatch_id AS repo_watch_dispatch_id
+                  FROM repo_watch_dispatch_action AS action
+                  JOIN repo_watch_event AS event ON event.event_id = action.event_id
+                 WHERE event.target_kind = 'pull_request'
+                   AND event.repository = $1
+                   AND event.pull_request_number = $2
+           ) AS target
+          WHERE ($3::uuid IS NULL OR target.session_id <> $3)
+            AND ($4::uuid IS NULL
+                 OR target.repo_watch_dispatch_id IS DISTINCT FROM $4)
+            AND coalesce((
+                SELECT event.event_kind IN ('commissioned', 'resumed', 'superseded')
+                  FROM goal_event AS event
+                 WHERE event.session_id = target.session_id
+                 ORDER BY event.event_ordinal DESC LIMIT 1
+            ), false)
+          ORDER BY target.recorded_at DESC, target.session_id DESC
+          LIMIT 1",
+    )
+    .bind(repository)
+    .bind(pull_request)
+    .bind(excluded_session.map(session_id_to_uuid))
+    .bind(excluded_repo_watch_dispatch)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(session.map(session_id_from_uuid))
+}
+
+pub(crate) async fn lock_live_pull_request_target_identity(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    repository: &signalbox_domain::RepositorySlug,
+    pull_request: signalbox_domain::PullRequestNumber,
+) -> Result<Option<SessionId>, sqlx::Error> {
+    let pull_request = Decimal::from(pull_request.get());
+    lock_pull_request_target(transaction, repository.as_str(), &pull_request).await?;
+    live_pull_request_session(transaction, repository.as_str(), &pull_request, None, None).await
 }
 
 /// Borrows the statement the prepared commission attaches.

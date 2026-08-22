@@ -8682,6 +8682,18 @@ where
             )
             .await
         }
+        Ok(CommissionDispatchOutcome::TargetBusy { session })
+        | Ok(CommissionDispatchOutcome::TargetCoolingOff { session }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::rejected(RejectionDetail::CommissionTargetBusy {
+                    session_id: wire_uuid(session.into_uuid()),
+                }),
+            )
+            .await
+        }
         Ok(CommissionDispatchOutcome::ConflictingReuse)
         | Err(CommissionedDispatchRepositoryError::SessionCreation(
             CreateSessionRepositoryError::DifferentCommandKind { .. },
@@ -13947,6 +13959,19 @@ where
                 version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Ok(GoalCommandHandlingOutcome::TargetBusy {
+            session: blocking_session,
+        }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::rejected(RejectionDetail::CommissionTargetBusy {
+                    session_id: CanonicalUuid::from_uuid(blocking_session.into_uuid()),
+                }),
             )
             .await
         }

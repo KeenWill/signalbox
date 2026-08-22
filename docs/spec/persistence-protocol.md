@@ -158,8 +158,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — ninety files, `202607180001` through
-`202608200001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — ninety-three files, `202607180001` through
+`202608210401` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -220,6 +220,20 @@ prefix and churn-renumber each time a sibling merges.
 Container-backed integration tests (`postgres-integration` feature, ignored by
 default, failing loudly when Docker is absent) exercise the real constraints,
 triggers, locks, and races described below against a pinned Postgres image.
+
+Migration `202608210400_convergence_sweep.sql` uses the reserved `2026082104xx`
+block to add the mutable `convergence_sweep_target` scheduler projection, the
+append-only `convergence_sweep_event` audit, and the
+`convergence_sweep_parked_target` operator view. Closed checks bind retry and
+park shapes to the five-attempt `convergence_sweep_retry_budget()` ceiling, bind
+each provider, commission, template, or state-access failure outcome to its
+typed cause and operator need, and prevent partial command-fence or
+commissioned-dispatch identities. Observation projections are decoded as
+complete pairs by the persistence adapter. The function pins the restore-safe
+schema search path. The cross-component behavior using these records is owned by
+[pull-request convergence reconciliation](convergence-reconciliation.md). The
+pull-request target and model-activity advisory fences described in the lock
+inventory below are verified against this PR (`agent/daemon-convergence-sweep`).
 
 ## Relational representation
 
@@ -815,27 +829,33 @@ Locks per transaction, in acquisition order:
   `turn_lifecycle` row `FOR UPDATE` at commit time, inside the deferred
   source-turn trigger.
 
-- **Goal commands and transitions**: an unseen user command first claims the
-  user-global registry, then every user, model, scheduler, and continuation
-  transaction locks the session row `FOR NO KEY UPDATE` before reading the event
-  stream. An applied user transition next locks `session_scheduler` `FOR UPDATE`
-  before recording its receipt or event, so stop and queued-turn activation
-  share one serialization point. Deferred provenance correlation first
-  reacquires the session-row lock before checking the current goal turn and, for
-  scheduler failure, holds the named lifecycle row `FOR SHARE` while checking
-  its unsuccessful terminal disposition. The continuity trigger reacquires the
-  session-row lock before validating the predecessor. Pursuing user transitions
-  then read current defaults and insert their queued goal turn; rejected
-  commands commit without firing the trigger, and exact user-command replay
-  takes no row lock.
+- **Goal commands and transitions**: a pursuit-starting command for a
+  pull-request-commissioned session first takes the transaction-scoped
+  pull-request target advisory lock and checks for a competing live session. An
+  unseen command then claims the user-global registry, and every user, model,
+  scheduler, and continuation transaction locks the session row
+  `FOR NO KEY UPDATE` before reading the event stream. An applied user
+  transition next locks `session_scheduler` `FOR UPDATE` before recording its
+  receipt or event, so stop and queued-turn activation share one serialization
+  point. Deferred provenance correlation first reacquires the session-row lock
+  before checking the current goal turn and, for scheduler failure, holds the
+  named lifecycle row `FOR SHARE` while checking its unsuccessful terminal
+  disposition. The continuity trigger reacquires the session-row lock before
+  validating the predecessor. Pursuing user transitions then read current
+  defaults and insert their queued goal turn; rejected commands commit without
+  firing the trigger, and exact user-command replay takes no row lock.
 
 - **StartEligibleTurn** and nonterminal **model-call execution transactions**
-  (prepare and authorize): the `session_scheduler` row `FOR UPDATE` is the only
-  explicit lock (session existence is checked with a bare `EXISTS`). The session
-  row is locked only `KEY SHARE`, implicitly, by the inserts' foreign keys, and
-  the candidate `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
-  Terminal observation commit and reread, restart recovery, startup recovery,
-  and submit-input interruption first discover whether the target is a delegated
+  (prepare and authorize): first model-call insertion first takes the
+  transaction-scoped model-activity advisory lock keyed by session; inactivity
+  parking takes the pull-request target advisory lock and then that same
+  model-activity lock before rechecking activity. The `session_scheduler` row
+  `FOR UPDATE` remains the execution transaction's explicit row lock (session
+  existence is checked with a bare `EXISTS`). The session row is locked only
+  `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
+  `turn_lifecycle` row is locked by the guarded `UPDATE` itself. Terminal
+  observation commit and reread, restart recovery, startup recovery, and
+  submit-input interruption first discover whether the target is a delegated
   child. When it is, they lock the immutable parent/child session pair
   `FOR NO KEY UPDATE` in canonical session-ID order before taking the child
   scheduler lock. This is the shared prefix for any path that can record a child
