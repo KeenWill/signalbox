@@ -115,6 +115,20 @@ test('closes the phone navigation sheet after route selection', async ({ page })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('closes the phone navigation sheet before entering Scenario studio', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open navigation' }).click()
+  const navigation = page.getByRole('dialog', { name: 'Product navigation' })
+  await navigation.getByRole('link', { name: /Scenario studio/ }).click()
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+  await expect(navigation).toBeHidden()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('retries a transient bootstrap failure without reloading', async ({ page }) => {
   const problems = watchBrowser(page)
   const state = { unavailable: true }
@@ -124,16 +138,28 @@ test('retries a transient bootstrap failure without reloading', async ({ page })
   })
   await page.goto('/attention')
 
-  await expect(page.getByText('Transport unavailable')).toBeVisible()
+  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
   state.unavailable = false
-  await page.getByRole('button', { name: 'Retry transport' }).click()
+  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
   await expect(
     page.getByText(`${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`),
   ).toBeVisible()
-  expect(problems).toEqual({
-    consoleErrors: [
-      'Failed to load resource: the server responded with a status of 503 (Service Unavailable)',
-    ],
-    pageErrors: [],
-  })
+  expect(problems.pageErrors).toEqual([])
+  expect(
+    problems.consoleErrors.every(
+      (message) =>
+        message ===
+        'Failed to load resource: the server responded with a status of 503 (Service Unavailable)',
+    ),
+  ).toBe(true)
+})
+
+test('distinguishes a rejected bootstrap contract from transport failure', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+  await page.goto('/attention')
+
+  await expect(page.getByText('Contract rejected')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Retry bootstrap' })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

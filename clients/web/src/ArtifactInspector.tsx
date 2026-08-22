@@ -18,6 +18,7 @@ export interface ArtifactInspectorState {
   mediaType: string
   displayFilename: string
   request: ArtifactRequest | null
+  originalRequested: boolean
 }
 
 export const emptyArtifactInspectorState: ArtifactInspectorState = {
@@ -25,6 +26,7 @@ export const emptyArtifactInspectorState: ArtifactInspectorState = {
   mediaType: '',
   displayFilename: '',
   request: null,
+  originalRequested: false,
 }
 
 const descriptorQueryPrefix = ['production', 'blob-descriptor'] as const
@@ -69,6 +71,7 @@ export function ArtifactInspector({
     queryClient.removeQueries({ queryKey: descriptorQueryPrefix })
     onStateChange({
       ...state,
+      originalRequested: false,
       request: {
         digest,
         mediaType,
@@ -153,7 +156,13 @@ export function ArtifactInspector({
         </div>
       )}
       {descriptor.data && (
-        <ArtifactRenderer key={descriptor.data.digest} descriptor={descriptor.data} compact />
+        <ArtifactRenderer
+          key={descriptor.data.digest}
+          descriptor={descriptor.data}
+          compact
+          originalRequested={state.originalRequested}
+          onOriginalRequested={() => onStateChange({ ...state, originalRequested: true })}
+        />
       )}
     </div>
   )

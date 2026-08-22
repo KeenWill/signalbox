@@ -136,11 +136,18 @@ test('preserves an active artifact when the inspector changes composition', asyn
   await page.goto('/sessions')
 
   await resolveArtifactWithoutMouse(page)
+  await page.getByRole('button', { name: 'Load original' }).click()
+  await expect(
+    page.getByRole('img', { name: `Original of ${imageArtifact.display_filename[0]}` }),
+  ).toBeVisible()
   await page.setViewportSize({ width: 1024, height: 900 })
   const sheet = page.getByRole('dialog', { name: 'Artifact inspector' })
   await expect(sheet.getByRole('textbox', { name: 'Digest' })).toHaveValue(imageArtifact.digest)
   await expect(
     sheet.getByRole('article', { name: `Artifact ${imageArtifact.display_filename[0]}` }),
+  ).toBeVisible()
+  await expect(
+    sheet.getByRole('img', { name: `Original of ${imageArtifact.display_filename[0]}` }),
   ).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

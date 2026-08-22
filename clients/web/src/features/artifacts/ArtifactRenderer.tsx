@@ -25,11 +25,14 @@ const displayName = (descriptor: WebBlobDescriptor): string =>
 export function ArtifactRenderer({
   compact = false,
   descriptor,
+  originalRequested = false,
+  onOriginalRequested,
 }: {
   compact?: boolean
   descriptor: WebBlobDescriptor
+  originalRequested?: boolean
+  onOriginalRequested?: () => void
 }) {
-  const [originalRequested, setOriginalRequested] = useState(false)
   const automatic = selectImageView(descriptor)
   const original = viewByKind(descriptor, 'browser_native')
   const download = viewByKind(descriptor, 'download')
@@ -76,11 +79,7 @@ export function ArtifactRenderer({
         </dl>
         <div className="artifact-actions">
           {original && (
-            <button
-              type="button"
-              aria-pressed={originalRequested}
-              onClick={() => setOriginalRequested(true)}
-            >
+            <button type="button" aria-pressed={originalRequested} onClick={onOriginalRequested}>
               <Maximize2 aria-hidden="true" />
               {originalRequested ? 'Original loaded' : 'Load original'}
             </button>
@@ -96,6 +95,17 @@ export function ArtifactRenderer({
   )
 }
 
+function StatefulArtifactRenderer({ descriptor }: { descriptor: WebBlobDescriptor }) {
+  const [originalRequested, setOriginalRequested] = useState(false)
+  return (
+    <ArtifactRenderer
+      descriptor={descriptor}
+      originalRequested={originalRequested}
+      onOriginalRequested={() => setOriginalRequested(true)}
+    />
+  )
+}
+
 export function ArtifactWorkbench() {
   return (
     <section className="artifact-panel" aria-labelledby="artifact-heading">
@@ -108,7 +118,7 @@ export function ArtifactWorkbench() {
       </header>
       <div className="artifact-list">
         {artifactScenario.map((descriptor) => (
-          <ArtifactRenderer key={descriptor.digest} descriptor={descriptor} />
+          <StatefulArtifactRenderer key={descriptor.digest} descriptor={descriptor} />
         ))}
       </div>
     </section>

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { imageArtifact } from './features/artifacts/artifactScenario'
 import {
   MAX_PRODUCT_JSON_BYTES,
+  ProductContractError,
   ProductTransportError,
   SameOriginProductTransport,
 } from './product'
@@ -39,8 +40,8 @@ describe('SameOriginProductTransport', () => {
       vi.fn(async () => new Response(JSON.stringify({ invented: true }))),
     )
 
-    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      'bootstrap.contract',
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toBeInstanceOf(
+      ProductContractError,
     )
   })
 
@@ -55,8 +56,8 @@ describe('SameOriginProductTransport', () => {
       ),
     )
 
-    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      'response exceeded the product JSON byte limit',
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toBeInstanceOf(
+      ProductContractError,
     )
   })
 

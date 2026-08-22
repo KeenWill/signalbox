@@ -51,6 +51,13 @@ export class ProductTransportError extends Error {
   }
 }
 
+export class ProductContractError extends Error {
+  constructor(cause: unknown) {
+    super('The bootstrap response did not match the generated web contract.', { cause })
+    this.name = 'ProductContractError'
+  }
+}
+
 export const MAX_PRODUCT_JSON_BYTES = 65_536
 
 const readBoundedJson = async (response: Response): Promise<unknown> => {
@@ -100,7 +107,11 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    return decodeWebContractBootstrap(await readBoundedJson(response))
+    try {
+      return decodeWebContractBootstrap(await readBoundedJson(response))
+    } catch (error) {
+      throw new ProductContractError(error)
+    }
   }
 
   async readBlobDescriptor(

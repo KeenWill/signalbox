@@ -23,7 +23,13 @@ import {
   globalHotkeySequenceBindings,
   invokeCommand,
 } from './commands'
-import { type ProductRouteId, productRoutes, productTransport } from './product'
+import {
+  ProductContractError,
+  type ProductRouteId,
+  ProductTransportError,
+  productRoutes,
+  productTransport,
+} from './product'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
 const surfaceCopy: Record<
@@ -119,6 +125,7 @@ function ProductNavigation({
         className="scenario-entry"
         to="/scenario/$scenarioId"
         params={{ scenarioId: 'streaming' }}
+        onClick={onNavigate}
       >
         Scenario studio <span aria-hidden="true">↗</span>
       </Link>
@@ -368,6 +375,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     staleTime: Number.POSITIVE_INFINITY,
   })
   const artifactAvailable = bootstrap.data?.capabilities.immutable_blob_content === true
+  const bootstrapFailure = bootstrap.error
+    ? bootstrap.error instanceof ProductTransportError
+      ? 'Transport unavailable'
+      : bootstrap.error instanceof ProductContractError
+        ? 'Contract rejected'
+        : 'Bootstrap unavailable'
+    : null
   const inspectorInSheet = app.layout === 'focus' || narrowInspector
   const context = useMemo<CommandContext>(
     () => ({
@@ -445,12 +459,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             {bootstrap.isSuccess
               ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
               : bootstrap.isError
-                ? 'Transport unavailable'
+                ? bootstrapFailure
                 : 'Checking contract…'}
           </span>
           {bootstrap.isError && (
             <button type="button" onClick={() => void bootstrap.refetch()}>
-              Retry transport
+              Retry bootstrap
             </button>
           )}
         </div>
