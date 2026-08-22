@@ -277,7 +277,7 @@ async fn oversized_canonical_assistant_text_preserves_a_searchable_tail()
     )])
     .expect("fixture selection resolves to one target");
     let response = format!(
-        "{} tail-chunk-needle",
+        "head-chunk-anchor {} tail-chunk-needle",
         "x".repeat(max_search_projection_text_bytes() + 1)
     );
     complete_text_turn(
@@ -291,7 +291,7 @@ async fn oversized_canonical_assistant_text_preserves_a_searchable_tail()
     .await?;
     let page = SearchRepository::new(pool.clone())
         .search(lexical_query(
-            "tail chunk needle",
+            "head anchor tail needle",
             SearchScope::Session(session),
             10,
             None,
@@ -312,10 +312,7 @@ async fn oversized_canonical_assistant_text_preserves_a_searchable_tail()
         SearchContentClass::AssistantTranscript
     );
     assert!(chunk_bounds.0 > 1);
-    assert!(
-        usize::try_from(chunk_bounds.1).expect("fixture chunk size fits")
-            <= max_search_projection_text_bytes()
-    );
+    assert!(usize::try_from(chunk_bounds.1).expect("fixture chunk size fits") <= 65_536);
 
     pool.close().await;
     drop(container);

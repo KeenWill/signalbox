@@ -6,11 +6,34 @@ import {
   decodeWebApiErrorResponse,
   decodeWebContractBootstrap,
   decodeWebContractExample,
+  decodeWebSearchPage,
   decodeWebSessionTimelineDescriptor,
   decodeWebSessionTimelineWindow,
 } from "../../../clients/web/src/generated/web-contract.mjs";
 
 const fixtureUrl = new URL("./fixtures/example.json", import.meta.url);
+
+function searchPage() {
+  return {
+    results: [
+      {
+        session_id: "00000000-0000-0000-0000-000000000991",
+        address: { event_sequence: "1" },
+        source: {
+          kind: "session",
+          session_id: "00000000-0000-0000-0000-000000000991",
+        },
+        content_class: "session_metadata",
+        snippet: "café",
+        highlights: [{ start_byte: 0, end_byte: 5 }],
+      },
+    ],
+    continuation: {
+      address: { event_sequence: "1" },
+      projection_id: "1",
+    },
+  };
+}
 
 test("generated example decoder round trips the Rust fixture", async () => {
   const source = JSON.parse(await readFile(fixtureUrl, "utf8"));
@@ -119,5 +142,59 @@ test("generated descriptor decoder rejects a fact beyond u64", () => {
         observed_through: "1",
       }),
     /unsigned 64-bit integer/,
+  );
+});
+
+test("generated search decoder rejects an invalid projection identity", () => {
+  const page = searchPage();
+  page.continuation.projection_id = "0";
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /continuation must be one recognized variant/,
+  );
+});
+
+test("generated search decoder rejects more than one bounded page", () => {
+  const page = searchPage();
+  page.results = Array.from({ length: 101 }, () => page.results[0]);
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /results must be at most 100 items/,
+  );
+});
+
+test("generated search decoder rejects an oversized UTF-8 snippet", () => {
+  const page = searchPage();
+  page.results[0].snippet = "é".repeat(257);
+  page.results[0].highlights = [];
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /snippet must be at most 512 UTF-8 bytes/,
+  );
+});
+
+test("generated search decoder rejects a highlight inside a UTF-8 character", () => {
+  const page = searchPage();
+  page.results[0].highlights = [{ start_byte: 4, end_byte: 5 }];
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /range on UTF-8 boundaries/,
+  );
+});
+
+test("generated search decoder rejects overlapping highlight ranges", () => {
+  const page = searchPage();
+  page.results[0].highlights = [
+    { start_byte: 0, end_byte: 3 },
+    { start_byte: 2, end_byte: 5 },
+  ];
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /ordered non-overlapping in-bounds UTF-8 byte range/,
   );
 });

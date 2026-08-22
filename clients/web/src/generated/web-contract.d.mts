@@ -36,13 +36,15 @@ type WebSearchContentClass = "user_transcript" | "assistant_transcript" | "tool_
 
 type WebSearchCursor = {
   readonly address: WebTimelineAddress;
-  readonly projection_id: string;
+  readonly projection_id: WebSearchProjectionId;
 };
 
 type WebSearchHighlight = {
   readonly end_byte: number;
   readonly start_byte: number;
 };
+
+type WebSearchProjectionId = string;
 
 type WebSearchResult = {
   readonly address: WebTimelineAddress;
