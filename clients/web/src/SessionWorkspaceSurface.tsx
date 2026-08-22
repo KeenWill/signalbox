@@ -772,7 +772,7 @@ export function SessionWorkspaceSurface({
               }
               ref={timelineRef}
               role="listbox"
-              tabIndex={-1}
+              tabIndex={0}
               onKeyDown={handleTimelineKeyDown}
             >
               {items.map((item) => {
