@@ -231,6 +231,21 @@ test('completes route switching from the command palette without a mouse', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('restores focus after opening keyboard help from the command palette', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const openPalette = page.getByRole('button', { name: 'Open command palette' })
+  await openPalette.focus()
+  await page.keyboard.press('Enter')
+  await page.getByRole('button', { name: /Open keyboard help/ }).focus()
+  await page.keyboard.press('Enter')
+  await page.keyboard.press('Escape')
+  await expect(openPalette).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('uses a navigation sheet on a phone viewport and unwinds it with Escape', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -295,6 +310,20 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(
     page.getByText(sessionWorkspaceFixture.detail.items[0].body.cause_code, { exact: true }),
   ).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('normalizes pasted session identity before native validation', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto('/sessions')
+
+  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  await sessionId.fill(` ${sessionWorkspaceFixture.id} `)
+  await expect(sessionId).toHaveValue(sessionWorkspaceFixture.id)
+  await sessionId.press('Enter')
+  await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

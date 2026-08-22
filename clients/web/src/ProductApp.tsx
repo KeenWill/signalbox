@@ -139,10 +139,12 @@ function ProductNavigation({
 function CommandPalette({
   context,
   openerRef,
+  helpOpenerRef,
   fallbackRef,
 }: {
   context: ProductCommandContext
   openerRef: RefObject<HTMLElement | null>
+  helpOpenerRef: RefObject<HTMLElement | null>
   fallbackRef: RefObject<HTMLElement | null>
 }) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
@@ -191,6 +193,7 @@ function CommandPalette({
                   key={command.id}
                   type="button"
                   onClick={() => {
+                    if (command.id === 'help.open') helpOpenerRef.current = openerRef.current
                     invokeProductCommand('surface.escape', context)
                     invokeProductCommand(command.id, context)
                   }}
@@ -209,7 +212,15 @@ function CommandPalette({
   )
 }
 
-function KeyboardHelp({ context }: { context: ProductCommandContext }) {
+function KeyboardHelp({
+  context,
+  openerRef,
+  fallbackRef,
+}: {
+  context: ProductCommandContext
+  openerRef: RefObject<HTMLElement | null>
+  fallbackRef: RefObject<HTMLElement | null>
+}) {
   const open = useAppSelector((state) => state.app.overlay === 'help')
   return (
     <Dialog.Root
@@ -220,7 +231,17 @@ function KeyboardHelp({ context }: { context: ProductCommandContext }) {
     >
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content" aria-describedby="keyboard-help-description">
+        <Dialog.Content
+          className="dialog-content"
+          aria-describedby="keyboard-help-description"
+          onCloseAutoFocus={(event) => {
+            event.preventDefault()
+            const opener = openerRef.current
+            if (opener?.isConnected && opener.getClientRects().length > 0) opener.focus()
+            else fallbackRef.current?.focus()
+            openerRef.current = null
+          }}
+        >
           <div className="dialog-heading">
             <div>
               <Dialog.Title>Keyboard help</Dialog.Title>
@@ -364,10 +385,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const primaryRef = useRef<HTMLElement>(null)
   const navigationOpenerRef = useRef<HTMLElement | null>(null)
   const paletteOpenerRef = useRef<HTMLElement | null>(null)
+  const helpOpenerRef = useRef<HTMLElement | null>(null)
   const timelineWindowNavigationRef = useRef<(anchor: 'first' | 'latest') => void>(() => {})
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
+  const focusPrimarySurface = useCallback(() => primaryRef.current?.focus(), [])
   const updateTimelineWindowNavigation = useCallback(
     (navigateTimelineWindow: (anchor: 'first' | 'latest') => void) => {
       timelineWindowNavigationRef.current = navigateTimelineWindow
@@ -467,6 +490,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         onTimelineWindowNavigation={updateTimelineWindowNavigation}
         onTimelineWindowAvailability={setTimelineWindowAvailable}
         onTimelineWindowCommand={(command) => invokeProductCommand(command, context)}
+        onEmptyTimelineFocus={focusPrimarySurface}
       />
     ) : surface === 'settings' ? (
       <SettingsSurface />
@@ -540,8 +564,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           </dl>
         </aside>
       )}
-      <CommandPalette context={context} openerRef={paletteOpenerRef} fallbackRef={primaryRef} />
-      <KeyboardHelp context={context} />
+      <CommandPalette
+        context={context}
+        openerRef={paletteOpenerRef}
+        helpOpenerRef={helpOpenerRef}
+        fallbackRef={primaryRef}
+      />
+      <KeyboardHelp context={context} openerRef={helpOpenerRef} fallbackRef={primaryRef} />
       <Dialog.Root
         open={app.overlay === 'navigation'}
         onOpenChange={(open) => {

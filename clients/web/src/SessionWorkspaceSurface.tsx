@@ -44,6 +44,7 @@ export function SessionWorkspaceSurface({
   onTimelineWindowNavigation,
   onTimelineWindowAvailability,
   onTimelineWindowCommand,
+  onEmptyTimelineFocus,
 }: {
   bootstrap: WebContractBootstrap | undefined
   onTimelineIds: (ids: readonly string[]) => void
@@ -52,6 +53,7 @@ export function SessionWorkspaceSurface({
   onTimelineWindowCommand: (
     command: Extract<ProductCommandId, 'selection.first' | 'selection.last'>,
   ) => void
+  onEmptyTimelineFocus: () => void
 }) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
@@ -143,12 +145,13 @@ export function SessionWorkspaceSurface({
     if (!session.data) return
     if (timelineIds.length === 0) {
       if (selected !== null) dispatch(actions.timelineSelected(null))
+      onEmptyTimelineFocus()
       return
     }
     if (selected !== null && timelineIds.includes(selected)) return
     const next = session.data.anchor.kind === 'latest' ? timelineIds.at(-1) : timelineIds[0]
     if (next) dispatch(actions.timelineSelected(next))
-  }, [dispatch, selected, session.data, timelineIds])
+  }, [dispatch, onEmptyTimelineFocus, selected, session.data, timelineIds])
   useEffect(() => {
     if (sessionId !== null && selected !== null && timelineIds.includes(selected)) {
       dispatch(actions.logicalPositionRecorded({ sessionId, position: selected }))
@@ -170,7 +173,7 @@ export function SessionWorkspaceSurface({
             aria-label="Exact session ID"
             placeholder="00000000-0000-0000-0000-000000000000"
             value={draftId}
-            onChange={(event) => setDraftId(event.target.value)}
+            onChange={(event) => setDraftId(event.target.value.trim())}
             pattern={SESSION_ID_PATTERN.source}
             required
           />
