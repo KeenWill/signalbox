@@ -421,7 +421,7 @@ mod tests {
 
     use super::{
         BlobDerivation, BlobDerivationProducer, BlobDigest, BlobDigestParseFailure,
-        BlobTransformation, BlobTransformationName,
+        BlobTransformation, BlobTransformationName, DeterministicBlobDerivationKey,
     };
 
     const ABC_SHA256: &str =
@@ -508,7 +508,50 @@ mod tests {
         let expected = first
             .deterministic_key()
             .expect("a deterministic producer has a key");
+        let changed_input = DeterministicBlobDerivationKey::try_derive(
+            &[BlobDigest::digest(b"another-input")],
+            first.transformation(),
+            implementation,
+        )
+        .expect("the changed input has a deterministic key");
+        let changed_name = BlobTransformation::try_new(
+            BlobTransformationName::try_new("image.preview")
+                .expect("the changed procedure name is valid"),
+            1,
+            &serde_json::json!({"edge_px": 256}),
+        )
+        .expect("the changed procedure is valid");
+        let changed_name =
+            DeterministicBlobDerivationKey::try_derive(&[input], &changed_name, implementation)
+                .expect("the changed procedure has a deterministic key");
+        let changed_version = BlobTransformation::try_new(
+            BlobTransformationName::try_new("image.thumbnail")
+                .expect("the fixture procedure name is valid"),
+            2,
+            &serde_json::json!({"edge_px": 256}),
+        )
+        .expect("the changed version is valid");
+        let changed_version =
+            DeterministicBlobDerivationKey::try_derive(&[input], &changed_version, implementation)
+                .expect("the changed version has a deterministic key");
+        let changed_parameters = BlobTransformation::try_new(
+            BlobTransformationName::try_new("image.thumbnail")
+                .expect("the fixture procedure name is valid"),
+            1,
+            &serde_json::json!({"edge_px": 512}),
+        )
+        .expect("the changed parameters are valid");
+        let changed_parameters = DeterministicBlobDerivationKey::try_derive(
+            &[input],
+            &changed_parameters,
+            implementation,
+        )
+        .expect("the changed parameters have a deterministic key");
         assert_eq!(replay.deterministic_key(), Some(expected));
+        assert_ne!(changed_input, expected);
+        assert_ne!(changed_name, expected);
+        assert_ne!(changed_version, expected);
+        assert_ne!(changed_parameters, expected);
         assert_ne!(changed_implementation.deterministic_key(), Some(expected));
     }
 }

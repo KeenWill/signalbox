@@ -72,6 +72,7 @@ test('selects an image capability without prefetching original bytes', async ({ 
     (response) => new URL(response.url()).pathname === originalPath,
   )
   await page.getByRole('button', { name: 'Load original' }).click()
+  await expect(page.getByRole('button', { name: 'Original loaded' })).toBeFocused()
   const original = page.getByRole('img', { name: 'Original of orbital-map.png' })
   await expect(original).toBeVisible()
   await expect(original).toHaveAttribute('src', originalPath)
