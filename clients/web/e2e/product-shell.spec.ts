@@ -4,14 +4,30 @@ const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '1' },
   capabilities: {
     bounded_json: true,
+    bounded_session_timeline: true,
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 262_144 },
+  limits: {
+    max_json_body_bytes: 65_536,
+    max_ndjson_item_bytes: 262_144,
+    max_timeline_window_bytes: 524_288,
+    max_timeline_window_items: 256,
+  },
 } as const
 
-const useDeterministicBootstrap = (page: Page) =>
-  page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+const emptySessionPage = {
+  continuation: null,
+  cursor: '0',
+  sort: 'last_activity_descending',
+  summaries: [],
+  total: '0',
+} as const
+
+const useDeterministicBootstrap = async (page: Page) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/sessions?**', (route) => route.fulfill({ json: emptySessionPage }))
+}
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }

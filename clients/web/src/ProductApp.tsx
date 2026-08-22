@@ -2,17 +2,7 @@ import * as Dialog from '@radix-ui/react-dialog'
 import { useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
-import {
-  AlertTriangle,
-  Command,
-  Menu,
-  Moon,
-  PanelLeftClose,
-  Rows3,
-  Search,
-  Sun,
-  X,
-} from 'lucide-react'
+import { AlertTriangle, Command, Menu, Moon, PanelLeftClose, Rows3, Sun, X } from 'lucide-react'
 import { useEffect, useMemo, useRef } from 'react'
 import {
   type CommandContext,
@@ -20,7 +10,13 @@ import {
   globalHotkeyBindings,
   invokeCommand,
 } from './commands'
-import { type ProductRouteId, productRoutes, productTransport } from './product'
+import {
+  type ProductRouteId,
+  type ProductSessionState,
+  productRoutes,
+  productTransport,
+} from './product'
+import { SessionCatalogSurface } from './SessionCatalogSurface'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
 const surfaceCopy: Record<
@@ -204,33 +200,6 @@ function AttentionSurface() {
   )
 }
 
-function SessionsSurface() {
-  return (
-    <div className="surface-body sessions-surface">
-      <div className="sessions-toolbar" role="toolbar" aria-label="Session controls">
-        <label>
-          <Search aria-hidden="true" />
-          <input
-            aria-label="Filter loaded sessions"
-            placeholder="Filter loaded sessions"
-            disabled
-          />
-        </label>
-        <button type="button" disabled>
-          New session
-        </button>
-      </div>
-      <div className="session-columns" aria-hidden="true">
-        <span>Session</span>
-        <span>State</span>
-        <span>Activity</span>
-        <span>Updated</span>
-      </div>
-      <SurfaceUnavailable surface="sessions" />
-    </div>
-  )
-}
-
 function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   return (
     <div className="surface-body">
@@ -287,7 +256,13 @@ function ProductToolbar({ context }: { context: CommandContext }) {
   )
 }
 
-export function ProductApp({ surface }: { surface: ProductRouteId }) {
+export function ProductApp({
+  surface,
+  search,
+}: {
+  surface: ProductRouteId
+  search: ProductSessionState
+}) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
@@ -320,11 +295,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   }, [app.density, app.theme])
 
   const copy = surfaceCopy[surface]
+  const updateSearch = (next: ProductSessionState) =>
+    void navigate({ to: '/$surface', params: { surface }, search: next })
   const content =
     surface === 'attention' ? (
       <AttentionSurface />
     ) : surface === 'sessions' ? (
-      <SessionsSurface />
+      <SessionCatalogSurface state={search} onStateChange={updateSearch} />
     ) : (
       <DeferredSurface surface={surface} />
     )
