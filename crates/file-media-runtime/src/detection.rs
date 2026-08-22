@@ -372,9 +372,12 @@ pub enum ProcessorReadOutput {
     InvalidViewArguments,
     /// Provider declined a declared view.
     UnsupportedView,
-    /// Source cannot satisfy a whole-decode view under its declaration.
+    /// Source exceeds a declared intrinsic whole-decode size limit.
+    ///
+    /// Version one declares only cumulative source-work budgets, so the
+    /// registry rejects this processor outcome until such a limit exists.
     SourceTooLarge {
-        /// Untrusted claimed maximum, checked against the view declaration.
+        /// Untrusted claimed intrinsic maximum.
         maximum_bytes: u64,
     },
     /// Decode expansion crossed a registered named limit.
