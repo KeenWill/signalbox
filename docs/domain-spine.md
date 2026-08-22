@@ -6495,6 +6495,156 @@ impl<Reader: SearchReader> SearchService<Reader> {
 }
 ```
 
+## application: usage
+
+```rust
+pub const fn max_usage_call_page_items() -> u16;
+pub const fn max_usage_aggregate_groups() -> u16;
+
+pub struct UsageTimestampError;
+
+pub struct UsageTimestampMicros(/* private u64 */);
+impl UsageTimestampMicros {
+    pub const fn new(value: u64) -> Result<Self, UsageTimestampError>;
+    pub const fn get(self) -> u64;
+}
+
+pub struct UsageTimeRangeError;
+
+pub struct UsageTimeRange {
+    pub from_inclusive: Option<UsageTimestampMicros>,
+    pub to_exclusive: Option<UsageTimestampMicros>,
+}
+impl UsageTimeRange {
+    pub const fn all() -> Self;
+    pub const fn new(
+        from_inclusive: Option<UsageTimestampMicros>,
+        to_exclusive: Option<UsageTimestampMicros>,
+    ) -> Result<Self, UsageTimeRangeError>;
+}
+
+pub enum UsageCallKind { ModelCall, ApprovalJudge }
+pub enum UsageProvenance { Reported, Estimated }
+pub enum UsageInputTokenSemantics { Unknown, CacheExclusive, CacheInclusive }
+
+pub struct UsageTokenCoverage {
+    pub input: bool,
+    pub output: bool,
+    pub cache_creation_input: bool,
+    pub cache_read_input: bool,
+}
+
+pub struct UsageTokenAxes {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_creation_input: Option<u64>,
+    pub cache_read_input: Option<u64>,
+}
+impl UsageTokenAxes {
+    pub const fn coverage(self) -> UsageTokenCoverage;
+}
+
+pub struct UsageSelection {
+    pub session: Option<SessionId>,
+    pub turn: Option<TurnId>,
+    pub model: Option<ResolvedProviderTarget>,
+    pub provenance: Option<UsageProvenance>,
+    pub call_kind: Option<UsageCallKind>,
+}
+impl UsageSelection {
+    pub const fn all() -> Self;
+}
+
+pub struct UsageQuery {
+    pub time: UsageTimeRange,
+    pub selection: UsageSelection,
+}
+
+pub struct UsageCallPageLimitError;
+
+pub struct UsageCallPageLimit(/* private u16 */);
+impl UsageCallPageLimit {
+    pub const fn new(value: u16) -> Result<Self, UsageCallPageLimitError>;
+    pub const fn get(self) -> u16;
+}
+
+pub enum UsageCallOrder { NewestFirst, OldestFirst }
+
+pub struct UsageCallCursor {
+    pub recorded_at: UsageTimestampMicros,
+    pub call: ModelCallId,
+}
+
+pub struct UsageCallQuery {
+    pub scope: UsageQuery,
+    pub order: UsageCallOrder,
+    pub limit: UsageCallPageLimit,
+    pub after: Option<UsageCallCursor>,
+}
+
+pub struct UsageCallEvidence {
+    pub call_kind: UsageCallKind,
+    pub call: ModelCallId,
+    pub session: SessionId,
+    pub turn: TurnId,
+    pub model: ResolvedProviderTarget,
+    pub credential_profile: String,
+    pub provenance: UsageProvenance,
+    pub input_semantics: UsageInputTokenSemantics,
+    pub tokens: UsageTokenAxes,
+    pub recorded_at: UsageTimestampMicros,
+}
+
+pub struct UsageCallPage {
+    pub calls: Vec<UsageCallEvidence>,
+    pub next: Option<UsageCallCursor>,
+}
+
+pub struct UsageAggregateKey {
+    pub call_kind: UsageCallKind,
+    pub model: ResolvedProviderTarget,
+    pub credential_profile: String,
+    pub provenance: UsageProvenance,
+    pub input_semantics: UsageInputTokenSemantics,
+    pub coverage: UsageTokenCoverage,
+}
+
+pub struct UsageAggregateGroup {
+    pub key: UsageAggregateKey,
+    pub call_count: u64,
+    pub tokens: UsageTokenAxes,
+    pub cost_derivation_safe: bool,
+}
+
+pub struct UsageAggregateReport {
+    pub groups: Vec<UsageAggregateGroup>,
+    pub truncated: bool,
+}
+
+pub trait UsageReader {
+    type Error;
+    fn aggregate(&self, query: UsageQuery)
+        -> impl Future<Output = Result<UsageAggregateReport, Self::Error>> + Send;
+    fn calls(&self, query: UsageCallQuery)
+        -> impl Future<Output = Result<UsageCallPage, Self::Error>> + Send;
+}
+
+pub struct UsageService<Reader> { /* private */ }
+impl<Reader> UsageService<Reader> {
+    pub const fn new(reader: Reader) -> Self;
+}
+impl<Reader: UsageReader> UsageService<Reader> {
+    pub async fn aggregate(
+        &self,
+        query: UsageQuery,
+    ) -> Result<UsageAggregateReport, Reader::Error>;
+    pub async fn calls(
+        &self,
+        query: UsageCallQuery,
+    ) -> Result<UsageCallPage, Reader::Error>;
+}
+```
+
 ## application: session_timeline
 
 ```rust
@@ -11319,6 +11469,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
 | application: search                                | 21 (+4 free fn) (incl. 2 traits) |
+| application: usage                                 | 23 (+2 free fn) (incl. 1 trait)  |
 | application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 35 (incl. 8 traits)              |
 | application: tool_loop                             | 26 (incl. 5 traits)              |
@@ -11338,4 +11489,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
 | application: turn_liveness                         | 7                                |
-| **signalbox-application total**                    | **330 (+13 free fn)**            |
+| **signalbox-application total**                    | **353 (+15 free fn)**            |

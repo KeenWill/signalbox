@@ -28,6 +28,7 @@ mod session_timeline;
 mod tool_round_lifecycle;
 mod turn_activation;
 mod turn_liveness;
+mod usage;
 
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},

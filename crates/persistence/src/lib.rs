@@ -47,6 +47,7 @@ pub mod startup;
 pub mod submit_input;
 pub mod tool_loop;
 pub mod turn_liveness;
+pub mod usage;
 
 pub use session_credentials::{
     ModelCredentialFamilyCatalog, ModelCredentialFamilyCatalogError, SessionCredentialPin,
