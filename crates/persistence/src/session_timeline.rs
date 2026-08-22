@@ -4,15 +4,24 @@ use std::{error::Error, fmt, num::NonZeroU64};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    SessionTimelineBounds, SessionTimelineDescriptor, SessionTimelineEventKind,
+    SessionTimelineBounds, SessionTimelineDescriptor, SessionTimelineDetail,
+    SessionTimelineDetailBody, SessionTimelineDetailPage, SessionTimelineEventKind,
     SessionTimelineItem, SessionTimelineReader, SessionTimelineSizeFacts, SessionTimelineWindow,
-    SessionWorkFacts, TimelineAddress, TimelineContinuation, TimelineWindowAnchor,
-    TimelineWindowLimits,
+    SessionWorkFacts, TimelineAddress, TimelineBodyContinuation, TimelineBodyField,
+    TimelineContinuation, TimelineDetailContinuation, TimelineDetailCursor, TimelineDetailLimits,
+    TimelineModelCallDisposition, TimelineModelCallState, TimelineModelUsage, TimelineTextExcerpt,
+    TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
 };
-use signalbox_domain::SessionId;
-use sqlx::{PgConnection, PgPool, Row};
+use signalbox_domain::{SessionId, TurnId};
+use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
-use crate::mapping::{OutboxEventDiscriminator, outbox_event_discriminator_from_str};
+use crate::{
+    mapping::{OutboxEventDiscriminator, outbox_event_discriminator_from_str},
+    outbox::{
+        DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEvent,
+        DispatchedOutboxEventKind, OutboxDispatchError,
+    },
+};
 
 const PROJECTED_ITEM_ENVELOPE_BYTES: u32 = 64;
 
@@ -23,6 +32,9 @@ pub enum SessionTimelineCorruption {
     InvalidOrdinal(&'static str),
     UnsupportedEventKind(String),
     ItemProjectionOverflow,
+    InvalidDetailCursor,
+    DetailProjectionOverflow,
+    MissingDetailRecord,
 }
 
 impl fmt::Display for SessionTimelineCorruption {
@@ -36,6 +48,15 @@ impl fmt::Display for SessionTimelineCorruption {
             Self::ItemProjectionOverflow => {
                 formatter.write_str("session timeline item projection overflowed")
             }
+            Self::InvalidDetailCursor => {
+                formatter.write_str("invalid session timeline detail cursor")
+            }
+            Self::DetailProjectionOverflow => {
+                formatter.write_str("session timeline detail projection overflowed")
+            }
+            Self::MissingDetailRecord => {
+                formatter.write_str("missing session timeline detail record")
+            }
         }
     }
 }
@@ -47,6 +68,7 @@ impl Error for SessionTimelineCorruption {}
 pub enum SessionTimelineRepositoryError {
     Database(sqlx::Error),
     Corruption(SessionTimelineCorruption),
+    Outbox(OutboxDispatchError),
 }
 
 impl fmt::Display for SessionTimelineRepositoryError {
@@ -56,6 +78,9 @@ impl fmt::Display for SessionTimelineRepositoryError {
                 write!(formatter, "session timeline database failure: {error}")
             }
             Self::Corruption(error) => error.fmt(formatter),
+            Self::Outbox(error) => {
+                write!(formatter, "session timeline detail decode failed: {error}")
+            }
         }
     }
 }
@@ -65,6 +90,7 @@ impl Error for SessionTimelineRepositoryError {
         match self {
             Self::Database(error) => Some(error),
             Self::Corruption(error) => Some(error),
+            Self::Outbox(error) => Some(error),
         }
     }
 }
@@ -78,6 +104,12 @@ impl From<sqlx::Error> for SessionTimelineRepositoryError {
 impl From<SessionTimelineCorruption> for SessionTimelineRepositoryError {
     fn from(error: SessionTimelineCorruption) -> Self {
         Self::Corruption(error)
+    }
+}
+
+impl From<OutboxDispatchError> for SessionTimelineRepositoryError {
+    fn from(error: OutboxDispatchError) -> Self {
+        Self::Outbox(error)
     }
 }
 
@@ -205,6 +237,120 @@ impl SessionTimelineRepository {
             continuation_after,
         }))
     }
+
+    /// Reads one selected typed body without scanning unrelated history.
+    pub async fn read_item_details(
+        &self,
+        session: SessionId,
+        address: TimelineAddress,
+        cursor: Option<TimelineDetailCursor>,
+        limits: TimelineDetailLimits,
+    ) -> Result<Option<SessionTimelineDetailPage>, SessionTimelineRepositoryError> {
+        if cursor.is_some_and(|cursor| cursor.address != address) {
+            return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *transaction)
+            .await?;
+        let Some(event) = load_detail_event(&mut transaction, session, address).await? else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let (detail, continuation) = project_detail_event(
+            &mut transaction,
+            &event,
+            cursor,
+            limits.max_projected_bytes(),
+        )
+        .await?;
+        let projected_body_bytes = detail.projected_body_bytes;
+        transaction.commit().await?;
+        Ok(Some(SessionTimelineDetailPage {
+            session,
+            items: vec![detail],
+            projected_body_bytes,
+            continuation,
+        }))
+    }
+
+    /// Reads bounded details belonging to one exact turn.
+    pub async fn read_turn_details(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        cursor: Option<TimelineDetailCursor>,
+        limits: TimelineDetailLimits,
+    ) -> Result<Option<SessionTimelineDetailPage>, SessionTimelineRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *transaction)
+            .await?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM turn_lifecycle WHERE session_id = $1 AND turn_id = $2)",
+        )
+        .bind(session.into_uuid())
+        .bind(turn.into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !exists {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+        let addresses = fetch_turn_addresses(
+            &mut transaction,
+            session,
+            turn,
+            cursor.map(|cursor| cursor.address),
+            limits.max_items(),
+        )
+        .await?;
+        let page =
+            project_address_page(&mut transaction, session, addresses, cursor, limits).await?;
+        transaction.commit().await?;
+        Ok(Some(page))
+    }
+
+    /// Reads one bounded inclusive contiguous address region.
+    pub async fn read_region_details(
+        &self,
+        session: SessionId,
+        first: TimelineAddress,
+        through: TimelineAddress,
+        cursor: Option<TimelineDetailCursor>,
+        limits: TimelineDetailLimits,
+    ) -> Result<Option<SessionTimelineDetailPage>, SessionTimelineRepositoryError> {
+        if first > through
+            || cursor.is_some_and(|cursor| cursor.address < first || cursor.address > through)
+        {
+            return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *transaction)
+            .await?;
+        let session_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM session WHERE session_id = $1)")
+                .bind(session.into_uuid())
+                .fetch_one(&mut *transaction)
+                .await?;
+        if !session_exists {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+        let addresses = fetch_region_addresses(
+            &mut transaction,
+            session,
+            cursor.map_or(first, |cursor| cursor.address),
+            through,
+            limits.max_items(),
+        )
+        .await?;
+        let page =
+            project_address_page(&mut transaction, session, addresses, cursor, limits).await?;
+        transaction.commit().await?;
+        Ok(Some(page))
+    }
 }
 
 impl SessionTimelineReader for SessionTimelineRepository {
@@ -225,6 +371,556 @@ impl SessionTimelineReader for SessionTimelineRepository {
     ) -> Result<Option<SessionTimelineWindow>, Self::Error> {
         SessionTimelineRepository::read_window(self, session, anchor, limits).await
     }
+
+    async fn read_item_details(
+        &self,
+        session: SessionId,
+        address: TimelineAddress,
+        cursor: Option<TimelineDetailCursor>,
+        limits: TimelineDetailLimits,
+    ) -> Result<Option<SessionTimelineDetailPage>, Self::Error> {
+        SessionTimelineRepository::read_item_details(self, session, address, cursor, limits).await
+    }
+
+    async fn read_turn_details(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        cursor: Option<TimelineDetailCursor>,
+        limits: TimelineDetailLimits,
+    ) -> Result<Option<SessionTimelineDetailPage>, Self::Error> {
+        SessionTimelineRepository::read_turn_details(self, session, turn, cursor, limits).await
+    }
+
+    async fn read_region_details(
+        &self,
+        session: SessionId,
+        first: TimelineAddress,
+        through: TimelineAddress,
+        cursor: Option<TimelineDetailCursor>,
+        limits: TimelineDetailLimits,
+    ) -> Result<Option<SessionTimelineDetailPage>, Self::Error> {
+        SessionTimelineRepository::read_region_details(
+            self, session, first, through, cursor, limits,
+        )
+        .await
+    }
+}
+
+const DETAIL_ENVELOPE_BYTES: u32 = 128;
+
+const TURN_DETAIL_ADDRESSES_SQL: &str = r#"
+WITH turn_events AS (
+    SELECT event_sequence FROM input_accepted_outbox_event
+     WHERE session_id = $1 AND turn_id = $2
+    UNION ALL
+    SELECT event_sequence FROM goal_turn_retired_outbox_event
+     WHERE session_id = $1 AND turn_id = $2
+    UNION ALL
+    SELECT event_sequence FROM turn_activated_outbox_event
+     WHERE session_id = $1 AND turn_id = $2
+    UNION ALL
+    SELECT event_sequence FROM turn_failed_outbox_event
+     WHERE session_id = $1 AND turn_id = $2
+    UNION ALL
+    SELECT event.event_sequence
+      FROM model_call_transition_outbox_event AS event
+      JOIN model_call AS call ON call.model_call_id = event.model_call_id
+     WHERE call.session_id = $1 AND call.turn_id = $2
+    UNION ALL
+    SELECT event.event_sequence
+      FROM tool_batch_transition_outbox_event AS event
+      JOIN model_call AS call
+        ON call.model_call_id = event.producing_model_call_id
+     WHERE call.session_id = $1 AND call.turn_id = $2
+    UNION ALL
+    SELECT event.event_sequence
+      FROM tool_approval_decided_outbox_event AS event
+      JOIN tool_request AS request ON request.request_id = event.request_id
+     WHERE request.session_id = $1 AND request.turn_id = $2
+    UNION ALL
+    SELECT event_sequence FROM turn_completed_outbox_event
+     WHERE session_id = $1 AND turn_id = $2
+    UNION ALL
+    SELECT event_sequence FROM turn_refused_outbox_event
+     WHERE session_id = $1 AND turn_id = $2
+    UNION ALL
+    SELECT event_sequence FROM turn_cancelled_outbox_event
+     WHERE session_id = $1 AND turn_id = $2
+    UNION ALL
+    SELECT event_sequence FROM turn_reconciliation_required_outbox_event
+     WHERE session_id = $1 AND turn_id = $2
+)
+SELECT event_sequence FROM turn_events
+ WHERE event_sequence >= $3
+ ORDER BY event_sequence ASC LIMIT $4
+"#;
+
+const REGION_DETAIL_ADDRESSES_SQL: &str = r#"
+WITH session_events AS (
+    SELECT event_sequence FROM outbox_event WHERE session_id = $1
+    UNION ALL
+    SELECT event_sequence FROM delegation_outbox_event WHERE session_id = $1
+)
+SELECT event_sequence FROM session_events
+ WHERE event_sequence >= $2 AND event_sequence <= $3
+ ORDER BY event_sequence ASC LIMIT $4
+"#;
+
+async fn fetch_turn_addresses(
+    transaction: &mut Transaction<'_, Postgres>,
+    session: SessionId,
+    turn: TurnId,
+    first: Option<TimelineAddress>,
+    max_items: u16,
+) -> Result<Vec<TimelineAddress>, SessionTimelineRepositoryError> {
+    let first = first.map_or(1, |address| address.sequence().get());
+    let rows: Vec<Decimal> = sqlx::query_scalar(TURN_DETAIL_ADDRESSES_SQL)
+        .bind(session.into_uuid())
+        .bind(turn.into_uuid())
+        .bind(Decimal::from(first))
+        .bind(i64::from(max_items) + 1)
+        .fetch_all(&mut **transaction)
+        .await?;
+    rows.into_iter()
+        .map(|value| required_address(value, "turn detail address").map_err(Into::into))
+        .collect()
+}
+
+async fn fetch_region_addresses(
+    transaction: &mut Transaction<'_, Postgres>,
+    session: SessionId,
+    first: TimelineAddress,
+    through: TimelineAddress,
+    max_items: u16,
+) -> Result<Vec<TimelineAddress>, SessionTimelineRepositoryError> {
+    let rows: Vec<Decimal> = sqlx::query_scalar(REGION_DETAIL_ADDRESSES_SQL)
+        .bind(session.into_uuid())
+        .bind(Decimal::from(first.sequence().get()))
+        .bind(Decimal::from(through.sequence().get()))
+        .bind(i64::from(max_items) + 1)
+        .fetch_all(&mut **transaction)
+        .await?;
+    rows.into_iter()
+        .map(|value| required_address(value, "region detail address").map_err(Into::into))
+        .collect()
+}
+
+async fn project_address_page(
+    transaction: &mut Transaction<'_, Postgres>,
+    session: SessionId,
+    addresses: Vec<TimelineAddress>,
+    cursor: Option<TimelineDetailCursor>,
+    limits: TimelineDetailLimits,
+) -> Result<SessionTimelineDetailPage, SessionTimelineRepositoryError> {
+    if cursor.is_some_and(|cursor| addresses.first().copied() != Some(cursor.address)) {
+        return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+    }
+    let item_limit = usize::from(limits.max_items());
+    let next_by_count = addresses.get(item_limit).copied();
+    let mut remaining = limits.max_projected_bytes();
+    let mut items = Vec::with_capacity(addresses.len().min(item_limit));
+    let mut continuation = None;
+    for address in addresses.into_iter().take(item_limit) {
+        if remaining < DETAIL_ENVELOPE_BYTES {
+            continuation = Some(TimelineDetailContinuation::MoreAt(address));
+            break;
+        }
+        let event = load_detail_event(transaction, session, address)
+            .await?
+            .ok_or(SessionTimelineCorruption::MissingDetailRecord)?;
+        let event_cursor = cursor.filter(|cursor| cursor.address == address);
+        let (detail, body_continuation) =
+            project_detail_event(transaction, &event, event_cursor, remaining).await?;
+        remaining = remaining
+            .checked_sub(detail.projected_body_bytes)
+            .ok_or(SessionTimelineCorruption::DetailProjectionOverflow)?;
+        items.push(detail);
+        if body_continuation.is_some() {
+            continuation = body_continuation;
+            break;
+        }
+    }
+    if continuation.is_none() {
+        continuation = next_by_count.map(TimelineDetailContinuation::MoreAt);
+    }
+    let projected_body_bytes = limits
+        .max_projected_bytes()
+        .checked_sub(remaining)
+        .ok_or(SessionTimelineCorruption::DetailProjectionOverflow)?;
+    Ok(SessionTimelineDetailPage {
+        session,
+        items,
+        projected_body_bytes,
+        continuation,
+    })
+}
+
+async fn load_detail_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    session: SessionId,
+    address: TimelineAddress,
+) -> Result<Option<DispatchedOutboxEvent>, SessionTimelineRepositoryError> {
+    let (_, event_beyond_allocated, event) =
+        crate::outbox::load_event(transaction, address.sequence().get()).await?;
+    if event_beyond_allocated {
+        return Err(SessionTimelineCorruption::MissingDetailRecord.into());
+    }
+    Ok(event.filter(|event| event.session() == session))
+}
+
+async fn project_detail_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: &DispatchedOutboxEvent,
+    cursor: Option<TimelineDetailCursor>,
+    max_bytes: u32,
+) -> Result<
+    (SessionTimelineDetail, Option<TimelineDetailContinuation>),
+    SessionTimelineRepositoryError,
+> {
+    if max_bytes < DETAIL_ENVELOPE_BYTES {
+        return Err(SessionTimelineCorruption::DetailProjectionOverflow.into());
+    }
+    let address = TimelineAddress::new(
+        NonZeroU64::new(event.sequence())
+            .ok_or(SessionTimelineCorruption::InvalidOrdinal("detail address"))?,
+    );
+    if cursor.is_some_and(|cursor| cursor.address != address) {
+        return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+    }
+    let kind = dispatched_event_kind(event.kind());
+    let mut remaining = max_bytes - DETAIL_ENVELOPE_BYTES;
+    let (body, body_continuation) = match event.kind() {
+        DispatchedOutboxEventKind::InputAccepted { turn, content, .. } => {
+            require_cursor_field(cursor, TimelineBodyField::InputText, 0)?;
+            let text = excerpt_text(
+                content,
+                address,
+                TimelineBodyField::InputText,
+                0,
+                cursor.map_or(0, |cursor| cursor.offset_bytes),
+                &mut remaining,
+            )?;
+            let continuation = text.continuation.map(TimelineDetailContinuation::MoreBody);
+            (
+                SessionTimelineDetailBody::UserInput {
+                    turn_id: turn.into_uuid().to_string(),
+                    text,
+                    attachments: Vec::new(),
+                },
+                continuation,
+            )
+        }
+        DispatchedOutboxEventKind::ModelCallTransition { turn, call, state } => {
+            require_cursor_field(cursor, TimelineBodyField::ModelResponse, 0)?;
+            let row = load_model_detail(transaction, *call).await?;
+            let response = match row.response {
+                Some(response) => Some(excerpt_text(
+                    &response,
+                    address,
+                    TimelineBodyField::ModelResponse,
+                    0,
+                    cursor.map_or(0, |cursor| cursor.offset_bytes),
+                    &mut remaining,
+                )?),
+                None if cursor.is_none() => None,
+                None => return Err(SessionTimelineCorruption::InvalidDetailCursor.into()),
+            };
+            let continuation = response
+                .as_ref()
+                .and_then(|response| response.continuation)
+                .map(TimelineDetailContinuation::MoreBody);
+            (
+                SessionTimelineDetailBody::ModelCall {
+                    turn_id: turn.into_uuid().to_string(),
+                    model_call_id: call.into_uuid().to_string(),
+                    state: model_call_state(*state),
+                    model_identity_id: row.model_identity_id,
+                    request_context_items: row.request_context_items,
+                    response,
+                    usage: row.usage,
+                    cause_code: row.cause_code,
+                },
+                continuation,
+            )
+        }
+        DispatchedOutboxEventKind::TurnActivated { turn, .. } => {
+            require_no_body_cursor(cursor)?;
+            (
+                SessionTimelineDetailBody::TurnLifecycle {
+                    turn_id: turn.into_uuid().to_string(),
+                    lifecycle: TimelineTurnLifecycleKind::Activated,
+                    cause_code: String::from("activated"),
+                },
+                None,
+            )
+        }
+        DispatchedOutboxEventKind::TurnFailed { turn, .. } => {
+            terminal_turn_body(*turn, "failed", cursor)?
+        }
+        DispatchedOutboxEventKind::TurnCompleted { turn, .. } => {
+            terminal_turn_body(*turn, "completed", cursor)?
+        }
+        DispatchedOutboxEventKind::TurnRefused { turn, .. } => {
+            terminal_turn_body(*turn, "refused", cursor)?
+        }
+        DispatchedOutboxEventKind::TurnCancelled { turn, .. } => {
+            terminal_turn_body(*turn, "cancelled", cursor)?
+        }
+        _ => {
+            require_no_body_cursor(cursor)?;
+            (SessionTimelineDetailBody::EventFact { kind }, None)
+        }
+    };
+    let projected_body_bytes = max_bytes
+        .checked_sub(remaining)
+        .ok_or(SessionTimelineCorruption::DetailProjectionOverflow)?;
+    Ok((
+        SessionTimelineDetail {
+            address,
+            kind,
+            body,
+            projected_body_bytes,
+        },
+        body_continuation,
+    ))
+}
+
+fn terminal_turn_body(
+    turn: TurnId,
+    cause_code: &str,
+    cursor: Option<TimelineDetailCursor>,
+) -> Result<
+    (
+        SessionTimelineDetailBody,
+        Option<TimelineDetailContinuation>,
+    ),
+    SessionTimelineRepositoryError,
+> {
+    require_no_body_cursor(cursor)?;
+    Ok((
+        SessionTimelineDetailBody::TurnLifecycle {
+            turn_id: turn.into_uuid().to_string(),
+            lifecycle: TimelineTurnLifecycleKind::Terminalized,
+            cause_code: cause_code.to_owned(),
+        },
+        None,
+    ))
+}
+
+fn require_no_body_cursor(
+    cursor: Option<TimelineDetailCursor>,
+) -> Result<(), SessionTimelineRepositoryError> {
+    if cursor.is_some_and(|cursor| {
+        cursor.field.is_some() || cursor.member_index != 0 || cursor.offset_bytes != 0
+    }) {
+        return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+    }
+    Ok(())
+}
+
+fn require_cursor_field(
+    cursor: Option<TimelineDetailCursor>,
+    field: TimelineBodyField,
+    member_index: u32,
+) -> Result<(), SessionTimelineRepositoryError> {
+    if let Some(cursor) = cursor {
+        let item_start =
+            cursor.field.is_none() && cursor.member_index == 0 && cursor.offset_bytes == 0;
+        if !item_start && (cursor.field != Some(field) || cursor.member_index != member_index) {
+            return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+        }
+    }
+    Ok(())
+}
+
+fn excerpt_text(
+    value: &str,
+    address: TimelineAddress,
+    field: TimelineBodyField,
+    member_index: u32,
+    offset_bytes: u64,
+    remaining: &mut u32,
+) -> Result<TimelineTextExcerpt, SessionTimelineRepositoryError> {
+    let start = usize::try_from(offset_bytes)
+        .map_err(|_| SessionTimelineCorruption::InvalidDetailCursor)?;
+    if start > value.len() || !value.is_char_boundary(start) {
+        return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+    }
+    let available = usize::try_from(*remaining)
+        .map_err(|_| SessionTimelineCorruption::DetailProjectionOverflow)?;
+    let mut end = start.saturating_add(available).min(value.len());
+    while end > start && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let text = value[start..end].to_owned();
+    let charged = u32::try_from(text.len())
+        .map_err(|_| SessionTimelineCorruption::DetailProjectionOverflow)?;
+    *remaining = remaining
+        .checked_sub(charged)
+        .ok_or(SessionTimelineCorruption::DetailProjectionOverflow)?;
+    let continuation = (end < value.len()).then_some(TimelineBodyContinuation {
+        address,
+        field,
+        member_index,
+        offset_bytes: u64::try_from(end)
+            .map_err(|_| SessionTimelineCorruption::DetailProjectionOverflow)?,
+    });
+    Ok(TimelineTextExcerpt {
+        text,
+        offset_bytes,
+        total_bytes: u64::try_from(value.len())
+            .map_err(|_| SessionTimelineCorruption::DetailProjectionOverflow)?,
+        continuation,
+    })
+}
+
+struct ModelDetailRow {
+    model_identity_id: String,
+    request_context_items: u64,
+    response: Option<String>,
+    usage: TimelineModelUsage,
+    cause_code: Option<String>,
+}
+
+async fn load_model_detail(
+    transaction: &mut Transaction<'_, Postgres>,
+    call: signalbox_domain::ModelCallId,
+) -> Result<ModelDetailRow, SessionTimelineRepositoryError> {
+    let row = sqlx::query(
+        r#"
+SELECT call.resolved_provider_model_identity_id,
+       frontier.member_count,
+       call.usage_input_tokens,
+       call.usage_output_tokens,
+       call.usage_cache_creation_input_tokens,
+       call.usage_cache_read_input_tokens,
+       call.terminal_provider_failure_cause,
+       (
+           SELECT string_agg(part.assistant_text_value, '' ORDER BY part.member_position)
+             FROM (
+                 SELECT entry.semantic_entry_id, entry.assistant_text_value,
+                        min(member.member_position) AS member_position
+                   FROM semantic_transcript_entry AS entry
+                   JOIN context_frontier_member AS member
+                     ON member.source_session_id = entry.source_session_id
+                    AND member.semantic_entry_id = entry.semantic_entry_id
+                  WHERE entry.producing_model_call_id = call.model_call_id
+                    AND entry.payload_kind = 'assistant_text'
+                  GROUP BY entry.semantic_entry_id, entry.assistant_text_value
+             ) AS part
+       ) AS response_text
+  FROM model_call AS call
+  JOIN context_frontier AS frontier
+    ON frontier.owning_session_id = call.session_id
+   AND frontier.context_frontier_id = call.context_frontier_id
+ WHERE call.model_call_id = $1
+"#,
+    )
+    .bind(call.into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(SessionTimelineCorruption::MissingDetailRecord)?;
+    Ok(ModelDetailRow {
+        model_identity_id: row
+            .try_get::<uuid::Uuid, _>("resolved_provider_model_identity_id")?
+            .to_string(),
+        request_context_items: nonnegative(row.try_get("member_count")?, "context item count")?,
+        response: row.try_get("response_text")?,
+        usage: TimelineModelUsage {
+            input_tokens: optional_nonnegative(row.try_get("usage_input_tokens")?, "input usage")?,
+            output_tokens: optional_nonnegative(
+                row.try_get("usage_output_tokens")?,
+                "output usage",
+            )?,
+            cache_creation_input_tokens: optional_nonnegative(
+                row.try_get("usage_cache_creation_input_tokens")?,
+                "cache creation usage",
+            )?,
+            cache_read_input_tokens: optional_nonnegative(
+                row.try_get("usage_cache_read_input_tokens")?,
+                "cache read usage",
+            )?,
+        },
+        cause_code: row.try_get("terminal_provider_failure_cause")?,
+    })
+}
+
+fn dispatched_event_kind(kind: &DispatchedOutboxEventKind) -> SessionTimelineEventKind {
+    match kind {
+        DispatchedOutboxEventKind::SessionCreated => SessionTimelineEventKind::SessionCreated,
+        DispatchedOutboxEventKind::SessionModelSettingsChanged(_) => {
+            SessionTimelineEventKind::SessionModelSettingsChanged
+        }
+        DispatchedOutboxEventKind::TurnModelSettingsResolved(_) => {
+            SessionTimelineEventKind::TurnModelSettingsResolved
+        }
+        DispatchedOutboxEventKind::InputAccepted { .. } => SessionTimelineEventKind::InputAccepted,
+        DispatchedOutboxEventKind::GoalTurnRetired { .. } => {
+            SessionTimelineEventKind::GoalTurnRetired
+        }
+        DispatchedOutboxEventKind::TurnActivated { .. } => SessionTimelineEventKind::TurnActivated,
+        DispatchedOutboxEventKind::TurnFailed { .. } => SessionTimelineEventKind::TurnFailed,
+        DispatchedOutboxEventKind::ModelCallTransition { .. } => {
+            SessionTimelineEventKind::ModelCallTransition
+        }
+        DispatchedOutboxEventKind::ToolBatchTransition { .. } => {
+            SessionTimelineEventKind::ToolBatchTransition
+        }
+        DispatchedOutboxEventKind::ToolApprovalDecided { .. } => {
+            SessionTimelineEventKind::ToolApprovalDecided
+        }
+        DispatchedOutboxEventKind::ContextCompacted { .. } => {
+            SessionTimelineEventKind::ContextCompacted
+        }
+        DispatchedOutboxEventKind::TurnCompleted { .. } => SessionTimelineEventKind::TurnCompleted,
+        DispatchedOutboxEventKind::TurnRefused { .. } => SessionTimelineEventKind::TurnRefused,
+        DispatchedOutboxEventKind::TurnCancelled { .. } => SessionTimelineEventKind::TurnCancelled,
+        DispatchedOutboxEventKind::TurnReconciliationRequired { .. } => {
+            SessionTimelineEventKind::TurnReconciliationRequired
+        }
+        DispatchedOutboxEventKind::RunnerStateTransition { .. } => {
+            SessionTimelineEventKind::RunnerStateTransition
+        }
+        DispatchedOutboxEventKind::DelegationUpdate(_) => {
+            SessionTimelineEventKind::DelegationUpdate
+        }
+        DispatchedOutboxEventKind::DelegationWake(_) => SessionTimelineEventKind::DelegationWake,
+    }
+}
+
+const fn model_call_state(state: DispatchedModelCallState) -> TimelineModelCallState {
+    match state {
+        DispatchedModelCallState::Prepared => TimelineModelCallState::Prepared,
+        DispatchedModelCallState::InFlight => TimelineModelCallState::InFlight,
+        DispatchedModelCallState::CancellationRequested => {
+            TimelineModelCallState::CancellationRequested
+        }
+        DispatchedModelCallState::Terminal(disposition) => {
+            TimelineModelCallState::Terminal(match disposition {
+                DispatchedModelCallDisposition::Completed => {
+                    TimelineModelCallDisposition::Completed
+                }
+                DispatchedModelCallDisposition::KnownFailed => {
+                    TimelineModelCallDisposition::KnownFailed
+                }
+                DispatchedModelCallDisposition::Refused => TimelineModelCallDisposition::Refused,
+                DispatchedModelCallDisposition::Cancelled => {
+                    TimelineModelCallDisposition::Cancelled
+                }
+                DispatchedModelCallDisposition::Ambiguous => {
+                    TimelineModelCallDisposition::Ambiguous
+                }
+            })
+        }
+    }
+}
+
+fn optional_nonnegative(
+    value: Option<Decimal>,
+    field: &'static str,
+) -> Result<Option<u64>, SessionTimelineCorruption> {
+    value.map(|value| nonnegative(value, field)).transpose()
 }
 
 const DESCRIPTOR_SQL: &str = r#"
@@ -455,6 +1151,65 @@ mod tests {
         assert!(matches!(
             decode_kind("future_event"),
             Err(SessionTimelineCorruption::UnsupportedEventKind(_))
+        ));
+    }
+
+    #[test]
+    fn detail_excerpt_continuation_preserves_utf8_boundaries() {
+        let address =
+            TimelineAddress::new(NonZeroU64::new(7).expect("fixture address is positive"));
+        let content = "aéz";
+        let first_expected = "aé";
+        let second_expected = "z";
+        let mut first_budget = 3;
+        let first = excerpt_text(
+            content,
+            address,
+            TimelineBodyField::InputText,
+            0,
+            0,
+            &mut first_budget,
+        )
+        .expect("the first excerpt is valid");
+        let continuation = first.continuation.expect("the body explicitly continues");
+        let mut second_budget = 1;
+        let second = excerpt_text(
+            content,
+            address,
+            TimelineBodyField::InputText,
+            0,
+            continuation.offset_bytes,
+            &mut second_budget,
+        )
+        .expect("the continuation begins on a character boundary");
+
+        assert_eq!(first.text, first_expected);
+        assert_eq!(continuation.offset_bytes, first_expected.len() as u64);
+        assert_eq!(second.text, second_expected);
+        assert_eq!(second.total_bytes, content.len() as u64);
+        assert_eq!(second.continuation, None);
+    }
+
+    #[test]
+    fn detail_excerpt_rejects_a_mid_character_cursor() {
+        let address =
+            TimelineAddress::new(NonZeroU64::new(8).expect("fixture address is positive"));
+        let mut budget = 4;
+        let error = excerpt_text(
+            "é",
+            address,
+            TimelineBodyField::InputText,
+            0,
+            1,
+            &mut budget,
+        )
+        .expect_err("a continuation cannot split a UTF-8 character");
+
+        assert!(matches!(
+            error,
+            SessionTimelineRepositoryError::Corruption(
+                SessionTimelineCorruption::InvalidDetailCursor
+            )
         ));
     }
 }

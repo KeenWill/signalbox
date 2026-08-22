@@ -9,7 +9,10 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use signalbox_application::{max_timeline_window_bytes, max_timeline_window_items};
+use signalbox_application::{
+    max_timeline_detail_bytes, max_timeline_detail_items, max_timeline_window_bytes,
+    max_timeline_window_items,
+};
 
 /// Exact browser HTTP contract version served by this daemon build.
 pub const WEB_CONTRACT_VERSION: &str = "1";
@@ -43,6 +46,8 @@ pub struct WebContractCapabilities {
     pub ndjson_streaming: bool,
     /// Stable bounded session descriptors and historical windows are available.
     pub bounded_session_timeline: bool,
+    /// Typed item, turn, and contiguous-region detail reads are available.
+    pub bounded_session_timeline_detail: bool,
 }
 
 /// Effective hard limits clients must honor for this contract version.
@@ -57,6 +62,10 @@ pub struct WebContractLimits {
     pub max_timeline_window_items: u32,
     /// Maximum projected structured item bytes in one timeline window.
     pub max_timeline_window_bytes: u32,
+    /// Maximum detailed timeline records in one response.
+    pub max_timeline_detail_items: u32,
+    /// Maximum projected typed-body bytes in one detail response.
+    pub max_timeline_detail_bytes: u32,
 }
 
 /// Response from the contract bootstrap endpoint.
@@ -85,12 +94,15 @@ impl WebContractBootstrap {
                 same_origin_json_mutations: true,
                 ndjson_streaming: true,
                 bounded_session_timeline: true,
+                bounded_session_timeline_detail: true,
             },
             limits: WebContractLimits {
                 max_json_body_bytes: MAX_JSON_BODY_BYTES as u32,
                 max_ndjson_item_bytes: MAX_NDJSON_ITEM_BYTES as u32,
                 max_timeline_window_items: u32::from(max_timeline_window_items()),
                 max_timeline_window_bytes: max_timeline_window_bytes(),
+                max_timeline_detail_items: u32::from(max_timeline_detail_items()),
+                max_timeline_detail_bytes: max_timeline_detail_bytes(),
             },
         }
     }
@@ -189,6 +201,141 @@ pub struct WebSessionTimelineWindow {
     pub continuation_after: Option<WebTimelineAddress>,
 }
 
+/// Text-bearing field within one typed timeline body.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineBodyField {
+    InputText,
+    ModelResponse,
+}
+
+/// Exact continuation within an oversized typed body.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineBodyContinuation {
+    pub address: WebTimelineAddress,
+    pub field: WebTimelineBodyField,
+    pub member_index: u32,
+    pub offset_bytes: String,
+}
+
+/// Bounded UTF-8 excerpt with explicit completeness evidence.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineTextExcerpt {
+    pub text: String,
+    pub offset_bytes: String,
+    pub total_bytes: String,
+    pub continuation: Option<WebTimelineBodyContinuation>,
+}
+
+/// Reference-only blob fact carried without blob bytes.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineBlobReference {
+    pub blob_id: String,
+    pub length_bytes: String,
+    pub media_type: Option<String>,
+}
+
+/// Closed model-call lifecycle checkpoint with terminal disposition in-band.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineModelCallState {
+    Prepared,
+    InFlight,
+    CancellationRequested,
+    Terminal {
+        disposition: WebTimelineModelCallDisposition,
+    },
+}
+
+/// Closed terminal model-call disposition.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineModelCallDisposition {
+    Completed,
+    KnownFailed,
+    Refused,
+    Cancelled,
+    Ambiguous,
+}
+
+/// Independently optional provider-reported usage counts.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineModelUsage {
+    pub input_tokens: Option<String>,
+    pub output_tokens: Option<String>,
+    pub cache_creation_input_tokens: Option<String>,
+    pub cache_read_input_tokens: Option<String>,
+}
+
+/// Closed turn lifecycle boundary.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineTurnLifecycleKind {
+    Activated,
+    Terminalized,
+}
+
+/// Typed browser body, distinct from application and persistence projections.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebSessionTimelineDetailBody {
+    UserInput {
+        turn_id: String,
+        text: WebTimelineTextExcerpt,
+        attachments: Vec<WebTimelineBlobReference>,
+    },
+    ModelCall {
+        turn_id: String,
+        model_call_id: String,
+        state: WebTimelineModelCallState,
+        model_identity_id: String,
+        request_context_items: String,
+        response: Option<WebTimelineTextExcerpt>,
+        usage: WebTimelineModelUsage,
+        cause_code: Option<String>,
+    },
+    TurnLifecycle {
+        turn_id: String,
+        lifecycle: WebTimelineTurnLifecycleKind,
+        cause_code: String,
+    },
+    EventFact {
+        kind: WebSessionTimelineEventKind,
+    },
+}
+
+/// One typed body at a stable timeline address.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTimelineDetail {
+    pub address: WebTimelineAddress,
+    pub kind: WebSessionTimelineEventKind,
+    pub body: WebSessionTimelineDetailBody,
+    pub projected_body_bytes: u32,
+}
+
+/// Explicit next position after a bounded detail response.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineDetailContinuation {
+    MoreAt { address: WebTimelineAddress },
+    MoreBody { body: WebTimelineBodyContinuation },
+}
+
+/// One bounded item, turn, or contiguous-region detail response.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTimelineDetailPage {
+    pub session_id: String,
+    pub items: Vec<WebSessionTimelineDetail>,
+    pub projected_body_bytes: u32,
+    pub continuation: Option<WebTimelineDetailContinuation>,
+}
+
 /// Layer that owns one browser API failure.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -272,6 +419,8 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
         canonical_schema(schemars::schema_for!(WebSessionTimelineDescriptor).to_value());
     let window_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
+    let detail_schema =
+        canonical_schema(schemars::schema_for!(WebSessionTimelineDetailPage).to_value());
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -289,6 +438,7 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
                 &error_schema,
                 &descriptor_schema,
                 &window_schema,
+                &detail_schema,
             )?,
         },
         GeneratedArtifact {
@@ -299,6 +449,7 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
                 &error_schema,
                 &descriptor_schema,
                 &window_schema,
+                &detail_schema,
             )?,
         },
         GeneratedArtifact {
@@ -322,6 +473,7 @@ fn runtime_module(
     error_schema: &Value,
     descriptor_schema: &Value,
     window_schema: &Value,
+    detail_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut schemas = json!({
         "WebContractBootstrap": bootstrap_schema,
@@ -329,6 +481,7 @@ fn runtime_module(
         "WebApiErrorResponse": error_schema,
         "WebSessionTimelineDescriptor": descriptor_schema,
         "WebSessionTimelineWindow": window_schema,
+        "WebSessionTimelineDetailPage": detail_schema,
     });
     schemas.sort_all_objects();
     let schemas = serde_json::to_string_pretty(&schemas)
@@ -502,6 +655,11 @@ export function decodeWebSessionTimelineWindow(value) {{
   assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "timeline_window");
   return value;
 }}
+
+export function decodeWebSessionTimelineDetailPage(value) {{
+  assertSchema(schemas.WebSessionTimelineDetailPage, schemas.WebSessionTimelineDetailPage, value, "timeline_detail_page");
+  return value;
+}}
 "##,
         contract_name = WEB_CONTRACT_NAME,
         contract_version = WEB_CONTRACT_VERSION,
@@ -514,6 +672,7 @@ fn declaration_module(
     error_schema: &Value,
     descriptor_schema: &Value,
     window_schema: &Value,
+    detail_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut definitions = BTreeMap::new();
     let bootstrap = typescript_type(bootstrap_schema, bootstrap_schema, &mut definitions)?;
@@ -521,6 +680,7 @@ fn declaration_module(
     let error = typescript_type(error_schema, error_schema, &mut definitions)?;
     let descriptor = typescript_type(descriptor_schema, descriptor_schema, &mut definitions)?;
     let window = typescript_type(window_schema, window_schema, &mut definitions)?;
+    let detail = typescript_type(detail_schema, detail_schema, &mut definitions)?;
     let mut output = String::from(
         "// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.\n// Do not edit by hand.\n\n",
     );
@@ -538,8 +698,11 @@ fn declaration_module(
     output.push_str(&format!(
         "export type WebSessionTimelineWindow = {window};\n\n"
     ));
+    output.push_str(&format!(
+        "export type WebSessionTimelineDetailPage = {detail};\n\n"
+    ));
     output.push_str(
-        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\n",
+        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\nexport function decodeWebSessionTimelineDetailPage(value: unknown): WebSessionTimelineDetailPage;\n",
     );
     Ok(output)
 }
@@ -626,21 +789,16 @@ fn typescript_object(
     schema: &Value,
     definitions: &mut BTreeMap<String, String>,
 ) -> Result<String, GenerateWebContractError> {
-    let properties = schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
-    let required = schema
-        .get("required")
-        .and_then(Value::as_array)
-        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    let properties = schema.get("properties").and_then(Value::as_object);
+    let required = schema.get("required").and_then(Value::as_array);
     let mut output = String::from("{\n");
-    for (name, property) in properties {
-        let optional = if required.iter().any(|required| required == name) {
-            ""
-        } else {
-            "?"
-        };
+    for (name, property) in properties.into_iter().flatten() {
+        let optional =
+            if required.is_some_and(|required| required.iter().any(|required| required == name)) {
+                ""
+            } else {
+                "?"
+            };
         output.push_str(&format!(
             "  readonly {name}{optional}: {};\n",
             typescript_type(root, property, definitions)?

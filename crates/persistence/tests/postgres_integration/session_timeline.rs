@@ -7,7 +7,10 @@
 
 use std::error::Error;
 
-use signalbox_application::{TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits};
+use signalbox_application::{
+    SessionTimelineDetailBody, TimelineContinuation, TimelineDetailLimits, TimelineWindowAnchor,
+    TimelineWindowLimits,
+};
 use signalbox_domain::{
     CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
@@ -115,6 +118,47 @@ async fn descriptor_and_windows_share_one_stable_creation_address() -> Result<()
         after_latest.continuation_after,
         TimelineContinuation::Exhausted
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn item_and_region_details_share_the_stable_creation_address() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x994);
+    create_session(&pool, identity).await?;
+    let repository = SessionTimelineRepository::new(pool.clone());
+    let descriptor = repository
+        .read_descriptor(identity)
+        .await?
+        .expect("created session has a descriptor");
+    let address = descriptor
+        .bounds
+        .first
+        .expect("created session has a first address");
+    let limits = TimelineDetailLimits::new(1, 256).expect("fixture limits are bounded");
+    let item = repository
+        .read_item_details(identity, address, None, limits)
+        .await?
+        .expect("the creation detail exists");
+    let region = repository
+        .read_region_details(identity, address, address, None, limits)
+        .await?
+        .expect("the creation region exists");
+
+    assert_eq!(item.items.len(), usize::from(limits.max_items()));
+    assert_eq!(item.items[0].address, address);
+    assert!(matches!(
+        item.items[0].body,
+        SessionTimelineDetailBody::EventFact { .. }
+    ));
+    assert!(item.projected_body_bytes > 0);
+    assert!(item.projected_body_bytes <= limits.max_projected_bytes());
+    assert_eq!(item.continuation, None);
+    assert_eq!(region, item);
 
     pool.close().await;
     drop(container);

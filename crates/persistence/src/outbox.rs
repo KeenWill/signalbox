@@ -739,7 +739,7 @@ async fn load_allocated_sequence(
         .map_err(Into::into)
 }
 
-async fn load_event(
+pub(crate) async fn load_event(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     expected_sequence: u64,
 ) -> Result<(u64, bool, Option<DispatchedOutboxEvent>), OutboxDispatchError> {

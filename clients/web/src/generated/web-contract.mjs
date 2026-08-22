@@ -73,6 +73,10 @@ const schemas = {
             "description": "Stable bounded session descriptors and historical windows are available.",
             "type": "boolean"
           },
+          "bounded_session_timeline_detail": {
+            "description": "Typed item, turn, and contiguous-region detail reads are available.",
+            "type": "boolean"
+          },
           "ndjson_streaming": {
             "description": "Incremental response items use newline-delimited JSON.",
             "type": "boolean"
@@ -86,7 +90,8 @@ const schemas = {
           "bounded_json",
           "same_origin_json_mutations",
           "ndjson_streaming",
-          "bounded_session_timeline"
+          "bounded_session_timeline",
+          "bounded_session_timeline_detail"
         ],
         "type": "object"
       },
@@ -125,6 +130,18 @@ const schemas = {
             "minimum": 0,
             "type": "integer"
           },
+          "max_timeline_detail_bytes": {
+            "description": "Maximum projected typed-body bytes in one detail response.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_timeline_detail_items": {
+            "description": "Maximum detailed timeline records in one response.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "max_timeline_window_bytes": {
             "description": "Maximum projected structured item bytes in one timeline window.",
             "format": "uint32",
@@ -142,7 +159,9 @@ const schemas = {
           "max_json_body_bytes",
           "max_ndjson_item_bytes",
           "max_timeline_window_items",
-          "max_timeline_window_bytes"
+          "max_timeline_window_bytes",
+          "max_timeline_detail_items",
+          "max_timeline_detail_bytes"
         ],
         "type": "object"
       }
@@ -288,6 +307,474 @@ const schemas = {
       "observed_through"
     ],
     "title": "WebSessionTimelineDescriptor",
+    "type": "object"
+  },
+  "WebSessionTimelineDetailPage": {
+    "$defs": {
+      "WebSessionTimelineDetail": {
+        "additionalProperties": false,
+        "description": "One typed body at a stable timeline address.",
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/WebTimelineAddress"
+          },
+          "body": {
+            "$ref": "#/$defs/WebSessionTimelineDetailBody"
+          },
+          "kind": {
+            "$ref": "#/$defs/WebSessionTimelineEventKind"
+          },
+          "projected_body_bytes": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "address",
+          "kind",
+          "body",
+          "projected_body_bytes"
+        ],
+        "type": "object"
+      },
+      "WebSessionTimelineDetailBody": {
+        "description": "Typed browser body, distinct from application and persistence projections.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "attachments": {
+                "items": {
+                  "$ref": "#/$defs/WebTimelineBlobReference"
+                },
+                "type": "array"
+              },
+              "text": {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              "turn_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "user_input",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "turn_id",
+              "text",
+              "attachments"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cause_code": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model_call_id": {
+                "type": "string"
+              },
+              "model_identity_id": {
+                "type": "string"
+              },
+              "request_context_items": {
+                "type": "string"
+              },
+              "response": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineTextExcerpt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "$ref": "#/$defs/WebTimelineModelCallState"
+              },
+              "turn_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "model_call",
+                "type": "string"
+              },
+              "usage": {
+                "$ref": "#/$defs/WebTimelineModelUsage"
+              }
+            },
+            "required": [
+              "type",
+              "turn_id",
+              "model_call_id",
+              "state",
+              "model_identity_id",
+              "request_context_items",
+              "usage"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cause_code": {
+                "type": "string"
+              },
+              "lifecycle": {
+                "$ref": "#/$defs/WebTimelineTurnLifecycleKind"
+              },
+              "turn_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "turn_lifecycle",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "turn_id",
+              "lifecycle",
+              "cause_code"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/WebSessionTimelineEventKind"
+              },
+              "type": {
+                "const": "event_fact",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebSessionTimelineEventKind": {
+        "description": "Closed durable event categories in the browser timeline foundation.",
+        "enum": [
+          "session_created",
+          "session_model_settings_changed",
+          "turn_model_settings_resolved",
+          "input_accepted",
+          "goal_turn_retired",
+          "turn_activated",
+          "turn_failed",
+          "model_call_transition",
+          "tool_batch_transition",
+          "tool_approval_decided",
+          "context_compacted",
+          "turn_completed",
+          "turn_refused",
+          "turn_cancelled",
+          "turn_reconciliation_required",
+          "runner_state_transition",
+          "delegation_update",
+          "delegation_wake"
+        ],
+        "type": "string"
+      },
+      "WebTimelineAddress": {
+        "additionalProperties": false,
+        "description": "Stable browser-visible location of one durable session event.",
+        "properties": {
+          "event_sequence": {
+            "description": "Positive global durable event sequence encoded losslessly for JavaScript.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_sequence"
+        ],
+        "type": "object"
+      },
+      "WebTimelineBlobReference": {
+        "additionalProperties": false,
+        "description": "Reference-only blob fact carried without blob bytes.",
+        "properties": {
+          "blob_id": {
+            "type": "string"
+          },
+          "length_bytes": {
+            "type": "string"
+          },
+          "media_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "blob_id",
+          "length_bytes"
+        ],
+        "type": "object"
+      },
+      "WebTimelineBodyContinuation": {
+        "additionalProperties": false,
+        "description": "Exact continuation within an oversized typed body.",
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/WebTimelineAddress"
+          },
+          "field": {
+            "$ref": "#/$defs/WebTimelineBodyField"
+          },
+          "member_index": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "offset_bytes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "address",
+          "field",
+          "member_index",
+          "offset_bytes"
+        ],
+        "type": "object"
+      },
+      "WebTimelineBodyField": {
+        "description": "Text-bearing field within one typed timeline body.",
+        "enum": [
+          "input_text",
+          "model_response"
+        ],
+        "type": "string"
+      },
+      "WebTimelineDetailContinuation": {
+        "description": "Explicit next position after a bounded detail response.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "address": {
+                "$ref": "#/$defs/WebTimelineAddress"
+              },
+              "type": {
+                "const": "more_at",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "address"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "body": {
+                "$ref": "#/$defs/WebTimelineBodyContinuation"
+              },
+              "type": {
+                "const": "more_body",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "body"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineModelCallDisposition": {
+        "description": "Closed terminal model-call disposition.",
+        "enum": [
+          "completed",
+          "known_failed",
+          "refused",
+          "cancelled",
+          "ambiguous"
+        ],
+        "type": "string"
+      },
+      "WebTimelineModelCallState": {
+        "description": "Closed model-call lifecycle checkpoint with terminal disposition in-band.",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "prepared",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "in_flight",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "cancellation_requested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "$ref": "#/$defs/WebTimelineModelCallDisposition"
+              },
+              "type": {
+                "const": "terminal",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "disposition"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineModelUsage": {
+        "additionalProperties": false,
+        "description": "Independently optional provider-reported usage counts.",
+        "properties": {
+          "cache_creation_input_tokens": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cache_read_input_tokens": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_tokens": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output_tokens": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WebTimelineTextExcerpt": {
+        "additionalProperties": false,
+        "description": "Bounded UTF-8 excerpt with explicit completeness evidence.",
+        "properties": {
+          "continuation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineBodyContinuation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "offset_bytes": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "total_bytes": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "offset_bytes",
+          "total_bytes"
+        ],
+        "type": "object"
+      },
+      "WebTimelineTurnLifecycleKind": {
+        "description": "Closed turn lifecycle boundary.",
+        "enum": [
+          "activated",
+          "terminalized"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One bounded item, turn, or contiguous-region detail response.",
+    "properties": {
+      "continuation": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebTimelineDetailContinuation"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "items": {
+        "items": {
+          "$ref": "#/$defs/WebSessionTimelineDetail"
+        },
+        "type": "array"
+      },
+      "projected_body_bytes": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "items",
+      "projected_body_bytes"
+    ],
+    "title": "WebSessionTimelineDetailPage",
     "type": "object"
   },
   "WebSessionTimelineWindow": {
@@ -564,5 +1051,10 @@ export function decodeWebSessionTimelineDescriptor(value) {
 
 export function decodeWebSessionTimelineWindow(value) {
   assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "timeline_window");
+  return value;
+}
+
+export function decodeWebSessionTimelineDetailPage(value) {
+  assertSchema(schemas.WebSessionTimelineDetailPage, schemas.WebSessionTimelineDetailPage, value, "timeline_detail_page");
   return value;
 }
