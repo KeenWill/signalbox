@@ -660,12 +660,11 @@ fn invalid_timeline_query() -> Response {
 }
 
 fn repository_projection_error(error: SessionTimelineRepositoryError) -> Response {
-    if matches!(error, SessionTimelineRepositoryError::InvalidDetailQuery) {
-        return invalid_timeline_detail_query();
-    }
     let failure_class = match &error {
+        SessionTimelineRepositoryError::InvalidDetailQuery => {
+            return invalid_timeline_detail_query();
+        }
         SessionTimelineRepositoryError::Database(_) => "infrastructure",
-        SessionTimelineRepositoryError::InvalidDetailQuery => unreachable!("handled above"),
         SessionTimelineRepositoryError::Corruption(_) => "fail_closed_corruption",
         SessionTimelineRepositoryError::Outbox(OutboxDispatchError::Database(_)) => {
             "infrastructure"
