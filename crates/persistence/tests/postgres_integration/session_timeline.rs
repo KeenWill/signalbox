@@ -214,6 +214,33 @@ async fn empty_projection_facts_are_corruption() -> Result<(), Box<dyn Error>> {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn projection_count_larger_than_address_span_is_corruption() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x996);
+    create_session(&pool, identity).await?;
+    sqlx::query("UPDATE session_timeline_fact SET item_count = 2 WHERE session_id = $1")
+        .bind(identity.into_uuid())
+        .execute(&pool)
+        .await?;
+    let error = SessionTimelineRepository::new(pool.clone())
+        .read_descriptor(identity)
+        .await
+        .expect_err("a count larger than the address span is durable corruption");
+
+    assert!(matches!(
+        error,
+        SessionTimelineRepositoryError::Corruption(SessionTimelineCorruption::InvalidOrdinal(
+            "timeline bounds"
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn retired_queued_goal_turn_is_removed_from_work_facts() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let identity = session(0x994);

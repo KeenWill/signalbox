@@ -241,7 +241,13 @@ export class BoundedSessionHistory {
     const latestAddress = decimalAddress(descriptor.latest_address.event_sequence)
     const observedThrough = decimalU64(descriptor.observed_through)
     const itemCount = decimalU64(descriptor.sizes.item_count)
-    if (itemCount === 0n || firstAddress > latestAddress || latestAddress > observedThrough) {
+    const addressSpan = latestAddress - firstAddress + 1n
+    if (
+      itemCount === 0n ||
+      firstAddress > latestAddress ||
+      latestAddress > observedThrough ||
+      itemCount > addressSpan
+    ) {
       throw new TypeError('descriptor timeline boundaries are contradictory')
     }
     decimalU64(descriptor.sizes.projected_text_bytes)
