@@ -78,7 +78,7 @@ export function AttentionSurface({
         liveProjection.current = projection
         void queryClient.cancelQueries({ queryKey: queryKey(null), exact: true })
         queryClient.setQueryData(queryKey(null), projection)
-        return projection
+        return { snapshot: projection, accepted: projection === snapshot }
       },
     })
     return () => {
@@ -162,6 +162,11 @@ export function AttentionSurface({
             <button type="button" onClick={() => void attention.refetch()}>
               Retry
             </button>
+            {after && (
+              <button type="button" onClick={returnToLivePage}>
+                Return to live page
+              </button>
+            )}
           </div>
         </section>
       )}

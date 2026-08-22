@@ -97,6 +97,32 @@ const installAttentionReplacementScenario = async (page: Page) => {
   await page.route('**/api/attention', (route) => route.fulfill({ json: nextAttentionFixture }))
 }
 
+const installFailedAttentionPageScenario = async (page: Page) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/attention**', (route) => {
+    const requestUrl = new URL(route.request().url())
+    if (requestUrl.pathname.endsWith('/follow')) {
+      return route.fulfill({
+        body: `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n`,
+        contentType: 'application/x-ndjson',
+      })
+    }
+    if (requestUrl.searchParams.has('after_session_id')) {
+      return route.fulfill({
+        json: {
+          error: {
+            code: 'attention_projection_unavailable',
+            kind: 'application',
+            message: 'the requested page is unavailable',
+          },
+        },
+        status: 503,
+      })
+    }
+    return route.fulfill({ json: attentionFixture })
+  })
+}
+
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
   page.on('console', (message) => {
@@ -154,6 +180,18 @@ test('replaces the current bounded page instead of accumulating attention histor
     }),
   ).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('returns to the live page after a paged read fails', async ({ page }) => {
+  await installFailedAttentionPageScenario(page)
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: /Next page/ }).click()
+  await expect(page.getByRole('heading', { name: 'Attention could not be read' })).toBeVisible()
+  await page.getByRole('button', { name: 'Return to live page' }).click()
+
+  await expect(page.getByText(approvalSessionId)).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Attention could not be read' })).toBeHidden()
 })
 
 test('closes the inspector with global Escape after focus leaves it', async ({ page }) => {

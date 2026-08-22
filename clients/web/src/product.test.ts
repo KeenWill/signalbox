@@ -18,6 +18,7 @@ const bootstrapFixture = {
 } as const
 
 const sessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
+const laterSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6e'
 const attentionFixture = {
   continuation_after_session_id: sessionId,
   cursor: '17',
@@ -207,6 +208,57 @@ describe('SameOriginProductTransport', () => {
 
     await expect(events.next()).rejects.toThrow(
       'attention snapshot contains duplicate session identities',
+    )
+  })
+
+  it('rejects attention summaries that are not ordered by session identity', async () => {
+    const unordered = {
+      ...attentionFixture,
+      summaries: [
+        { ...attentionFixture.summaries[0], session_id: laterSessionId },
+        attentionFixture.summaries[0],
+      ],
+      continuation_after_session_id: sessionId,
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(unordered))),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
+      'attention snapshot summaries are not ordered by session identity',
+    )
+  })
+
+  it('rejects a continuation that does not match the last session identity', async () => {
+    const incoherent = { ...attentionFixture, continuation_after_session_id: laterSessionId }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(incoherent))),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
+      'attention snapshot continuation does not match its last session identity',
+    )
+  })
+
+  it('classifies an attention response-body read failure as a transport failure', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      pull() {
+        throw new TypeError('connection reset')
+      },
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body)),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).rejects.toEqual(
+      new ProductRequestError(
+        'transport_unavailable',
+        'transport',
+        'Network request failed while reading the attention snapshot.',
+      ),
     )
   })
 

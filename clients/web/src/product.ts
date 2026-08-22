@@ -22,6 +22,21 @@ const validateAttentionSnapshot = (snapshot: WebAttentionSnapshot): WebAttention
   if (sessionIds.size !== snapshot.summaries.length) {
     throw new TypeError('attention snapshot contains duplicate session identities')
   }
+  for (let index = 1; index < snapshot.summaries.length; index += 1) {
+    const previous = snapshot.summaries[index - 1]
+    const current = snapshot.summaries[index]
+    if (!previous || !current) continue
+    if (previous.session_id >= current.session_id) {
+      throw new TypeError('attention snapshot summaries are not ordered by session identity')
+    }
+  }
+  const lastSessionId = snapshot.summaries.at(-1)?.session_id ?? null
+  if (
+    snapshot.continuation_after_session_id !== null &&
+    snapshot.continuation_after_session_id !== lastSessionId
+  ) {
+    throw new TypeError('attention snapshot continuation does not match its last session identity')
+  }
   return snapshot
 }
 
@@ -32,6 +47,7 @@ const readBoundedJson = async (
   response: Response,
   maximumBytes: number,
   resource: string,
+  signal?: AbortSignal,
 ): Promise<unknown> => {
   if (!response.body) throw new TypeError(`${resource} response has no body`)
   const reader = response.body.getReader()
@@ -39,7 +55,17 @@ const readBoundedJson = async (
   let byteLength = 0
   try {
     while (true) {
-      const chunk = await reader.read()
+      let chunk: ReadableStreamReadResult<Uint8Array>
+      try {
+        chunk = await reader.read()
+      } catch (error) {
+        if (signal?.aborted) throw error
+        throw new ProductRequestError(
+          'transport_unavailable',
+          'transport',
+          `Network request failed while reading the ${resource}.`,
+        )
+      }
       if (chunk.done) break
       byteLength += chunk.value.byteLength
       if (byteLength > maximumBytes) {
@@ -62,6 +88,7 @@ const readBoundedJson = async (
 
 const decodeAttentionLines = async function* (
   body: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
 ): AsyncGenerator<WebAttentionStreamEvent> {
   const reader = body.getReader()
   const decoder = new TextDecoder('utf-8', { fatal: true })
@@ -69,7 +96,17 @@ const decodeAttentionLines = async function* (
   let completed = false
   try {
     while (true) {
-      const chunk = await reader.read()
+      let chunk: ReadableStreamReadResult<Uint8Array>
+      try {
+        chunk = await reader.read()
+      } catch (error) {
+        if (signal?.aborted) throw error
+        throw new ProductRequestError(
+          'transport_unavailable',
+          'transport',
+          'Network request failed while reading the attention stream.',
+        )
+      }
       if (chunk.done) {
         completed = true
         break
@@ -150,7 +187,7 @@ export class SameOriginProductTransport implements ProductTransport {
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
     return decodeWebContractBootstrap(
-      await readBoundedJson(response, MAX_BOOTSTRAP_BYTES, 'bootstrap response'),
+      await readBoundedJson(response, MAX_BOOTSTRAP_BYTES, 'bootstrap response', signal),
     )
   }
 
@@ -166,9 +203,9 @@ export class SameOriginProductTransport implements ProductTransport {
       credentials: 'same-origin',
       signal,
     })
-    if (!response.ok) throw await this.requestError(response)
+    if (!response.ok) throw await this.requestError(response, signal)
     return decodeBoundedAttentionSnapshot(
-      await readBoundedJson(response, MAX_ATTENTION_SNAPSHOT_BYTES, 'attention snapshot'),
+      await readBoundedJson(response, MAX_ATTENTION_SNAPSHOT_BYTES, 'attention snapshot', signal),
     )
   }
 
@@ -178,14 +215,17 @@ export class SameOriginProductTransport implements ProductTransport {
       credentials: 'same-origin',
       signal,
     })
-    if (!response.ok) throw await this.requestError(response)
+    if (!response.ok) throw await this.requestError(response, signal)
     if (!response.body) throw new TypeError('attention stream response has no body')
-    yield* decodeAttentionLines(response.body)
+    yield* decodeAttentionLines(response.body, signal)
   }
 
-  private async requestError(response: Response): Promise<ProductRequestError> {
+  private async requestError(
+    response: Response,
+    signal?: AbortSignal,
+  ): Promise<ProductRequestError> {
     const failure = decodeWebApiErrorResponse(
-      await readBoundedJson(response, MAX_ATTENTION_SNAPSHOT_BYTES, 'error response'),
+      await readBoundedJson(response, MAX_ATTENTION_SNAPSHOT_BYTES, 'error response', signal),
     )
     return new ProductRequestError(failure.error.code, failure.error.kind, failure.error.message)
   }

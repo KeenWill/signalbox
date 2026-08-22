@@ -7,6 +7,11 @@ export type AttentionReduction =
   | { kind: 'projection'; snapshot: WebAttentionSnapshot }
   | { kind: 'resync' }
 
+export type AttentionProjectionAcceptance = {
+  snapshot: WebAttentionSnapshot
+  accepted: boolean
+}
+
 export const reduceAttentionEvent = (
   current: WebAttentionSnapshot | undefined,
   event: WebAttentionStreamEvent,
@@ -45,7 +50,7 @@ export const synchronizeAttention = async ({
   transport: ProductTransport
   signal: AbortSignal
   onPhase: (phase: AttentionSyncPhase) => void
-  onProjection: (snapshot: WebAttentionSnapshot) => WebAttentionSnapshot
+  onProjection: (snapshot: WebAttentionSnapshot) => AttentionProjectionAcceptance
 }): Promise<void> => {
   let resyncs = 0
   let projection: WebAttentionSnapshot | undefined
@@ -72,8 +77,9 @@ export const synchronizeAttention = async ({
           restart = true
           break
         }
-        projection = onProjection(reduction.snapshot)
-        if (event.kind === 'snapshot') resyncs = 0
+        const acceptance = onProjection(reduction.snapshot)
+        projection = acceptance.snapshot
+        if (event.kind === 'snapshot' && acceptance.accepted) resyncs = 0
         transition('live')
       }
       if (!restart) {
