@@ -199,6 +199,32 @@ describe('BoundedSessionHistory', () => {
     )
   })
 
+  it('rejects impossible advertised timeline ceilings', async () => {
+    const request = async () =>
+      new Response(
+        JSON.stringify({
+          contract: { name: 'signalbox.web-http', version: '1' },
+          capabilities: {
+            bounded_json: true,
+            same_origin_json_mutations: true,
+            ndjson_streaming: true,
+            bounded_session_timeline: true,
+          },
+          limits: {
+            max_json_body_bytes: 1024,
+            max_ndjson_item_bytes: 1024,
+            max_timeline_window_items: 0,
+            max_timeline_window_bytes: 255,
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+
+    await expect(HttpSessionTimelineSource.connect(request)).rejects.toThrow(
+      'timeline limits are invalid',
+    )
+  })
+
   it('does not expose mutable retained items', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const history = new BoundedSessionHistory(sessionId, scenario)
@@ -306,10 +332,66 @@ describe('BoundedSessionHistory', () => {
 
     await expect(
       new BoundedSessionHistory(sessionId, source).load(
-        { kind: 'first' },
+        { kind: 'around', eventSequence: '150' },
         { maxItems: 2, maxBytes: 256 },
       ),
     ).rejects.toThrow('returned boundary')
+  })
+
+  it('rejects a first window with a continuation before it', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '100' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 96,
+          },
+        ],
+        projected_structured_bytes: 96,
+        continuation_before: { event_sequence: '100' },
+        continuation_after: null,
+      }),
+    }
+
+    await expect(
+      new BoundedSessionHistory(sessionId, source).load(
+        { kind: 'first' },
+        { maxItems: 1, maxBytes: 256 },
+      ),
+    ).rejects.toThrow('cannot continue before')
+  })
+
+  it('rejects a latest window with a continuation after it', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '100' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 96,
+          },
+        ],
+        projected_structured_bytes: 96,
+        continuation_before: null,
+        continuation_after: { event_sequence: '100' },
+      }),
+    }
+
+    await expect(
+      new BoundedSessionHistory(sessionId, source).load(
+        { kind: 'latest' },
+        { maxItems: 1, maxBytes: 256 },
+      ),
+    ).rejects.toThrow('cannot continue after')
   })
 
   it('rejects a window on the wrong side of a strict anchor', async () => {

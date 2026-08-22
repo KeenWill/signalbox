@@ -138,6 +138,12 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     if (!bootstrap.capabilities.bounded_session_timeline) {
       throw new TypeError('bounded session timeline capability is unavailable')
     }
+    if (
+      bootstrap.limits.max_timeline_window_items < 1 ||
+      bootstrap.limits.max_timeline_window_bytes < 256
+    ) {
+      throw new TypeError('bounded session timeline limits are invalid')
+    }
     return new HttpSessionTimelineSource(bootstrap.limits, request)
   }
 
@@ -269,6 +275,12 @@ export class BoundedSessionHistory {
     }
     const firstItemAddress = window.items[0]?.address.event_sequence
     const lastItemAddress = window.items.at(-1)?.address.event_sequence
+    if (anchor.kind === 'first' && window.continuation_before) {
+      throw new TypeError('first timeline window cannot continue before its anchor')
+    }
+    if (anchor.kind === 'latest' && window.continuation_after) {
+      throw new TypeError('latest timeline window cannot continue after its anchor')
+    }
     if (window.continuation_before) {
       decimalAddress(window.continuation_before.event_sequence)
       if (window.continuation_before.event_sequence !== firstItemAddress) {
