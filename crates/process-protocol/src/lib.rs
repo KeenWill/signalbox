@@ -501,17 +501,17 @@ impl InputContent {
     }
 }
 
-// numeric-bound: ceiling - bounds retained parts in one user input
 /// Maximum number of ordered parts in one process-protocol user input.
+// numeric-bound: ceiling - bounds retained parts in one user input
 pub const MAX_USER_INPUT_PARTS: usize = signalbox_domain::UserContent::MAX_PARTS;
-// numeric-bound: ceiling - bounds aggregate retained user text
 /// Maximum aggregate UTF-8 bytes across process-protocol text parts.
+// numeric-bound: ceiling - bounds aggregate retained user text
 pub const MAX_USER_INPUT_TEXT_BYTES: usize = signalbox_domain::UserContent::MAX_TEXT_BYTES;
-// numeric-bound: ceiling - bounds retained attachment media types
 /// Maximum encoded bytes in one process-protocol attachment media type.
+// numeric-bound: ceiling - bounds retained attachment media types
 pub const MAX_USER_INPUT_MEDIA_TYPE_BYTES: usize = signalbox_domain::DeclaredMediaType::MAX_BYTES;
-// numeric-bound: ceiling - bounds retained attachment display filenames
 /// Maximum encoded bytes in one process-protocol attachment display filename.
+// numeric-bound: ceiling - bounds retained attachment display filenames
 pub const MAX_USER_INPUT_DISPLAY_FILENAME_BYTES: usize =
     signalbox_domain::AttachmentDisplayFilename::MAX_BYTES;
 
@@ -528,7 +528,7 @@ pub enum UserAttachmentKind {
 }
 
 /// One exact part in canonical ordered user input.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UserInputPart {
     /// Exact decoded text.
@@ -548,6 +548,32 @@ pub enum UserInputPart {
         #[serde(deserialize_with = "deserialize_required_nullable")]
         display_filename: Option<String>,
     },
+}
+
+impl fmt::Debug for UserInputPart {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text { .. } => formatter
+                .debug_struct("Text")
+                .field("text", &"<redacted>")
+                .finish(),
+            Self::Attachment {
+                digest,
+                kind,
+                media_type,
+                display_filename,
+            } => formatter
+                .debug_struct("Attachment")
+                .field("digest", digest)
+                .field("kind", kind)
+                .field("media_type", media_type)
+                .field(
+                    "display_filename",
+                    &display_filename.as_ref().map(|_| "<redacted>"),
+                )
+                .finish(),
+        }
+    }
 }
 
 /// Canonical nonempty ordered user-input parts array.
@@ -9562,6 +9588,31 @@ mod tests {
                 "\"service_tier\":{\"kind\":\"inherit\"}}}}\n"
             )
         );
+        Ok(())
+    }
+
+    #[test]
+    fn user_input_debug_redacts_content_bearing_values() -> Result<(), Box<dyn std::error::Error>> {
+        let private_text = "private user text";
+        let private_filename = "private-filename.txt";
+        let digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            .parse::<CanonicalBlobDigest>()?;
+        let content = UserInputContent::from_parts(vec![
+            UserInputPart::Text {
+                text: String::from(private_text),
+            },
+            UserInputPart::Attachment {
+                digest,
+                kind: UserAttachmentKind::File,
+                media_type: String::from("text/plain"),
+                display_filename: Some(String::from(private_filename)),
+            },
+        ]);
+
+        let debug = format!("{content:?}");
+        assert!(!debug.contains(private_text));
+        assert!(!debug.contains(private_filename));
+        assert!(debug.contains("<redacted>"));
         Ok(())
     }
 
