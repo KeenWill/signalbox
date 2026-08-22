@@ -82,6 +82,7 @@ const schemas = {
             "$ref": "#/$defs/WebBlobViewKind"
           },
           "media_type": {
+            "maxLength": 255,
             "type": "string"
           }
         },
@@ -236,6 +237,7 @@ const schemas = {
         "type": "string"
       },
       "declared_media_type": {
+        "maxLength": 255,
         "type": "string"
       },
       "digest": {
@@ -589,6 +591,14 @@ function parseCanonicalJson(source) {
         const spelling = source.slice(start, cursor);
         const decoded = JSON.parse(spelling);
         if (JSON.stringify(decoded) !== spelling) throw new TypeError();
+        for (let index = 0; index < decoded.length; index += 1) {
+          const unit = decoded.charCodeAt(index);
+          if (unit >= 0xd800 && unit <= 0xdbff) {
+            const next = decoded.charCodeAt(index + 1);
+            if (!(next >= 0xdc00 && next <= 0xdfff)) throw new TypeError();
+            index += 1;
+          } else if (unit >= 0xdc00 && unit <= 0xdfff) throw new TypeError();
+        }
         return decoded;
       } else cursor += 1;
     }
@@ -658,6 +668,16 @@ function assertDisplayFilename(value, path) {
   }
 }
 
+function assertMediaType(value, path) {
+  if (
+    typeof value !== "string" ||
+    utf8.encode(value).length > 255 ||
+    !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+\/[!#$%&'*+.^_`|~0-9A-Za-z-]+(?:[ \t]*;[ \t]*[!#$%&'*+.^_`|~0-9A-Za-z-]+=(?:[!#$%&'*+.^_`|~0-9A-Za-z-]+|"(?:[^"\\\r\n]|\\.)*"))*$/u.test(value)
+  ) {
+    fail(path, "a MIME value of at most 255 UTF-8 bytes");
+  }
+}
+
 function assertBlobDigest(value, path) {
   if (!/^sha256:[0-9a-f]{64}$/.test(value)) {
     fail(path, "a tagged lowercase SHA-256 digest");
@@ -689,6 +709,10 @@ function assertSameOriginBlobUrl(value, path) {
     const known = [...parsed.searchParams.keys()].every((key) => key === "media_type" || key === "display_filename");
     if (mediaTypes.length !== 1 || mediaTypes[0] === "" || filenames.length > 1 || !known) {
       fail(path, "a download route with required media type metadata");
+    }
+    assertMediaType(mediaTypes[0], `${path} media_type`);
+    if (filenames.length === 1) {
+      assertDisplayFilename(filenames[0], `${path} display_filename`);
     }
   } else if (parsed.search !== "") {
     fail(path, "a content route without query metadata");
@@ -741,9 +765,11 @@ export function decodeWebBlobDescriptor(value) {
   assertSchema(schemas.WebBlobDescriptor, schemas.WebBlobDescriptor, value, "blob_descriptor");
   assertBlobDigest(value.digest, "blob_descriptor.digest");
   assertCanonicalU64(value.byte_length, "blob_descriptor.byte_length");
+  assertMediaType(value.declared_media_type, "blob_descriptor.declared_media_type");
   value.display_filename.forEach((filename, index) =>
     assertDisplayFilename(filename, `blob_descriptor.display_filename[${index}]`));
   value.available_views.forEach((view, index) => {
+    assertMediaType(view.media_type, `blob_descriptor.available_views[${index}].media_type`);
     assertCanonicalU64(view.byte_length, `blob_descriptor.available_views[${index}].byte_length`);
     const contentPath = `blob_descriptor.available_views[${index}].content_url`;
     const contentRoute = assertSameOriginBlobUrl(view.content_url, contentPath);
