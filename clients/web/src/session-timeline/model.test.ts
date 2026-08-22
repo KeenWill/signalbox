@@ -674,6 +674,20 @@ describe('BoundedSessionHistory', () => {
     ).rejects.toThrow('encoded byte ceiling')
   })
 
+  it('forwards cancellation to the bootstrap request', async () => {
+    const controller = new AbortController()
+    const request = vi.fn<typeof fetch>().mockImplementation(async (_input, init) => {
+      expect(init?.signal).toBe(controller.signal)
+      throw new DOMException('aborted', 'AbortError')
+    })
+
+    const connected = HttpSessionTimelineSource.connect(request, controller.signal)
+    controller.abort()
+
+    await expect(connected).rejects.toMatchObject({ name: 'AbortError' })
+    expect(request).toHaveBeenCalledOnce()
+  })
+
   it('rejects invalid UTF-8 before JSON decoding', async () => {
     const prefix = new TextEncoder().encode(
       '{"error":{"kind":"application","code":"projection_failed","message":"',

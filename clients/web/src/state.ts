@@ -1,5 +1,15 @@
 import { configureStore, createSlice, type Middleware } from '@reduxjs/toolkit'
 import { useDispatch, useSelector } from 'react-redux'
+import {
+  type BrowserPreferences,
+  createDefaultBrowserPreferences,
+  isBoundedLogicalPosition,
+  loadBrowserPreferences,
+  MAX_SAVED_LOGICAL_POSITIONS,
+  type RemoteMediaPolicy,
+  saveBrowserPreferences,
+  serializeBrowserPreferences,
+} from './preferences'
 
 export type LayoutMode = 'focus' | 'workbench'
 export type DensityMode = 'compact' | 'comfortable'
@@ -12,7 +22,7 @@ export interface VisibleRange {
   end: number
 }
 
-interface AppState {
+interface AppState extends BrowserPreferences {
   layout: LayoutMode
   density: DensityMode
   detail: DetailMode
@@ -25,10 +35,7 @@ interface AppState {
 }
 
 const initialState: AppState = {
-  layout: 'workbench',
-  density: 'compact',
-  detail: 'condensed',
-  theme: 'dark',
+  ...loadBrowserPreferences(),
   overlay: null,
   selectedTimeline: null,
   transcriptRange: { start: 0, end: 0 },
@@ -60,6 +67,42 @@ const appSlice = createSlice({
     themeSet(state, action: { payload: ThemeMode }) {
       state.theme = action.payload
       state.activitySequence += 1
+    },
+    paneSizesSet(state, action: { payload: BrowserPreferences['paneSizes'] }) {
+      state.paneSizes = action.payload
+      state.activitySequence += 1
+    },
+    remoteMediaSet(state, action: { payload: RemoteMediaPolicy }) {
+      state.remoteMedia = action.payload
+      state.activitySequence += 1
+    },
+    preferencesReset(state) {
+      Object.assign(state, createDefaultBrowserPreferences())
+      state.activitySequence += 1
+    },
+    logicalPositionRecorded(state, action: { payload: { sessionId: string; position: string } }) {
+      if (!isBoundedLogicalPosition(action.payload.sessionId, action.payload.position)) return
+      const nextPositions = { ...state.lastLogicalPositions }
+      delete nextPositions[action.payload.sessionId]
+      nextPositions[action.payload.sessionId] = action.payload.position
+      const lastLogicalPositions = Object.fromEntries(
+        Object.entries(nextPositions).slice(-MAX_SAVED_LOGICAL_POSITIONS),
+      )
+      if (
+        serializeBrowserPreferences({
+          layout: state.layout,
+          density: state.density,
+          detail: state.detail,
+          theme: state.theme,
+          paneSizes: state.paneSizes,
+          remoteMedia: state.remoteMedia,
+          lastLogicalPositions,
+          keyOverrides: state.keyOverrides,
+        }) === null
+      ) {
+        return
+      }
+      state.lastLogicalPositions = lastLogicalPositions
     },
     overlaySet(state, action: { payload: Overlay }) {
       state.overlay = action.payload
@@ -93,9 +136,43 @@ const traceMiddleware: Middleware = () => (next) => (action) => {
   return next(action)
 }
 
+const preferenceActionTypes = new Set<string>([
+  appSlice.actions.layoutSet.type,
+  appSlice.actions.densitySet.type,
+  appSlice.actions.detailSet.type,
+  appSlice.actions.themeSet.type,
+  appSlice.actions.paneSizesSet.type,
+  appSlice.actions.remoteMediaSet.type,
+  appSlice.actions.preferencesReset.type,
+  appSlice.actions.logicalPositionRecorded.type,
+])
+const preferenceMiddleware: Middleware = (api) => (next) => (action) => {
+  const result = next(action)
+  if (
+    typeof action === 'object' &&
+    action !== null &&
+    'type' in action &&
+    preferenceActionTypes.has(String(action.type))
+  ) {
+    const app = (api.getState() as { app: AppState }).app
+    saveBrowserPreferences({
+      layout: app.layout,
+      density: app.density,
+      detail: app.detail,
+      theme: app.theme,
+      paneSizes: app.paneSizes,
+      remoteMedia: app.remoteMedia,
+      lastLogicalPositions: app.lastLogicalPositions,
+      keyOverrides: app.keyOverrides,
+    })
+  }
+  return result
+}
+
 export const store = configureStore({
   reducer: { app: appSlice.reducer },
-  middleware: (getDefaultMiddleware) => getDefaultMiddleware().concat(traceMiddleware),
+  middleware: (getDefaultMiddleware) =>
+    getDefaultMiddleware().concat(traceMiddleware, preferenceMiddleware),
   devTools: { maxAge: REDUX_DEVTOOLS_ACTIONS, trace: false },
 })
 

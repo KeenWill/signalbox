@@ -171,7 +171,7 @@ test('makes the fleet scroll viewport keyboard reachable', async ({ page }) => {
   await rows.focus()
   await expect(rows).toBeFocused()
   await rows.press('End')
-  expect(await rows.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+  await expect.poll(() => rows.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -475,7 +475,9 @@ test('keeps the fleet surface reachable on a short wide viewport', async ({ page
 test('Mod+K opens the registered command palette', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
 
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
@@ -495,11 +497,17 @@ test('Escape closes the command palette', async ({ page }) => {
 test('the command palette opens keyboard help without closing it', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
 
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   await page.getByRole('button', { name: /Open keyboard help/ }).click()
-  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  const help = page.getByRole('dialog', { name: 'Keyboard help' })
+  await expect(help).toBeVisible()
+  await expect(help.getByText('Go to Attention', { exact: true })).toHaveCount(0)
+  await expect(help.getByText('Go to Sessions', { exact: true })).toHaveCount(0)
+  await expect(help.getByText('Go to Settings', { exact: true })).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

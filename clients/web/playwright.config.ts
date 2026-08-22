@@ -6,6 +6,7 @@ const CROSS_HOST_TEXT_RASTERIZATION_TOLERANCE = 0.035
 // Tunable effective ceiling: two CI retries expose persistent browser failures without allowing
 // flakes to consume unbounded matrix time or pass after repeated attempts.
 const CI_BROWSER_RETRY_CEILING = 2
+const WEB_TEST_PORT = process.env.SIGNALBOX_WEB_TEST_PORT ?? '4173'
 
 export default defineConfig({
   testDir: './e2e',
@@ -19,13 +20,13 @@ export default defineConfig({
     },
   },
   use: {
-    baseURL: 'http://127.0.0.1:4173',
+    baseURL: `http://127.0.0.1:${WEB_TEST_PORT}`,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
   webServer: {
-    command: 'npm run preview -- --port 4173',
-    url: 'http://127.0.0.1:4173',
+    command: `npm run preview -- --port ${WEB_TEST_PORT}`,
+    url: `http://127.0.0.1:${WEB_TEST_PORT}`,
     reuseExistingServer: !process.env.CI,
   },
   projects: [
