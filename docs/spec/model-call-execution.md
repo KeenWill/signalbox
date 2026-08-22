@@ -6,8 +6,8 @@ verified against this PR (`agent/turn-lifecycle-hardening`).
 Post-response configured-usage treatment is verified against this PR
 (`agent/daemon-live-known-failed-cause`).
 
-Pre-activation reconciliation from durable completed-call usage is verified
-against this PR (`agent/daemon-live-reported-usage-compaction`).
+Pre-activation reconciliation from durable terminal-call usage is verified
+against this PR (`agent/daemon-live-ambiguous-usage-compaction`).
 
 Same-turn tool-continuation headroom closure is verified against this PR
 (`agent/daemon-live-in-turn-context-headroom`).
@@ -422,22 +422,25 @@ inferred from provider or model names. Adapters with a provider setting surface,
 including Anthropic, send the configured output ceiling in the provider request.
 Codex CLI instead renders the ceiling as model-visible advisory context because
 the CLI exposes no provider-side control. Before activating a queued turn, the
-daemon reads the newest completed call for the same resolved target since the
-latest compaction. If its provider-reported input, interpreted with the stored
-cache-inclusion semantics, plus its completed output and the next configured
-output reservation exceeds the context window, the daemon performs one bounded
-automatic compaction before activation. This is a conservative lower-bound
-trigger: later transcript entries can only increase the next input. A queued
-turn spends at most one automatic attempt; if durable evidence says that attempt
-was already spent, the scheduler reports exhaustion and permits activation
-rather than wedging the queue on a compaction it may not repeat. After a nominal
-completion, the daemon retains adapter-reported usage and the completed
-observation even when reported output exceeds `max_output_tokens` or the
-reported input-plus-output lower bound exceeds `context_window_tokens`; it emits
-a closed operator cause for the overage rather than discarding assistant
-material after the provider has already accepted and served the request. Missing
-usage fields remain missing and are never invented. Adapters need no separate
-counting operation.
+daemon reads the newest terminal call with provider-reported input for the same
+resolved target since the latest compaction. The terminal disposition does not
+erase usage from a provider round that may have been accepted: ambiguous and
+failed calls therefore protect a resumed session from re-sending a request whose
+reported size already exhausted headroom. If the reported input, interpreted
+with the stored cache-inclusion semantics, plus output only when completion
+retained it as assistant transcript, and the next configured output reservation
+exceeds the context window, the daemon performs one bounded automatic compaction
+before activation. This is a conservative lower-bound trigger: later transcript
+entries can only increase the next input. A queued turn spends at most one
+automatic attempt; if durable evidence says that attempt was already spent, the
+scheduler reports exhaustion and permits activation rather than wedging the
+queue on a compaction it may not repeat. After a nominal completion, the daemon
+retains adapter-reported usage and the completed observation even when reported
+output exceeds `max_output_tokens` or the reported input-plus-output lower bound
+exceeds `context_window_tokens`; it emits a closed operator cause for the
+overage rather than discarding assistant material after the provider has already
+accepted and served the request. Missing usage fields remain missing and are
+never invented. Adapters need no separate counting operation.
 
 The same lower-bound check runs inside the atomic tool-result continuation
 transaction against the exact completed tool-producing call. When its reported
@@ -1051,7 +1054,7 @@ pass raises the same signal whenever a durable stage it owns reports
 `Infrastructure { commit_ambiguous: true }` from the guarded counted activation
 commit, since only that next scan can decide what committed. After recovering
 any active call, the scheduled pass prepares bounded automatic compaction before
-activating queued work when durable completed-call usage proves the configured
+activating queued work when durable terminal-call usage proves the configured
 headroom is exhausted. The connection runtime raises the same signal through its
 recovery handle for an explicit compaction command reporting that class, and
 still answers the client `commit_ambiguous`: a connection handler holds no

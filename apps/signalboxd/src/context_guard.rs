@@ -22,7 +22,7 @@ use signalbox_persistence::{
 use crate::{
     ActivatedTurnExecution, HubModelConfiguration, TurnPassExecutionStage,
     process_runtime::compact_automatically, report_ambiguous_commit,
-    usage_limits::completed_usage_requires_compaction,
+    usage_limits::reported_usage_requires_compaction,
 };
 use tracing::Instrument;
 
@@ -31,7 +31,7 @@ use tracing::Instrument;
 pub enum ReportedUsageCompactionError {
     /// Read-only selection of the queued turn failed.
     Activation(StartEligibleTurnRepositoryError),
-    /// Prospective operation or prior completed usage could not be read.
+    /// Prospective operation or prior terminal usage could not be read.
     Model {
         /// Selected queued turn.
         turn: TurnId,
@@ -149,7 +149,7 @@ impl ReportedUsageCompaction {
         }
     }
 
-    /// Compacts once when the newest completed call proves reserved headroom is gone.
+    /// Compacts once when the newest terminal call proves reserved headroom is gone.
     pub async fn compact_if_needed(
         &self,
         session: SessionId,
@@ -189,17 +189,18 @@ impl ReportedUsageCompaction {
                 operation.request().model_settings().effective().fast_mode(),
             )
             .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
-        let Some(completed) = self
+        let Some(reported) = self
             .model_calls
-            .latest_completed_usage(session, target)
+            .latest_reported_usage(session, target)
             .await
             .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?
         else {
             return Ok(());
         };
-        if !completed_usage_requires_compaction(
-            completed.usage(),
-            completed.input_includes_cache_tokens(),
+        if !reported_usage_requires_compaction(
+            reported.usage(),
+            reported.input_includes_cache_tokens(),
+            reported.output_is_retained(),
             u64::from(definition.max_output_tokens()),
             u64::from(definition.context_window_tokens()),
         ) {

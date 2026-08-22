@@ -121,14 +121,15 @@ pub struct ProspectiveModelCall {
     tool_entries: Box<[ResolvedToolConversationEntry]>,
 }
 
-/// Latest completed-call usage usable as a conservative next-call lower bound.
+/// Latest terminal-call usage usable as a conservative next-call lower bound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CompletedModelCallUsage {
+pub struct ReportedModelCallUsage {
     usage: ProviderReportedTokenUsage,
     input_includes_cache_tokens: bool,
+    output_is_retained: bool,
 }
 
-impl CompletedModelCallUsage {
+impl ReportedModelCallUsage {
     /// Returns the exact provider-reported fields retained for the call.
     pub const fn usage(self) -> ProviderReportedTokenUsage {
         self.usage
@@ -137,6 +138,11 @@ impl CompletedModelCallUsage {
     /// Whether the stored input field already includes the cache axes.
     pub const fn input_includes_cache_tokens(self) -> bool {
         self.input_includes_cache_tokens
+    }
+
+    /// Whether reported output became assistant transcript for the next call.
+    pub const fn output_is_retained(self) -> bool {
+        self.output_is_retained
     }
 }
 
@@ -583,18 +589,19 @@ impl PostgresModelCallRepository {
         &self.pool
     }
 
-    /// Reads the newest completed call with reported input usage for one exact target.
+    /// Reads the newest terminal call with reported input usage for one exact target.
     ///
     /// A later failed call with no usage does not erase the last provider-confirmed
     /// context size. Callers may use this only as a lower bound: later transcript
     /// entries can make the next request larger, never smaller absent compaction.
-    pub async fn latest_completed_usage(
+    pub async fn latest_reported_usage(
         &self,
         session: SessionId,
         target: ResolvedProviderTarget,
-    ) -> Result<Option<CompletedModelCallUsage>, ModelCallRepositoryError> {
+    ) -> Result<Option<ReportedModelCallUsage>, ModelCallRepositoryError> {
         let row = sqlx::query(
             "SELECT usage_input_includes_cache_tokens,
+                    terminal_disposition_kind = 'completed' AS output_is_retained,
                     usage_input_tokens, usage_output_tokens,
                     usage_cache_creation_input_tokens,
                     usage_cache_read_input_tokens
@@ -602,7 +609,6 @@ impl PostgresModelCallRepository {
               WHERE session_id = $1
                 AND resolved_provider_model_identity_id = $2
                 AND state_kind = 'terminal'
-                AND terminal_disposition_kind = 'completed'
                 AND usage_input_tokens IS NOT NULL
                 AND NOT EXISTS (
                     SELECT 1
@@ -650,13 +656,14 @@ impl PostgresModelCallRepository {
                 })
                 .transpose()
         };
-        Ok(Some(CompletedModelCallUsage {
+        Ok(Some(ReportedModelCallUsage {
             usage: ProviderReportedTokenUsage::unreported()
                 .with_input_tokens(decode("usage_input_tokens")?)
                 .with_output_tokens(decode("usage_output_tokens")?)
                 .with_cache_creation_input_tokens(decode("usage_cache_creation_input_tokens")?)
                 .with_cache_read_input_tokens(decode("usage_cache_read_input_tokens")?),
             input_includes_cache_tokens: row.try_get("usage_input_includes_cache_tokens")?,
+            output_is_retained: row.try_get("output_is_retained")?,
         }))
     }
 

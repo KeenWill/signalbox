@@ -168,6 +168,50 @@ async fn model_call_input_semantics_keep_historical_unknown_and_new_default()
     Ok(())
 }
 
+/// An ambiguous provider round can still report the exact input it accepted.
+/// That durable usage remains a conservative lower bound for pre-activation
+/// compaction instead of being discarded solely because completion was
+/// uncertain.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn ambiguous_model_call_usage_is_available_to_pre_activation_compaction()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d70;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let correlation = authorized.observation_correlation();
+    let reported_usage = ProviderReportedTokenUsage::unreported()
+        .with_input_tokens(Some(207_928))
+        .with_output_tokens(Some(698));
+    let observation = correlation.bind_terminal_observation_with_usage(
+        ModelCallTerminalObservation::Ambiguous,
+        reported_usage,
+    );
+
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Ambiguous(AmbiguousModelCallTurnIdentities::new(
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 20)),
+            )),
+            |_| panic!("an ambiguous call creates no pending-steering successors"),
+        )
+        .await?;
+    let retained = repository
+        .latest_reported_usage(fixture.session, correlation.target())
+        .await?
+        .expect("ambiguous provider-reported input remains available");
+
+    assert_eq!(retained.usage(), reported_usage);
+    assert!(!retained.input_includes_cache_tokens());
+    assert!(!retained.output_is_retained());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-006: cancellation evidence cannot carry provider usage because neither
 /// cancellation-confirmed nor pre-send cancellation reports token evidence.
 #[tokio::test(flavor = "multi_thread")]
