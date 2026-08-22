@@ -4831,7 +4831,7 @@ async fn load_availability_predecessor_snapshot(
         .map(Some)
 }
 
-async fn load_call_snapshot(
+pub(crate) async fn load_call_snapshot(
     connection: &mut PgConnection,
     session: SessionId,
     frontier: signalbox_domain::ContextFrontierId,

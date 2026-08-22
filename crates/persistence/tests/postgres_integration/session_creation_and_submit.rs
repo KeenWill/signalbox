@@ -2974,6 +2974,15 @@ struct MultipartReplayFixture {
     digest: BlobDigest,
 }
 
+const INITIAL_MULTIPART_ACCEPTED_INPUT_ID: u128 = 0x925;
+const INITIAL_MULTIPART_TURN_ID: u128 = 0xa25;
+const EQUAL_REPLAY_ACCEPTED_INPUT_ID: u128 = 0x926;
+const EQUAL_REPLAY_TURN_ID: u128 = 0xa26;
+const REORDERED_REPLAY_ACCEPTED_INPUT_ID: u128 = 0x927;
+const REORDERED_REPLAY_TURN_ID: u128 = 0xa27;
+const CHANGED_METADATA_REPLAY_ACCEPTED_INPUT_ID: u128 = 0x928;
+const CHANGED_METADATA_REPLAY_TURN_ID: u128 = 0xa28;
+
 impl MultipartReplayFixture {
     async fn finish(self) {
         self.pool.close().await;
@@ -3040,8 +3049,10 @@ async fn multipart_replay_fixture() -> Result<MultipartReplayFixture, Box<dyn Er
     let first = repository
         .handle(
             command.clone(),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x925)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xa25))),
+            AcceptedInputId::from_uuid(Uuid::from_u128(INITIAL_MULTIPART_ACCEPTED_INPUT_ID)),
+            Some(TurnId::from_uuid(Uuid::from_u128(
+                INITIAL_MULTIPART_TURN_ID,
+            ))),
         )
         .await?;
 
@@ -3058,8 +3069,7 @@ async fn multipart_replay_fixture() -> Result<MultipartReplayFixture, Box<dyn Er
     })
 }
 
-/// INV-012: equal multipart replay returns the original durable receipt and
-/// command value.
+/// INV-012: equal multipart replay returns the original durable receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
@@ -3070,12 +3080,22 @@ async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
             .repository
             .handle(
                 fixture.command.clone(),
-                AcceptedInputId::from_uuid(Uuid::from_u128(0x926)),
-                Some(TurnId::from_uuid(Uuid::from_u128(0xa26))),
+                AcceptedInputId::from_uuid(Uuid::from_u128(EQUAL_REPLAY_ACCEPTED_INPUT_ID)),
+                Some(TurnId::from_uuid(Uuid::from_u128(EQUAL_REPLAY_TURN_ID))),
             )
             .await?,
         fixture.first
     );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: loading a multipart command reconstructs its exact ordered value.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_multipart_submit_load_reconstructs_the_exact_command() -> Result<(), Box<dyn Error>>
+{
+    let fixture = multipart_replay_fixture().await?;
     assert_eq!(
         fixture
             .repository
@@ -3110,8 +3130,10 @@ async fn inv012_reordered_multipart_submit_is_conflicting_reuse() -> Result<(), 
             .repository
             .handle(
                 reordered,
-                AcceptedInputId::from_uuid(Uuid::from_u128(0x927)),
-                Some(TurnId::from_uuid(Uuid::from_u128(0xa27))),
+                AcceptedInputId::from_uuid(Uuid::from_u128(REORDERED_REPLAY_ACCEPTED_INPUT_ID)),
+                Some(TurnId::from_uuid(
+                    Uuid::from_u128(REORDERED_REPLAY_TURN_ID,)
+                )),
             )
             .await?,
         SubmitInputHandlingOutcome::ConflictingReuse {
@@ -3154,8 +3176,12 @@ async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(),
             .repository
             .handle(
                 changed_metadata,
-                AcceptedInputId::from_uuid(Uuid::from_u128(0x928)),
-                Some(TurnId::from_uuid(Uuid::from_u128(0xa28))),
+                AcceptedInputId::from_uuid(Uuid::from_u128(
+                    CHANGED_METADATA_REPLAY_ACCEPTED_INPUT_ID,
+                )),
+                Some(TurnId::from_uuid(Uuid::from_u128(
+                    CHANGED_METADATA_REPLAY_TURN_ID,
+                ))),
             )
             .await?,
         SubmitInputHandlingOutcome::ConflictingReuse {

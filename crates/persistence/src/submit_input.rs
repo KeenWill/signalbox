@@ -84,7 +84,7 @@ use crate::{
         attach_interrupt_reclassification_candidates_for_activated,
         attach_interrupt_reclassification_candidates_for_active,
         attach_recovery_interrupt_reclassification_candidates,
-        attach_recovery_interrupt_reclassification_candidates_for_activated,
+        attach_recovery_interrupt_reclassification_candidates_for_activated, load_call_snapshot,
         load_delegated_runner_recovery_for_interrupt, lock_delegated_child_endpoint_sessions,
         persist_stop_requested, persist_terminal_outcome, persist_tool_reconciliation_required,
         require_live_execution_for_restart,
@@ -2081,11 +2081,12 @@ async fn delegated_parked_attachment_frontier_origins(
             .ok_or(SubmitInputCorruption::Inconsistent(
                 "delegated model recovery frontier missing",
             ))?;
-            scheduling
-                .resolved_snapshot(ContextFrontierId::from_uuid(frontier))
-                .cloned()
+            load_call_snapshot(connection, session, ContextFrontierId::from_uuid(frontier))
+                .await
+                .map_err(|error| SubmitInputRepositoryError::ModelExecution(Box::new(error)))?
+                .reconstitute()
                 .ok_or(SubmitInputCorruption::Inconsistent(
-                    "delegated model recovery snapshot missing",
+                    "delegated model recovery snapshot invalid",
                 ))?
         }
         "awaiting_runner_recovery" => {
@@ -2114,11 +2115,12 @@ async fn delegated_parked_attachment_frontier_origins(
             .ok_or(SubmitInputCorruption::Inconsistent(
                 "delegated stop-requested frontier missing",
             ))?;
-            scheduling
-                .resolved_snapshot(ContextFrontierId::from_uuid(frontier))
-                .cloned()
+            load_call_snapshot(connection, session, ContextFrontierId::from_uuid(frontier))
+                .await
+                .map_err(|error| SubmitInputRepositoryError::ModelExecution(Box::new(error)))?
+                .reconstitute()
                 .ok_or(SubmitInputCorruption::Inconsistent(
-                    "delegated stop-requested snapshot missing",
+                    "delegated stop-requested snapshot invalid",
                 ))?
         }
         value => {
@@ -4437,36 +4439,6 @@ pub(crate) async fn load_scheduling_projection(
     .fetch_all(&mut *connection)
     .await?;
     required_model_calls.extend(assistant_model_calls);
-
-    let delegated_active_model_calls = sqlx::query_scalar::<_, Uuid>(
-        "SELECT recovery_model_call_id
-           FROM turn_lifecycle
-          WHERE session_id = $1
-            AND origin_kind = 'delegation'
-            AND state_kind = 'active'
-            AND NOT delegation_runtime_terminal
-            AND recovery_model_call_id IS NOT NULL
-            AND goal_turn_is_runtime_relevant(session_id, turn_id)
-          UNION
-         SELECT call.model_call_id
-           FROM turn_lifecycle AS lifecycle
-           JOIN model_call AS call
-             ON call.session_id = lifecycle.session_id
-            AND call.turn_id = lifecycle.turn_id
-            AND call.state_kind = 'cancellation_requested'
-          WHERE lifecycle.session_id = $1
-            AND lifecycle.origin_kind = 'delegation'
-            AND lifecycle.state_kind = 'active'
-            AND NOT lifecycle.delegation_runtime_terminal
-            AND goal_turn_is_runtime_relevant(
-                    lifecycle.session_id, lifecycle.turn_id
-                )
-          ORDER BY 1",
-    )
-    .bind(session_id_to_uuid(session_id))
-    .fetch_all(&mut *connection)
-    .await?;
-    required_model_calls.extend(delegated_active_model_calls);
 
     let required_model_call_ids = required_model_calls.iter().copied().collect::<Vec<_>>();
     let model_call_rows = sqlx::query(
