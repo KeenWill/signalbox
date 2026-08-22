@@ -184,8 +184,8 @@ version `2`, the `bounded_json`, `same_origin_json_mutations`,
 65,536-byte JSON-body and NDJSON-item hard ceilings, and the 256-item and
 65,536-projected-byte timeline ceilings. The generated browser decoder rejects
 an unknown field, wrong shape, different family, or different version rather
-than interpreting it as the local process protocol. No process-protocol frame
-is a browser DTO. The blob descriptor, content, and download routes beneath
+than interpreting it as the local process protocol. No process-protocol frame is
+a browser DTO. The blob descriptor, content, and download routes beneath
 `/api/blobs/{digest}` are the same-origin surface owned by
 [blob storage](blob-storage.md#browser-delivery-views-and-derivations). The
 session descriptor and historical-window route shapes and semantics are owned by

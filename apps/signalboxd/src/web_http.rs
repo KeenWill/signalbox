@@ -323,7 +323,7 @@ pub fn production_router(
 #[cfg(test)]
 fn bootstrap_only_router(asset_root: Option<PathBuf>) -> Router {
     let api = Router::new()
-        .route("/bootstrap", get(contract_bootstrap))
+        .route("/bootstrap", get(deterministic_contract_bootstrap))
         .fallback(api_not_found);
     same_origin_router(asset_root, api)
 }
@@ -1764,6 +1764,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_blob_query_is_a_structured_transport_error() {
         let request = Request::get("/api/blobs/not-a-digest/descriptor")
+            .header(header::HOST, "127.0.0.1")
             .body(Body::empty())
             .expect("the request is valid");
         let response = production_router(None, None, None, None)
@@ -1784,6 +1785,7 @@ mod tests {
         let request = Request::head(
             "/api/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/descriptor",
         )
+        .header(header::HOST, "127.0.0.1")
         .body(Body::empty())
         .expect("the request is valid");
         let response = production_router(None, None, None, None)
@@ -1991,6 +1993,7 @@ mod tests {
         let request = Request::get(
             "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?max_items=nope",
         )
+        .header(header::HOST, "127.0.0.1")
         .body(Body::empty())
         .expect("the request is valid");
         let response = production_router(None, None, None, None)
@@ -2011,6 +2014,7 @@ mod tests {
         let request = Request::get(
             "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?anchor=first&max_items=1",
         )
+        .header(header::HOST, "127.0.0.1")
         .body(Body::empty())
         .expect("the request is valid");
         let response = production_router(None, None, None, None)
