@@ -624,6 +624,8 @@ fn provider_declaration(name: &str, owned_media_type: &str) -> FileMediaProvider
 fn distinct_static_media_claims_are_admitted() {
     let first_provider = provider_declaration("first", SYNTHETIC_MEDIA_TYPE);
     let second_provider = provider_declaration("second", OTHER_SYNTHETIC_MEDIA_TYPE);
+    let first_name = first_provider.provider().clone();
+    let second_name = second_provider.provider().clone();
 
     let registry = FileMediaRegistry::try_new(
         vec![second_provider, first_provider],
@@ -632,8 +634,8 @@ fn distinct_static_media_claims_are_admitted() {
     )
     .expect("distinct media claims are conflict-free");
 
-    assert_eq!(registry.providers()[0].provider().as_str(), "first");
-    assert_eq!(registry.providers()[1].provider().as_str(), "second");
+    assert_eq!(registry.providers()[0].provider(), &first_name);
+    assert_eq!(registry.providers()[1].provider(), &second_name);
 }
 
 #[test]
