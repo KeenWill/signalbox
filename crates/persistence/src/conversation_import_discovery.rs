@@ -147,6 +147,8 @@ pub struct ImportedEntryProjection {
 /// Browser discovery facts decoded from a byte-bounded stored-content projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ImportedEntryContentProjection {
+    /// A non-text encoding whose complete value exceeds the validation bound.
+    OpaqueNonText,
     /// A source event whose potentially large details are not projected.
     SourceEvent,
     /// Text attestation with a byte-bounded UTF-8 projection.
@@ -646,10 +648,11 @@ fn checked_non_text_content(
     projection: ImportedEntryContentProjection,
 ) -> Result<ImportedEntryContentProjection, ImportedConversationDiscoveryError> {
     let encoding: Option<Vec<u8>> = row.try_get("validated_content_encoding")?;
-    let content = decode_content(
-        &encoding.ok_or(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?,
-    )
-    .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
+    let Some(encoding) = encoding else {
+        return Ok(ImportedEntryContentProjection::OpaqueNonText);
+    };
+    let content = decode_content(&encoding)
+        .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
     let kind_matches = matches!(
         (&projection, content),
         (

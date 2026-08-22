@@ -85,6 +85,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   const importsQuery = useQuery({
     queryKey: ['imports', queryScope, 'catalog', listRequest],
     queryFn: ({ signal }) => api.list(listRequest, signal),
+    gcTime: 0,
   })
   const imports = importsQuery.data
   const firstImport = imports?.items[0]?.imported_conversation_id ?? null
@@ -218,13 +219,15 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   ])
 
   const resetCatalog = () => {
-    if (!hasRetainedCommand) resetContinuation()
+    if (hasRetainedCommand) return
+    resetContinuation()
     setAfter(undefined)
     setSelectedImport(null)
   }
 
   const showCatalogPage = (cursor: string | undefined) => {
-    if (!hasRetainedCommand) resetContinuation()
+    if (hasRetainedCommand) return
+    resetContinuation()
     setAfter(cursor)
   }
 
@@ -313,7 +316,9 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                   <select
                     aria-label="Filter imports by format"
                     value={format}
+                    disabled={hasRetainedCommand}
                     onChange={(event) => {
+                      if (hasRetainedCommand) return
                       setFormat(event.target.value as FormatFilter)
                       resetCatalog()
                     }}
@@ -331,7 +336,9 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                     aria-label="Filter imports by exact source session evidence"
                     value={sourceSession}
                     placeholder="Exact attested identifier"
+                    disabled={hasRetainedCommand}
                     onChange={(event) => {
+                      if (hasRetainedCommand) return
                       setSourceSession(event.target.value)
                       resetCatalog()
                     }}
@@ -343,18 +350,24 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                     aria-label="Use exact source session filter"
                     type="checkbox"
                     checked={sourceSessionFilterEnabled}
+                    disabled={hasRetainedCommand}
                     onChange={(event) => {
+                      if (hasRetainedCommand) return
                       setSourceSessionFilterEnabled(event.target.checked)
                       resetCatalog()
                     }}
                   />
                 </label>
-                <button type="button" disabled={!after} onClick={() => showCatalogPage(undefined)}>
+                <button
+                  type="button"
+                  disabled={!after || hasRetainedCommand}
+                  onClick={() => showCatalogPage(undefined)}
+                >
                   First page
                 </button>
                 <button
                   type="button"
-                  disabled={!imports?.next_cursor}
+                  disabled={!imports?.next_cursor || hasRetainedCommand}
                   onClick={() => showCatalogPage(imports?.next_cursor ?? undefined)}
                 >
                   Next page

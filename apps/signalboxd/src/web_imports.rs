@@ -436,6 +436,9 @@ fn web_content(
     content: &ImportedEntryContentProjection,
 ) -> (WebImportedContentKind, Option<WebImportTextEvidence>) {
     match content {
+        ImportedEntryContentProjection::OpaqueNonText => {
+            (WebImportedContentKind::OpaqueNonText, None)
+        }
         ImportedEntryContentProjection::SourceEvent => (WebImportedContentKind::SourceEvent, None),
         ImportedEntryContentProjection::SourceMessageBlock => {
             (WebImportedContentKind::SourceMessageBlock, None)
