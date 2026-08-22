@@ -782,6 +782,7 @@ const schemas = {
       "WebRepoWatchAutomationStatus": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "unattempted",
@@ -794,6 +795,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "dispatch_id": {
                 "type": "string"
@@ -810,6 +812,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "queued",
@@ -826,6 +829,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "dispatch_id": {
                 "type": "string"
@@ -842,6 +846,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "dispatch_id": {
                 "type": "string"
@@ -862,6 +867,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "dispatch_id": {
                 "type": "string"
@@ -1279,6 +1285,7 @@ const schemas = {
           "blocked",
           "awaiting_approval",
           "ambiguous",
+          "awaiting_tool_recovery",
           "awaiting_reconciliation",
           "runner_lost",
           "idle"
@@ -1374,6 +1381,7 @@ const schemas = {
       "WebRepoWatchSessionPurpose": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "dispatch_id": {
                 "type": "string"
@@ -1402,6 +1410,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "dispatch_id": {
                 "type": "string"
@@ -1844,6 +1853,7 @@ const schemas = {
       "WebRepoWatchObligationReadiness": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "ready",
@@ -1856,6 +1866,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "dispatch_id": {
                 "type": "string"
@@ -1879,6 +1890,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "eligible_at_unix_milliseconds": {
                 "type": [
@@ -1897,6 +1909,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "parked",

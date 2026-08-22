@@ -381,9 +381,9 @@ pub enum WebRepoWatchReviewDecision {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebRepoWatchAutomationStatus {
-    Unattempted,
+    Unattempted {},
     Held {
         dispatch_id: String,
     },
@@ -462,9 +462,9 @@ pub struct WebRepoWatchHeldSlot {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebRepoWatchObligationReadiness {
-    Ready,
+    Ready {},
     Occupied {
         dispatch_id: String,
         session_ids: Vec<String>,
@@ -518,7 +518,7 @@ pub struct WebRepoWatchWorkPage {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebRepoWatchSessionPurpose {
     RuleDispatch {
         dispatch_id: String,
@@ -1121,7 +1121,9 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        WebAttentionStreamEvent, WebContractBootstrap, WebContractExample, generated_artifacts,
+        WebAttentionStreamEvent, WebContractBootstrap, WebContractExample,
+        WebRepoWatchAutomationStatus, WebRepoWatchObligationReadiness, WebRepoWatchSessionPurpose,
+        generated_artifacts,
     };
 
     #[track_caller]
@@ -1180,5 +1182,27 @@ mod tests {
         let encoded = r#"{"kind":"resync_required","cursor":"1","unexpected":true}"#;
 
         assert!(serde_json::from_str::<WebAttentionStreamEvent>(encoded).is_err());
+    }
+
+    #[test]
+    fn repository_tagged_variants_reject_unknown_fields() {
+        assert!(
+            serde_json::from_str::<WebRepoWatchAutomationStatus>(
+                r#"{"kind":"held","dispatch_id":"dispatch","future_field":true}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<WebRepoWatchObligationReadiness>(
+                r#"{"kind":"ready","future_field":true}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<WebRepoWatchSessionPurpose>(
+                r#"{"kind":"operator_commission","dispatch_id":"dispatch","template":"template","future_field":true}"#,
+            )
+            .is_err()
+        );
     }
 }

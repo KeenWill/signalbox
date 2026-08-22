@@ -262,14 +262,14 @@ fn production_router_with_budget(
 ) -> Router {
     let state = WebApiState {
         attention: pool.clone().map(AttentionRepository::new),
-        snapshot_reader_budget,
+        snapshot_reader_budget: snapshot_reader_budget.clone(),
     };
     let api = Router::new()
         .route("/bootstrap", get(contract_bootstrap))
         .route("/attention", get(attention_snapshot))
         .route("/attention/follow", get(attention_follow))
         .with_state(state)
-        .merge(crate::web_repo_watch::router(pool))
+        .merge(crate::web_repo_watch::router(pool, snapshot_reader_budget))
         .fallback(api_not_found);
     let router = Router::new().nest("/api", api);
     match asset_root {

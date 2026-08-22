@@ -2,6 +2,7 @@
 
 use std::{
     num::NonZeroU64,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -49,15 +50,20 @@ use sqlx::{
     PgPool,
     types::{Uuid, time::OffsetDateTime},
 };
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::web_http::{application_error, attention_summary_dto};
 
 #[derive(Clone, Debug)]
 struct RepoWatchApiState {
     operations: Option<PostgresRepoWatchOperations>,
+    snapshot_reader_budget: Option<Arc<Semaphore>>,
 }
 
-pub(crate) fn router(pool: Option<PgPool>) -> Router {
+pub(crate) fn router(
+    pool: Option<PgPool>,
+    snapshot_reader_budget: Option<Arc<Semaphore>>,
+) -> Router {
     Router::new()
         .route("/repository-watch/repositories", get(repository_statuses))
         .route("/repository-watch/pull-requests", get(pull_requests))
@@ -66,7 +72,18 @@ pub(crate) fn router(pool: Option<PgPool>) -> Router {
         .route("/repository-watch/activity", get(activity))
         .with_state(RepoWatchApiState {
             operations: pool.map(PostgresRepoWatchOperations::new),
+            snapshot_reader_budget,
         })
+}
+
+async fn snapshot_permit(state: &RepoWatchApiState) -> Result<OwnedSemaphorePermit, Response> {
+    let Some(budget) = state.snapshot_reader_budget.as_ref() else {
+        return Err(projection_error(None));
+    };
+    Arc::clone(budget)
+        .acquire_owned()
+        .await
+        .map_err(|_| projection_error(None))
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,12 +143,16 @@ async fn repository_statuses(
         Ok(query) => query,
         Err(response) => return response,
     };
-    let Some(operations) = state.operations else {
+    let Some(operations) = state.operations.clone() else {
         return unavailable();
     };
     let after = match query.after_repository.map(repository_slug).transpose() {
         Ok(after) => after,
         Err(()) => return invalid_query("invalid_repository", "repository is not canonical"),
+    };
+    let _permit = match snapshot_permit(&state).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
     };
     match operations.repository_statuses(after).await {
         Ok(page) => match repository_status_page_dto(page) {
@@ -150,7 +171,7 @@ async fn pull_requests(
         Ok(query) => query,
         Err(response) => return response,
     };
-    let Some(operations) = state.operations else {
+    let Some(operations) = state.operations.clone() else {
         return unavailable();
     };
     let repository = match repository_slug(query.repository) {
@@ -164,6 +185,10 @@ async fn pull_requests(
     {
         Ok(after) => after,
         Err(()) => return invalid_query("invalid_cursor", "pull-request cursor is invalid"),
+    };
+    let _permit = match snapshot_permit(&state).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
     };
     match operations.pull_requests(repository, after).await {
         Ok(page) => match pull_request_page_dto(page) {
@@ -182,7 +207,7 @@ async fn work(
         Ok(query) => query,
         Err(response) => return response,
     };
-    let Some(operations) = state.operations else {
+    let Some(operations) = state.operations.clone() else {
         return unavailable();
     };
     let repository = match repository_slug(query.repository) {
@@ -211,6 +236,10 @@ async fn work(
     let held_after = held_after.map_or(RepoWatchPagePosition::Start, RepoWatchPagePosition::After);
     let obligation_after =
         obligation_after.map_or(RepoWatchPagePosition::Start, RepoWatchPagePosition::After);
+    let _permit = match snapshot_permit(&state).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
     match operations
         .work(repository, held_after, obligation_after)
         .await
@@ -231,7 +260,7 @@ async fn pull_request_sessions(
         Ok(query) => query,
         Err(response) => return response,
     };
-    let Some(operations) = state.operations else {
+    let Some(operations) = state.operations.clone() else {
         return unavailable();
     };
     let repository = match repository_slug(query.repository) {
@@ -247,6 +276,10 @@ async fn pull_request_sessions(
         Err(()) => {
             return invalid_query("invalid_cursor", "session cursor is incomplete or invalid");
         }
+    };
+    let _permit = match snapshot_permit(&state).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
     };
     match operations
         .pull_request_sessions(repository, pull_request, before)
@@ -268,7 +301,7 @@ async fn activity(
         Ok(query) => query,
         Err(response) => return response,
     };
-    let Some(operations) = state.operations else {
+    let Some(operations) = state.operations.clone() else {
         return unavailable();
     };
     let repository = match repository_slug(query.repository) {
@@ -309,6 +342,10 @@ async fn activity(
         webhooks_before.map_or(RepoWatchPagePosition::Start, RepoWatchPagePosition::After)
     } else {
         RepoWatchPagePosition::Exhausted
+    };
+    let _permit = match snapshot_permit(&state).await {
+        Ok(permit) => permit,
+        Err(response) => return response,
     };
     match operations
         .activity(repository, events_before, webhooks_before)
@@ -559,7 +596,7 @@ fn repository_status_page_dto(
 
 fn automation_dto(status: RepoWatchAutomationStatus) -> Result<WebRepoWatchAutomationStatus, ()> {
     Ok(match status {
-        RepoWatchAutomationStatus::Unattempted => WebRepoWatchAutomationStatus::Unattempted,
+        RepoWatchAutomationStatus::Unattempted => WebRepoWatchAutomationStatus::Unattempted {},
         RepoWatchAutomationStatus::Held { dispatch } => WebRepoWatchAutomationStatus::Held {
             dispatch_id: dispatch.into_uuid().to_string(),
         },
@@ -718,7 +755,7 @@ fn readiness_dto(
     readiness: RepoWatchObligationReadiness,
 ) -> Result<WebRepoWatchObligationReadiness, ()> {
     Ok(match readiness {
-        RepoWatchObligationReadiness::Ready => WebRepoWatchObligationReadiness::Ready,
+        RepoWatchObligationReadiness::Ready => WebRepoWatchObligationReadiness::Ready {},
         RepoWatchObligationReadiness::Occupied { dispatch, sessions } => {
             WebRepoWatchObligationReadiness::Occupied {
                 dispatch_id: dispatch.into_uuid().to_string(),
@@ -1003,7 +1040,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_typed_query_returns_the_json_api_error_contract() {
-        let response = super::router(None)
+        let response = super::router(None, None)
             .oneshot(
                 Request::builder()
                     .uri(
