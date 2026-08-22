@@ -2973,6 +2973,8 @@ const MULTIPART_REORDERED_TURN_ID: u128 = 0xa27;
 const MULTIPART_METADATA_ACCEPTED_INPUT_ID: u128 = 0x928;
 const MULTIPART_METADATA_TURN_ID: u128 = 0xa28;
 const MULTIPART_ATTACHMENT_PAYLOAD: &[u8] = b"multipart attachment";
+const MULTIPART_BLOB_STORE_NAME: &str = "multipart_test";
+const MULTIPART_BLOB_OBJECT_KEY: &str = "multipart/object";
 
 #[derive(sqlx::FromRow)]
 struct MultipartProjectionFacts {
@@ -3004,8 +3006,9 @@ async fn multipart_replay_fixture(
     let mut catalog = pool.begin().await?;
     sqlx::query(
         "INSERT INTO blob_store_binding (store_name, namespace_id)
-         VALUES ('multipart_test', $1)",
+         VALUES ($1, $2)",
     )
+    .bind(MULTIPART_BLOB_STORE_NAME)
     .bind(Uuid::from_u128(MULTIPART_BLOB_NAMESPACE_ID))
     .execute(&mut *catalog)
     .await?;
@@ -3016,9 +3019,11 @@ async fn multipart_replay_fixture(
         .await?;
     sqlx::query(
         "INSERT INTO blob_replica (digest, store_name, object_key)
-         VALUES ($1, 'multipart_test', 'multipart/object')",
+         VALUES ($1, $2, $3)",
     )
     .bind(digest.as_bytes().as_slice())
+    .bind(MULTIPART_BLOB_STORE_NAME)
+    .bind(MULTIPART_BLOB_OBJECT_KEY)
     .execute(&mut *catalog)
     .await?;
     catalog.commit().await?;
@@ -3289,16 +3294,26 @@ async fn inv012_multipart_command_and_accepted_satellites_are_identical()
     let mirrored: MultipartProjectionFacts = sqlx::query_as(
         "SELECT
             (SELECT jsonb_agg(
-                jsonb_build_array(position, part_kind, text_value,
-                    encode(blob_digest, 'hex'), attachment_kind,
-                    declared_media_type, display_filename)
+                jsonb_build_object(
+                    'position', position,
+                    'part_kind', part_kind,
+                    'text_value', text_value,
+                    'blob_digest', encode(blob_digest, 'hex'),
+                    'attachment_kind', attachment_kind,
+                    'declared_media_type', declared_media_type,
+                    'display_filename', display_filename)
                 ORDER BY position)
                FROM submit_input_command_content_part
               WHERE command_id = $1) AS command_projection,
             (SELECT jsonb_agg(
-                jsonb_build_array(position, part_kind, text_value,
-                    encode(blob_digest, 'hex'), attachment_kind,
-                    declared_media_type, display_filename)
+                jsonb_build_object(
+                    'position', position,
+                    'part_kind', part_kind,
+                    'text_value', text_value,
+                    'blob_digest', encode(blob_digest, 'hex'),
+                    'attachment_kind', attachment_kind,
+                    'declared_media_type', declared_media_type,
+                    'display_filename', display_filename)
                 ORDER BY position)
                FROM accepted_input_content_part AS part
                JOIN accepted_input AS accepted
