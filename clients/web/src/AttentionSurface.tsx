@@ -105,6 +105,13 @@ export function AttentionSurface({
     return () => cancelAnimationFrame(frame)
   }, [attention.data])
 
+  useEffect(() => {
+    if (!selectedId || !attention.data || selected) return
+    returnFocus.current = null
+    pageHeading.current?.focus()
+    setSelectedId(null)
+  }, [attention.data, selected, selectedId])
+
   const open = (summary: AttentionSummary, button: HTMLButtonElement) => {
     returnFocus.current = button
     setSelectedId(summary.session_id)

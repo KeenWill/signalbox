@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   MAX_ATTENTION_SNAPSHOT_BYTES,
   MAX_ATTENTION_SNAPSHOT_ITEMS,
+  MAX_BOOTSTRAP_BYTES,
   ProductRequestError,
   SameOriginProductTransport,
 } from './product'
@@ -67,6 +68,17 @@ describe('SameOriginProductTransport', () => {
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
       'bootstrap.contract',
+    )
+  })
+
+  it('rejects bootstrap before buffering beyond the JSON byte ceiling', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(' '.repeat(MAX_BOOTSTRAP_BYTES + 1))),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'bootstrap response exceeds the contract byte ceiling',
     )
   })
 
@@ -170,5 +182,34 @@ describe('SameOriginProductTransport', () => {
     const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
 
     await expect(events.next()).rejects.toThrow('attention stream ended with an incomplete item')
+  })
+
+  it('cancels a follower stream when its consumer reconnects early', async () => {
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(
+            `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n`,
+          ),
+        )
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body)),
+    )
+    const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
+
+    await expect(events.next()).resolves.toEqual({
+      done: false,
+      value: { kind: 'snapshot', snapshot: attentionFixture },
+    })
+    await events.return?.(undefined)
+
+    expect(cancelled).toBe(true)
   })
 })

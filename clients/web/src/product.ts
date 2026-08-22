@@ -10,6 +10,7 @@ import {
 
 // The version-one browser contract fixes the NDJSON item ceiling at 65,536 bytes.
 const MAX_ATTENTION_EVENT_BYTES = 65_536
+export const MAX_BOOTSTRAP_BYTES = 65_536
 export const MAX_ATTENTION_SNAPSHOT_BYTES = 65_536
 export const MAX_ATTENTION_SNAPSHOT_ITEMS = 64
 
@@ -21,8 +22,12 @@ const decodeBoundedAttentionSnapshot = (value: unknown): WebAttentionSnapshot =>
   return snapshot
 }
 
-const readBoundedJson = async (response: Response, maximumBytes: number): Promise<unknown> => {
-  if (!response.body) throw new TypeError('attention snapshot response has no body')
+const readBoundedJson = async (
+  response: Response,
+  maximumBytes: number,
+  resource: string,
+): Promise<unknown> => {
+  if (!response.body) throw new TypeError(`${resource} response has no body`)
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
   let byteLength = 0
@@ -33,7 +38,7 @@ const readBoundedJson = async (response: Response, maximumBytes: number): Promis
       byteLength += chunk.value.byteLength
       if (byteLength > maximumBytes) {
         await reader.cancel().catch(() => undefined)
-        throw new TypeError('attention snapshot exceeds the contract byte ceiling')
+        throw new TypeError(`${resource} exceeds the contract byte ceiling`)
       }
       chunks.push(chunk.value)
     }
@@ -55,10 +60,14 @@ const decodeAttentionLines = async function* (
   const reader = body.getReader()
   const decoder = new TextDecoder('utf-8', { fatal: true })
   let line: number[] = []
+  let completed = false
   try {
     while (true) {
       const chunk = await reader.read()
-      if (chunk.done) break
+      if (chunk.done) {
+        completed = true
+        break
+      }
       for (const byte of chunk.value) {
         if (byte === 10) {
           if (line.length === 0) throw new TypeError('attention stream contains an empty item')
@@ -81,10 +90,8 @@ const decodeAttentionLines = async function* (
       }
     }
     if (line.length !== 0) throw new TypeError('attention stream ended with an incomplete item')
-  } catch (error) {
-    await reader.cancel().catch(() => undefined)
-    throw error
   } finally {
+    if (!completed) await reader.cancel().catch(() => undefined)
     reader.releaseLock()
   }
 }
@@ -128,7 +135,9 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    return decodeWebContractBootstrap(await response.json())
+    return decodeWebContractBootstrap(
+      await readBoundedJson(response, MAX_BOOTSTRAP_BYTES, 'bootstrap response'),
+    )
   }
 
   async readAttention(
@@ -145,7 +154,7 @@ export class SameOriginProductTransport implements ProductTransport {
     })
     if (!response.ok) throw await this.requestError(response)
     return decodeBoundedAttentionSnapshot(
-      await readBoundedJson(response, MAX_ATTENTION_SNAPSHOT_BYTES),
+      await readBoundedJson(response, MAX_ATTENTION_SNAPSHOT_BYTES, 'attention snapshot'),
     )
   }
 

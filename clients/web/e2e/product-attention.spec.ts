@@ -155,6 +155,28 @@ test('closes the inspector with global Escape after focus leaves it', async ({ p
   await expect(approval).toBeFocused()
 })
 
+test('moves focus to the page heading when refreshed data removes the selection', async ({
+  page,
+}) => {
+  let snapshotReads = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/attention**', (route) => {
+    const requestUrl = new URL(route.request().url())
+    if (requestUrl.pathname.endsWith('/follow')) return route.abort()
+    snapshotReads += 1
+    return route.fulfill({ json: snapshotReads === 1 ? attentionFixture : nextAttentionFixture })
+  })
+  await page.goto('/attention')
+
+  await page
+    .getByRole('button', { name: new RegExp(`awaiting approval.*${approvalSessionId}`) })
+    .click()
+  await page.getByRole('button', { name: 'Refresh snapshot' }).click()
+
+  await expect(page.getByRole('button', { name: 'Close attention inspector' })).toBeHidden()
+  await expect(page.getByRole('heading', { name: '1 sessions', level: 2 })).toBeFocused()
+})
+
 test('captures the dark attention fleet', async ({ page }, testInfo) => {
   skipUnlessLinuxChromium(testInfo)
   const problems = watchBrowser(page)
