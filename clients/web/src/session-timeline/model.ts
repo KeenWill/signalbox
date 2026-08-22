@@ -250,17 +250,25 @@ const isCanonicalCrossFieldContinuation = (
   const current = cursor?.type === 'more_body' ? cursor.body : undefined
   const currentField = current?.field ?? 'tool_arguments'
   const currentMember = current?.member_index ?? 0
+  const tool = body.tools.length === 1 ? body.tools[0] : undefined
+  if (!tool || body.goal_events.length !== 0) return false
+  const currentExcerpt =
+    currentField === 'tool_arguments'
+      ? tool.arguments
+      : currentField === 'tool_result'
+        ? tool.result
+        : currentField === 'tool_failure'
+          ? tool.failure
+          : null
+  if (currentExcerpt === null) return false
   if (continuation.field === 'goal_text') {
-    return continuation.member_index === 0 && body.goal_events.length === 0
+    return continuation.member_index === 0
   }
   if (continuation.field === 'tool_result' || continuation.field === 'tool_failure') {
     return currentField === 'tool_arguments' && continuation.member_index === currentMember
   }
   if (continuation.field === 'tool_arguments') {
-    return (
-      ['tool_arguments', 'tool_result', 'tool_failure'].includes(currentField) &&
-      continuation.member_index === currentMember + 1
-    )
+    return continuation.member_index === currentMember + 1
   }
   return false
 }
@@ -426,6 +434,11 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
         if (!continuesExcerpt && !continuesCanonicalBodyField) {
           throw new TypeError('timeline detail continuation disagrees with its excerpt')
         }
+      }
+    } else {
+      const excerpts = page.items.flatMap((item) => bodyContinuations(item.body))
+      if (excerpts.length > 0) {
+        throw new TypeError('timeline detail excerpt continuation requires a page continuation')
       }
     }
     return page

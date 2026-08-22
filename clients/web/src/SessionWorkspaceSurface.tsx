@@ -62,6 +62,19 @@ export const visibleSessionItems = (
   return items
 }
 
+export const timelineArrowTarget = (
+  ids: readonly string[],
+  selected: string | null,
+  key: string,
+): string | undefined => {
+  if (key !== 'ArrowDown' && key !== 'ArrowUp') return undefined
+  const currentIndex = ids.indexOf(selected ?? '')
+  if (key === 'ArrowDown') {
+    return ids[currentIndex < 0 ? 0 : Math.min(currentIndex + 1, ids.length - 1)]
+  }
+  return ids[Math.max(currentIndex < 0 ? 0 : currentIndex - 1, 0)]
+}
+
 export function SessionWorkspaceSurface({
   bootstrap,
   bootstrapState,
@@ -130,6 +143,7 @@ export function SessionWorkspaceSurface({
   const openTimelineWindow = useCallback(
     (anchor: 'first' | 'latest') => {
       setManualAnchor({ kind: anchor })
+      setOpenAttempt((attempt) => attempt + 1)
       setExpanded(new Set())
       dispatch(actions.timelineSelected(null))
     },
@@ -297,7 +311,16 @@ export function SessionWorkspaceSurface({
               {session.data.window.projected_structured_bytes} B
             </span>
           </div>
-          <ol className="session-timeline" aria-label="Session timeline">
+          <ol
+            className="session-timeline"
+            aria-label="Session timeline"
+            onKeyDown={(event) => {
+              const target = timelineArrowTarget(timelineIds, selected, event.key)
+              if (!target) return
+              event.preventDefault()
+              select(target)
+            }}
+          >
             {items.map((item) => {
               const id = item.address.event_sequence
               const isExpanded = expanded.has(id)

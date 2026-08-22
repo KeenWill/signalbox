@@ -1021,6 +1021,37 @@ describe('BoundedSessionHistory', () => {
     ).resolves.toMatchObject({ continuation: { type: 'more_body', body: continuation } })
   })
 
+  it('rejects an incomplete excerpt without a matching page continuation', async () => {
+    const continuation = {
+      address: { event_sequence: '41' },
+      field: 'input_text',
+      member_index: 0,
+      offset_bytes: '5',
+    }
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: { text: 'hello', offset_bytes: '0', total_bytes: '11', continuation },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+      continuation: null,
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('requires a page continuation')
+  })
+
   it('rejects a body-page continuation when no excerpt continues', async () => {
     const source = await detailSource({
       session_id: sessionId,

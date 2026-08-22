@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { decodeWebSessionTimelineWindow } from './generated/web-contract.mjs'
 import { isCompatibleDetailBody } from './SessionItemDetail'
-import { isCanonicalSessionId, visibleSessionItems } from './SessionWorkspaceSurface'
+import {
+  isCanonicalSessionId,
+  timelineArrowTarget,
+  visibleSessionItems,
+} from './SessionWorkspaceSurface'
 
 const fixture = decodeWebSessionTimelineWindow({
   session_id: '00000000-0000-0000-0000-000000000991',
@@ -63,6 +67,15 @@ describe('Session Workspace projection', () => {
       fixture.items[2],
       fixture.items[4],
     ])
+  })
+
+  it('moves focused timeline selection with arrow keys', () => {
+    const ids = ['41', '42', '43']
+
+    expect(timelineArrowTarget(ids, '41', 'ArrowDown')).toBe('42')
+    expect(timelineArrowTarget(ids, '42', 'ArrowUp')).toBe('41')
+    expect(timelineArrowTarget(ids, null, 'ArrowDown')).toBe('41')
+    expect(timelineArrowTarget(ids, '42', 'Enter')).toBeUndefined()
   })
 
   it('rejects detail bodies that do not belong to the advertised event kind', () => {
