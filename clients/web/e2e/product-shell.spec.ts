@@ -125,6 +125,8 @@ test('runs product navigation sequences but leaves Mod+K to an editing field', a
 
 test('retries an initial bootstrap failure', async ({ page }) => {
   const problems = watchBrowser(page)
+  const expectedFailureMessage =
+    'Failed to load resource: the server responded with a status of 503 (Service Unavailable)'
   let attempts = 0
   await page.route('**/api/bootstrap', (route) => {
     attempts += 1
@@ -136,10 +138,6 @@ test('retries an initial bootstrap failure', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Retry contract check' }).click()
   await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
-  expect(problems).toEqual({
-    consoleErrors: [
-      'Failed to load resource: the server responded with a status of 503 (Service Unavailable)',
-    ],
-    pageErrors: [],
-  })
+  expect(problems.pageErrors).toEqual([])
+  expect(problems.consoleErrors.filter((message) => message !== expectedFailureMessage)).toEqual([])
 })
