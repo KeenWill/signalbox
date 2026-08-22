@@ -6,21 +6,20 @@ use reqwest::Url;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde_json::{Value, json};
 
-use super::arguments::{CodeHostFilePath, valid_opaque_id, valid_revision};
+use super::{
+    CodeHostNumericBounds,
+    arguments::{CodeHostFilePath, valid_opaque_id, valid_revision},
+};
 
-// numeric-bound: tunable - controls retained code-host result text
-pub(super) const MAX_RESULT_TEXT_BYTES: usize = 64 * 1024;
-// numeric-bound: tunable - the result URL length this tool advertises accepting
+// numeric-bound: guard - the tool contract advertises accepting result URLs only to this length
 const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
-// numeric-bound: tunable - controls retained paginated result items
-pub(super) const MAX_RESULT_ITEMS: usize = 100;
-// numeric-bound: ceiling - protects tool transport memory from encoded results
+// numeric-bound: guard - one encoded tool result exhausting transport memory
 pub(super) const MAX_ENCODED_RESULT_BYTES: usize = 512 * 1024;
 
 /// Whether a bounded code-host result exhausted its source.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CodeHostResultCompleteness {
-    /// The complete source fit within the operation's fixed bound.
+    /// The complete source fit within the operation's configured policy and guards.
     Complete,
     /// More source content existed beyond the retained prefix or page.
     Truncated,
@@ -50,12 +49,12 @@ impl ReviewThreadResolution {
     }
 }
 
-pub(super) fn valid_text(value: &str) -> bool {
-    value.len() <= MAX_RESULT_TEXT_BYTES && !value.contains('\0')
+pub(super) fn valid_text(bounds: CodeHostNumericBounds, value: &str) -> bool {
+    bounds.permits_result_text(value.len()) && !value.contains('\0')
 }
 
-pub(super) fn valid_required_text(value: &str) -> bool {
-    !value.is_empty() && valid_text(value)
+pub(super) fn valid_required_text(bounds: CodeHostNumericBounds, value: &str) -> bool {
+    !value.is_empty() && valid_text(bounds, value)
 }
 
 /// Whether a parsed location is one absolute credential-free HTTPS URL. The
@@ -154,15 +153,24 @@ pub struct ChangeRequestSummaryFields {
 
 impl ChangeRequestSummaryResult {
     /// Validates one complete summary result.
-    pub fn try_new(fields: ChangeRequestSummaryFields) -> Option<Self> {
+    pub fn try_new(
+        bounds: CodeHostNumericBounds,
+        fields: ChangeRequestSummaryFields,
+    ) -> Option<Self> {
         let url = CodeHostUrl::try_new(fields.url)?;
         (fields.number > 0
-            && valid_required_text(&fields.title)
-            && fields.body.as_deref().is_none_or(valid_text)
-            && valid_required_text(&fields.state)
-            && fields.author.as_deref().is_none_or(valid_required_text)
-            && valid_required_text(&fields.base_ref)
-            && valid_required_text(&fields.head_ref)
+            && valid_required_text(bounds, &fields.title)
+            && fields
+                .body
+                .as_deref()
+                .is_none_or(|value| valid_text(bounds, value))
+            && valid_required_text(bounds, &fields.state)
+            && fields
+                .author
+                .as_deref()
+                .is_none_or(|value| valid_required_text(bounds, value))
+            && valid_required_text(bounds, &fields.base_ref)
+            && valid_required_text(bounds, &fields.head_ref)
             && valid_revision(&fields.head_revision))
         .then_some(Self {
             number: fields.number,
@@ -205,8 +213,14 @@ pub struct ChangedFile {
 
 impl ChangedFile {
     /// Validates one changed-file summary.
-    pub fn try_new(path: String, status: String, additions: u64, deletions: u64) -> Option<Self> {
-        (valid_path(&path) && valid_required_text(&status)).then_some(Self {
+    pub fn try_new(
+        bounds: CodeHostNumericBounds,
+        path: String,
+        status: String,
+        additions: u64,
+        deletions: u64,
+    ) -> Option<Self> {
+        (valid_path(&path) && valid_required_text(bounds, &status)).then_some(Self {
             path,
             status,
             additions,
@@ -239,10 +253,11 @@ pub struct ChangedFilesResult {
 impl ChangedFilesResult {
     /// Validates one bounded changed-file page.
     pub fn try_new(
+        bounds: CodeHostNumericBounds,
         files: Vec<ChangedFile>,
         completeness: CodeHostResultCompleteness,
     ) -> Option<Self> {
-        (files.len() <= MAX_RESULT_ITEMS).then_some(Self {
+        bounds.permits_result_items(files.len()).then_some(Self {
             files,
             completeness,
         })
@@ -265,10 +280,14 @@ pub struct FilePatchResult {
 
 impl FilePatchResult {
     /// Validates one optional bounded patch.
-    pub fn try_new(file: ChangedFile, patch: Option<String>) -> Option<Self> {
+    pub fn try_new(
+        bounds: CodeHostNumericBounds,
+        file: ChangedFile,
+        patch: Option<String>,
+    ) -> Option<Self> {
         patch
             .as_deref()
-            .is_none_or(valid_text)
+            .is_none_or(|value| valid_text(bounds, value))
             .then_some(Self { file, patch })
     }
 
@@ -293,6 +312,7 @@ pub struct CheckStatus {
 impl CheckStatus {
     /// Validates one check-run status.
     pub fn try_new(
+        bounds: CodeHostNumericBounds,
         id: u64,
         name: String,
         status: String,
@@ -301,9 +321,11 @@ impl CheckStatus {
     ) -> Option<Self> {
         let url = CodeHostUrl::try_new(url)?;
         (id > 0
-            && valid_required_text(&name)
-            && valid_required_text(&status)
-            && conclusion.as_deref().is_none_or(valid_required_text))
+            && valid_required_text(bounds, &name)
+            && valid_required_text(bounds, &status)
+            && conclusion
+                .as_deref()
+                .is_none_or(|value| valid_required_text(bounds, value)))
         .then_some(Self {
             id,
             name,
@@ -335,15 +357,17 @@ pub struct ChecksStatusResult {
 impl ChecksStatusResult {
     /// Validates one bounded checks page for an exact revision.
     pub fn try_new(
+        bounds: CodeHostNumericBounds,
         revision: String,
         checks: Vec<CheckStatus>,
         completeness: CodeHostResultCompleteness,
     ) -> Option<Self> {
-        (valid_required_text(&revision) && checks.len() <= MAX_RESULT_ITEMS).then_some(Self {
-            revision,
-            checks,
-            completeness,
-        })
+        (valid_required_text(bounds, &revision) && bounds.permits_result_items(checks.len()))
+            .then_some(Self {
+                revision,
+                checks,
+                completeness,
+            })
     }
 
     fn into_value(self) -> Value {
@@ -385,11 +409,19 @@ pub struct ReviewThreadComment {
 
 impl ReviewThreadComment {
     /// Validates one review-thread comment.
-    pub fn try_new(id: String, author: Option<String>, body: String, url: String) -> Option<Self> {
+    pub fn try_new(
+        bounds: CodeHostNumericBounds,
+        id: String,
+        author: Option<String>,
+        body: String,
+        url: String,
+    ) -> Option<Self> {
         let url = CodeHostUrl::try_new(url)?;
         (valid_opaque_id(&id)
-            && author.as_deref().is_none_or(valid_required_text)
-            && valid_text(&body))
+            && author
+                .as_deref()
+                .is_none_or(|value| valid_required_text(bounds, value))
+            && valid_text(bounds, &body))
         .then_some(Self {
             id,
             author,
@@ -441,19 +473,19 @@ pub struct ReviewThreadFields {
 
 impl ReviewThread {
     /// Validates one review thread.
-    pub fn try_new(fields: ReviewThreadFields) -> Option<Self> {
+    pub fn try_new(bounds: CodeHostNumericBounds, fields: ReviewThreadFields) -> Option<Self> {
         (valid_opaque_id(&fields.id)
             && valid_path(&fields.path)
-            && fields.comments.len() <= MAX_RESULT_ITEMS)
-            .then_some(Self {
-                id: fields.id,
-                resolved: fields.resolved,
-                outdated: fields.outdated,
-                path: fields.path,
-                line: fields.line,
-                comments: fields.comments,
-                comments_truncated: fields.comments_truncated,
-            })
+            && bounds.permits_result_items(fields.comments.len()))
+        .then_some(Self {
+            id: fields.id,
+            resolved: fields.resolved,
+            outdated: fields.outdated,
+            path: fields.path,
+            line: fields.line,
+            comments: fields.comments,
+            comments_truncated: fields.comments_truncated,
+        })
     }
 
     fn into_value(self) -> Value {
@@ -479,10 +511,11 @@ pub struct ReviewThreadsResult {
 impl ReviewThreadsResult {
     /// Validates one bounded review-thread page.
     pub fn try_new(
+        bounds: CodeHostNumericBounds,
         threads: Vec<ReviewThread>,
         completeness: CodeHostResultCompleteness,
     ) -> Option<Self> {
-        (threads.len() <= MAX_RESULT_ITEMS).then_some(Self {
+        bounds.permits_result_items(threads.len()).then_some(Self {
             threads,
             completeness,
         })
@@ -524,8 +557,12 @@ pub struct ThreadResolveResult {
 
 impl ThreadResolveResult {
     /// Validates the resolved thread identity.
-    pub fn try_new(thread_id: String, resolution: ReviewThreadResolution) -> Option<Self> {
-        (valid_required_text(&thread_id) && resolution == ReviewThreadResolution::Resolved)
+    pub fn try_new(
+        bounds: CodeHostNumericBounds,
+        thread_id: String,
+        resolution: ReviewThreadResolution,
+    ) -> Option<Self> {
+        (valid_required_text(bounds, &thread_id) && resolution == ReviewThreadResolution::Resolved)
             .then_some(Self {
                 thread_id,
                 resolution,
@@ -551,11 +588,12 @@ pub struct CiJobLogResult {
 impl CiJobLogResult {
     /// Validates one bounded job-log prefix.
     pub fn try_new(
+        bounds: CodeHostNumericBounds,
         job_id: u64,
         text: String,
         completeness: CodeHostResultCompleteness,
     ) -> Option<Self> {
-        (job_id > 0 && valid_text(&text)).then_some(Self {
+        (job_id > 0 && valid_text(bounds, &text)).then_some(Self {
             job_id,
             text,
             completeness,

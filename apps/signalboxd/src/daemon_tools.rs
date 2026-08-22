@@ -2537,6 +2537,10 @@ mod tests {
     struct OfflineCodeHostTransport;
 
     impl CodeHostTransport for OfflineCodeHostTransport {
+        fn numeric_bounds(&self) -> crate::CodeHostNumericBounds {
+            crate::CodeHostNumericBounds::new(None, None, None, None, None, None)
+        }
+
         async fn execute(
             &mut self,
             _operation: crate::CodeHostOperation,
@@ -2728,7 +2732,10 @@ mod tests {
                     CredentialReference::new(SYNTHETIC_GITHUB_CREDENTIAL_REFERENCE),
                 ),
             },
-            GitHubCodeHostTransport::try_new().expect("offline code-host transport constructs"),
+            GitHubCodeHostTransport::try_new(crate::CodeHostNumericBounds::new(
+                None, None, None, None, None, None,
+            ))
+            .expect("offline code-host transport constructs"),
             GitHubEgressPolicy::github_api_only(),
             workspace.path(),
             git_identity(),

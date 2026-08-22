@@ -57,18 +57,18 @@ use signalboxd::runner_protocol_runtime::{
 };
 use signalboxd::{
     ActivatedTurnPass, BaseDaemonCredentialInputs, BlobStoreRegistry,
-    CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError, ConvergenceSweepNumericBounds,
-    ConvergenceSweepRuntime, DaemonToolCatalog, DaemonToolComposition, DaemonTools,
-    DaemonToolsConstructionError, ExpiredPassRecoveryPolicy, FatalExecutionSupervisor,
-    FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport,
-    GoalModeNumericBounds, HubModelConfiguration, HubModelConfigurationError, LocalProcessListener,
-    LocalSocketError, MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime,
-    PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
-    ProcessRuntimeError, PrometheusServer, ReportedUsageCompaction, RepositoryWatchRuntime,
-    RepositoryWatchRuntimeError, SessionTemplateConfiguration, SessionTemplateConfigurationError,
-    SingleHubGuardError, SystemCurrentTimeClock, TelemetryConfiguration,
-    TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
-    TurnLivenessNumericBounds, TurnLivenessRuntime,
+    CODE_HOST_CREDENTIAL_REFERENCE, CodeHostNumericBounds, ConfiguredApprovalPostureError,
+    ConvergenceSweepNumericBounds, ConvergenceSweepRuntime, DaemonToolCatalog,
+    DaemonToolComposition, DaemonTools, DaemonToolsConstructionError, ExpiredPassRecoveryPolicy,
+    FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess,
+    GitHubCodeHostTransport, GoalModeNumericBounds, HubModelConfiguration,
+    HubModelConfigurationError, LocalProcessListener, LocalSocketError,
+    MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
+    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
+    ReportedUsageCompaction, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
+    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
+    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
+    TelemetryExportFilter, TelemetryMetrics, TurnLivenessNumericBounds, TurnLivenessRuntime,
     model_adapter::ConfiguredModelRuntime,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
@@ -1317,6 +1317,14 @@ async fn run_hub(
     let diagnostic_model_identity_limit = configured_usize("diagnostic_model_identity_limit")?;
     let post_kill_reap_bound = configured_duration("post_kill_reap_bound");
     let native_message_limit = configured_usize("max_native_message_bytes")?;
+    let code_host_numeric_bounds = CodeHostNumericBounds::new(
+        configured_duration("code_host_request_timeout"),
+        configured_usize("max_job_log_bytes")?,
+        configured_usize("max_stack_comparisons_in_flight")?,
+        configured_usize("max_code_host_result_text_bytes")?,
+        configured_usize("max_code_host_result_items")?,
+        configured_usize("max_repository_file_content_bytes")?,
+    );
     if configuration.repository_watch_credential_conflicts(&model_configuration) {
         let error = HubConfigurationError::new(
             GITHUB_TOKEN_FILE_ENVIRONMENT,
@@ -1459,12 +1467,13 @@ async fn run_hub(
                 SanitizedStartupCause::Static(openai_construction_cause(&error)),
             )
         })?;
-    let code_host_transport = GitHubCodeHostTransport::try_new().map_err(|_| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static("github_transport_construction_failed"),
-        )
-    })?;
+    let code_host_transport =
+        GitHubCodeHostTransport::try_new(code_host_numeric_bounds).map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("github_transport_construction_failed"),
+            )
+        })?;
     let runtime_models = model_configuration.runtime_model_catalog();
     let compaction_runtime = ConfiguredModelRuntime::new(
         compaction_anthropic,
