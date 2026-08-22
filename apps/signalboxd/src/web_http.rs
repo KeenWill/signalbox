@@ -389,8 +389,8 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
             if disposition == AttentionFollowDisposition::End {
                 return None;
             }
-            let cursor = cursor;
-            let delay = Duration::from_millis(250);
+            let mut cursor = cursor;
+            let mut delay = Duration::from_millis(250);
             loop {
                 tokio::time::sleep(delay).await;
                 let Ok(_permit) = Arc::clone(&budget).acquire_owned().await else {
@@ -401,19 +401,8 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                         cursor: next,
                         summaries,
                     }) if summaries.is_empty() => {
-                        return Some((
-                            WebAttentionStreamEvent::Update {
-                                cursor: next.value().to_string(),
-                                summaries: Vec::new(),
-                            },
-                            (
-                                repository,
-                                None,
-                                next,
-                                budget,
-                                AttentionFollowDisposition::Continue,
-                            ),
-                        ));
+                        cursor = next;
+                        delay = delay.saturating_mul(2).min(Duration::from_secs(4));
                     }
                     Ok(AttentionChanges::Updated {
                         cursor: next,
@@ -1318,7 +1307,7 @@ mod tests {
             goal_block: Some(AttentionGoalBlock {
                 generation: u64::MAX,
                 reason: AttentionBlockedReason::ExternalChangeRequired,
-                need_summary: String::from("🦀")
+                need_summary: String::from('\u{1}')
                     .repeat(usize::from(max_attention_goal_summary_characters())),
             }),
             judge: AttentionJudgeFacts {
