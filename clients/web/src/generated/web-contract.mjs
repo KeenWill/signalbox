@@ -749,6 +749,9 @@ export function decodeWebBlobDescriptor(value) {
     const contentRoute = assertSameOriginBlobUrl(view.content_url, contentPath);
     const contentDigest = contentRoute.digest;
     if (view.kind === "download" || view.kind === "browser_native") {
+      if (view.derivations.length !== 0) {
+        fail(`blob_descriptor.available_views[${index}].derivations`, "empty for an original representation");
+      }
       if (contentDigest !== value.digest) {
         fail(contentPath, "a route for the descriptor digest");
       }

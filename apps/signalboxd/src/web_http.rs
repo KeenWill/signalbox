@@ -384,6 +384,7 @@ async fn blob_descriptor(
         if runtime.supports_image_derivatives() {
             append_image_derivative_view(
                 &runtime,
+                Arc::clone(&state.blob_read_budget),
                 digest,
                 WebImageDerivativeKind::Thumbnail,
                 WebBlobViewKind::Thumbnail,
@@ -392,6 +393,7 @@ async fn blob_descriptor(
             .await;
             append_image_derivative_view(
                 &runtime,
+                Arc::clone(&state.blob_read_budget),
                 digest,
                 WebImageDerivativeKind::Preview,
                 WebBlobViewKind::Preview,
@@ -420,6 +422,7 @@ async fn blob_descriptor_head() -> Response {
 
 async fn append_image_derivative_view(
     runtime: &WebBlobRuntime,
+    read_budget: Arc<Semaphore>,
     input: BlobDigest,
     kind: WebImageDerivativeKind,
     view_kind: WebBlobViewKind,
@@ -432,6 +435,9 @@ async fn append_image_derivative_view(
         return;
     };
     let Ok(entry) = runtime.entry(output).await else {
+        return;
+    };
+    let Some(_permit) = try_acquire_web_blob_read_permit(read_budget) else {
         return;
     };
     if open_recorded_blob_verified(runtime.registry(), &entry)
