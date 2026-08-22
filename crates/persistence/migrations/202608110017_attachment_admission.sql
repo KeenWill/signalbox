@@ -73,6 +73,7 @@ BEGIN
                 AND result_selected_defaults_version IS NULL
                 AND result_last_position IS NULL
                 AND result_existing_interrupt_command_id IS NULL
+                AND result_blob_digest IS NOT NULL
                 AND octet_length(result_blob_digest) = 32
                 AND result_maximum_attachment_bytes IS NULL
             )
@@ -90,6 +91,7 @@ BEGIN
                 AND result_last_position IS NULL
                 AND result_existing_interrupt_command_id IS NULL
                 AND result_blob_digest IS NULL
+                AND result_maximum_attachment_bytes IS NOT NULL
                 AND result_maximum_attachment_bytes BETWEEN 1 AND 18446744073709551615
             )
         )
