@@ -12,6 +12,16 @@ async fn lock_tool_continuation_outbox_allocator(
     Ok(transaction)
 }
 
+async fn lock_tool_continuation_result_writes(
+    pool: &sqlx::PgPool,
+) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("LOCK TABLE semantic_transcript_entry IN SHARE MODE")
+        .execute(&mut *transaction)
+        .await?;
+    Ok(transaction)
+}
+
 async fn tool_continuation_order_guard_is_available(
     pool: &sqlx::PgPool,
 ) -> Result<bool, Box<dyn Error>> {
@@ -52,10 +62,12 @@ struct ReclassifiedSteeringFacts {
     origin: TurnOriginPresence,
 }
 
-/// INV-007 / INV-009 / INV-012: a tool-result continuation takes the shared
-/// model-call ordering guard before its results-projected outbox append can wait
-/// on the allocator. This excludes the allocator-to-guard edge that would
-/// deadlock against counted activation.
+/// INV-007 / INV-009 / INV-012: a tool-result continuation materializes and
+/// reconstructs its transaction-local results before taking the shared
+/// model-call ordering guard, then takes that guard before its results-projected
+/// outbox append can wait on the allocator. This excludes both long reads from
+/// the global writer critical section and the allocator-to-guard edge that
+/// would deadlock against counted activation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv007_inv009_inv012_tool_continuation_guards_before_result_outbox()
@@ -116,6 +128,7 @@ async fn inv007_inv009_inv012_tool_continuation_guards_before_result_outbox()
     let turn = fixture.turn;
     let producing_call = fixture.call;
     let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28));
+    let result_holder = lock_tool_continuation_result_writes(&pool).await?;
     let allocator_holder = lock_tool_continuation_outbox_allocator(&pool).await?;
     let continuation = tokio::spawn(async move {
         continuing_repository
@@ -139,6 +152,9 @@ async fn inv007_inv009_inv012_tool_continuation_guards_before_result_outbox()
             )
             .await
     });
+    assert!(blocked_backends_reached(&pool, 1).await?);
+    assert!(tool_continuation_order_guard_is_available(&pool).await?);
+    result_holder.rollback().await?;
     assert!(blocked_backends_reached(&pool, 1).await?);
     assert!(!tool_continuation_order_guard_is_available(&pool).await?);
     allocator_holder.rollback().await?;
