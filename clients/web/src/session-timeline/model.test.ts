@@ -187,6 +187,25 @@ describe('BoundedSessionHistory', () => {
     )
   })
 
+  it('rejects a descriptor count larger than its address span', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        sizes: { ...descriptor.sizes, item_count: '2' },
+        first_address: { event_sequence: '100' },
+        latest_address: { event_sequence: '100' },
+      }),
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+
+    await expect(new BoundedSessionHistory(sessionId, source).describe()).rejects.toThrow(
+      'boundaries are contradictory',
+    )
+  })
+
   it('normalizes non-finite limits to their safe minima', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const window = await new BoundedSessionHistory(sessionId, scenario).load(
@@ -275,6 +294,37 @@ describe('BoundedSessionHistory', () => {
         { maxItems: 1, maxBytes: 256 },
       ),
     ).rejects.toThrow('requested item ceiling')
+  })
+
+  it('preserves an immutable anchor when a source mutates its request anchor', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async (_requestedSessionId, anchor) => {
+        Object.assign(anchor, { kind: 'around', eventSequence: '100' })
+        return {
+          session_id: sessionId,
+          items: [
+            {
+              address: { event_sequence: '100' },
+              kind: 'input_accepted',
+              projected_structured_bytes: 78,
+            },
+          ],
+          projected_structured_bytes: 78,
+          continuation_before: null,
+          continuation_after: null,
+        }
+      },
+    }
+
+    await expect(
+      new BoundedSessionHistory(sessionId, source).load(
+        { kind: 'after', eventSequence: '500' },
+        { maxItems: 1, maxBytes: 256 },
+      ),
+    ).rejects.toThrow('strictly after')
   })
 
   it('budgets scenario windows and descriptors from exact event-kind charges', async () => {
