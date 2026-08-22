@@ -12,7 +12,6 @@ import {
 } from 'lucide-react'
 import { type ComponentType, type ReactNode, useState } from 'react'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import { actions, useAppDispatch, useAppSelector } from '../../state'
 import { artifactScenario } from './artifactScenario'
 import {
   type ArtifactItem,
@@ -23,6 +22,7 @@ import {
   type SignalboxImageArtifact,
   type TextArtifact,
 } from './artifactTypes'
+import { type RemoteMediaPolicy, useRemoteMediaPreference } from './remoteMediaPreference'
 import './artifacts.css'
 
 type WebBlobAvailableView = WebBlobDescriptor['available_views'][number]
@@ -43,6 +43,7 @@ const viewByKind = (
 
 interface RendererProps<T extends RenderableArtifact> {
   artifact: T
+  remoteMediaPolicy: RemoteMediaPolicy
 }
 
 function TextBody({ artifact }: RendererProps<TextArtifact>) {
@@ -157,8 +158,10 @@ function SignalboxImageBody({ artifact }: RendererProps<SignalboxImageArtifact>)
   )
 }
 
-function RemoteImageBody({ artifact }: RendererProps<RemoteImageArtifact>) {
-  const policy = useAppSelector((state) => state.app.remoteMedia)
+function RemoteImageBody({
+  artifact,
+  remoteMediaPolicy: policy,
+}: RendererProps<RemoteImageArtifact>) {
   const [approved, setApproved] = useState(false)
   const visible = policy === 'allow' || (policy === 'ask' && approved)
 
@@ -190,11 +193,14 @@ const isSignalboxImage = (
   artifact: SignalboxImageArtifact | RemoteImageArtifact,
 ): artifact is SignalboxImageArtifact => artifact.source.kind === 'signalbox_blob'
 
-function ImageBody({ artifact }: RendererProps<SignalboxImageArtifact | RemoteImageArtifact>) {
+function ImageBody({
+  artifact,
+  remoteMediaPolicy,
+}: RendererProps<SignalboxImageArtifact | RemoteImageArtifact>) {
   return isSignalboxImage(artifact) ? (
-    <SignalboxImageBody artifact={artifact} />
+    <SignalboxImageBody artifact={artifact} remoteMediaPolicy={remoteMediaPolicy} />
   ) : (
-    <RemoteImageBody artifact={artifact} />
+    <RemoteImageBody artifact={artifact} remoteMediaPolicy={remoteMediaPolicy} />
   )
 }
 
@@ -242,7 +248,13 @@ const rendererRegistry: {
 
 export const registeredArtifactKinds = Object.freeze(Object.keys(rendererRegistry).sort())
 
-function RendererBoundary({ artifact }: { artifact: ArtifactItem }) {
+function RendererBoundary({
+  artifact,
+  remoteMediaPolicy,
+}: {
+  artifact: ArtifactItem
+  remoteMediaPolicy: RemoteMediaPolicy
+}) {
   if (artifact.kind === 'blocked') {
     return (
       <div className="artifact-state blocked" role="status">
@@ -270,7 +282,7 @@ function RendererBoundary({ artifact }: { artifact: ArtifactItem }) {
   }
 
   const Renderer = rendererRegistry[artifact.kind] as ComponentType<RendererProps<typeof artifact>>
-  return <Renderer artifact={artifact} />
+  return <Renderer artifact={artifact} remoteMediaPolicy={remoteMediaPolicy} />
 }
 
 const artifactIcon = (artifact: ArtifactItem) => {
@@ -281,7 +293,13 @@ const artifactIcon = (artifact: ArtifactItem) => {
   return <FileQuestion aria-hidden="true" />
 }
 
-export function ArtifactRenderer({ artifact }: { artifact: ArtifactItem }) {
+export function ArtifactRenderer({
+  artifact,
+  remoteMediaPolicy = 'ask',
+}: {
+  artifact: ArtifactItem
+  remoteMediaPolicy?: RemoteMediaPolicy
+}) {
   return (
     <article className="artifact-row" aria-label={`Artifact ${artifact.displayName}`}>
       <header className="artifact-heading">
@@ -295,14 +313,13 @@ export function ArtifactRenderer({ artifact }: { artifact: ArtifactItem }) {
           </small>
         </div>
       </header>
-      <RendererBoundary artifact={artifact} />
+      <RendererBoundary artifact={artifact} remoteMediaPolicy={remoteMediaPolicy} />
     </article>
   )
 }
 
 export function ArtifactWorkbench() {
-  const dispatch = useAppDispatch()
-  const remoteMedia = useAppSelector((state) => state.app.remoteMedia)
+  const [remoteMedia, setRemoteMedia] = useRemoteMediaPreference()
 
   return (
     <section className="artifact-panel" aria-labelledby="artifact-heading">
@@ -315,9 +332,7 @@ export function ArtifactWorkbench() {
           Remote media
           <select
             value={remoteMedia}
-            onChange={(event) =>
-              dispatch(actions.remoteMediaSet(event.target.value as typeof remoteMedia))
-            }
+            onChange={(event) => setRemoteMedia(event.target.value as typeof remoteMedia)}
           >
             <option value="ask">Ask</option>
             <option value="block">Block</option>
@@ -331,7 +346,7 @@ export function ArtifactWorkbench() {
       </p>
       <div className="artifact-list">
         {artifactScenario.map((artifact) => (
-          <ArtifactRenderer key={artifact.id} artifact={artifact} />
+          <ArtifactRenderer key={artifact.id} artifact={artifact} remoteMediaPolicy={remoteMedia} />
         ))}
       </div>
     </section>

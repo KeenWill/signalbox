@@ -12,6 +12,7 @@ import {
   ARTIFACT_PREVIEW_CHARACTERS,
   boundArtifactText,
 } from './artifactTypes'
+import { decodeRemoteMediaPolicy } from './remoteMediaPreference'
 
 describe('artifact renderer compatibility', () => {
   it('registers the closed text, code, and image renderer set', () => {
@@ -72,5 +73,9 @@ describe('artifact renderer compatibility', () => {
 
     expect(bounded.content).toHaveLength(ARTIFACT_EXPANDED_CHARACTERS)
     expect(bounded.omittedCharacters).toBe(content.length - ARTIFACT_EXPANDED_CHARACTERS)
+  })
+
+  it('fails an unknown remote-media preference closed to ask', () => {
+    expect(decodeRemoteMediaPolicy('invented')).toBe('ask')
   })
 })
