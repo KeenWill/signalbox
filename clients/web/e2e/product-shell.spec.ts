@@ -152,6 +152,23 @@ test('changes and restores a Settings preference without a mouse', async ({ page
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('keeps Settings available without consulting daemon bootstrap', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let bootstrapRequests = 0
+  await page.route('**/api/bootstrap', (route) => {
+    bootstrapRequests += 1
+    return route.abort()
+  })
+
+  await page.goto('/settings')
+
+  await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible()
+  await expect(page.getByText('Browser-local preferences', { exact: true })).toBeVisible()
+  await expect(page.getByText('Transport unavailable')).toHaveCount(0)
+  expect(bootstrapRequests).toBe(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('closes phone navigation after selecting a route', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)

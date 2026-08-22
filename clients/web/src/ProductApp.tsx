@@ -339,6 +339,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
     staleTime: Number.POSITIVE_INFINITY,
+    enabled: surface !== 'settings',
   })
   const context = useMemo<CommandContext>(
     () => ({
@@ -411,19 +412,25 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         </header>
         <div className="surface-question">
           <p>{copy.question}</p>
-          <span
-            className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
-            role="status"
-            aria-live="polite"
-          >
-            {bootstrap.isSuccess
-              ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
-              : bootstrap.isError
-                ? bootstrap.error instanceof BootstrapContractError
-                  ? 'Incompatible daemon contract'
-                  : 'Transport unavailable'
-                : 'Checking contract…'}
-          </span>
+          {surface === 'settings' ? (
+            <span className="contract-state ready" role="status">
+              Browser-local preferences
+            </span>
+          ) : (
+            <span
+              className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
+              role="status"
+              aria-live="polite"
+            >
+              {bootstrap.isSuccess
+                ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
+                : bootstrap.isError
+                  ? bootstrap.error instanceof BootstrapContractError
+                    ? 'Incompatible daemon contract'
+                    : 'Transport unavailable'
+                  : 'Checking contract…'}
+            </span>
+          )}
         </div>
         {content}
       </main>

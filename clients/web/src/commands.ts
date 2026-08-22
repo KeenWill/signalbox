@@ -1,5 +1,5 @@
 import type { HotkeySequence, RegisterableHotkey } from '@tanstack/react-hotkeys'
-import type { BrowserPreferences, RemoteMediaPolicy } from './preferences'
+import type { BrowserPreferences } from './preferences'
 import type { AppDispatch, DensityMode, LayoutMode, RootState, ThemeMode } from './state'
 import { actions } from './state'
 
@@ -39,8 +39,6 @@ const setDensity = (density: DensityMode) => (context: CommandContext) =>
   context.dispatch(actions.densitySet(density))
 const setTheme = (theme: ThemeMode) => (context: CommandContext) =>
   context.dispatch(actions.themeSet(theme))
-const setRemoteMedia = (policy: RemoteMediaPolicy) => (context: CommandContext) =>
-  context.dispatch(actions.remoteMediaSet(policy))
 export const commandRegistry = [
   {
     id: 'navigate.attention',
@@ -335,33 +333,6 @@ export const commandRegistry = [
     bindings: [],
     available: always,
     run: (context) => context.dispatch(actions.detailSet('results')),
-  },
-  {
-    id: 'remote-media.ask',
-    title: 'Ask before loading remote media',
-    description: 'Require confirmation before the browser loads remote media.',
-    category: 'Settings',
-    bindings: [],
-    available: always,
-    run: setRemoteMedia('ask'),
-  },
-  {
-    id: 'remote-media.block',
-    title: 'Block remote media',
-    description: 'Prevent the browser from loading remote media.',
-    category: 'Settings',
-    bindings: [],
-    available: always,
-    run: setRemoteMedia('block'),
-  },
-  {
-    id: 'remote-media.allow',
-    title: 'Allow remote media',
-    description: 'Allow the browser to load remote media.',
-    category: 'Settings',
-    bindings: [],
-    available: always,
-    run: setRemoteMedia('allow'),
   },
   {
     id: 'pane.navigation.resize',

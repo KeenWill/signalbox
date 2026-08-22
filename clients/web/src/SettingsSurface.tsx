@@ -123,36 +123,6 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
           </label>
         </PreferenceGroup>
 
-        <PreferenceGroup legend="Remote media">
-          <label>
-            <input
-              type="radio"
-              name="remote-media"
-              checked={app.remoteMedia === 'ask'}
-              onChange={() => invokeCommand('remote-media.ask', context)}
-            />
-            <span>Ask before loading</span>
-          </label>
-          <label>
-            <input
-              type="radio"
-              name="remote-media"
-              checked={app.remoteMedia === 'block'}
-              onChange={() => invokeCommand('remote-media.block', context)}
-            />
-            <span>Block</span>
-          </label>
-          <label>
-            <input
-              type="radio"
-              name="remote-media"
-              checked={app.remoteMedia === 'allow'}
-              onChange={() => invokeCommand('remote-media.allow', context)}
-            />
-            <span>Allow</span>
-          </label>
-        </PreferenceGroup>
-
         <fieldset className="preference-group pane-preferences">
           <legend>Workbench panes</legend>
           <label>
