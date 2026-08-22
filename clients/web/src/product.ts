@@ -93,6 +93,17 @@ export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> =
   settings: { kind: 'browser-local', authority: 'browser preferences' },
 }
 
+export const productSurfaceCacheLabel = (surface: ProductRouteId): string | null => {
+  switch (productSurfaceStates[surface].kind) {
+    case 'browser-local':
+      return 'Local settings'
+    case 'server-backed':
+      return 'Bounded query'
+    case 'committed-unimplemented':
+      return null
+  }
+}
+
 export interface ProductTransport {
   readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap>
 }

@@ -102,6 +102,7 @@ test('opens the product at Attention with generated-contract transport status', 
   await page.goto('/')
 
   await expect(page).toHaveURL(/\/attention$/)
+  await expect(page).toHaveTitle('Attention · Signalbox')
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
   await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
   await expect(page.getByRole('link', { name: /Attention/ })).toHaveAttribute(
@@ -118,7 +119,25 @@ test('navigates from Attention to Sessions with the shared semantic link', async
 
   await page.getByRole('link', { name: /Sessions/ }).click()
   await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page).toHaveTitle('Sessions · Signalbox')
   await expect(page.getByRole('heading', { name: 'Sessions', level: 1 })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('gates Sessions on the validated bootstrap capability', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        capabilities: { ...bootstrapFixture.capabilities, bounded_session_timeline: false },
+      },
+    }),
+  )
+  await page.goto('/sessions')
+
+  await expect(page.getByText('Timeline reads unavailable')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Open workspace' })).toBeDisabled()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

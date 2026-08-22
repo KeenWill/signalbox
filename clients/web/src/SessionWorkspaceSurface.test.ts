@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { decodeWebSessionTimelineWindow } from './generated/web-contract.mjs'
-import { isCanonicalSessionId, visibleSessionItems } from './SessionWorkspaceSurface'
+import {
+  isCanonicalSessionId,
+  sessionWorkspaceQueryKey,
+  visibleSessionItems,
+} from './SessionWorkspaceSurface'
 
 const fixture = decodeWebSessionTimelineWindow({
   session_id: '00000000-0000-0000-0000-000000000991',
@@ -42,5 +46,13 @@ describe('Session Workspace projection', () => {
     const results = visibleSessionItems(fixture.items, 'results')
 
     expect(results).toEqual([fixture.items[0], fixture.items[1], fixture.items[2]])
+  })
+
+  it('uses one stable cache entry for every request for a session', () => {
+    expect(sessionWorkspaceQueryKey(fixture.session_id)).toEqual([
+      'production',
+      'session-workspace',
+      fixture.session_id,
+    ])
   })
 })

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   MAX_BOOTSTRAP_RESPONSE_BYTES,
   productRoutes,
+  productSurfaceCacheLabel,
   productSurfaceStates,
   SameOriginProductTransport,
 } from './product'
@@ -94,5 +95,11 @@ describe('product surface availability', () => {
       owningTrack: '#991 session projections',
       facts: ['bounded session descriptors', 'stable-address timeline windows'],
     })
+  })
+
+  it('reports cache ownership only for implemented surfaces', () => {
+    expect(productSurfaceCacheLabel('sessions')).toBe('Bounded query')
+    expect(productSurfaceCacheLabel('settings')).toBe('Local settings')
+    expect(productSurfaceCacheLabel('attention')).toBeNull()
   })
 })

@@ -22,8 +22,11 @@ const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 const NATIVE_SESSION_ID_PATTERN = String.raw`\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*`
 const SESSION_WINDOW_ITEMS = 80
 const SESSION_WINDOW_BYTES = 64 * 1024
+type TimelineCapability = 'checking' | 'available' | 'unavailable'
 
 export const isCanonicalSessionId = (value: string): boolean => SESSION_ID_PATTERN.test(value)
+export const sessionWorkspaceQueryKey = (sessionId: string | null) =>
+  ['production', 'session-workspace', sessionId] as const
 
 export const visibleSessionItems = (
   items: WebSessionTimelineWindow['items'],
@@ -45,12 +48,14 @@ export function SessionWorkspaceSurface({
   onTimelineIds,
   onTimelineWindowAvailable,
   onWindowRequestConsumed,
+  timelineCapability,
   timelineRef,
   windowRequest,
 }: {
   onTimelineIds: (ids: readonly string[]) => void
   onTimelineWindowAvailable: (available: boolean) => void
   onWindowRequestConsumed: () => void
+  timelineCapability: TimelineCapability
   timelineRef: RefObject<HTMLDivElement | null>
   windowRequest: { anchor: 'first' | 'latest'; attempt: number } | null
 }) {
@@ -60,18 +65,12 @@ export function SessionWorkspaceSurface({
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [manualAnchor, setManualAnchor] = useState<SessionWindowAnchor | null>(null)
   const [openingPosition, setOpeningPosition] = useState<string | undefined>()
-  const [attempt, setAttempt] = useState(0)
+  const [refetchRequest, setRefetchRequest] = useState(0)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
+  const handledRefetchRequest = useRef(0)
   const session = useQuery({
-    queryKey: [
-      'production',
-      'session-workspace',
-      sessionId,
-      manualAnchor,
-      openingPosition,
-      attempt,
-    ],
+    queryKey: sessionWorkspaceQueryKey(sessionId),
     queryFn: async ({ signal }) => {
       const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window))
       const history = new BoundedSessionHistory(sessionId ?? '', source)
@@ -89,7 +88,7 @@ export function SessionWorkspaceSurface({
       )
       return { active, anchor, descriptor, window: timelineWindow }
     },
-    enabled: sessionId !== null,
+    enabled: sessionId !== null && timelineCapability === 'available',
   })
   const items = useMemo(
     () => visibleSessionItems(session.data?.window.items ?? [], app.detail),
@@ -100,16 +99,28 @@ export function SessionWorkspaceSurface({
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   useEffect(
-    () => onTimelineWindowAvailable(session.data !== undefined),
-    [onTimelineWindowAvailable, session.data],
+    () =>
+      onTimelineWindowAvailable(timelineCapability === 'available' && session.data !== undefined),
+    [onTimelineWindowAvailable, session.data, timelineCapability],
   )
   useEffect(() => () => onTimelineWindowAvailable(false), [onTimelineWindowAvailable])
   useEffect(() => {
     if (windowRequest === null || sessionId === null) return
     setManualAnchor({ kind: windowRequest.anchor })
-    setAttempt((current) => current + 1)
+    setRefetchRequest((current) => current + 1)
     onWindowRequestConsumed()
   }, [onWindowRequestConsumed, sessionId, windowRequest])
+  useEffect(() => {
+    if (
+      refetchRequest === handledRefetchRequest.current ||
+      sessionId === null ||
+      timelineCapability !== 'available'
+    ) {
+      return
+    }
+    handledRefetchRequest.current = refetchRequest
+    void session.refetch()
+  }, [refetchRequest, session.refetch, sessionId, timelineCapability])
   useEffect(() => {
     if (sessionId !== null && app.selectedTimeline !== null) {
       dispatch(
@@ -129,18 +140,19 @@ export function SessionWorkspaceSurface({
   const openSession = (event: FormEvent) => {
     event.preventDefault()
     const candidate = draftId.trim().toLowerCase()
-    if (!isCanonicalSessionId(candidate)) return
+    if (!isCanonicalSessionId(candidate) || timelineCapability !== 'available') return
+    const reopeningCurrentSession = candidate === sessionId
     setOpeningPosition(app.lastLogicalPositions[candidate])
     setManualAnchor(null)
-    setAttempt((current) => current + 1)
     setExpanded(new Set())
     dispatch(actions.timelineSelected(null))
     setSessionId(candidate)
+    if (reopeningCurrentSession) setRefetchRequest((current) => current + 1)
   }
   const selected = app.selectedTimeline
   const loadWindow = (anchor: 'first' | 'latest') => {
     setManualAnchor({ kind: anchor })
-    setAttempt((current) => current + 1)
+    setRefetchRequest((current) => current + 1)
   }
   const select = (eventSequence: string) => {
     dispatch(actions.timelineSelected(eventSequence))
@@ -189,7 +201,10 @@ export function SessionWorkspaceSurface({
             required
           />
         </label>
-        <button type="submit" disabled={!isCanonicalSessionId(draftId.trim())}>
+        <button
+          type="submit"
+          disabled={!isCanonicalSessionId(draftId.trim()) || timelineCapability !== 'available'}
+        >
           Open workspace
         </button>
       </form>
@@ -198,11 +213,20 @@ export function SessionWorkspaceSurface({
         <section className="surface-empty session-entry" aria-labelledby="session-entry-heading">
           <Radio aria-hidden="true" />
           <div>
-            <span className="availability-tag ready">Timeline reads available</span>
+            <span
+              className={`availability-tag ${timelineCapability === 'available' ? 'ready' : ''}`}
+            >
+              {timelineCapability === 'checking'
+                ? 'Checking timeline capability'
+                : timelineCapability === 'available'
+                  ? 'Timeline reads available'
+                  : 'Timeline reads unavailable'}
+            </span>
             <h2 id="session-entry-heading">Open a known session by immutable identity</h2>
             <p>
-              This branch provides bounded descriptor and timeline reads, but no session catalog,
-              creation operation, or live follow channel. Enter an exact server-issued ID.
+              {timelineCapability === 'available'
+                ? 'This branch provides bounded descriptor and timeline reads, but no session catalog, creation operation, or live follow channel. Enter an exact server-issued ID.'
+                : 'The validated daemon bootstrap has not authorized bounded session timeline reads. Signalbox will not call or advertise that surface until the capability is available.'}
             </p>
           </div>
         </section>

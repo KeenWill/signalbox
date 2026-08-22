@@ -7,6 +7,7 @@ import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState }
 import {
   type ProductRouteId,
   productRoutes,
+  productSurfaceCacheLabel,
   productSurfaceStates,
   productTransport,
 } from './product'
@@ -376,6 +377,17 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   }, [app.density, app.theme])
 
   const copy = surfaceCopy[surface]
+  const cacheLabel = productSurfaceCacheLabel(surface)
+  const timelineCapability = bootstrap.isPending
+    ? 'checking'
+    : bootstrap.isSuccess && bootstrap.data.capabilities.bounded_session_timeline
+      ? 'available'
+      : 'unavailable'
+
+  useEffect(() => {
+    document.title = `${copy.title} · Signalbox`
+  }, [copy.title])
+
   const content =
     surface === 'attention' ? (
       <AttentionSurface />
@@ -384,6 +396,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         onTimelineIds={updateTimelineIds}
         onTimelineWindowAvailable={setTimelineWindowAvailable}
         onWindowRequestConsumed={consumeWindowRequest}
+        timelineCapability={timelineCapability}
         timelineRef={timelineRef}
         windowRequest={windowRequest}
       />
@@ -439,10 +452,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               <dt>Authority</dt>
               <dd>{surface === 'settings' ? 'Browser' : 'Daemon'}</dd>
             </div>
-            <div>
-              <dt>Cache</dt>
-              <dd>{surface === 'settings' ? 'Local settings' : 'Bounded query'}</dd>
-            </div>
+            {cacheLabel !== null && (
+              <div>
+                <dt>Cache</dt>
+                <dd>{cacheLabel}</dd>
+              </div>
+            )}
           </dl>
         </aside>
       )}
