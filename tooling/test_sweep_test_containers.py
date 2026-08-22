@@ -184,7 +184,7 @@ CHAIN_LINE_LIMIT = 40
 
 # Re-verified against the head; a scan that silently matched nothing would
 # otherwise satisfy the marking test with no evidence at all.
-CONTAINER_START_SITES = 30
+CONTAINER_START_SITES = 31
 
 
 def container_start_sites() -> tuple[list[str], list[str]]:
@@ -330,12 +330,22 @@ def cancel_a_hung_sweep(
     has begun, so the cancellation always lands while the sweep is blocked
     rather than racing its startup.
     """
+    def restore_cancellation_signals() -> None:
+        for cancellation_signal in (
+            signal.SIGHUP,
+            signal.SIGINT,
+            signal.SIGQUIT,
+            signal.SIGTERM,
+        ):
+            signal.signal(cancellation_signal, signal.SIG_DFL)
+
     process = subprocess.Popen(
         [str(SWEEP), *arguments],
         env=environment,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        preexec_fn=restore_cancellation_signals,
     )
     began = time.monotonic()
     while not start_log.exists() and time.monotonic() - began < SWEEP_TIMEOUT_SECONDS:

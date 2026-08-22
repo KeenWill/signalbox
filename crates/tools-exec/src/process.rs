@@ -1268,6 +1268,41 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         #[cfg(target_os = "linux")]
         let probe_environment = SandboxEnvironmentDelivery::try_probe()
             .map_err(|()| SandboxEnvironmentRunError::Delivery)?;
+        #[cfg(target_os = "linux")]
+        {
+            let sandbox_path = self.mount_profile.executable_path(&self.workspace_root);
+            let probe_program = executable_sandbox_shell(&sandbox_path)
+                .unwrap_or_else(|| PathBuf::from("/bin/sh"))
+                .to_string_lossy()
+                .into_owned();
+            let probe_request = bwrap_request(
+                SandboxLaunchContext {
+                    bind_source: &self.workspace_identity.bind_source,
+                    bind_descriptor: i32::MIN,
+                    launcher_descriptor: i32::MIN,
+                    working_directory_bind_descriptor: None,
+                },
+                &self.bubblewrap_program,
+                SandboxInvocation {
+                    program: &probe_program,
+                    arguments: &[String::from("-c"), String::from("exit 0")],
+                    working_directory: ".",
+                    timeout: Duration::from_secs(5),
+                    capture_bytes: 8 * 1024,
+                    environment: Some(&probe_environment),
+                },
+                SandboxRequestProfile {
+                    mounts: &self.mount_profile,
+                    executable_path: &sandbox_path,
+                },
+            );
+            if !process_request_fits_linux_arg_max(
+                self.runner.sandbox_launcher_program(),
+                &probe_request,
+            ) {
+                return Err(SandboxEnvironmentRunError::Arguments);
+            }
+        }
         Ok(self
             .run_with_capture_environment(
                 arguments,
@@ -1729,10 +1764,20 @@ fn capture_read_only_paths(
             source: None,
         });
     }
-    paths
+    let paths = paths
         .iter()
         .map(|path| ReadOnlyPathIdentity::capture(path))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(path) = paths
+        .iter()
+        .find(|path| Path::new(SANDBOX_ENVIRONMENT_FILE).starts_with(&path.destination))
+    {
+        return Err(ExecToolConstructionError::ReadOnlyPath {
+            path: path.destination.clone(),
+            source: None,
+        });
+    }
+    Ok(paths)
 }
 
 #[cfg(target_os = "linux")]
@@ -5551,6 +5596,31 @@ mod tests {
         assert_eq!(error, SandboxEnvironmentRunError::Arguments);
         assert_eq!(observation.recorded_probes(), Vec::new());
         assert_eq!(observation.recorded_requests(), Vec::new());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runner_restricted_profile_rejects_a_read_only_delivery_ancestor()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+
+        let error = SandboxedCommandRunner::try_new_runner_restricted(
+            runner,
+            workspace.path(),
+            &[PathBuf::from("/")],
+        )
+        .expect_err("a read-only delivery ancestor must be rejected at construction");
+
+        assert!(matches!(
+            error,
+            ExecToolConstructionError::ReadOnlyPath { path, source: None }
+                if path == Path::new("/")
+        ));
         Ok(())
     }
 
