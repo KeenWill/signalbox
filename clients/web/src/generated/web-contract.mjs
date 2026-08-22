@@ -1105,7 +1105,7 @@ function assertTimelineExcerpt(excerpt, address, field, path) {
   if (offset > total || end > total) {
     fail(path, "an excerpt within its declared byte range");
   }
-  if (excerpt.continuation === null) {
+  if (excerpt.continuation === undefined || excerpt.continuation === null) {
     if (end !== total) {
       fail(path, "complete when no continuation is present");
     }
@@ -1158,7 +1158,7 @@ function assertTimelineDetailPage(value) {
         if (item.kind !== "model_call_transition") {
           fail(`${path}.kind`, "model_call_transition for a model_call body");
         }
-        if (item.body.response !== null) {
+        if (item.body.response !== undefined && item.body.response !== null) {
           continuation = assertTimelineExcerpt(
             item.body.response,
             item.address,
@@ -1189,7 +1189,7 @@ function assertTimelineDetailPage(value) {
     }
   });
 
-  if (value.continuation === null) {
+  if (value.continuation === undefined || value.continuation === null) {
     if (expectedBodyContinuation !== null) {
       fail("timeline_detail_page.continuation", "the excerpt body continuation");
     }

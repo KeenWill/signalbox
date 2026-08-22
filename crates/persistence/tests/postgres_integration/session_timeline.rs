@@ -170,6 +170,36 @@ async fn item_and_region_details_share_the_stable_creation_address() -> Result<(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn item_detail_returns_absent_for_an_unallocated_future_address() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x996);
+    create_session(&pool, identity).await?;
+    let allocated: i64 = sqlx::query_scalar(
+        "SELECT last_sequence::bigint FROM outbox_sequence_state WHERE singleton",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let future_sequence = u64::try_from(allocated)?
+        .checked_add(1)
+        .expect("fixture sequence has room");
+    let address = TimelineAddress::new(
+        NonZeroU64::new(future_sequence).expect("future sequence is positive"),
+    );
+    let limits = TimelineDetailLimits::new(1, 256).expect("fixture limits are bounded");
+    let detail = SessionTimelineRepository::new(pool.clone())
+        .read_item_details(identity, address, None, limits)
+        .await?;
+
+    assert_eq!(detail, None);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn input_detail_rejects_a_header_beyond_the_allocator() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let identity = session(0x996);
