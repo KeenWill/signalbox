@@ -30,7 +30,7 @@ import {
   productTransport,
 } from './product'
 import { SettingsSurface } from './SettingsSurface'
-import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
+import { selectApp, store, useAppDispatch, useAppSelector } from './state'
 
 const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; question: string }> = {
   attention: {
@@ -147,7 +147,13 @@ function ProductNavigation({
   )
 }
 
-function CommandPalette({ context }: { context: CommandContext }) {
+function CommandPalette({
+  context,
+  onOpenNavigation,
+}: {
+  context: CommandContext
+  onOpenNavigation: () => void
+}) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
   return (
     <Dialog.Root
@@ -184,6 +190,7 @@ function CommandPalette({ context }: { context: CommandContext }) {
                   type="button"
                   onClick={() => {
                     invokeCommand('surface.escape', context)
+                    if (command.id === 'navigation.open') onOpenNavigation()
                     invokeCommand(command.id, context)
                   }}
                 >
@@ -277,9 +284,13 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
 function ProductToolbar({
   context,
   navigationTriggerRef,
+  paletteTriggerRef,
+  onOpenNavigation,
 }: {
   context: CommandContext
   navigationTriggerRef: RefObject<HTMLButtonElement | null>
+  paletteTriggerRef: RefObject<HTMLButtonElement | null>
+  onOpenNavigation: () => void
 }) {
   const app = useAppSelector(selectApp)
   return (
@@ -289,7 +300,10 @@ function ProductToolbar({
         className="icon-button mobile-only"
         type="button"
         aria-label="Open navigation"
-        onClick={() => invokeCommand('navigation.open', context)}
+        onClick={() => {
+          onOpenNavigation()
+          invokeCommand('navigation.open', context)
+        }}
       >
         <Menu />
       </button>
@@ -318,6 +332,7 @@ function ProductToolbar({
         {app.theme === 'dark' ? <Sun /> : <Moon />}
       </button>
       <button
+        ref={paletteTriggerRef}
         className="icon-button"
         type="button"
         aria-label="Open command palette"
@@ -335,6 +350,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
   const navigationTriggerRef = useRef<HTMLButtonElement>(null)
+  const paletteTriggerRef = useRef<HTMLButtonElement>(null)
+  const navigationReturnFocusRef = useRef<HTMLButtonElement | null>(null)
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -408,7 +425,14 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <span className="eyebrow">{copy.eyebrow}</span>
             <h1>{copy.title}</h1>
           </div>
-          <ProductToolbar context={context} navigationTriggerRef={navigationTriggerRef} />
+          <ProductToolbar
+            context={context}
+            navigationTriggerRef={navigationTriggerRef}
+            paletteTriggerRef={paletteTriggerRef}
+            onOpenNavigation={() => {
+              navigationReturnFocusRef.current = navigationTriggerRef.current
+            }}
+          />
         </header>
         <div className="surface-question">
           <p>{copy.question}</p>
@@ -459,11 +483,16 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           </dl>
         </aside>
       )}
-      <CommandPalette context={context} />
+      <CommandPalette
+        context={context}
+        onOpenNavigation={() => {
+          navigationReturnFocusRef.current = paletteTriggerRef.current
+        }}
+      />
       <Dialog.Root
         open={app.overlay === 'navigation'}
         onOpenChange={(open) => {
-          if (!open) dispatch(actions.overlaySet(null))
+          if (!open) invokeCommand('surface.escape', context)
         }}
       >
         <Dialog.Portal>
@@ -472,10 +501,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             className="mobile-navigation"
             aria-describedby="mobile-navigation-description"
             onCloseAutoFocus={(event) => {
-              const trigger = navigationTriggerRef.current
+              const trigger = navigationReturnFocusRef.current
               if (trigger?.getClientRects().length) {
                 event.preventDefault()
-                trigger.focus()
+                requestAnimationFrame(() => trigger.focus())
               }
             }}
           >
@@ -486,7 +515,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <ProductNavigation
               active={surface}
               context={context}
-              onNavigate={() => dispatch(actions.overlaySet(null))}
+              onNavigate={() => invokeCommand('surface.escape', context)}
             />
           </Dialog.Content>
         </Dialog.Portal>

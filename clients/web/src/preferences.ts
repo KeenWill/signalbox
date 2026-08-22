@@ -38,6 +38,7 @@ export const MAX_LOGICAL_POSITION_KEY_BYTES = 512
 export const MAX_LOGICAL_POSITION_VALUE_BYTES = 4_096
 export const MAX_KEY_OVERRIDE_KEY_BYTES = 512
 export const MAX_KEY_OVERRIDE_VALUE_BYTES = 512
+export const MAX_BROWSER_PREFERENCES_BYTES = 1_048_576
 
 const isWithinUtf8ByteLimit = (value: string, limit: number): boolean => {
   let bytes = 0
@@ -155,6 +156,9 @@ export const loadBrowserPreferences = (): BrowserPreferences => {
     if (storage === undefined) return createDefaultBrowserPreferences()
     const stored = storage.getItem(BROWSER_PREFERENCES_KEY)
     if (stored === null) return createDefaultBrowserPreferences()
+    if (!isWithinUtf8ByteLimit(stored, MAX_BROWSER_PREFERENCES_BYTES)) {
+      return createDefaultBrowserPreferences()
+    }
     return decodeBrowserPreferences(JSON.parse(stored))
   } catch {
     return createDefaultBrowserPreferences()

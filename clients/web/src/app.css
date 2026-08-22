@@ -272,6 +272,9 @@ kbd {
   border: 1px solid var(--border);
   background: var(--surface-1);
 }
+.surface-empty-no-icon {
+  grid-template-columns: minmax(0, 1fr);
+}
 .surface-empty > svg {
   width: 17px;
   color: var(--warning);
