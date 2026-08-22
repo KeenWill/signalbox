@@ -156,6 +156,36 @@ test('gates catalog reads on a successful bootstrap', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('recovers after retrying a transient bootstrap failure', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let bootstrapReads = 0
+  await page.route('**/api/bootstrap', (route) => {
+    bootstrapReads += 1
+    return bootstrapReads === 1
+      ? route.fulfill({ json: { invented: true } })
+      : route.fulfill({ json: bootstrapFixture })
+  })
+  await page.route('**/api/sessions?**', (route) => route.fulfill({ json: firstPage }))
+
+  await page.goto('/sessions')
+  await page.getByRole('button', { name: 'Retry contract handshake' }).click()
+  await expect(page.getByRole('heading', { name: `${firstPage.total} sessions` })).toBeVisible()
+  expect(bootstrapReads).toBe(2)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('focuses a deep-linked mobile inspector after data arrives', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(`/sessions?session=${firstSessionId}`)
+
+  const inspector = page.getByRole('dialog', { name: firstPage.summaries[0].title_summary })
+  await expect(inspector).toHaveAttribute('aria-modal', 'true')
+  await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('uses product navigation sequences and closes mobile navigation after activation', async ({
   page,
 }) => {

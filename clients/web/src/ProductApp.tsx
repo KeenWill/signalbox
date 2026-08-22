@@ -318,9 +318,14 @@ export function ProductApp({
     ) : surface === 'sessions' && bootstrap.isSuccess ? (
       <SessionCatalogSurface state={search} onStateChange={updateSearch} />
     ) : surface === 'sessions' ? (
-      <p className="catalog-notice">
-        Sessions are unavailable until the browser contract handshake succeeds.
-      </p>
+      <div className="catalog-notice">
+        <p>Sessions are unavailable until the browser contract handshake succeeds.</p>
+        {bootstrap.isError && (
+          <button type="button" onClick={() => void bootstrap.refetch()}>
+            Retry contract handshake
+          </button>
+        )}
+      </div>
     ) : (
       <DeferredSurface surface={surface} />
     )

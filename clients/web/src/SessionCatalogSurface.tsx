@@ -61,6 +61,7 @@ export function SessionCatalogSurface({
     gcTime: 0,
   })
   const selected = sessions.data?.summaries.find((summary) => summary.session_id === state.session)
+  const selectedSessionId = selected?.session_id
 
   useEffect(() => {
     const query = window.matchMedia('(max-width: 760px)')
@@ -71,13 +72,13 @@ export function SessionCatalogSurface({
   }, [])
 
   useEffect(() => {
-    const focusTarget = state.session ? closeFocus : returnFocus
+    const focusTarget = selectedSessionId ? closeFocus : returnFocus
     const frame = requestAnimationFrame(() => focusTarget.current?.focus())
     return () => cancelAnimationFrame(frame)
-  }, [state.session])
+  }, [selectedSessionId])
 
   useEffect(() => {
-    if (!narrowInspector || !state.session) return
+    if (!narrowInspector || !selectedSessionId) return
     const containFocus = (event: KeyboardEvent) => {
       if (event.key !== 'Tab') return
       event.preventDefault()
@@ -89,7 +90,7 @@ export function SessionCatalogSurface({
       cancelAnimationFrame(frame)
       document.removeEventListener('keydown', containFocus, true)
     }
-  }, [narrowInspector, state.session])
+  }, [narrowInspector, selectedSessionId])
 
   useEffect(() => {
     if (!sessions.data || !restorePageFocus.current) return

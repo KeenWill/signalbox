@@ -33,7 +33,7 @@ export const readProductSessionState = (value: Record<string, unknown>): Product
   const text = (key: keyof ProductSessionState) =>
     typeof value[key] === 'string' && value[key].length > 0 ? value[key] : undefined
   return {
-    q: text('q'),
+    q: admittedSessionSearch(value.q),
     sort: value.sort === 'identity' ? 'identity' : undefined,
     archived: value.archived === true ? true : undefined,
     afterSession: text('afterSession'),
@@ -57,6 +57,15 @@ export interface ProductTransport {
 
 export const MAX_SESSION_PAGE_ITEMS = 32
 export const MAX_PRODUCT_HTTP_RESPONSE_BYTES = 64 * 1024
+export const MAX_SESSION_SEARCH_BYTES = 1024
+
+const admittedSessionSearch = (value: unknown) => {
+  if (typeof value === 'string' && value.indexOf(String.fromCharCode(0)) !== -1) {
+    return undefined
+  }
+  if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) return undefined
+  return new TextEncoder().encode(value).byteLength <= MAX_SESSION_SEARCH_BYTES ? value : undefined
+}
 
 const readBoundedJson = async (response: Response): Promise<unknown> => {
   const reader = response.body?.getReader()
@@ -107,11 +116,13 @@ const validateSessionPage = (
     }
     if (page.continuation.kind === 'last_activity') {
       const milliseconds = boundary.last_activity.unix_milliseconds
-      if (!/^(0|[1-9]\d*)$/.test(milliseconds)) {
+      const microseconds = page.continuation.unix_microseconds
+      if (!/^(0|[1-9]\d*)$/.test(milliseconds) || !/^(0|[1-9]\d*)$/.test(microseconds)) {
         throw new Error('session catalog boundary activity is not canonical')
       }
-      const expectedMicroseconds = (BigInt(milliseconds) * 1000n).toString()
-      if (page.continuation.unix_microseconds !== expectedMicroseconds) {
+      const millisecondFloor = BigInt(milliseconds) * 1000n
+      const exactMicroseconds = BigInt(microseconds)
+      if (exactMicroseconds < millisecondFloor || exactMicroseconds >= millisecondFloor + 1000n) {
         throw new Error('session catalog continuation does not match its returned boundary')
       }
     }
@@ -137,13 +148,20 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    return decodeWebContractBootstrap(await readBoundedJson(response))
+    const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
+    if (!bootstrap.capabilities.bounded_json) {
+      throw new Error('bootstrap does not provide bounded JSON responses')
+    }
+    return bootstrap
   }
 
   async readSessions(
     request: ProductSessionRequest,
     signal?: AbortSignal,
   ): Promise<WebAttentionSnapshot> {
+    if (request.search && admittedSessionSearch(request.search) === undefined) {
+      throw new TypeError('session catalog search exceeds its contract bound')
+    }
     const query = new URLSearchParams({
       sort: request.sort === 'identity' ? 'session_id_asc' : 'last_activity_desc',
       include_archived: String(request.includeArchived),

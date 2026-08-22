@@ -3,6 +3,7 @@ import bootstrapFixture from './generated/web-contract-bootstrap.json' with { ty
 import {
   MAX_PRODUCT_HTTP_RESPONSE_BYTES,
   MAX_SESSION_PAGE_ITEMS,
+  MAX_SESSION_SEARCH_BYTES,
   ProductRequestError,
   readProductSessionState,
   SameOriginProductTransport,
@@ -66,6 +67,25 @@ describe('SameOriginProductTransport', () => {
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
       'bootstrap.contract',
+    )
+  })
+
+  it('fails closed when bounded JSON is unavailable', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...bootstrapFixture,
+              capabilities: { ...bootstrapFixture.capabilities, bounded_json: false },
+            }),
+          ),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'does not provide bounded JSON',
     )
   })
 
@@ -208,6 +228,38 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('does not match its returned boundary')
   })
 
+  it('accepts exact continuation precision within the displayed millisecond', async () => {
+    const precisePage = {
+      ...sessionPageFixture,
+      continuation: { ...sessionPageFixture.continuation, unix_microseconds: '1724200000000999' },
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(precisePage))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).resolves.toEqual(precisePage)
+  })
+
+  it('rejects an invalid search before fetching', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        search: 'x'.repeat(MAX_SESSION_SEARCH_BYTES + 1),
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('search exceeds its contract bound')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('rejects a catalog response beyond its encoded byte ceiling before decoding', async () => {
     vi.stubGlobal(
       'fetch',
@@ -242,5 +294,10 @@ describe('readProductSessionState', () => {
       afterActivity: undefined,
       session: undefined,
     })
+  })
+
+  it('drops searches that violate the catalog contract', () => {
+    expect(readProductSessionState({ q: 'release\0candidate' }).q).toBeUndefined()
+    expect(readProductSessionState({ q: 'é'.repeat(MAX_SESSION_SEARCH_BYTES) }).q).toBeUndefined()
   })
 })
