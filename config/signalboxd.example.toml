@@ -13,7 +13,10 @@
 # after completion. It is an operator budget, not a declaration of the model's
 # capability: the working default below is well under each model's hard cap,
 # which is recorded beside the entry. Raise it per selection as the deployment
-# requires, up to but never above the model's cap.
+# requires, up to but never above the model's cap. The daemon also reserves this
+# complete budget before a Codex continuation. Keep it aligned with the reply
+# budget the deployment actually needs: an inflated advisory value cannot make
+# the CLI emit more, but it can force otherwise-unnecessary early compaction.
 version = 1
 
 # Omit this table for the fixed baseline of 16 concurrent per-session scheduler

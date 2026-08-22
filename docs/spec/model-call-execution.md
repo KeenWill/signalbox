@@ -16,7 +16,9 @@ headroom is verified against this PR
 as the next queued-turn baseline is verified against this PR
 (`agent/daemon-live-compaction-source-headroom`). Automatic compaction's
 content-weighted boundary is verified against this PR
-(`agent/daemon-live-compaction-byte-boundary`).
+(`agent/daemon-live-compaction-byte-boundary`). Codex advisory output
+reservation behavior is re-verified against this PR
+(`agent/daemon-live-codex-output-reservation`).
 
 Non-ambiguous execution-failure containment is verified against this PR
 (`agent/daemon-live-nonambiguous-execution-containment`).
@@ -430,32 +432,35 @@ exceeds the context ceiling. Both are operator-declared per selection and never
 inferred from provider or model names. Adapters with a provider setting surface,
 including Anthropic, send the configured output ceiling in the provider request.
 Codex CLI instead renders the ceiling as model-visible advisory context because
-the CLI exposes no provider-side control. Before activating a queued turn, the
-daemon reads the newest provider-reported input for the same resolved target
-from either a terminal ordinary call since the latest compaction or the latest
-completed dedicated compaction call itself. The terminal disposition does not
-erase usage from an ordinary provider round that may have been accepted:
-ambiguous and failed calls therefore protect a resumed session from re-sending a
-request whose reported size already exhausted headroom. If the reported input,
-interpreted with the stored cache-inclusion semantics, plus output only when
-completion retained it in the model-visible transcript, a conservative UTF-8
-byte allowance for model-visible entries appended after that input, and the next
-configured output reservation exceeds the context window, the daemon performs
-one bounded automatic compaction before activation. The allowance counts durable
-content and excludes ordinary assistant content or the dedicated summary when
-reported output already accounts for it. Historical dedicated calls prepared
-before that semantics became durable retain an unknown value; the guard treats
-unknown as cache-exclusive so it may overcount but cannot omit reported cache
-axes. A queued turn spends at most one automatic attempt; if durable evidence
-says that attempt was already spent, the scheduler reports exhaustion and
-permits activation rather than wedging the queue on a compaction it may not
-repeat. After a nominal completion, the daemon retains adapter-reported usage
-and the completed observation even when reported output exceeds
-`max_output_tokens` or the reported input-plus-output lower bound exceeds
-`context_window_tokens`; it emits a closed operator cause for the overage rather
-than discarding assistant material after the provider has already accepted and
-served the request. Missing usage fields remain missing and are never invented.
-Adapters need no separate counting operation.
+the CLI exposes no provider-side control. The daemon still reserves that full
+operator-selected ceiling before each continuation, so a Codex deployment keeps
+the value aligned with its intended reply budget rather than the model's larger
+capability ceiling. Before activating a queued turn, the daemon reads the newest
+provider-reported input for the same resolved target from either a terminal
+ordinary call since the latest compaction or the latest completed dedicated
+compaction call itself. The terminal disposition does not erase usage from an
+ordinary provider round that may have been accepted: ambiguous and failed calls
+therefore protect a resumed session from re-sending a request whose reported
+size already exhausted headroom. If the reported input, interpreted with the
+stored cache-inclusion semantics, plus output only when completion retained it
+in the model-visible transcript, a conservative UTF-8 byte allowance for
+model-visible entries appended after that input, and the next configured output
+reservation exceeds the context window, the daemon performs one bounded
+automatic compaction before activation. The allowance counts durable content and
+excludes ordinary assistant content or the dedicated summary when reported
+output already accounts for it. Historical dedicated calls prepared before that
+semantics became durable retain an unknown value; the guard treats unknown as
+cache-exclusive so it may overcount but cannot omit reported cache axes. A
+queued turn spends at most one automatic attempt; if durable evidence says that
+attempt was already spent, the scheduler reports exhaustion and permits
+activation rather than wedging the queue on a compaction it may not repeat.
+After a nominal completion, the daemon retains adapter-reported usage and the
+completed observation even when reported output exceeds `max_output_tokens` or
+the reported input-plus-output lower bound exceeds `context_window_tokens`; it
+emits a closed operator cause for the overage rather than discarding assistant
+material after the provider has already accepted and served the request. Missing
+usage fields remain missing and are never invented. Adapters need no separate
+counting operation.
 
 The same guard runs inside the atomic tool-result continuation transaction
 against the exact completed tool-producing call. It combines reported usage, the
