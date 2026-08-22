@@ -502,6 +502,13 @@ impl PostgresRepoWatchStore {
         .bind(Json(payload))
         .execute(&mut *transaction)
         .await?;
+        replace_current_pull_requests(
+            &mut transaction,
+            repository,
+            generation,
+            request.candidate().observation().state().pull_requests(),
+        )
+        .await?;
         let already_durable =
             durable_occurrences(&mut transaction, repository, request.events(), None).await?;
         let fresh = request
@@ -1055,6 +1062,56 @@ fn pull_request_state_record(state: &RepoWatchPullRequestState) -> PullRequestSt
             })
             .collect(),
     }
+}
+
+pub(crate) fn encode_current_pull_request(
+    state: &RepoWatchPullRequestState,
+) -> Result<Value, RepoWatchStoreError> {
+    serde_json::to_value(pull_request_state_record(state))
+        .map_err(RepoWatchStoreError::CursorEncoding)
+}
+
+pub(crate) fn decode_current_pull_request(
+    value: Value,
+) -> Result<RepoWatchPullRequestState, RepoWatchStoreError> {
+    let record = serde_json::from_value(value).map_err(|_| {
+        RepoWatchStoreError::Corruption(RepoWatchPersistenceCorruption::MalformedCursorDocument)
+    })?;
+    decode_pull_request_state(record)
+}
+
+async fn replace_current_pull_requests(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &RepositorySlug,
+    generation: RepoWatchCursorGeneration,
+    pull_requests: &[RepoWatchPullRequestState],
+) -> Result<(), RepoWatchStoreError> {
+    sqlx::query("DELETE FROM repo_watch_current_pull_request WHERE repository = $1")
+        .bind(repository.as_str())
+        .execute(&mut **transaction)
+        .await?;
+    for pull_request in pull_requests {
+        let context = pull_request.context();
+        sqlx::query(
+            "INSERT INTO repo_watch_current_pull_request (
+                repository, pull_request_number, cursor_generation, lifecycle,
+                head_repository, base_branch, head_branch, state_payload
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(repository.as_str())
+        .bind(Decimal::from(context.number().get()))
+        .bind(generation_to_i64(generation))
+        .bind(repo_watch_pull_request_lifecycle_to_str(
+            pull_request.lifecycle(),
+        ))
+        .bind(context.head_repository().as_str())
+        .bind(context.base_branch().as_str())
+        .bind(context.head_branch().as_str())
+        .bind(Json(encode_current_pull_request(pull_request)?))
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
 }
 
 fn decode_cursor_candidate(value: Value) -> Result<RepoWatchCursorCandidate, RepoWatchStoreError> {
