@@ -316,11 +316,11 @@ pub struct WebTimelineBlobReference {
 
 /// Closed model-call lifecycle checkpoint with terminal disposition in-band.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 pub enum WebTimelineModelCallState {
-    Prepared,
-    InFlight,
-    CancellationRequested,
+    Prepared {},
+    InFlight {},
+    CancellationRequested {},
     Terminal {
         disposition: WebTimelineModelCallDisposition,
     },
@@ -899,8 +899,8 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        WebContractBootstrap, WebContractExample, WebTimelineEventSequence, WebU64,
-        generated_artifacts,
+        WebContractBootstrap, WebContractExample, WebTimelineEventSequence,
+        WebTimelineModelCallState, WebU64, generated_artifacts,
     };
 
     #[track_caller]
@@ -963,6 +963,22 @@ mod tests {
             serde_json::from_str::<WebTimelineEventSequence>(r#""18446744073709551616""#).is_err()
         );
         assert!(serde_json::from_str::<WebTimelineEventSequence>(r#""1""#).is_ok());
+    }
+
+    #[test]
+    fn model_call_state_rejects_contradictory_extra_fields() {
+        assert!(
+            serde_json::from_str::<WebTimelineModelCallState>(
+                r#"{"type":"prepared","disposition":"completed"}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<WebTimelineModelCallState>(
+                r#"{"type":"terminal","disposition":"completed"}"#,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
