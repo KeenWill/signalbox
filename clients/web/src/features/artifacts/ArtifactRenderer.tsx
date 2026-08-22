@@ -10,7 +10,7 @@ import {
   Minimize2,
   ShieldAlert,
 } from 'lucide-react'
-import type { ComponentType, ReactNode } from 'react'
+import { type ComponentType, type ReactNode, useState } from 'react'
 import { type CommandContext, invokeCommand } from '../../commands'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import { actions, useAppDispatch, useAppSelector } from '../../state'
@@ -35,10 +35,13 @@ type SupportedArtifactKind = RenderableArtifact['kind']
 
 const IMAGE_VIEW_PRIORITY: ReadonlyArray<WebBlobViewKind> = ['preview', 'thumbnail']
 
-export const selectImageView = (descriptor: WebBlobDescriptor): WebBlobAvailableView | undefined =>
+export const selectImageView = (
+  descriptor: WebBlobDescriptor,
+  failedContentUrls: ReadonlySet<string> = new Set(),
+): WebBlobAvailableView | undefined =>
   IMAGE_VIEW_PRIORITY.map((kind) =>
     descriptor.available_views.find((view) => view.kind === kind),
-  ).find((view) => view !== undefined)
+  ).find((view) => view !== undefined && !failedContentUrls.has(view.content_url))
 
 export const imageViewLabel = (kind: WebBlobViewKind): string =>
   ({
@@ -181,9 +184,12 @@ function BoundedFooter({
 
 function SignalboxImageBody({ artifact, commandContext }: RendererProps<SignalboxImageArtifact>) {
   const dispatch = useAppDispatch()
+  const [failedAutomaticUrls, setFailedAutomaticUrls] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  )
   const originalState = useAppSelector((state) => state.app.originalArtifacts[artifact.id])
   const { descriptor } = artifact.source
-  const automatic = selectImageView(descriptor)
+  const automatic = selectImageView(descriptor, failedAutomaticUrls)
   const original = viewByKind(descriptor, 'browser_native')
   const download = viewByKind(descriptor, 'download')
   const originalRequested = originalState === 'loading' || originalState === 'loaded'
@@ -206,6 +212,12 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
             onError={() => {
               if (rendered.kind === 'browser_native') {
                 dispatch(actions.artifactOriginalSettled({ id: artifact.id, result: 'failed' }))
+              } else {
+                setFailedAutomaticUrls((current) => {
+                  const next = new Set(current)
+                  next.add(rendered.content_url)
+                  return next
+                })
               }
             }}
           />
@@ -239,7 +251,16 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
           </button>
         )}
         {originalState === 'failed' && (
-          <p role="status">Original image failed to load. The preview remains available.</p>
+          <p role="status">
+            {automatic
+              ? `Original image failed to load. The ${automatic.kind} remains available.`
+              : 'Original image failed to load. No automatic image view remains available.'}
+          </p>
+        )}
+        {originalState !== 'failed' && failedAutomaticUrls.size > 0 && !automatic && (
+          <p role="status">
+            No admitted inline image view could be loaded. Metadata and download remain available.
+          </p>
         )}
         {download && (
           <a href={download.content_url} download={artifact.displayName}>

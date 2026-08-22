@@ -100,22 +100,32 @@ test('selects admitted image views without prefetching original bytes', async ({
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('falls back to metadata when automatic image views fail', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.unroute('**/api/blobs/**/content/image-png')
+  await page.route(`**${previewPath}`, async (route) => {
+    await route.fulfill({ status: 500, body: 'unavailable' })
+  })
+  await page.goto('/scenario/blobs')
+
+  const artifact = page.getByRole('article', { name: 'Artifact orbital-map.png' })
+  await expect(artifact.getByLabel('No compatible inline renderer')).toBeVisible()
+  await expect(artifact.getByText('metadata fallback')).toBeVisible()
+  await expect(artifact.getByRole('status')).toHaveText(
+    'No admitted inline image view could be loaded. Metadata and download remain available.',
+  )
+  await expect(artifact.getByRole('link', { name: 'Download' })).toBeVisible()
+  expect(problems.pageErrors).toEqual([])
+})
+
 test('reports original image failures and permits retry', async ({ page }) => {
   const problems = watchBrowser(page)
-  let originalAttempts = 0
   await page.unroute('**/api/blobs/**/content/image-png')
-  await page.route('**/api/blobs/**/content/image-png', async (route) => {
-    const path = new URL(route.request().url()).pathname
-    if (path === originalPath) {
-      originalAttempts += 1
-      if (originalAttempts === 1) {
-        await route.fulfill({ status: 500, body: 'unavailable' })
-        return
-      }
-      await route.fulfill({ body: originalFixture, contentType: 'image/png' })
-      return
-    }
+  await page.route(`**${previewPath}`, async (route) => {
     await route.fulfill({ body: previewFixture, contentType: 'image/png' })
+  })
+  await page.route(`**${originalPath}`, async (route) => {
+    await route.fulfill({ status: 500, body: 'unavailable' })
   })
   await page.goto('/scenario/blobs')
 
@@ -126,10 +136,13 @@ test('reports original image failures and permits retry', async ({ page }) => {
   )
   await expect(artifact.getByRole('img', { name: 'Preview of orbital-map.png' })).toBeVisible()
 
+  await page.unroute(`**${originalPath}`)
+  await page.route(`**${originalPath}`, async (route) => {
+    await route.fulfill({ body: originalFixture, contentType: 'image/png' })
+  })
   await artifact.getByRole('button', { name: 'Retry original' }).click()
   await expect(artifact.getByRole('button', { name: 'Original loaded' })).toBeVisible()
   await expect(artifact.getByRole('img', { name: 'Original of orbital-map.png' })).toBeVisible()
-  expect(originalAttempts).toBe(2)
   expect(problems.pageErrors).toEqual([])
 })
 
