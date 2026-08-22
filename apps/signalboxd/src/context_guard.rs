@@ -582,7 +582,7 @@ where
                         continue;
                     }
                     let committed = activation
-                        .commit_counted_preview(preview, call, &model_calls)
+                        .commit_counted_preview(preview, prospective, &model_calls)
                         .await
                         .map_err(|error| match error {
                             CommitActivationPreviewError::Activation(error) => {

@@ -26,7 +26,9 @@ Non-ambiguous execution-failure containment is verified against this PR
 Credential-pool action and outbox allocator lock ordering is verified against
 this PR (`agent/daemon-live-tool-continuation-order`). The tool-result
 continuation guard's narrowed write scope is verified against this PR
-(`agent/daemon-live-continuation-guard-scope`).
+(`agent/daemon-live-continuation-guard-scope`). Counted activation's pre-guard
+call preparation is verified against this PR
+(`agent/daemon-live-counted-activation-guard-scope`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -1053,10 +1055,14 @@ event and carries that proof into same-transaction call preparation. Why: long
 frontier reads do not serialize unrelated model-call writers, while the guard
 still prevents a credential/allocator cycle without making unrelated outbox
 writers wait through credential selection and validation. Prospective
-preparation takes neither guard nor allocator lock because it rolls back without
-appending or consuming actions. The in-process per-attempt dispatch gate is the
-only other ordering primitive; in this slice the execution service is its sole
-consumer. Interrupt application deliberately does not acquire it: once
+preparation derives the exact initial-call checkpoint before counted activation;
+the guarded commit revalidates the unchanged activation candidate and carries
+that preparation into the atomic activation-and-call write instead of
+reconstructing the session while holding the guard. Prospective preparation
+takes neither guard nor allocator lock because it rolls back without appending
+or consuming actions. The in-process per-attempt dispatch gate is the only other
+ordering primitive; in this slice the execution service is its sole consumer.
+Interrupt application deliberately does not acquire it: once
 `InFlight` commits, the call is issued work, so a later interrupt durably
 requests cancellation and the runtime signal races any provider progress without
 claiming that acceptance was prevented.

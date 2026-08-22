@@ -10,9 +10,8 @@ use signalbox_domain::{
     AcceptedInputEligibilityFailure, AcceptedInputSchedulingProjection,
     AcceptedInputStartingLineage, AcceptedInputTurnActivationIdentities, ActivatedTurn,
     ActiveTurnPhase, CurrentTurnAttemptState, DelegatedTurnActivationInput,
-    DelegatedWakeTurnActivationInput, DelegationContent, ModelCallId,
-    PreparedAcceptedInputTurnActivation, PreparedDelegatedTurnActivation, PreparedTurnActivation,
-    SemanticTranscriptEntryId,
+    DelegatedWakeTurnActivationInput, DelegationContent, PreparedAcceptedInputTurnActivation,
+    PreparedDelegatedTurnActivation, PreparedTurnActivation, SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, SessionId,
     ToolRequestId, TurnId,
@@ -321,7 +320,7 @@ impl StartEligibleTurnRepository {
     pub async fn commit_counted_preview(
         &self,
         preview: PreparedActivationPreview,
-        call: ModelCallId,
+        prospective: crate::model_execution::ProspectiveModelCall,
         model_calls: &crate::model_execution::PostgresModelCallRepository,
     ) -> Result<CommitActivationPreviewOutcome, CommitActivationPreviewError> {
         let session = preview.prepared.turn().session();
@@ -376,8 +375,8 @@ impl StartEligibleTurnRepository {
         model_calls
             .checkpoint_counted_activation_in_transaction(
                 &mut transaction,
-                session,
-                call,
+                &activated,
+                &prospective,
                 outbox_order_guard,
             )
             .await

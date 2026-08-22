@@ -3308,11 +3308,11 @@ async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_bef
     let model_calls =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
     let counted_call = ModelCallId::from_uuid(Uuid::from_u128(0xcd0c));
-    let counted_operation = model_calls
+    let prospective = model_calls
         .preview_activation_operation(preview.prepared(), counted_call)
         .await?
-        .expect("an admitted credential previews the activation operation")
-        .render(Box::new([]))?;
+        .expect("an admitted credential previews the activation operation");
+    let counted_operation = prospective.render(Box::new([]))?;
     let counted_entries = counted_operation
         .request()
         .frontier_entries()
@@ -3320,7 +3320,7 @@ async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_bef
         .collect::<Vec<_>>();
 
     let committed = activation
-        .commit_counted_preview(preview, counted_call, &model_calls)
+        .commit_counted_preview(preview, prospective, &model_calls)
         .await?;
     let CommitActivationPreviewOutcome::Activated(activated) = committed else {
         panic!("the unchanged counted activation must commit");
