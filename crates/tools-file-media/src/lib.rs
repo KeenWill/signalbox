@@ -18,7 +18,8 @@ use signalbox_domain::{
 };
 use signalbox_file_media_runtime::{
     AttachmentKind, FileDigest, FileInspection, FileMediaFailure, FileReadInput, FileReadResult,
-    ReadContinuationCursor, ReadOutputKind, ReadViewName, VisiblePartSelector,
+    MAX_PROCESSOR_FRAME_BYTES, ReadContinuationCursor, ReadOutputKind, ReadViewName,
+    VisiblePartSelector,
 };
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
@@ -30,6 +31,8 @@ const INVALID_INSPECT_ARGUMENTS: &str =
     "expected exactly a canonical digest and optional visible-part selector";
 const INVALID_READ_ARGUMENTS: &str = "expected a canonical digest, view, optional selector, and exactly one of object options or continuation";
 const RESULT_TOO_LARGE_DETAIL: &str = r#"{"status":"result_too_large"}"#;
+// numeric-bound: ceiling - reserves processor-frame space for validated evidence and framing
+const MAX_INITIAL_OPTIONS_BYTES: usize = MAX_PROCESSOR_FRAME_BYTES / 4;
 
 /// Checked service request for `file_inspect`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -324,7 +327,10 @@ fn decode_read(
         .transpose()
         .map_err(|_| InvalidFileMediaArguments)?;
     let input = match (decoded.options, continuation) {
-        (Some(options), None) => FileReadServiceInput::Initial { options },
+        (Some(options), None) if initial_options_fit(&options) => {
+            FileReadServiceInput::Initial { options }
+        }
+        (Some(_), None) => return Err(InvalidFileMediaArguments),
         (None, Some(cursor)) => FileReadServiceInput::Continuation { cursor },
         (Some(_), Some(_)) | (None, None) => return Err(InvalidFileMediaArguments),
     };
@@ -340,6 +346,10 @@ fn decode_read(
         view: ReadViewName::try_new(decoded.view).map_err(|_| InvalidFileMediaArguments)?,
         input,
     })
+}
+
+fn initial_options_fit(options: &BTreeMap<String, Value>) -> bool {
+    serde_json::to_vec(options).is_ok_and(|encoded| encoded.len() <= MAX_INITIAL_OPTIONS_BYTES)
 }
 
 /// Generic executor for both file/media tools.
@@ -614,6 +624,16 @@ mod tests {
             .expect("fixture arguments are admitted")
     }
 
+    fn oversized_initial_options(digest: FileDigest) -> String {
+        serde_json::json!({
+            "digest": digest.to_string(),
+            "view": "body_text",
+            "options": {"value": "x".repeat(MAX_INITIAL_OPTIONS_BYTES)},
+            "visible_part": null,
+        })
+        .to_string()
+    }
+
     #[test]
     fn stable_catalog_exposes_exact_inspect_and_read_names() {
         let (catalog, _executor) = FileMediaTools::try_new(UnusedService)
@@ -679,6 +699,15 @@ mod tests {
                 .as_str(),
             "next-page"
         );
+    }
+
+    #[test]
+    fn read_arguments_reject_initial_options_that_cannot_fit_the_processor_frame() {
+        let supplied = oversized_initial_options(FileDigest::from_bytes([0x33; 32]));
+
+        let outcome = decode_read(&arguments(&supplied));
+
+        assert_eq!(outcome, Err(InvalidFileMediaArguments));
     }
 
     #[test]
