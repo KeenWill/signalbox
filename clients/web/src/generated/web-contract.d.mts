@@ -85,7 +85,7 @@ type WebSessionWorkFacts = {
 };
 
 type WebTimelineAddress = {
-  readonly event_sequence: string;
+  readonly event_sequence: WebTimelineEventSequence;
 };
 
 type WebTimelineBlobReference = {
@@ -110,6 +110,8 @@ type WebTimelineDetailContinuation = {
   readonly body: WebTimelineBodyContinuation;
   readonly type: "more_body";
 };
+
+type WebTimelineEventSequence = string;
 
 type WebTimelineModelCallDisposition = "completed" | "known_failed" | "refused" | "cancelled" | "ambiguous";
 
