@@ -579,6 +579,7 @@ impl PreparedModelOperation {
         tool_entries: &[ResolvedToolConversationEntry],
         runner_placement_entries: &[ResolvedRunnerPlacementConversationEntry],
     ) -> Result<Self, ModelFrontierRenderingError> {
+        let receiving_session = request.session();
         let complete_entries = request.frontier_entries().cloned().collect::<Vec<_>>();
         let projection = ContextFrontierProjection::from_complete_entries(&complete_entries)
             .map_err(ModelFrontierRenderingError::InvalidContextProjection)?;
@@ -594,6 +595,14 @@ impl PreparedModelOperation {
                     entry: reference,
                 });
             };
+            if reference.source_session() != receiving_session
+                && matches!(
+                    entry.payload(),
+                    SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+                )
+            {
+                continue;
+            }
             projected_entries.push((reference, entry.payload()));
         }
         let messages = render_frontier_messages(

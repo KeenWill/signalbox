@@ -515,6 +515,7 @@ struct ExecutingToolBatchReconstitutionFacts {
     session: SessionId,
     producing_call: crate::ModelCallId,
     yielded_snapshot: ResolvedContextFrontierSnapshot,
+    projection_base_snapshot: ResolvedContextFrontierSnapshot,
     batch_attempt: Option<TurnAttemptId>,
     awaiting_request: Option<ToolRequestId>,
     requests: Box<[ToolRequestId]>,
@@ -577,6 +578,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
             session: batch.session(),
             producing_call: batch.producing_call(),
             yielded_snapshot: batch.yielded_snapshot().clone(),
+            projection_base_snapshot: batch.projection_base_snapshot().clone(),
             batch_attempt: match batch.phase() {
                 crate::ToolBatchPhase::Executing { turn_attempt } => Some(turn_attempt),
                 crate::ToolBatchPhase::AwaitingApproval { .. }
@@ -620,6 +622,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                 session: batch.session(),
                 producing_call: batch.producing_call(),
                 yielded_snapshot: batch.yielded_snapshot().clone(),
+                projection_base_snapshot: batch.projection_base_snapshot().clone(),
                 batch_attempt: None,
                 awaiting_request: Some(wait.request()),
                 requests: batch
@@ -652,6 +655,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                 session: batch.session(),
                 producing_call: batch.producing_call(),
                 yielded_snapshot: batch.yielded_snapshot().clone(),
+                projection_base_snapshot: batch.projection_base_snapshot().clone(),
                 batch_attempt: None,
                 awaiting_request: Some(wait.awaiting_request()),
                 requests: batch
@@ -2358,6 +2362,7 @@ struct ActiveExecutingToolBatchCorrelation {
     turn: TurnId,
     producing_call: crate::ModelCallId,
     yielded_frontier: ContextFrontierId,
+    projection_base_frontier: ContextFrontierId,
     turn_attempt: Option<TurnAttemptId>,
 }
 
@@ -2552,6 +2557,8 @@ impl AcceptedInputSchedulingProjection {
             || correlation.turn != batch.turn()
             || correlation.producing_call != batch.producing_call()
             || correlation.yielded_frontier != batch.yielded_snapshot().frontier().snapshot()
+            || correlation.projection_base_frontier
+                != batch.projection_base_snapshot().frontier().snapshot()
             || correlation.turn_attempt != turn_attempt
         {
             return Err(crate::ModelCallClosureError::InterruptCorrelationMismatch);
@@ -5851,6 +5858,10 @@ fn reconstitute_inner(
                         turn,
                         producing_call: tool_batch.producing_call,
                         yielded_frontier,
+                        projection_base_frontier: tool_batch
+                            .projection_base_snapshot
+                            .frontier()
+                            .snapshot(),
                         turn_attempt: tool_batch.batch_attempt,
                     });
                 }
@@ -6874,7 +6885,7 @@ fn reconstitute_inner(
             .chain(
                 active_executing_tool_batch
                     .iter()
-                    .map(|batch| batch.yielded_frontier),
+                    .flat_map(|batch| [batch.yielded_frontier, batch.projection_base_frontier]),
             )
             .map(|candidate| &snapshots[&candidate])
             .chain(
@@ -10187,6 +10198,7 @@ mod tests {
                 turn: active.turn(),
                 producing_call,
                 yielded_frontier: yielded_frontier.id(),
+                projection_base_frontier: yielded_frontier.id(),
                 turn_attempt: Some(continuation_attempt),
             })
         );

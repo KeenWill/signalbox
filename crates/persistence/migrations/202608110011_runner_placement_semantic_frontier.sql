@@ -416,6 +416,323 @@ BEGIN
 END;
 $migration$;
 
+-- Continued calls derive results from the newest authenticated placement
+-- frontier that extends the yielded tool boundary. Locate that projection
+-- base before validating proposal-ordered results and the steering suffix.
+DO $migration$
+DECLARE
+    definition text;
+    updated_definition text;
+    old_result_validation CONSTANT text := $old$
+        IF checked_count < result_boundary_count + result_request_count
+           OR EXISTS (
+                SELECT 1
+                  FROM context_frontier_member AS boundary
+                  LEFT JOIN context_frontier_member AS checked
+                    ON checked.owning_session_id =
+                       boundary.owning_session_id
+                   AND checked.context_frontier_id = checked_frontier
+                   AND checked.member_position = boundary.member_position
+                 WHERE boundary.owning_session_id = checked_session
+                   AND boundary.context_frontier_id = result_boundary
+                   AND ROW(
+                        checked.source_session_id,
+                        checked.semantic_entry_id
+                   ) IS DISTINCT FROM ROW(
+                        boundary.source_session_id,
+                        boundary.semantic_entry_id
+                   )
+           )
+        THEN
+            RAISE EXCEPTION
+                'continued model call omits its tool-round boundary'
+                USING ERRCODE = '23514';
+        END IF;
+
+        SELECT count(*)
+          INTO malformed_result_count
+          FROM generate_series(
+                0,
+                result_request_count - 1
+          ) AS expected(request_ordinal)
+          JOIN tool_request AS request
+            ON request.producing_model_call_id = result_producing_call
+           AND request.request_ordinal = expected.request_ordinal
+          LEFT JOIN context_frontier_member AS member
+            ON member.owning_session_id = checked_session
+           AND member.context_frontier_id = checked_frontier
+           AND member.member_position =
+               result_boundary_count + expected.request_ordinal + 1
+          LEFT JOIN semantic_transcript_entry AS entry
+            ON entry.source_session_id = member.source_session_id
+           AND entry.semantic_entry_id = member.semantic_entry_id
+          LEFT JOIN tool_attempt AS attempt
+            ON attempt.attempt_id = entry.tool_result_attempt_id
+         WHERE member.source_session_id IS DISTINCT FROM checked_session
+            OR (
+                (
+                    entry.payload_kind = 'tool_execution_result'
+                    AND attempt.request_id = request.request_id
+                )
+                OR (
+                    entry.payload_kind IN ('tool_denied', 'delegation_result')
+                    AND entry.tool_result_request_id = request.request_id
+                )
+            ) IS NOT TRUE;
+
+        IF malformed_result_count <> 0 THEN
+            RAISE EXCEPTION
+                'continued model call lacks proposal-ordered tool results'
+                USING ERRCODE = '23514';
+        END IF;
+        suffix_start_count :=
+            result_boundary_count + result_request_count;
+$old$;
+    new_result_validation CONSTANT text := $new$
+        SELECT max(candidate.member_count)
+          INTO suffix_start_count
+          FROM (
+                SELECT boundary.context_frontier_id, boundary.member_count
+                  FROM context_frontier AS boundary
+                 WHERE boundary.owning_session_id = checked_session
+                   AND boundary.context_frontier_id = result_boundary
+                UNION ALL
+                SELECT frontier.context_frontier_id, frontier.member_count
+                  FROM session_runner_placement_frontier AS pointer
+                  JOIN context_frontier AS frontier
+                    ON frontier.owning_session_id = pointer.session_id
+                   AND frontier.context_frontier_id = pointer.context_frontier_id
+                 WHERE pointer.session_id = checked_session
+          ) AS candidate
+         WHERE NOT EXISTS (
+                SELECT 1
+                  FROM context_frontier_member AS boundary_member
+                  LEFT JOIN context_frontier_member AS candidate_member
+                    ON candidate_member.owning_session_id = checked_session
+                   AND candidate_member.context_frontier_id = candidate.context_frontier_id
+                   AND candidate_member.member_position = boundary_member.member_position
+                   AND candidate_member.source_session_id = boundary_member.source_session_id
+                   AND candidate_member.semantic_entry_id = boundary_member.semantic_entry_id
+                 WHERE boundary_member.owning_session_id = checked_session
+                   AND boundary_member.context_frontier_id = result_boundary
+                   AND candidate_member.member_position IS NULL
+         )
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM context_frontier_member AS candidate_member
+                  LEFT JOIN context_frontier_member AS checked_member
+                    ON checked_member.owning_session_id = checked_session
+                   AND checked_member.context_frontier_id = checked_frontier
+                   AND checked_member.member_position = candidate_member.member_position
+                   AND checked_member.source_session_id = candidate_member.source_session_id
+                   AND checked_member.semantic_entry_id = candidate_member.semantic_entry_id
+                 WHERE candidate_member.owning_session_id = checked_session
+                   AND candidate_member.context_frontier_id = candidate.context_frontier_id
+                   AND checked_member.member_position IS NULL
+         );
+
+        IF suffix_start_count IS NULL
+           OR checked_count < suffix_start_count + result_request_count
+        THEN
+            RAISE EXCEPTION
+                'continued model call omits its tool-round projection base'
+                USING ERRCODE = '23514';
+        END IF;
+
+        SELECT count(*)
+          INTO malformed_result_count
+          FROM generate_series(0, result_request_count - 1)
+               AS expected(request_ordinal)
+          JOIN tool_request AS request
+            ON request.producing_model_call_id = result_producing_call
+           AND request.request_ordinal = expected.request_ordinal
+          LEFT JOIN context_frontier_member AS member
+            ON member.owning_session_id = checked_session
+           AND member.context_frontier_id = checked_frontier
+           AND member.member_position =
+               suffix_start_count + expected.request_ordinal + 1
+          LEFT JOIN semantic_transcript_entry AS entry
+            ON entry.source_session_id = member.source_session_id
+           AND entry.semantic_entry_id = member.semantic_entry_id
+          LEFT JOIN tool_attempt AS attempt
+            ON attempt.attempt_id = entry.tool_result_attempt_id
+         WHERE member.source_session_id IS DISTINCT FROM checked_session
+            OR (
+                (entry.payload_kind = 'tool_execution_result'
+                    AND attempt.request_id = request.request_id)
+                OR (entry.payload_kind IN ('tool_denied', 'delegation_result')
+                    AND entry.tool_result_request_id = request.request_id)
+            ) IS NOT TRUE;
+
+        IF malformed_result_count <> 0 THEN
+            RAISE EXCEPTION
+                'continued model call lacks proposal-ordered tool results'
+                USING ERRCODE = '23514';
+        END IF;
+        suffix_start_count := suffix_start_count + result_request_count;
+$new$;
+BEGIN
+    SELECT pg_get_functiondef(
+        'assert_model_call_steering_final_state(uuid)'::regprocedure
+    ) INTO definition;
+    IF strpos(definition, old_result_validation) = 0 THEN
+        RAISE EXCEPTION 'unexpected steering result validator';
+    END IF;
+    updated_definition := replace(
+        definition, old_result_validation, new_result_validation
+    );
+    EXECUTE updated_definition;
+END;
+$migration$;
+
+-- Reconciliation retains the authenticated placement projection base between
+-- the yielded boundary and proposal-ordered logical result closure.
+DO $migration$
+DECLARE
+    definition text;
+    updated_definition text;
+    old_declaration CONSTANT text :=
+        '    source_frontier_count bigint;';
+    new_declaration CONSTANT text :=
+        '    source_frontier_count bigint;' || chr(10) ||
+        '    projection_base_frontier uuid;';
+    old_source CONSTANT text := $old$
+        SELECT count(*)
+          INTO source_frontier_count
+          FROM context_frontier_member
+         WHERE owning_session_id = checked_session
+           AND context_frontier_id = source_frontier;
+$old$;
+    new_source CONSTANT text := $new$
+        SELECT candidate.context_frontier_id, candidate.member_count
+          INTO projection_base_frontier, source_frontier_count
+          FROM (
+                SELECT frontier.context_frontier_id, frontier.member_count
+                  FROM context_frontier AS frontier
+                 WHERE frontier.owning_session_id = checked_session
+                   AND frontier.context_frontier_id = source_frontier
+                UNION ALL
+                SELECT frontier.context_frontier_id, frontier.member_count
+                  FROM session_runner_placement_frontier AS pointer
+                  JOIN context_frontier AS frontier
+                    ON frontier.owning_session_id = pointer.session_id
+                   AND frontier.context_frontier_id = pointer.context_frontier_id
+                 WHERE pointer.session_id = checked_session
+          ) AS candidate
+         WHERE NOT EXISTS (
+                SELECT 1
+                  FROM context_frontier_member AS source_member
+                  LEFT JOIN context_frontier_member AS candidate_member
+                    ON candidate_member.owning_session_id = checked_session
+                   AND candidate_member.context_frontier_id = candidate.context_frontier_id
+                   AND candidate_member.member_position = source_member.member_position
+                   AND candidate_member.source_session_id = source_member.source_session_id
+                   AND candidate_member.semantic_entry_id = source_member.semantic_entry_id
+                 WHERE source_member.owning_session_id = checked_session
+                   AND source_member.context_frontier_id = source_frontier
+                   AND candidate_member.member_position IS NULL
+         )
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM context_frontier_member AS candidate_member
+                  LEFT JOIN context_frontier_member AS terminal_member
+                    ON terminal_member.owning_session_id = checked_session
+                   AND terminal_member.context_frontier_id = checked_terminal_frontier
+                   AND terminal_member.member_position = candidate_member.member_position
+                   AND terminal_member.source_session_id = candidate_member.source_session_id
+                   AND terminal_member.semantic_entry_id = candidate_member.semantic_entry_id
+                 WHERE candidate_member.owning_session_id = checked_session
+                   AND candidate_member.context_frontier_id = candidate.context_frontier_id
+                   AND terminal_member.member_position IS NULL
+         )
+         ORDER BY candidate.member_count DESC
+         LIMIT 1;
+$new$;
+    old_expected CONSTANT text :=
+        '               AND context_frontier_id = source_frontier' || chr(10) ||
+        '            UNION ALL';
+    new_expected CONSTANT text :=
+        '               AND context_frontier_id = projection_base_frontier' || chr(10) ||
+        '            UNION ALL';
+BEGIN
+    SELECT pg_get_functiondef(
+        'assert_reconciliation_required_turn_final_state(uuid)'::regprocedure
+    ) INTO definition;
+    IF strpos(definition, old_declaration) = 0
+       OR strpos(definition, old_source) = 0
+       OR strpos(definition, old_expected) = 0
+    THEN
+        RAISE EXCEPTION 'unexpected reconciliation projection validator';
+    END IF;
+    updated_definition := replace(definition, old_declaration, new_declaration);
+    updated_definition := replace(updated_definition, old_source, new_source);
+    updated_definition := replace(updated_definition, old_expected, new_expected);
+    EXECUTE updated_definition;
+END;
+$migration$;
+
+-- Failed and cancelled tool turns may retain authenticated placement entries
+-- between the producing round boundary and the terminal result suffix.
+DO $migration$
+DECLARE
+    definition text;
+    updated_definition text;
+    old_boundary_check CONSTANT text := $old$
+                    ) = terminal_member_count - round.request_count - 1
+               )
+$old$;
+    new_boundary_check CONSTANT text := $new$
+                    ) <= terminal_member_count - round.request_count - 1
+               )
+               AND (
+                    round.boundary_kind = 'closed_by_turn_end'
+                    OR NOT EXISTS (
+                        SELECT 1
+                          FROM context_frontier_member AS placement_member
+                          JOIN semantic_transcript_entry AS placement_entry
+                            ON placement_entry.source_session_id =
+                               placement_member.source_session_id
+                           AND placement_entry.semantic_entry_id =
+                               placement_member.semantic_entry_id
+                          LEFT JOIN session_runner_placement_frontier AS pointer
+                            ON pointer.session_id = placement_entry.source_session_id
+                           AND pointer.semantic_entry_id =
+                               placement_entry.semantic_entry_id
+                         WHERE placement_member.owning_session_id =
+                               lifecycle.session_id
+                           AND placement_member.context_frontier_id =
+                               lifecycle.terminal_frontier_id
+                           AND placement_member.member_position > (
+                                SELECT member_count
+                                  FROM context_frontier
+                                 WHERE owning_session_id = lifecycle.session_id
+                                   AND context_frontier_id =
+                                       round.boundary_frontier_id
+                           )
+                           AND placement_member.member_position <=
+                               terminal_member_count - round.request_count - 1
+                           AND (
+                                placement_entry.payload_kind <>
+                                    'runner_placement_changed'
+                                OR pointer.semantic_entry_id IS NULL
+                           )
+                    )
+               )
+$new$;
+BEGIN
+    SELECT pg_get_functiondef(
+        'assert_tool_loop_turn_final_state_pre_delegation(uuid)'::regprocedure
+    ) INTO definition;
+    IF strpos(definition, old_boundary_check) = 0 THEN
+        RAISE EXCEPTION 'unexpected terminal tool-result validator';
+    END IF;
+    updated_definition := replace(
+        definition, old_boundary_check, new_boundary_check
+    );
+    EXECUTE updated_definition;
+END;
+$migration$;
+
 -- Turn activation treats the latest relocation boundary as part of the
 -- authoritative predecessor prefix. The helper keeps the existing imported
 -- seed and predecessor rules while admitting that one exact intervening
