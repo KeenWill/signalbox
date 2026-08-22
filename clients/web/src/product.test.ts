@@ -211,8 +211,8 @@ describe('SameOriginProductTransport', () => {
     expect(fetchRequest).not.toHaveBeenCalled()
   })
 
-  it('accepts multibyte descriptor metadata at the exact UTF-8 ceilings', async () => {
-    const mediaType = `${'é'.repeat(127)}a`
+  it('accepts descriptor metadata at the exact UTF-8 ceilings', async () => {
+    const mediaType = `application/${'a'.repeat(MAX_DECLARED_MEDIA_TYPE_BYTES - 'application/'.length)}`
     const displayFilename = 'é'.repeat(MAX_DISPLAY_FILENAME_BYTES / 2)
     const descriptor = {
       ...imageArtifact,
