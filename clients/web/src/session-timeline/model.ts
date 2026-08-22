@@ -91,6 +91,9 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     const response = await request('/api/bootstrap')
     if (!response.ok) return throwApiError(response)
     const bootstrap = decodeWebContractBootstrap(await response.json())
+    if (!bootstrap.capabilities.bounded_session_timeline) {
+      throw new TypeError('bounded session timeline capability is unavailable')
+    }
     return new HttpSessionTimelineSource(bootstrap.limits, request)
   }
 
@@ -144,7 +147,7 @@ export class BoundedSessionHistory {
   }
 
   get retained(): WebSessionTimelineWindow['items'] {
-    return this.retainedValue
+    return [...this.retainedValue]
   }
 
   async describe(signal?: AbortSignal): Promise<WebSessionTimelineDescriptor> {
@@ -183,11 +186,16 @@ export class BoundedSessionHistory {
       throw new TypeError('timeline window exceeds the requested byte ceiling')
     }
     const incoming = new Map<string, (typeof window.items)[number]>()
+    let previousAddress: bigint | undefined
     for (const item of window.items) {
       const address = item.address.event_sequence
-      decimalAddress(address)
+      const parsedAddress = decimalAddress(address)
+      if (previousAddress !== undefined && parsedAddress <= previousAddress) {
+        throw new TypeError('timeline window addresses must be strictly increasing')
+      }
       if (incoming.has(address)) throw new TypeError('timeline window repeats an address')
       incoming.set(address, item)
+      previousAddress = parsedAddress
     }
     if (window.continuation_before) decimalAddress(window.continuation_before.event_sequence)
     if (window.continuation_after) decimalAddress(window.continuation_after.event_sequence)
@@ -259,7 +267,10 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
       anchor.kind === 'before'
         ? Math.min(addressed - 1, SESSION_FOUNDATION_TOTAL)
         : Math.min(initialStart + count - 1, SESSION_FOUNDATION_TOTAL)
-    const start = anchor.kind === 'before' ? Math.max(end - count + 1, 1) : initialStart
+    const start =
+      anchor.kind === 'before' || anchor.kind === 'around'
+        ? Math.max(end - count + 1, 1)
+        : initialStart
     const items =
       start > end
         ? []
