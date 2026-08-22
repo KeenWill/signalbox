@@ -43,4 +43,17 @@ describe('command registry', () => {
       }),
     ).toBe(false)
   })
+
+  it('keeps product navigation bindings unavailable on scenario surfaces', () => {
+    const navigate = commandById('navigate.sessions')
+    expect(
+      navigate.available({
+        dispatch: store.dispatch,
+        getState: store.getState,
+        scenarioSurface: true,
+        timelineIds: [],
+        focusTimeline: () => undefined,
+      }),
+    ).toBe(false)
+  })
 })

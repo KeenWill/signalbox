@@ -49,9 +49,17 @@ const platformModifier = (page: Page) =>
 const useArtifactScenario = async (page: Page, descriptor = imageArtifact) => {
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
   await page.route('**/api/blobs/**/descriptor?*', (route) => route.fulfill({ json: descriptor }))
-  await page.route('**/api/blobs/**/content/image-png', (route) =>
-    route.fulfill({ body: previewFixture, contentType: 'image/png' }),
-  )
+  await page.route('**/api/blobs/**/content/image-png', (route) => {
+    if (route.request().headers().range) {
+      return route.fulfill({
+        status: 206,
+        body: previewFixture.subarray(0, 64 * 1024),
+        contentType: 'image/png',
+        headers: { 'content-range': `bytes 0-${64 * 1024 - 1}/${previewFixture.byteLength}` },
+      })
+    }
+    return route.fulfill({ body: previewFixture, contentType: 'image/png' })
+  })
 }
 
 const useRecoveringArtifactScenario = async (page: Page) => {
@@ -94,6 +102,9 @@ const resolveArtifactWithoutMouse = async (page: Page) => {
     name: `Artifact ${imageArtifact.display_filename[0]}`,
   })
   await expect(artifact).toBeVisible()
+  await expect(page.getByRole('status')).toContainText(
+    `Resolved artifact ${imageArtifact.display_filename[0]}`,
+  )
   await expect(artifact).toHaveClass(/artifact-row-compact/)
   const preview = artifact.getByRole('img', {
     name: `Preview of ${imageArtifact.display_filename[0]}`,
@@ -147,9 +158,8 @@ test('preserves an active artifact when the inspector changes composition', asyn
   await page.goto('/sessions')
 
   await resolveArtifactWithoutMouse(page)
-  await expect(
-    page.getByRole('button', { name: 'Original dimensions unavailable; download only' }),
-  ).toBeDisabled()
+  await page.getByRole('button', { name: 'Load original' }).click()
+  await expect(page.getByRole('button', { name: 'Original loaded' })).toBeVisible()
   await page.setViewportSize({ width: 1024, height: 900 })
   const sheet = page.getByRole('dialog', { name: 'Artifact inspector' })
   await expect(sheet.getByRole('textbox', { name: 'Digest' })).toHaveValue(imageArtifact.digest)
@@ -157,7 +167,7 @@ test('preserves an active artifact when the inspector changes composition', asyn
     sheet.getByRole('article', { name: `Artifact ${imageArtifact.display_filename[0]}` }),
   ).toBeVisible()
   await expect(
-    sheet.getByRole('img', { name: `Preview of ${imageArtifact.display_filename[0]}` }),
+    sheet.getByRole('img', { name: `Original of ${imageArtifact.display_filename[0]}` }),
   ).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -195,6 +205,34 @@ test('does not restore stale side-inspector focus after closing a narrow sheet',
   await density.focus()
   await page.setViewportSize({ width: 1440, height: 900 })
   await expect(density).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('restores inspector focus when a sheet returns to the side pane', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useArtifactScenario(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/sessions')
+
+  await page.getByRole('button', { name: 'Open artifact inspector' }).click()
+  await page.setViewportSize({ width: 1024, height: 900 })
+  await expect(page.getByRole('dialog', { name: 'Artifact inspector' })).toBeVisible()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await expect(page.getByRole('textbox', { name: 'Digest' })).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('preserves editing context when Escape is pressed in an inspector input', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useArtifactScenario(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/sessions')
+
+  await page.getByRole('button', { name: 'Open artifact inspector' }).click()
+  const digest = page.getByRole('textbox', { name: 'Digest' })
+  await digest.press('Escape')
+  await expect(digest).toBeFocused()
+  await expect(page.getByRole('heading', { name: 'Artifact inspector' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

@@ -61,7 +61,7 @@ test.afterEach(async ({ page }, testInfo) => {
   })
 })
 
-test('selects a bounded image capability without loading unbounded original bytes', async ({
+test('selects a bounded image capability and admits a bounded original explicitly', async ({
   page,
 }) => {
   const problems = watchBrowser(page)
@@ -84,15 +84,9 @@ test('selects a bounded image capability without loading unbounded original byte
     ),
   ).toBe(0)
 
-  await expect(
-    page.getByRole('button', { name: 'Original dimensions unavailable; download only' }),
-  ).toBeDisabled()
-  expect(
-    await page.evaluate(
-      (path) => performance.getEntriesByName(new URL(path, location.href).href).length,
-      originalPath,
-    ),
-  ).toBe(0)
+  await page.getByRole('button', { name: 'Load original' }).click()
+  await expect(page.getByRole('button', { name: 'Original loaded' })).toBeVisible()
+  await expect(page.getByRole('img', { name: 'Original of orbital-map.png' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

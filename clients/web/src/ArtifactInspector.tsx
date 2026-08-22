@@ -156,13 +156,18 @@ export function ArtifactInspector({
         </div>
       )}
       {descriptor.data && (
-        <ArtifactRenderer
-          key={descriptor.data.digest}
-          descriptor={descriptor.data}
-          compact
-          originalRequested={state.originalRequested}
-          onOriginalRequested={() => onStateChange({ ...state, originalRequested: true })}
-        />
+        <>
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            Resolved artifact {descriptor.data.display_filename[0] ?? descriptor.data.digest}
+          </span>
+          <ArtifactRenderer
+            key={descriptor.data.digest}
+            descriptor={descriptor.data}
+            compact
+            originalRequested={state.originalRequested}
+            onOriginalRequested={() => onStateChange({ ...state, originalRequested: true })}
+          />
+        </>
       )}
     </div>
   )

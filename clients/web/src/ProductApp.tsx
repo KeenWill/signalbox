@@ -367,6 +367,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const artifactButtonRef = useRef<HTMLButtonElement>(null)
   const artifactDigestRef = useRef<HTMLInputElement>(null)
   const artifactSideWasOpen = useRef(false)
+  const inspectorWasInSheet = useRef(false)
+  const navigationSelectedRoute = useRef(false)
   const [artifactOpen, setArtifactOpen] = useState(false)
   const [artifactInspectorState, setArtifactInspectorState] = useState(emptyArtifactInspectorState)
   const narrowInspector = useNarrowInspector()
@@ -411,7 +413,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   useHotkeySequences(
     globalHotkeySequenceBindings.map((binding) => ({
       sequence: binding.sequence,
-      callback: () => invokeCommand(binding.commandId, context),
+      callback: () => {
+        if (store.getState().app.overlay === null) invokeCommand(binding.commandId, context)
+      },
     })),
   )
 
@@ -421,12 +425,20 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   }, [app.density, app.theme])
 
   useEffect(() => {
-    if (artifactOpen && !inspectorInSheet && !artifactSideWasOpen.current) {
+    if (app.overlay === 'help') {
+      dispatch(actions.overlaySet(null))
+    }
+  }, [app.overlay, dispatch])
+
+  useEffect(() => {
+    const returnedToSidePane = artifactOpen && inspectorWasInSheet.current && !inspectorInSheet
+    if (artifactOpen && !inspectorInSheet && (!artifactSideWasOpen.current || returnedToSidePane)) {
       artifactSideWasOpen.current = true
       artifactDigestRef.current?.focus()
     } else if (!artifactOpen) {
       artifactSideWasOpen.current = false
     }
+    inspectorWasInSheet.current = inspectorInSheet
   }, [artifactOpen, inspectorInSheet])
 
   const closeArtifactInspector = () => {
@@ -439,6 +451,15 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     if (!artifactOpen) return undefined
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || inspectorInSheet || app.overlay !== null) return
+      const target = event.target
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return
+      }
       event.preventDefault()
       artifactSideWasOpen.current = false
       setArtifactOpen(false)
@@ -526,6 +547,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             aria-describedby="mobile-navigation-description"
             onCloseAutoFocus={(event) => {
               event.preventDefault()
+              if (navigationSelectedRoute.current) {
+                navigationSelectedRoute.current = false
+                requestAnimationFrame(() => primaryRef.current?.focus())
+                return
+              }
               document.querySelector<HTMLElement>('[aria-label="Open navigation"]')?.focus()
             }}
           >
@@ -535,7 +561,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             </Dialog.Description>
             <ProductNavigation
               active={surface}
-              onNavigate={() => dispatch(actions.overlaySet(null))}
+              onNavigate={() => {
+                navigationSelectedRoute.current = true
+                dispatch(actions.overlaySet(null))
+              }}
             />
           </Dialog.Content>
         </Dialog.Portal>

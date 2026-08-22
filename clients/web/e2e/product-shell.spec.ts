@@ -88,6 +88,21 @@ test('runs advertised product navigation sequences', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('does not run product navigation sequences while a modal owns focus', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await palette.getByRole('button', { name: /Go to Sessions/ }).focus()
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(palette).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('uses a navigation sheet on a phone viewport and unwinds it with Escape', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -114,6 +129,7 @@ test('closes the phone navigation sheet after route selection', async ({ page })
   await navigation.getByRole('link', { name: /Sessions/ }).click()
   await expect(page).toHaveURL(/\/sessions$/)
   await expect(navigation).toBeHidden()
+  await expect(page.getByRole('main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -128,6 +144,23 @@ test('closes the phone navigation sheet before entering Scenario studio', async 
   await navigation.getByRole('link', { name: /Scenario studio/ }).click()
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
   await expect(navigation).toBeHidden()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('clears scenario keyboard help when browser history returns to a product route', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+  await page.keyboard.press('?')
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+
+  await page.goBack()
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeHidden()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

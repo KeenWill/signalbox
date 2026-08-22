@@ -59,6 +59,22 @@ export class ProductContractError extends Error {
 }
 
 export const MAX_PRODUCT_JSON_BYTES = 65_536
+export const MAX_DECLARED_MEDIA_TYPE_BYTES = 255
+export const MAX_DISPLAY_FILENAME_BYTES = 1_024
+
+const utf8Length = (value: string): number => new TextEncoder().encode(value).byteLength
+
+const validateBlobDescriptorInput = (input: BlobDescriptorInput): void => {
+  if (utf8Length(input.mediaType) > MAX_DECLARED_MEDIA_TYPE_BYTES) {
+    throw new Error('descriptor media type exceeded the 255-byte limit')
+  }
+  if (
+    input.displayFilename !== undefined &&
+    utf8Length(input.displayFilename) > MAX_DISPLAY_FILENAME_BYTES
+  ) {
+    throw new Error('descriptor display filename exceeded the 1024-byte limit')
+  }
+}
 
 const readBoundedJson = async (response: Response): Promise<unknown> => {
   const declaredLength = Number(response.headers.get('content-length'))
@@ -124,6 +140,7 @@ export class SameOriginProductTransport implements ProductTransport {
     input: BlobDescriptorInput,
     signal?: AbortSignal,
   ): Promise<WebBlobDescriptor> {
+    validateBlobDescriptorInput(input)
     const query = new URLSearchParams({ media_type: input.mediaType })
     if (input.displayFilename) query.set('display_filename', input.displayFilename)
     const response = await request(
@@ -141,6 +158,16 @@ export class SameOriginProductTransport implements ProductTransport {
     const descriptor = decodeWebBlobDescriptor(payload)
     if (descriptor.digest !== input.digest) {
       throw new Error('descriptor digest did not match the requested blob identity')
+    }
+    if (descriptor.declared_media_type !== input.mediaType) {
+      throw new Error('descriptor media type did not match the requested blob use')
+    }
+    const expectedFilenames = input.displayFilename ? [input.displayFilename] : []
+    if (
+      descriptor.display_filename.length !== expectedFilenames.length ||
+      descriptor.display_filename.some((filename, index) => filename !== expectedFilenames[index])
+    ) {
+      throw new Error('descriptor filename did not match the requested blob use')
     }
     return descriptor
   }

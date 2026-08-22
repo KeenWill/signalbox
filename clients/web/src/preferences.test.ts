@@ -48,6 +48,23 @@ describe('browser preferences', () => {
     expect(BROWSER_PREFERENCES_KEY).toBe('signalbox.web.preferences.v1')
   })
 
+  it('falls back when looking up the browser storage global throws', () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get: () => {
+        throw new DOMException('denied', 'SecurityError')
+      },
+    })
+
+    try {
+      expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor)
+      else Reflect.deleteProperty(globalThis, 'localStorage')
+    }
+  })
+
   it('applies decoded presentation settings synchronously', () => {
     const root = { dataset: {} } as unknown as HTMLElement
 

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { binaryArtifact, imageArtifact } from './features/artifacts/artifactScenario'
 import {
+  MAX_DECLARED_MEDIA_TYPE_BYTES,
+  MAX_DISPLAY_FILENAME_BYTES,
   MAX_PRODUCT_JSON_BYTES,
   ProductContractError,
   ProductTransportError,
@@ -130,6 +132,104 @@ describe('SameOriginProductTransport', () => {
     })
 
     await expect(request).rejects.toThrow('descriptor digest did not match')
+  })
+
+  it('rejects descriptor metadata for a different semantic use', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...imageArtifact,
+              declared_media_type: 'image/jpeg',
+              display_filename: ['different.jpg'],
+            }),
+          ),
+      ),
+    )
+
+    const request = new SameOriginProductTransport().readBlobDescriptor({
+      digest: imageArtifact.digest,
+      mediaType: imageArtifact.declared_media_type,
+      displayFilename: imageArtifact.display_filename[0],
+    })
+
+    await expect(request).rejects.toThrow('descriptor media type did not match')
+  })
+
+  it('rejects a mismatched descriptor filename', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ ...imageArtifact, display_filename: ['different.png'] })),
+      ),
+    )
+
+    const request = new SameOriginProductTransport().readBlobDescriptor({
+      digest: imageArtifact.digest,
+      mediaType: imageArtifact.declared_media_type,
+      displayFilename: imageArtifact.display_filename[0],
+    })
+
+    await expect(request).rejects.toThrow('descriptor filename did not match')
+  })
+
+  it('rejects an unexpected descriptor filename when none was requested', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(imageArtifact))),
+    )
+
+    const request = new SameOriginProductTransport().readBlobDescriptor({
+      digest: imageArtifact.digest,
+      mediaType: imageArtifact.declared_media_type,
+    })
+
+    await expect(request).rejects.toThrow('descriptor filename did not match')
+  })
+
+  it('bounds descriptor use metadata before constructing the request URL', async () => {
+    const fetchRequest = vi.fn()
+    vi.stubGlobal('fetch', fetchRequest)
+    const transport = new SameOriginProductTransport()
+
+    await expect(
+      transport.readBlobDescriptor({
+        digest: imageArtifact.digest,
+        mediaType: 'x'.repeat(MAX_DECLARED_MEDIA_TYPE_BYTES + 1),
+      }),
+    ).rejects.toThrow('255-byte limit')
+    await expect(
+      transport.readBlobDescriptor({
+        digest: imageArtifact.digest,
+        mediaType: imageArtifact.declared_media_type,
+        displayFilename: 'é'.repeat(MAX_DISPLAY_FILENAME_BYTES / 2 + 1),
+      }),
+    ).rejects.toThrow('1024-byte limit')
+    expect(fetchRequest).not.toHaveBeenCalled()
+  })
+
+  it('accepts multibyte descriptor metadata at the exact UTF-8 ceilings', async () => {
+    const mediaType = `${'é'.repeat(127)}a`
+    const displayFilename = 'é'.repeat(MAX_DISPLAY_FILENAME_BYTES / 2)
+    const descriptor = {
+      ...imageArtifact,
+      declared_media_type: mediaType,
+      display_filename: [displayFilename],
+    }
+    const fetchRequest = vi.fn(async () => new Response(JSON.stringify(descriptor)))
+    vi.stubGlobal('fetch', fetchRequest)
+
+    await expect(
+      new SameOriginProductTransport().readBlobDescriptor({
+        digest: imageArtifact.digest,
+        mediaType,
+        displayFilename,
+      }),
+    ).resolves.toEqual(descriptor)
+    expect(fetchRequest).toHaveBeenCalledOnce()
   })
 
   it('bounds descriptor error payloads before decoding them', async () => {
