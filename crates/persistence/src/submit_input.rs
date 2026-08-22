@@ -3464,7 +3464,7 @@ pub(crate) async fn load_scheduling_projection(
                                     starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
                                     reconciling_attempt: stored_attempt_id,
                                     reconciling_attempt_end,
-                                    tool_batch: batch,
+                                    tool_batch: Box::new(batch),
                                     interrupt,
                                     terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
                                 }

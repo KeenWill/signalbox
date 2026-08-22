@@ -138,7 +138,7 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         /// The preserved stored end classification for that attempt.
         reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
         /// Complete checked batch carrying the exact ambiguous tool attempt.
-        tool_batch: crate::ToolBatch,
+        tool_batch: Box<crate::ToolBatch>,
         /// The later or already-applied interrupt that requires reconciliation.
         interrupt: AppliedInterruptCommandResult,
         /// The exact proposal-ordered result-suffix terminal frontier.
@@ -15457,7 +15457,7 @@ mod tests {
                     CancellationStopDisposition::Lost,
                     interrupt,
                 ),
-                tool_batch: batch.clone(),
+                tool_batch: Box::new(batch.clone()),
                 interrupt,
                 terminal_frontier: starting_frontier.id(),
             },
