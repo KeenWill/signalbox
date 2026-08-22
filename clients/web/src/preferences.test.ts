@@ -5,6 +5,8 @@ import {
   defaultBrowserPreferences,
   loadBrowserPreferences,
   MAX_KEY_OVERRIDES,
+  MAX_LOGICAL_POSITION_KEY_BYTES,
+  MAX_LOGICAL_POSITION_VALUE_BYTES,
   MAX_SAVED_LOGICAL_POSITIONS,
   saveBrowserPreferences,
 } from './preferences'
@@ -73,5 +75,39 @@ describe('browser preferences', () => {
 
     expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
     expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
+  })
+
+  it('guards access to a throwing browser storage getter', () => {
+    const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get: () => {
+        throw new DOMException('blocked', 'SecurityError')
+      },
+    })
+
+    try {
+      expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+      expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
+    } finally {
+      if (originalDescriptor) Object.defineProperty(globalThis, 'localStorage', originalDescriptor)
+      else Reflect.deleteProperty(globalThis, 'localStorage')
+    }
+  })
+
+  it('rejects logical-position keys and values above their UTF-8 byte ceilings', () => {
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { ['é'.repeat(MAX_LOGICAL_POSITION_KEY_BYTES)]: 'cursor' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { session: 'é'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES) },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
   })
 })

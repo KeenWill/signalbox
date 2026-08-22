@@ -106,6 +106,13 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
 
+  useEffect(() => {
+    document.title = `${transport.scenario.title} · Signalbox scenarios`
+    return () => {
+      document.title = 'Signalbox'
+    }
+  }, [transport.scenario.title])
+
   const snapshot = useMemo<DiagnosticSnapshot>(
     () => ({
       scenario: transport.scenario.id,
