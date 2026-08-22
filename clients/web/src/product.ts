@@ -43,7 +43,7 @@ const MAX_SEARCH_QUERY_BYTES = 512
 const MAX_SEARCH_PAGE_ITEMS = 100
 const MAX_SEARCH_SNIPPET_BYTES = 512
 const ERROR_RESPONSE_BYTES = 16_384
-const MAX_U64 = 18_446_744_073_709_551_615n
+const MAX_I64 = 9_223_372_036_854_775_807n
 const isUtf8ContinuationByte = (byte: number | undefined) =>
   byte !== undefined && (byte & 0xc0) === 0x80
 
@@ -183,8 +183,8 @@ const validateSearchPageBounds = (
     if (
       lastResult === undefined ||
       continuation.address.event_sequence !== lastResult.address.event_sequence ||
-      !/^(0|[1-9][0-9]*)$/.test(projectionId) ||
-      BigInt(projectionId) > MAX_U64
+      !/^[1-9][0-9]*$/.test(projectionId) ||
+      BigInt(projectionId) > MAX_I64
     ) {
       throw new TypeError('search page carries an invalid continuation')
     }

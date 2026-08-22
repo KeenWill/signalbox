@@ -141,6 +141,22 @@ test('replaces the bounded result page through its typed cursor', async ({ page 
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('resets pagination when submitting a different search scope', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.goto('/search?q=release')
+  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+
+  await page.getByRole('button', { name: 'Next page' }).click()
+  await expect(page.getByRole('heading', { name: '1 results on this page' })).toBeVisible()
+  const search = page.getByRole('textbox', { name: 'Search text' })
+  await search.fill('different scope')
+  await search.press('Enter')
+
+  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page).toHaveURL(/q=different(?:\+|%20)scope/)
+  await expect(page).not.toHaveURL(/afterAddress=/)
+})
+
 test('preserves search focus and announces asynchronous results', async ({ page }) => {
   const problems = watchBrowser(page)
   await useSearchFixture(page)

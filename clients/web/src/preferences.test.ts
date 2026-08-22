@@ -8,7 +8,20 @@ import {
   saveBrowserPreferences,
 } from './preferences'
 
-afterEach(() => vi.unstubAllGlobals())
+const originalLocalStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+
+const restoreLocalStorageDescriptor = () => {
+  if (originalLocalStorageDescriptor === undefined) {
+    Reflect.deleteProperty(globalThis, 'localStorage')
+    return
+  }
+  Object.defineProperty(globalThis, 'localStorage', originalLocalStorageDescriptor)
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  restoreLocalStorageDescriptor()
+})
 
 describe('browser preferences', () => {
   it('fails closed to defaults for an unrelated stored value', () => {
@@ -65,7 +78,6 @@ describe('browser preferences', () => {
   })
 
   it('falls back when resolving the browser storage getter throws', () => {
-    const previousDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
     Object.defineProperty(globalThis, 'localStorage', {
       configurable: true,
       get: () => {
@@ -73,15 +85,7 @@ describe('browser preferences', () => {
       },
     })
 
-    try {
-      expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
-      expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
-    } finally {
-      if (previousDescriptor === undefined) {
-        Reflect.deleteProperty(globalThis, 'localStorage')
-      } else {
-        Object.defineProperty(globalThis, 'localStorage', previousDescriptor)
-      }
-    }
+    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+    expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
   })
 })

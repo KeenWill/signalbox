@@ -35,6 +35,8 @@ const watchBrowser = (page: Page) => {
 const platformModifier = (page: Page) =>
   page.evaluate(() => (/Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Meta' : 'Control'))
 
+const expectedContractStatus = `${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`
+
 test('opens the product at Attention with generated-contract transport status', async ({
   page,
 }) => {
@@ -44,7 +46,7 @@ test('opens the product at Attention with generated-contract transport status', 
 
   await expect(page).toHaveURL(/\/attention$/)
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
-  await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
+  await expect(page.getByText(expectedContractStatus)).toBeVisible()
   await expect(page.getByRole('link', { name: /Attention/ })).toHaveAttribute(
     'aria-current',
     'page',
@@ -132,9 +134,17 @@ test('runs product navigation sequences but leaves Mod+K to an editing field', a
 
   const search = page.getByRole('textbox', { name: 'Search text' })
   await search.focus()
+  await search.evaluate((element) => {
+    element.addEventListener('keydown', (event) => {
+      queueMicrotask(() => {
+        element.dataset.modKDefaultPrevented = String(event.defaultPrevented)
+      })
+    })
+  })
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeHidden()
+  await expect(search).toHaveAttribute('data-mod-k-default-prevented', 'false')
   await search.press('Escape')
   await page.keyboard.press('g')
   await page.keyboard.press('a')
@@ -197,7 +207,7 @@ test('retries an initial bootstrap failure', async ({ page }) => {
 
   await expect(page.getByRole('status')).toContainText('Transport unavailable')
   await page.getByRole('button', { name: 'Retry contract check' }).click()
-  await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
+  await expect(page.getByText(expectedContractStatus)).toBeVisible()
   expect(problems.pageErrors).toEqual([])
   expect(problems.consoleErrors.filter((message) => message !== expectedFailureMessage)).toEqual([])
 })

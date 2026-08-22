@@ -361,6 +361,7 @@ export function ProductApp({
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
+      options: binding.commandId === 'palette.open' ? { ignoreInputs: true } : undefined,
       callback: (event) => {
         if (app.overlay !== null && binding.commandId !== 'surface.escape') return
         if (binding.commandId === 'palette.open' && isEditableTarget(event.target)) return

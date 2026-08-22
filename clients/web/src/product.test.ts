@@ -448,7 +448,19 @@ describe('SameOriginProductTransport', () => {
       projection_id: 'not-decimal',
     }))
 
-  it('rejects an out-of-range continuation projection ID', () =>
+  it('rejects a zero continuation projection ID', () =>
+    rejectContinuation({
+      address: { event_sequence: '901' },
+      projection_id: '0',
+    }))
+
+  it('rejects a continuation projection ID above positive i64', () =>
+    rejectContinuation({
+      address: { event_sequence: '901' },
+      projection_id: '9223372036854775808',
+    }))
+
+  it('rejects a continuation projection ID above u64', () =>
     rejectContinuation({
       address: { event_sequence: '901' },
       projection_id: '18446744073709551616',

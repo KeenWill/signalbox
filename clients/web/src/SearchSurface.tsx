@@ -109,6 +109,8 @@ export function SearchSurface({
     const form = new FormData(event.currentTarget)
     const q = String(form.get('q') ?? '').trim()
     const session = String(form.get('session') ?? '').trim()
+    restorePaginationFocusRef.current = false
+    setActiveAfter(undefined)
     onStateChange({ q: q || undefined, session: session || undefined })
   }
 
