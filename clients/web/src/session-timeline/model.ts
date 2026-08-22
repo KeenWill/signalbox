@@ -37,6 +37,7 @@ type TimelineContractLimits = Pick<
 type TimelineDetailCursor = NonNullable<WebSessionTimelineDetailPage['continuation']>
 type TimelineDetailItem = WebSessionTimelineDetailPage['items'][number]
 type TimelineTextExcerpt = Extract<TimelineDetailItem['body'], { type: 'user_input' }>['text']
+export type TimelineDetailIdentity = readonly string[]
 
 export type SessionWindowAnchor =
   | { kind: 'first' | 'latest' }
@@ -98,6 +99,9 @@ const validateTextExcerpt = (
     if (excerptBytes === 0) {
       throw new TypeError('timeline detail text continuation must make positive byte progress')
     }
+    if (nextOffset >= total) {
+      throw new TypeError('timeline detail text continuation requires an incomplete excerpt')
+    }
     if (
       continuation.address.event_sequence !== item.address.event_sequence ||
       continuation.field !== field ||
@@ -134,6 +138,16 @@ const projectedDetailBodyBytes = (item: TimelineDetailItem): number => {
         ? validateTextExcerpt(item, body.response, 'model_response')
         : 0
   return PROJECTED_DETAIL_ENVELOPE_BYTES + excerptBytes
+}
+
+export const timelineDetailIdentity = (item: TimelineDetailItem): TimelineDetailIdentity => {
+  const body = item.body
+  if (body.type === 'user_input') return [body.type, body.turn_id]
+  if (body.type === 'model_call') {
+    return [body.type, body.turn_id, body.model_call_id, body.model_identity_id]
+  }
+  if (body.type === 'turn_lifecycle') return [body.type, body.turn_id]
+  return [body.type, body.kind]
 }
 
 const boundedLimit = (value: number, minimum: number, maximum: number): number =>
@@ -300,6 +314,7 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     cursor?: TimelineDetailCursor,
     signal?: AbortSignal,
     expectedTotalBytes?: string,
+    expectedIdentity?: TimelineDetailIdentity,
   ): Promise<WebSessionTimelineDetailPage> {
     if (!this.detailAvailable) {
       throw new TypeError('bounded session timeline detail capability is unavailable')
@@ -392,6 +407,12 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       ) {
         throw new TypeError('timeline detail body changed its declared text total')
       }
+      if (
+        expectedIdentity === undefined ||
+        JSON.stringify(timelineDetailIdentity(item)) !== JSON.stringify(expectedIdentity)
+      ) {
+        throw new TypeError('timeline detail body changed its immutable record identity')
+      }
     }
     const excerptContinuations = page.items.flatMap((item) => {
       const excerpt =
@@ -468,6 +489,13 @@ export class BoundedSessionHistory {
   ): Promise<WebSessionTimelineWindow> {
     const anchorAddress =
       'eventSequence' in anchor ? decimalAddress(anchor.eventSequence) : undefined
+    if (anchor.kind === 'around' && anchorAddress !== undefined && this.descriptorValue) {
+      const firstAddress = decimalAddress(this.descriptorValue.first_address.event_sequence)
+      const latestAddress = decimalAddress(this.descriptorValue.latest_address.event_sequence)
+      if (anchorAddress < firstAddress || anchorAddress > latestAddress) {
+        throw new TypeError('around timeline anchor lies outside the descriptor boundaries')
+      }
+    }
     const bounded = boundedLimits(limits, this.source.limits)
     const window = await this.source.readWindow(this.sessionId, anchor, bounded, signal)
     if (canonicalSessionId(window.session_id) !== this.sessionId)

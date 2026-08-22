@@ -1347,7 +1347,7 @@ kbd {
 }
 .session-item-summary {
   display: grid;
-  grid-template-columns: 16px 64px minmax(160px, 1fr) auto;
+  grid-template-columns: 16px 20ch minmax(160px, 1fr) auto;
   align-items: center;
   gap: 8px;
   width: 100%;
@@ -1468,7 +1468,7 @@ kbd {
     margin: 2px 0 0;
   }
   .session-item-summary {
-    grid-template-columns: 16px 50px minmax(100px, 1fr);
+    grid-template-columns: 16px 20ch minmax(100px, 1fr);
   }
   .session-item-summary small {
     display: none;

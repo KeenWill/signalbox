@@ -29,6 +29,7 @@ describe('command registry', () => {
       navigateTimelineWindow: (anchor: 'first' | 'latest') => navigated.push(anchor),
       openNavigation: () => undefined,
       openPalette: () => undefined,
+      prepareFocusLayout: () => undefined,
       timelineWindowAvailable: true,
     }
 

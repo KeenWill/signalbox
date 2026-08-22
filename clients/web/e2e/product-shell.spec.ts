@@ -24,7 +24,7 @@ const sessionWorkspaceFixture = {
   descriptorFirstAddress: '1',
   firstAddress: '41',
   latestAddress: '43',
-  itemCount: '1000000',
+  itemCount: '43',
   projectedBytes: 234,
   detail: {
     session_id: '00000000-0000-0000-0000-000000000991',

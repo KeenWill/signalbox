@@ -8,6 +8,7 @@ import {
   MAX_TIMELINE_HTTP_RESPONSE_BYTES,
   SESSION_FOUNDATION_TOTAL,
   type SessionTimelineSource,
+  timelineDetailIdentity,
 } from './model'
 
 const sessionId = '00000000-0000-0000-0000-000000000991'
@@ -910,6 +911,7 @@ describe('BoundedSessionHistory', () => {
       first.continuation ?? undefined,
       undefined,
       firstPageFixture.items[0].body.text.total_bytes,
+      timelineDetailIdentity(firstPageFixture.items[0]),
     )
     const firstUrl = new URL(String(request.mock.calls[1]?.[0]), 'http://signalbox.test')
     const secondUrl = new URL(String(request.mock.calls[2]?.[0]), 'http://signalbox.test')

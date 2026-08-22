@@ -391,7 +391,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           : null
         ;(control ?? primaryRef.current)?.focus()
       },
-      navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      navigate: (path) => {
+        void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() =>
+          primaryRef.current?.focus(),
+        )
+      },
       navigateTimelineWindow: (anchor) => timelineWindowNavigationRef.current(anchor),
       openNavigation: () => {
         const active = document.activeElement
@@ -404,6 +408,15 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         paletteOpenerRef.current =
           active instanceof HTMLElement && active !== document.body ? active : null
         dispatch(actions.overlaySet('palette'))
+      },
+      prepareFocusLayout: () => {
+        const active = document.activeElement
+        if (
+          active instanceof HTMLElement &&
+          (active.closest('.product-navigation-pane') || active.closest('.product-inspector'))
+        ) {
+          primaryRef.current?.focus()
+        }
       },
       timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
     }),
@@ -453,6 +466,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         onTimelineIds={updateTimelineIds}
         onTimelineWindowNavigation={updateTimelineWindowNavigation}
         onTimelineWindowAvailability={setTimelineWindowAvailable}
+        onTimelineWindowCommand={(command) => invokeProductCommand(command, context)}
       />
     ) : surface === 'settings' ? (
       <SettingsSurface />

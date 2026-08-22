@@ -4,7 +4,11 @@ import type {
   WebSessionTimelineDetailPage,
   WebSessionTimelineWindow,
 } from './generated/web-contract.mjs'
-import type { HttpSessionTimelineSource } from './session-timeline/model'
+import {
+  type HttpSessionTimelineSource,
+  type TimelineDetailIdentity,
+  timelineDetailIdentity,
+} from './session-timeline/model'
 
 const DETAIL_PAGE_ITEMS = 1
 const DETAIL_PAGE_BYTES = 16 * 1024
@@ -188,6 +192,7 @@ export function SessionItemDetail({
 }) {
   const [cursor, setCursor] = useState<NonNullable<WebSessionTimelineDetailPage['continuation']>>()
   const [expectedTotalBytes, setExpectedTotalBytes] = useState<string>()
+  const [expectedIdentity, setExpectedIdentity] = useState<TimelineDetailIdentity>()
   const retryRef = useRef<HTMLButtonElement>(null)
   const detailRef = useRef<HTMLElement>(null)
   const detail = useQuery({
@@ -207,6 +212,7 @@ export function SessionItemDetail({
         cursor,
         signal,
         expectedTotalBytes,
+        expectedIdentity,
       ),
     gcTime: 0,
     placeholderData: (previousData) => previousData,
@@ -278,8 +284,9 @@ export function SessionItemDetail({
                     detailItem?.body.type === 'model_call'
                   ? detailItem.body.response
                   : undefined
-            if (!excerpt) return
+            if (!excerpt || !detailItem) return
             setExpectedTotalBytes(excerpt.total_bytes)
+            setExpectedIdentity(timelineDetailIdentity(detailItem))
             setCursor(continuation)
           }}
         >

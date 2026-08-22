@@ -6,6 +6,7 @@ export interface ProductCommandContext extends CommandContext {
   navigateTimelineWindow: (anchor: 'first' | 'latest') => void
   openNavigation: () => void
   openPalette: () => void
+  prepareFocusLayout: () => void
   timelineWindowAvailable: boolean
 }
 
@@ -22,6 +23,18 @@ const productNavigationCommands = [
     category: 'Surface',
     bindings: [{ label: 'Mod+K', registration: { kind: 'hotkey', hotkey: 'Mod+K' } }],
     run: (context: ProductCommandContext) => context.openPalette(),
+  },
+  {
+    id: 'layout.toggle',
+    title: 'Toggle focus/workbench layout',
+    description: 'Switch between a quiet transcript and the full operator workspace.',
+    category: 'View',
+    bindings: [{ label: 'Shift+W', registration: { kind: 'hotkey', hotkey: 'Shift+W' } }],
+    run: (context: ProductCommandContext) => {
+      context.prepareFocusLayout()
+      const current = context.getState().app.layout
+      context.dispatch(actions.layoutSet(current === 'focus' ? 'workbench' : 'focus'))
+    },
   },
   {
     id: 'navigation.open',
@@ -133,6 +146,7 @@ export const productCommandRegistry = [
     (command) =>
       command.id !== 'navigation.open' &&
       command.id !== 'palette.open' &&
+      command.id !== 'layout.toggle' &&
       command.id !== 'selection.first' &&
       command.id !== 'selection.last',
   ),

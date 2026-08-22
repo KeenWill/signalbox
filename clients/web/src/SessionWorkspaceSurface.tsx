@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { WebContractBootstrap, WebSessionTimelineWindow } from './generated/web-contract.mjs'
+import type { ProductCommandId } from './productCommands'
 import { SessionItemDetail } from './SessionItemDetail'
 import {
   BoundedSessionHistory,
@@ -41,11 +42,15 @@ export function SessionWorkspaceSurface({
   onTimelineIds,
   onTimelineWindowNavigation,
   onTimelineWindowAvailability,
+  onTimelineWindowCommand,
 }: {
   bootstrap: WebContractBootstrap | undefined
   onTimelineIds: (ids: readonly string[]) => void
   onTimelineWindowNavigation: (navigate: (anchor: 'first' | 'latest') => void) => void
   onTimelineWindowAvailability: (available: boolean) => void
+  onTimelineWindowCommand: (
+    command: Extract<ProductCommandId, 'selection.first' | 'selection.last'>,
+  ) => void
 }) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
@@ -54,6 +59,7 @@ export function SessionWorkspaceSurface({
   const [restoreAnchor, setRestoreAnchor] = useState<SessionWindowAnchor | null>(null)
   const [manualAnchor, setManualAnchor] = useState<SessionWindowAnchor | null>(null)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
+  const retryRef = useRef<HTMLButtonElement>(null)
   const session = useQuery({
     queryKey: ['production', 'session-workspace', sessionId, manualAnchor, restoreAnchor],
     queryFn: async ({ signal }) => {
@@ -79,6 +85,10 @@ export function SessionWorkspaceSurface({
     [app.detail, session.data?.window.items],
   )
   const timelineIds = useMemo(() => items.map((item) => item.address.event_sequence), [items])
+
+  useEffect(() => {
+    if (session.isError) retryRef.current?.focus()
+  }, [session.isError])
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
@@ -192,7 +202,7 @@ export function SessionWorkspaceSurface({
       ) : session.isError ? (
         <div className="session-load-state" role="alert">
           <p>The daemon could not provide this bounded session window: {session.error.message}</p>
-          <button type="button" onClick={() => void session.refetch()}>
+          <button ref={retryRef} type="button" onClick={() => void session.refetch()}>
             Retry
           </button>
         </div>
@@ -235,10 +245,10 @@ export function SessionWorkspaceSurface({
             </dl>
           </header>
           <div className="session-window-controls" role="toolbar" aria-label="Timeline window">
-            <button type="button" onClick={() => navigateTimelineWindow('first')}>
+            <button type="button" onClick={() => onTimelineWindowCommand('selection.first')}>
               <SkipBack aria-hidden="true" /> First <kbd>gg</kbd>
             </button>
-            <button type="button" onClick={() => navigateTimelineWindow('latest')}>
+            <button type="button" onClick={() => onTimelineWindowCommand('selection.last')}>
               <SkipForward aria-hidden="true" /> Latest <kbd>G</kbd>
             </button>
             <span>
