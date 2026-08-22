@@ -67,9 +67,7 @@ describe('artifact renderer compatibility', () => {
   })
 
   it('selects document affordances only by their admitted capability', () => {
-    expect(selectBlobView(documentAttachment.source.descriptor, 'browser_native')?.kind).toBe(
-      'browser_native',
-    )
+    expect(selectBlobView(documentAttachment.source.descriptor, 'browser_native')).toBeUndefined()
     expect(selectBlobView(documentAttachment.source.descriptor, 'download')?.kind).toBe('download')
   })
 

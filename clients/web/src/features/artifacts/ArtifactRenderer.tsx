@@ -17,6 +17,7 @@ import {
 } from 'lucide-react'
 import { type ComponentType, type ReactNode, useState } from 'react'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
+import { actions, selectApp, useAppDispatch, useAppSelector } from '../../state'
 import { artifactScenario } from './artifactScenario'
 import {
   type ArtifactItem,
@@ -30,11 +31,7 @@ import {
   type SignalboxImageArtifact,
   type TextArtifact,
 } from './artifactTypes'
-import {
-  admitRemoteMediaUrl,
-  type RemoteMediaPolicy,
-  useRemoteMediaPreference,
-} from './remoteMediaPreference'
+import { admitRemoteMediaUrl, type RemoteMediaPolicy } from './remoteMediaPreference'
 import './artifacts.css'
 
 type WebBlobAvailableView = WebBlobDescriptor['available_views'][number]
@@ -446,7 +443,8 @@ export function ArtifactRenderer({
 }
 
 export function ArtifactWorkbench() {
-  const [remoteMedia, setRemoteMedia] = useRemoteMediaPreference()
+  const remoteMedia = useAppSelector(selectApp).remoteMedia
+  const dispatch = useAppDispatch()
 
   return (
     <section className="artifact-panel" aria-labelledby="artifact-heading">
@@ -459,7 +457,9 @@ export function ArtifactWorkbench() {
           Remote media
           <select
             value={remoteMedia}
-            onChange={(event) => setRemoteMedia(event.target.value as typeof remoteMedia)}
+            onChange={(event) =>
+              dispatch(actions.remoteMediaSet(event.target.value as typeof remoteMedia))
+            }
           >
             <option value="ask">Ask</option>
             <option value="block">Block</option>

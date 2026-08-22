@@ -81,12 +81,16 @@ impl WebContractBootstrap {
     /// Describes this daemon build's one exact browser contract.
     #[must_use]
     pub fn current() -> Self {
-        Self::for_runtime(false, false)
+        Self::for_runtime(false, false, false)
     }
 
     /// Describes this contract with deployment-bound blob capabilities.
     #[must_use]
-    pub fn for_runtime(immutable_blob_content: bool, image_derivatives: bool) -> Self {
+    pub fn for_runtime(
+        immutable_blob_content: bool,
+        image_derivatives: bool,
+        bounded_session_timeline: bool,
+    ) -> Self {
         Self {
             contract: WebContractIdentity {
                 name: WEB_CONTRACT_NAME.to_owned(),
@@ -99,7 +103,7 @@ impl WebContractBootstrap {
                 immutable_blob_content,
                 blob_derivations: immutable_blob_content,
                 image_derivatives,
-                bounded_session_timeline: true,
+                bounded_session_timeline,
             },
             limits: WebContractLimits {
                 max_json_body_bytes: MAX_JSON_BODY_BYTES as u32,
@@ -908,6 +912,19 @@ mod tests {
             serde_json::from_slice(&encoded).expect("bootstrap decodes");
 
         assert_eq!(decoded, bootstrap);
+    }
+
+    #[test]
+    fn runtime_bootstrap_reports_only_configured_capabilities() {
+        let unavailable = WebContractBootstrap::for_runtime(false, false, false);
+        let available = WebContractBootstrap::for_runtime(true, true, true);
+
+        assert!(!unavailable.capabilities.immutable_blob_content);
+        assert!(!unavailable.capabilities.image_derivatives);
+        assert!(!unavailable.capabilities.bounded_session_timeline);
+        assert!(available.capabilities.immutable_blob_content);
+        assert!(available.capabilities.image_derivatives);
+        assert!(available.capabilities.bounded_session_timeline);
     }
 
     #[test]

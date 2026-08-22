@@ -154,6 +154,21 @@ test('uses a navigation sheet on a phone viewport and unwinds it with Escape', a
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('closes the phone navigation sheet after route selection', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open navigation' }).click()
+  const navigation = page.getByRole('dialog', { name: 'Product navigation' })
+  await navigation.getByRole('link', { name: /Sessions/ }).click()
+
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(navigation).toBeHidden()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('changes and restores a Settings preference without a mouse', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -202,5 +217,12 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(
     completedItem.getByText('Header only; rich event detail is not exposed'),
   ).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Previous window' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Next window' })).toBeDisabled()
+  await page.keyboard.press('g')
+  await page.keyboard.press('g')
+  const acceptedItem = page.getByRole('listitem').filter({ has: accepted })
+  await expect(acceptedItem).toHaveClass(/selected/)
+  await expect(completedItem).not.toHaveClass(/selected/)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

@@ -1,9 +1,9 @@
 import { FileQuestion, Paperclip, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import { selectApp, useAppSelector } from '../../state'
 import { ArtifactRenderer } from './ArtifactRenderer'
 import { attachmentScenario } from './artifactScenario'
 import type { ArtifactItem } from './artifactTypes'
-import { useRemoteMediaPreference } from './remoteMediaPreference'
 
 export const MAX_VISIBLE_ATTACHMENTS = 12
 
@@ -100,7 +100,7 @@ export function MissingAttachmentState({ placement }: { placement: 'composer' | 
 }
 
 export function AttachmentWorkbench() {
-  const [remoteMedia] = useRemoteMediaPreference()
+  const remoteMedia = useAppSelector(selectApp).remoteMedia
   const [composerItems, setComposerItems] =
     useState<ReadonlyArray<ArtifactItem>>(attachmentScenario)
   const [selectedId, setSelectedId] = useState(attachmentScenario[0]?.id ?? null)

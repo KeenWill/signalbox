@@ -72,13 +72,6 @@ const documentDescriptor = decodeWebBlobDescriptor({
       content_url: `/api/blobs/${documentDigest}/download?media_type=application%2Fpdf&display_filename=architecture.pdf`,
       derivations: [],
     },
-    {
-      kind: 'browser_native',
-      media_type: 'application/pdf',
-      byte_length: '1843200',
-      content_url: `/api/blobs/${documentDigest}/content/application-pdf`,
-      derivations: [],
-    },
   ],
 })
 

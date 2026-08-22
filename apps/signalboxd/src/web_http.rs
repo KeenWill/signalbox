@@ -627,6 +627,7 @@ async fn contract_bootstrap(State(state): State<WebHttpState>) -> Json<WebContra
     Json(WebContractBootstrap::for_runtime(
         state.blobs.is_some(),
         image_derivatives,
+        state.timeline.is_some(),
     ))
 }
 
@@ -1695,7 +1696,10 @@ mod tests {
                 .expect("fixture URL is valid")
                 .origin()
         );
-        assert_eq!(decoded, WebContractBootstrap::for_runtime(false, false));
+        assert_eq!(
+            decoded,
+            WebContractBootstrap::for_runtime(false, false, false)
+        );
         assert_eq!(runtime_outcome, Ok(()));
     }
 

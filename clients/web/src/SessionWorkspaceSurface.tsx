@@ -1,9 +1,13 @@
 import { useQuery } from '@tanstack/react-query'
-import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
+import { ChevronDown, ChevronLeft, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
 import { MissingAttachmentState } from './features/artifacts/ArtifactAttachments'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
-import { HttpSessionTimelineSource, type SessionWindowAnchor } from './session-timeline/model'
+import {
+  BoundedSessionHistory,
+  HttpSessionTimelineSource,
+  type SessionWindowAnchor,
+} from './session-timeline/model'
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -18,7 +22,13 @@ export const visibleSessionItems = (
 ) =>
   detail === 'results'
     ? items.filter((item) =>
-        ['turn_completed', 'turn_failed', 'turn_refused', 'turn_cancelled'].includes(item.kind),
+        [
+          'input_accepted',
+          'turn_completed',
+          'turn_failed',
+          'turn_refused',
+          'turn_cancelled',
+        ].includes(item.kind),
       )
     : items
 
@@ -35,16 +45,16 @@ export function SessionWorkspaceSurface({
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const remembered = sessionId === null ? undefined : app.lastLogicalPositions[sessionId]
   const session = useQuery({
-    queryKey: ['production', 'session-workspace', sessionId, manualAnchor, remembered],
+    queryKey: ['production', 'session-workspace', sessionId, manualAnchor],
     queryFn: async ({ signal }) => {
       const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window))
-      const descriptor = await source.readDescriptor(sessionId ?? '', signal)
+      const history = new BoundedSessionHistory(sessionId ?? '', source)
+      const descriptor = await history.describe(signal)
       const active = BigInt(descriptor.work.active_turn_count) !== BigInt(0)
       const anchor: SessionWindowAnchor =
         manualAnchor ??
         (!active && remembered ? { kind: 'around', eventSequence: remembered } : { kind: 'latest' })
-      const timelineWindow = await source.readWindow(
-        sessionId ?? '',
+      const timelineWindow = await history.load(
         anchor,
         { maxItems: SESSION_WINDOW_ITEMS, maxBytes: SESSION_WINDOW_BYTES },
         signal,
@@ -156,6 +166,30 @@ export function SessionWorkspaceSurface({
           <div className="session-window-controls" role="toolbar" aria-label="Timeline window">
             <button type="button" onClick={() => setManualAnchor({ kind: 'first' })}>
               <SkipBack aria-hidden="true" /> First <kbd>gg</kbd>
+            </button>
+            <button
+              type="button"
+              disabled={session.data.window.continuation_before === null}
+              onClick={() => {
+                const continuation = session.data.window.continuation_before
+                if (continuation) {
+                  setManualAnchor({ kind: 'before', eventSequence: continuation.event_sequence })
+                }
+              }}
+            >
+              <ChevronLeft aria-hidden="true" /> Previous window
+            </button>
+            <button
+              type="button"
+              disabled={session.data.window.continuation_after === null}
+              onClick={() => {
+                const continuation = session.data.window.continuation_after
+                if (continuation) {
+                  setManualAnchor({ kind: 'after', eventSequence: continuation.event_sequence })
+                }
+              }}
+            >
+              Next window <ChevronRight aria-hidden="true" />
             </button>
             <button type="button" onClick={() => setManualAnchor({ kind: 'latest' })}>
               <SkipForward aria-hidden="true" /> Latest <kbd>G</kbd>
