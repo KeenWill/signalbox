@@ -429,6 +429,7 @@ pub struct WebSearchResult {
     pub content_class: WebSearchContentClass,
     #[schemars(length(max = 512))]
     pub snippet: String,
+    #[schemars(length(max = 512))]
     pub highlights: Vec<WebSearchHighlight>,
 }
 

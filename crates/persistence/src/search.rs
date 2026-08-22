@@ -25,6 +25,12 @@ WITH lexical_query AS (
     SELECT unnest(
         tsvector_to_array(to_tsvector('simple'::regconfig, $1))
     ) AS lexeme
+), candidate_query AS (
+    SELECT to_tsquery(
+        'simple'::regconfig,
+        string_agg(quote_literal(lexeme), ' | ')
+    ) AS value
+      FROM query_terms
 )
 SELECT projection.projection_id, projection.session_id,
        projection.event_sequence, projection.item_kind, projection.item_id,
@@ -44,11 +50,8 @@ SELECT projection.projection_id, projection.session_id,
        ) AS marked_snippet
   FROM web_search_projection AS projection
  CROSS JOIN lexical_query
- WHERE EXISTS (
-       SELECT 1
-         FROM query_terms AS term
-        WHERE term.lexeme = ANY(tsvector_to_array(projection.search_vector))
-   )
+ CROSS JOIN candidate_query
+ WHERE projection.search_vector @@ candidate_query.value
    AND NOT EXISTS (
        SELECT 1
          FROM query_terms AS term
@@ -90,8 +93,47 @@ SELECT projection.projection_id, projection.session_id,
  LIMIT $5";
 
 const PUBLISH_ARTIFACT_SQL: &str = "
-WITH chunks AS (
+WITH chunks AS MATERIALIZED (
     SELECT * FROM web_search_projection_chunks($6)
+), existing AS MATERIALIZED (
+    SELECT projection.*
+      FROM web_search_projection AS projection
+     WHERE projection.source_kind = $1
+       AND projection.source_id = $2
+       AND projection.content_class = $5
+), compatible AS MATERIALIZED (
+    SELECT NOT EXISTS (SELECT 1 FROM existing)
+        OR (
+            NOT EXISTS (
+                SELECT 1
+                  FROM existing
+                 WHERE session_id <> $3
+                    OR event_sequence <> $4
+                    OR item_kind <> $1
+                    OR item_id <> $2
+                    OR turn_id IS NOT NULL
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM existing
+                 WHERE NOT EXISTS (
+                     SELECT 1
+                       FROM chunks
+                      WHERE chunks.ordinal = existing.projection_ordinal
+                        AND chunks.content_text = existing.content_text
+                 )
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM chunks
+                 WHERE NOT EXISTS (
+                     SELECT 1
+                       FROM existing
+                      WHERE existing.projection_ordinal = chunks.ordinal
+                        AND existing.content_text = chunks.content_text
+                 )
+            )
+        ) AS value
 ), published AS (
 INSERT INTO web_search_projection (
     source_kind, source_id, session_id, event_sequence,
@@ -99,19 +141,14 @@ INSERT INTO web_search_projection (
 ) SELECT $1, $2, $3, $4, $1, $2, NULL, $5,
          chunks.ordinal, chunks.content_text
     FROM chunks
+   CROSS JOIN compatible
+   WHERE compatible.value
 ON CONFLICT (
     source_kind, source_id, content_class, projection_ordinal
-) DO UPDATE
-       SET content_text = web_search_projection.content_text
-     WHERE web_search_projection.session_id = EXCLUDED.session_id
-       AND web_search_projection.event_sequence = EXCLUDED.event_sequence
-       AND web_search_projection.item_kind = EXCLUDED.item_kind
-       AND web_search_projection.item_id = EXCLUDED.item_id
-       AND web_search_projection.turn_id IS NOT DISTINCT FROM EXCLUDED.turn_id
-       AND web_search_projection.content_text = EXCLUDED.content_text
-RETURNING projection_ordinal
+) DO NOTHING
+RETURNING 1
 )
-SELECT (SELECT count(*) FROM published), (SELECT count(*) FROM chunks)";
+SELECT value FROM compatible";
 
 /// Integrity failure in the dedicated search projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -240,20 +277,36 @@ impl SearchRepository {
                 ("derived_artifact", "derived_text_artifact")
             }
         };
-        let (published, expected) = sqlx::query_as::<_, (i64, i64)>(PUBLISH_ARTIFACT_SQL)
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(
+                 hashtextextended(
+                     concat_ws(chr(31), $1::text, $2::text, $3::text),
+                     0
+                 )
+             )",
+        )
+        .bind(source_kind)
+        .bind(projection.artifact.into_uuid())
+        .bind(content_class)
+        .execute(&mut *transaction)
+        .await?;
+        let compatible = sqlx::query_scalar::<_, bool>(PUBLISH_ARTIFACT_SQL)
             .bind(source_kind)
             .bind(projection.artifact.into_uuid())
             .bind(projection.session.into_uuid())
             .bind(Decimal::from(projection.address.sequence().get()))
             .bind(content_class)
             .bind(projection.text.as_str())
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *transaction)
             .await?;
-        if published != expected {
+        if !compatible {
+            transaction.rollback().await?;
             return Err(
                 SearchProjectionCorruption::Invalid("conflicting artifact publication").into(),
             );
         }
+        transaction.commit().await?;
         Ok(())
     }
 }

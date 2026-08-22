@@ -292,6 +292,7 @@ const schemas = {
             "items": {
               "$ref": "#/$defs/WebSearchHighlight"
             },
+            "maxItems": 512,
             "type": "array"
           },
           "session_id": {

@@ -201,16 +201,30 @@ async fn derived_text_is_searchable_only_after_its_durable_publisher_runs()
         ))
         .await?;
     let artifact = SearchArtifactId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x201));
+    let address = session_created_address(&pool, session).await?;
     repository
         .publish(SearchArtifactProjection {
             session,
-            address: session_created_address(&pool, session).await?,
+            address,
             artifact,
             class: SearchArtifactProjectionClass::DerivedText,
             text: SearchProjectionText::try_new(String::from("quartz-derivation"))
                 .expect("fixture projection text is admitted"),
         })
         .await?;
+    let conflict = repository
+        .publish(SearchArtifactProjection {
+            session,
+            address,
+            artifact,
+            class: SearchArtifactProjectionClass::DerivedText,
+            text: SearchProjectionText::try_new(format!(
+                "quartz-derivation {} conflicting-extension",
+                "x".repeat(20_000)
+            ))
+            .expect("fixture conflicting projection is admitted"),
+        })
+        .await;
     let after = repository
         .search(lexical_query(
             "quartz derivation",
@@ -221,6 +235,7 @@ async fn derived_text_is_searchable_only_after_its_durable_publisher_runs()
         .await?;
 
     assert!(before.results.is_empty());
+    assert!(conflict.is_err());
     assert_eq!(after.results.len(), 1);
     assert_eq!(
         after.results[0].content_class,
@@ -230,6 +245,17 @@ async fn derived_text_is_searchable_only_after_its_durable_publisher_runs()
         after.results[0].source,
         SearchResultSource::DerivedArtifact { artifact }
     );
+    let stored_chunks: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM web_search_projection
+          WHERE source_kind = 'derived_artifact'
+            AND source_id = $1
+            AND content_class = 'derived_text_artifact'",
+    )
+    .bind(artifact.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored_chunks, 1);
 
     pool.close().await;
     drop(container);
@@ -276,8 +302,10 @@ async fn oversized_canonical_assistant_text_preserves_a_searchable_tail()
         ))),
     )])
     .expect("fixture selection resolves to one target");
+    let boundary_lexeme = "boundarylexeme".repeat(30);
     let response = format!(
-        "head-chunk-anchor {} tail-chunk-needle",
+        "head-chunk-anchor {} {boundary_lexeme} {} tail-chunk-needle",
+        "x".repeat(16_200),
         "x".repeat(max_search_projection_text_bytes() + 1)
     );
     complete_text_turn(
@@ -297,6 +325,14 @@ async fn oversized_canonical_assistant_text_preserves_a_searchable_tail()
             None,
         ))
         .await?;
+    let boundary_page = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            &boundary_lexeme,
+            SearchScope::Session(session),
+            10,
+            None,
+        ))
+        .await?;
     let chunk_bounds: (i64, i32) = sqlx::query_as(
         "SELECT count(*), max(octet_length(content_text))
            FROM web_search_projection
@@ -307,6 +343,7 @@ async fn oversized_canonical_assistant_text_preserves_a_searchable_tail()
     .await?;
 
     assert_eq!(page.results.len(), 1);
+    assert_eq!(boundary_page.results.len(), 1);
     assert_eq!(
         page.results[0].content_class,
         SearchContentClass::AssistantTranscript

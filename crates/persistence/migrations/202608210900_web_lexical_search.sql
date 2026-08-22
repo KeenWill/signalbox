@@ -7,9 +7,9 @@ RETURNS TABLE (ordinal integer, content_text text)
 LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
 SET search_path FROM CURRENT AS $$
     SELECT chunk.ordinal,
-           substring(source_text FROM chunk.ordinal * 16384 + 1 FOR 16384)
+           substring(source_text FROM chunk.ordinal * 15872 + 1 FOR 16384)
       FROM generate_series(
-               0, (char_length(source_text) - 1) / 16384
+               0, (char_length(source_text) - 1) / 15872
            ) AS chunk(ordinal)
 $$;
 
