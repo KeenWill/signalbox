@@ -133,6 +133,17 @@ export function Transcript({ items, context }: { items: TimelineItem[]; context:
     }
   }, [dispatch, firstVisibleId, selected, visibleItems.length])
 
+  useEffect(() => {
+    let innerFrame = 0
+    const outerFrame = requestAnimationFrame(() => {
+      innerFrame = requestAnimationFrame(() => parentRef.current?.focus())
+    })
+    return () => {
+      cancelAnimationFrame(outerFrame)
+      cancelAnimationFrame(innerFrame)
+    }
+  }, [])
+
   const handleListboxKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const command = {
       ArrowDown: 'selection.next',

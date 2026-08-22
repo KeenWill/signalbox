@@ -282,6 +282,7 @@ export function ProductApp({
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
   const sessionOpenedHere = useRef(false)
+  const currentSession = useRef(search.session)
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -290,6 +291,7 @@ export function ProductApp({
   const updateSearch = useCallback(
     (next: ProductSessionState, mode: 'push' | 'close' = 'push') => {
       if (mode === 'close') {
+        currentSession.current = next.session
         if (sessionOpenedHere.current) {
           sessionOpenedHere.current = false
           window.history.back()
@@ -298,10 +300,23 @@ export function ProductApp({
         void navigate({ to: '/$surface', params: { surface }, search: next, replace: true })
         return
       }
-      if (!search.session && next.session) sessionOpenedHere.current = true
-      void navigate({ to: '/$surface', params: { surface }, search: next })
+      const previousSession = currentSession.current
+      if (!previousSession && next.session) {
+        sessionOpenedHere.current = true
+      }
+      const switchesSelectedSession =
+        previousSession !== undefined &&
+        next.session !== undefined &&
+        next.session !== previousSession
+      currentSession.current = next.session
+      void navigate({
+        to: '/$surface',
+        params: { surface },
+        search: next,
+        replace: switchesSelectedSession,
+      })
     },
-    [navigate, search.session, surface],
+    [navigate, surface],
   )
   const dismissSession = useCallback(() => {
     updateSearch({ ...search, session: undefined }, 'close')
@@ -344,7 +359,7 @@ export function ProductApp({
   }, [app.density, app.theme])
 
   useEffect(() => {
-    if (!search.session) sessionOpenedHere.current = false
+    currentSession.current = search.session
   }, [search.session])
 
   useEffect(() => {

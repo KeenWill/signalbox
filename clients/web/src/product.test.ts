@@ -36,6 +36,31 @@ const sessionPageFixture = {
   ],
   total: '48',
 } as const
+
+const fullActivityPageFixture = () => {
+  const summaries = Array.from({ length: MAX_SESSION_PAGE_ITEMS }, (_, index) => ({
+    ...sessionPageFixture.summaries[0],
+    session_id: `018f1840-6f3d-7a8b-9c1d-${(0x0e2f3a4b5c6dn + BigInt(index))
+      .toString(16)
+      .padStart(12, '0')}`,
+    last_activity: {
+      kind: 'turn' as const,
+      unix_milliseconds: String(1_724_200_000_000 - index),
+    },
+  }))
+  const boundary = summaries.at(-1)
+  if (!boundary) throw new Error('full activity fixture has a boundary')
+  return {
+    ...sessionPageFixture,
+    summaries,
+    continuation: {
+      kind: 'last_activity' as const,
+      session_id: boundary.session_id,
+      unix_microseconds: String(BigInt(boundary.last_activity.unix_milliseconds) * 1000n),
+    },
+  }
+}
+
 const sessionRequestPath = `/api/sessions?sort=last_activity_desc&include_archived=true&search=release&after_session_id=${sessionId}&after_activity_unix_microseconds=1724200000000000`
 const errorFixture = {
   error: {
@@ -67,6 +92,25 @@ describe('SameOriginProductTransport', () => {
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
       'bootstrap.contract',
+    )
+  })
+
+  it('fails closed when the bootstrap identity contradicts the generated contract', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...bootstrapFixture,
+              contract: { ...bootstrapFixture.contract, version: '2' },
+            }),
+          ),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'incompatible web contract',
     )
   })
 
@@ -118,7 +162,8 @@ describe('SameOriginProductTransport', () => {
   })
 
   it('decodes one bounded session page and preserves its typed cursor request', async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify(sessionPageFixture)))
+    const pageFixture = fullActivityPageFixture()
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(pageFixture)))
     vi.stubGlobal('fetch', fetchMock)
 
     const page = await new SameOriginProductTransport().readSessions({
@@ -129,7 +174,7 @@ describe('SameOriginProductTransport', () => {
       afterActivity: '1724200000000000',
     })
 
-    expect(page).toEqual(sessionPageFixture)
+    expect(page).toEqual(pageFixture)
     expect(fetchMock).toHaveBeenCalledWith(
       sessionRequestPath,
       expect.objectContaining({ credentials: 'same-origin' }),
@@ -365,6 +410,134 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('summary scalar ceiling')
   })
 
+  it('rejects blocked-goal summaries beyond the daemon scalar ceiling', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+              summaries: [
+                {
+                  ...sessionPageFixture.summaries[0],
+                  state: 'blocked',
+                  action: 'provide_goal_need',
+                  goal_block: {
+                    generation: '1',
+                    reason: 'user_input_required',
+                    need_summary: '🦀'.repeat(129),
+                  },
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('summary scalar ceiling')
+  })
+
+  it('rejects displayed turn counts that are not canonical u64 values', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+              summaries: [{ ...sessionPageFixture.summaries[0], active_turn_count: '01' }],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('non-canonical turn count')
+  })
+
+  it('rejects pre-epoch activity timestamps', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+              summaries: [
+                {
+                  ...sessionPageFixture.summaries[0],
+                  last_activity: { kind: 'turn', unix_milliseconds: '-1' },
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('outside the JavaScript Date range')
+  })
+
+  it('rejects duplicate session identities on activity pages', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+              summaries: [
+                sessionPageFixture.summaries[0],
+                {
+                  ...sessionPageFixture.summaries[0],
+                  last_activity: { kind: 'turn', unix_milliseconds: '1724199999999' },
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('duplicate session identity')
+  })
+
+  it('rejects continuations attached to partial catalog pages', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(sessionPageFixture))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('continuation accompanies a partial page')
+  })
+
   it('rejects a response beyond the catalog page ceiling', async () => {
     const oversizedSummaries = Array.from(
       { length: MAX_SESSION_PAGE_ITEMS + 1 },
@@ -463,9 +636,15 @@ describe('SameOriginProductTransport', () => {
   })
 
   it('accepts exact continuation precision within the displayed millisecond', async () => {
+    const pageFixture = fullActivityPageFixture()
+    const boundary = pageFixture.summaries.at(-1)
+    if (!boundary) throw new Error('full activity fixture has a boundary')
     const precisePage = {
-      ...sessionPageFixture,
-      continuation: { ...sessionPageFixture.continuation, unix_microseconds: '1724200000000999' },
+      ...pageFixture,
+      continuation: {
+        ...pageFixture.continuation,
+        unix_microseconds: String(BigInt(boundary.last_activity.unix_milliseconds) * 1000n + 999n),
+      },
     }
     vi.stubGlobal(
       'fetch',

@@ -149,12 +149,23 @@ const validateSessionPage = (
   if (!isCanonicalUnsigned64(page.total) || BigInt(page.total) < BigInt(page.summaries.length)) {
     throw new Error('session catalog response contains a contradictory total')
   }
+  const sessionIdentities = new Set<string>()
   for (const summary of page.summaries) {
     if (!CANONICAL_UUID.test(summary.session_id)) {
       throw new Error('session catalog response contains a non-canonical session identity')
     }
+    if (sessionIdentities.has(summary.session_id)) {
+      throw new Error('session catalog response contains a duplicate session identity')
+    }
+    sessionIdentities.add(summary.session_id)
     if (!request.includeArchived && summary.archived) {
       throw new Error('session catalog response contains an excluded archived session')
+    }
+    if (
+      !isCanonicalUnsigned64(summary.active_turn_count) ||
+      !isCanonicalUnsigned64(summary.queued_turn_count)
+    ) {
+      throw new Error('session catalog response contains a non-canonical turn count')
     }
     if (summary.action !== expectedActionByState[summary.state]) {
       throw new Error('session catalog response contains a contradictory state and action')
@@ -171,7 +182,7 @@ const validateSessionPage = (
     const milliseconds = summary.last_activity.unix_milliseconds
     const numericMilliseconds = Number(milliseconds)
     if (
-      !/^-?(0|[1-9]\d*)$/.test(milliseconds) ||
+      !isCanonicalUnsigned64(milliseconds) ||
       !Number.isSafeInteger(numericMilliseconds) ||
       !Number.isFinite(new Date(numericMilliseconds).getTime())
     ) {
@@ -216,6 +227,9 @@ const validateSessionPage = (
       if (exactMicroseconds < millisecondFloor || exactMicroseconds >= millisecondFloor + 1000n) {
         throw new Error('session catalog continuation does not match its returned boundary')
       }
+    }
+    if (page.summaries.length !== MAX_SESSION_PAGE_ITEMS) {
+      throw new Error('session catalog continuation accompanies a partial page')
     }
   }
   return page

@@ -3,11 +3,29 @@ import bootstrapFixture from '../src/generated/web-contract-bootstrap.json' with
 
 const firstSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
 const secondSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e'
+const continuationSummaries = Array.from({ length: 30 }, (_, index) => ({
+  action: null,
+  active_turn_count: '0',
+  archived: false,
+  current_turn_id: null,
+  goal_block: null,
+  judge: { actionable: '0', completed: '0', escalated: '0', failed: '0' },
+  last_activity: { kind: 'session', unix_milliseconds: String(1_724_194_799_999 - index) },
+  queued_turn_count: '0',
+  session_id: `018f1840-6f3d-7a8b-9c1d-${(0x0e2f3a4b5c80n + BigInt(index))
+    .toString(16)
+    .padStart(12, '0')}`,
+  state: 'idle',
+  title_summary: `Catalog session ${index + 3}`,
+  title_truncated: false,
+}))
+const continuationBoundary = continuationSummaries.at(-1)
+if (!continuationBoundary) throw new Error('catalog continuation fixture has a boundary')
 const firstPage = {
   continuation: {
     kind: 'last_activity',
-    session_id: secondSessionId,
-    unix_microseconds: '1724194800000000',
+    session_id: continuationBoundary.session_id,
+    unix_microseconds: String(BigInt(continuationBoundary.last_activity.unix_milliseconds) * 1000n),
   },
   cursor: '18',
   sort: 'last_activity_descending',
@@ -44,6 +62,7 @@ const firstPage = {
       title_summary: 'Deployment decision',
       title_truncated: false,
     },
+    ...continuationSummaries,
   ],
   total: '48',
 } as const
@@ -167,6 +186,22 @@ test('keeps Escape and browser history aligned with the desktop inspector', asyn
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('replaces history when switching the inspected session', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
+  await page.getByRole('button', { name: firstPage.summaries[1].title_summary }).click()
+  await expect(
+    page.getByRole('heading', { name: firstPage.summaries[1].title_summary, level: 2 }),
+  ).toBeVisible()
+  await page.getByRole('button', { name: 'Close session inspector' }).click()
+
+  await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeHidden()
+  await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBeNull()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('replaces the bounded catalog page through its typed continuation', async ({ page }) => {
   const problems = watchBrowser(page)
   await useCatalogFixture(page)
@@ -236,6 +271,26 @@ test('focuses a deep-linked mobile inspector after data arrives', async ({ page 
   await expect(
     page.getByRole('button', { name: firstPage.summaries[0].title_summary }),
   ).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('lets the command palette own focus over a mobile inspector', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(`/sessions?session=${firstSessionId}`)
+  await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeFocused()
+
+  const modifier = await page.evaluate(() =>
+    /Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Meta' : 'Control',
+  )
+  await page.keyboard.press(`${modifier}+K`)
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(palette).toBeVisible()
+  await page.keyboard.press('Tab')
+  await expect
+    .poll(() => palette.evaluate((element) => element.contains(document.activeElement)))
+    .toBe(true)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

@@ -106,6 +106,17 @@ test('clears scenario-owned help when browser history returns to the product', a
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('moves focus into the scenario workspace after product navigation', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+  await page.getByRole('link', { name: /Scenario studio/ }).click()
+
+  await expect(page).toHaveURL(/scenario\/streaming/)
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('uses a navigation sheet on a phone viewport and unwinds it with Escape', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)

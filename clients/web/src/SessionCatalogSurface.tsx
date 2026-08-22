@@ -3,6 +3,7 @@ import { ArrowRight, Search, X } from 'lucide-react'
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import type { WebAttentionSnapshot } from './generated/web-contract.mjs'
 import { ProductRequestError, type ProductSessionState, productTransport } from './product'
+import { useAppSelector } from './state'
 
 type SessionSummary = WebAttentionSnapshot['summaries'][number]
 
@@ -38,6 +39,7 @@ export function SessionCatalogSurface({
   const pageHeading = useRef<HTMLHeadingElement>(null)
   const restorePageFocus = useRef(false)
   const [narrowInspector, setNarrowInspector] = useState(false)
+  const overlay = useAppSelector((root) => root.app.overlay)
   const sessions = useQuery({
     queryKey: [
       'production',
@@ -82,7 +84,7 @@ export function SessionCatalogSurface({
   }, [selectedSessionId])
 
   useEffect(() => {
-    if (!narrowInspector || !selectedSessionId) return
+    if (!narrowInspector || !selectedSessionId || overlay !== null) return
     const containFocus = (event: KeyboardEvent) => {
       if (event.key !== 'Tab') return
       event.preventDefault()
@@ -94,7 +96,7 @@ export function SessionCatalogSurface({
       cancelAnimationFrame(frame)
       document.removeEventListener('keydown', containFocus, true)
     }
-  }, [narrowInspector, selectedSessionId])
+  }, [narrowInspector, overlay, selectedSessionId])
 
   useEffect(() => {
     if (!sessions.data || !restorePageFocus.current) return
@@ -236,7 +238,7 @@ export function SessionCatalogSurface({
               aria-modal={narrowInspector || undefined}
               aria-labelledby="catalog-inspector-heading"
               onKeyDown={(event) => {
-                if (event.key === 'Tab' && narrowInspector) {
+                if (event.key === 'Tab' && narrowInspector && overlay === null) {
                   event.preventDefault()
                   closeFocus.current?.focus()
                 }
