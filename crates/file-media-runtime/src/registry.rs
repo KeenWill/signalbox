@@ -24,6 +24,8 @@ const MAX_REGISTRY_MEDIA_TYPES: usize = 4_096;
 const MAX_VIEWS_PER_READER: usize = 256;
 // numeric-bound: ceiling - reserves tool-result space for fixed inspection facts and metadata
 const MAX_INSPECTION_VIEW_INVENTORY_BYTES: usize = 512 * 1_024;
+// numeric-bound: ceiling - reserves effective result space for fixed inspection facts and metadata
+const INSPECTION_NON_VIEW_RESERVE_BYTES: usize = 64 * 1_024;
 // numeric-bound: ceiling - bounds aggregate process-lifetime view inventory memory
 const MAX_REGISTRY_VIEWS: usize = 4_096;
 // numeric-bound: ceiling - bounds aggregate retained view-schema bytes
@@ -486,7 +488,14 @@ impl FileMediaRegistry {
                 cancellation,
             )
             .await?;
-        sanitize_read(reader, view, self.ceilings, initial_request, raw)
+        sanitize_read(
+            reader,
+            view,
+            self.ceilings,
+            source.byte_length().get(),
+            initial_request,
+            raw,
+        )
     }
 }
 
@@ -615,6 +624,7 @@ fn sanitize_read(
     reader: &ReaderDeclaration,
     view: &crate::ReadViewDeclaration,
     ceilings: FileMediaCeilings,
+    source_bytes: u64,
     initial_request: bool,
     raw: ProcessorReadOutput,
 ) -> Result<FileReadResult, FileMediaFailure> {
@@ -668,7 +678,7 @@ fn sanitize_read(
                 return Err(FileMediaFailure::ProcessorFailed);
             }
             let mut observed = ObservedJson::default();
-            observe_json(&body, 1, &mut observed)?;
+            observe_json(&body, 0, &mut observed)?;
             if observed.depth > depth
                 || observed.depth > ceilings.structured_depth
                 || observed.nodes > nodes
@@ -686,7 +696,7 @@ fn sanitize_read(
         ProcessorReadOutput::InvalidViewArguments => Err(FileMediaFailure::ProcessorFailed),
         ProcessorReadOutput::UnsupportedView => Err(FileMediaFailure::ProcessorFailed),
         ProcessorReadOutput::SourceTooLarge { maximum_bytes } => {
-            if maximum_bytes != view.bounds().source_bytes() {
+            if maximum_bytes != view.bounds().source_bytes() || source_bytes <= maximum_bytes {
                 return Err(FileMediaFailure::ProcessorFailed);
             }
             Err(FileMediaFailure::SourceTooLarge { maximum_bytes })
@@ -713,7 +723,6 @@ fn observe_json(
     depth: u32,
     observed: &mut ObservedJson,
 ) -> Result<(), FileMediaFailure> {
-    observed.depth = observed.depth.max(depth);
     observed.nodes = observed
         .nodes
         .checked_add(1)
@@ -726,23 +735,25 @@ fn observe_json(
                 .ok_or(FileMediaFailure::ProcessorFailed)?;
         }
         serde_json::Value::Array(values) => {
-            let entries =
-                u64::try_from(values.len()).map_err(|_| FileMediaFailure::ProcessorFailed)?;
-            observed.max_container_entries = observed.max_container_entries.max(entries);
             let next = depth
                 .checked_add(1)
                 .ok_or(FileMediaFailure::ProcessorFailed)?;
+            observed.depth = observed.depth.max(next);
+            let entries =
+                u64::try_from(values.len()).map_err(|_| FileMediaFailure::ProcessorFailed)?;
+            observed.max_container_entries = observed.max_container_entries.max(entries);
             for value in values {
                 observe_json(value, next, observed)?;
             }
         }
         serde_json::Value::Object(values) => {
-            let entries =
-                u64::try_from(values.len()).map_err(|_| FileMediaFailure::ProcessorFailed)?;
-            observed.max_container_entries = observed.max_container_entries.max(entries);
             let next = depth
                 .checked_add(1)
                 .ok_or(FileMediaFailure::ProcessorFailed)?;
+            observed.depth = observed.depth.max(next);
+            let entries =
+                u64::try_from(values.len()).map_err(|_| FileMediaFailure::ProcessorFailed)?;
+            observed.max_container_entries = observed.max_container_entries.max(entries);
             for (name, value) in values {
                 observed.string_bytes = observed
                     .string_bytes
@@ -809,7 +820,7 @@ fn validate_reader(
     {
         return Err(FileMediaRegistryConstructionError::DuplicateReaderMember);
     }
-    validate_inspection_view_inventory(reader)?;
+    validate_inspection_view_inventory(reader, ceilings)?;
     let probe = reader.probe();
     if probe.prefix_bytes() > ceilings.probe_prefix_bytes
         || probe.suffix_bytes() > ceilings.probe_suffix_bytes
@@ -832,7 +843,13 @@ fn validate_reader(
 
 fn validate_inspection_view_inventory(
     reader: &ReaderDeclaration,
+    ceilings: FileMediaCeilings,
 ) -> Result<(), FileMediaRegistryConstructionError> {
+    let maximum_bytes = MAX_INSPECTION_VIEW_INVENTORY_BYTES.min(
+        ceilings
+            .text_or_json_bytes
+            .saturating_sub(INSPECTION_NON_VIEW_RESERVE_BYTES),
+    );
     let mut projected_bytes = 2_usize;
     for (index, view) in reader.views().iter().enumerate() {
         let encoded = serde_json::to_vec(&serde_json::json!({
@@ -846,7 +863,7 @@ fn validate_inspection_view_inventory(
             .checked_add(encoded.len())
             .and_then(|total| total.checked_add(usize::from(index > 0)))
             .ok_or(FileMediaRegistryConstructionError::Inventory)?;
-        if projected_bytes > MAX_INSPECTION_VIEW_INVENTORY_BYTES {
+        if projected_bytes > maximum_bytes {
             return Err(FileMediaRegistryConstructionError::Inventory);
         }
     }
@@ -1022,6 +1039,12 @@ impl Error for FileMediaRegistryConstructionError {}
 mod tests {
     use super::*;
 
+    fn nested_arrays(depth: u32) -> serde_json::Value {
+        (0..depth).fold(serde_json::Value::Null, |value, _| {
+            serde_json::Value::Array(vec![value])
+        })
+    }
+
     #[test]
     fn malformed_ambiguity_includes_structural_and_strong_claims() {
         assert!(recognized_probe_strength(
@@ -1039,5 +1062,15 @@ mod tests {
         assert!(!streaming_text_terminal_becomes_unknown(
             ValidationEvidence::StructuralValidation
         ));
+    }
+
+    #[test]
+    fn json_depth_counts_containers_without_charging_the_scalar_leaf() {
+        let body = nested_arrays(crate::MAX_STRUCTURED_DEPTH);
+        let mut observed = ObservedJson::default();
+
+        observe_json(&body, 0, &mut observed).expect("the bounded fixture is observable");
+
+        assert_eq!(observed.depth, crate::MAX_STRUCTURED_DEPTH);
     }
 }

@@ -79,6 +79,7 @@ enum ValidationBehavior {
 enum ReadBehavior {
     Text,
     InvalidViewArguments,
+    SourceTooLarge,
     OversizedText,
     MalformedStructured,
     DuplicateStructuredMember,
@@ -170,6 +171,9 @@ impl FileMediaProcessor for SyntheticProcessor {
                     cursor: None,
                 },
                 ReadBehavior::InvalidViewArguments => ProcessorReadOutput::InvalidViewArguments,
+                ReadBehavior::SourceTooLarge => ProcessorReadOutput::SourceTooLarge {
+                    maximum_bytes: 1_024,
+                },
                 ReadBehavior::OversizedText => ProcessorReadOutput::Text {
                     body: "x".repeat(65),
                     truncated: false,
@@ -515,6 +519,28 @@ fn inv076_continuation_invalid_arguments_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
+/// INV-076: a processor cannot report an authenticated in-bounds source as too large.
+#[test]
+fn inv076_false_source_too_large_is_sanitized_to_failure() {
+    let source = MemorySource::synthetic();
+    let registry = registry_with_view(text_view());
+    let processor = SyntheticProcessor {
+        validation: ValidationBehavior::Valid,
+        read: ReadBehavior::SourceTooLarge,
+    };
+    let request = FileReadRequest {
+        inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
+        view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
+        },
+    };
+
+    let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
+
+    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
 struct SourceFailureProcessor;
 
 impl FileMediaProcessor for SourceFailureProcessor {
@@ -722,6 +748,20 @@ fn oversized_inspection_view_inventory_is_rejected() {
         FileMediaCeilings::version_one(),
         ProcessorIsolation::Available,
     );
+
+    assert!(matches!(
+        outcome,
+        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::Inventory)
+    ));
+}
+
+#[test]
+fn lowered_result_ceiling_applies_to_inspection_view_inventory() {
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.text_or_json_bytes = 64 * 1_024;
+    let view = text_view();
+
+    let outcome = registry_outcome_with_view(view, ceilings);
 
     assert!(matches!(
         outcome,
