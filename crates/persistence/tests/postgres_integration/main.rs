@@ -37,6 +37,7 @@ use std::{
 };
 
 use rust_decimal::Decimal;
+use serde_json::Value;
 use signalbox_application::{
     ApprovalJudgeCompletionIdentities, AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
     ClassifyOperatorFailure, CommitModelCallObservationTransaction, CompiledTool,
@@ -58,10 +59,11 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, AcceptedInputTurnActivationIdentities,
     AcceptedInputTurnFailureIdentities, ActivatedAcceptedInputTurn, ActiveTurnPhase,
-    AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText, AuthorizedModelCall,
+    AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
+    AttachmentDisplayFilename, AttachmentKind, AuthorizedModelCall, BlobDigest,
     CancelledModelCallTurnIdentities, CompletedModelCallIdentities, ContextFrontierId,
     CorrelatedModelCallTerminalObservation, CreateSession, CurrentToolAttemptState,
-    CurrentTurnAttemptState, DecideToolRequest, DecideToolRequestResult,
+    CurrentTurnAttemptState, DecideToolRequest, DecideToolRequestResult, DeclaredMediaType,
     DelegateApprovalRecommendation, DelegationAwaitRequest, DelegationContent,
     DelegationMessageDirection, DelegationMessageId, DelegationMessageRequest, DelegationWaitMode,
     DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
@@ -90,7 +92,7 @@ use signalbox_domain::{
     ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequestId,
     ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
     ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
-    TurnId, UserContent,
+    TurnId, UserContent, UserContentPart,
 };
 use signalbox_persistence::{
     MIGRATOR, ModelCredentialFamilyCatalog,

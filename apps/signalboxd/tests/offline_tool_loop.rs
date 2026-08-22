@@ -2830,6 +2830,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
         "max_bytes": 131072
     })
     .to_string();
+    let expected_user_content = r#"[{"type":"text","text":"offline tool-loop request"}]"#;
     let expected_tool_use_content = format!(
         "{}\n{arguments}",
         signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME
@@ -2856,7 +2857,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
             "entries": [{
                 "position": 1,
                 "kind": "user",
-                "content": FIXTURE_USER_CONTENT,
+                "content": expected_user_content,
                 "content_truncated": false
             }, {
                 "position": 2,
