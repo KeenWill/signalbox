@@ -373,7 +373,17 @@ async fn supervise_repository_tasks(
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
     for poller in &pollers {
-        poller.drain_fetches().await;
+        if !poller
+            .drain_fetches_within(WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT)
+            .await
+        {
+            tracing::error!(
+                repository = %poller.repository.as_str(),
+                timeout_seconds = WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT.as_secs(),
+                cause_code = "webhook_cancelled_fetch_drain_timed_out",
+                "repository-watch supervisor fetch cleanup exceeded its deadline"
+            );
+        }
     }
     result
 }
@@ -1143,18 +1153,15 @@ impl RepositoryWatchTask {
                         PollAttemptWait::Completed(result) => result,
                         PollAttemptWait::Shutdown => {
                             // A cancelled full poll may own spawned PR fetches.
-                            self.poller.drain_fetches().await;
-                            self.poller.invalidate_freshness();
+                            self.finish_cancelled_webhook_attempt().await;
                             return;
                         }
                         PollAttemptWait::Continue => {
-                            self.poller.drain_fetches().await;
-                            self.poller.invalidate_freshness();
+                            self.finish_cancelled_webhook_attempt().await;
                             continue;
                         }
                         PollAttemptWait::WebhookRetry => {
-                            self.poller.drain_fetches().await;
-                            self.poller.invalidate_freshness();
+                            self.finish_cancelled_webhook_attempt().await;
                             webhook_retry.consume();
                             let Some(outcome) =
                                 self.run_webhook_attempt_until_shutdown(&mut shutdown).await
@@ -1175,11 +1182,7 @@ impl RepositoryWatchTask {
                             continue;
                         }
                         PollAttemptWait::Webhook => {
-                            self.poller.drain_fetches().await;
-                            // A cancelled child can publish freshness until its
-                            // final await completes. Invalidate only after every
-                            // child is joined so none can repopulate partial state.
-                            self.poller.invalidate_freshness();
+                            self.finish_cancelled_webhook_attempt().await;
                             let Some(outcome) =
                                 self.run_webhook_attempt_until_shutdown(&mut shutdown).await
                             else {
@@ -1717,12 +1720,10 @@ impl RepositoryWatchTask {
     }
 
     async fn finish_cancelled_webhook_attempt(&self) {
-        if timeout(
-            WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT,
-            self.poller.drain_fetches(),
-        )
-        .await
-        .is_err()
+        if !self
+            .poller
+            .drain_fetches_within(WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT)
+            .await
         {
             tracing::error!(
                 repository = %self.repository.as_str(),
@@ -3686,6 +3687,11 @@ impl GitHubRepositoryPoller {
         self.fetches.lock().await.shutdown().await;
     }
 
+    /// Bounds cleanup after a caller cancels a poll that may own child fetches.
+    async fn drain_fetches_within(&self, deadline: Duration) -> bool {
+        timeout(deadline, self.drain_fetches()).await.is_ok()
+    }
+
     async fn collect_pull_request_fetches(
         self: &Arc<Self>,
         pull_numbers: BTreeSet<u64>,
@@ -5401,7 +5407,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
-        sync::{Notify, watch},
+        sync::{Notify, oneshot, watch},
         task::{JoinHandle, JoinSet},
         time::{Instant, sleep},
     };
@@ -9258,6 +9264,47 @@ mod tests {
             Arc::strong_count(&fixture.poller),
             1,
             "a drained poller has no child still holding it"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_fetch_cleanup_returns_at_its_deadline() {
+        let fixture = poller_fixture(
+            Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
+        )
+        .expect("poller is constructed");
+        let (started_sender, started_receiver) = oneshot::channel();
+        let (release_sender, release_receiver) = oneshot::channel();
+        {
+            let mut fetches = fixture.poller.fetches.lock().await;
+            fetches.spawn_blocking(move || {
+                started_sender
+                    .send(())
+                    .expect("the fixture awaits the blocking child");
+                release_receiver
+                    .blocking_recv()
+                    .expect("the fixture releases the blocking child");
+                Err(RepositoryWatchAttemptError::Persistence)
+            });
+        }
+        started_receiver
+            .await
+            .expect("the blocking child reports readiness");
+
+        let timed_out = fixture
+            .poller
+            .drain_fetches_within(Duration::from_millis(10))
+            .await;
+
+        assert!(!timed_out);
+        release_sender
+            .send(())
+            .expect("the blocking child still awaits release");
+        assert!(
+            fixture
+                .poller
+                .drain_fetches_within(Duration::from_secs(1))
+                .await
         );
     }
 
