@@ -478,6 +478,38 @@ pub enum TimelineApprovalSource {
     User,
 }
 
+/// Exact durable actor that decided an explicit approval request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TimelineApprovalDecider {
+    User {
+        command_id: String,
+    },
+    Delegate {
+        model_selection_id: String,
+        model_call_id: String,
+    },
+}
+
+/// Closed runner sandbox posture exposed by timeline detail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineRunnerSandboxPosture {
+    Unsandboxed,
+    Sandboxed,
+}
+
+/// Closed runner lifecycle state exposed by timeline detail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineRunnerState {
+    Pinned,
+    Suspect,
+    Connected,
+    RunnerLostBeforePin,
+    RunnerLost,
+    Replaced,
+    WorkingDirectoryChanged,
+    Abandoned,
+}
+
 /// Typed goal-lineage event attached to the timeline fact that caused it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TimelineGoalEvent {
@@ -538,6 +570,7 @@ pub enum SessionTimelineDetailBody {
         tool_name: String,
         decision: String,
         source: TimelineApprovalSource,
+        decider: TimelineApprovalDecider,
         rationale: Option<TimelineTextExcerpt>,
         approval_judge_escalated: bool,
     },
@@ -575,9 +608,9 @@ pub enum SessionTimelineDetailBody {
     Runner {
         runner_id: String,
         placement_revision: u64,
-        sandbox_posture: String,
+        sandbox_posture: TimelineRunnerSandboxPosture,
         working_directory: Option<String>,
-        state: String,
+        state: TimelineRunnerState,
     },
     /// Typed delegation update or wake with optional bounded delivered content.
     Delegation {

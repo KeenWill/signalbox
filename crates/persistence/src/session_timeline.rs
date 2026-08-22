@@ -7,12 +7,12 @@ use signalbox_application::{
     SessionTimelineBounds, SessionTimelineDescriptor, SessionTimelineDetail,
     SessionTimelineDetailBody, SessionTimelineDetailPage, SessionTimelineEventKind,
     SessionTimelineItem, SessionTimelineReader, SessionTimelineSizeFacts, SessionTimelineWindow,
-    SessionWorkFacts, TimelineAddress, TimelineApprovalSource, TimelineBodyContinuation,
-    TimelineBodyField, TimelineContinuation, TimelineDetailContinuation, TimelineDetailCursor,
-    TimelineDetailLimits, TimelineGoalEvent, TimelineImportedEvidence,
-    TimelineModelCallDisposition, TimelineModelCallState, TimelineModelUsage, TimelineTextExcerpt,
-    TimelineToolAttempt, TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor,
-    TimelineWindowLimits,
+    SessionWorkFacts, TimelineAddress, TimelineApprovalDecider, TimelineApprovalSource,
+    TimelineBodyContinuation, TimelineBodyField, TimelineContinuation, TimelineDetailContinuation,
+    TimelineDetailCursor, TimelineDetailLimits, TimelineGoalEvent, TimelineImportedEvidence,
+    TimelineModelCallDisposition, TimelineModelCallState, TimelineModelUsage,
+    TimelineRunnerSandboxPosture, TimelineRunnerState, TimelineTextExcerpt, TimelineToolAttempt,
+    TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::{
     ModelCallId, RunnerSandboxProfile, SessionId, ToolApprovalDecider, ToolApprovalDecision,
@@ -42,6 +42,7 @@ pub enum SessionTimelineCorruption {
     InvalidDetailCursor,
     DetailProjectionOverflow,
     MissingDetailRecord,
+    InvalidStoredValue(&'static str),
 }
 
 impl fmt::Display for SessionTimelineCorruption {
@@ -63,6 +64,9 @@ impl fmt::Display for SessionTimelineCorruption {
             }
             Self::MissingDetailRecord => {
                 formatter.write_str("missing session timeline detail record")
+            }
+            Self::InvalidStoredValue(field) => {
+                write!(formatter, "invalid stored session timeline {field}")
             }
         }
     }
@@ -956,84 +960,128 @@ async fn project_tool_batch(
     ),
     SessionTimelineRepositoryError,
 > {
-    let goal_rows = load_goal_event_rows(transaction, producing_call).await?;
+    if let Some(cursor) = cursor
+        && cursor.field.is_none()
+        && (cursor.member_index != 0 || cursor.offset_bytes != 0)
+    {
+        return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+    }
     if let Some(goal_cursor) =
         cursor.filter(|cursor| cursor.field == Some(TimelineBodyField::GoalText))
     {
+        let goal_row = load_goal_event_row(transaction, producing_call, goal_cursor.member_index)
+            .await?
+            .ok_or(SessionTimelineCorruption::InvalidDetailCursor)?;
         return project_tool_goal(
             address,
             turn,
             producing_call,
             state,
             goal_cursor,
-            goal_rows,
+            goal_row,
             remaining,
         );
     }
-    let rows = sqlx::query(
-        "SELECT request.request_id, request.tool_name, request.arguments_text,
+    let requested_field = cursor
+        .and_then(|cursor| cursor.field)
+        .unwrap_or(TimelineBodyField::ToolArguments);
+    if !matches!(
+        requested_field,
+        TimelineBodyField::ToolArguments
+            | TimelineBodyField::ToolResult
+            | TimelineBodyField::ToolFailure
+    ) {
+        return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+    }
+    let member_index = cursor.map_or(0, |cursor| cursor.member_index);
+    let member_ordinal = i64::from(member_index) + 1;
+    let selected_field = match requested_field {
+        TimelineBodyField::ToolArguments => "tool_arguments",
+        TimelineBodyField::ToolResult => "tool_result",
+        TimelineBodyField::ToolFailure => "tool_failure",
+        _ => unreachable!("tool detail field was validated above"),
+    };
+    let row = sqlx::query(
+        "WITH ordered_members AS (
+            SELECT request.request_id, attempt.attempt_id,
+                   row_number() OVER (
+                       ORDER BY request.request_ordinal,
+                                generation.generation NULLS FIRST
+                   ) AS member_ordinal
+              FROM tool_request AS request
+              LEFT JOIN tool_attempt AS attempt
+                ON attempt.request_id = request.request_id
+              LEFT JOIN runner_physical_attempt_lease_binding AS binding
+                ON binding.attempt_id = attempt.attempt_id
+              LEFT JOIN runner_lease_generation AS generation
+                ON generation.lease_id = binding.lease_id
+               AND generation.attempt_id = attempt.attempt_id
+             WHERE request.producing_model_call_id = $1
+        ), selected_member AS (
+            SELECT request_id, attempt_id
+              FROM ordered_members
+             WHERE member_ordinal = $2
+        )
+        SELECT request.request_id, request.tool_name,
+                CASE $3::text
+                    WHEN 'tool_arguments' THEN request.arguments_text
+                    WHEN 'tool_result' THEN attempt.result_text
+                    WHEN 'tool_failure' THEN attempt.error_detail
+                END AS selected_body,
                 request.approval_posture, attempt.attempt_id,
                 attempt.effect_class, attempt.state_kind,
-                attempt.terminal_disposition_kind, attempt.result_text,
-                attempt.error_kind, attempt.error_detail,
+                attempt.terminal_disposition_kind, attempt.error_kind,
+                attempt.result_text IS NOT NULL AS has_result,
+                attempt.error_detail IS NOT NULL AS has_failure,
+                EXISTS (
+                    SELECT 1
+                      FROM ordered_members AS probe
+                     WHERE probe.member_ordinal = $2 + 1
+                ) AS has_next,
+                EXISTS (
+                    SELECT 1
+                      FROM goal_event AS event
+                      JOIN tool_request AS goal_request
+                        ON goal_request.request_id = event.model_tool_request_id
+                     WHERE goal_request.producing_model_call_id = $1
+                ) AS has_goal_events,
                 (
                     SELECT CASE placement.requested_sandbox_profile
                         WHEN 'ambient' THEN 'unsandboxed'
                         WHEN 'workspace_restricted' THEN 'sandboxed'
                     END
-                      FROM runner_tool_request_lease_binding AS binding
+                      FROM runner_physical_attempt_lease_binding AS physical_binding
                       JOIN runner_lease_generation AS lease
-                        ON lease.lease_id = binding.lease_id
+                        ON lease.lease_id = physical_binding.lease_id
+                       AND lease.attempt_id = physical_binding.attempt_id
                       JOIN runner_session_placement_record AS placement
                         ON placement.session_id = lease.session_id
                        AND placement.event_ordinal = lease.placement_event_ordinal
-                     WHERE binding.request_id = request.request_id
-                     ORDER BY lease.generation DESC
-                     LIMIT 1
+                     WHERE physical_binding.attempt_id = attempt.attempt_id
                 ) AS sandbox_posture,
                 EXISTS (
                     SELECT 1 FROM tool_approval_judge_model_call AS judge
                      WHERE judge.request_id = request.request_id
                        AND judge.recommendation_kind = 'escalate_to_human'
                 ) AS judge_escalated
-           FROM tool_request AS request
-           LEFT JOIN tool_attempt AS attempt ON attempt.request_id = request.request_id
-          WHERE request.producing_model_call_id = $1
-          ORDER BY request.request_ordinal",
+           FROM selected_member AS selected
+           JOIN tool_request AS request
+             ON request.request_id = selected.request_id
+           LEFT JOIN tool_attempt AS attempt
+             ON attempt.attempt_id = selected.attempt_id",
     )
     .bind(producing_call.into_uuid())
-    .fetch_all(&mut **transaction)
+    .bind(member_ordinal)
+    .bind(selected_field)
+    .fetch_optional(&mut **transaction)
     .await?;
-    if rows.is_empty() {
-        require_no_body_cursor(cursor)?;
-    }
-    let member_index = cursor.map_or(0, |cursor| cursor.member_index);
-    let index = usize::try_from(member_index)
-        .map_err(|_| SessionTimelineCorruption::InvalidDetailCursor)?;
     let mut tools = Vec::new();
     let mut continuation = None;
-    if let Some(row) = rows.get(index) {
-        let requested_field = cursor
-            .and_then(|cursor| cursor.field)
-            .unwrap_or(TimelineBodyField::ToolArguments);
-        if !matches!(
-            requested_field,
-            TimelineBodyField::ToolArguments
-                | TimelineBodyField::ToolResult
-                | TimelineBodyField::ToolFailure
-        ) {
-            return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
-        }
-        let arguments_text: String = row.try_get("arguments_text")?;
-        let result_text: Option<String> = row.try_get("result_text")?;
-        let failure_text: Option<String> = row.try_get("error_detail")?;
-        let selected = match requested_field {
-            TimelineBodyField::ToolArguments => Some(&arguments_text),
-            TimelineBodyField::ToolResult => result_text.as_ref(),
-            TimelineBodyField::ToolFailure => failure_text.as_ref(),
-            _ => None,
-        }
-        .ok_or(SessionTimelineCorruption::InvalidDetailCursor)?;
+    if let Some(row) = row {
+        let selected_body: Option<String> = row.try_get("selected_body")?;
+        let selected = selected_body
+            .as_deref()
+            .ok_or(SessionTimelineCorruption::InvalidDetailCursor)?;
         let excerpt = excerpt_text(
             selected,
             address,
@@ -1042,6 +1090,9 @@ async fn project_tool_batch(
             cursor.map_or(0, |cursor| cursor.offset_bytes),
             remaining,
         )?;
+        let has_result: bool = row.try_get("has_result")?;
+        let has_failure: bool = row.try_get("has_failure")?;
+        let has_next: bool = row.try_get("has_next")?;
         continuation = excerpt
             .continuation
             .map(TimelineDetailContinuation::MoreBody)
@@ -1050,12 +1101,13 @@ async fn project_tool_batch(
                     address,
                     requested_field,
                     member_index,
-                    result_text.is_some(),
-                    failure_text.is_some(),
-                    index + 1 < rows.len(),
+                    has_result,
+                    has_failure,
+                    has_next,
                 )
             });
-        if continuation.is_none() && index + 1 == rows.len() && !goal_rows.is_empty() {
+        let has_goal_events: bool = row.try_get("has_goal_events")?;
+        if continuation.is_none() && has_goal_events {
             continuation = Some(TimelineDetailContinuation::MoreBody(
                 TimelineBodyContinuation {
                     address,
@@ -1069,11 +1121,10 @@ async fn project_tool_batch(
         let disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
         let approval_posture: String = row.try_get("approval_posture")?;
         let approval_judge_escalated: bool = row.try_get("judge_escalated")?;
+        let attempt_id: Option<uuid::Uuid> = row.try_get("attempt_id")?;
         tools.push(TimelineToolAttempt {
             request_id: row.try_get::<uuid::Uuid, _>("request_id")?.to_string(),
-            attempt_id: row
-                .try_get::<Option<uuid::Uuid>, _>("attempt_id")?
-                .map(|id| id.to_string()),
+            attempt_id: attempt_id.map(|id| id.to_string()),
             tool_name: row.try_get("tool_name")?,
             arguments: (requested_field == TimelineBodyField::ToolArguments)
                 .then_some(excerpt.clone()),
@@ -1084,10 +1135,14 @@ async fn project_tool_batch(
             approval_judge_escalated,
             effect_posture: row.try_get("effect_class")?,
             sandbox_posture: row.try_get("sandbox_posture")?,
-            state: tool_state(state_kind.as_deref(), disposition.as_deref()),
+            state: tool_state(
+                attempt_id.is_some(),
+                state_kind.as_deref(),
+                disposition.as_deref(),
+            )?,
             cause_code: row.try_get("error_kind")?,
         });
-    } else if !rows.is_empty() {
+    } else if cursor.is_some() {
         return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
     }
     Ok((
@@ -1136,14 +1191,21 @@ fn next_tool_field(
     ))
 }
 
-fn tool_state(state: Option<&str>, disposition: Option<&str>) -> Option<TimelineToolState> {
-    match (state, disposition) {
-        (Some("prepared"), None) => Some(TimelineToolState::Prepared),
-        (Some("in_flight"), None) => Some(TimelineToolState::InFlight),
-        (Some("terminal"), Some("completed")) => Some(TimelineToolState::Completed),
-        (Some("terminal"), Some("known_failed")) => Some(TimelineToolState::KnownFailed),
-        (Some("terminal"), Some("ambiguous")) => Some(TimelineToolState::Ambiguous),
-        _ => None,
+fn tool_state(
+    attempt_present: bool,
+    state: Option<&str>,
+    disposition: Option<&str>,
+) -> Result<Option<TimelineToolState>, SessionTimelineCorruption> {
+    match (attempt_present, state, disposition) {
+        (false, None, None) => Ok(None),
+        (true, Some("prepared"), None) => Ok(Some(TimelineToolState::Prepared)),
+        (true, Some("in_flight"), None) => Ok(Some(TimelineToolState::InFlight)),
+        (true, Some("terminal"), Some("completed")) => Ok(Some(TimelineToolState::Completed)),
+        (true, Some("terminal"), Some("known_failed")) => Ok(Some(TimelineToolState::KnownFailed)),
+        (true, Some("terminal"), Some("ambiguous")) => Ok(Some(TimelineToolState::Ambiguous)),
+        _ => Err(SessionTimelineCorruption::InvalidStoredValue(
+            "tool attempt state",
+        )),
     }
 }
 
@@ -1161,34 +1223,51 @@ struct StoredGoalEvent {
     event_kind: String,
     reason: Option<String>,
     text: Option<String>,
+    has_next: bool,
 }
 
-async fn load_goal_event_rows(
+async fn load_goal_event_row(
     transaction: &mut Transaction<'_, Postgres>,
     call: ModelCallId,
-) -> Result<Vec<StoredGoalEvent>, SessionTimelineRepositoryError> {
-    let rows = sqlx::query(
-        "SELECT event.generation, event.event_kind, event.blocked_reason,
-                COALESCE(event.statement, event.need, event.guidance, event.report) AS body
-           FROM goal_event AS event
-           JOIN tool_request AS request
-             ON request.request_id = event.model_tool_request_id
-          WHERE request.producing_model_call_id = $1
-          ORDER BY event.event_ordinal",
+    member_index: u32,
+) -> Result<Option<StoredGoalEvent>, SessionTimelineRepositoryError> {
+    let member_ordinal = i64::from(member_index) + 1;
+    let row = sqlx::query(
+        "WITH ordered_goals AS (
+            SELECT event.generation, event.event_kind, event.blocked_reason,
+                   event.statement, event.need, event.guidance, event.report,
+                   row_number() OVER (
+                       ORDER BY request.request_ordinal, event.event_ordinal
+                   ) AS member_ordinal
+              FROM goal_event AS event
+              JOIN tool_request AS request
+                ON request.request_id = event.model_tool_request_id
+             WHERE request.producing_model_call_id = $1
+        )
+        SELECT generation, event_kind, blocked_reason,
+               COALESCE(statement, need, guidance, report) AS body,
+               EXISTS (
+                   SELECT 1
+                     FROM ordered_goals AS probe
+                    WHERE probe.member_ordinal = $2 + 1
+               ) AS has_next
+          FROM ordered_goals
+         WHERE member_ordinal = $2",
     )
     .bind(call.into_uuid())
-    .fetch_all(&mut **transaction)
+    .bind(member_ordinal)
+    .fetch_optional(&mut **transaction)
     .await?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(StoredGoalEvent {
-                generation: nonnegative(row.try_get("generation")?, "goal generation")?,
-                event_kind: row.try_get("event_kind")?,
-                reason: row.try_get("blocked_reason")?,
-                text: row.try_get("body")?,
-            })
+    row.map(|row| {
+        Ok(StoredGoalEvent {
+            generation: nonnegative(row.try_get("generation")?, "goal generation")?,
+            event_kind: row.try_get("event_kind")?,
+            reason: row.try_get("blocked_reason")?,
+            text: row.try_get("body")?,
+            has_next: row.try_get("has_next")?,
         })
-        .collect()
+    })
+    .transpose()
 }
 
 fn project_tool_goal(
@@ -1197,7 +1276,7 @@ fn project_tool_goal(
     producing_call: ModelCallId,
     state: DispatchedToolBatchState,
     cursor: TimelineDetailCursor,
-    goal_rows: Vec<StoredGoalEvent>,
+    row: StoredGoalEvent,
     remaining: &mut u32,
 ) -> Result<
     (
@@ -1206,11 +1285,6 @@ fn project_tool_goal(
     ),
     SessionTimelineRepositoryError,
 > {
-    let index = usize::try_from(cursor.member_index)
-        .map_err(|_| SessionTimelineCorruption::InvalidDetailCursor)?;
-    let row = goal_rows
-        .get(index)
-        .ok_or(SessionTimelineCorruption::InvalidDetailCursor)?;
     let raw_text = row
         .text
         .as_deref()
@@ -1227,7 +1301,7 @@ fn project_tool_goal(
         .continuation
         .map(TimelineDetailContinuation::MoreBody)
         .or_else(|| {
-            (index + 1 < goal_rows.len()).then_some(TimelineDetailContinuation::MoreBody(
+            row.has_next.then_some(TimelineDetailContinuation::MoreBody(
                 TimelineBodyContinuation {
                     address,
                     field: TimelineBodyField::GoalText,
@@ -1244,8 +1318,8 @@ fn project_tool_goal(
             tools: Vec::new(),
             goal_events: vec![TimelineGoalEvent {
                 generation: row.generation,
-                event_kind: row.event_kind.clone(),
-                reason: row.reason.clone(),
+                event_kind: row.event_kind,
+                reason: row.reason,
                 text: Some(text),
             }],
         },
@@ -1258,7 +1332,7 @@ async fn project_tool_approval(
     address: TimelineAddress,
     turn: TurnId,
     approval: &ToolApprovalResolution,
-    _decider: &ToolApprovalDecider,
+    decider: &ToolApprovalDecider,
     cursor: Option<TimelineDetailCursor>,
     remaining: &mut u32,
 ) -> Result<
@@ -1268,11 +1342,20 @@ async fn project_tool_approval(
     ),
     SessionTimelineRepositoryError,
 > {
-    let tool_name: String =
-        sqlx::query_scalar("SELECT tool_name FROM tool_request WHERE request_id = $1")
-            .bind(approval.request().into_uuid())
-            .fetch_one(&mut **transaction)
-            .await?;
+    let row = sqlx::query(
+        "SELECT request.tool_name, EXISTS (
+             SELECT 1 FROM tool_approval_judge_model_call AS judge
+              WHERE judge.request_id = request.request_id
+                AND judge.recommendation_kind = 'escalate_to_human'
+         ) AS judge_escalated
+           FROM tool_request AS request
+          WHERE request.request_id = $1",
+    )
+    .bind(approval.request().into_uuid())
+    .fetch_one(&mut **transaction)
+    .await?;
+    let tool_name: String = row.try_get("tool_name")?;
+    let approval_judge_escalated: bool = row.try_get("judge_escalated")?;
     let rationale = approval
         .rationale()
         .map(|rationale| rationale.as_str())
@@ -1313,6 +1396,15 @@ async fn project_tool_approval(
         ToolDecisionSource::Delegate => TimelineApprovalSource::Delegate,
         ToolDecisionSource::UserCommand => TimelineApprovalSource::User,
     };
+    let decider = match decider {
+        ToolApprovalDecider::User { command } => TimelineApprovalDecider::User {
+            command_id: command.into_uuid().to_string(),
+        },
+        ToolApprovalDecider::Delegate { model, call } => TimelineApprovalDecider::Delegate {
+            model_selection_id: model.into_uuid().to_string(),
+            model_call_id: call.into_uuid().to_string(),
+        },
+    };
     Ok((
         SessionTimelineDetailBody::ToolApprovalDecision {
             turn_id: turn.into_uuid().to_string(),
@@ -1320,8 +1412,9 @@ async fn project_tool_approval(
             tool_name,
             decision,
             source,
+            decider,
             rationale,
-            approval_judge_escalated: false,
+            approval_judge_escalated,
         },
         continuation,
     ))
@@ -1351,23 +1444,25 @@ fn reconciliation_operation(operation: DispatchedReconciliationOperation) -> (St
     }
 }
 
-fn runner_sandbox(sandbox: RunnerSandboxProfile) -> String {
+fn runner_sandbox(sandbox: RunnerSandboxProfile) -> TimelineRunnerSandboxPosture {
     match sandbox {
-        RunnerSandboxProfile::Ambient => String::from("unsandboxed"),
-        RunnerSandboxProfile::WorkspaceRestricted => String::from("sandboxed"),
+        RunnerSandboxProfile::Ambient => TimelineRunnerSandboxPosture::Unsandboxed,
+        RunnerSandboxProfile::WorkspaceRestricted => TimelineRunnerSandboxPosture::Sandboxed,
     }
 }
 
-fn runner_state(state: DispatchedRunnerState) -> String {
+fn runner_state(state: DispatchedRunnerState) -> TimelineRunnerState {
     match state {
-        DispatchedRunnerState::Pinned => String::from("pinned"),
-        DispatchedRunnerState::Suspect => String::from("suspect"),
-        DispatchedRunnerState::Connected => String::from("connected"),
-        DispatchedRunnerState::RunnerLostBeforePin => String::from("runner_lost_before_pin"),
-        DispatchedRunnerState::RunnerLost => String::from("runner_lost"),
-        DispatchedRunnerState::Replaced => String::from("replaced"),
-        DispatchedRunnerState::WorkingDirectoryChanged => String::from("working_directory_changed"),
-        DispatchedRunnerState::Abandoned => String::from("abandoned"),
+        DispatchedRunnerState::Pinned => TimelineRunnerState::Pinned,
+        DispatchedRunnerState::Suspect => TimelineRunnerState::Suspect,
+        DispatchedRunnerState::Connected => TimelineRunnerState::Connected,
+        DispatchedRunnerState::RunnerLostBeforePin => TimelineRunnerState::RunnerLostBeforePin,
+        DispatchedRunnerState::RunnerLost => TimelineRunnerState::RunnerLost,
+        DispatchedRunnerState::Replaced => TimelineRunnerState::Replaced,
+        DispatchedRunnerState::WorkingDirectoryChanged => {
+            TimelineRunnerState::WorkingDirectoryChanged
+        }
+        DispatchedRunnerState::Abandoned => TimelineRunnerState::Abandoned,
     }
 }
 
@@ -2093,5 +2188,20 @@ mod tests {
         ));
 
         assert_eq!(continuation, expected);
+    }
+
+    #[test]
+    fn absent_tool_attempt_has_no_state() {
+        assert_eq!(tool_state(false, None, None), Ok(None));
+    }
+
+    #[test]
+    fn invalid_present_tool_attempt_state_fails_closed() {
+        assert_eq!(
+            tool_state(true, Some("future_state"), None),
+            Err(SessionTimelineCorruption::InvalidStoredValue(
+                "tool attempt state"
+            ))
+        );
     }
 }

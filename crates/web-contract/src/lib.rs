@@ -399,6 +399,38 @@ pub enum WebTimelineApprovalSource {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineApprovalDecider {
+    User {
+        command_id: String,
+    },
+    Delegate {
+        model_selection_id: String,
+        model_call_id: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineRunnerSandboxPosture {
+    Unsandboxed,
+    Sandboxed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineRunnerState {
+    Pinned,
+    Suspect,
+    Connected,
+    RunnerLostBeforePin,
+    RunnerLost,
+    Replaced,
+    WorkingDirectoryChanged,
+    Abandoned,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineGoalEvent {
     pub generation: String,
@@ -453,6 +485,7 @@ pub enum WebSessionTimelineDetailBody {
         tool_name: String,
         decision: String,
         source: WebTimelineApprovalSource,
+        decider: WebTimelineApprovalDecider,
         rationale: Option<WebTimelineTextExcerpt>,
         approval_judge_escalated: bool,
     },
@@ -485,9 +518,9 @@ pub enum WebSessionTimelineDetailBody {
     Runner {
         runner_id: String,
         placement_revision: String,
-        sandbox_posture: String,
+        sandbox_posture: WebTimelineRunnerSandboxPosture,
         working_directory: Option<String>,
-        state: String,
+        state: WebTimelineRunnerState,
     },
     Delegation {
         event_kind: String,

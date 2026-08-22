@@ -93,4 +93,84 @@ describe('generated timeline detail decoder', () => {
 
     expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
   })
+
+  it('accepts exact delegate approval provenance', () => {
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '10' },
+          kind: 'tool_approval_decided',
+          body: {
+            type: 'tool_approval_decision',
+            turn_id: '00000000-0000-0000-0000-000000000002',
+            request_id: '00000000-0000-0000-0000-000000000004',
+            tool_name: 'exec',
+            decision: 'approve',
+            source: 'delegate',
+            decider: {
+              type: 'delegate',
+              model_selection_id: '00000000-0000-0000-0000-000000000005',
+              model_call_id: '00000000-0000-0000-0000-000000000006',
+            },
+            approval_judge_escalated: true,
+          },
+          projected_body_bytes: 160,
+        },
+      ],
+      projected_body_bytes: 160,
+    }
+
+    expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
+  })
+
+  it('rejects unknown runner sandbox posture', () => {
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '11' },
+          kind: 'runner_state_transition',
+          body: {
+            type: 'runner',
+            runner_id: '00000000-0000-0000-0000-000000000007',
+            placement_revision: '1',
+            sandbox_posture: 'future_sandbox',
+            state: 'pinned',
+          },
+          projected_body_bytes: 96,
+        },
+      ],
+      projected_body_bytes: 96,
+    }
+
+    expect(() => decodeWebSessionTimelineDetailPage(page)).toThrow(
+      'timeline_detail_page.items[0].body must be one recognized variant',
+    )
+  })
+
+  it('rejects unknown runner state', () => {
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '12' },
+          kind: 'runner_state_transition',
+          body: {
+            type: 'runner',
+            runner_id: '00000000-0000-0000-0000-000000000007',
+            placement_revision: '1',
+            sandbox_posture: 'sandboxed',
+            state: 'future_state',
+          },
+          projected_body_bytes: 96,
+        },
+      ],
+      projected_body_bytes: 96,
+    }
+
+    expect(() => decodeWebSessionTimelineDetailPage(page)).toThrow(
+      'timeline_detail_page.items[0].body must be one recognized variant',
+    )
+  })
 })

@@ -29,10 +29,11 @@ use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
     SessionTimelineDescriptor, SessionTimelineDetailBody, SessionTimelineDetailPage,
-    SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress, TimelineApprovalSource,
-    TimelineBodyContinuation, TimelineBodyField, TimelineContinuation, TimelineDetailContinuation,
-    TimelineDetailCursor, TimelineDetailLimits, TimelineGoalEvent, TimelineModelCallDisposition,
-    TimelineModelCallState, TimelineTextExcerpt, TimelineToolAttempt, TimelineToolState,
+    SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress, TimelineApprovalDecider,
+    TimelineApprovalSource, TimelineBodyContinuation, TimelineBodyField, TimelineContinuation,
+    TimelineDetailContinuation, TimelineDetailCursor, TimelineDetailLimits, TimelineGoalEvent,
+    TimelineModelCallDisposition, TimelineModelCallState, TimelineRunnerSandboxPosture,
+    TimelineRunnerState, TimelineTextExcerpt, TimelineToolAttempt, TimelineToolState,
     TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::{SessionId, TurnId};
@@ -44,11 +45,12 @@ use signalbox_web_contract::{
     WebContractBootstrap, WebContractExample, WebSessionTimelineDescriptor,
     WebSessionTimelineDetail, WebSessionTimelineDetailBody, WebSessionTimelineDetailPage,
     WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
-    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineApprovalSource,
-    WebTimelineBlobReference, WebTimelineBodyContinuation, WebTimelineBodyField,
-    WebTimelineDetailContinuation, WebTimelineEventSequence, WebTimelineGoalEvent,
-    WebTimelineImportedEvidence, WebTimelineModelCallDisposition, WebTimelineModelCallState,
-    WebTimelineModelUsage, WebTimelineTextExcerpt, WebTimelineToolAttempt, WebTimelineToolState,
+    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineApprovalDecider,
+    WebTimelineApprovalSource, WebTimelineBlobReference, WebTimelineBodyContinuation,
+    WebTimelineBodyField, WebTimelineDetailContinuation, WebTimelineEventSequence,
+    WebTimelineGoalEvent, WebTimelineImportedEvidence, WebTimelineModelCallDisposition,
+    WebTimelineModelCallState, WebTimelineModelUsage, WebTimelineRunnerSandboxPosture,
+    WebTimelineRunnerState, WebTimelineTextExcerpt, WebTimelineToolAttempt, WebTimelineToolState,
     WebTimelineTurnLifecycleKind, WebU64,
 };
 use sqlx::PgPool;
@@ -864,6 +866,7 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             tool_name,
             decision,
             source,
+            decider,
             rationale,
             approval_judge_escalated,
         } => WebSessionTimelineDetailBody::ToolApprovalDecision {
@@ -875,6 +878,18 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
                 TimelineApprovalSource::Policy => WebTimelineApprovalSource::Policy,
                 TimelineApprovalSource::Delegate => WebTimelineApprovalSource::Delegate,
                 TimelineApprovalSource::User => WebTimelineApprovalSource::User,
+            },
+            decider: match decider {
+                TimelineApprovalDecider::User { command_id } => {
+                    WebTimelineApprovalDecider::User { command_id }
+                }
+                TimelineApprovalDecider::Delegate {
+                    model_selection_id,
+                    model_call_id,
+                } => WebTimelineApprovalDecider::Delegate {
+                    model_selection_id,
+                    model_call_id,
+                },
             },
             rationale: rationale.map(text_excerpt_dto),
             approval_judge_escalated,
@@ -940,9 +955,29 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
         } => WebSessionTimelineDetailBody::Runner {
             runner_id,
             placement_revision: placement_revision.to_string(),
-            sandbox_posture,
+            sandbox_posture: match sandbox_posture {
+                TimelineRunnerSandboxPosture::Unsandboxed => {
+                    WebTimelineRunnerSandboxPosture::Unsandboxed
+                }
+                TimelineRunnerSandboxPosture::Sandboxed => {
+                    WebTimelineRunnerSandboxPosture::Sandboxed
+                }
+            },
             working_directory,
-            state,
+            state: match state {
+                TimelineRunnerState::Pinned => WebTimelineRunnerState::Pinned,
+                TimelineRunnerState::Suspect => WebTimelineRunnerState::Suspect,
+                TimelineRunnerState::Connected => WebTimelineRunnerState::Connected,
+                TimelineRunnerState::RunnerLostBeforePin => {
+                    WebTimelineRunnerState::RunnerLostBeforePin
+                }
+                TimelineRunnerState::RunnerLost => WebTimelineRunnerState::RunnerLost,
+                TimelineRunnerState::Replaced => WebTimelineRunnerState::Replaced,
+                TimelineRunnerState::WorkingDirectoryChanged => {
+                    WebTimelineRunnerState::WorkingDirectoryChanged
+                }
+                TimelineRunnerState::Abandoned => WebTimelineRunnerState::Abandoned,
+            },
         },
         SessionTimelineDetailBody::Delegation {
             event_kind,

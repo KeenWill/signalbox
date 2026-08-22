@@ -69,6 +69,7 @@ type WebSessionTimelineDetailBody = {
   readonly type: "tool_batch";
 } | {
   readonly approval_judge_escalated: boolean;
+  readonly decider: WebTimelineApprovalDecider;
   readonly decision: string;
   readonly rationale?: WebTimelineTextExcerpt | null;
   readonly request_id: string;
@@ -105,8 +106,8 @@ type WebSessionTimelineDetailBody = {
 } | {
   readonly placement_revision: string;
   readonly runner_id: string;
-  readonly sandbox_posture: string;
-  readonly state: string;
+  readonly sandbox_posture: WebTimelineRunnerSandboxPosture;
+  readonly state: WebTimelineRunnerState;
   readonly type: "runner";
   readonly working_directory?: string | null;
 } | {
@@ -142,6 +143,15 @@ type WebSessionWorkFacts = {
 
 type WebTimelineAddress = {
   readonly event_sequence: WebTimelineEventSequence;
+};
+
+type WebTimelineApprovalDecider = {
+  readonly command_id: string;
+  readonly type: "user";
+} | {
+  readonly model_call_id: string;
+  readonly model_selection_id: string;
+  readonly type: "delegate";
 };
 
 type WebTimelineApprovalSource = "policy" | "delegate" | "user";
@@ -202,6 +212,10 @@ type WebTimelineModelUsage = {
   readonly input_tokens?: string | null;
   readonly output_tokens?: string | null;
 };
+
+type WebTimelineRunnerSandboxPosture = "unsandboxed" | "sandboxed";
+
+type WebTimelineRunnerState = "pinned" | "suspect" | "connected" | "runner_lost_before_pin" | "runner_lost" | "replaced" | "working_directory_changed" | "abandoned";
 
 type WebTimelineTextExcerpt = {
   readonly continuation?: WebTimelineBodyContinuation | null;
