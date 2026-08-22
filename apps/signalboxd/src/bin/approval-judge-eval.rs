@@ -392,6 +392,17 @@ fn main() -> ExitCode {
 async fn run(options: RunOptions) -> Result<(), String> {
     let configuration = HubModelConfiguration::read(&options.configuration)
         .map_err(|error| format!("configuration rejected: {error:?}"))?;
+    let post_kill_reap_bound = configuration
+        .numeric_bounds()
+        .duration("post_kill_reap_bound")
+        .ok_or_else(|| String::from("configuration has no post_kill_reap_bound policy"))?;
+    let native_message_limit = configuration
+        .numeric_bounds()
+        .integer("max_native_message_bytes")
+        .ok_or_else(|| String::from("configuration has no max_native_message_bytes policy"))?
+        .map(usize::try_from)
+        .transpose()
+        .map_err(|_| String::from("max_native_message_bytes exceeds this platform"))?;
     // Daemon startup rejects the whole configuration when any posture entry
     // in `tool_approval_postures()` names a tool absent from the statically
     // selected composition — even an entry for a tool no selected corpus case
@@ -443,7 +454,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
                         (CredentialReference::new(reference), path.to_path_buf())
                     }),
             );
-            let mut adapter_configuration = AnthropicConfig::new();
+            let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
             adapter_configuration.model_capabilities =
                 configuration.runtime_model_capability_catalog();
             AnthropicRuntime::new(adapter_configuration, credentials)
@@ -460,15 +471,21 @@ async fn run(options: RunOptions) -> Result<(), String> {
                         (CredentialReference::new(reference), path.to_path_buf())
                     }),
             );
-            let mut adapter_configuration = OpenAiConfig::new();
+            let mut adapter_configuration = OpenAiConfig::new(native_message_limit);
             adapter_configuration.model_capabilities =
                 configuration.runtime_model_capability_catalog();
             OpenAiRuntime::new(adapter_configuration, credentials)
         })
         .transpose()
         .map_err(|error| format!("openai adapter construction failed: {error}"))?;
-    let adapters = ConfiguredModelRuntime::new(anthropic, openai, &configuration)
-        .map_err(|error| format!("adapter construction failed: {error}"))?;
+    let adapters = ConfiguredModelRuntime::new(
+        anthropic,
+        openai,
+        &configuration,
+        post_kill_reap_bound,
+        native_message_limit,
+    )
+    .map_err(|error| format!("adapter construction failed: {error}"))?;
     let model = RuntimeApprovalJudgeModel::new(adapters, configuration.runtime_model_catalog());
     let (provider_model, definition_max_output_tokens, definition_context_window_tokens) =
         configuration

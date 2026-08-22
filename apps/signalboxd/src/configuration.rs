@@ -1256,6 +1256,7 @@ impl HubModelConfiguration {
                         .as_deref()
                         .unwrap_or(CODEX_CLI_CREDENTIAL_REFERENCE),
                 ),
+                None,
             ))
             .map_err(|_| HubModelConfigurationError::InvalidCodexCliConfiguration)?;
         }
@@ -1309,6 +1310,8 @@ impl HubModelConfiguration {
                         .as_deref()
                         .unwrap_or(CLAUDE_CLI_CREDENTIAL_REFERENCE),
                 ),
+                None,
+                None,
             ))
             .map_err(|_| HubModelConfigurationError::InvalidClaudeCliConfiguration)?;
         }
@@ -1905,6 +1908,7 @@ impl HubModelConfiguration {
 
     pub(crate) fn codex_cli_runtime(
         &self,
+        post_kill_reap_bound: Option<Duration>,
     ) -> Result<Option<CodexCliRuntime>, CodexCliConstructionError> {
         self.codex_cli
             .as_ref()
@@ -1917,6 +1921,7 @@ impl HubModelConfiguration {
                     configuration.executable.clone(),
                     configuration.working_directory.clone(),
                     CredentialReference::new(credential_profile),
+                    post_kill_reap_bound,
                 );
                 runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
                 CodexCliRuntime::new(runtime_configuration)
@@ -1931,6 +1936,8 @@ impl HubModelConfiguration {
 
     pub(crate) fn claude_cli_runtime(
         &self,
+        post_kill_reap_bound: Option<Duration>,
+        native_message_limit: Option<usize>,
     ) -> Result<Option<ClaudeCliRuntime>, ClaudeCliConstructionError> {
         self.claude_cli
             .as_ref()
@@ -1944,6 +1951,8 @@ impl HubModelConfiguration {
                     configuration.mcp_bridge_executable.clone(),
                     configuration.working_directory.clone(),
                     CredentialReference::new(credential_profile),
+                    post_kill_reap_bound,
+                    native_message_limit,
                 );
                 runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
                 let credentials = FileCredentialAccess::from_files(
@@ -8088,7 +8097,7 @@ context_window_tokens = 200000
         );
         assert!(
             configuration
-                .codex_cli_runtime()
+                .codex_cli_runtime(None)
                 .expect("the stored profile constructs the runtime")
                 .is_some()
         );
@@ -8292,7 +8301,7 @@ context_window_tokens = 200000
         );
         assert!(
             configuration
-                .claude_cli_runtime()
+                .claude_cli_runtime(None, None)
                 .expect("the stored profile constructs the runtime")
                 .is_some()
         );

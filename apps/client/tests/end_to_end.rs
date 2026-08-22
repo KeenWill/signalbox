@@ -2956,7 +2956,7 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
             .map(|(reference, path)| (CredentialReference::new(reference), path.to_path_buf())),
     );
     let credential_reference = ModelCallCredentialReference::new(credential_profile);
-    let anthropic = AnthropicRuntime::new(AnthropicConfig::new(), credential_access)?;
+    let anthropic = AnthropicRuntime::new(AnthropicConfig::new(None), credential_access)?;
     let provider =
         RuntimeModelCallProvider::new(anthropic, model_configuration.runtime_model_catalog(), None);
     let targets = model_configuration.target_catalog();

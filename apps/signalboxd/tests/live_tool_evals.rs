@@ -6969,7 +6969,7 @@ impl ForcedToolSequence {
 
 impl EvalOpenAiRuntime {
     fn new(forced_tool: Option<&str>, tracker: OperationTracker) -> EvalResult<Self> {
-        let mut config = OpenAiConfig::new();
+        let mut config = OpenAiConfig::new(None);
         config.exchange_timeout = EXCHANGE_TIMEOUT;
         Ok(Self {
             inner: OpenAiRuntime::new(config, EnvironmentCredential)?,

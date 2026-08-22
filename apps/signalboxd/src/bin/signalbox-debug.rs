@@ -451,7 +451,14 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                         }),
                 );
                 let credential_reference = ModelCallCredentialReference::new(credential_profile);
-                let mut adapter_configuration = AnthropicConfig::new();
+                let native_message_limit = configuration
+                    .numeric_bounds()
+                    .integer("max_native_message_bytes")
+                    .ok_or(DebugDriverError::Configuration)?
+                    .map(usize::try_from)
+                    .transpose()
+                    .map_err(|_| DebugDriverError::Configuration)?;
+                let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
                 adapter_configuration.model_capabilities =
                     configuration.runtime_model_capability_catalog();
                 let runtime = AnthropicRuntime::new(adapter_configuration, credential_access)

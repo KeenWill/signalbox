@@ -292,6 +292,7 @@ async fn the_pinned_codex_cli_completes_one_exchange() {
         &executable,
         working_directory.path(),
         credential_reference.clone(),
+        None,
     );
     config.exchange_timeout = Duration::from_secs(4 * 60);
     let runtime = CodexCliRuntime::new(config).expect("smoke runtime configuration is valid");
@@ -1395,6 +1396,7 @@ async fn preparation_projection_returns_a_prepared_capability() {
         working_directory.path().join("codex-fixture"),
         working_directory.path(),
         credential_reference.clone(),
+        None,
     );
     let runtime = CodexCliRuntime::new(config).expect("smoke runtime configuration is valid");
     let operation = ModelOperation::new(

@@ -47,6 +47,7 @@ pub struct OpenAiRuntime<A> {
     completions_url: Url,
     credentials: A,
     sse_record_limit: usize,
+    native_message_limit: Option<usize>,
     model_capabilities: ModelCapabilityCatalog,
 }
 
@@ -253,6 +254,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             completions_url,
             credentials,
             sse_record_limit: config.sse_record_limit,
+            native_message_limit: config.native_message_limit,
             model_capabilities: config.model_capabilities,
         })
     }
@@ -657,7 +659,7 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for OpenAiRunt
         // Per the runtime-substrate spec, sanitize with the exact
         // preparation-time value, after no second credential lookup or
         // request reconstruction.
-        let evidence = redact_evidence(evidence, &credential);
+        let evidence = redact_evidence(evidence, &credential, self.native_message_limit);
         TerminalReport {
             correlation,
             evidence,

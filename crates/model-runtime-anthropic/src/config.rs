@@ -31,13 +31,15 @@ pub struct AnthropicConfig {
     /// construction and larger records are stream-protocol-violation
     /// evidence.
     pub sse_record_limit: usize,
+    /// Maximum retained provider-native diagnostic message bytes, or
+    /// unbounded when explicitly configured as `none`.
+    pub native_message_limit: Option<usize>,
 }
 
 impl AnthropicConfig {
-    /// The documented defaults: public API base URL, version `2023-06-01`,
-    /// no connect timeout, 10-minute exchange timeout, 8 MiB SSE record
-    /// limit.
-    pub fn new() -> Self {
+    /// Builds the baseline provider configuration with the caller-supplied
+    /// native-message retention policy.
+    pub fn new(native_message_limit: Option<usize>) -> Self {
         Self {
             model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog::empty(),
             base_url: "https://api.anthropic.com".to_string(),
@@ -45,12 +47,7 @@ impl AnthropicConfig {
             connect_timeout: None,
             exchange_timeout: Duration::from_secs(10 * 60),
             sse_record_limit: 8 * 1024 * 1024,
+            native_message_limit,
         }
-    }
-}
-
-impl Default for AnthropicConfig {
-    fn default() -> Self {
-        Self::new()
     }
 }

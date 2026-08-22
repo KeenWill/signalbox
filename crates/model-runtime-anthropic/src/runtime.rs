@@ -47,6 +47,7 @@ pub struct AnthropicRuntime<A> {
     credentials: A,
     version_header: HeaderValue,
     sse_record_limit: usize,
+    native_message_limit: Option<usize>,
     model_capabilities: ModelCapabilityCatalog,
 }
 
@@ -295,6 +296,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             credentials,
             version_header,
             sse_record_limit: config.sse_record_limit,
+            native_message_limit: config.native_message_limit,
             model_capabilities: config.model_capabilities,
         })
     }
@@ -758,7 +760,7 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for AnthropicR
         // evidence (error messages, raw bodies, transport detail) is
         // credential-sanitized before it leaves the adapter boundary, using
         // the exact preparation-time value.
-        let evidence = redact_evidence(evidence, &credential);
+        let evidence = redact_evidence(evidence, &credential, self.native_message_limit);
         TerminalReport {
             correlation,
             evidence,

@@ -2801,8 +2801,14 @@ mod tests {
         )
         .expect("expected catalog bridge path is written");
         let credential = CredentialReference::new(SYNTHETIC_CLAUDE_CREDENTIAL_REFERENCE);
-        let mut config =
-            ClaudeCliConfig::new(&executable, bridge, workspace.path(), credential.clone());
+        let mut config = ClaudeCliConfig::new(
+            &executable,
+            bridge,
+            workspace.path(),
+            credential.clone(),
+            None,
+            None,
+        );
         config.exchange_timeout = BRIDGE_RESPONSE_TIMEOUT;
         let runtime = ClaudeCliRuntime::new(config)
             .expect("offline Claude catalog capture runtime constructs");

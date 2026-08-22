@@ -143,6 +143,9 @@ pub struct CliProcessRequest<D> {
     pub exchange_timeout: Duration,
     /// Grace between interrupt and forced cleanup.
     pub interrupt_grace: Duration,
+    /// Maximum wait after process-group cleanup for the leader or stderr
+    /// reader to finish, or unbounded when explicitly configured as `none`.
+    pub post_kill_reap_bound: Option<Duration>,
     /// Maximum JSONL event size.
     pub event_limit: usize,
     /// Maximum emitted stderr evidence size.
@@ -267,15 +270,17 @@ pub trait CliSession<C>: Sized {
 struct SupervisedChild {
     child: Child,
     process_group_id: Option<u32>,
+    post_kill_reap_bound: Option<Duration>,
     armed: bool,
 }
 
 impl SupervisedChild {
-    fn new(child: Child) -> Self {
+    fn new(child: Child, post_kill_reap_bound: Option<Duration>) -> Self {
         let process_group_id = child.id();
         Self {
             child,
             process_group_id,
+            post_kill_reap_bound,
             armed: true,
         }
     }
@@ -361,6 +366,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
         decoder,
         exchange_timeout: _,
         interrupt_grace,
+        post_kill_reap_bound,
         event_limit,
         stderr_limit,
         environment,
@@ -435,7 +441,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
         fact: ObservationFact::SendCommenced,
     });
     let mut child = match command.spawn() {
-        Ok(child) => SupervisedChild::new(child),
+        Ok(child) => SupervisedChild::new(child, post_kill_reap_bound),
         Err(error) => {
             return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
                 cause: UnsentCause::ConnectFailed(TransportFacts::new(error.to_string())),
@@ -711,6 +717,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                                 labels.provider
                             ),
                             labels,
+                            child.post_kill_reap_bound,
                         )
                         .await;
                         reaped_status = Some(Ok(status));
@@ -803,6 +810,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                             labels.provider
                         ),
                         labels,
+                        child.post_kill_reap_bound,
                     )
                     .await
                 }
@@ -1206,6 +1214,7 @@ async fn reap_exited_leader(
         return None;
     };
     child.disarm();
+    let post_kill_reap_bound = child.post_kill_reap_bound;
     let detail = drain_stderr_after_cleanup(
         stderr_task,
         &format!(
@@ -1213,6 +1222,7 @@ async fn reap_exited_leader(
             labels.provider
         ),
         labels,
+        post_kill_reap_bound,
     )
     .await;
     Some((Ok(status), detail))
@@ -1232,8 +1242,9 @@ async fn drain_stderr_after_cleanup(
     stderr_task: &mut tokio::task::JoinHandle<std::io::Result<BoundedOutput>>,
     unavailable_message: &str,
     labels: CliProcessLabels,
+    post_kill_reap_bound: Option<Duration>,
 ) -> BoundedOutput {
-    match tokio::time::timeout(POST_KILL_REAP_BOUND, &mut *stderr_task).await {
+    match optional_timeout(post_kill_reap_bound, &mut *stderr_task).await {
         Ok(result) => stderr_result(result, labels),
         Err(_) => {
             abort_stderr_task(stderr_task).await;
@@ -1542,10 +1553,10 @@ async fn interrupt_then_kill(child: &mut SupervisedChild, grace: Duration) {
             tokio::time::sleep(grace).await;
             kill_process_group(process_group_id);
             let _ = child.start_kill();
-            // Bounded like `force_kill`: a leader stuck in uninterruptible
-            // kernel I/O after SIGKILL is left to its drop guard rather than
-            // hanging the exchange past its deadline.
-            if let Ok(Ok(_)) = tokio::time::timeout(POST_KILL_REAP_BOUND, child.wait()).await {
+            // Apply the deployment's post-kill reap policy just as
+            // `force_kill` does. A bounded policy leaves a stuck leader to its
+            // drop guard; `none` explicitly waits without a deadline.
+            if let Ok(Ok(_)) = optional_timeout(child.post_kill_reap_bound, child.wait()).await {
                 child.disarm();
             }
             return;
@@ -1558,18 +1569,24 @@ fn remaining_interrupt_grace(grace: Duration, deadline: tokio::time::Instant) ->
     grace.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
 }
 
-/// After a group kill the leader is normally waitable at once; bound the reap
-/// so a leader stuck in uninterruptible kernel I/O cannot hang the exchange
-/// past its deadline. On timeout the child is left for its drop guard, which
-/// re-signals the group, rather than blocking indefinitely.
-// numeric-bound: ceiling - protects exchange latency from an uninterruptible child
-const POST_KILL_REAP_BOUND: Duration = Duration::from_secs(5);
-
 async fn force_kill(child: &mut SupervisedChild) {
     kill_process_group(child.id());
     let _ = child.start_kill();
-    if let Ok(Ok(_)) = tokio::time::timeout(POST_KILL_REAP_BOUND, child.wait()).await {
+    if let Ok(Ok(_)) = optional_timeout(child.post_kill_reap_bound, child.wait()).await {
         child.disarm();
+    }
+}
+
+async fn optional_timeout<F>(
+    bound: Option<Duration>,
+    future: F,
+) -> Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: std::future::Future,
+{
+    match bound {
+        Some(bound) => tokio::time::timeout(bound, future).await,
+        None => Ok(future.await),
     }
 }
 
@@ -1750,8 +1767,8 @@ mod tests {
         CliEnvironmentVariable, CliProcessLabels, CliProcessRequest, CliSession,
         CliTerminalTextCapture, EnvironmentRejection, EnvironmentRejectionReason, LineProgress,
         TRUNCATION_SUFFIX, absolute_credential_home, allowlisted_environment, execute_cli_process,
-        read_bounded_line, read_bounded_output, read_error_loss, sanitized_stderr,
-        validated_environment_overrides,
+        optional_timeout, read_bounded_line, read_bounded_output, read_error_loss,
+        sanitized_stderr, validated_environment_overrides,
     };
     use crate::{
         BoundaryLossEvidence, CancellationSignal, ExchangeFacts, LossCause, ProviderErrorKind,
@@ -1993,11 +2010,33 @@ mod tests {
             decoder: UnusedSession { correlation: 7 },
             exchange_timeout,
             interrupt_grace: std::time::Duration::from_millis(1),
+            post_kill_reap_bound: None,
             event_limit: 1_024,
             stderr_limit: 1_024,
             environment: &[],
             environment_overrides: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn configured_post_kill_reap_bound_times_out_pending_cleanup() {
+        let outcome = optional_timeout(
+            Some(std::time::Duration::ZERO),
+            std::future::pending::<()>(),
+        )
+        .await;
+
+        assert!(outcome.is_err());
+    }
+
+    #[tokio::test]
+    async fn unbounded_post_kill_reap_waits_for_cleanup() {
+        let completed_cleanup = 41_u8;
+        let outcome = optional_timeout(None, std::future::ready(completed_cleanup))
+            .await
+            .expect("unbounded wait completes with the cleanup future");
+
+        assert_eq!(outcome, completed_cleanup);
     }
 
     #[cfg(all(
