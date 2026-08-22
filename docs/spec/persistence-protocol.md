@@ -10,7 +10,9 @@ automatic-reconciliation transaction deadline is verified against this PR
 validation is verified against this PR
 (`agent/daemon-live-frontier-validation-materialization`). Context-compaction
 evidence validation is verified against this PR
-(`agent/daemon-live-context-compaction-validation`). Deferred immutable
+(`agent/daemon-live-context-compaction-validation`). Compaction-leaf selection
+before recursive turn-start validation is verified against this PR
+(`agent/daemon-live-compaction-leaf-validation-scope`). Deferred immutable
 tool-round validation scope is verified against this PR
 (`agent/daemon-live-deferred-round-validation-scope`).
 
@@ -1522,7 +1524,11 @@ correlation as one tool result; a background result has no tool-result
 correlation and counts as neither one. Each immutable compaction validates its
 summary's tool balance exactly when it commits. A successor replays prior
 summary structure to derive model-visible order without rescanning those already
-validated balances, then resolves the current boundary's semantic entries
+validated balances. A later turn first isolates the one immutable compaction
+leaf, rejects it from frontier header counts when it is shorter than the turn's
+terminal predecessor, and performs recursive prefix validation only for that one
+remaining candidate; historical compaction results are never expanded by a
+turn-start commit. The successor then resolves the current boundary's entries
 through their typed source-session and entry key.
 
 An accepted background wait reserves one future recipient delivery position
