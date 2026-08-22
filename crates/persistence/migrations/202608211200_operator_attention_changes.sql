@@ -1,8 +1,23 @@
 -- Durable, timestamped invalidation journal for the bounded operator fleet view.
 -- It records observation facts only; no runtime decision reads this table.
 
+CREATE SEQUENCE operator_attention_change_sequence AS bigint;
+
+CREATE FUNCTION next_operator_attention_change_sequence()
+RETURNS bigint
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended('signalbox.operator_attention_change', 0)
+    );
+    RETURN nextval('operator_attention_change_sequence');
+END;
+$$;
+
 CREATE TABLE operator_attention_change (
-    change_sequence bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    change_sequence bigint PRIMARY KEY
+        DEFAULT next_operator_attention_change_sequence(),
     session_id uuid NOT NULL REFERENCES session(session_id) ON DELETE RESTRICT,
     fact_kind text NOT NULL CHECK (
         fact_kind IN ('session', 'turn', 'goal', 'approval_judge', 'runner')
@@ -20,7 +35,15 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
     INSERT INTO operator_attention_change (session_id, fact_kind)
-    VALUES (NEW.session_id, 'turn');
+    VALUES (
+        NEW.session_id,
+        CASE NEW.event_kind
+            WHEN 'session_created' THEN 'session'
+            WHEN 'session_model_settings_changed' THEN 'session'
+            WHEN 'runner_state_transition' THEN 'runner'
+            ELSE 'turn'
+        END
+    );
     RETURN NULL;
 END;
 $$;

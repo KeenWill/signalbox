@@ -338,6 +338,7 @@ pub struct ProcessRuntime {
     fanouts: ProcessFanouts,
     metrics: Option<TelemetryMetrics>,
     blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+    snapshot_reader_budget: Option<Arc<Semaphore>>,
 }
 
 #[derive(Clone, Debug)]
@@ -374,6 +375,8 @@ impl ProcessRuntime {
         model_configuration: HubModelConfiguration,
         template_configuration: SessionTemplateConfiguration,
     ) -> Self {
+        let snapshot_reader_budget =
+            shared_snapshot_reader_budget(pool.options().get_max_connections());
         let (durable_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         let (streaming_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         Self {
@@ -387,6 +390,7 @@ impl ProcessRuntime {
             template_configuration,
             metrics: None,
             blob_store_registry: None,
+            snapshot_reader_budget,
             fanouts: ProcessFanouts {
                 durable: durable_updates,
                 streaming: streaming_updates,
@@ -430,6 +434,13 @@ impl ProcessRuntime {
         self
     }
 
+    /// Installs the daemon-wide admission budget shared with browser snapshots.
+    #[must_use]
+    pub fn with_snapshot_reader_budget(mut self, budget: Arc<Semaphore>) -> Self {
+        self.snapshot_reader_budget = Some(budget);
+        self
+    }
+
     pub fn provider_text_delta_sink(&self) -> ProcessProviderTextDeltaSink {
         ProcessProviderTextDeltaSink {
             updates: self.fanouts.streaming.clone(),
@@ -450,6 +461,7 @@ impl ProcessRuntime {
             template_configuration: self.template_configuration,
             fanouts: fanouts.clone(),
             blob_store_registry: self.blob_store_registry,
+            snapshot_reader_budget: self.snapshot_reader_budget,
         };
         let server = serve_connections(&self.listener, connection_dependencies, shutdown.clone());
         let dispatcher = dispatch_updates(
@@ -616,6 +628,7 @@ struct ConnectionDependencies {
     template_configuration: SessionTemplateConfiguration,
     fanouts: ProcessFanouts,
     blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+    snapshot_reader_budget: Option<Arc<Semaphore>>,
 }
 
 async fn serve_connections(
@@ -623,9 +636,9 @@ async fn serve_connections(
     dependencies: ConnectionDependencies,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessRuntimeError> {
-    let snapshot_reader_capacity =
-        snapshot_reader_capacity(dependencies.pool.options().get_max_connections())
-            .ok_or(ProcessRuntimeError::InsufficientPoolCapacity)?;
+    let snapshot_reader_budget = dependencies
+        .snapshot_reader_budget
+        .ok_or(ProcessRuntimeError::InsufficientPoolCapacity)?;
     let services = ConnectionServices {
         recovery_reporter: dependencies.recovery_reporter,
         pool: dependencies.pool,
@@ -640,7 +653,7 @@ async fn serve_connections(
         import_waiter_budget: Arc::new(Semaphore::new(MAX_IMPORT_ADMISSION_WAITERS)),
         blob_read_budget: blob_read_budget(),
         review_command_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEW_COMMANDS)),
-        snapshot_reader_budget: Arc::new(Semaphore::new(snapshot_reader_capacity)),
+        snapshot_reader_budget,
         blob_store_registry: dependencies.blob_store_registry,
     };
     let mut connections = JoinSet::new();
@@ -1315,6 +1328,11 @@ fn snapshot_reader_capacity(max_pool_connections: u32) -> Option<usize> {
     usize::try_from(available)
         .ok()
         .map(|available| available.min(MAX_CONCURRENT_SNAPSHOT_READERS))
+}
+
+pub fn shared_snapshot_reader_budget(max_pool_connections: u32) -> Option<Arc<Semaphore>> {
+    snapshot_reader_capacity(max_pool_connections)
+        .map(|capacity| Arc::new(Semaphore::new(capacity)))
 }
 
 const fn is_review_mutation(request: &ClientRequest) -> bool {

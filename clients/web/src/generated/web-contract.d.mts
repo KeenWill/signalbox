@@ -33,13 +33,7 @@ type WebAttentionJudgeFacts = {
   readonly failed: string;
 };
 
-type WebAttentionSnapshot = {
-  readonly continuation_after_session_id?: string | null;
-  readonly cursor: string;
-  readonly summaries: ReadonlyArray<WebAttentionSummary>;
-};
-
-type WebAttentionState = "active" | "queued" | "blocked" | "awaiting_approval" | "ambiguous" | "awaiting_reconciliation" | "runner_lost" | "idle";
+type WebAttentionState = "active" | "queued" | "blocked" | "awaiting_approval" | "ambiguous" | "awaiting_tool_recovery" | "awaiting_reconciliation" | "runner_lost" | "idle";
 
 type WebAttentionSummary = {
   readonly action?: WebAttentionAction | null;
