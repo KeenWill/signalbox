@@ -1565,7 +1565,14 @@ fn process_user_entry(entry: &ProcessTranscriptEntry) -> (AcceptedInputId, TurnI
             turn,
             content,
             ..
-        } => (*accepted_input, *turn, content.as_str()),
+        } => (
+            *accepted_input,
+            *turn,
+            content
+                .single_text()
+                .expect("fixture process content is one text part")
+                .as_str(),
+        ),
         _ => panic!("fixture entry must be a process user entry"),
     }
 }
@@ -1820,6 +1827,20 @@ async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, Stri
         .await?;
 
     Ok((container, pool, database_url))
+}
+
+async fn apply_migrations_before(pool: &PgPool, exclusive_version: i64) -> Result<(), sqlx::Error> {
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .take_while(|migration| migration.version < exclusive_version)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    Ok(())
 }
 
 async fn postgres_before_approval_migration()
@@ -2690,6 +2711,10 @@ fn input_with_delivery(
     )
 }
 
+fn user_content(value: &str) -> UserContent {
+    UserContent::try_text(value.to_owned()).expect("test content is admitted")
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn insert_malformed_submit_rejection(
     pool: &PgPool,
@@ -2719,7 +2744,7 @@ async fn insert_malformed_submit_rejection(
         "INSERT INTO submit_input_command
             (command_id, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind, descendant_scope,
+             delivery_kind, descendant_scope,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -2731,7 +2756,7 @@ async fn insert_malformed_submit_rejection(
          SELECT
              $1, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind, descendant_scope,
+             delivery_kind, descendant_scope,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -2749,6 +2774,19 @@ async fn insert_malformed_submit_rejection(
     .bind(result_unknown_alias)
     .bind(result_selected_defaults)
     .bind(result_last_position)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO submit_input_command_content_part
+            (command_id, position, part_kind, text_value, blob_digest,
+             attachment_kind, declared_media_type, display_filename)
+         SELECT $1, position, part_kind, text_value, blob_digest,
+                attachment_kind, declared_media_type, display_filename
+           FROM submit_input_command_content_part
+          WHERE command_id = $2",
+    )
+    .bind(command_id)
+    .bind(source_command_id)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await
@@ -2776,7 +2814,7 @@ async fn insert_cross_wired_occupied_rejection(
         "INSERT INTO submit_input_command
             (command_id, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind, descendant_scope,
+             delivery_kind, descendant_scope,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -2789,7 +2827,7 @@ async fn insert_cross_wired_occupied_rejection(
          SELECT
              $1, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind, descendant_scope,
+             delivery_kind, descendant_scope,
              $3, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -2805,6 +2843,19 @@ async fn insert_cross_wired_occupied_rejection(
     .bind(command_id)
     .bind(source_command_id)
     .bind(expected_active_turn_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO submit_input_command_content_part
+            (command_id, position, part_kind, text_value, blob_digest,
+             attachment_kind, declared_media_type, display_filename)
+         SELECT $1, position, part_kind, text_value, blob_digest,
+                attachment_kind, declared_media_type, display_filename
+           FROM submit_input_command_content_part
+          WHERE command_id = $2",
+    )
+    .bind(command_id)
+    .bind(source_command_id)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await
@@ -2836,7 +2887,7 @@ async fn insert_parked_approval_interrupt_rejection(
         "INSERT INTO submit_input_command
             (command_id, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind, descendant_scope,
+             delivery_kind, descendant_scope,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -2849,7 +2900,7 @@ async fn insert_parked_approval_interrupt_rejection(
          SELECT
              $1, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, 'interrupt', 'parent_alone',
+             'interrupt', 'parent_alone',
              $3, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -2866,6 +2917,19 @@ async fn insert_parked_approval_interrupt_rejection(
     .bind(command_id)
     .bind(source_command_id)
     .bind(named_active_turn_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO submit_input_command_content_part
+            (command_id, position, part_kind, text_value, blob_digest,
+             attachment_kind, declared_media_type, display_filename)
+         SELECT $1, position, part_kind, text_value, blob_digest,
+                attachment_kind, declared_media_type, display_filename
+           FROM submit_input_command_content_part
+          WHERE command_id = $2",
+    )
+    .bind(command_id)
+    .bind(source_command_id)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await
@@ -4139,17 +4203,8 @@ fn assert_projected_steering_entry(
             ..
         } if *accepted_input == expected_input
             && *turn == expected_turn
-            && content == expected_content
+            && content == &user_content(expected_content)
     ));
-}
-
-#[track_caller]
-fn assert_refused_reclassified_successor(outcome: &ModelCallTerminalOutcome, successor: TurnId) {
-    let ModelCallTerminalOutcome::Refused(refused) = outcome else {
-        panic!("the source call must refuse and reclassify its steering")
-    };
-    assert_eq!(refused.reclassified_pending_steering().len(), 1);
-    assert_eq!(refused.reclassified_pending_steering()[0].turn(), successor);
 }
 
 fn create_session_corruption(error: CreateSessionRepositoryError) -> CreateSessionCorruption {

@@ -799,7 +799,8 @@ async fn s_goal_inv048_inv053_goal_owned_input_activates_without_a_user_command(
             accepted_input: candidates.accepted_input(),
             turn: candidates.turn(),
             acceptance_position: SessionInputPosition::first(),
-            content: goal_content,
+            content: UserContent::try_text(goal_content)
+                .expect("the goal fixture content is admitted"),
         }
     );
 
@@ -1041,10 +1042,13 @@ async fn s_goal_inv048_resume_delivers_guidance_to_the_next_turn() -> Result<(),
             .await?;
 
     let resumed_content: String = sqlx::query_scalar(
-        "SELECT content_text
-           FROM accepted_input
-          WHERE accepted_input_id = $1
-            AND session_id = $2",
+        "SELECT part.text_value
+           FROM accepted_input AS accepted
+           JOIN accepted_input_content_part AS part
+             ON part.accepted_input_id = accepted.accepted_input_id
+            AND part.position = 0
+          WHERE accepted.accepted_input_id = $1
+            AND accepted.session_id = $2",
     )
     .bind(resumed_turn.accepted_input().into_uuid())
     .bind(Uuid::from_u128(SESSION))
@@ -2739,19 +2743,27 @@ async fn inv048_goal_turn_configuration_matches_its_defaults_epoch() -> Result<(
     sqlx::query(
         "INSERT INTO accepted_input
             (accepted_input_id, accepting_command_id, session_id,
-             content_kind, content_text, delivery_kind,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
              acceptance_position, disposition_kind, origin_turn_id)
-         VALUES ($1, NULL, $2, 'text', $3, 'start_when_no_active_turn',
+         VALUES ($1, NULL, $2, 'start_when_no_active_turn',
                  NULL, 1, 'use_session_default', NULL, NULL, NULL,
-                 1, 'origin_of', $4)",
+                 1, 'origin_of', $3)",
     )
     .bind(accepted.into_uuid())
     .bind(Uuid::from_u128(SESSION))
-    .bind("misconfigured turn")
     .bind(turn.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO accepted_input_content_part
+            (accepted_input_id, position, part_kind, text_value)
+         VALUES ($1, 0, 'text', $2)",
+    )
+    .bind(accepted.into_uuid())
+    .bind("misconfigured turn")
     .execute(&mut *transaction)
     .await?;
     sqlx::query(

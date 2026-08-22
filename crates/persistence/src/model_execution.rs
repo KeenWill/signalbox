@@ -4939,7 +4939,9 @@ async fn load_origin_contents(
         .collect::<Vec<_>>();
     let rows = sqlx::query(
         "SELECT accepted.accepted_input_id, accepted.accepting_command_id,
-                accepted.content_text, goal.turn_id AS goal_turn_id
+                accepted_input_content_parts_json(accepted.accepted_input_id)
+                    AS content_parts,
+                goal.turn_id AS goal_turn_id
            FROM accepted_input AS accepted
            LEFT JOIN goal_turn AS goal
              ON goal.accepted_input_id = accepted.accepted_input_id
@@ -4965,7 +4967,7 @@ async fn load_origin_contents(
         if pending_by_accepted.contains_key(&accepted)
             || consumed_by_accepted.contains_key(&accepted)
         {
-            let content = UserContent::try_text(required(&row, "content_text")?)
+            let content = crate::user_content::decode(required(&row, "content_parts")?)
                 .map_err(|_| ModelCallCorruption::Inconsistent("steering content"))?;
             if steering_content_by_accepted
                 .insert(accepted, content)
@@ -4989,7 +4991,7 @@ async fn load_origin_contents(
                 StoredAcceptedInputProvenance::Command(command)
             }
             (None, Some(_)) => {
-                let content = UserContent::try_text(required(&row, "content_text")?)
+                let content = crate::user_content::decode(required(&row, "content_parts")?)
                     .map_err(|_| ModelCallCorruption::Inconsistent("goal input content"))?;
                 StoredAcceptedInputProvenance::Goal(content)
             }

@@ -1042,7 +1042,7 @@ async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
             ('10000000-0000-4000-8000-000000000134',
              'replace_session_defaults', 99, transaction_timestamp()),
             ('10000000-0000-4000-8000-000000000135',
-             'submit_input', 1, transaction_timestamp()),
+             'submit_input', 3, transaction_timestamp()),
             ('10000000-0000-4000-8000-000000000136',
              'submit_input', 99, transaction_timestamp())",
     )
@@ -2533,7 +2533,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+         VALUES ($1, 'submit_input', 3, transaction_timestamp())",
     )
     .bind(Uuid::from_u128(0x3ff))
     .execute(&mut *transaction)
@@ -2562,8 +2562,8 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
         )
         .await?;
     let error = sqlx::query(
-        "UPDATE submit_input_command
-            SET content_text = 'mutated'
+        "UPDATE submit_input_command_content_part
+            SET text_value = 'mutated'
           WHERE command_id = $1",
     )
     .bind(Uuid::from_u128(0x3fe))
@@ -2593,78 +2593,86 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
         .await?;
 
     let source_command_id = Uuid::from_u128(0x3fd);
-    let malformed_rejections = [
-        (
-            Uuid::from_u128(0x3fa),
-            "no_active_turn",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
-        (
-            Uuid::from_u128(0x3f9),
-            "session_defaults_version_mismatch",
-            None,
-            None,
-            Some(Decimal::ONE),
-            None,
-            None,
-            None,
-        ),
-        (
-            Uuid::from_u128(0x3f8),
-            "unknown_model_alias",
-            None,
-            None,
-            None,
-            Some(Uuid::from_u128(0x8f8)),
-            None,
-            None,
-        ),
-        (
-            Uuid::from_u128(0x3f7),
-            "acceptance_position_exhausted",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
-    ];
-    for (
-        command_id,
-        rejection_kind,
-        expected_turn,
-        expected_defaults,
-        current_defaults,
-        unknown_alias,
-        selected_defaults,
-        last_position,
-    ) in malformed_rejections
-    {
-        let error = insert_malformed_submit_rejection(
-            &pool,
-            command_id,
-            source_command_id,
-            rejection_kind,
-            expected_turn,
-            expected_defaults,
-            current_defaults,
-            unknown_alias,
-            selected_defaults,
-            last_position,
-        )
-        .await
-        .expect_err(rejection_kind);
-        assert_eq!(
-            error.as_database_error().and_then(|error| error.code()),
-            Some("23514".into())
-        );
-    }
+    let malformed_no_active_turn = insert_malformed_submit_rejection(
+        &pool,
+        Uuid::from_u128(0x3fa),
+        source_command_id,
+        "no_active_turn",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("no_active_turn");
+    assert_eq!(
+        malformed_no_active_turn
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    let malformed_defaults_mismatch = insert_malformed_submit_rejection(
+        &pool,
+        Uuid::from_u128(0x3f9),
+        source_command_id,
+        "session_defaults_version_mismatch",
+        None,
+        None,
+        Some(Decimal::ONE),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("session_defaults_version_mismatch");
+    assert_eq!(
+        malformed_defaults_mismatch
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    let malformed_unknown_alias = insert_malformed_submit_rejection(
+        &pool,
+        Uuid::from_u128(0x3f8),
+        source_command_id,
+        "unknown_model_alias",
+        None,
+        None,
+        None,
+        Some(Uuid::from_u128(0x8f8)),
+        None,
+        None,
+    )
+    .await
+    .expect_err("unknown_model_alias");
+    assert_eq!(
+        malformed_unknown_alias
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    let malformed_exhaustion = insert_malformed_submit_rejection(
+        &pool,
+        Uuid::from_u128(0x3f7),
+        source_command_id,
+        "acceptance_position_exhausted",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("acceptance_position_exhausted");
+    assert_eq!(
+        malformed_exhaustion
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
 
     let error = insert_malformed_submit_rejection(
         &pool,
@@ -2689,7 +2697,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+         VALUES ($1, 'submit_input', 3, transaction_timestamp())",
     )
     .bind(Uuid::from_u128(0x3fb))
     .execute(&mut *transaction)
@@ -2698,7 +2706,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
         "INSERT INTO submit_input_command
             (command_id, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -2710,7 +2718,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
          SELECT
              $1, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -2725,6 +2733,19 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     .bind(Uuid::from_u128(0x3fb))
     .bind(Uuid::from_u128(0x9fb))
     .bind(Uuid::from_u128(0xafb))
+    .bind(Uuid::from_u128(0x3fd))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO submit_input_command_content_part
+            (command_id, position, part_kind, text_value, blob_digest,
+             attachment_kind, declared_media_type, display_filename)
+         SELECT $1, position, part_kind, text_value, blob_digest,
+                attachment_kind, declared_media_type, display_filename
+           FROM submit_input_command_content_part
+          WHERE command_id = $2",
+    )
+    .bind(Uuid::from_u128(0x3fb))
     .bind(Uuid::from_u128(0x3fd))
     .execute(&mut *transaction)
     .await?;
@@ -2771,9 +2792,11 @@ async fn content_size_bound_commits_at_exact_maximum() -> Result<(), Box<dyn Err
     let (container, pool, _database_url) = migrated_postgres().await?;
     let expected_length = i32::try_from(persist_at_bound_content(&pool).await?)?;
     let stored_lengths: Vec<i32> = sqlx::query_scalar(
-        "SELECT octet_length(content_text) FROM submit_input_command
+        "SELECT octet_length(text_value)
+           FROM submit_input_command_content_part
          UNION ALL
-         SELECT octet_length(content_text) FROM accepted_input",
+         SELECT octet_length(text_value)
+           FROM accepted_input_content_part",
     )
     .fetch_all(&pool)
     .await?;
@@ -2794,22 +2817,22 @@ async fn content_size_bound_commits_at_exact_maximum() -> Result<(), Box<dyn Err
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn submit_command_schema_rejects_content_above_maximum() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    persist_at_bound_content(&pool).await?;
+    let above_bound = "a".repeat(persist_at_bound_content(&pool).await? + 1);
 
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+         VALUES ($1, 'submit_input', 3, transaction_timestamp())",
     )
     .bind(Uuid::from_u128(0x323))
     .execute(&mut *transaction)
     .await?;
-    let command_error = sqlx::query(
+    sqlx::query(
         "INSERT INTO submit_input_command
             (command_id, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -2821,7 +2844,7 @@ async fn submit_command_schema_rejects_content_above_maximum() -> Result<(), Box
          SELECT
              $1, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text || 'a', delivery_kind,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
@@ -2836,15 +2859,28 @@ async fn submit_command_schema_rejects_content_above_maximum() -> Result<(), Box
     .bind(Uuid::from_u128(0x323))
     .bind(Uuid::from_u128(0x322))
     .execute(&mut *transaction)
-    .await
-    .expect_err("the schema refuses command content one byte over the bound");
+    .await?;
+    sqlx::query(
+        "INSERT INTO submit_input_command_content_part
+            (command_id, position, part_kind, text_value)
+         VALUES ($1, 0, 'text', $2)",
+    )
+    .bind(Uuid::from_u128(0x323))
+    .bind(above_bound)
+    .execute(&mut *transaction)
+    .await?;
+    let command_error =
+        sqlx::query("SET CONSTRAINTS submit_input_command_content_parts_are_valid IMMEDIATE")
+            .execute(&mut *transaction)
+            .await
+            .expect_err("the schema refuses command content one byte over the bound");
     let database_error = command_error
         .as_database_error()
         .expect("a check violation is a database error");
     assert_eq!(database_error.code(), Some("23514".into()));
     assert_eq!(
         database_error.constraint(),
-        Some("submit_input_command_content_bounded")
+        Some("submit_input_command_content_parts_valid")
     );
     transaction.rollback().await?;
 
@@ -2859,50 +2895,54 @@ async fn submit_command_schema_rejects_content_above_maximum() -> Result<(), Box
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn accepted_input_schema_rejects_content_above_maximum() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    persist_at_bound_content(&pool).await?;
+    let above_bound = "a".repeat(persist_at_bound_content(&pool).await? + 1);
 
     let mut transaction = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
-    )
-    .bind(Uuid::from_u128(0x323))
-    .execute(&mut *transaction)
-    .await?;
-    let accepted_error = sqlx::query(
         "INSERT INTO accepted_input
             (accepted_input_id, accepting_command_id, session_id,
-             content_kind, content_text, delivery_kind,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
              acceptance_position, disposition_kind, origin_turn_id)
          SELECT
-             $1, $2, session_id,
-             content_kind, content_text || 'a', delivery_kind,
+             $1, NULL, session_id,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
-             $3, disposition_kind, $4
+             $2, disposition_kind, $3
            FROM accepted_input
-          WHERE accepted_input_id = $5",
+          WHERE accepted_input_id = $4",
     )
     .bind(Uuid::from_u128(0x922))
-    .bind(Uuid::from_u128(0x323))
     .bind(Decimal::TWO)
     .bind(Uuid::from_u128(0xa22))
     .bind(Uuid::from_u128(0x921))
     .execute(&mut *transaction)
-    .await
-    .expect_err("the schema refuses accepted content one byte over the bound");
+    .await?;
+    sqlx::query(
+        "INSERT INTO accepted_input_content_part
+            (accepted_input_id, position, part_kind, text_value)
+         VALUES ($1, 0, 'text', $2)",
+    )
+    .bind(Uuid::from_u128(0x922))
+    .bind(above_bound)
+    .execute(&mut *transaction)
+    .await?;
+    let accepted_error =
+        sqlx::query("SET CONSTRAINTS accepted_input_content_parts_are_valid IMMEDIATE")
+            .execute(&mut *transaction)
+            .await
+            .expect_err("the schema refuses accepted content one byte over the bound");
     let database_error = accepted_error
         .as_database_error()
         .expect("a check violation is a database error");
     assert_eq!(database_error.code(), Some("23514".into()));
     assert_eq!(
         database_error.constraint(),
-        Some("accepted_input_content_bounded")
+        Some("accepted_input_content_parts_valid")
     );
     transaction.rollback().await?;
 
@@ -2984,11 +3024,18 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
     );
 
     let stored: (String, String, String, i64, String) = sqlx::query_as(
-        "SELECT typed.content_text, accepted.content_text, queued.priority_kind,
+        "SELECT command_part.text_value, accepted_part.text_value,
+                queued.priority_kind,
                 queued.acceptance_position::bigint, turn.state_kind
            FROM submit_input_command AS typed
+           JOIN submit_input_command_content_part AS command_part
+             ON command_part.command_id = typed.command_id
+            AND command_part.position = 0
            JOIN accepted_input AS accepted
              ON accepted.accepting_command_id = typed.command_id
+           JOIN accepted_input_content_part AS accepted_part
+             ON accepted_part.accepted_input_id = accepted.accepted_input_id
+            AND accepted_part.position = 0
            JOIN queued_input_origin AS queued
              ON queued.accepted_input_id = accepted.accepted_input_id
            JOIN turn_lifecycle AS turn

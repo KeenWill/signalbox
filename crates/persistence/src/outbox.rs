@@ -20,7 +20,7 @@ use signalbox_domain::{
     RunnerGeneration, RunnerId, RunnerSandboxProfile, RunnerWorkingDirectory,
     SemanticTranscriptEntryId, SessionId, SessionInputPosition, SessionModelSettingsChanged,
     ToolApprovalResolution, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
-    TurnModelSettingsResolved,
+    TurnModelSettingsResolved, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -132,8 +132,8 @@ pub enum DispatchedOutboxEventKind {
         turn: TurnId,
         /// Immutable per-session acceptance position.
         acceptance_position: SessionInputPosition,
-        /// Exact accepted text.
-        content: String,
+        /// Exact accepted ordered content.
+        content: UserContent,
     },
     /// A queued goal turn became intentionally ineligible.
     GoalTurnRetired {
@@ -565,6 +565,8 @@ pub enum OutboxCorruption {
     InvalidSequence,
     /// An input-accepted record carried an invalid positive position.
     InvalidAcceptancePosition,
+    /// An input-accepted record carried invalid ordered content satellites.
+    InvalidAcceptedInputContent,
     /// An event header used an unsupported storage version.
     UnsupportedStorageVersion,
     /// An event header named no admitted typed record family.
@@ -600,6 +602,7 @@ impl fmt::Display for OutboxCorruption {
             Self::MissingCommittedEventHeader => "outbox committed event header is missing",
             Self::InvalidSequence => "outbox sequence is invalid",
             Self::InvalidAcceptancePosition => "outbox input acceptance position is invalid",
+            Self::InvalidAcceptedInputContent => "outbox accepted input content is invalid",
             Self::UnsupportedStorageVersion => "outbox storage version is unsupported",
             Self::UnsupportedEventKind => "outbox event kind is unsupported",
             Self::MissingTypedRecord => "outbox typed event record is missing",
@@ -1039,7 +1042,10 @@ async fn load_event(
             // that also carries a `goal_turn` row.
             let row = sqlx::query(
                 "SELECT event.accepted_input_id, event.turn_id,
-                        event.acceptance_position, accepted.content_text
+                        event.acceptance_position,
+                        accepted_input_content_parts_json(
+                            accepted.accepted_input_id
+                        ) AS content_parts
                    FROM input_accepted_outbox_event AS event
                    JOIN accepted_input AS accepted
                      ON accepted.accepted_input_id = event.accepted_input_id
@@ -1052,8 +1058,9 @@ async fn load_event(
                     AND command.result_session_id = event.session_id
                     AND command.result_kind = 'applied'
                     AND command.result_accepted_input_id = event.accepted_input_id
-                    AND command.content_kind = 'text'
-                    AND command.content_text = accepted.content_text
+                    AND accepted_input_parts_match_command(
+                        accepted.accepted_input_id
+                    )
                    LEFT JOIN goal_turn AS goal
                      ON goal.session_id = event.session_id
                     AND goal.accepted_input_id = event.accepted_input_id
@@ -1106,11 +1113,13 @@ async fn load_event(
             let acceptance_position: Decimal = row.try_get("acceptance_position")?;
             let acceptance_position = input_position_from_numeric(acceptance_position)
                 .map_err(|_| OutboxCorruption::InvalidAcceptancePosition)?;
+            let content = crate::user_content::decode(row.try_get("content_parts")?)
+                .map_err(|_| OutboxCorruption::InvalidAcceptedInputContent)?;
             DispatchedOutboxEventKind::InputAccepted {
                 accepted_input: AcceptedInputId::from_uuid(row.try_get("accepted_input_id")?),
                 turn: TurnId::from_uuid(row.try_get("turn_id")?),
                 acceptance_position,
-                content: row.try_get("content_text")?,
+                content,
             }
         }
         GOAL_TURN_RETIRED => {

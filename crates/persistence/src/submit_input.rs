@@ -12,23 +12,23 @@ use signalbox_domain::{
     AcceptedInputSchedulingReconstitutionFailure, AcceptedInputSchedulingReconstitutionInput,
     AcceptedInputStartingLineage, AcceptedInputTurnSchedulingRecord,
     AcceptedInputTurnSchedulingRecordState, ActiveTurnSchedulingReconstitutionInput, Actor,
-    AppliedInterruptCommandResult, AssistantText, CancellationStopDisposition,
-    CancelledModelCallTurnIdentities, CancelledTurnExecutionReconstitutionInput,
-    ConsumedSteeringReconstitutionInput, ContextCompactionId,
-    ContextCompactionModelCallReconstitutionInput, ContextCompactionModelCallState,
-    ContextCompactionRange, ContextCompactionReconstitutionInput, ContextCompactionTokenUsage,
-    ContextFrontierId, ContinuationRoundReconstitutionInput, DelegatedTurnSchedulingFact,
-    DelegatedTurnSchedulingState, DelegationContent, DelegationMessageId, DelegationOutcome,
-    DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenanceReconstitutionInput,
-    DelegationWaitMode, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
-    DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
-    FrozenModelSelection, GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput,
-    GoalTurnSource, IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId,
-    ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-    ModelCallTerminalOutcome, ModelCapabilityCatalog, ModelSelectionOverride,
-    ModelSelectionRequest, NonAcceptedTurnPredecessorReconstitutionInput,
-    NonEmptyUnicodeTextFailure, OriginConfiguration, OriginConfigurationReconstitutionInput,
-    OriginModelSettingsError, PerInputConfigurationChoices,
+    AppliedInterruptCommandResult, AssistantText, AttachmentDisplayFilename, AttachmentKind,
+    CancellationStopDisposition, CancelledModelCallTurnIdentities,
+    CancelledTurnExecutionReconstitutionInput, ConsumedSteeringReconstitutionInput,
+    ContextCompactionId, ContextCompactionModelCallReconstitutionInput,
+    ContextCompactionModelCallState, ContextCompactionRange, ContextCompactionReconstitutionInput,
+    ContextCompactionTokenUsage, ContextFrontierId, ContinuationRoundReconstitutionInput,
+    DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState, DelegationContent,
+    DelegationMessageId, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
+    DelegationProvenanceReconstitutionInput, DelegationWaitMode, DeliveryRequest,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
+    GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput, GoalTurnSource,
+    IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId, ModelCallInterruptOutcome,
+    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCallTerminalOutcome,
+    ModelCapabilityCatalog, ModelSelectionOverride, ModelSelectionRequest,
+    NonAcceptedTurnPredecessorReconstitutionInput, NonEmptyUnicodeTextFailure, OriginConfiguration,
+    OriginConfigurationReconstitutionInput, OriginModelSettingsError, PerInputConfigurationChoices,
     PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
     ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
     RunnerGeneration, RunnerId, SemanticTranscriptEntryId,
@@ -57,7 +57,7 @@ use signalbox_domain::{
     SubmitInputTerminalSourceConstructionInput, SubmitInputTerminalSourceReconstitutionInput,
     SubmitInputTurnOriginReconstitutionInput, TerminalAttemptEndReconstitutionInput, ToolAttemptId,
     ToolRequestId, TranscriptAncestry, TurnAttemptId, TurnId, UnstoppedAttemptDisposition,
-    UnsupportedModelSetting, UserContent,
+    UnsupportedModelSetting, UserContent, UserContentPart,
 };
 use sqlx::{FromRow, PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -97,8 +97,7 @@ use crate::{
     },
 };
 
-const STORAGE_VERSION: i16 = 2;
-const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 2;
+const STORAGE_VERSION: i16 = 3;
 const APPLIED: &str = "applied";
 const REJECTED: &str = "rejected";
 
@@ -5760,7 +5759,6 @@ async fn insert_prepared_command(
         "INSERT INTO submit_input_command
             (command_id, command_kind, storage_version, session_id,
              actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text,
              delivery_kind, descendant_scope,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
@@ -5773,9 +5771,9 @@ async fn insert_prepared_command(
              result_selected_defaults_version, result_last_position,
              result_existing_interrupt_command_id)
          VALUES
-            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-             $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-             $26, $27, $28, $29, $30, $31)",
+            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+             $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
+             $24, $25, $26, $27, $28, $29)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(SUBMIT_INPUT_KIND)
@@ -5784,8 +5782,6 @@ async fn insert_prepared_command(
     .bind(actor.kind)
     .bind(actor.turn)
     .bind(actor.tool_request)
-    .bind("text")
-    .bind(required_single_text(command.content())?)
     .bind(delivery.kind)
     .bind(delivery.descendant_scope)
     .bind(delivery.expected_active_turn)
@@ -5810,6 +5806,8 @@ async fn insert_prepared_command(
     .bind(result.existing_interrupt_command)
     .execute(&mut *connection)
     .await?;
+
+    insert_command_content_parts(connection, command.command_id(), command.content()).await?;
 
     Ok(())
 }
@@ -5839,7 +5837,7 @@ async fn insert_prepared_effects(
         sqlx::query(
             "INSERT INTO accepted_input
                 (accepted_input_id, accepting_command_id, session_id,
-                 content_kind, content_text, delivery_kind,
+                 delivery_kind,
                  descendant_scope,
                  expected_active_turn_id, expected_defaults_version,
                  model_override_kind, replacement_model_kind,
@@ -5847,14 +5845,12 @@ async fn insert_prepared_effects(
                  model_settings_override, acceptance_position, disposition_kind,
                  origin_turn_id)
              VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                 $14, $15, $16, $17)",
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                 $12, $13, $14, $15)",
         )
         .bind(accepted_input_id_to_uuid(applied.accepted_input()))
         .bind(durable_command_id_to_uuid(command.command_id()))
         .bind(session_id_to_uuid(applied.session()))
-        .bind("text")
-        .bind(required_single_text(command.content())?)
         .bind(delivery.kind)
         .bind(delivery.descendant_scope)
         .bind(delivery.expected_active_turn)
@@ -5869,6 +5865,8 @@ async fn insert_prepared_effects(
         .bind(turn_id_to_uuid(applied.turn()))
         .execute(&mut *connection)
         .await?;
+
+        mirror_accepted_content_parts(connection, applied.accepted_input()).await?;
 
         let settings_event =
             applied
@@ -5949,7 +5947,7 @@ async fn insert_prepared_effects(
         sqlx::query(
             "INSERT INTO accepted_input
                 (accepted_input_id, accepting_command_id, session_id,
-                 content_kind, content_text, delivery_kind,
+                 delivery_kind,
                  descendant_scope,
                  expected_active_turn_id, expected_defaults_version,
                  model_override_kind, replacement_model_kind,
@@ -5957,14 +5955,13 @@ async fn insert_prepared_effects(
                  model_settings_override, acceptance_position, disposition_kind,
                  origin_turn_id)
              VALUES
-                ($1, $2, $3, 'text', $4, 'next_safe_point', NULL,
-                 $5, NULL, NULL, NULL, NULL, NULL, $6, $7,
+                ($1, $2, $3, 'next_safe_point', NULL,
+                 $4, NULL, NULL, NULL, NULL, NULL, $5, $6,
                  'pending_steering', NULL)",
         )
         .bind(accepted_input_id_to_uuid(applied.accepted_input()))
         .bind(durable_command_id_to_uuid(command.command_id()))
         .bind(session_id_to_uuid(applied.session()))
-        .bind(required_single_text(command.content())?)
         .bind(turn_id_to_uuid(applied.binding().source_turn()))
         .bind(model_settings_overlay_to_json(
             signalbox_domain::ModelSettingsOverlay::inherit_all(),
@@ -5972,21 +5969,106 @@ async fn insert_prepared_effects(
         .bind(input_position_to_numeric(applied.acceptance_position()))
         .execute(&mut *connection)
         .await?;
+
+        mirror_accepted_content_parts(connection, applied.accepted_input()).await?;
     }
 
     Ok(())
 }
 
-fn required_single_text(content: &UserContent) -> Result<&str, SubmitInputRepositoryError> {
-    content
-        .single_text()
-        .map(signalbox_domain::NonEmptyUnicodeText::as_str)
-        .ok_or_else(|| {
-            SubmitInputCorruption::Inconsistent(
-                "multipart content requires the ordered-parts storage migration",
-            )
-            .into()
-        })
+async fn insert_command_content_parts(
+    connection: &mut PgConnection,
+    command: DurableCommandId,
+    content: &UserContent,
+) -> Result<(), SubmitInputRepositoryError> {
+    for (position, part) in content.parts().iter().enumerate() {
+        let encoded = encode_content_part(part);
+        sqlx::query(
+            "INSERT INTO submit_input_command_content_part
+                (command_id, position, part_kind, text_value, blob_digest,
+                 attachment_kind, declared_media_type, display_filename)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(durable_command_id_to_uuid(command))
+        .bind(
+            i16::try_from(position).map_err(|_| {
+                SubmitInputCorruption::Inconsistent("command content part position")
+            })?,
+        )
+        .bind(encoded.kind)
+        .bind(encoded.text)
+        .bind(encoded.digest)
+        .bind(encoded.attachment_kind)
+        .bind(encoded.media_type)
+        .bind(encoded.filename)
+        .execute(&mut *connection)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn mirror_accepted_content_parts(
+    connection: &mut PgConnection,
+    accepted_input: AcceptedInputId,
+) -> Result<(), SubmitInputRepositoryError> {
+    sqlx::query(
+        "INSERT INTO accepted_input_content_part
+            (accepted_input_id, position, part_kind, text_value, blob_digest,
+             attachment_kind, declared_media_type, display_filename)
+         SELECT accepted.accepted_input_id, part.position, part.part_kind,
+                part.text_value, part.blob_digest, part.attachment_kind,
+                part.declared_media_type, part.display_filename
+           FROM accepted_input AS accepted
+           JOIN submit_input_command_content_part AS part
+             ON part.command_id = accepted.accepting_command_id
+          WHERE accepted.accepted_input_id = $1
+          ORDER BY part.position",
+    )
+    .bind(accepted_input_id_to_uuid(accepted_input))
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
+struct EncodedContentPart<'a> {
+    kind: &'static str,
+    text: Option<&'a str>,
+    digest: Option<&'a [u8]>,
+    attachment_kind: Option<&'static str>,
+    media_type: Option<&'a str>,
+    filename: Option<&'a str>,
+}
+
+fn encode_content_part(part: &UserContentPart) -> EncodedContentPart<'_> {
+    match part {
+        UserContentPart::Text { value } => EncodedContentPart {
+            kind: "text",
+            text: Some(value.as_str()),
+            digest: None,
+            attachment_kind: None,
+            media_type: None,
+            filename: None,
+        },
+        UserContentPart::Attachment {
+            digest,
+            kind,
+            media_type,
+            display_filename,
+        } => EncodedContentPart {
+            kind: "attachment",
+            text: None,
+            digest: Some(digest.as_bytes()),
+            attachment_kind: Some(match kind {
+                AttachmentKind::Image => "image",
+                AttachmentKind::Document => "document",
+                AttachmentKind::File => "file",
+            }),
+            media_type: Some(media_type.as_str()),
+            filename: display_filename
+                .as_ref()
+                .map(AttachmentDisplayFilename::as_str),
+        },
+    }
 }
 
 struct EncodedActor {
@@ -6439,8 +6521,27 @@ async fn load_complete_rows(
             typed.actor_kind,
             typed.actor_turn_id,
             typed.actor_tool_request_id,
-            typed.content_kind AS command_content_kind,
-            typed.content_text AS command_content_text,
+            (
+                SELECT COALESCE(
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'position', part.position,
+                            'part_kind', part.part_kind,
+                            'text_value', part.text_value,
+                            'blob_digest', CASE
+                                WHEN part.blob_digest IS NULL THEN NULL
+                                ELSE 'sha256:' || encode(part.blob_digest, 'hex')
+                            END,
+                            'attachment_kind', part.attachment_kind,
+                            'declared_media_type', part.declared_media_type,
+                            'display_filename', part.display_filename
+                        ) ORDER BY part.position
+                    ),
+                    '[]'::jsonb
+                )
+                  FROM submit_input_command_content_part AS part
+                 WHERE part.command_id = typed.command_id
+            ) AS command_content_parts,
             typed.delivery_kind AS command_delivery_kind,
             typed.descendant_scope AS command_descendant_scope,
             typed.expected_active_turn_id AS command_expected_active_turn_id,
@@ -6466,8 +6567,27 @@ async fn load_complete_rows(
             accepted.accepting_command_id,
             accepted.accepted_input_id,
             accepted.session_id AS accepted_session_id,
-            accepted.content_kind AS accepted_content_kind,
-            accepted.content_text AS accepted_content_text,
+            (
+                SELECT COALESCE(
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'position', part.position,
+                            'part_kind', part.part_kind,
+                            'text_value', part.text_value,
+                            'blob_digest', CASE
+                                WHEN part.blob_digest IS NULL THEN NULL
+                                ELSE 'sha256:' || encode(part.blob_digest, 'hex')
+                            END,
+                            'attachment_kind', part.attachment_kind,
+                            'declared_media_type', part.declared_media_type,
+                            'display_filename', part.display_filename
+                        ) ORDER BY part.position
+                    ),
+                    '[]'::jsonb
+                )
+                  FROM accepted_input_content_part AS part
+                 WHERE part.accepted_input_id = accepted.accepted_input_id
+            ) AS accepted_content_parts,
             accepted.delivery_kind AS accepted_delivery_kind,
             accepted.descendant_scope AS accepted_descendant_scope,
             accepted.expected_active_turn_id AS accepted_expected_active_turn_id,
@@ -6803,8 +6923,7 @@ fn decode_stored_turn_origin_provenance(
                 }
             };
             let content = decode_content(
-                required(row, "origin_content_kind")?,
-                required(row, "origin_content_text")?,
+                required(row, "origin_content_parts")?,
                 "goal origin content",
             )?;
             Ok((
@@ -6884,8 +7003,27 @@ pub(crate) async fn load_turn_origin_graph(
             current.turn_id AS origin_turn_id,
             accepted.accepting_command_id AS origin_command_id,
             accepted.accepted_input_id AS origin_accepted_input_id,
-            accepted.content_kind AS origin_content_kind,
-            accepted.content_text AS origin_content_text,
+            (
+                SELECT COALESCE(
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'position', part.position,
+                            'part_kind', part.part_kind,
+                            'text_value', part.text_value,
+                            'blob_digest', CASE
+                                WHEN part.blob_digest IS NULL THEN NULL
+                                ELSE 'sha256:' || encode(part.blob_digest, 'hex')
+                            END,
+                            'attachment_kind', part.attachment_kind,
+                            'declared_media_type', part.declared_media_type,
+                            'display_filename', part.display_filename
+                        ) ORDER BY part.position
+                    ),
+                    '[]'::jsonb
+                )
+                  FROM accepted_input_content_part AS part
+                 WHERE part.accepted_input_id = accepted.accepted_input_id
+            ) AS origin_content_parts,
             goal.goal_generation AS origin_goal_generation,
             goal.source_event_ordinal AS origin_goal_source_event_ordinal,
             goal.predecessor_turn_id AS origin_goal_predecessor_turn_id,
@@ -7499,19 +7637,10 @@ fn decode_complete(
         row.try_get("actor_tool_request_id")?,
     )?;
     let command_model_settings_override: Value = required(&row, "command_model_settings_override")?;
-    require_model_settings_override_version(
-        &command_model_settings_override,
-        typed_version,
-        "command model settings override",
-    )?;
     let command = SubmitInput::new(
         command_id,
         session_id_from_uuid(required(&row, "command_session_id")?),
-        decode_content(
-            required(&row, "command_content_kind")?,
-            required(&row, "command_content_text")?,
-            "command content",
-        )?,
+        decode_content(required(&row, "command_content_parts")?, "command content")?,
         decode_delivery(
             required(&row, "command_delivery_kind")?,
             row.try_get("command_descendant_scope")?,
@@ -7670,17 +7799,13 @@ fn decode_applied_turn_origin(
     result_turn: TurnId,
     predecessor: RelatedTurnEvidence,
 ) -> Result<SubmitInputReconstitutionInput, SubmitInputRepositoryError> {
-    let command_storage_version: i16 = required(row, "typed_version")?;
     let accepting_command_uuid: Uuid = required(row, "accepting_command_id")?;
     let accepting_command = durable_command_id_from_uuid(accepting_command_uuid)
         .map_err(|_| SubmitInputCorruption::Inconsistent("accepting command identity"))?;
     let accepted_input = accepted_input_id_from_uuid(required(row, "accepted_input_id")?);
     let accepted_session = session_id_from_uuid(required(row, "accepted_session_id")?);
-    let accepted_content = decode_content(
-        required(row, "accepted_content_kind")?,
-        required(row, "accepted_content_text")?,
-        "accepted content",
-    )?;
+    let accepted_content =
+        decode_content(required(row, "accepted_content_parts")?, "accepted content")?;
     let accepted_delivery = decode_delivery(
         required(row, "accepted_delivery_kind")?,
         row.try_get("accepted_descendant_scope")?,
@@ -7823,15 +7948,6 @@ fn decode_applied_turn_origin(
     if model_settings_evidence_required && stored_model_settings.is_none() {
         return Err(SubmitInputCorruption::Missing("turn model settings evidence").into());
     }
-    if command_storage_version < MODEL_SETTINGS_FROM_STORAGE_VERSION
-        && stored_model_settings.is_some()
-    {
-        return Err(SubmitInputCorruption::Inconsistent(
-            "storage version with turn model settings evidence",
-        )
-        .into());
-    }
-
     Ok(SubmitInputReconstitutionInput::applied_turn_origin(
         SubmitInputAppliedTurnOriginReconstitutionInput {
             command,
@@ -7876,11 +7992,8 @@ fn decode_applied_pending_steering(
         .map_err(|_| SubmitInputCorruption::Inconsistent("accepting command identity"))?;
     let accepted_input = accepted_input_id_from_uuid(required(row, "accepted_input_id")?);
     let accepted_session = session_id_from_uuid(required(row, "accepted_session_id")?);
-    let accepted_content = decode_content(
-        required(row, "accepted_content_kind")?,
-        required(row, "accepted_content_text")?,
-        "accepted content",
-    )?;
+    let accepted_content =
+        decode_content(required(row, "accepted_content_parts")?, "accepted content")?;
     let accepted_delivery = decode_delivery(
         required(row, "accepted_delivery_kind")?,
         row.try_get("accepted_descendant_scope")?,
@@ -8310,7 +8423,7 @@ fn require_supported_version(
     field: &'static str,
 ) -> Result<i16, SubmitInputRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if matches!(actual, 1..=STORAGE_VERSION) {
+    if actual == STORAGE_VERSION {
         Ok(actual)
     } else {
         Err(SubmitInputCorruption::Unsupported {
@@ -8318,25 +8431,6 @@ fn require_supported_version(
             value: actual.to_string(),
         }
         .into())
-    }
-}
-
-fn require_model_settings_override_version(
-    value: &Value,
-    storage_version: i16,
-    field: &'static str,
-) -> Result<(), SubmitInputRepositoryError> {
-    let overlay = model_settings_overlay_from_json(value.clone())
-        .map_err(|_| SubmitInputCorruption::Inconsistent(field))?;
-    if storage_version < MODEL_SETTINGS_FROM_STORAGE_VERSION
-        && overlay != signalbox_domain::ModelSettingsOverlay::inherit_all()
-    {
-        Err(
-            SubmitInputCorruption::Inconsistent("storage version without model settings override")
-                .into(),
-        )
-    } else {
-        Ok(())
     }
 }
 
@@ -8391,19 +8485,17 @@ fn decode_actor(
 }
 
 fn decode_content(
-    kind: String,
-    text: String,
+    stored: Value,
     field: &'static str,
 ) -> Result<UserContent, SubmitInputRepositoryError> {
-    if kind != "text" {
-        return Err(SubmitInputCorruption::Unsupported { field, value: kind }.into());
-    }
-    UserContent::try_text(text).map_err(|error| {
-        SubmitInputCorruption::InvalidContent {
-            field,
-            failure: error.failure(),
+    crate::user_content::decode(stored).map_err(|error| match error {
+        crate::user_content::StoredUserContentError::UnsupportedPartKind(value)
+        | crate::user_content::StoredUserContentError::UnsupportedAttachmentKind(value) => {
+            SubmitInputCorruption::Unsupported { field, value }.into()
         }
-        .into()
+        crate::user_content::StoredUserContentError::Malformed => {
+            SubmitInputCorruption::Inconsistent(field).into()
+        }
     })
 }
 

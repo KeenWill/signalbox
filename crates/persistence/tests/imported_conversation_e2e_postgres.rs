@@ -595,7 +595,10 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
             accepted_input: projected,
             content,
             ..
-        } if *projected == accepted_input && content == "native continuation"
+        } if *projected == accepted_input
+            && content.single_text().is_some_and(|text| {
+                text.as_str() == "native continuation"
+            })
     ));
     assert!(matches!(
         &completed_snapshot.entries()[3],
