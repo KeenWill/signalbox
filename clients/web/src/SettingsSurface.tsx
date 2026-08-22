@@ -14,6 +14,14 @@ function PreferenceGroup({ legend, children }: { legend: string; children: React
 
 export function SettingsSurface({ context }: { context: CommandContext }) {
   const app = useAppSelector(selectApp)
+  const resizePane = (
+    command:
+      | 'pane.navigation.preview'
+      | 'pane.navigation.resize'
+      | 'pane.inspector.preview'
+      | 'pane.inspector.resize',
+    paneSize: number,
+  ) => invokeCommand(command, { ...context, paneSize })
   return (
     <div className="surface-body settings-surface">
       <section className="settings-intro">
@@ -133,11 +141,17 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
               min="160"
               max="360"
               value={app.paneSizes.navigation}
-              onChange={(event) =>
-                invokeCommand('pane.navigation.resize', {
-                  ...context,
-                  paneSize: event.currentTarget.valueAsNumber,
-                })
+              onInput={(event) =>
+                resizePane('pane.navigation.preview', event.currentTarget.valueAsNumber)
+              }
+              onPointerUp={(event) =>
+                resizePane('pane.navigation.resize', event.currentTarget.valueAsNumber)
+              }
+              onKeyUp={(event) =>
+                resizePane('pane.navigation.resize', event.currentTarget.valueAsNumber)
+              }
+              onBlur={(event) =>
+                resizePane('pane.navigation.resize', event.currentTarget.valueAsNumber)
               }
             />
           </label>
@@ -149,11 +163,17 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
               min="200"
               max="480"
               value={app.paneSizes.inspector}
-              onChange={(event) =>
-                invokeCommand('pane.inspector.resize', {
-                  ...context,
-                  paneSize: event.currentTarget.valueAsNumber,
-                })
+              onInput={(event) =>
+                resizePane('pane.inspector.preview', event.currentTarget.valueAsNumber)
+              }
+              onPointerUp={(event) =>
+                resizePane('pane.inspector.resize', event.currentTarget.valueAsNumber)
+              }
+              onKeyUp={(event) =>
+                resizePane('pane.inspector.resize', event.currentTarget.valueAsNumber)
+              }
+              onBlur={(event) =>
+                resizePane('pane.inspector.resize', event.currentTarget.valueAsNumber)
               }
             />
           </label>

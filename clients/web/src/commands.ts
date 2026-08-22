@@ -346,6 +346,22 @@ export const commandRegistry = [
     run: (context) => context.dispatch(actions.detailSet('results')),
   },
   {
+    id: 'pane.navigation.preview',
+    title: 'Preview navigation pane size',
+    description: 'Preview the browser-local navigation pane width without persisting it.',
+    category: 'Settings',
+    bindings: [],
+    available: paneSizeProvided,
+    run: (context) => {
+      if (context.paneSize === undefined) return
+      const paneSizes: BrowserPreferences['paneSizes'] = {
+        ...context.getState().app.paneSizes,
+        navigation: context.paneSize,
+      }
+      context.dispatch(actions.paneSizesPreviewed(paneSizes))
+    },
+  },
+  {
     id: 'pane.navigation.resize',
     title: 'Resize navigation pane',
     description: 'Set the browser-local navigation pane width.',
@@ -359,6 +375,22 @@ export const commandRegistry = [
         navigation: context.paneSize,
       }
       context.dispatch(actions.paneSizesSet(paneSizes))
+    },
+  },
+  {
+    id: 'pane.inspector.preview',
+    title: 'Preview inspector pane size',
+    description: 'Preview the browser-local inspector pane width without persisting it.',
+    category: 'Settings',
+    bindings: [],
+    available: paneSizeProvided,
+    run: (context) => {
+      if (context.paneSize === undefined) return
+      const paneSizes: BrowserPreferences['paneSizes'] = {
+        ...context.getState().app.paneSizes,
+        inspector: context.paneSize,
+      }
+      context.dispatch(actions.paneSizesPreviewed(paneSizes))
     },
   },
   {

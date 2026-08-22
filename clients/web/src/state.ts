@@ -72,6 +72,9 @@ const appSlice = createSlice({
       state.paneSizes = action.payload
       state.activitySequence += 1
     },
+    paneSizesPreviewed(state, action: { payload: BrowserPreferences['paneSizes'] }) {
+      state.paneSizes = action.payload
+    },
     remoteMediaSet(state, action: { payload: RemoteMediaPolicy }) {
       state.remoteMedia = action.payload
       state.activitySequence += 1

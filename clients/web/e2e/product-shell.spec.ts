@@ -194,9 +194,13 @@ test('applies saved pane widths to the scenario workspace', async ({ page }) => 
   const paneSliders = page.getByRole('group', { name: 'Workbench panes' }).getByRole('slider')
   await paneSliders.nth(0).fill('300')
   await paneSliders.nth(1).fill('400')
+  await page.setViewportSize({ width: 1000, height: 800 })
+  await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '300px')
   await page.getByRole('link', { name: /Scenario studio/ }).click()
 
   await expect(page.locator('.navigation-pane')).toHaveCSS('width', '300px')
+  await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toBeHidden()
+  await page.setViewportSize({ width: 1440, height: 900 })
   await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toHaveCSS('width', '400px')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
