@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   BoundedSessionHistory,
   EnormousSessionScenarioSource,
   HttpSessionTimelineSource,
   MAX_RETAINED_SESSION_ITEMS,
+  MAX_TIMELINE_HTTP_RESPONSE_BYTES,
   SESSION_FOUNDATION_TOTAL,
   type SessionTimelineSource,
 } from './model'
@@ -80,6 +81,35 @@ describe('BoundedSessionHistory', () => {
     }
 
     await expect(new BoundedSessionHistory(sessionId, source).describe()).resolves.toBeDefined()
+  })
+
+  it('canonicalizes every UUID form accepted by the server', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+
+    await expect(
+      new BoundedSessionHistory(`urn:uuid:${sessionId}`, scenario).describe(),
+    ).resolves.toBeDefined()
+    await expect(
+      new BoundedSessionHistory(`{${sessionId}}`, scenario).describe(),
+    ).resolves.toBeDefined()
+  })
+
+  it('rejects contradictory descriptor boundaries', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        first_address: { event_sequence: '200' },
+        latest_address: { event_sequence: '100' },
+      }),
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+
+    await expect(new BoundedSessionHistory(sessionId, source).describe()).rejects.toThrow(
+      'boundaries are contradictory',
+    )
   })
 
   it('normalizes non-finite limits to their safe minima', async () => {
@@ -201,6 +231,105 @@ describe('BoundedSessionHistory', () => {
         { maxItems: 2, maxBytes: 256 },
       ),
     ).rejects.toThrow('strictly increasing')
+  })
+
+  it('rejects a timeline window whose byte total understates its items', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '1' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 200,
+          },
+          {
+            address: { event_sequence: '2' },
+            kind: 'turn_activated',
+            projected_structured_bytes: 200,
+          },
+        ],
+        projected_structured_bytes: 0,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    }
+
+    await expect(
+      new BoundedSessionHistory(sessionId, source).load(
+        { kind: 'first' },
+        { maxItems: 2, maxBytes: 256 },
+      ),
+    ).rejects.toThrow('byte total does not match')
+  })
+
+  it('rejects a continuation that is not a returned boundary', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '100' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 96,
+          },
+          {
+            address: { event_sequence: '200' },
+            kind: 'turn_activated',
+            projected_structured_bytes: 96,
+          },
+        ],
+        projected_structured_bytes: 192,
+        continuation_before: { event_sequence: '100' },
+        continuation_after: { event_sequence: '999' },
+      }),
+    }
+
+    await expect(
+      new BoundedSessionHistory(sessionId, source).load(
+        { kind: 'first' },
+        { maxItems: 2, maxBytes: 256 },
+      ),
+    ).rejects.toThrow('returned boundary')
+  })
+
+  it('bounds an HTTP timeline response before JSON decoding', async () => {
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            contract: { name: 'signalbox.web-http', version: '1' },
+            capabilities: {
+              bounded_json: true,
+              same_origin_json_mutations: true,
+              ndjson_streaming: true,
+              bounded_session_timeline: true,
+            },
+            limits: {
+              max_json_body_bytes: 1024,
+              max_ndjson_item_bytes: 1024,
+              max_timeline_window_items: 256,
+              max_timeline_window_bytes: 64 * 1024,
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(' '.repeat(MAX_TIMELINE_HTTP_RESPONSE_BYTES + 1), { status: 200 }),
+      )
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    await expect(
+      source.readWindow(sessionId, { kind: 'first' }, { maxItems: 1, maxBytes: 256 }),
+    ).rejects.toThrow('encoded byte ceiling')
   })
 
   it('decodes structured API errors before throwing', async () => {
