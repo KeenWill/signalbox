@@ -113,15 +113,18 @@ describe('SameOriginProductTransport', () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(activityFixture)))
     vi.stubGlobal('fetch', fetchMock)
 
-    const page = await new SameOriginProductTransport().readRepoWatchActivity('owner/repository', {
-      eventBefore: { cursorGeneration: '9', eventOrdinal: 42 },
-      includeEvents: true,
-      includeWebhooks: false,
-    })
+    const page = await new SameOriginProductTransport().readRepoWatchActivity(
+      'example/repository',
+      {
+        eventBefore: { cursorGeneration: '9', eventOrdinal: 42 },
+        includeEvents: true,
+        includeWebhooks: false,
+      },
+    )
 
     expect(page).toEqual(activityFixture)
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/repository-watch/activity?repository=owner%2Frepository&include_events=true&include_webhooks=false&event_before_cursor_generation=9&event_before_ordinal=42',
+      '/api/repository-watch/activity?repository=example%2Frepository&include_events=true&include_webhooks=false&event_before_cursor_generation=9&event_before_ordinal=42',
       expect.objectContaining({ credentials: 'same-origin' }),
     )
   })
@@ -133,7 +136,7 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(
-      new SameOriginProductTransport().readRepoWatchActivity('owner/repository'),
+      new SameOriginProductTransport().readRepoWatchActivity('example/repository'),
     ).rejects.toThrow('activity_page')
   })
 
