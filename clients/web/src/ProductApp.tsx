@@ -276,7 +276,7 @@ function ProductToolbar({ context }: { context: ProductCommandContext }) {
         className="icon-button mobile-only"
         type="button"
         aria-label="Open navigation"
-        onClick={() => context.dispatch(actions.overlaySet('navigation'))}
+        onClick={() => invokeProductCommand('navigation.open', context)}
       >
         <Menu />
       </button>

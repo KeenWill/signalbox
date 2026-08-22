@@ -188,6 +188,7 @@ export function SessionItemDetail({
 }) {
   const [cursor, setCursor] = useState<NonNullable<WebSessionTimelineDetailPage['continuation']>>()
   const retryRef = useRef<HTMLButtonElement>(null)
+  const detailRef = useRef<HTMLElement>(null)
   const detail = useQuery({
     queryKey: ['production', 'session-item-detail', sessionId, item.address.event_sequence, cursor],
     queryFn: ({ signal }) =>
@@ -204,6 +205,11 @@ export function SessionItemDetail({
   useEffect(() => {
     if (detail.isError && cursor) retryRef.current?.focus()
   }, [cursor, detail.isError])
+  useEffect(() => {
+    if (cursor && detail.data && !detail.isFetching && detail.data.continuation === null) {
+      detailRef.current?.focus()
+    }
+  }, [cursor, detail.data, detail.isFetching])
 
   if (detail.isError) {
     return (
@@ -229,7 +235,12 @@ export function SessionItemDetail({
   }
 
   return (
-    <div className="session-item-detail">
+    <section
+      ref={detailRef}
+      className="session-item-detail"
+      tabIndex={-1}
+      aria-label="Loaded typed detail chunk"
+    >
       {detail.data.items.map((detailItem) => (
         <DetailRecord
           key={`${detailItem.address.event_sequence}:${detailItem.body.type}`}
@@ -251,6 +262,6 @@ export function SessionItemDetail({
             : 'Load next bounded detail chunk'}
         </button>
       )}
-    </div>
+    </section>
   )
 }

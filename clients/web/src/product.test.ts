@@ -17,7 +17,7 @@ const bootstrapFixture = {
   },
   limits: {
     max_json_body_bytes: 65_536,
-    max_ndjson_item_bytes: 262_144,
+    max_ndjson_item_bytes: 65_536,
     max_timeline_detail_items: 128,
     max_timeline_detail_bytes: 65_536,
     max_timeline_window_items: 256,

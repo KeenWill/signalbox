@@ -463,7 +463,7 @@ describe('BoundedSessionHistory', () => {
 
     await expect(
       new BoundedSessionHistory(sessionId, source).load(
-        { kind: 'around', eventSequence: '150' },
+        { kind: 'around', eventSequence: '100' },
         { maxItems: 2, maxBytes: 256 },
       ),
     ).rejects.toThrow('returned boundary')
@@ -609,6 +609,34 @@ describe('BoundedSessionHistory', () => {
         { maxItems: 1, maxBytes: 256 },
       ),
     ).rejects.toThrow('requires a nonempty window')
+  })
+
+  it('rejects an around window that omits its requested anchor', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '42' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 78,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    }
+
+    await expect(
+      new BoundedSessionHistory(sessionId, source).load(
+        { kind: 'around', eventSequence: '41' },
+        { maxItems: 1, maxBytes: 256 },
+      ),
+    ).rejects.toThrow('does not contain its requested anchor')
   })
 
   it('bounds an HTTP timeline response before JSON decoding', async () => {
@@ -853,6 +881,50 @@ describe('BoundedSessionHistory', () => {
     await expect(
       source.readItemDetail(sessionId, detailAddress, { maxItems: 1, maxBytes: 1024 }),
     ).rejects.toThrow('continuation contradicts its body excerpt')
+  })
+
+  it('rejects more-at continuations from exact item detail reads', async () => {
+    const detailAddress = '41'
+    const bootstrap = decodeWebContractBootstrap({
+      contract: { name: 'signalbox.web-http', version: '1' },
+      capabilities: {
+        bounded_json: true,
+        same_origin_json_mutations: true,
+        ndjson_streaming: true,
+        bounded_session_timeline: true,
+        bounded_session_timeline_detail: true,
+      },
+      limits: {
+        max_json_body_bytes: 1024,
+        max_ndjson_item_bytes: 65_536,
+        max_timeline_window_items: 256,
+        max_timeline_window_bytes: 64 * 1024,
+        max_timeline_detail_items: 128,
+        max_timeline_detail_bytes: 64 * 1024,
+      },
+    })
+    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          session_id: sessionId,
+          items: [
+            {
+              address: { event_sequence: detailAddress },
+              kind: 'session_created',
+              body: { type: 'event_fact', kind: 'session_created' },
+              projected_body_bytes: 128,
+            },
+          ],
+          projected_body_bytes: 128,
+          continuation: { type: 'more_at', address: { event_sequence: detailAddress } },
+        }),
+      ),
+    )
+    const source = HttpSessionTimelineSource.fromBootstrap(bootstrap, request)
+
+    await expect(
+      source.readItemDetail(sessionId, detailAddress, { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('cannot return a more-at continuation')
   })
 
   it('rejects a text continuation that makes zero byte progress', async () => {

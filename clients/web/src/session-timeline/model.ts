@@ -285,15 +285,15 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     if (!this.detailAvailable) {
       throw new TypeError('bounded session timeline detail capability is unavailable')
     }
+    if (cursor?.type === 'more_at') {
+      throw new TypeError('exact item detail does not accept more-at continuations')
+    }
     const address = String(decimalAddress(eventSequence))
     const bounded = boundedDetailLimits(limits, this.limits)
     const query = new URLSearchParams({
       max_items: String(bounded.maxItems),
       max_bytes: String(bounded.maxBytes),
     })
-    if (cursor?.type === 'more_at') {
-      query.set('cursor_address', cursor.address.event_sequence)
-    }
     if (cursor?.type === 'more_body') {
       query.set('cursor_address', cursor.body.address.event_sequence)
       query.set('cursor_field', cursor.body.field)
@@ -306,6 +306,9 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     )
     if (!response.ok) return throwApiError(response)
     const page = decodeWebSessionTimelineDetailPage(await readBoundedJson(response))
+    if (page.continuation?.type === 'more_at') {
+      throw new TypeError('exact item detail cannot return a more-at continuation')
+    }
     if (canonicalSessionId(page.session_id) !== canonicalSessionId(sessionId)) {
       throw new TypeError('timeline detail session mismatch')
     }
@@ -346,11 +349,6 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
         if (excerpt && decimalU64(excerpt.offset_bytes) !== 0n) {
           throw new TypeError('initial timeline detail text excerpt must start at byte zero')
         }
-      }
-    }
-    if (cursor?.type === 'more_at') {
-      if (page.items[0]?.address.event_sequence !== cursor.address.event_sequence) {
-        throw new TypeError('timeline detail page does not match its requested cursor')
       }
     }
     if (cursor?.type === 'more_body') {
@@ -491,6 +489,9 @@ export class BoundedSessionHistory {
     }
     if (projectedStructuredBytes > bounded.maxBytes) {
       throw new TypeError('timeline window exceeds the requested byte ceiling')
+    }
+    if (anchor.kind === 'around' && !incoming.has(anchor.eventSequence)) {
+      throw new TypeError('around timeline window does not contain its requested anchor')
     }
     const firstItemAddress = window.items[0]?.address.event_sequence
     const lastItemAddress = window.items.at(-1)?.address.event_sequence
