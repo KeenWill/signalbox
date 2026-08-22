@@ -395,6 +395,22 @@ async fn tool_arguments_preserve_the_provider_json_lexeme() {
     assert_eq!(result.spawns, 1);
 }
 
+/// A whole-object credential suppression remains typed and never emits an
+/// executable tool proposal or argument delta.
+#[tokio::test]
+async fn fully_suppressed_tool_arguments_are_non_executable() {
+    let result = execute_scenario("suppressed_tool_arguments", OperationShape::Tool).await;
+    let completion = completed(&result.evidence);
+
+    assert_eq!(completion.content, vec![AssistantPart::SuppressedToolCall]);
+    assert!(!result.observations.iter().any(|observation| matches!(
+        observation.fact,
+        signalbox_model_runtime::ObservationFact::ToolCallProposed(_)
+            | signalbox_model_runtime::ObservationFact::ToolArgumentsDelta { .. }
+    )));
+    assert_eq!(result.spawns, 1);
+}
+
 #[tokio::test]
 async fn named_tool_choice_rejects_an_extra_declared_proposal() {
     let result = execute_scenario("named_choice_extra_tool", OperationShape::NamedTool).await;

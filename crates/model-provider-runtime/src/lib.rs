@@ -1963,6 +1963,12 @@ fn classify_terminal(
                             DomainToolCallProposal::new(name, arguments),
                         ));
                     }
+                    AssistantPart::SuppressedToolCall => {
+                        return classify(
+                            ModelCallTerminalObservation::KnownFailed,
+                            ModelCallCauseCode::UnrepresentableToolMaterial,
+                        );
+                    }
                     // Claude 5-family models run adaptive thinking by
                     // default and, with the default omitted display, return
                     // thinking blocks whose text is empty: the block carries
@@ -2137,12 +2143,12 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AcceptanceObservations, InvalidRuntimeToolSchema, ModelCallTelemetry, ProviderTextDelta,
-        ProviderTextDeltaContext, ProviderTextDeltaSink, RuntimeInputTokenCountError,
-        RuntimeModelCallProviderError, RuntimeModelCatalog, RuntimeModelCatalogError,
-        RuntimeModelDefinition, RuntimeModelDefinitionError, classify_terminal,
-        decode_checked_raw_json, provider_reported_token_usage, render_runtime_messages,
-        runtime_delivery_definitions, runtime_model_settings,
+        AcceptanceObservations, InvalidRuntimeToolSchema, ModelCallCauseCode, ModelCallTelemetry,
+        ProviderTextDelta, ProviderTextDeltaContext, ProviderTextDeltaSink,
+        RuntimeInputTokenCountError, RuntimeModelCallProviderError, RuntimeModelCatalog,
+        RuntimeModelCatalogError, RuntimeModelDefinition, RuntimeModelDefinitionError,
+        classify_terminal, decode_checked_raw_json, provider_reported_token_usage,
+        render_runtime_messages, runtime_delivery_definitions, runtime_model_settings,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -2973,6 +2979,32 @@ mod tests {
             .observation,
             ModelCallTerminalObservation::KnownFailed,
             "a ToolUse finish without a tool call is not an ordinary completion"
+        );
+    }
+
+    /// A CLI-redacted argument object is not an executable tool request. The
+    /// completed provider call closes as the existing unrepresentable-material
+    /// failure instead of entering the tool loop with sentinel JSON.
+    #[test]
+    fn fully_suppressed_tool_arguments_close_as_known_failure() {
+        let classified = classify_terminal(
+            completion_with_finish(
+                "model-exact",
+                CompletionFinish::ToolUse,
+                vec![AssistantPart::SuppressedToolCall],
+            ),
+            &[],
+            &configured("model-exact"),
+        )
+        .expect("suppressed tool material has a bounded terminal classification");
+
+        assert_eq!(
+            classified.observation,
+            ModelCallTerminalObservation::KnownFailed
+        );
+        assert_eq!(
+            classified.cause,
+            ModelCallCauseCode::UnrepresentableToolMaterial
         );
     }
 

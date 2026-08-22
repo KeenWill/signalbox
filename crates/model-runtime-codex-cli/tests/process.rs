@@ -14,7 +14,7 @@ use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
     CredentialReference, DeliveryMode, LossCause, MessagePart, ModelOperation, ModelRuntime,
     Observation, ObservationFact, PreparationFailure, PreparationOutcome, ProviderErrorKind,
-    RequestedTarget, ResolvedTarget, StreamInterruption, StructuredDecodeFailure,
+    REDACTED, RequestedTarget, ResolvedTarget, StreamInterruption, StructuredDecodeFailure,
     StructuredOutputContract, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
     ToolCallsAtLoss, ToolChoice, ToolDefinition, ToolName, decode_structured,
 };
@@ -157,6 +157,7 @@ fn collect_assistant_parts(parts: &[AssistantPart], material: &mut Vec<String>) 
             }
             AssistantPart::RedactedThinking { data } => material.push(data.clone()),
             AssistantPart::ToolCall(proposal) => collect_tool_proposal(proposal, material),
+            AssistantPart::SuppressedToolCall => {}
         }
     }
 }
@@ -599,6 +600,13 @@ async fn inv_035_buffered_reasoning_marker_suppresses_tool_arguments() {
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
     assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(
+        completed(&result.evidence).content,
+        vec![
+            AssistantPart::Text(REDACTED.to_string()),
+            AssistantPart::SuppressedToolCall,
+        ]
+    );
     assert_eq!(result.spawns, 1);
 }
 
@@ -4692,7 +4700,8 @@ fn tool_ids(content: &[AssistantPart]) -> Vec<&str> {
             AssistantPart::ToolCall(proposal) => Some(proposal.id.as_str()),
             AssistantPart::Text(_)
             | AssistantPart::Thinking { .. }
-            | AssistantPart::RedactedThinking { .. } => None,
+            | AssistantPart::RedactedThinking { .. }
+            | AssistantPart::SuppressedToolCall => None,
         })
         .collect()
 }

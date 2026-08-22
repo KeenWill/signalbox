@@ -1268,14 +1268,19 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   quote; object- or array-shaped credential values consume through their
   balanced structural close, and a container still open at the end of the
   controlled text is suppressed through that end rather than released piecewise;
-  a private-key PEM block is consumed through its matching end marker whether or
-  not an assignment introduces it; credential labels are recognized in their
-  space-separated spellings as well as their underscore, hyphenated, and
-  concatenated ones; and JSON identity/session-token members are included.
-  Envelope-decode errors are content-silent rather than embedding a rejected
-  provider value. Why: subscription authentication remains wholly inside the
-  intended CLI control surface while credential-shaped reflection still fails
-  closed.
+  a tool argument object suppressed as a whole crosses the adapter as typed
+  non-executable material and closes the model call as a known failure, never as
+  sentinel JSON that could enter the tool loop; a private-key PEM block is
+  consumed through its matching end marker whether or not an assignment
+  introduces it; credential labels are recognized in their space-separated
+  spellings as well as their underscore, hyphenated, and concatenated ones; and
+  JSON identity/session-token members are included. Envelope-decode errors are
+  content-silent rather than embedding a rejected provider value. Why:
+  subscription authentication remains wholly inside the intended CLI control
+  surface while credential-shaped reflection still fails closed.
+
+The Codex CLI whole-tool-argument closeout is verified against this PR
+(`agent/daemon-live-redacted-tool-closeout`).
 
 ### Codex CLI shape-redaction scope
 

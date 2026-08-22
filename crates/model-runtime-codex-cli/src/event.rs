@@ -45,8 +45,9 @@ use signalbox_model_runtime::{
     ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation, ObservationFact,
     ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
     ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence, TerminalEvidence, TokenUsage,
-    ToolCallId, ToolCallProposal, ToolCallsAtLoss, ToolName, provider_json_has_duplicate_members,
-    redact_text, trailing_credential_context, validate_provider_json_nesting,
+    ToolArgumentRedaction, ToolCallId, ToolCallProposal, ToolCallsAtLoss, ToolName,
+    provider_json_has_duplicate_members, redact_text, trailing_credential_context,
+    validate_provider_json_nesting,
 };
 
 use crate::status::{classify_error, retry_after};
@@ -690,16 +691,22 @@ impl<C: Clone> EventDecoder<C> {
             } else {
                 next_redacted_call_id(&mut redacted_id_cursor, &clean_ids)
             };
-            content.push(AssistantPart::ToolCall(ToolCallProposal {
-                id: ToolCallId::new(id),
-                name: ToolName::new(call.name.clone()),
-                // The arguments consult the held cross-fragment lookbehind
-                // before the stateless JSON-aware redaction, and this same
-                // sanitized value feeds the streamed argument delta and the
-                // terminal proposal, so a credential whose marker arrived in
-                // an earlier fragment cannot escape through tool arguments.
-                arguments_json: sink.redact_tool_arguments(final_text_context, &call.arguments),
-            }));
+            // The arguments consult the held cross-fragment lookbehind before
+            // stateless JSON-aware redaction. A whole-object suppression is
+            // typed separately so no executable sentinel request can cross
+            // the adapter boundary and churn through tool rounds.
+            match sink.redact_tool_arguments(final_text_context, &call.arguments) {
+                ToolArgumentRedaction::Admitted(arguments_json) => {
+                    content.push(AssistantPart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new(id),
+                        name: ToolName::new(call.name.clone()),
+                        arguments_json,
+                    }));
+                }
+                ToolArgumentRedaction::Suppressed => {
+                    content.push(AssistantPart::SuppressedToolCall);
+                }
+            }
         }
         if let Some(contract_name) = &self.output_contract_name {
             if !envelope
@@ -764,7 +771,9 @@ impl<C: Clone> EventDecoder<C> {
                             fragment: call.arguments_json.clone(),
                         },
                     }),
-                    AssistantPart::Thinking { .. } | AssistantPart::RedactedThinking { .. } => {}
+                    AssistantPart::Thinking { .. }
+                    | AssistantPart::RedactedThinking { .. }
+                    | AssistantPart::SuppressedToolCall => {}
                 }
             }
             self.next_part_index += content_len;

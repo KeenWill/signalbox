@@ -11,6 +11,15 @@ pub const REDACTED: &str = "[redacted]";
 /// form still carries a credential shape after structural redaction, so the
 /// `arguments_json` raw-JSON contract is never broken by a bare sentinel.
 const REDACTED_JSON_OBJECT: &str = r#"{"redacted":"[redacted]"}"#;
+
+/// Whether CLI-controlled tool arguments remain executable after redaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ToolArgumentRedaction {
+    /// The admitted JSON text, either unchanged or structurally redacted.
+    Admitted(String),
+    /// The argument object had to be suppressed as a whole.
+    Suppressed,
+}
 // numeric-bound: ceiling - protects redaction memory from an unterminated stream value
 const MAX_PENDING_STREAM_BYTES: usize = 64 * 1024;
 // numeric-bound: derived ceiling from MAX_PENDING_STREAM_BYTES
@@ -888,15 +897,22 @@ fn json_key_can_start_at(text: &str, key_start: usize) -> bool {
 /// Redacts credential shapes from provider-controlled JSON while preserving
 /// credential-clean bytes exactly.
 pub fn redact_json(raw: &str) -> String {
+    match redact_json_for_tool_arguments(raw) {
+        ToolArgumentRedaction::Admitted(redacted) => redacted,
+        ToolArgumentRedaction::Suppressed => REDACTED_JSON_OBJECT.to_string(),
+    }
+}
+
+fn redact_json_for_tool_arguments(raw: &str) -> ToolArgumentRedaction {
     let Ok(mut value) = serde_json::from_str::<Value>(raw) else {
-        return redact_text(raw);
+        return ToolArgumentRedaction::Admitted(redact_text(raw));
     };
     let changed = redact_value(&mut value);
     // Credential-clean raw bytes are returned verbatim. Cleanliness is judged
     // on the raw text, not the parsed tree, because a shadowed duplicate
     // member is invisible after parsing.
     if !changed && redact_text(raw) == raw {
-        return raw.to_string();
+        return ToolArgumentRedaction::Admitted(raw.to_string());
     }
     // Every serialized result is rescanned: structural field-name redaction
     // reaches neither a shadowed duplicate value nor a token-shaped object
@@ -907,9 +923,9 @@ pub fn redact_json(raw: &str) -> String {
     let serialized =
         serde_json::to_string(&value).unwrap_or_else(|_| REDACTED_JSON_OBJECT.to_string());
     if redact_text(&serialized) == serialized {
-        return serialized;
+        return ToolArgumentRedaction::Admitted(serialized);
     }
-    REDACTED_JSON_OBJECT.to_string()
+    ToolArgumentRedaction::Suppressed
 }
 
 fn redact_value(value: &mut Value) -> bool {
@@ -2083,17 +2099,15 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
     /// exactly as the streamed fragments they continue are; otherwise the
     /// stateless JSON-aware redaction applies and clean arguments stay
     /// byte-verbatim.
-    pub fn redact_tool_arguments(&self, preceding: &str, arguments: &str) -> String {
-        // Suppression yields a valid JSON object, not the bare `[redacted]`
-        // sentinel, so the `arguments_json` raw-JSON contract holds and
-        // `decode_tool_arguments` never reports a syntax error for a call the
-        // provider actually supplied validly. The final text emitted before
-        // this field is joined in, so an argument continuing a marker at the
-        // end of that text is suppressed too.
+    pub fn redact_tool_arguments(&self, preceding: &str, arguments: &str) -> ToolArgumentRedaction {
+        // Whole-object suppression is typed separately from admitted JSON, so
+        // callers cannot accidentally execute a sentinel argument object. The
+        // final text emitted before this field is joined in, so an argument
+        // continuing a marker at the end of that text is suppressed too.
         if self.extends_held_credential(preceding, arguments) {
-            return REDACTED_JSON_OBJECT.to_string();
+            return ToolArgumentRedaction::Suppressed;
         }
-        redact_json(arguments)
+        redact_json_for_tool_arguments(arguments)
     }
 
     /// Sanitizes a provider-controlled identifier or name against the held
@@ -3538,12 +3552,12 @@ mod tests {
         CREDENTIAL_INDICATORS, CURL_USER_FLAGS, DiscardedField, LINE_CREDENTIAL_MARKERS,
         LINE_CREDENTIAL_NAMES, MAX_PENDING_RESCAN_BYTES, MAX_PENDING_STREAM_BYTES,
         PendingRescanWork, REDACTED, REDACTED_JSON_OBJECT, RedactingSink,
-        SPACE_SEPARATED_CREDENTIAL_FLAGS, TOKEN_PREFIXES, VALUE_CREDENTIAL_MARKERS,
-        VALUE_CREDENTIAL_NAMES, decode_unicode_escapes, identifier_assignment_candidate,
-        identifier_assignment_unsafe_start, json_claim_scan_bytes, redact_identifier_assignment,
-        redact_json, redact_text, reset_json_claim_scan_bytes, stream_candidate_starts_at_zero,
-        text_might_contain_credential, trailing_credential_context, unsafe_stream_suffix_start,
-        unterminated_json_key_start,
+        SPACE_SEPARATED_CREDENTIAL_FLAGS, TOKEN_PREFIXES, ToolArgumentRedaction,
+        VALUE_CREDENTIAL_MARKERS, VALUE_CREDENTIAL_NAMES, decode_unicode_escapes,
+        identifier_assignment_candidate, identifier_assignment_unsafe_start, json_claim_scan_bytes,
+        redact_identifier_assignment, redact_json, redact_text, reset_json_claim_scan_bytes,
+        stream_candidate_starts_at_zero, text_might_contain_credential,
+        trailing_credential_context, unsafe_stream_suffix_start, unterminated_json_key_start,
     };
 
     const CREDENTIAL_SHAPED_VALUE: &str = "sk-sensitive-value";
@@ -4244,7 +4258,10 @@ mod tests {
         let json_output = redact_json(&fixture);
         let mut observed: Vec<Observation<u8>> = Vec::new();
         let sink = RedactingSink::new(&mut observed);
-        let tool_output = sink.redact_tool_arguments("", &fixture);
+        let ToolArgumentRedaction::Admitted(tool_output) = sink.redact_tool_arguments("", &fixture)
+        else {
+            panic!("malformed arguments retain their safely redacted text");
+        };
 
         assert!(!text_output.contains(PLANTED_SYNTHETIC_SECRET));
         assert!(!json_output.contains(PLANTED_SYNTHETIC_SECRET));
@@ -4990,13 +5007,7 @@ safe-line"
         let redacted =
             sink.redact_tool_arguments("", &format!(r#"{{"city":" {AUTHORIZATION_VALUE}"}}"#));
 
-        assert_eq!(redacted, REDACTED_JSON_OBJECT);
-        assert!(!redacted.contains(AUTHORIZATION_VALUE));
-        assert!(
-            serde_json::from_str::<serde_json::Value>(&redacted)
-                .expect("suppressed tool arguments are valid JSON")
-                .is_object()
-        );
+        assert_eq!(redacted, ToolArgumentRedaction::Suppressed);
     }
 
     /// Credential redaction: a tool argument continuing a marker at the end of the
@@ -5011,8 +5022,7 @@ safe-line"
             &format!(r#"{{"value":" {AUTHORIZATION_VALUE}"}}"#),
         );
 
-        assert_eq!(redacted, REDACTED_JSON_OBJECT);
-        assert!(!redacted.contains(AUTHORIZATION_VALUE));
+        assert_eq!(redacted, ToolArgumentRedaction::Suppressed);
     }
 
     /// Harmless tool arguments stay byte-exact with no held redaction state.
@@ -5022,7 +5032,23 @@ safe-line"
         let sink = RedactingSink::new(&mut observed);
         let arguments = r#"{ "city" : "Oslo", "limit": 3 }"#;
 
-        assert_eq!(sink.redact_tool_arguments("", arguments), arguments);
+        assert_eq!(
+            sink.redact_tool_arguments("", arguments),
+            ToolArgumentRedaction::Admitted(arguments.to_string())
+        );
+    }
+
+    /// Whole-object credential suppression is reported as a disposition rather
+    /// than disguised as executable argument JSON.
+    #[test]
+    fn fully_suppressed_tool_arguments_are_typed() {
+        let mut observed: Vec<Observation<u8>> = Vec::new();
+        let sink = RedactingSink::new(&mut observed);
+
+        assert_eq!(
+            sink.redact_tool_arguments("", r#"{"sk-opaque-token-key":"safe"}"#),
+            ToolArgumentRedaction::Suppressed
+        );
     }
 
     /// A failure message with no held redaction state keeps its stateless

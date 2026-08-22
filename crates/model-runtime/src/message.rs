@@ -106,4 +106,7 @@ pub enum AssistantPart {
     /// [`crate::decode_tool_arguments`]; executing it is never this layer's
     /// work.
     ToolCall(ToolCallProposal),
+    /// A tool call whose argument object the CLI credential boundary suppressed
+    /// as a whole. No executable proposal exists beyond the adapter boundary.
+    SuppressedToolCall,
 }
