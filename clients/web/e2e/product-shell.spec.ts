@@ -244,6 +244,11 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
   const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await expect(page.getByRole('option', { name: /41 input accepted/ })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  )
+  await expect(timeline).toHaveAttribute('aria-activedescendant', 'session-timeline-option-41')
   const latest = page.getByRole('button', { name: /Latest/ })
   await latest.focus()
   await page.keyboard.press('Tab')
@@ -251,7 +256,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await latest.focus()
   await page.keyboard.press('j')
   await expect(timeline).toBeFocused()
-  await expect(page.getByRole('option', { name: /41 input accepted/ })).toHaveAttribute(
+  await expect(page.getByRole('option', { name: /42 turn activated/ })).toHaveAttribute(
     'aria-selected',
     'true',
   )
