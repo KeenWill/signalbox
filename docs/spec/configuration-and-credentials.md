@@ -193,9 +193,8 @@ fleet page.
 Runner loss, model-call recovery ambiguity, tool recovery, reconciliation,
 approval wait, blocked goal, active, queued, and idle remain distinct states.
 Tool recovery carries no reconciliation action because no current command writes
-that wait. The projection uses one set
-query over the selected identities and never constructs the fleet by following
-individual sessions.
+that wait. The projection uses one set query over the selected identities and
+never constructs the fleet by following individual sessions.
 
 `GET /api/attention/follow` begins with the first coherent attention page and
 its durable change-journal cursor, then emits summary replacements only for
