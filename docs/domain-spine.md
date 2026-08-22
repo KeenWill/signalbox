@@ -6046,11 +6046,16 @@ pub struct RepoWatchObligationCursor {
     pub owed_since: SystemTime,
     pub obligation: RepoWatchObligationId,
 }
+pub enum RepoWatchPagePosition<T> {
+    Start,
+    After(T),
+    Exhausted,
+}
 pub struct RepoWatchWorkPage {
     pub held_slots: Vec<RepoWatchHeldSlot>,
-    pub held_continuation_after: Option<RepoWatchHeldCursor>,
+    pub held_continuation_after: RepoWatchPagePosition<RepoWatchHeldCursor>,
     pub queued_obligations: Vec<RepoWatchQueuedObligation>,
-    pub obligation_continuation_after: Option<RepoWatchObligationCursor>,
+    pub obligation_continuation_after: RepoWatchPagePosition<RepoWatchObligationCursor>,
 }
 
 pub enum RepoWatchSessionPurpose {
@@ -6101,9 +6106,9 @@ pub struct RepoWatchWebhookActivity {
 }
 pub struct RepoWatchActivityPage {
     pub events: Vec<RepoWatchOperatorEvent>,
-    pub event_continuation_before: Option<RepoWatchEventCursor>,
+    pub event_continuation_before: RepoWatchPagePosition<RepoWatchEventCursor>,
     pub webhooks: Vec<RepoWatchWebhookActivity>,
-    pub webhook_continuation_before: Option<u64>,
+    pub webhook_continuation_before: RepoWatchPagePosition<u64>,
 }
 
 pub trait RepoWatchOperationsReader {
@@ -6120,8 +6125,8 @@ pub trait RepoWatchOperationsReader {
     fn work(
         &self,
         repository: RepositorySlug,
-        held_after: Option<RepoWatchHeldCursor>,
-        obligation_after: Option<RepoWatchObligationCursor>,
+        held_after: RepoWatchPagePosition<RepoWatchHeldCursor>,
+        obligation_after: RepoWatchPagePosition<RepoWatchObligationCursor>,
     ) -> impl Future<Output = Result<RepoWatchWorkPage, Self::Error>> + Send;
     fn pull_request_sessions(
         &self,
@@ -6132,10 +6137,8 @@ pub trait RepoWatchOperationsReader {
     fn activity(
         &self,
         repository: RepositorySlug,
-        events_before: Option<RepoWatchEventCursor>,
-        webhooks_before: Option<u64>,
-        include_events: bool,
-        include_webhooks: bool,
+        events_before: RepoWatchPagePosition<RepoWatchEventCursor>,
+        webhooks_before: RepoWatchPagePosition<u64>,
     ) -> impl Future<Output = Result<RepoWatchActivityPage, Self::Error>> + Send;
 }
 ```
@@ -11438,7 +11441,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: workspace                                  | 4                                |
 | **signalbox-domain total**                         | **806 (+12 free fn)**            |
 | application: attention                             | 12 (+3 free fn) (incl. 1 trait)  |
-| application: repo_watch_operations                 | 32 (+2 free fn) (incl. 1 trait)  |
+| application: repo_watch_operations                 | 33 (+2 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
@@ -11465,4 +11468,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
 | application: turn_liveness                         | 7                                |
-| **signalbox-application total**                    | **339 (+11 free fn)**            |
+| **signalbox-application total**                    | **340 (+11 free fn)**            |

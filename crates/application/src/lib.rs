@@ -117,12 +117,12 @@ pub use repo_watch_operations::{
     RepoWatchHeldSlotBlocker, RepoWatchLatestWebhook, RepoWatchObligationCursor,
     RepoWatchObligationId, RepoWatchObligationReadiness, RepoWatchOperationsReader,
     RepoWatchOperatorDispatch, RepoWatchOperatorEvent, RepoWatchOperatorSettlement,
-    RepoWatchPullRequestOperations, RepoWatchPullRequestOperationsFacts, RepoWatchPullRequestPage,
-    RepoWatchPullRequestSession, RepoWatchPullRequestSessionPage, RepoWatchQueuedObligation,
-    RepoWatchRepositoryStatus, RepoWatchRepositoryStatusPage, RepoWatchReviewDecision,
-    RepoWatchSessionCursor, RepoWatchSessionPurpose, RepoWatchWebhookActivity,
-    RepoWatchWebhookDisposition, RepoWatchWebhookWindow, RepoWatchWorkPage,
-    max_repo_watch_activity_page_items, max_repo_watch_operations_page_items,
+    RepoWatchPagePosition, RepoWatchPullRequestOperations, RepoWatchPullRequestOperationsFacts,
+    RepoWatchPullRequestPage, RepoWatchPullRequestSession, RepoWatchPullRequestSessionPage,
+    RepoWatchQueuedObligation, RepoWatchRepositoryStatus, RepoWatchRepositoryStatusPage,
+    RepoWatchReviewDecision, RepoWatchSessionCursor, RepoWatchSessionPurpose,
+    RepoWatchWebhookActivity, RepoWatchWebhookDisposition, RepoWatchWebhookWindow,
+    RepoWatchWorkPage, max_repo_watch_activity_page_items, max_repo_watch_operations_page_items,
 };
 pub use repo_watch_webhook::{
     RepoWatchBranchHeadPreviousV1, RepoWatchObservationApplyV1, RepoWatchObservationChangeV1,

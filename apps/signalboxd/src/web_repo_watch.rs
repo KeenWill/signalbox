@@ -17,12 +17,13 @@ use signalbox_application::{
     RepoWatchActivityPage, RepoWatchAutomationStatus, RepoWatchChecksStatus, RepoWatchDraftStatus,
     RepoWatchEventCursor, RepoWatchHeldCursor, RepoWatchHeldSlot, RepoWatchHeldSlotBlocker,
     RepoWatchObligationCursor, RepoWatchObligationReadiness, RepoWatchOperatorDispatch,
-    RepoWatchOperatorEvent, RepoWatchOperatorSettlement, RepoWatchPullRequestLifecycle,
-    RepoWatchPullRequestOperations, RepoWatchPullRequestPage, RepoWatchPullRequestSession,
-    RepoWatchPullRequestSessionPage, RepoWatchQueuedObligation, RepoWatchRepositoryStatus,
-    RepoWatchRepositoryStatusPage, RepoWatchReviewDecision, RepoWatchSessionCursor,
-    RepoWatchSessionPurpose, RepoWatchSingletonKey, RepoWatchWebhookActivity,
-    RepoWatchWebhookDisposition, RepoWatchWebhookWindow, RepoWatchWorkPage,
+    RepoWatchOperatorEvent, RepoWatchOperatorSettlement, RepoWatchPagePosition,
+    RepoWatchPullRequestLifecycle, RepoWatchPullRequestOperations, RepoWatchPullRequestPage,
+    RepoWatchPullRequestSession, RepoWatchPullRequestSessionPage, RepoWatchQueuedObligation,
+    RepoWatchRepositoryStatus, RepoWatchRepositoryStatusPage, RepoWatchReviewDecision,
+    RepoWatchSessionCursor, RepoWatchSessionPurpose, RepoWatchSingletonKey,
+    RepoWatchWebhookActivity, RepoWatchWebhookDisposition, RepoWatchWebhookWindow,
+    RepoWatchWorkPage,
 };
 use signalbox_domain::{
     MergeableState, PullRequestNumber, RepoWatchDispatchId, RepoWatchEventKindNameV1,
@@ -267,14 +268,18 @@ async fn activity(
     ) {
         return invalid_query(code, message);
     }
+    let events_before = if include_events {
+        events_before.map_or(RepoWatchPagePosition::Start, RepoWatchPagePosition::After)
+    } else {
+        RepoWatchPagePosition::Exhausted
+    };
+    let webhooks_before = if include_webhooks {
+        webhooks_before.map_or(RepoWatchPagePosition::Start, RepoWatchPagePosition::After)
+    } else {
+        RepoWatchPagePosition::Exhausted
+    };
     match operations
-        .activity(
-            repository,
-            events_before,
-            webhooks_before,
-            include_events,
-            include_webhooks,
-        )
+        .activity(repository, events_before, webhooks_before)
         .await
     {
         Ok(page) => match activity_page_dto(page, include_events, include_webhooks) {
@@ -834,13 +839,17 @@ fn activity_page_dto(
         } else {
             Vec::new()
         },
-        event_continuation_before: include_events
-            .then_some(page.event_continuation_before)
-            .flatten()
-            .map(|cursor| WebRepoWatchEventCursor {
-                cursor_generation: cursor.cursor_generation.to_string(),
-                event_ordinal: cursor.event_ordinal,
-            }),
+        event_continuation_before: match page.event_continuation_before {
+            RepoWatchPagePosition::After(cursor) if include_events => {
+                Some(WebRepoWatchEventCursor {
+                    cursor_generation: cursor.cursor_generation.to_string(),
+                    event_ordinal: cursor.event_ordinal,
+                })
+            }
+            RepoWatchPagePosition::Start
+            | RepoWatchPagePosition::After(_)
+            | RepoWatchPagePosition::Exhausted => None,
+        },
         webhooks: if include_webhooks {
             page.webhooks
                 .into_iter()
@@ -849,10 +858,14 @@ fn activity_page_dto(
         } else {
             Vec::new()
         },
-        webhook_continuation_before_receipt_sequence: include_webhooks
-            .then_some(page.webhook_continuation_before)
-            .flatten()
-            .map(|sequence| sequence.to_string()),
+        webhook_continuation_before_receipt_sequence: match page.webhook_continuation_before {
+            RepoWatchPagePosition::After(sequence) if include_webhooks => {
+                Some(sequence.to_string())
+            }
+            RepoWatchPagePosition::Start
+            | RepoWatchPagePosition::After(_)
+            | RepoWatchPagePosition::Exhausted => None,
+        },
     })
 }
 

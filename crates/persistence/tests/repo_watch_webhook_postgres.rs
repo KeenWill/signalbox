@@ -13,8 +13,8 @@ use std::{
 use rust_decimal::Decimal;
 use signalbox_application::RepoWatchEventContentIdentityV1;
 use signalbox_application::{
-    RepoWatchObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
-    max_repo_watch_activity_page_items,
+    RepoWatchObservation, RepoWatchPagePosition, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateInput, max_repo_watch_activity_page_items,
 };
 use signalbox_domain::{CommitSha, PullRequestNumber, RepoWatchEventKindNameV1, RepositorySlug};
 use signalbox_persistence::{
@@ -699,15 +699,17 @@ async fn operations_webhook_window_and_activity_are_bounded_and_keyset_paged()
     let reader = PostgresRepoWatchOperations::new(pool);
     let statuses = reader.repository_statuses(None).await?;
     let first = reader
-        .activity(repository.clone(), None, None, true, true)
+        .activity(
+            repository.clone(),
+            RepoWatchPagePosition::Start,
+            RepoWatchPagePosition::Start,
+        )
         .await?;
     let second = reader
         .activity(
             repository,
-            None,
+            RepoWatchPagePosition::Exhausted,
             first.webhook_continuation_before,
-            true,
-            true,
         )
         .await?;
 
