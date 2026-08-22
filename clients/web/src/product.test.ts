@@ -182,6 +182,62 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('continuation session_identity contradicts last_activity')
   })
 
+  it('rejects rows that violate the declared activity ordering', async () => {
+    const laterSummary = {
+      ...sessionPageFixture.summaries[0],
+      session_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e',
+      last_activity: { kind: 'turn', unix_milliseconds: '1724200000001' },
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+              summaries: [sessionPageFixture.summaries[0], laterSummary],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('rows contradict last_activity_descending')
+  })
+
+  it('rejects rows that violate the declared identity ordering', async () => {
+    const earlierSession = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c5c'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              sort: 'session_identity_ascending',
+              continuation: null,
+              summaries: [
+                sessionPageFixture.summaries[0],
+                { ...sessionPageFixture.summaries[0], session_id: earlierSession },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'identity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('rows contradict session_identity_ascending')
+  })
+
   it('rejects a response beyond the catalog page ceiling', async () => {
     const oversizedSummaries = Array.from(
       { length: MAX_SESSION_PAGE_ITEMS + 1 },
@@ -325,7 +381,9 @@ describe('readProductSessionState', () => {
   })
 
   it('drops searches that violate the catalog contract', () => {
-    expect(readProductSessionState({ q: 'release\0candidate' }).q).toBeUndefined()
+    expect(
+      readProductSessionState({ q: `release${String.fromCharCode(0)}candidate` }).q,
+    ).toBeUndefined()
     expect(readProductSessionState({ q: 'é'.repeat(MAX_SESSION_SEARCH_BYTES) }).q).toBeUndefined()
   })
 })

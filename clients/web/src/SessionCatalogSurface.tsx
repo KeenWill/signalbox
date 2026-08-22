@@ -102,7 +102,7 @@ export function SessionCatalogSurface({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const form = new FormData(event.currentTarget)
-    const q = String(form.get('q') ?? '').trim()
+    const q = String(form.get('q') ?? '')
     const sort = form.get('sort') === 'identity' ? 'identity' : undefined
     const archived = form.get('archived') === 'on' ? true : undefined
     onStateChange({ q: q || undefined, sort, archived })

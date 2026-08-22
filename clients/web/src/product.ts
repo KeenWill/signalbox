@@ -120,6 +120,19 @@ const validateSessionPage = (
       throw new Error('session catalog activity timestamp is outside the JavaScript Date range')
     }
   }
+  for (let index = 1; index < page.summaries.length; index += 1) {
+    const previous = page.summaries[index - 1]
+    const current = page.summaries[index]
+    if (!previous || !current) continue
+    const violatesSort =
+      request.sort === 'identity'
+        ? previous.session_id >= current.session_id
+        : BigInt(previous.last_activity.unix_milliseconds) <
+          BigInt(current.last_activity.unix_milliseconds)
+    if (violatesSort) {
+      throw new Error(`session catalog rows contradict ${expectedSort}`)
+    }
+  }
   if (page.continuation) {
     const boundary = page.summaries.at(-1)
     if (!boundary || page.continuation.session_id !== boundary.session_id) {

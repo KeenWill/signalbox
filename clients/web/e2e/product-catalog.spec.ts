@@ -119,6 +119,24 @@ test('filters and inspects a session without a mouse, then restores focus', asyn
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('preserves meaningful whitespace in exact catalog searches', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let observedSearch: string | null = null
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/sessions?**', (route) => {
+    observedSearch = new URL(route.request().url()).searchParams.get('search')
+    return route.fulfill({ json: firstPage })
+  })
+  await page.goto('/sessions')
+
+  const search = page.getByRole('textbox', { name: 'Search titles' })
+  await search.fill(' release ')
+  await search.press('Enter')
+  await expect.poll(() => new URL(page.url()).searchParams.get('q')).toBe(' release ')
+  await expect.poll(() => observedSearch).toBe(' release ')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('replaces the bounded catalog page through its typed continuation', async ({ page }) => {
   const problems = watchBrowser(page)
   await useCatalogFixture(page)

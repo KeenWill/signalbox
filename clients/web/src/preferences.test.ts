@@ -25,6 +25,18 @@ describe('browser preferences', () => {
     expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
   })
 
+  it('falls back when access to the browser storage object is denied', () => {
+    vi.stubGlobal('localStorage', undefined)
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get: () => {
+        throw new DOMException('Storage denied', 'SecurityError')
+      },
+    })
+
+    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+  })
+
   it('treats browser storage write failures as best-effort persistence', () => {
     vi.stubGlobal('localStorage', {
       setItem: () => {

@@ -95,8 +95,8 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
 }
 
 export const loadBrowserPreferences = (): BrowserPreferences => {
-  if (typeof localStorage === 'undefined') return defaultBrowserPreferences
   try {
+    if (typeof localStorage === 'undefined') return defaultBrowserPreferences
     const stored = localStorage.getItem(BROWSER_PREFERENCES_KEY)
     if (stored === null) return defaultBrowserPreferences
     return decodeBrowserPreferences(JSON.parse(stored))
@@ -106,8 +106,8 @@ export const loadBrowserPreferences = (): BrowserPreferences => {
 }
 
 export const saveBrowserPreferences = (preferences: BrowserPreferences): void => {
-  if (typeof localStorage === 'undefined') return
   try {
+    if (typeof localStorage === 'undefined') return
     localStorage.setItem(BROWSER_PREFERENCES_KEY, JSON.stringify(preferences))
   } catch {
     // Persistence is best-effort when access is denied or quota is exhausted.
