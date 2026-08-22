@@ -149,8 +149,9 @@ nonempty registry is constructed.
 On Linux the processor launches the exact worker through bubblewrap. It unshares
 every supported namespace, explicitly unshares and then disables further user
 namespaces, drops every capability, clears the environment, creates private
-`/proc`, `/dev`, `/tmp`, and `/run`, and mounts only the exact worker plus the
-host's dynamic-runtime library trees read-only. It exposes no source path,
+`/proc`, `/dev`, `/tmp`, and `/run`, places `/dev/shm` under its own bounded
+tmpfs mount, and mounts only the exact worker plus the host's dynamic-runtime
+library trees read-only. It exposes no source path,
 catalog, database, daemon socket, configuration, credential, home directory, or
 network namespace. An architecture-checked seccomp filter returns `ENOSYS` for
 `clone3`, permits fallback `clone` only with `CLONE_THREAD`, and denies process
@@ -160,7 +161,7 @@ Before releasing a dedicated startup gate, the daemon applies hard
 address-space, CPU, task, core-dump, and descriptor limits to the sandbox
 process and all inherited worker threads. The configured memory ceiling is one
 combined budget: half is reserved for address space and half is split between
-the two writable tmpfs mounts, so their maxima cannot add to more than the
+the three writable tmpfs mounts, so their maxima cannot add to more than the
 configured value. Construction fails when either the real or effective UID is 0
 because Linux exempts those identities from `RLIMIT_NPROC`, making the task
 ceiling unenforceable. The daemon independently owns the wall deadline and kills

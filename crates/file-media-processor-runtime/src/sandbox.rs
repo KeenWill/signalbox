@@ -13,10 +13,7 @@ use std::{
     time::Duration,
 };
 
-use rustix::{
-    fd::AsFd as _,
-    process::{Resource, Rlimit, geteuid, getuid},
-};
+use rustix::process::{Resource, Rlimit, geteuid, getuid};
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProcessCeilings, FileMediaProcessor, FileMediaProcessorFuture,
     FileMediaProviderDeclaration, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
@@ -347,9 +344,7 @@ impl SandboxedFileMediaProcessor {
     ) -> Result<RunningWorker, ProcessorFailure> {
         let seccomp = process_creation_filter().map_err(|_| ProcessorFailure::Unavailable)?;
         let (block_read, block_write) =
-            rustix::pipe::pipe().map_err(|_| ProcessorFailure::Unavailable)?;
-        rustix::io::fcntl_setfd(block_write.as_fd(), rustix::io::FdFlags::CLOEXEC)
-            .map_err(|_| ProcessorFailure::Unavailable)?;
+            startup_pipe().map_err(|_| ProcessorFailure::Unavailable)?;
         let profile = sandbox_arguments(
             &worker.proc_path,
             seccomp.as_raw_fd(),
@@ -369,13 +364,14 @@ impl SandboxedFileMediaProcessor {
             .kill_on_drop(true);
         let ceilings = self.ceilings;
         let seccomp_fd = seccomp.as_raw_fd();
+        let block_fd = block_read.as_raw_fd();
         command.as_std_mut().process_group(0);
         unsafe {
             // SAFETY: the closure performs direct setrlimit, fcntl, and keyctl
             // syscalls before exec, and captures only copy-only values.
             command
                 .as_std_mut()
-                .pre_exec(move || prepare_sandbox_process(ceilings, seccomp_fd));
+                .pre_exec(move || prepare_sandbox_process(ceilings, seccomp_fd, block_fd));
         }
         let child = command.spawn().map_err(|_| ProcessorFailure::Unavailable)?;
         drop(block_read);
@@ -727,17 +723,23 @@ fn apply_process_limits(ceilings: FileMediaProcessCeilings) -> Result<(), rustix
 fn prepare_sandbox_process(
     ceilings: FileMediaProcessCeilings,
     seccomp_fd: i32,
+    block_fd: i32,
 ) -> Result<(), std::io::Error> {
     apply_process_limits(ceilings).map_err(std::io::Error::from)?;
-    // This runs after fork in the child, so only bubblewrap inherits the
-    // descriptor; the multithreaded daemon keeps it close-on-exec.
-    rustix::io::fcntl_setfd(
-        // SAFETY: seccomp_fd names the live descriptor captured for this child.
-        unsafe { rustix::fd::BorrowedFd::borrow_raw(seccomp_fd) },
-        rustix::io::FdFlags::empty(),
-    )
-    .map_err(std::io::Error::from)?;
+    inherit_child_descriptor(seccomp_fd)?;
+    inherit_child_descriptor(block_fd)?;
     detach_session_keyring()
+}
+
+fn startup_pipe() -> Result<(rustix::fd::OwnedFd, rustix::fd::OwnedFd), rustix::io::Errno> {
+    rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+}
+
+#[allow(unsafe_code)]
+fn inherit_child_descriptor(raw_fd: i32) -> Result<(), std::io::Error> {
+    // SAFETY: command setup keeps the captured descriptor alive through pre-exec.
+    let descriptor = unsafe { rustix::fd::BorrowedFd::borrow_raw(raw_fd) };
+    rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::empty()).map_err(std::io::Error::from)
 }
 
 #[allow(unsafe_code)]
@@ -819,6 +821,10 @@ fn sandbox_arguments(
         std::ffi::OsString::from(memory.second_tmpfs_bytes.to_string()),
         std::ffi::OsString::from("--tmpfs"),
         std::ffi::OsString::from("/run"),
+        std::ffi::OsString::from("--size"),
+        std::ffi::OsString::from(memory.shared_memory_bytes.to_string()),
+        std::ffi::OsString::from("--tmpfs"),
+        std::ffi::OsString::from("/dev/shm"),
         std::ffi::OsString::from("--ro-bind"),
         worker.as_os_str().to_owned(),
         std::ffi::OsString::from(WORKER_SANDBOX_PATH),
@@ -854,16 +860,19 @@ struct WorkerMemoryBudget {
     address_space_bytes: u64,
     first_tmpfs_bytes: u64,
     second_tmpfs_bytes: u64,
+    shared_memory_bytes: u64,
 }
 
 const fn worker_memory_budget(memory_bytes: u64) -> WorkerMemoryBudget {
     let tmpfs_bytes = memory_bytes / WRITABLE_TMPFS_BUDGET_DIVISOR;
-    let first_tmpfs_bytes = tmpfs_bytes / 2;
-    let second_tmpfs_bytes = tmpfs_bytes - first_tmpfs_bytes;
+    let first_tmpfs_bytes = tmpfs_bytes / 3;
+    let second_tmpfs_bytes = tmpfs_bytes / 3;
+    let shared_memory_bytes = tmpfs_bytes - first_tmpfs_bytes - second_tmpfs_bytes;
     WorkerMemoryBudget {
         address_space_bytes: memory_bytes - tmpfs_bytes,
         first_tmpfs_bytes,
         second_tmpfs_bytes,
+        shared_memory_bytes,
     }
 }
 
@@ -1269,7 +1278,7 @@ mod tests {
         CompletedOutput, ConstructionTarget, MAX_AGGREGATE_EXECUTABLE_SNAPSHOT_BYTES,
         MAX_EXECUTABLE_SNAPSHOT_BYTES, MAX_WORKER_BINDINGS, admit_completed,
         admit_executable_snapshot_bytes, admit_worker_binding_count, open_executable_snapshot,
-        open_worker_executable, sandbox_arguments, seccomp_instructions,
+        open_worker_executable, sandbox_arguments, seccomp_instructions, startup_pipe,
         task_ceiling_is_enforceable, worker_memory_budget,
     };
 
@@ -1336,7 +1345,7 @@ mod tests {
             window
                 == [
                     OsStr::new("--size"),
-                    OsStr::new("134217728"),
+                    OsStr::new("89478485"),
                     OsStr::new("--tmpfs"),
                     OsStr::new("/tmp"),
                 ]
@@ -1345,9 +1354,18 @@ mod tests {
             window
                 == [
                     OsStr::new("--size"),
-                    OsStr::new("134217728"),
+                    OsStr::new("89478485"),
                     OsStr::new("--tmpfs"),
                     OsStr::new("/run"),
+                ]
+        }));
+        assert!(arguments.windows(4).any(|window| {
+            window
+                == [
+                    OsStr::new("--size"),
+                    OsStr::new("89478486"),
+                    OsStr::new("--tmpfs"),
+                    OsStr::new("/dev/shm"),
                 ]
         }));
     }
@@ -1372,12 +1390,25 @@ mod tests {
     fn memory_budget_combines_address_space_and_writable_tmpfs() {
         let budget = worker_memory_budget(512 * 1024 * 1024);
         assert_eq!(budget.address_space_bytes, 256 * 1024 * 1024);
-        assert_eq!(budget.first_tmpfs_bytes, 128 * 1024 * 1024);
-        assert_eq!(budget.second_tmpfs_bytes, 128 * 1024 * 1024);
+        assert_eq!(budget.first_tmpfs_bytes, 89_478_485);
+        assert_eq!(budget.second_tmpfs_bytes, 89_478_485);
+        assert_eq!(budget.shared_memory_bytes, 89_478_486);
         assert_eq!(
-            budget.address_space_bytes + budget.first_tmpfs_bytes + budget.second_tmpfs_bytes,
+            budget.address_space_bytes
+                + budget.first_tmpfs_bytes
+                + budget.second_tmpfs_bytes
+                + budget.shared_memory_bytes,
             512 * 1024 * 1024
         );
+    }
+
+    #[test]
+    fn startup_gate_descriptors_are_close_on_exec_in_the_daemon() {
+        let (read, write) = startup_pipe().expect("startup pipe is created");
+        let read_flags = rustix::io::fcntl_getfd(&read).expect("read flags are available");
+        let write_flags = rustix::io::fcntl_getfd(&write).expect("write flags are available");
+        assert!(read_flags.contains(rustix::io::FdFlags::CLOEXEC));
+        assert!(write_flags.contains(rustix::io::FdFlags::CLOEXEC));
     }
 
     #[test]

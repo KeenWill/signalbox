@@ -432,9 +432,7 @@ impl FileMediaRegistry {
     ) -> Result<FileReadResult, FileMediaFailure> {
         let initial_request = match &request.input {
             crate::FileReadInput::Initial { options }
-                if options.is_object()
-                    && serde_json::to_vec(options)
-                        .is_ok_and(|encoded| encoded.len() <= MAX_READ_OPTIONS_BYTES) =>
+                if options.is_object() && serialized_read_options_fit(options) =>
             {
                 true
             }
@@ -494,6 +492,37 @@ impl FileMediaRegistry {
             )
             .await?;
         sanitize_read(reader, view, self.ceilings, initial_request, raw)
+    }
+}
+
+fn serialized_read_options_fit(options: &serde_json::Value) -> bool {
+    serde_json::to_writer(
+        LimitedWriter {
+            written: 0,
+            maximum: MAX_READ_OPTIONS_BYTES,
+        },
+        options,
+    )
+    .is_ok()
+}
+
+struct LimitedWriter {
+    written: usize,
+    maximum: usize,
+}
+
+impl std::io::Write for LimitedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.written = self
+            .written
+            .checked_add(bytes.len())
+            .filter(|total| *total <= self.maximum)
+            .ok_or_else(|| std::io::Error::other("serialized value exceeds its byte ceiling"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -1089,5 +1118,12 @@ mod tests {
         observe_json(&body, 0, &mut observed).expect("the bounded fixture is observable");
 
         assert_eq!(observed.depth, crate::MAX_STRUCTURED_DEPTH);
+    }
+
+    #[test]
+    fn read_option_serialization_stops_at_its_byte_ceiling() {
+        let options = serde_json::json!({ "value": "x".repeat(MAX_READ_OPTIONS_BYTES) });
+
+        assert!(!serialized_read_options_fit(&options));
     }
 }
