@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { decodeWebContractBootstrap } from '../generated/web-contract.mjs'
 import {
   BoundedSessionHistory,
   EnormousSessionScenarioSource,
@@ -7,11 +8,104 @@ import {
   MAX_TIMELINE_HTTP_RESPONSE_BYTES,
   SESSION_FOUNDATION_TOTAL,
   type SessionTimelineSource,
+  timelineDetailIdentity,
 } from './model'
 
 const sessionId = '00000000-0000-0000-0000-000000000991'
 
 describe('BoundedSessionHistory', () => {
+  it('keeps all model-call metadata in continuation identity', () => {
+    const body = {
+      type: 'model_call',
+      turn_id: '00000000-0000-0000-0000-000000000041',
+      model_call_id: '00000000-0000-0000-0000-000000000042',
+      model_identity_id: '00000000-0000-0000-0000-000000000043',
+      state: 'terminal',
+      request_context_items: '3',
+      usage: {
+        input_tokens: '10',
+        output_tokens: '20',
+        cache_creation_input_tokens: '2',
+        cache_read_input_tokens: '4',
+      },
+      cause_code: 'completed',
+      response: null,
+    } as const
+    const item = {
+      address: { event_sequence: '41' },
+      kind: 'model_call_transition',
+      body,
+      projected_body_bytes: 128,
+    }
+    const identity = timelineDetailIdentity(
+      item as unknown as Parameters<typeof timelineDetailIdentity>[0],
+    )
+
+    const changedState = { ...item, body: { ...body, state: 'known_failed' } }
+    const changedContext = { ...item, body: { ...body, request_context_items: '4' } }
+    const changedUsage = {
+      ...item,
+      body: { ...body, usage: { ...body.usage, output_tokens: '21' } },
+    }
+    const changedCause = { ...item, body: { ...body, cause_code: 'failed' } }
+
+    expect(
+      timelineDetailIdentity(
+        changedState as unknown as Parameters<typeof timelineDetailIdentity>[0],
+      ),
+    ).not.toEqual(identity)
+    expect(
+      timelineDetailIdentity(
+        changedContext as unknown as Parameters<typeof timelineDetailIdentity>[0],
+      ),
+    ).not.toEqual(identity)
+    expect(
+      timelineDetailIdentity(
+        changedUsage as unknown as Parameters<typeof timelineDetailIdentity>[0],
+      ),
+    ).not.toEqual(identity)
+    expect(
+      timelineDetailIdentity(
+        changedCause as unknown as Parameters<typeof timelineDetailIdentity>[0],
+      ),
+    ).not.toEqual(identity)
+  })
+
+  it('changes user-input continuation identity when attachment facts drift', () => {
+    const body = {
+      type: 'user_input',
+      turn_id: '00000000-0000-0000-0000-000000000041',
+      text: { text: 'hello', offset_bytes: '0', total_bytes: '5', continuation: null },
+      attachments: [
+        {
+          blob_id: '00000000-0000-0000-0000-000000000042',
+          length_bytes: '5',
+          media_type: 'text/plain',
+        },
+      ],
+    } as const
+    const item = {
+      address: { event_sequence: '41' },
+      kind: 'input_accepted',
+      body,
+      projected_body_bytes: 133,
+    }
+    const identity = timelineDetailIdentity(
+      item as unknown as Parameters<typeof timelineDetailIdentity>[0],
+    )
+    const changed = {
+      ...item,
+      body: {
+        ...body,
+        attachments: [{ ...body.attachments[0], length_bytes: '6' }],
+      },
+    }
+
+    expect(
+      timelineDetailIdentity(changed as unknown as Parameters<typeof timelineDetailIdentity>[0]),
+    ).not.toEqual(identity)
+  })
+
   it('navigates an enormous session without retaining lifetime history', async () => {
     const arbitraryAddress = '500000'
     const scenario = new EnormousSessionScenarioSource()
@@ -69,6 +163,25 @@ describe('BoundedSessionHistory', () => {
     const history = new BoundedSessionHistory(sessionId, source)
 
     await expect(history.describe()).rejects.toThrow('exceeds 64 bits')
+  })
+
+  it('rejects a descriptor count that contradicts its address span', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        first_address: { event_sequence: '10' },
+        latest_address: { event_sequence: '11' },
+        sizes: { ...descriptor.sizes, item_count: '3' },
+      }),
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+
+    await expect(new BoundedSessionHistory(sessionId, source).describe()).rejects.toThrow(
+      'item count contradicts its address span',
+    )
   })
 
   it('compares canonical UUID identities', async () => {
@@ -141,7 +254,7 @@ describe('BoundedSessionHistory', () => {
     }
 
     await expect(new BoundedSessionHistory(sessionId, source).describe()).rejects.toThrow(
-      'boundaries are contradictory',
+      'item count contradicts its address span',
     )
   })
 
@@ -164,6 +277,8 @@ describe('BoundedSessionHistory', () => {
       limits: {
         max_timeline_window_items: 1_000_000,
         max_timeline_window_bytes: 1_000_000_000,
+        max_timeline_detail_items: 128,
+        max_timeline_detail_bytes: 64 * 1024,
       },
       readDescriptor: scenario.readDescriptor.bind(scenario),
       readWindow: async (requestedSessionId, anchor, limits) => {
@@ -190,6 +305,8 @@ describe('BoundedSessionHistory', () => {
       limits: {
         max_timeline_window_items: Number.NaN,
         max_timeline_window_bytes: Number.POSITIVE_INFINITY,
+        max_timeline_detail_items: 128,
+        max_timeline_detail_bytes: 64 * 1024,
       },
       readDescriptor: scenario.readDescriptor.bind(scenario),
       readWindow: async (requestedSessionId, anchor, limits) => {
@@ -394,7 +511,7 @@ describe('BoundedSessionHistory', () => {
     )
   })
 
-  it('rejects advertised timeline ceilings above the protocol maxima', async () => {
+  it('rejects impossible advertised detail ceilings', async () => {
     const request = async () =>
       new Response(
         JSON.stringify({
@@ -405,6 +522,59 @@ describe('BoundedSessionHistory', () => {
             ndjson_streaming: true,
             bounded_session_timeline: true,
             bounded_session_timeline_detail: true,
+          },
+          limits: {
+            max_json_body_bytes: 1024,
+            max_ndjson_item_bytes: 1024,
+            max_timeline_window_items: 256,
+            max_timeline_window_bytes: 64 * 1024,
+            max_timeline_detail_items: 0,
+            max_timeline_detail_bytes: 255,
+          },
+        }),
+      )
+
+    await expect(HttpSessionTimelineSource.connect(request)).rejects.toThrow(
+      'detail limits are invalid',
+    )
+  })
+
+  it('rejects advertised detail ceilings above the protocol maxima', () => {
+    const bootstrap = decodeWebContractBootstrap({
+      contract: { name: 'signalbox.web-http', version: '1' },
+      capabilities: {
+        bounded_json: true,
+        same_origin_json_mutations: true,
+        ndjson_streaming: true,
+        bounded_session_timeline: true,
+        bounded_session_timeline_detail: true,
+      },
+      limits: {
+        max_json_body_bytes: 1024,
+        max_ndjson_item_bytes: 1024,
+        max_timeline_window_items: 256,
+        max_timeline_window_bytes: 64 * 1024,
+        max_timeline_detail_items: 129,
+        max_timeline_detail_bytes: 64 * 1024 + 1,
+      },
+    })
+
+    expect(() => HttpSessionTimelineSource.fromBootstrap(bootstrap)).toThrow(
+      'detail limits are invalid',
+    )
+  })
+
+  it('rejects advertised timeline ceilings above the protocol maxima', async () => {
+    const request = async () =>
+      new Response(
+        JSON.stringify({
+          contract: { name: 'signalbox.web-http', version: '1' },
+          capabilities: {
+            bounded_json: true,
+            same_origin_json_mutations: true,
+            ndjson_streaming: true,
+            bounded_session_timeline: true,
+            bounded_session_timeline_detail: false,
           },
           limits: {
             max_json_body_bytes: 1024,
@@ -575,7 +745,7 @@ describe('BoundedSessionHistory', () => {
 
     await expect(
       new BoundedSessionHistory(sessionId, source).load(
-        { kind: 'around', eventSequence: '150' },
+        { kind: 'around', eventSequence: '100' },
         { maxItems: 2, maxBytes: 256 },
       ),
     ).rejects.toThrow('returned boundary')
@@ -637,6 +807,127 @@ describe('BoundedSessionHistory', () => {
     ).rejects.toThrow('cannot continue after')
   })
 
+  it('requires a continuation before a truncated latest window', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => descriptor,
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: descriptor.latest_address,
+            kind: 'turn_completed',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 78,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(history.load({ kind: 'latest' }, { maxItems: 1, maxBytes: 256 })).rejects.toThrow(
+      'latest timeline window continuation contradicts the descriptor',
+    )
+  })
+
+  it('correlates first and latest windows with described boundaries', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => descriptor,
+      readWindow: async (_sessionId, anchor) => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: anchor.kind === 'first' ? '2' : '999999' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 78,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(history.load({ kind: 'first' }, { maxItems: 1, maxBytes: 256 })).rejects.toThrow(
+      'descriptor boundary',
+    )
+    await expect(history.load({ kind: 'latest' }, { maxItems: 1, maxBytes: 256 })).rejects.toThrow(
+      'descriptor boundary',
+    )
+  })
+
+  it('accepts a latest window that advances beyond an earlier descriptor', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const appendedAddress = String(BigInt(descriptor.latest_address.event_sequence) + 1n)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => descriptor,
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: appendedAddress },
+            kind: 'turn_completed',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 78,
+        continuation_before: { event_sequence: appendedAddress },
+        continuation_after: null,
+      }),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(
+      history.load({ kind: 'latest' }, { maxItems: 1, maxBytes: 256 }),
+    ).resolves.toMatchObject({ items: [{ address: { event_sequence: appendedAddress } }] })
+  })
+
+  it('accepts a first-window continuation created after the descriptor snapshot', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        latest_address: { event_sequence: '1' },
+        observed_through: '1',
+        sizes: { ...descriptor.sizes, item_count: '1' },
+      }),
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '1' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 78,
+        continuation_before: null,
+        continuation_after: { event_sequence: '1' },
+      }),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(
+      history.load({ kind: 'first' }, { maxItems: 1, maxBytes: 256 }),
+    ).resolves.toMatchObject({ continuation_after: { event_sequence: '1' } })
+  })
+
   it('rejects a window on the wrong side of a strict anchor', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const source: SessionTimelineSource = {
@@ -690,6 +981,34 @@ describe('BoundedSessionHistory', () => {
         { maxItems: 1, maxBytes: 256 },
       ),
     ).rejects.toThrow('requires a nonempty window')
+  })
+
+  it('rejects an around window that omits its requested anchor', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '42' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 78,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    }
+
+    await expect(
+      new BoundedSessionHistory(sessionId, source).load(
+        { kind: 'around', eventSequence: '41' },
+        { maxItems: 1, maxBytes: 256 },
+      ),
+    ).rejects.toThrow('does not contain its requested anchor')
   })
 
   it('bounds an HTTP timeline response before JSON decoding', async () => {
@@ -758,5 +1077,379 @@ describe('BoundedSessionHistory', () => {
         error: { kind: 'application', code: 'projection_failed', message: 'projection failed' },
       },
     })
+  })
+
+  it('reads typed item detail and carries an explicit body continuation', async () => {
+    const detailAddress = '41'
+    const detailLimits = { maxItems: 1, maxBytes: 1024 }
+    const bodyContinuation = {
+      type: 'more_body',
+      body: {
+        address: { event_sequence: detailAddress },
+        field: 'input_text',
+        member_index: 0,
+        offset_bytes: '5',
+      },
+    } as const
+    const firstPageFixture = {
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: detailAddress },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: {
+              text: 'hello',
+              offset_bytes: '0',
+              total_bytes: '11',
+              continuation: bodyContinuation.body,
+            },
+            attachments: [],
+          },
+          projected_body_bytes: 133,
+        },
+      ],
+      projected_body_bytes: 133,
+      continuation: bodyContinuation,
+    } as const
+    const secondPageFixture = {
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: detailAddress },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: firstPageFixture.items[0].body.turn_id,
+            text: {
+              text: ' world',
+              offset_bytes: bodyContinuation.body.offset_bytes,
+              total_bytes: firstPageFixture.items[0].body.text.total_bytes,
+              continuation: null,
+            },
+            attachments: [],
+          },
+          projected_body_bytes: 134,
+        },
+      ],
+      projected_body_bytes: 134,
+      continuation: null,
+    } as const
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            contract: { name: 'signalbox.web-http', version: '1' },
+            capabilities: {
+              bounded_json: true,
+              same_origin_json_mutations: true,
+              ndjson_streaming: true,
+              bounded_session_timeline: true,
+              bounded_session_timeline_detail: true,
+            },
+            limits: {
+              max_json_body_bytes: 1024,
+              max_ndjson_item_bytes: 1024,
+              max_timeline_window_items: 256,
+              max_timeline_window_bytes: 64 * 1024,
+              max_timeline_detail_items: 128,
+              max_timeline_detail_bytes: 64 * 1024,
+            },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(firstPageFixture)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(secondPageFixture)))
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    const first = await source.readItemDetail(sessionId, detailAddress, detailLimits)
+    const second = await source.readItemDetail(
+      sessionId,
+      detailAddress,
+      detailLimits,
+      first.continuation ?? undefined,
+      undefined,
+      firstPageFixture.items[0].body.text.total_bytes,
+      timelineDetailIdentity(firstPageFixture.items[0]),
+    )
+    const firstUrl = new URL(String(request.mock.calls[1]?.[0]), 'http://signalbox.test')
+    const secondUrl = new URL(String(request.mock.calls[2]?.[0]), 'http://signalbox.test')
+
+    expect(first).toEqual(firstPageFixture)
+    expect(second).toEqual(secondPageFixture)
+    expect(firstUrl.pathname).toBe(`/api/sessions/${sessionId}/timeline/${detailAddress}/detail`)
+    expect(firstUrl.searchParams.get('max_items')).toBe(String(detailLimits.maxItems))
+    expect(firstUrl.searchParams.get('max_bytes')).toBe(String(detailLimits.maxBytes))
+    expect(secondUrl.searchParams.get('cursor_address')).toBe(
+      bodyContinuation.body.address.event_sequence,
+    )
+    expect(secondUrl.searchParams.get('cursor_field')).toBe(bodyContinuation.body.field)
+    expect(secondUrl.searchParams.get('cursor_member')).toBe(
+      String(bodyContinuation.body.member_index),
+    )
+    expect(secondUrl.searchParams.get('cursor_offset')).toBe(bodyContinuation.body.offset_bytes)
+  })
+
+  it('rejects continuation disagreement on the initial detail page', async () => {
+    const detailAddress = '41'
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            contract: { name: 'signalbox.web-http', version: '1' },
+            capabilities: {
+              bounded_json: true,
+              same_origin_json_mutations: true,
+              ndjson_streaming: true,
+              bounded_session_timeline: true,
+              bounded_session_timeline_detail: true,
+            },
+            limits: {
+              max_json_body_bytes: 1024,
+              max_ndjson_item_bytes: 1024,
+              max_timeline_window_items: 256,
+              max_timeline_window_bytes: 64 * 1024,
+              max_timeline_detail_items: 128,
+              max_timeline_detail_bytes: 64 * 1024,
+            },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: sessionId,
+            items: [
+              {
+                address: { event_sequence: detailAddress },
+                kind: 'input_accepted',
+                body: {
+                  type: 'user_input',
+                  turn_id: '00000000-0000-0000-0000-000000000041',
+                  text: {
+                    text: 'hello',
+                    offset_bytes: '0',
+                    total_bytes: '11',
+                    continuation: {
+                      address: { event_sequence: detailAddress },
+                      field: 'input_text',
+                      member_index: 0,
+                      offset_bytes: '5',
+                    },
+                  },
+                  attachments: [],
+                },
+                projected_body_bytes: 133,
+              },
+            ],
+            projected_body_bytes: 133,
+            continuation: null,
+          }),
+        ),
+      )
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    await expect(
+      source.readItemDetail(sessionId, detailAddress, { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('continuation must be the excerpt body continuation')
+  })
+
+  it('rejects more-at continuations from exact item detail reads', async () => {
+    const detailAddress = '41'
+    const bootstrap = decodeWebContractBootstrap({
+      contract: { name: 'signalbox.web-http', version: '1' },
+      capabilities: {
+        bounded_json: true,
+        same_origin_json_mutations: true,
+        ndjson_streaming: true,
+        bounded_session_timeline: true,
+        bounded_session_timeline_detail: true,
+      },
+      limits: {
+        max_json_body_bytes: 1024,
+        max_ndjson_item_bytes: 65_536,
+        max_timeline_window_items: 256,
+        max_timeline_window_bytes: 64 * 1024,
+        max_timeline_detail_items: 128,
+        max_timeline_detail_bytes: 64 * 1024,
+      },
+    })
+    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          session_id: sessionId,
+          items: [
+            {
+              address: { event_sequence: detailAddress },
+              kind: 'session_created',
+              body: { type: 'event_fact', kind: 'session_created' },
+              projected_body_bytes: 128,
+            },
+          ],
+          projected_body_bytes: 128,
+          continuation: { type: 'more_at', address: { event_sequence: '42' } },
+        }),
+      ),
+    )
+    const source = HttpSessionTimelineSource.fromBootstrap(bootstrap, request)
+
+    await expect(
+      source.readItemDetail(sessionId, detailAddress, { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('cannot return a more-at continuation')
+  })
+
+  it('rejects a text continuation that makes zero byte progress', async () => {
+    const detailAddress = '41'
+    const bootstrap = decodeWebContractBootstrap({
+      contract: { name: 'signalbox.web-http', version: '1' },
+      capabilities: {
+        bounded_json: true,
+        same_origin_json_mutations: true,
+        ndjson_streaming: true,
+        bounded_session_timeline: true,
+        bounded_session_timeline_detail: true,
+      },
+      limits: {
+        max_json_body_bytes: 1024,
+        max_ndjson_item_bytes: 1024,
+        max_timeline_window_items: 256,
+        max_timeline_window_bytes: 64 * 1024,
+        max_timeline_detail_items: 128,
+        max_timeline_detail_bytes: 64 * 1024,
+      },
+    })
+    const continuation = {
+      address: { event_sequence: detailAddress },
+      field: 'input_text',
+      member_index: 0,
+      offset_bytes: '0',
+    } as const
+    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          session_id: sessionId,
+          items: [
+            {
+              address: { event_sequence: detailAddress },
+              kind: 'input_accepted',
+              body: {
+                type: 'user_input',
+                turn_id: '00000000-0000-0000-0000-000000000041',
+                text: {
+                  text: '',
+                  offset_bytes: '0',
+                  total_bytes: '1',
+                  continuation,
+                },
+                attachments: [],
+              },
+              projected_body_bytes: 128,
+            },
+          ],
+          projected_body_bytes: 128,
+          continuation: { type: 'more_body', body: continuation },
+        }),
+      ),
+    )
+    const source = HttpSessionTimelineSource.fromBootstrap(bootstrap, request)
+
+    await expect(
+      source.readItemDetail(sessionId, detailAddress, { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('positive byte progress')
+  })
+
+  it('rejects an initial text excerpt that does not start at byte zero', async () => {
+    const detailAddress = '41'
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            contract: { name: 'signalbox.web-http', version: '1' },
+            capabilities: {
+              bounded_json: true,
+              same_origin_json_mutations: true,
+              ndjson_streaming: true,
+              bounded_session_timeline: true,
+              bounded_session_timeline_detail: true,
+            },
+            limits: {
+              max_json_body_bytes: 1024,
+              max_ndjson_item_bytes: 1024,
+              max_timeline_window_items: 256,
+              max_timeline_window_bytes: 64 * 1024,
+              max_timeline_detail_items: 128,
+              max_timeline_detail_bytes: 64 * 1024,
+            },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: sessionId,
+            items: [
+              {
+                address: { event_sequence: detailAddress },
+                kind: 'input_accepted',
+                body: {
+                  type: 'user_input',
+                  turn_id: '00000000-0000-0000-0000-000000000041',
+                  text: {
+                    text: 'hello',
+                    offset_bytes: '10',
+                    total_bytes: '15',
+                    continuation: null,
+                  },
+                  attachments: [],
+                },
+                projected_body_bytes: 133,
+              },
+            ],
+            projected_body_bytes: 133,
+            continuation: null,
+          }),
+        ),
+      )
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    await expect(
+      source.readItemDetail(sessionId, detailAddress, { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('must start at byte zero')
+  })
+
+  it('fails closed when item detail capability is unavailable', async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          contract: { name: 'signalbox.web-http', version: '1' },
+          capabilities: {
+            bounded_json: true,
+            same_origin_json_mutations: true,
+            ndjson_streaming: true,
+            bounded_session_timeline: true,
+            bounded_session_timeline_detail: false,
+          },
+          limits: {
+            max_json_body_bytes: 1024,
+            max_ndjson_item_bytes: 1024,
+            max_timeline_window_items: 256,
+            max_timeline_window_bytes: 64 * 1024,
+            max_timeline_detail_items: 128,
+            max_timeline_detail_bytes: 64 * 1024,
+          },
+        }),
+      ),
+    )
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('detail capability is unavailable')
+    expect(request).toHaveBeenCalledTimes(1)
   })
 })

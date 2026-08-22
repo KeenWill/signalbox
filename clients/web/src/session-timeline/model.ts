@@ -2,33 +2,53 @@ import type {
   WebApiErrorResponse,
   WebContractBootstrap,
   WebSessionTimelineDescriptor,
+  WebSessionTimelineDetailPage,
   WebSessionTimelineWindow,
 } from '../generated/web-contract.mjs'
 import {
   decodeWebApiErrorResponse,
   decodeWebContractBootstrap,
   decodeWebSessionTimelineDescriptor,
+  decodeWebSessionTimelineDetailPage,
   decodeWebSessionTimelineWindow,
 } from '../generated/web-contract.mjs'
 
 export const MAX_RETAINED_SESSION_ITEMS = 768
 const MAX_CONTRACT_TIMELINE_WINDOW_ITEMS = 256
 const MAX_CONTRACT_TIMELINE_WINDOW_BYTES = 64 * 1024
+const MAX_CONTRACT_TIMELINE_DETAIL_ITEMS = 128
+const MAX_CONTRACT_TIMELINE_DETAIL_BYTES = 64 * 1024
 const PROJECTED_ITEM_ENVELOPE_BYTES = 64
+const PROJECTED_DETAIL_ENVELOPE_BYTES = 128
 // Hard safety ceiling preventing a regressed endpoint from materializing an
 // unbounded JSON response before the generated decoder can reject its shape.
 export const MAX_TIMELINE_HTTP_RESPONSE_BYTES = 256 * 1024
+export const MAX_TIMELINE_DETAIL_HTTP_RESPONSE_BYTES =
+  MAX_TIMELINE_HTTP_RESPONSE_BYTES + 5 * MAX_CONTRACT_TIMELINE_DETAIL_BYTES
 
 type TimelineContractLimits = Pick<
   WebContractBootstrap['limits'],
-  'max_timeline_window_items' | 'max_timeline_window_bytes'
+  | 'max_timeline_window_items'
+  | 'max_timeline_window_bytes'
+  | 'max_timeline_detail_items'
+  | 'max_timeline_detail_bytes'
 >
+
+type TimelineDetailCursor = NonNullable<WebSessionTimelineDetailPage['continuation']>
+type TimelineDetailItem = WebSessionTimelineDetailPage['items'][number]
+type TimelineTextExcerpt = Extract<TimelineDetailItem['body'], { type: 'user_input' }>['text']
+export type TimelineDetailIdentity = readonly string[]
 
 export type SessionWindowAnchor =
   | { kind: 'first' | 'latest' }
   | { kind: 'before' | 'after' | 'around'; eventSequence: string }
 
 export interface SessionWindowLimits {
+  maxItems: number
+  maxBytes: number
+}
+
+export interface SessionDetailLimits {
   maxItems: number
   maxBytes: number
 }
@@ -62,6 +82,97 @@ const decimalAddress = (value: string): bigint => {
 const projectedItemBytes = (kind: string): number =>
   PROJECTED_ITEM_ENVELOPE_BYTES + new TextEncoder().encode(kind).byteLength
 
+const validateTextExcerpt = (
+  item: TimelineDetailItem,
+  excerpt: TimelineTextExcerpt,
+  field: 'input_text' | 'model_response',
+): number => {
+  const offset = decimalU64(excerpt.offset_bytes)
+  const total = decimalU64(excerpt.total_bytes)
+  const excerptBytes = new TextEncoder().encode(excerpt.text).byteLength
+  const nextOffset = offset + BigInt(excerptBytes)
+  if (nextOffset > total) {
+    throw new TypeError('timeline detail text excerpt exceeds its declared total')
+  }
+  const continuation = excerpt.continuation
+  if (continuation) {
+    if (excerptBytes === 0) {
+      throw new TypeError('timeline detail text continuation must make positive byte progress')
+    }
+    if (nextOffset >= total) {
+      throw new TypeError('timeline detail text continuation requires an incomplete excerpt')
+    }
+    if (
+      continuation.address.event_sequence !== item.address.event_sequence ||
+      continuation.field !== field ||
+      continuation.member_index !== 0 ||
+      decimalU64(continuation.offset_bytes) !== nextOffset
+    ) {
+      throw new TypeError('timeline detail text continuation does not make exact UTF-8 progress')
+    }
+  } else if (nextOffset !== total) {
+    throw new TypeError('timeline detail terminal excerpt does not reach its declared total')
+  }
+  return excerptBytes
+}
+
+const projectedDetailBodyBytes = (item: TimelineDetailItem): number => {
+  const body = item.body
+  if (body.type === 'user_input') {
+    for (const attachment of body.attachments) decimalU64(attachment.length_bytes)
+  } else if (body.type === 'model_call') {
+    decimalU64(body.request_context_items)
+    for (const value of [
+      body.usage.input_tokens,
+      body.usage.output_tokens,
+      body.usage.cache_creation_input_tokens,
+      body.usage.cache_read_input_tokens,
+    ]) {
+      if (value != null) decimalU64(value)
+    }
+  }
+  const excerptBytes =
+    body.type === 'user_input'
+      ? validateTextExcerpt(item, body.text, 'input_text')
+      : body.type === 'model_call' && body.response
+        ? validateTextExcerpt(item, body.response, 'model_response')
+        : 0
+  return PROJECTED_DETAIL_ENVELOPE_BYTES + excerptBytes
+}
+
+export const timelineDetailIdentity = (item: TimelineDetailItem): TimelineDetailIdentity => {
+  const body = item.body
+  if (body.type === 'user_input') {
+    return [
+      body.type,
+      JSON.stringify({
+        turn_id: body.turn_id,
+        attachments: body.attachments.map((attachment) => ({
+          blob_id: attachment.blob_id,
+          length_bytes: attachment.length_bytes,
+          media_type: attachment.media_type,
+        })),
+      }),
+    ]
+  }
+  if (body.type === 'model_call') {
+    return [
+      body.type,
+      JSON.stringify({
+        turn_id: body.turn_id,
+        model_call_id: body.model_call_id,
+        model_identity_id: body.model_identity_id,
+        state: body.state,
+        request_context_items: body.request_context_items,
+        usage: body.usage,
+        cause_code: body.cause_code,
+      }),
+    ]
+  }
+  if (body.type === 'turn_lifecycle') return [body.type, body.turn_id]
+  return [body.type, body.kind]
+}
+
 const boundedLimit = (value: number, minimum: number, maximum: number): number =>
   Number.isFinite(value) ? Math.min(Math.max(Math.trunc(value), minimum), maximum) : minimum
 
@@ -84,6 +195,14 @@ const boundedLimits = (
   ),
 })
 
+const boundedDetailLimits = (
+  limits: SessionDetailLimits,
+  contract: TimelineContractLimits,
+): SessionDetailLimits => ({
+  maxItems: boundedLimit(limits.maxItems, 1, contract.max_timeline_detail_items),
+  maxBytes: boundedLimit(limits.maxBytes, 256, contract.max_timeline_detail_bytes),
+})
+
 const canonicalSessionId = (value: string): string => {
   const simple = /^[0-9a-f]{32}$/i
   const hyphenated = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -100,7 +219,10 @@ const canonicalSessionId = (value: string): string => {
   return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`
 }
 
-const readBoundedJson = async (response: Response): Promise<unknown> => {
+const readBoundedJson = async (
+  response: Response,
+  maxEncodedBytes = MAX_TIMELINE_HTTP_RESPONSE_BYTES,
+): Promise<unknown> => {
   const reader = response.body?.getReader()
   if (!reader) throw new TypeError('HTTP response has no body')
   const chunks: Uint8Array[] = []
@@ -109,7 +231,7 @@ const readBoundedJson = async (response: Response): Promise<unknown> => {
     const next = await reader.read()
     if (next.done) break
     byteCount += next.value.byteLength
-    if (byteCount > MAX_TIMELINE_HTTP_RESPONSE_BYTES) {
+    if (byteCount > maxEncodedBytes) {
       await reader.cancel()
       throw new TypeError('timeline HTTP response exceeds its encoded byte ceiling')
     }
@@ -155,6 +277,7 @@ const throwApiError = async (response: Response): Promise<never> => {
 export class HttpSessionTimelineSource implements SessionTimelineSource {
   private constructor(
     readonly limits: TimelineContractLimits,
+    private readonly detailAvailable: boolean,
     private readonly request: typeof fetch,
   ) {}
 
@@ -162,6 +285,13 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     const response = await request('/api/bootstrap')
     if (!response.ok) return throwApiError(response)
     const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
+    return HttpSessionTimelineSource.fromBootstrap(bootstrap, request)
+  }
+
+  static fromBootstrap(
+    bootstrap: WebContractBootstrap,
+    request: typeof fetch = fetch,
+  ): HttpSessionTimelineSource {
     if (!bootstrap.capabilities.bounded_session_timeline) {
       throw new TypeError('bounded session timeline capability is unavailable')
     }
@@ -173,7 +303,20 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     ) {
       throw new TypeError('bounded session timeline limits are invalid')
     }
-    return new HttpSessionTimelineSource(bootstrap.limits, request)
+    if (
+      bootstrap.capabilities.bounded_session_timeline_detail &&
+      (bootstrap.limits.max_timeline_detail_items < 1 ||
+        bootstrap.limits.max_timeline_detail_items > MAX_CONTRACT_TIMELINE_DETAIL_ITEMS ||
+        bootstrap.limits.max_timeline_detail_bytes < 256 ||
+        bootstrap.limits.max_timeline_detail_bytes > MAX_CONTRACT_TIMELINE_DETAIL_BYTES)
+    ) {
+      throw new TypeError('bounded session timeline detail limits are invalid')
+    }
+    return new HttpSessionTimelineSource(
+      bootstrap.limits,
+      bootstrap.capabilities.bounded_session_timeline_detail,
+      request,
+    )
   }
 
   async readDescriptor(
@@ -207,6 +350,134 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     if (!response.ok) return throwApiError(response)
     return decodeWebSessionTimelineWindow(await readBoundedJson(response))
   }
+
+  async readItemDetail(
+    sessionId: string,
+    eventSequence: string,
+    limits: SessionDetailLimits,
+    cursor?: TimelineDetailCursor,
+    signal?: AbortSignal,
+    expectedTotalBytes?: string,
+    expectedIdentity?: TimelineDetailIdentity,
+  ): Promise<WebSessionTimelineDetailPage> {
+    if (!this.detailAvailable) {
+      throw new TypeError('bounded session timeline detail capability is unavailable')
+    }
+    if (cursor?.type === 'more_at') {
+      throw new TypeError('exact item detail does not accept more-at continuations')
+    }
+    const address = String(decimalAddress(eventSequence))
+    const bounded = boundedDetailLimits(limits, this.limits)
+    const query = new URLSearchParams({
+      max_items: String(bounded.maxItems),
+      max_bytes: String(bounded.maxBytes),
+    })
+    if (cursor?.type === 'more_body') {
+      query.set('cursor_address', cursor.body.address.event_sequence)
+      query.set('cursor_field', cursor.body.field)
+      query.set('cursor_member', String(cursor.body.member_index))
+      query.set('cursor_offset', cursor.body.offset_bytes)
+    }
+    const response = await this.request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/timeline/${address}/detail?${query}`,
+      { signal },
+    )
+    if (!response.ok) return throwApiError(response)
+    const page = decodeWebSessionTimelineDetailPage(
+      await readBoundedJson(response, MAX_TIMELINE_DETAIL_HTTP_RESPONSE_BYTES),
+    )
+    if (page.continuation?.type === 'more_at') {
+      throw new TypeError('exact item detail cannot return a more-at continuation')
+    }
+    if (canonicalSessionId(page.session_id) !== canonicalSessionId(sessionId)) {
+      throw new TypeError('timeline detail session mismatch')
+    }
+    if (page.items.length > bounded.maxItems) {
+      throw new TypeError('timeline detail exceeds the requested item ceiling')
+    }
+    if (page.items.length === 0) {
+      throw new TypeError('timeline item detail requires a nonempty page')
+    }
+    let projectedBodyBytes = 0
+    for (const item of page.items) {
+      if (item.address.event_sequence !== address) {
+        throw new TypeError('item detail returned a different timeline address')
+      }
+      const authoritativeBodyBytes = projectedDetailBodyBytes(item)
+      if (item.projected_body_bytes !== authoritativeBodyBytes) {
+        throw new TypeError('timeline detail item byte charge does not match its body')
+      }
+      projectedBodyBytes += authoritativeBodyBytes
+      if (!Number.isSafeInteger(projectedBodyBytes)) {
+        throw new TypeError('timeline detail byte total is not a safe integer')
+      }
+    }
+    if (projectedBodyBytes !== page.projected_body_bytes) {
+      throw new TypeError('timeline detail byte total does not match its items')
+    }
+    if (projectedBodyBytes > bounded.maxBytes) {
+      throw new TypeError('timeline detail exceeds the requested byte ceiling')
+    }
+    if (!cursor) {
+      for (const item of page.items) {
+        const excerpt =
+          item.body.type === 'user_input'
+            ? item.body.text
+            : item.body.type === 'model_call'
+              ? item.body.response
+              : undefined
+        if (excerpt && decimalU64(excerpt.offset_bytes) !== 0n) {
+          throw new TypeError('initial timeline detail text excerpt must start at byte zero')
+        }
+      }
+    }
+    if (cursor?.type === 'more_body') {
+      const item = page.items[0]
+      if (!item || item.address.event_sequence !== cursor.body.address.event_sequence) {
+        throw new TypeError('timeline detail body does not match its requested cursor address')
+      }
+      const excerpt =
+        cursor.body.field === 'input_text' && item.body.type === 'user_input'
+          ? item.body.text
+          : cursor.body.field === 'model_response' && item.body.type === 'model_call'
+            ? item.body.response
+            : undefined
+      if (!excerpt || excerpt.offset_bytes !== cursor.body.offset_bytes) {
+        throw new TypeError('timeline detail body does not match its requested cursor field')
+      }
+      if (
+        expectedTotalBytes === undefined ||
+        decimalU64(excerpt.total_bytes) !== decimalU64(expectedTotalBytes)
+      ) {
+        throw new TypeError('timeline detail body changed its declared text total')
+      }
+      if (
+        expectedIdentity === undefined ||
+        JSON.stringify(timelineDetailIdentity(item)) !== JSON.stringify(expectedIdentity)
+      ) {
+        throw new TypeError('timeline detail body changed its immutable record identity')
+      }
+    }
+    const excerptContinuations = page.items.flatMap((item) => {
+      const excerpt =
+        item.body.type === 'user_input'
+          ? item.body.text
+          : item.body.type === 'model_call'
+            ? item.body.response
+            : undefined
+      return excerpt?.continuation ? [excerpt.continuation] : []
+    })
+    if (excerptContinuations.length > 1) {
+      throw new TypeError('timeline detail page has multiple body continuations')
+    }
+    const excerptContinuation = excerptContinuations[0] ?? null
+    const pageBodyContinuation =
+      page.continuation?.type === 'more_body' ? page.continuation.body : null
+    if (JSON.stringify(excerptContinuation) !== JSON.stringify(pageBodyContinuation)) {
+      throw new TypeError('timeline detail continuation contradicts its body excerpt')
+    }
+    return page
+  }
 }
 
 export class BoundedSessionHistory {
@@ -239,13 +510,11 @@ export class BoundedSessionHistory {
     const observedThrough = decimalU64(descriptor.observed_through)
     const itemCount = decimalU64(descriptor.sizes.item_count)
     const addressSpan = latestAddress - firstAddress + 1n
-    if (
-      itemCount === 0n ||
-      firstAddress > latestAddress ||
-      latestAddress > observedThrough ||
-      itemCount > addressSpan
-    ) {
+    if (itemCount === 0n || firstAddress > latestAddress || latestAddress > observedThrough) {
       throw new TypeError('descriptor timeline boundaries are contradictory')
+    }
+    if ((itemCount === 1n) !== (firstAddress === latestAddress) || itemCount > addressSpan) {
+      throw new TypeError('descriptor item count contradicts its address span')
     }
     decimalU64(descriptor.sizes.projected_text_bytes)
     decimalU64(descriptor.sizes.projected_structured_bytes)
@@ -266,6 +535,13 @@ export class BoundedSessionHistory {
     const sourceAnchor = { ...anchor }
     const anchorAddress =
       'eventSequence' in anchor ? decimalAddress(anchor.eventSequence) : undefined
+    if (anchorKind === 'around' && anchorAddress !== undefined && this.descriptorValue) {
+      const firstAddress = decimalAddress(this.descriptorValue.first_address.event_sequence)
+      const latestAddress = decimalAddress(this.descriptorValue.latest_address.event_sequence)
+      if (anchorAddress < firstAddress || anchorAddress > latestAddress) {
+        throw new TypeError('around timeline anchor lies outside the descriptor boundaries')
+      }
+    }
     const bounded = boundedLimits(limits, this.source.limits)
     const maxItems = bounded.maxItems
     const maxBytes = bounded.maxBytes
@@ -322,8 +598,44 @@ export class BoundedSessionHistory {
     if (projectedStructuredBytes > maxBytes) {
       throw new TypeError('timeline window exceeds the requested byte ceiling')
     }
+    if (
+      anchorKind === 'around' &&
+      'eventSequence' in anchor &&
+      !incoming.has(anchor.eventSequence)
+    ) {
+      throw new TypeError('around timeline window does not contain its requested anchor')
+    }
     const firstItemAddress = window.items[0]?.address.event_sequence
     const lastItemAddress = window.items.at(-1)?.address.event_sequence
+    if (
+      anchorKind === 'first' &&
+      this.descriptorValue &&
+      firstItemAddress !== this.descriptorValue.first_address.event_sequence
+    ) {
+      throw new TypeError('first timeline window does not match the descriptor boundary')
+    }
+    if (anchorKind === 'latest' && this.descriptorValue) {
+      const describedLatest = decimalAddress(this.descriptorValue.latest_address.event_sequence)
+      if (!lastItemAddress || decimalAddress(lastItemAddress) < describedLatest) {
+        throw new TypeError('latest timeline window does not reach the descriptor boundary')
+      }
+    }
+    if (anchorKind === 'first' && this.descriptorValue && lastItemAddress) {
+      const hasLaterItems =
+        decimalAddress(lastItemAddress) <
+        decimalAddress(this.descriptorValue.latest_address.event_sequence)
+      if (hasLaterItems && window.continuation_after === null) {
+        throw new TypeError('first timeline window continuation contradicts the descriptor')
+      }
+    }
+    if (anchorKind === 'latest' && this.descriptorValue && firstItemAddress) {
+      const hasEarlierItems =
+        decimalAddress(firstItemAddress) >
+        decimalAddress(this.descriptorValue.first_address.event_sequence)
+      if (hasEarlierItems !== (window.continuation_before !== null)) {
+        throw new TypeError('latest timeline window continuation contradicts the descriptor')
+      }
+    }
     if (anchorKind === 'first' && window.continuation_before) {
       throw new TypeError('first timeline window cannot continue before its anchor')
     }
@@ -398,6 +710,8 @@ const scenarioItem = (sequence: number) => {
 const SCENARIO_TIMELINE_LIMITS: TimelineContractLimits = {
   max_timeline_window_items: 256,
   max_timeline_window_bytes: 64 * 1024,
+  max_timeline_detail_items: 128,
+  max_timeline_detail_bytes: 64 * 1024,
 }
 
 export class EnormousSessionScenarioSource implements SessionTimelineSource {
