@@ -3,7 +3,6 @@ import {
   decodeBrowserPreferences,
   defaultBrowserPreferences,
   loadBrowserPreferences,
-  MAX_KEY_OVERRIDES,
   MAX_SAVED_LOGICAL_POSITIONS,
   saveBrowserPreferences,
 } from './preferences'
@@ -30,24 +29,20 @@ describe('browser preferences', () => {
     expect(decoded).not.toHaveProperty('remoteMedia')
   })
 
-  it('bounds retained positions and future key overrides', () => {
+  it('bounds retained positions and ignores unsupported key overrides', () => {
     const lastLogicalPositions = Object.fromEntries(
       Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS + 3 }, (_, index) => [
         `session-${index}`,
         String(index + 1),
       ]),
     )
-    const keyOverrides = Object.fromEntries(
-      Array.from({ length: MAX_KEY_OVERRIDES + 2 }, (_, index) => [
-        `command-${index}`,
-        `key-${index}`,
-      ]),
-    )
-
-    const decoded = decodeBrowserPreferences({ lastLogicalPositions, keyOverrides })
+    const decoded = decodeBrowserPreferences({
+      lastLogicalPositions,
+      keyOverrides: { 'selection.next': 'n' },
+    })
 
     expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
-    expect(Object.keys(decoded.keyOverrides)).toHaveLength(MAX_KEY_OVERRIDES)
+    expect(decoded).not.toHaveProperty('keyOverrides')
   })
 
   it('discards malformed saved logical positions', () => {

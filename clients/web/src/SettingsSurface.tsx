@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
+import { type CommandId, invokeCommand } from './commands'
 import { defaultBrowserPreferences } from './preferences'
-import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
+import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
 function PreferenceGroup({ legend, children }: { legend: string; children: ReactNode }) {
   return (
@@ -14,6 +15,13 @@ function PreferenceGroup({ legend, children }: { legend: string; children: React
 export function SettingsSurface() {
   const app = useAppSelector(selectApp)
   const dispatch = useAppDispatch()
+  const invokeDetailCommand = (command: Extract<CommandId, `detail.${string}`>) =>
+    invokeCommand(command, {
+      dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => {},
+    })
   return (
     <div className="surface-body settings-surface">
       <section className="settings-intro">
@@ -78,7 +86,7 @@ export function SettingsSurface() {
               type="radio"
               name="detail"
               checked={app.detail === 'full'}
-              onChange={() => dispatch(actions.detailSet('full'))}
+              onChange={() => invokeDetailCommand('detail.full')}
             />
             <span>Full</span>
           </label>
@@ -87,7 +95,7 @@ export function SettingsSurface() {
               type="radio"
               name="detail"
               checked={app.detail === 'condensed'}
-              onChange={() => dispatch(actions.detailSet('condensed'))}
+              onChange={() => invokeDetailCommand('detail.condensed')}
             />
             <span>Condensed</span>
           </label>
@@ -96,7 +104,7 @@ export function SettingsSurface() {
               type="radio"
               name="detail"
               checked={app.detail === 'results'}
-              onChange={() => dispatch(actions.detailSet('results'))}
+              onChange={() => invokeDetailCommand('detail.results')}
             />
             <span>Results</span>
           </label>
