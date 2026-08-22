@@ -7,11 +7,25 @@ const bootstrapFixture = {
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 262_144 },
+  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 65_536 },
 } as const
 
-const useDeterministicBootstrap = (page: Page) =>
-  page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+const emptyAttentionFixture = {
+  continuation_after_session_id: null,
+  cursor: '0',
+  summaries: [],
+} as const
+
+const useDeterministicProductTransport = async (page: Page) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      body: `${JSON.stringify({ kind: 'snapshot', snapshot: emptyAttentionFixture })}\n`,
+      contentType: 'application/x-ndjson',
+    }),
+  )
+  await page.route('**/api/attention', (route) => route.fulfill({ json: emptyAttentionFixture }))
+}
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
@@ -29,7 +43,7 @@ test('opens the product at Attention with generated-contract transport status', 
   page,
 }) => {
   const problems = watchBrowser(page)
-  await useDeterministicBootstrap(page)
+  await useDeterministicProductTransport(page)
   await page.goto('/')
 
   await expect(page).toHaveURL(/\/attention$/)
@@ -44,7 +58,7 @@ test('opens the product at Attention with generated-contract transport status', 
 
 test('navigates from Attention to Sessions with the shared semantic link', async ({ page }) => {
   const problems = watchBrowser(page)
-  await useDeterministicBootstrap(page)
+  await useDeterministicProductTransport(page)
   await page.goto('/attention')
 
   await page.getByRole('link', { name: /Sessions/ }).click()
@@ -55,7 +69,7 @@ test('navigates from Attention to Sessions with the shared semantic link', async
 
 test('completes route switching from the command palette without a mouse', async ({ page }) => {
   const problems = watchBrowser(page)
-  await useDeterministicBootstrap(page)
+  await useDeterministicProductTransport(page)
   await page.goto('/attention')
 
   const modifier = await platformModifier(page)
@@ -69,7 +83,7 @@ test('completes route switching from the command palette without a mouse', async
 
 test('uses a navigation sheet on a phone viewport and unwinds it with Escape', async ({ page }) => {
   const problems = watchBrowser(page)
-  await useDeterministicBootstrap(page)
+  await useDeterministicProductTransport(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/attention')
 

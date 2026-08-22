@@ -14,6 +14,7 @@ import {
   X,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef } from 'react'
+import { AttentionSurface } from './AttentionSurface'
 import {
   type CommandContext,
   commandRegistry,
@@ -185,22 +186,6 @@ function SurfaceUnavailable({ surface }: { surface: ProductRouteId }) {
         </p>
       </div>
     </section>
-  )
-}
-
-function AttentionSurface() {
-  return (
-    <div className="surface-body attention-surface">
-      <section className="surface-intro">
-        <span className="eyebrow">Decision queue</span>
-        <h2>Intervention before observation</h2>
-        <p>
-          Approvals, blocked goals, ambiguous outcomes, runner loss, and held repository work will
-          share one bounded priority surface when their owning read model is available.
-        </p>
-      </section>
-      <SurfaceUnavailable surface="attention" />
-    </div>
   )
 }
 
