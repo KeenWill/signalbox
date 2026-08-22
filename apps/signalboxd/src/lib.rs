@@ -36,7 +36,7 @@ use signalbox_persistence::model_execution::{
 };
 use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError};
 use signalbox_persistence::turn_liveness::{
-    PostgresTurnLivenessRepository, TurnLivenessRepositoryError,
+    PostgresTurnLivenessRepository, TurnLivenessPersistenceBounds, TurnLivenessRepositoryError,
 };
 use tokio::{
     sync::watch,
@@ -827,6 +827,7 @@ struct SchedulerPassOccupancyRecovery {
     execution_expiry: Option<std::sync::Arc<dyn SchedulerPassExpiryHandler>>,
     expected_turns: std::sync::Arc<std::sync::Mutex<HashMap<SessionId, TurnId>>>,
     policy: ExpiredPassRecoveryPolicy,
+    persistence_bounds: TurnLivenessPersistenceBounds,
 }
 
 impl SchedulerPassOccupancyRecovery {
@@ -905,6 +906,7 @@ impl<Generator, Transaction, Execution> ActivatedTurnPass<Generator, Transaction
         pool: sqlx::PgPool,
         eligibility_nudge: signalbox_application::InProcessEligibilityNudge,
         policy: ExpiredPassRecoveryPolicy,
+        persistence_bounds: TurnLivenessPersistenceBounds,
     ) -> Self
     where
         Execution: ActivatedTurnExecution,
@@ -915,6 +917,7 @@ impl<Generator, Transaction, Execution> ActivatedTurnPass<Generator, Transaction
             execution_expiry: self.execution.occupancy_expiry_handler(),
             expected_turns: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             policy,
+            persistence_bounds,
         });
         self
     }
@@ -1045,7 +1048,8 @@ async fn recover_expired_scheduler_pass(
     expected_turn: TurnId,
 ) {
     let policy = recovery.policy;
-    let repository = PostgresTurnLivenessRepository::new(recovery.pool.clone());
+    let repository =
+        PostgresTurnLivenessRepository::new(recovery.pool.clone(), recovery.persistence_bounds);
     let candidate = match optional_timeout(
         policy.attempt_bound,
         repository.observed_slot_held_turn(session),
@@ -2396,6 +2400,7 @@ mod tests {
         AcceptedInputTurnActivationIdentities, ActivatedTurn, ContextFrontierId,
         SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId,
     };
+    use signalbox_persistence::turn_liveness::TurnLivenessPersistenceBounds;
     use tokio::sync::watch;
     use uuid::Uuid;
 
@@ -2430,6 +2435,14 @@ mod tests {
             bounds
                 .duration("expired_pass_recovery_conservative_retry_delay")
                 .flatten(),
+        )
+    }
+
+    fn test_turn_liveness_persistence_bounds() -> TurnLivenessPersistenceBounds {
+        TurnLivenessPersistenceBounds::new(
+            Some(std::time::Duration::from_millis(7)),
+            Some(std::time::Duration::from_millis(11)),
+            Some(std::time::Duration::from_millis(13)),
         )
     }
 
@@ -2839,7 +2852,12 @@ mod tests {
                 observed: Arc::clone(&observed),
             },
         )
-        .with_occupancy_recovery(pool, nudge, example_expired_pass_policy());
+        .with_occupancy_recovery(
+            pool,
+            nudge,
+            example_expired_pass_policy(),
+            test_turn_liveness_persistence_bounds(),
+        );
         let recovery = pass
             .occupancy_recovery
             .clone()
@@ -2882,6 +2900,7 @@ mod tests {
             execution_expiry: None,
             expected_turns: Arc::new(Mutex::new(std::collections::HashMap::new())),
             policy: example_expired_pass_policy(),
+            persistence_bounds: test_turn_liveness_persistence_bounds(),
         };
 
         recovery.occupancy_expired(session);

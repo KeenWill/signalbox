@@ -9,7 +9,7 @@
 //! for a terminal turn — repository-watch dispatch release included — fires
 //! without this module naming any of them.
 
-use std::{error::Error, fmt, time::Duration};
+use std::{error::Error, fmt, future::Future, time::Duration};
 
 use signalbox_application::{
     ClassifyOperatorFailure, OperatorFailureClass, StaleTurnCandidate, StaleTurnOutcome,
@@ -40,49 +40,28 @@ use crate::submit_input::load_scheduling_projection;
 /// bound holds whatever the population is.
 const QUIESCENT_INVENTORY_PAGE_SIZE: i64 = 256;
 
-/// How long one terminalization waits for the session's scheduler row.
-///
-/// The attempt takes that row under an exclusive row lock, and the transactions holding it —
-/// activation, submission, startup recovery — are short. A wait longer than
-/// this means the session is busy, which is itself evidence against the turn
-/// being wedged, so failing fast costs nothing: the turn stays due and its lap
-/// reaches it again. What an unbounded wait would cost is the whole serial
-/// phase, which one stuck transaction could hold for as long as it lived.
-///
-/// The value is what keeps the phase inside its interval in the worst case: a
-/// windowful of attempts that all wait the full bound is sixteen seconds, the
-/// same budget a windowful of committing transactions is estimated at.
-// numeric-bound: tunable - bounds one terminalization's wait for the scheduler row
-const TERMINALIZATION_LOCK_WAIT: &str = "250ms";
+/// Deployment policy for liveness-terminalization database waits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TurnLivenessPersistenceBounds {
+    lock_wait: Option<Duration>,
+    acquire_wait: Option<Duration>,
+    write_lock_wait: Option<Duration>,
+}
 
-/// The same wait, applied to reaching a connection at all.
-///
-/// The shared pool's own acquisition timeout is thirty seconds, which a
-/// windowful of attempts would multiply into half an hour of a phase that is
-/// supposed to fit inside a one-minute interval. Cancelling an acquisition is
-/// safe in a way cancelling later work would not be: no transaction has begun,
-/// so there is nothing whose fate could be unknown.
-// numeric-bound: tunable - bounds one terminalization's wait for a pooled connection
-const TERMINALIZATION_ACQUIRE_WAIT: Duration = Duration::from_millis(250);
-
-/// How long the rest of the attempt waits for any lock, once the row is held.
-///
-/// The write phase needs its own budget rather than the acquisition one or none
-/// at all. Not the acquisition budget: appending to the outbox takes the shared
-/// `outbox_sequence_state` row, which every writer in the daemon holds from its
-/// first append until it commits, so a wait of a few hundred milliseconds there
-/// is ordinary traffic rather than a stall, and refusing on it would make the
-/// pass fail whenever the daemon was busy. And not `0`, which is what this
-/// previously reset to: an unbounded wait lets one indefinite holder of that
-/// row stall the whole reconciliation loop, which is the failure the
-/// acquisition budget exists to prevent, reintroduced one statement later.
-///
-/// A second is two orders of magnitude above a brief hold and still detects a
-/// stalled holder within one interval. Tripping it costs a retry rather than a
-/// turn: the attempt has written nothing durable, the transaction rolls back,
-/// and the lap reaches the turn again.
-// numeric-bound: tunable - bounds the write phase's wait for any contended row
-const TERMINALIZATION_WRITE_LOCK_WAIT: &str = "1s";
+impl TurnLivenessPersistenceBounds {
+    /// Binds every terminalization wait to validated daemon configuration.
+    pub const fn new(
+        lock_wait: Option<Duration>,
+        acquire_wait: Option<Duration>,
+        write_lock_wait: Option<Duration>,
+    ) -> Self {
+        Self {
+            lock_wait,
+            acquire_wait,
+            write_lock_wait,
+        }
+    }
+}
 
 /// Infrastructure or integrity failure while supervising turn liveness.
 ///
@@ -210,12 +189,13 @@ impl From<StartupScanRepositoryError> for TurnLivenessRepositoryError {
 #[derive(Clone, Debug)]
 pub struct PostgresTurnLivenessRepository {
     pool: PgPool,
+    bounds: TurnLivenessPersistenceBounds,
 }
 
 impl PostgresTurnLivenessRepository {
     /// Uses the supplied shared pool for liveness supervision.
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, bounds: TurnLivenessPersistenceBounds) -> Self {
+        Self { pool, bounds }
     }
 
     /// Reads one bounded page of active turns with no work in flight.
@@ -286,12 +266,12 @@ impl PostgresTurnLivenessRepository {
     where
         Generator: signalbox_application::StartupScanIdGenerator + Send,
     {
-        let mut transaction = timeout(TERMINALIZATION_ACQUIRE_WAIT, self.pool.begin())
+        let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
             .await
             .unwrap_or(Err(sqlx::Error::PoolTimedOut))
             .map_err(TurnLivenessRepositoryError::terminalization)?;
         sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-            .bind(TERMINALIZATION_LOCK_WAIT)
+            .bind(postgres_lock_timeout(self.bounds.lock_wait))
             .execute(&mut *transaction)
             .await
             .map_err(TurnLivenessRepositoryError::terminalization)?;
@@ -336,7 +316,7 @@ impl PostgresTurnLivenessRepository {
         candidate: StaleTurnCandidate,
         identities: AcceptedInputTurnFailureIdentities,
     ) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError> {
-        let mut transaction = timeout(TERMINALIZATION_ACQUIRE_WAIT, self.pool.begin())
+        let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
             .await
             .unwrap_or(Err(sqlx::Error::PoolTimedOut))
             .map_err(TurnLivenessRepositoryError::terminalization)?;
@@ -346,11 +326,17 @@ impl PostgresTurnLivenessRepository {
         // might interrupt the commit instead, and this pass would then not know
         // whether the turn ended.
         sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-            .bind(TERMINALIZATION_LOCK_WAIT)
+            .bind(postgres_lock_timeout(self.bounds.lock_wait))
             .execute(&mut *transaction)
             .await
             .map_err(TurnLivenessRepositoryError::terminalization)?;
-        let outcome = terminalize_in_transaction(&mut transaction, candidate, identities).await;
+        let outcome = terminalize_in_transaction(
+            &mut transaction,
+            candidate,
+            identities,
+            self.bounds.write_lock_wait,
+        )
+        .await;
         match outcome {
             Ok(StaleTurnOutcome::Terminalized) => {
                 transaction.commit().await.map_err(|error| {
@@ -746,6 +732,7 @@ async fn terminalize_in_transaction(
     connection: &mut PgConnection,
     candidate: StaleTurnCandidate,
     identities: AcceptedInputTurnFailureIdentities,
+    write_lock_wait: Option<Duration>,
 ) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError> {
     let locks = sqlx::query(crate::lock_inventory::STARTUP_RECOVERY)
         .bind(session_id_to_uuid(candidate.session()))
@@ -759,7 +746,7 @@ async fn terminalize_in_transaction(
     // mistaken for a stall, and finite so that one indefinite holder of it
     // cannot stall this loop.
     sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-        .bind(TERMINALIZATION_WRITE_LOCK_WAIT)
+        .bind(postgres_lock_timeout(write_lock_wait))
         .execute(&mut *connection)
         .await
         .map_err(TurnLivenessRepositoryError::terminalization)?;
@@ -866,12 +853,31 @@ async fn terminalize_in_transaction(
     Ok(StaleTurnOutcome::Terminalized)
 }
 
+async fn optional_timeout<F>(
+    bound: Option<Duration>,
+    future: F,
+) -> Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: Future,
+{
+    match bound {
+        Some(bound) => timeout(bound, future).await,
+        None => Ok(future.await),
+    }
+}
+
+fn postgres_lock_timeout(bound: Option<Duration>) -> String {
+    match bound {
+        Some(bound) => format!("{}us", bound.as_micros().max(1)),
+        None => String::from("0"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ClassifyOperatorFailure, FetchedPage, QUIESCENT_INVENTORY_PAGE_SIZE,
-        QuiescentActiveTurnPage, TERMINALIZATION_LOCK_WAIT, TERMINALIZATION_WRITE_LOCK_WAIT,
-        TurnLivenessRepositoryError,
+        QuiescentActiveTurnPage, TurnLivenessRepositoryError, postgres_lock_timeout,
     };
     use signalbox_application::{StaleTurnCandidate, TurnLivenessEvidence};
     use signalbox_domain::{SessionId, TurnAttemptId, TurnId};
@@ -915,13 +921,13 @@ mod tests {
         assert_eq!(empty.resume_after(), None);
     }
 
-    /// An attempt bounds two different waits, on two different rows, for two
-    /// different questions — so the budgets are not the same number.
     #[test]
-    fn an_attempt_carries_two_lock_budgets() {
-        assert_eq!(TERMINALIZATION_LOCK_WAIT, "250ms");
-        assert_eq!(TERMINALIZATION_WRITE_LOCK_WAIT, "1s");
-        assert_ne!(TERMINALIZATION_LOCK_WAIT, TERMINALIZATION_WRITE_LOCK_WAIT);
+    fn postgres_lock_waits_preserve_bounded_and_unbounded_policy() {
+        assert_eq!(
+            postgres_lock_timeout(Some(std::time::Duration::from_micros(7))),
+            "7us"
+        );
+        assert_eq!(postgres_lock_timeout(None), "0");
     }
 
     /// Only PostgreSQL's lock-refusal code reports contention, so a different

@@ -68,13 +68,14 @@ use signalbox_persistence::{
     },
     conversation_import::ImportedConversationRepository,
     create_session_from_imported_frontier::ImportedSessionRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     scheduler::PostgresEligibilitySweep,
     session_metadata::SessionMetadataRepository,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
+    turn_liveness::TurnLivenessPersistenceBounds,
 };
 use signalbox_process_protocol::{
     BlobChunk, CanonicalBlobDigest, CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame,
@@ -294,7 +295,7 @@ async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -2060,7 +2061,7 @@ async fn execute_streamed_turn_until(
     let model_configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
     let probe = scripted.clone();
     let provider =
-        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog())
+        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog(), None)
             .with_text_delta_sink(runtime.provider_text_delta_sink());
     let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
@@ -2107,7 +2108,7 @@ async fn execute_recorded_turn(
 ) -> Result<RecordingCountedScriptedModel, Box<dyn Error>> {
     let probe = scripted.clone();
     let provider =
-        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog())
+        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog(), None)
             .with_text_delta_sink(runtime.provider_text_delta_sink());
     let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
@@ -2180,7 +2181,7 @@ async fn execute_guarded_turn(
 ) -> Result<RecordingCountedScriptedModel, Box<dyn Error>> {
     let probe = scripted.clone();
     let runtime_models = model_configuration.runtime_model_catalog();
-    let provider = RuntimeModelCallProvider::new(scripted, runtime_models.clone())
+    let provider = RuntimeModelCallProvider::new(scripted, runtime_models.clone(), None)
         .with_text_delta_sink(runtime.provider_text_delta_sink());
     let counter = provider.clone();
     let repository = PostgresModelCallRepository::new(
@@ -2471,6 +2472,11 @@ fn start_fleet_scheduler(
             .duration("expired_pass_recovery_conservative_retry_delay")
             .flatten(),
     );
+    let turn_liveness_persistence_bounds = TurnLivenessPersistenceBounds::new(
+        bounds.duration("terminalization_lock_wait").flatten(),
+        bounds.duration("terminalization_acquire_wait").flatten(),
+        bounds.duration("terminalization_write_lock_wait").flatten(),
+    );
     let turn_liveness_numeric_bounds = TurnLivenessNumericBounds::new(
         bounds
             .integer("terminalizations_per_liveness_scan")
@@ -2483,6 +2489,7 @@ fn start_fleet_scheduler(
             .integer("automatic_reconciliations_per_liveness_scan")
             .flatten()
             .and_then(|value| usize::try_from(value).ok()),
+        turn_liveness_persistence_bounds,
     );
     let stale_active_turn_bound = bounds
         .duration("stale_active_turn_bound")
@@ -2504,8 +2511,9 @@ fn start_fleet_scheduler(
     let automatic_reconciliation_backoff_cap = bounds
         .duration("automatic_reconciliation_backoff_cap")
         .flatten();
-    let provider = RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog())
-        .with_text_delta_sink(runtime.provider_text_delta_sink());
+    let provider =
+        RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog(), None)
+            .with_text_delta_sink(runtime.provider_text_delta_sink());
     let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
             PostgresModelCallRepository::new(
@@ -2527,6 +2535,7 @@ fn start_fleet_scheduler(
         runtime.pool.clone(),
         runtime.eligibility_nudge.clone(),
         expired_pass_recovery_policy,
+        turn_liveness_persistence_bounds,
     );
     let mut scheduler =
         SchedulerLoop::new(runtime.take_work_source(), pass).with_occupancy_bound(occupancy_bound);
@@ -8296,7 +8305,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
     ));
     let summary_probe = summary_runtime.clone();
     let runtime_models = guarded_configuration.runtime_model_catalog();
-    let provider = RuntimeModelCallProvider::new(ordinary_runtime, runtime_models.clone())
+    let provider = RuntimeModelCallProvider::new(ordinary_runtime, runtime_models.clone(), None)
         .with_text_delta_sink(runtime.provider_text_delta_sink());
     let counter = provider.clone();
     let repository = PostgresModelCallRepository::new(
@@ -8437,6 +8446,7 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
     let provider = RuntimeModelCallProvider::new(
         ScriptedModel::<ModelCallId>::following(std::iter::empty::<Script>()),
         runtime_models.clone(),
+        None,
     )
     .with_text_delta_sink(runtime.provider_text_delta_sink());
     let repository = PostgresModelCallRepository::new(

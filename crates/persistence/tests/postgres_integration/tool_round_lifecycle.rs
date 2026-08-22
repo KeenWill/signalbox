@@ -1164,10 +1164,17 @@ async fn s07_s10_inv012_inv028_parked_approval_interrupt_records_typed_rejection
         "the confirmed tool round must be parked before the interrupt"
     );
     assert_eq!(
-        signalbox_persistence::turn_liveness::PostgresTurnLivenessRepository::new(pool.clone())
-            .slot_held_active_turns(None)
-            .await?
-            .candidates(),
+        signalbox_persistence::turn_liveness::PostgresTurnLivenessRepository::new(
+            pool.clone(),
+            signalbox_persistence::turn_liveness::TurnLivenessPersistenceBounds::new(
+                Some(std::time::Duration::from_millis(7)),
+                Some(std::time::Duration::from_millis(11)),
+                Some(std::time::Duration::from_millis(13)),
+            ),
+        )
+        .slot_held_active_turns(None)
+        .await?
+        .candidates(),
         [],
         "the slot-held watchdog never treats an approval wait as daemon-owned work"
     );

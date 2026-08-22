@@ -41,7 +41,7 @@ use signalbox_model_runtime::{
 };
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
     session::SessionRepository, start_eligible_turn::StartEligibleTurnRepository,
@@ -125,7 +125,7 @@ async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -1777,7 +1777,7 @@ context_window_tokens = 200000
             usage: TokenUsage::unreported(),
         },
     )));
-    let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models, None);
 
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
@@ -2029,7 +2029,7 @@ context_window_tokens = 200000
             usage: TokenUsage::unreported(),
         })),
     ]);
-    let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models, None);
 
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
@@ -2269,7 +2269,7 @@ context_window_tokens = 200000
             usage: TokenUsage::unreported(),
         },
     )));
-    let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models, None);
 
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
@@ -2782,7 +2782,7 @@ context_window_tokens = 200000
             usage: TokenUsage::unreported(),
         })),
     ]);
-    let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models, None);
     let tool_catalog = CompiledToolCatalog::try_new([CompiledTool::new(
         ToolDefinition::new(
             ToolName::try_new(String::from("confirmed_probe"))
@@ -2958,7 +2958,7 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
     let credential_reference = ModelCallCredentialReference::new(credential_profile);
     let anthropic = AnthropicRuntime::new(AnthropicConfig::new(), credential_access)?;
     let provider =
-        RuntimeModelCallProvider::new(anthropic, model_configuration.runtime_model_catalog());
+        RuntimeModelCallProvider::new(anthropic, model_configuration.runtime_model_catalog(), None);
     let targets = model_configuration.target_catalog();
     // Captured before the configuration moves into the process runtime.
     // Production composition attaches this catalog so every call resolves the

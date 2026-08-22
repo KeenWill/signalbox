@@ -48,6 +48,7 @@ use signalbox_persistence::{
     scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
+    turn_liveness::TurnLivenessPersistenceBounds,
 };
 use signalbox_tools_web::BRAVE_SEARCH_CREDENTIAL_REFERENCE;
 use signalboxd::runner_protocol_runtime::{
@@ -1296,10 +1297,16 @@ async fn run_hub(
         configured_duration("convergence_sweep_retry_backoff_base"),
         configured_duration("convergence_sweep_retry_backoff_cap"),
     );
+    let turn_liveness_persistence_bounds = TurnLivenessPersistenceBounds::new(
+        configured_duration("terminalization_lock_wait"),
+        configured_duration("terminalization_acquire_wait"),
+        configured_duration("terminalization_write_lock_wait"),
+    );
     let turn_liveness_numeric_bounds = TurnLivenessNumericBounds::new(
         configured_usize("terminalizations_per_liveness_scan")?,
         configured_duration("turn_liveness_recovery_attempt_bound"),
         configured_usize("automatic_reconciliations_per_liveness_scan")?,
+        turn_liveness_persistence_bounds,
     );
     let goal_mode_numeric_bounds = GoalModeNumericBounds::new(
         configured_duration("automatic_resume_base_backoff"),
@@ -1307,6 +1314,7 @@ async fn run_hub(
         configured_u32("automatic_resume_attempt_budget")?,
         configured_duration("automatic_resume_startup_retry_delay"),
     );
+    let diagnostic_model_identity_limit = configured_usize("diagnostic_model_identity_limit")?;
     if configuration.repository_watch_credential_conflicts(&model_configuration) {
         let error = HubConfigurationError::new(
             GITHUB_TOKEN_FILE_ENVIRONMENT,
@@ -1473,7 +1481,11 @@ async fn run_hub(
     let approval_judge_model: Arc<dyn ApprovalJudgeModel> = Arc::new(
         RuntimeApprovalJudgeModel::new(runtime.clone(), runtime_models.clone()),
     );
-    let provider = RuntimeModelCallProvider::new(runtime, runtime_models.clone());
+    let provider = RuntimeModelCallProvider::new(
+        runtime,
+        runtime_models.clone(),
+        diagnostic_model_identity_limit,
+    );
     let model_targets = model_configuration.target_catalog();
     let mut database = FencedHubDatabase::connect_production(configuration.database_url())
         .await
@@ -1954,6 +1966,7 @@ async fn run_hub(
         scheduler_pool.clone(),
         eligibility_nudge.clone(),
         expired_pass_recovery_policy,
+        turn_liveness_persistence_bounds,
     );
     let turn_liveness_runtime = TurnLivenessRuntime::new(
         scheduler_pool.clone(),

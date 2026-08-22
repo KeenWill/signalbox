@@ -35,7 +35,7 @@ use signalbox_model_runtime::{
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalRepository},
     goal_turn::GoalTurnCandidates,
@@ -146,7 +146,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -363,7 +363,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
             usage: TokenUsage::unreported(),
         },
     )));
-    let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models, None);
     let credential_reference = ModelCallCredentialReference::new("scripted-test");
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(
@@ -560,7 +560,7 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let runtime = ScriptedModel::following([goal_completion_script(), goal_refusal_script()]);
     let provider =
-        RuntimeModelCallProvider::new(runtime.clone(), configuration.runtime_model_catalog());
+        RuntimeModelCallProvider::new(runtime.clone(), configuration.runtime_model_catalog(), None);
     let credential_reference = ModelCallCredentialReference::new("scripted-goal-test");
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(

@@ -325,11 +325,6 @@ pub fn disposable_test_container_labels_for_command(
 #[cfg(feature = "postgres-integration")]
 const POSTGRES_STATE_DIRECTORY: &str = "/var/lib/postgresql";
 
-// numeric-bound: ceiling - bounds a runaway test's in-memory database so it
-// cannot consume unbounded host memory
-#[cfg(feature = "postgres-integration")]
-const DISPOSABLE_POSTGRES_STATE_CEILING_BYTES: i64 = 512 * 1024 * 1024;
-
 /// The `postgres` server arguments every disposable test container starts
 /// with: durability off, because every container is discarded after its test.
 ///
@@ -358,19 +353,47 @@ pub fn disposable_postgres_server_args() -> [&'static str; 6] {
 /// state on, so ephemeral `initdb`, WAL, and relation writes never reach the
 /// host's disk.
 ///
-/// The size bound exists so a runaway test fails its own container with
-/// `No space left on device` instead of consuming host memory without limit;
-/// tmpfs charges only pages actually written, so the bound costs nothing when
-/// unreached. A fully migrated test database measures 79 MiB of state all-in —
-/// PostgreSQL 18.4, every embedded migration applied, 32 MiB of it WAL — so
-/// the 512 MiB bound leaves ordinary tests six times their whole footprint in
-/// headroom. Stranded containers hold their tmpfs until removed, which is one
-/// more reason `tooling/sweep-test-containers.sh` runs on a timer on shared
-/// machines.
+/// A configured size makes a runaway test fail its own container with `No
+/// space left on device` instead of consuming host memory without limit;
+/// `None` selects the deployment's explicit unbounded policy. Tmpfs charges
+/// only pages actually written. Stranded containers hold those pages until
+/// removed, which is one more reason `tooling/sweep-test-containers.sh` runs on
+/// a timer on shared machines.
 #[cfg(feature = "postgres-integration")]
-pub fn disposable_postgres_state_tmpfs() -> testcontainers_modules::testcontainers::core::Mount {
-    testcontainers_modules::testcontainers::core::Mount::tmpfs_mount(POSTGRES_STATE_DIRECTORY)
-        .with_size_bytes(DISPOSABLE_POSTGRES_STATE_CEILING_BYTES)
+pub fn disposable_postgres_state_tmpfs(
+    ceiling_bytes: Option<i64>,
+) -> testcontainers_modules::testcontainers::core::Mount {
+    let mount =
+        testcontainers_modules::testcontainers::core::Mount::tmpfs_mount(POSTGRES_STATE_DIRECTORY);
+    match ceiling_bytes {
+        Some(ceiling_bytes) => mount.with_size_bytes(ceiling_bytes),
+        None => mount,
+    }
+}
+
+/// Builds the disposable-database mount from the checked-in deployment
+/// example used by repository integration tests.
+#[cfg(feature = "postgres-integration")]
+pub fn disposable_postgres_state_tmpfs_from_example()
+-> std::io::Result<testcontainers_modules::testcontainers::core::Mount> {
+    const FIELD_PREFIX: &str = "disposable_postgres_state_ceiling_bytes = ";
+    let document = include_str!("../../../config/signalboxd.example.toml");
+    let value = document
+        .lines()
+        .find_map(|line| line.strip_prefix(FIELD_PREFIX))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "checked-in example omits disposable PostgreSQL state ceiling",
+            )
+        })?;
+    let ceiling_bytes = value.parse::<i64>().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "checked-in disposable PostgreSQL state ceiling is not an integer",
+        )
+    })?;
+    Ok(disposable_postgres_state_tmpfs(Some(ceiling_bytes)))
 }
 
 #[cfg(test)]
@@ -658,18 +681,21 @@ mod tests {
 
     #[cfg(feature = "postgres-integration")]
     #[test]
-    fn a_disposable_container_keeps_its_database_state_on_a_bounded_tmpfs() {
+    fn a_disposable_container_uses_the_supplied_tmpfs_policy() {
         use testcontainers_modules::testcontainers::core::MountType;
 
-        let mount = super::disposable_postgres_state_tmpfs();
+        let bounded = super::disposable_postgres_state_tmpfs(Some(4_096));
+        let unbounded = super::disposable_postgres_state_tmpfs(None);
 
-        assert_eq!(mount.mount_type(), MountType::Tmpfs);
-        // The literal contract, not the implementation's constants: the mount
-        // must cover the postgres image's state directory and stay inside the
-        // documented 512 MiB bound, and a constant drifting away from either
-        // value has to fail here.
-        assert_eq!(mount.target(), Some("/var/lib/postgresql"));
-        let options = mount.tmpfs_options().expect("the tmpfs mount is bounded");
-        assert_eq!(options.size_bytes, Some(512 * 1024 * 1024));
+        assert_eq!(bounded.mount_type(), MountType::Tmpfs);
+        assert_eq!(bounded.target(), Some("/var/lib/postgresql"));
+        assert_eq!(
+            bounded
+                .tmpfs_options()
+                .expect("the fixture selects a bounded tmpfs")
+                .size_bytes,
+            Some(4_096)
+        );
+        assert!(unbounded.tmpfs_options().is_none());
     }
 }
