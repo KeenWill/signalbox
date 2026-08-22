@@ -1,17 +1,32 @@
 import { type CommandContext, type CommandId, commandRegistry, invokeCommand } from './commands'
+import { actions } from './state'
 
 export interface ProductCommandContext extends CommandContext {
   navigate: (path: string) => void
+  navigateTimelineWindow: (anchor: 'first' | 'latest') => void
+}
+
+const navigateProductSurface = (context: ProductCommandContext, path: string) => {
+  context.dispatch(actions.overlaySet(null))
+  context.navigate(path)
 }
 
 const productNavigationCommands = [
+  {
+    id: 'navigation.open',
+    title: 'Open product navigation',
+    description: 'Choose a Signalbox product surface.',
+    category: 'Surface',
+    bindings: [],
+    run: (context: ProductCommandContext) => context.dispatch(actions.overlaySet('navigation')),
+  },
   {
     id: 'navigate.attention',
     title: 'Go to Attention',
     description: 'Open the operator intervention queue.',
     category: 'Navigate',
     bindings: [{ label: 'g a', registration: { kind: 'sequence', sequence: ['G', 'A'] } }],
-    run: (context: ProductCommandContext) => context.navigate('/attention'),
+    run: (context: ProductCommandContext) => navigateProductSurface(context, '/attention'),
   },
   {
     id: 'navigate.sessions',
@@ -19,7 +34,7 @@ const productNavigationCommands = [
     description: 'Open the bounded session workspace.',
     category: 'Navigate',
     bindings: [{ label: 'g s', registration: { kind: 'sequence', sequence: ['G', 'S'] } }],
-    run: (context: ProductCommandContext) => context.navigate('/sessions'),
+    run: (context: ProductCommandContext) => navigateProductSurface(context, '/sessions'),
   },
   {
     id: 'navigate.activity',
@@ -27,7 +42,7 @@ const productNavigationCommands = [
     description: 'Open the system-wide event stream.',
     category: 'Navigate',
     bindings: [],
-    run: (context: ProductCommandContext) => context.navigate('/activity'),
+    run: (context: ProductCommandContext) => navigateProductSurface(context, '/activity'),
   },
   {
     id: 'navigate.imports',
@@ -35,7 +50,7 @@ const productNavigationCommands = [
     description: 'Open conversation import operations.',
     category: 'Navigate',
     bindings: [],
-    run: (context: ProductCommandContext) => context.navigate('/imports'),
+    run: (context: ProductCommandContext) => navigateProductSurface(context, '/imports'),
   },
   {
     id: 'navigate.reviews',
@@ -43,7 +58,7 @@ const productNavigationCommands = [
     description: 'Open approval work and history.',
     category: 'Navigate',
     bindings: [],
-    run: (context: ProductCommandContext) => context.navigate('/reviews'),
+    run: (context: ProductCommandContext) => navigateProductSurface(context, '/reviews'),
   },
   {
     id: 'navigate.runners',
@@ -51,7 +66,7 @@ const productNavigationCommands = [
     description: 'Open runner capacity and health.',
     category: 'Navigate',
     bindings: [],
-    run: (context: ProductCommandContext) => context.navigate('/runners'),
+    run: (context: ProductCommandContext) => navigateProductSurface(context, '/runners'),
   },
   {
     id: 'navigate.search',
@@ -59,7 +74,7 @@ const productNavigationCommands = [
     description: 'Open cross-session search.',
     category: 'Navigate',
     bindings: [],
-    run: (context: ProductCommandContext) => context.navigate('/search'),
+    run: (context: ProductCommandContext) => navigateProductSurface(context, '/search'),
   },
   {
     id: 'navigate.usage',
@@ -67,7 +82,7 @@ const productNavigationCommands = [
     description: 'Open token and cost analysis.',
     category: 'Navigate',
     bindings: [],
-    run: (context: ProductCommandContext) => context.navigate('/usage'),
+    run: (context: ProductCommandContext) => navigateProductSurface(context, '/usage'),
   },
   {
     id: 'navigate.settings',
@@ -75,11 +90,14 @@ const productNavigationCommands = [
     description: 'Open browser-local workstation preferences.',
     category: 'Navigate',
     bindings: [{ label: 'g ,', registration: { kind: 'sequence', sequence: ['G', ','] } }],
-    run: (context: ProductCommandContext) => context.navigate('/settings'),
+    run: (context: ProductCommandContext) => navigateProductSurface(context, '/settings'),
   },
 ] as const
 
-export const productCommandRegistry = [...productNavigationCommands, ...commandRegistry]
+export const productCommandRegistry = [
+  ...productNavigationCommands,
+  ...commandRegistry.filter((command) => command.id !== 'navigation.open'),
+]
 export type ProductCommandId = (typeof productCommandRegistry)[number]['id']
 
 export const productHotkeySequenceBindings = productNavigationCommands.flatMap((command) =>
@@ -96,5 +114,7 @@ export const invokeProductCommand = (
 ): void => {
   const navigationCommand = productNavigationCommands.find((command) => command.id === id)
   if (navigationCommand) navigationCommand.run(context)
+  else if (id === 'selection.first') context.navigateTimelineWindow('first')
+  else if (id === 'selection.last') context.navigateTimelineWindow('latest')
   else invokeCommand(id as CommandId, context)
 }

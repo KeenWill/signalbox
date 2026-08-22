@@ -319,8 +319,15 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
+  const timelineWindowNavigationRef = useRef<(anchor: 'first' | 'latest') => void>(() => {})
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
+  const updateTimelineWindowNavigation = useCallback(
+    (navigateTimelineWindow: (anchor: 'first' | 'latest') => void) => {
+      timelineWindowNavigationRef.current = navigateTimelineWindow
+    },
+    [],
+  )
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -339,6 +346,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         ;(control ?? primaryRef.current)?.focus()
       },
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      navigateTimelineWindow: (anchor) => timelineWindowNavigationRef.current(anchor),
     }),
     [dispatch, navigate, timelineIds],
   )
@@ -370,7 +378,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     surface === 'attention' ? (
       <AttentionSurface />
     ) : surface === 'sessions' ? (
-      <SessionWorkspaceSurface bootstrap={bootstrap.data} onTimelineIds={updateTimelineIds} />
+      <SessionWorkspaceSurface
+        bootstrap={bootstrap.data}
+        onTimelineIds={updateTimelineIds}
+        onTimelineWindowNavigation={updateTimelineWindowNavigation}
+      />
     ) : surface === 'settings' ? (
       <SettingsSurface />
     ) : (
@@ -406,6 +418,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
                 ? 'Transport unavailable'
                 : 'Checking contract…'}
           </span>
+          {bootstrap.isError && (
+            <button type="button" onClick={() => void bootstrap.refetch()}>
+              Retry bootstrap
+            </button>
+          )}
         </div>
         {content}
       </main>

@@ -10,7 +10,8 @@ import {
 } from './session-timeline/model'
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
 
-const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const SESSION_ID_PATTERN =
+  /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/
 const SESSION_WINDOW_ITEMS = 80
 const SESSION_WINDOW_BYTES = 64 * 1024
 
@@ -35,9 +36,11 @@ export const visibleSessionItems = (
 export function SessionWorkspaceSurface({
   bootstrap,
   onTimelineIds,
+  onTimelineWindowNavigation,
 }: {
   bootstrap: WebContractBootstrap | undefined
   onTimelineIds: (ids: readonly string[]) => void
+  onTimelineWindowNavigation: (navigate: (anchor: 'first' | 'latest') => void) => void
 }) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
@@ -73,6 +76,10 @@ export function SessionWorkspaceSurface({
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
+  useEffect(() => {
+    onTimelineWindowNavigation((anchor) => setManualAnchor({ kind: anchor }))
+    return () => onTimelineWindowNavigation(() => {})
+  }, [onTimelineWindowNavigation])
 
   const openSession = (event: FormEvent) => {
     event.preventDefault()
@@ -91,10 +98,12 @@ export function SessionWorkspaceSurface({
   const detailAvailable = bootstrap?.capabilities.bounded_session_timeline_detail === true
   const select = (eventSequence: string) => {
     dispatch(actions.timelineSelected(eventSequence))
-    if (sessionId !== null) {
-      dispatch(actions.logicalPositionRecorded({ sessionId, position: eventSequence }))
-    }
   }
+  useEffect(() => {
+    if (sessionId !== null && selected !== null && timelineIds.includes(selected)) {
+      dispatch(actions.logicalPositionRecorded({ sessionId, position: selected }))
+    }
+  }, [dispatch, selected, sessionId, timelineIds])
   const toggleExpanded = (eventSequence: string) => {
     const next = new Set(expanded)
     if (next.has(eventSequence)) next.delete(eventSequence)

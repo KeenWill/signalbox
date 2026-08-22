@@ -172,6 +172,13 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     ) {
       throw new TypeError('bounded session timeline limits are invalid')
     }
+    if (
+      bootstrap.capabilities.bounded_session_timeline_detail &&
+      (bootstrap.limits.max_timeline_detail_items < 1 ||
+        bootstrap.limits.max_timeline_detail_bytes < 256)
+    ) {
+      throw new TypeError('bounded session timeline detail limits are invalid')
+    }
     return new HttpSessionTimelineSource(
       bootstrap.limits,
       bootstrap.capabilities.bounded_session_timeline_detail,
@@ -283,12 +290,24 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       if (!excerpt || excerpt.offset_bytes !== cursor.body.offset_bytes) {
         throw new TypeError('timeline detail body does not match its requested cursor field')
       }
-      const excerptContinuation = excerpt.continuation ?? null
-      const pageContinuation =
-        page.continuation?.type === 'more_body' ? page.continuation.body : null
-      if (JSON.stringify(excerptContinuation) !== JSON.stringify(pageContinuation)) {
-        throw new TypeError('timeline detail continuation contradicts its body excerpt')
-      }
+    }
+    const excerptContinuations = page.items.flatMap((item) => {
+      const excerpt =
+        item.body.type === 'user_input'
+          ? item.body.text
+          : item.body.type === 'model_call'
+            ? item.body.response
+            : undefined
+      return excerpt?.continuation ? [excerpt.continuation] : []
+    })
+    if (excerptContinuations.length > 1) {
+      throw new TypeError('timeline detail page has multiple body continuations')
+    }
+    const excerptContinuation = excerptContinuations[0] ?? null
+    const pageBodyContinuation =
+      page.continuation?.type === 'more_body' ? page.continuation.body : null
+    if (JSON.stringify(excerptContinuation) !== JSON.stringify(pageBodyContinuation)) {
+      throw new TypeError('timeline detail continuation contradicts its body excerpt')
     }
     return page
   }
