@@ -183,6 +183,7 @@ impl Error for WebHttpRuntimeError {}
 pub struct WebHttpRuntime {
     listener: TcpListener,
     router: Router,
+    follow_shutdown: Option<watch::Sender<bool>>,
 }
 
 impl WebHttpRuntime {
@@ -191,8 +192,10 @@ impl WebHttpRuntime {
         configuration: WebHttpConfiguration,
         pool: PgPool,
     ) -> Result<Self, WebHttpRuntimeError> {
-        let router = production_router(configuration.asset_root, Some(pool));
-        Self::bind_router(configuration.bind_address, router).await
+        let snapshot_reader_budget = super::process_runtime::shared_snapshot_reader_budget(
+            pool.options().get_max_connections(),
+        );
+        Self::bind_production(configuration, pool, snapshot_reader_budget).await
     }
 
     /// Binds production HTTP reads to the daemon-wide snapshot-reader budget.
@@ -201,12 +204,27 @@ impl WebHttpRuntime {
         pool: PgPool,
         snapshot_reader_budget: Arc<Semaphore>,
     ) -> Result<Self, WebHttpRuntimeError> {
+        Self::bind_production(configuration, pool, Some(snapshot_reader_budget)).await
+    }
+
+    async fn bind_production(
+        configuration: WebHttpConfiguration,
+        pool: PgPool,
+        snapshot_reader_budget: Option<Arc<Semaphore>>,
+    ) -> Result<Self, WebHttpRuntimeError> {
+        let (follow_shutdown, follow_shutdown_receiver) = watch::channel(false);
         let router = production_router_with_budget(
             configuration.asset_root,
             Some(pool),
-            Some(snapshot_reader_budget),
+            snapshot_reader_budget,
+            Some(follow_shutdown_receiver),
         );
-        Self::bind_router(configuration.bind_address, router).await
+        Self::bind_router_with_follow_shutdown(
+            configuration.bind_address,
+            router,
+            Some(follow_shutdown),
+        )
+        .await
     }
 
     /// Binds an explicit router, primarily for deterministic browser scenarios.
@@ -214,10 +232,22 @@ impl WebHttpRuntime {
         bind_address: SocketAddr,
         router: Router,
     ) -> Result<Self, WebHttpRuntimeError> {
+        Self::bind_router_with_follow_shutdown(bind_address, router, None).await
+    }
+
+    async fn bind_router_with_follow_shutdown(
+        bind_address: SocketAddr,
+        router: Router,
+        follow_shutdown: Option<watch::Sender<bool>>,
+    ) -> Result<Self, WebHttpRuntimeError> {
         let listener = TcpListener::bind(bind_address)
             .await
             .map_err(|_| WebHttpRuntimeError::Bind)?;
-        Ok(Self { listener, router })
+        Ok(Self {
+            listener,
+            router,
+            follow_shutdown,
+        })
     }
 
     /// Actual address, including an operating-system-selected test port.
@@ -229,17 +259,24 @@ impl WebHttpRuntime {
 
     /// Serves until shutdown, then cancels requests by dropping their futures.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<(), WebHttpRuntimeError> {
+        let Self {
+            listener,
+            router,
+            follow_shutdown,
+        } = self;
         let shutdown_requested = async move {
-            if *shutdown.borrow() {
-                return;
-            }
-            while shutdown.changed().await.is_ok() {
-                if *shutdown.borrow() {
-                    return;
+            if !*shutdown.borrow() {
+                while shutdown.changed().await.is_ok() {
+                    if *shutdown.borrow() {
+                        break;
+                    }
                 }
             }
+            if let Some(follow_shutdown) = follow_shutdown {
+                let _ = follow_shutdown.send(true);
+            }
         };
-        axum::serve(self.listener, self.router)
+        axum::serve(listener, router)
             .with_graceful_shutdown(shutdown_requested)
             .await
             .map_err(|_| WebHttpRuntimeError::Serve)
@@ -251,17 +288,19 @@ pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> R
     let snapshot_reader_budget = pool.as_ref().and_then(|pool| {
         super::process_runtime::shared_snapshot_reader_budget(pool.options().get_max_connections())
     });
-    production_router_with_budget(asset_root, pool, snapshot_reader_budget)
+    production_router_with_budget(asset_root, pool, snapshot_reader_budget, None)
 }
 
 fn production_router_with_budget(
     asset_root: Option<PathBuf>,
     pool: Option<PgPool>,
     snapshot_reader_budget: Option<Arc<Semaphore>>,
+    shutdown: Option<watch::Receiver<bool>>,
 ) -> Router {
     let state = WebApiState {
         attention: pool.map(AttentionRepository::new),
         snapshot_reader_budget,
+        shutdown,
     };
     let api = Router::new()
         .route("/bootstrap", get(contract_bootstrap))
@@ -284,6 +323,7 @@ fn production_router_with_budget(
 struct WebApiState {
     attention: Option<AttentionRepository>,
     snapshot_reader_budget: Option<Arc<Semaphore>>,
+    shutdown: Option<watch::Receiver<bool>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -342,6 +382,7 @@ async fn attention_snapshot(
 }
 
 async fn attention_follow(State(state): State<WebApiState>) -> Response {
+    let mut shutdown = state.shutdown;
     let Some(repository) = state.attention else {
         return application_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -352,10 +393,17 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
     let Some(budget) = state.snapshot_reader_budget else {
         return attention_projection_error(None);
     };
-    let Ok(snapshot_permit) = budget.acquire().await else {
+    let snapshot_permit = tokio::select! {
+        () = wait_for_web_shutdown(&mut shutdown) => return empty_ndjson_response(),
+        permit = Arc::clone(&budget).acquire_owned() => permit,
+    };
+    let Ok(snapshot_permit) = snapshot_permit else {
         return attention_projection_error(None);
     };
-    let snapshot = match repository.snapshot(None).await {
+    let snapshot = match tokio::select! {
+        () = wait_for_web_shutdown(&mut shutdown) => return empty_ndjson_response(),
+        snapshot = repository.snapshot(None) => snapshot,
+    } {
         Ok(snapshot) => snapshot,
         Err(error) => return attention_projection_error(Some(error)),
     };
@@ -371,9 +419,13 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
             Some(WebAttentionStreamEvent::Snapshot { snapshot }),
             cursor,
             budget,
+            shutdown,
             AttentionFollowDisposition::Continue,
         ),
-        |(repository, pending, cursor, budget, disposition)| async move {
+        |(repository, pending, cursor, budget, mut shutdown, disposition)| async move {
+            if shutdown.as_ref().is_some_and(|shutdown| *shutdown.borrow()) {
+                return None;
+            }
             if let Some(event) = pending {
                 return Some((
                     event,
@@ -382,6 +434,7 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                         None,
                         cursor,
                         budget,
+                        shutdown,
                         AttentionFollowDisposition::Continue,
                     ),
                 ));
@@ -392,11 +445,22 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
             let mut cursor = cursor;
             let mut delay = Duration::from_millis(250);
             loop {
-                tokio::time::sleep(delay).await;
-                let Ok(_permit) = Arc::clone(&budget).acquire_owned().await else {
+                tokio::select! {
+                    () = wait_for_web_shutdown(&mut shutdown) => return None,
+                    () = tokio::time::sleep(delay) => {}
+                }
+                let permit = tokio::select! {
+                    () = wait_for_web_shutdown(&mut shutdown) => return None,
+                    permit = Arc::clone(&budget).acquire_owned() => permit,
+                };
+                let Ok(_permit) = permit else {
                     return None;
                 };
-                match repository.changes_after(cursor).await {
+                let changes = tokio::select! {
+                    () = wait_for_web_shutdown(&mut shutdown) => return None,
+                    changes = repository.changes_after(cursor) => changes,
+                };
+                match changes {
                     Ok(AttentionChanges::Updated {
                         cursor: next,
                         summaries,
@@ -423,6 +487,7 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                                 None,
                                 next,
                                 budget,
+                                shutdown,
                                 AttentionFollowDisposition::Continue,
                             ),
                         ));
@@ -437,6 +502,7 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                                 None,
                                 next,
                                 budget,
+                                shutdown,
                                 AttentionFollowDisposition::End,
                             ),
                         ));
@@ -450,6 +516,22 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
         },
     );
     ndjson_response(source)
+}
+
+fn empty_ndjson_response() -> Response {
+    ndjson_response(stream::empty::<WebAttentionStreamEvent>())
+}
+
+async fn wait_for_web_shutdown(shutdown: &mut Option<watch::Receiver<bool>>) {
+    let Some(shutdown) = shutdown else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    while !*shutdown.borrow() {
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1244,6 +1326,23 @@ mod tests {
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"]["code"], "attention_projection_unavailable");
+    }
+
+    #[tokio::test]
+    async fn attention_follower_wait_stops_when_web_shutdown_begins() {
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        let mut shutdown_receiver = Some(shutdown_receiver);
+        let waiting = tokio::spawn(async move {
+            super::wait_for_web_shutdown(&mut shutdown_receiver).await;
+        });
+
+        shutdown
+            .send(true)
+            .expect("the follower still observes web shutdown");
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("the follower wait exits promptly on shutdown")
+            .expect("the follower wait task completes cleanly");
     }
 
     #[test]

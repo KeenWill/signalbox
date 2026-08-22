@@ -305,15 +305,20 @@ SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
        runner.state_kind AS runner_state,
        activity.fact_kind, activity.recorded_at
   FROM selected
-  LEFT JOIN latest_turn AS turn USING (session_id)
+  LEFT JOIN latest_turn AS turn
+    ON turn.session_id = selected.session_id
   LEFT JOIN tool_request AS request
     ON request.request_id = turn.approval_tool_request_id
   LEFT JOIN tool_approval_judge_model_call AS approval_call
     ON approval_call.request_id = request.request_id
-  LEFT JOIN latest_goal AS goal USING (session_id)
-  LEFT JOIN judge USING (session_id)
-  LEFT JOIN latest_runner AS runner USING (session_id)
-  LEFT JOIN latest_activity AS activity USING (session_id)
+  LEFT JOIN latest_goal AS goal
+    ON goal.session_id = selected.session_id
+  LEFT JOIN judge
+    ON judge.session_id = selected.session_id
+  LEFT JOIN latest_runner AS runner
+    ON runner.session_id = selected.session_id
+  LEFT JOIN latest_activity AS activity
+    ON activity.session_id = selected.session_id
  ORDER BY selected.session_id
 "#;
 
