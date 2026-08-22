@@ -4133,6 +4133,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "serde_stacker",
  "signalbox-application",
  "signalbox-domain",
  "signalbox-file-media-runtime",

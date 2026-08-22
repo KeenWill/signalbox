@@ -6,6 +6,7 @@
 
 use std::{collections::BTreeMap, error::Error, fmt, future::Future, pin::Pin, str::FromStr};
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -17,9 +18,9 @@ use signalbox_domain::{
     ToolResultText,
 };
 use signalbox_file_media_runtime::{
-    AttachmentKind, FileDigest, FileInspection, FileMediaFailure, FileReadInput, FileReadResult,
-    MAX_PROCESSOR_FRAME_BYTES, ReadContinuationCursor, ReadOutputKind, ReadViewName,
-    VisiblePartSelector,
+    AttachmentKind, CanonicalMediaType, FileDigest, FileInspection, FileMediaFailure,
+    FileReadInput, FileReadResult, MAX_PROCESSOR_FRAME_BYTES, ReadContinuationCursor,
+    ReadOutputKind, ReadViewName, VisiblePartSelector,
 };
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
@@ -319,8 +320,7 @@ fn decode_inspect(
 fn decode_read(
     arguments: &NormalizedToolArguments,
 ) -> Result<FileReadServiceRequest, InvalidFileMediaArguments> {
-    let decoded: FileReadArguments =
-        serde_json::from_str(arguments.as_str()).map_err(|_| InvalidFileMediaArguments)?;
+    let decoded: FileReadArguments = decode_without_recursion_limit(arguments.as_str())?;
     let continuation = decoded
         .continuation
         .map(ReadContinuationCursor::try_new)
@@ -346,6 +346,17 @@ fn decode_read(
         view: ReadViewName::try_new(decoded.view).map_err(|_| InvalidFileMediaArguments)?,
         input,
     })
+}
+
+fn decode_without_recursion_limit<T: for<'de> Deserialize<'de>>(
+    encoded: &str,
+) -> Result<T, InvalidFileMediaArguments> {
+    let mut deserializer = serde_json::Deserializer::from_str(encoded);
+    deserializer.disable_recursion_limit();
+    let stacked = serde_stacker::Deserializer::new(&mut deserializer);
+    let decoded = T::deserialize(stacked).map_err(|_| InvalidFileMediaArguments)?;
+    deserializer.end().map_err(|_| InvalidFileMediaArguments)?;
+    Ok(decoded)
 }
 
 fn initial_options_fit(options: &BTreeMap<String, Value>) -> bool {
@@ -470,13 +481,7 @@ fn inspection_evidence(inspection: FileInspection) -> ToolExecutorEvidence {
             "media_type": media_type.as_str(),
             "reason_code": reason_code.as_str(),
         })),
-        FileInspection::Ambiguous { media_types, .. } => known_failure(json!({
-            "status": "ambiguous",
-            "media_types": media_types
-                .iter()
-                .map(|media_type| media_type.as_str())
-                .collect::<Vec<_>>(),
-        })),
+        FileInspection::Ambiguous { media_types, .. } => ambiguous_failure(&media_types),
         FileInspection::DeclaredMismatch {
             declared, detected, ..
         } => known_failure(json!({
@@ -489,6 +494,30 @@ fn inspection_evidence(inspection: FileInspection) -> ToolExecutorEvidence {
             "media_type": media_type.as_str(),
         })),
     }
+}
+
+fn ambiguous_failure(media_types: &[CanonicalMediaType]) -> ToolExecutorEvidence {
+    let mut projected = Vec::new();
+    for media_type in media_types {
+        projected.push(media_type.as_str());
+        let candidate = json!({
+            "status": "ambiguous",
+            "media_types": &projected,
+            "truncated": true,
+        });
+        if ToolExecutionErrorDetail::try_new(candidate.to_string()).is_err() {
+            projected.pop();
+            return known_failure(json!({
+                "status": "ambiguous",
+                "media_types": projected,
+                "truncated": true,
+            }));
+        }
+    }
+    known_failure(json!({
+        "status": "ambiguous",
+        "media_types": projected,
+    }))
 }
 
 fn read_evidence(result: FileReadResult) -> ToolExecutorEvidence {
@@ -634,6 +663,23 @@ mod tests {
         .to_string()
     }
 
+    fn deeply_nested_initial_options(digest: FileDigest) -> String {
+        let nested = format!("{}0{}", "[".repeat(160), "]".repeat(160));
+        format!(
+            r#"{{"digest":"{digest}","view":"body_text","options":{{"nested":{nested}}},"visible_part":null}}"#
+        )
+    }
+
+    fn many_long_media_types() -> Vec<CanonicalMediaType> {
+        (0..32)
+            .map(|index| {
+                format!("application/x-{index:02}-{}", "a".repeat(110))
+                    .parse()
+                    .expect("fixture media type is canonical")
+            })
+            .collect()
+    }
+
     #[test]
     fn stable_catalog_exposes_exact_inspect_and_read_names() {
         let (catalog, _executor) = FileMediaTools::try_new(UnusedService)
@@ -708,6 +754,34 @@ mod tests {
         let outcome = decode_read(&arguments(&supplied));
 
         assert_eq!(outcome, Err(InvalidFileMediaArguments));
+    }
+
+    #[test]
+    fn read_arguments_preserve_deep_options_for_adapter_validation() {
+        let supplied = deeply_nested_initial_options(FileDigest::from_bytes([0x44; 32]));
+
+        let decoded = decode_read(&arguments(&supplied))
+            .expect("deep bounded options remain available to the selected adapter");
+
+        assert!(decoded.options().is_some());
+    }
+
+    #[test]
+    fn oversized_ambiguity_inventory_preserves_ambiguous_status() {
+        let media_types = many_long_media_types();
+
+        let evidence = ambiguous_failure(&media_types);
+
+        let ToolExecutorEvidence::KnownFailed {
+            detail: Some(detail),
+        } = evidence
+        else {
+            panic!("ambiguous evidence remains a typed known failure");
+        };
+        let projected: Value =
+            serde_json::from_str(detail.as_str()).expect("bounded ambiguity detail remains JSON");
+        assert_eq!(projected["status"], "ambiguous");
+        assert_eq!(projected["truncated"], true);
     }
 
     #[test]
