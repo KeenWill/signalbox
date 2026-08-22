@@ -68,13 +68,17 @@ const boundedLimits = (
 })
 
 const canonicalSessionId = (value: string): string => {
-  const lowered = value.toLowerCase()
-  const unwrapped = lowered.startsWith('urn:uuid:')
-    ? lowered.slice('urn:uuid:'.length)
-    : lowered.startsWith('{') && lowered.endsWith('}')
-      ? lowered.slice(1, -1)
-      : lowered
-  const compact = unwrapped.replaceAll('-', '')
+  const simple = /^[0-9a-f]{32}$/i
+  const hyphenated = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  const unwrapped =
+    value.startsWith('urn:uuid:') && hyphenated.test(value.slice('urn:uuid:'.length))
+      ? value.slice('urn:uuid:'.length)
+      : value.startsWith('{') && value.endsWith('}') && hyphenated.test(value.slice(1, -1))
+        ? value.slice(1, -1)
+        : simple.test(value) || hyphenated.test(value)
+          ? value
+          : ''
+  const compact = unwrapped.toLowerCase().replaceAll('-', '')
   if (!/^[0-9a-f]{32}$/.test(compact)) throw new TypeError('session id must be a UUID')
   return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`
 }
@@ -100,8 +104,15 @@ const readBoundedJson = async (response: Response): Promise<unknown> => {
     encoded.set(chunk, offset)
     offset += chunk.byteLength
   }
-  return JSON.parse(new TextDecoder().decode(encoded)) as unknown
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(encoded)) as unknown
 }
+
+const cloneTimelineItem = (
+  item: WebSessionTimelineWindow['items'][number],
+): WebSessionTimelineWindow['items'][number] => ({
+  ...item,
+  address: { ...item.address },
+})
 
 export class SessionTimelineClientError extends Error {
   constructor(readonly response: WebApiErrorResponse) {
@@ -126,6 +137,12 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
     if (!bootstrap.capabilities.bounded_session_timeline) {
       throw new TypeError('bounded session timeline capability is unavailable')
+    }
+    if (
+      bootstrap.limits.max_timeline_window_items < 1 ||
+      bootstrap.limits.max_timeline_window_bytes < 256
+    ) {
+      throw new TypeError('bounded session timeline limits are invalid')
     }
     return new HttpSessionTimelineSource(bootstrap.limits, request)
   }
@@ -180,7 +197,7 @@ export class BoundedSessionHistory {
   }
 
   get retained(): WebSessionTimelineWindow['items'] {
-    return [...this.retainedValue]
+    return this.retainedValue.map(cloneTimelineItem)
   }
 
   async describe(signal?: AbortSignal): Promise<WebSessionTimelineDescriptor> {
@@ -210,7 +227,8 @@ export class BoundedSessionHistory {
     limits: SessionWindowLimits,
     signal?: AbortSignal,
   ): Promise<WebSessionTimelineWindow> {
-    if ('eventSequence' in anchor) decimalAddress(anchor.eventSequence)
+    const anchorAddress =
+      'eventSequence' in anchor ? decimalAddress(anchor.eventSequence) : undefined
     const bounded = boundedLimits(limits, this.source.limits)
     const window = await this.source.readWindow(this.sessionId, anchor, bounded, signal)
     if (canonicalSessionId(window.session_id) !== this.sessionId)
@@ -224,11 +242,25 @@ export class BoundedSessionHistory {
     for (const item of window.items) {
       const address = item.address.event_sequence
       const parsedAddress = decimalAddress(address)
+      if (
+        anchor.kind === 'after' &&
+        anchorAddress !== undefined &&
+        parsedAddress <= anchorAddress
+      ) {
+        throw new TypeError('timeline window item is not strictly after its anchor')
+      }
+      if (
+        anchor.kind === 'before' &&
+        anchorAddress !== undefined &&
+        parsedAddress >= anchorAddress
+      ) {
+        throw new TypeError('timeline window item is not strictly before its anchor')
+      }
       if (previousAddress !== undefined && parsedAddress <= previousAddress) {
         throw new TypeError('timeline window addresses must be strictly increasing')
       }
       if (incoming.has(address)) throw new TypeError('timeline window repeats an address')
-      incoming.set(address, item)
+      incoming.set(address, cloneTimelineItem(item))
       previousAddress = parsedAddress
       projectedStructuredBytes += item.projected_structured_bytes
       if (!Number.isSafeInteger(projectedStructuredBytes)) {
@@ -243,6 +275,12 @@ export class BoundedSessionHistory {
     }
     const firstItemAddress = window.items[0]?.address.event_sequence
     const lastItemAddress = window.items.at(-1)?.address.event_sequence
+    if (anchor.kind === 'first' && window.continuation_before) {
+      throw new TypeError('first timeline window cannot continue before its anchor')
+    }
+    if (anchor.kind === 'latest' && window.continuation_after) {
+      throw new TypeError('latest timeline window cannot continue after its anchor')
+    }
     if (window.continuation_before) {
       decimalAddress(window.continuation_before.event_sequence)
       if (window.continuation_before.event_sequence !== firstItemAddress) {
