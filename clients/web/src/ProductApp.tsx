@@ -310,6 +310,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
       callback: () => invokeCommand(binding.commandId, context),
+      options: { enabled: app.overlay === null },
     })),
   )
   useHotkeySequences(
@@ -410,7 +411,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             aria-describedby="mobile-navigation-description"
             onCloseAutoFocus={(event) => {
               event.preventDefault()
-              document.querySelector<HTMLElement>('[aria-label="Open navigation"]')?.focus()
+              const visibleNavigationTrigger = Array.from(
+                document.querySelectorAll<HTMLElement>('[aria-label="Open navigation"]'),
+              ).find((candidate) => candidate.getClientRects().length > 0)
+              const fallbackTrigger = document.querySelector<HTMLElement>(
+                '[aria-label="Open command palette"]',
+              )
+              ;(visibleNavigationTrigger ?? fallbackTrigger)?.focus()
             }}
           >
             <Dialog.Title className="sr-only">Product navigation</Dialog.Title>

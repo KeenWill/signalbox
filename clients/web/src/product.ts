@@ -14,13 +14,19 @@ export const MAX_BOOTSTRAP_BYTES = 65_536
 export const MAX_ATTENTION_SNAPSHOT_BYTES = 65_536
 export const MAX_ATTENTION_SNAPSHOT_ITEMS = 64
 
-const decodeBoundedAttentionSnapshot = (value: unknown): WebAttentionSnapshot => {
-  const snapshot = decodeWebAttentionSnapshot(value)
+const validateAttentionSnapshot = (snapshot: WebAttentionSnapshot): WebAttentionSnapshot => {
   if (snapshot.summaries.length > MAX_ATTENTION_SNAPSHOT_ITEMS) {
     throw new TypeError('attention snapshot exceeds the contract item ceiling')
   }
+  const sessionIds = new Set(snapshot.summaries.map((summary) => summary.session_id))
+  if (sessionIds.size !== snapshot.summaries.length) {
+    throw new TypeError('attention snapshot contains duplicate session identities')
+  }
   return snapshot
 }
+
+const decodeBoundedAttentionSnapshot = (value: unknown): WebAttentionSnapshot =>
+  validateAttentionSnapshot(decodeWebAttentionSnapshot(value))
 
 const readBoundedJson = async (
   response: Response,
@@ -74,12 +80,7 @@ const decodeAttentionLines = async function* (
           const value = JSON.parse(decoder.decode(Uint8Array.from(line)))
           line = []
           const event = decodeWebAttentionStreamEvent(value)
-          if (
-            event.kind === 'snapshot' &&
-            event.snapshot.summaries.length > MAX_ATTENTION_SNAPSHOT_ITEMS
-          ) {
-            throw new TypeError('attention snapshot exceeds the contract item ceiling')
-          }
+          if (event.kind === 'snapshot') validateAttentionSnapshot(event.snapshot)
           yield event
         } else {
           if (line.length === MAX_ATTENTION_EVENT_BYTES) {

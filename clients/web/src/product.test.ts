@@ -163,6 +163,38 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('rejects duplicate session identities in HTTP attention snapshots', async () => {
+    const duplicate = {
+      ...attentionFixture,
+      summaries: [attentionFixture.summaries[0], attentionFixture.summaries[0]],
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(duplicate))),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
+      'attention snapshot contains duplicate session identities',
+    )
+  })
+
+  it('rejects duplicate session identities in streamed attention snapshots', async () => {
+    const duplicate = {
+      ...attentionFixture,
+      summaries: [attentionFixture.summaries[0], attentionFixture.summaries[0]],
+    }
+    const body = `${JSON.stringify({ kind: 'snapshot', snapshot: duplicate })}\n`
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body)),
+    )
+    const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
+
+    await expect(events.next()).rejects.toThrow(
+      'attention snapshot contains duplicate session identities',
+    )
+  })
+
   it('rejects an attention snapshot before buffering beyond the byte ceiling', async () => {
     vi.stubGlobal(
       'fetch',

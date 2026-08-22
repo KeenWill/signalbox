@@ -13,6 +13,7 @@ export const reduceAttentionEvent = (
 ): AttentionReduction => {
   if (event.kind === 'snapshot') return { kind: 'projection', snapshot: event.snapshot }
   if (event.kind === 'resync_required' || !current) return { kind: 'resync' }
+  if (BigInt(event.cursor) <= BigInt(current.cursor)) return { kind: 'resync' }
 
   const replacements = new Map(event.summaries.map((summary) => [summary.session_id, summary]))
   const knownSessionIds = new Set(current.summaries.map((summary) => summary.session_id))

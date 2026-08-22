@@ -97,6 +97,38 @@ test('suspends product navigation sequences while the palette owns input', async
   await expect(palette).toBeVisible()
 })
 
+test('keeps ordinary hotkeys and Escape scoped to the command palette', async ({ page }) => {
+  await useDeterministicProductTransport(page)
+  await page.goto('/attention')
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(palette).toBeVisible()
+  await page.keyboard.press('Shift+T')
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+  await page.keyboard.press('Escape')
+
+  await expect(palette).toBeHidden()
+  await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
+})
+
+test('restores desktop navigation focus to the visible palette trigger', async ({ page }) => {
+  await useDeterministicProductTransport(page)
+  await page.goto('/attention')
+
+  const modifier = await platformModifier(page)
+  const paletteTrigger = page.getByRole('button', { name: 'Open command palette' })
+  await paletteTrigger.focus()
+  await page.keyboard.press(`${modifier}+K`)
+  await page.getByRole('button', { name: 'Open navigation' }).click()
+  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeHidden()
+  await expect(paletteTrigger).toBeFocused()
+})
+
 test('uses a navigation sheet on a phone viewport and unwinds it with Escape', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicProductTransport(page)
