@@ -12,6 +12,7 @@ import {
   MAX_LOGICAL_POSITION_VALUE_BYTES,
   MAX_SAVED_LOGICAL_POSITIONS,
   saveBrowserPreferences,
+  serializeBrowserPreferences,
 } from './preferences'
 
 afterEach(() => vi.unstubAllGlobals())
@@ -73,6 +74,24 @@ describe('browser preferences', () => {
     })
 
     expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+  })
+
+  it('does not persist preferences above the serialized byte ceiling', () => {
+    const setItem = vi.fn()
+    vi.stubGlobal('localStorage', { setItem })
+    const oversized = {
+      ...defaultBrowserPreferences,
+      lastLogicalPositions: Object.fromEntries(
+        Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS }, (_, index) => [
+          `session-${index}`,
+          '\0'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES),
+        ]),
+      ),
+    }
+
+    expect(serializeBrowserPreferences(oversized)).toBeNull()
+    saveBrowserPreferences(oversized)
+    expect(setItem).not.toHaveBeenCalled()
   })
 
   it('treats browser storage access failures as optional', () => {

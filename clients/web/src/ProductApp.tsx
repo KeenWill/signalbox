@@ -149,7 +149,19 @@ function ProductNavigation({
         className="scenario-entry"
         to="/scenario/$scenarioId"
         params={{ scenarioId: 'streaming' }}
-        onClick={onNavigate}
+        onClick={(event) => {
+          if (
+            event.button === 0 &&
+            !event.altKey &&
+            !event.ctrlKey &&
+            !event.metaKey &&
+            !event.shiftKey
+          ) {
+            event.preventDefault()
+            onNavigate?.()
+            invokeCommand('navigate.scenario', context)
+          }
+        }}
       >
         Scenario studio <span aria-hidden="true">↗</span>
       </Link>
@@ -389,6 +401,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       timelineIds: [],
       focusTimeline: () => primaryRef.current?.focus(),
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      navigateScenario: () =>
+        void navigate({ to: '/scenario/$scenarioId', params: { scenarioId: 'streaming' } }),
     }),
     [dispatch, navigate],
   )
@@ -475,7 +489,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         <aside className="product-inspector" aria-label="Inspector">
           <span className="eyebrow">Inspector</span>
           <h2>Selection details</h2>
-          <p>Select an available operational record to inspect its server-provided evidence.</p>
+          <p>
+            {surface === 'settings'
+              ? 'Presentation preferences are stored locally in this browser.'
+              : 'Select an available operational record to inspect its server-provided evidence.'}
+          </p>
           <dl>
             <div>
               <dt>Surface</dt>

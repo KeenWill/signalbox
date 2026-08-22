@@ -65,6 +65,10 @@ test('describes Settings as browser-local rather than daemon-backed', async ({ p
   await expect(inspector.getByText('Browser', { exact: true })).toBeVisible()
   await expect(inspector.getByText('Local preferences', { exact: true })).toBeVisible()
   await expect(inspector.getByText('Daemon', { exact: true })).toHaveCount(0)
+  await expect(
+    inspector.getByText('Presentation preferences are stored locally in this browser.'),
+  ).toBeVisible()
+  await expect(inspector.getByText(/server-provided evidence/)).toHaveCount(0)
   const settingsCopy = page.getByRole('heading', {
     name: 'Local settings are not exposed in this slice',
   })

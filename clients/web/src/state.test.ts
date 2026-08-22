@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_LOGICAL_POSITION_KEY_BYTES, MAX_LOGICAL_POSITION_VALUE_BYTES } from './preferences'
+import {
+  MAX_LOGICAL_POSITION_KEY_BYTES,
+  MAX_LOGICAL_POSITION_VALUE_BYTES,
+  serializeBrowserPreferences,
+} from './preferences'
 import { actions, selectApp, store } from './state'
 
 describe('application state', () => {
@@ -19,5 +23,30 @@ describe('application state', () => {
 
     expect(selectApp(store.getState()).lastLogicalPositions[oversizedSession]).toBeUndefined()
     expect(selectApp(store.getState()).lastLogicalPositions['oversized-position']).toBeUndefined()
+  })
+
+  it('rejects logical positions that would exceed the serialized preference ceiling', () => {
+    for (let index = 0; index < 128; index += 1) {
+      store.dispatch(
+        actions.logicalPositionRecorded({
+          sessionId: `escaped-${index}`,
+          position: '\0'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES),
+        }),
+      )
+    }
+
+    const app = selectApp(store.getState())
+    const serialized = serializeBrowserPreferences({
+      layout: app.layout,
+      density: app.density,
+      detail: app.detail,
+      theme: app.theme,
+      paneSizes: app.paneSizes,
+      remoteMedia: app.remoteMedia,
+      lastLogicalPositions: app.lastLogicalPositions,
+      keyOverrides: app.keyOverrides,
+    })
+    expect(serialized).not.toBeNull()
+    expect(Object.keys(app.lastLogicalPositions)).not.toHaveLength(128)
   })
 })

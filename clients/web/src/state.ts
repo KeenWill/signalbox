@@ -7,6 +7,7 @@ import {
   MAX_SAVED_LOGICAL_POSITIONS,
   type RemoteMediaPolicy,
   saveBrowserPreferences,
+  serializeBrowserPreferences,
 } from './preferences'
 
 export type LayoutMode = 'focus' | 'workbench'
@@ -76,12 +77,28 @@ const appSlice = createSlice({
     },
     logicalPositionRecorded(state, action: { payload: { sessionId: string; position: string } }) {
       if (!isBoundedLogicalPosition(action.payload.sessionId, action.payload.position)) return
-      delete state.lastLogicalPositions[action.payload.sessionId]
-      state.lastLogicalPositions[action.payload.sessionId] = action.payload.position
-      const retained = Object.entries(state.lastLogicalPositions).slice(
-        -MAX_SAVED_LOGICAL_POSITIONS,
+      const nextPositions = {
+        ...state.lastLogicalPositions,
+        [action.payload.sessionId]: action.payload.position,
+      }
+      const lastLogicalPositions = Object.fromEntries(
+        Object.entries(nextPositions).slice(-MAX_SAVED_LOGICAL_POSITIONS),
       )
-      state.lastLogicalPositions = Object.fromEntries(retained)
+      if (
+        serializeBrowserPreferences({
+          layout: state.layout,
+          density: state.density,
+          detail: state.detail,
+          theme: state.theme,
+          paneSizes: state.paneSizes,
+          remoteMedia: state.remoteMedia,
+          lastLogicalPositions,
+          keyOverrides: state.keyOverrides,
+        }) === null
+      ) {
+        return
+      }
+      state.lastLogicalPositions = lastLogicalPositions
     },
     overlaySet(state, action: { payload: Overlay }) {
       state.overlay = action.payload

@@ -158,11 +158,18 @@ export const loadBrowserPreferences = (): BrowserPreferences => {
   }
 }
 
+export const serializeBrowserPreferences = (preferences: BrowserPreferences): string | null => {
+  const serialized = JSON.stringify(preferences)
+  return isWithinUtf8ByteLimit(serialized, MAX_BROWSER_PREFERENCES_BYTES) ? serialized : null
+}
+
 export const saveBrowserPreferences = (preferences: BrowserPreferences): void => {
   try {
     const storage = globalThis.localStorage
     if (storage === undefined) return
-    storage.setItem(BROWSER_PREFERENCES_KEY, JSON.stringify(preferences))
+    const serialized = serializeBrowserPreferences(preferences)
+    if (serialized === null) return
+    storage.setItem(BROWSER_PREFERENCES_KEY, serialized)
   } catch {
     // Browser persistence is optional; the active Redux state remains authoritative.
   }

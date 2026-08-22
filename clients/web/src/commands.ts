@@ -8,6 +8,7 @@ export interface CommandContext {
   timelineIds: readonly string[]
   focusTimeline: () => void
   navigate?: (path: string) => void
+  navigateScenario?: () => void
 }
 
 export interface CommandBinding {
@@ -29,6 +30,7 @@ interface CommandDefinitionShape {
 
 const always = () => true
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
+const scenarioNavigation = (context: CommandContext) => context.navigateScenario !== undefined
 const scenarioTimeline = (context: CommandContext) => context.timelineIds.length > 0
 export const commandRegistry = [
   {
@@ -111,6 +113,15 @@ export const commandRegistry = [
     bindings: [{ label: 'g ,', registration: { kind: 'sequence', sequence: ['G', ','] } }],
     available: productNavigation,
     run: (context) => context.navigate?.('/settings'),
+  },
+  {
+    id: 'navigate.scenario',
+    title: 'Open Scenario studio',
+    description: 'Open the deterministic scenario workspace.',
+    category: 'Navigate',
+    bindings: [],
+    available: scenarioNavigation,
+    run: (context) => context.navigateScenario?.(),
   },
   {
     id: 'palette.open',
