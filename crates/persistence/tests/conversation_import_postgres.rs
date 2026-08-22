@@ -753,27 +753,76 @@ async fn inv064_one_time_import_migration_installs_only_the_final_schema()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = postgres_before_import_blob_migration().await?;
     let mut transaction = pool.begin().await?;
-    insert_pre_blob_imported_source_scaffolding(&mut transaction).await?;
+    let imported = insert_pre_blob_imported_source_scaffolding(&mut transaction).await?;
+    insert_imported_session_scaffolding(&mut transaction).await?;
+    insert_imported_semantic_prefix(&mut transaction, imported).await?;
+    insert_exact_seed_members(&mut transaction, imported).await?;
+    sqlx::query(
+        "INSERT INTO imported_session_seed
+            (session_id, seed_context_frontier_id)
+         VALUES ($1, $2)",
+    )
+    .bind(imported.session)
+    .bind(imported.seed_frontier)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::raw_sql(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ('30000000-0000-4000-8000-000000000064',
+                 'create_session', 1, transaction_timestamp());
+         INSERT INTO session
+            (session_id, creation_cause, ancestry_kind)
+         VALUES ('40000000-0000-4000-8000-000000000064',
+                 'user_initiated', 'none');
+         INSERT INTO session_scheduler (session_id)
+         VALUES ('40000000-0000-4000-8000-000000000064');
+         INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind,
+             direct_model_selection_id, model_alias_id)
+         VALUES ('40000000-0000-4000-8000-000000000064', 1, 'direct',
+                 '50000000-0000-4000-8000-000000000064', NULL);
+         INSERT INTO session_current_defaults (session_id, current_version)
+         VALUES ('40000000-0000-4000-8000-000000000064', 1);
+         INSERT INTO create_session_command
+            (command_id, command_kind, storage_version, creation_cause,
+             ancestry_kind, initial_defaults_version, model_selection_kind,
+             direct_model_selection_id, model_alias_id, result_kind,
+             created_session_id)
+         VALUES ('30000000-0000-4000-8000-000000000064',
+                 'create_session', 1, 'user_initiated', 'none', 1, 'direct',
+                 '50000000-0000-4000-8000-000000000064', NULL, 'applied',
+                 '40000000-0000-4000-8000-000000000064');",
+    )
+    .execute(&mut *transaction)
+    .await?;
     transaction.commit().await?;
-    let before: (i64, i64) = sqlx::query_as(
+    let before: (i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM imported_conversation),
-            (SELECT count(*) FROM imported_raw_source_record)",
+            (SELECT count(*) FROM imported_raw_source_record),
+            (SELECT count(*) FROM session)",
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!(before, (1, 1));
+    assert_eq!(before, (1, 1, 2));
 
     apply_exact_migration(&pool, 202608110019).await?;
 
-    let after: (i64, i64) = sqlx::query_as(
+    let after: (i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM imported_conversation),
-            (SELECT count(*) FROM imported_raw_source_record)",
+            (SELECT count(*) FROM imported_raw_source_record),
+            (SELECT count(*) FROM session
+              WHERE ancestry_kind = 'imported_conversation'),
+            (SELECT count(*) FROM session
+              WHERE session_id = '40000000-0000-4000-8000-000000000064'),
+            (SELECT count(*) FROM durable_command
+              WHERE command_id = '30000000-0000-4000-8000-000000000064')",
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!(after, (0, 0));
+    assert_eq!(after, (0, 0, 0, 1, 1));
     let raw_bytes_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1

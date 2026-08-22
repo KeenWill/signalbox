@@ -6157,6 +6157,12 @@ where
         ImportConversationError::Store(ImportedConversationRepositoryError::Database(_)) => {
             OperationalImportError::Database
         }
+        ImportConversationError::Store(ImportedConversationRepositoryError::BlobCatalog(
+            signalbox_persistence::blob::BlobCatalogRepositoryError::Database(_),
+        )) => OperationalImportError::Database,
+        ImportConversationError::Store(ImportedConversationRepositoryError::BlobCatalog(
+            signalbox_persistence::blob::BlobCatalogRepositoryError::CommitAmbiguous(_),
+        )) => OperationalImportError::Unavailable,
         ImportConversationError::Store(ImportedConversationRepositoryError::BlobStorage(
             ImportedRawBlobStorageError::Unavailable,
         )) => OperationalImportError::Unavailable,
@@ -17257,6 +17263,40 @@ mod tests {
             ImportConversationError::<io::Error, ImportedConversationRepositoryError>::Store(
                 ImportedConversationRepositoryError::BlobStorage(
                     ImportedRawBlobStorageError::Unavailable,
+                ),
+            );
+
+        assert_eq!(
+            operational_import_error(error),
+            OperationalImportError::Unavailable,
+        );
+    }
+
+    #[test]
+    fn import_catalog_database_failure_remains_retryable() {
+        let error =
+            ImportConversationError::<io::Error, ImportedConversationRepositoryError>::Store(
+                ImportedConversationRepositoryError::BlobCatalog(
+                    signalbox_persistence::blob::BlobCatalogRepositoryError::Database(
+                        sqlx::Error::PoolTimedOut,
+                    ),
+                ),
+            );
+
+        assert_eq!(
+            operational_import_error(error),
+            OperationalImportError::Database,
+        );
+    }
+
+    #[test]
+    fn import_catalog_ambiguous_commit_remains_retryable() {
+        let error =
+            ImportConversationError::<io::Error, ImportedConversationRepositoryError>::Store(
+                ImportedConversationRepositoryError::BlobCatalog(
+                    signalbox_persistence::blob::BlobCatalogRepositoryError::CommitAmbiguous(
+                        sqlx::Error::PoolTimedOut,
+                    ),
                 ),
             );
 

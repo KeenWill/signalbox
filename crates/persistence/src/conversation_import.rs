@@ -1259,34 +1259,56 @@ async fn decode_projection(
     })
 }
 
+fn distinct_expected_blobs(
+    blobs: impl IntoIterator<Item = ExpectedBlob>,
+) -> Result<BTreeMap<BlobDigest, ExpectedBlob>, ImportedConversationRepositoryError> {
+    let mut expected_by_digest = BTreeMap::new();
+    for expected in blobs {
+        match expected_by_digest.entry(expected.digest()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(expected);
+            }
+            std::collections::btree_map::Entry::Occupied(entry) if *entry.get() == expected => {}
+            std::collections::btree_map::Entry::Occupied(_) => {
+                return Err(ImportedConversationCorruption::RawRecordHashCollision.into());
+            }
+        }
+    }
+    Ok(expected_by_digest)
+}
+
 pub(crate) async fn finish_projection(
     storage: &dyn ImportedRawBlobStorage,
     projection: StoredConversationProjection,
 ) -> Result<ImportedConversation, ImportedConversationRepositoryError> {
-    let expected = projection
-        .raws
-        .iter()
-        .map(|raw| raw.expected)
-        .collect::<Vec<_>>()
-        .into_boxed_slice();
-    let bytes = storage.read(expected).await?;
-    if bytes.len() != projection.raws.len() {
+    let expected_by_digest =
+        distinct_expected_blobs(projection.raws.iter().map(|raw| raw.expected))?;
+    let expected = expected_by_digest.values().copied().collect::<Box<[_]>>();
+    let distinct_bytes = storage.read(expected).await?;
+    if distinct_bytes.len() != expected_by_digest.len() {
         return Err(ImportedConversationCorruption::Missing("raw blob bytes").into());
     }
+    let bytes_by_digest = expected_by_digest
+        .into_keys()
+        .zip(distinct_bytes)
+        .collect::<BTreeMap<_, _>>();
     let raws = projection
         .raws
         .into_iter()
-        .zip(bytes)
-        .map(|(raw, bytes)| {
-            ImportedRawSourceRecordReconstitutionInput::new(
+        .map(|raw| {
+            let bytes = bytes_by_digest
+                .get(&raw.expected.digest())
+                .cloned()
+                .ok_or(ImportedConversationCorruption::Missing("raw blob bytes"))?;
+            Ok(ImportedRawSourceRecordReconstitutionInput::new(
                 raw.position,
                 raw.hash,
                 raw.conversion_digest,
                 bytes,
                 raw.normalized,
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<Vec<_>, ImportedConversationRepositoryError>>()?;
     let conversation = ImportedConversationReconstitutionInput::new(
         projection.requested,
         projection.stored,
@@ -1562,11 +1584,12 @@ mod tests {
     use sqlx::types::Uuid;
 
     use super::{
-        CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE, CLAUDE_CODE_VERSION_TWO, CODEX_FORMAT,
-        CODEX_VERSION_ONE, EncodedEntry, EncodedRawRecord, ImportedConversationFormat,
-        ImportedRawRecordConversionDigest, ImportedRawRecordHash, ImportedRawRecordPosition,
-        ImportedRecordEntryPosition, ImportedTranscriptEntryId, ImportedTranscriptPosition,
-        decode_format, encode_format, entries_in_key_order, raw_blobs_in_key_order,
+        BlobDigest, CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE, CLAUDE_CODE_VERSION_TWO,
+        CODEX_FORMAT, CODEX_VERSION_ONE, EncodedEntry, EncodedRawRecord, ExpectedBlob,
+        ImportedConversationFormat, ImportedRawRecordConversionDigest, ImportedRawRecordHash,
+        ImportedRawRecordPosition, ImportedRecordEntryPosition, ImportedTranscriptEntryId,
+        ImportedTranscriptPosition, decode_format, distinct_expected_blobs, encode_format,
+        entries_in_key_order, raw_blobs_in_key_order,
     };
 
     fn encoded_raw(key: u8) -> EncodedRawRecord {
@@ -1644,6 +1667,18 @@ mod tests {
             ordered[1].content_hash,
             ImportedRawRecordHash::from_bytes([2; 32])
         );
+    }
+
+    #[test]
+    fn imported_blob_read_plan_deduplicates_equal_occurrences() {
+        let expected = ExpectedBlob::try_new(BlobDigest::from_bytes([1; 32]), 1)
+            .expect("fixture length is positive");
+
+        let distinct = distinct_expected_blobs([expected, expected])
+            .expect("equal immutable identities agree");
+
+        assert_eq!(distinct.len(), 1);
+        assert_eq!(distinct.get(&expected.digest()), Some(&expected));
     }
 
     /// S28 / INV-001 / INV-038: globally unique entry keys are emitted in one

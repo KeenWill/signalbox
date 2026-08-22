@@ -397,13 +397,20 @@ impl ImportedSessionRepository {
         Option<ReconstitutedSessionCreationFromImportedFrontier>,
         ImportedSessionRepositoryError,
     > {
+        let mut connection = self.pool.acquire().await?;
+        let Some(kind) = inspect_registry(&mut connection, command_id).await? else {
+            return Ok(None);
+        };
+        if kind != CommandKind::CreateSessionFromImportedFrontier {
+            return Err(ImportedSessionRepositoryError::DifferentCommandKind { command_id });
+        }
         let conversation_id: Option<Uuid> = sqlx::query_scalar(
             "SELECT imported_conversation_id
                FROM create_session_from_imported_frontier_command
               WHERE command_id = $1",
         )
         .bind(durable_command_id_to_uuid(command_id))
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
         let conversation = match conversation_id {
             Some(identity) => self
@@ -413,31 +420,10 @@ impl ImportedSessionRepository {
                 .map_err(map_imported_conversation_error)?,
             None => None,
         };
-        let mut connection = self.pool.acquire().await?;
-        match inspect_registry(&mut connection, command_id).await? {
-            None => Ok(None),
-            Some(CommandKind::CreateSessionFromImportedFrontier) => {
-                let conversation = conversation
-                    .as_ref()
-                    .ok_or(ImportedSessionCorruption::Missing("imported conversation"))?;
-                load_creation_from_connection(&mut connection, command_id, conversation).await
-            }
-            Some(
-                CommandKind::CreateSession
-                | CommandKind::ReplaceSessionDefaults
-                | CommandKind::ReplaceSessionMetadata
-                | CommandKind::SubmitInput
-                | CommandKind::DecideToolRequest
-                | CommandKind::ReviewWorkflow
-                | CommandKind::ReviewOrchestration
-                | CommandKind::CompactSession
-                | CommandKind::Goal
-                | CommandKind::UpdateSessionPlacement
-                | CommandKind::RegisterWorkspace
-                | CommandKind::MintGitRemote
-                | CommandKind::WithdrawGitRemote,
-            ) => Err(ImportedSessionRepositoryError::DifferentCommandKind { command_id }),
-        }
+        let conversation = conversation
+            .as_ref()
+            .ok_or(ImportedSessionCorruption::Missing("imported conversation"))?;
+        load_creation_from_connection(&mut connection, command_id, conversation).await
     }
 
     async fn existing_outcome(
