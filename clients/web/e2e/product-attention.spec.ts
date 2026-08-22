@@ -87,6 +87,7 @@ const installAttentionScenario = async (page: Page) => {
 }
 
 const installAttentionReplacementScenario = async (page: Page) => {
+  let snapshotRequests = 0
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
   await page.route('**/api/attention/follow', (route) =>
     route.fulfill({
@@ -94,7 +95,12 @@ const installAttentionReplacementScenario = async (page: Page) => {
       contentType: 'application/x-ndjson',
     }),
   )
-  await page.route('**/api/attention', (route) => route.fulfill({ json: nextAttentionFixture }))
+  await page.route('**/api/attention', (route) => {
+    snapshotRequests += 1
+    return route.fulfill({
+      json: snapshotRequests === 1 ? attentionFixture : nextAttentionFixture,
+    })
+  })
 }
 
 const installFailedAttentionPageScenario = async (page: Page) => {
@@ -146,6 +152,35 @@ const installRecoveringMonitorScenario = async (page: Page) => {
   })
   await page.route('**/api/attention', (route) => route.fulfill({ json: attentionFixture }))
   return () => followRequests
+}
+
+const installStaleMonitorScenario = async (page: Page) => {
+  let followRequests = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/attention/follow', (route) => {
+    followRequests += 1
+    return route.fulfill({
+      body: `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n`,
+      contentType: 'application/x-ndjson',
+    })
+  })
+  await page.route('**/api/attention', (route) => route.fulfill({ json: attentionFixture }))
+  return () => followRequests
+}
+
+const installNewerHttpSnapshotScenario = async (page: Page) => {
+  const newerSnapshot = { ...nextAttentionFixture, cursor: '43' }
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      body: `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n`,
+      contentType: 'application/x-ndjson',
+    }),
+  )
+  await page.route('**/api/attention', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    await route.fulfill({ json: newerSnapshot })
+  })
 }
 
 const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
@@ -255,6 +290,25 @@ test('restarts a failed Attention monitor in place', async ({ page }) => {
 
   await expect.poll(followRequests).toBe(2)
   await expect(page.getByText('Monitor paused')).toBeVisible()
+})
+
+test('restarts a stale Attention monitor in place', async ({ page }) => {
+  const followRequests = await installStaleMonitorScenario(page)
+  await page.goto('/attention')
+
+  await expect(page.getByText('Monitor paused')).toBeVisible()
+  await page.getByRole('button', { name: 'Refresh snapshot' }).click()
+
+  await expect.poll(followRequests).toBe(2)
+})
+
+test('keeps a newer HTTP snapshot than an in-flight follower snapshot', async ({ page }) => {
+  await installNewerHttpSnapshotScenario(page)
+  await page.goto('/attention')
+
+  await expect(page.getByText(idleSessionId)).toBeVisible()
+  await expect(page.getByText(approvalSessionId)).toBeHidden()
+  await expect(page.getByText('cursor 43')).toBeVisible()
 })
 
 test('captures the dark attention fleet', async ({ page }, testInfo) => {

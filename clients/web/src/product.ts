@@ -36,6 +36,31 @@ const validateBootstrap = (bootstrap: WebContractBootstrap): WebContractBootstra
   return bootstrap
 }
 
+type AttentionSummary = WebAttentionSnapshot['summaries'][number]
+
+const validateAttentionSummary = (summary: AttentionSummary): void => {
+  const expectedAction = (() => {
+    switch (summary.state) {
+      case 'blocked':
+        return 'provide_goal_need'
+      case 'awaiting_approval':
+        return 'decide_approval'
+      case 'ambiguous':
+      case 'awaiting_reconciliation':
+        return 'reconcile_turn'
+      case 'runner_lost':
+        return 'restore_runner'
+      case 'active':
+      case 'queued':
+      case 'idle':
+        return null
+    }
+  })()
+  if ((summary.action ?? null) !== expectedAction) {
+    throw new TypeError('attention summary state and action are incoherent')
+  }
+}
+
 const validateAttentionSnapshot = (snapshot: WebAttentionSnapshot): WebAttentionSnapshot => {
   validateCursor(snapshot.cursor)
   if (snapshot.summaries.length > MAX_ATTENTION_SNAPSHOT_ITEMS) {
@@ -45,6 +70,7 @@ const validateAttentionSnapshot = (snapshot: WebAttentionSnapshot): WebAttention
   if (sessionIds.size !== snapshot.summaries.length) {
     throw new TypeError('attention snapshot contains duplicate session identities')
   }
+  for (const summary of snapshot.summaries) validateAttentionSummary(summary)
   for (let index = 1; index < snapshot.summaries.length; index += 1) {
     const previous = snapshot.summaries[index - 1]
     const current = snapshot.summaries[index]
@@ -139,7 +165,12 @@ const decodeAttentionLines = async function* (
           line = []
           const event = decodeWebAttentionStreamEvent(value)
           if (event.kind === 'snapshot') validateAttentionSnapshot(event.snapshot)
-          else validateCursor(event.cursor)
+          else {
+            validateCursor(event.cursor)
+            if (event.kind === 'update') {
+              for (const summary of event.summaries) validateAttentionSummary(summary)
+            }
+          }
           yield event
         } else {
           if (line.length === MAX_ATTENTION_EVENT_BYTES) {

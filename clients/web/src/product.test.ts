@@ -265,6 +265,31 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('rejects incoherent state and action pairs in snapshots and updates', async () => {
+    const incoherentSummary = {
+      ...attentionFixture.summaries[0],
+      state: 'idle',
+      action: 'restore_runner',
+    }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ...attentionFixture, summaries: [incoherentSummary] })),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          `${JSON.stringify({ kind: 'update', cursor: '18', summaries: [incoherentSummary] })}\n`,
+        ),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
+      'attention summary state and action are incoherent',
+    )
+    const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
+    await expect(events.next()).rejects.toThrow('attention summary state and action are incoherent')
+  })
+
   it('rejects attention summaries that are not ordered by session identity', async () => {
     const unordered = {
       ...attentionFixture,

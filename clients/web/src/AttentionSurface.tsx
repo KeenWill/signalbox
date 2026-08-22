@@ -56,7 +56,10 @@ export function AttentionSurface({
       const projectionAtStart = liveProjection.current
       const snapshot = await productTransport.readAttention(after ?? undefined, signal)
       const latestProjection = liveProjection.current
-      return after === null && latestProjection !== projectionAtStart ? latestProjection : snapshot
+      if (after !== null || latestProjection === projectionAtStart || !latestProjection) {
+        return snapshot
+      }
+      return BigInt(latestProjection.cursor) > BigInt(snapshot.cursor) ? latestProjection : snapshot
     },
     gcTime: 0,
   })
@@ -77,11 +80,10 @@ export function AttentionSurface({
       onProjection: (snapshot) => {
         const queryProjection = queryClient.getQueryData<WebAttentionSnapshot>(queryKey(null))
         const projection =
-          queryProjection && BigInt(queryProjection.cursor) > BigInt(snapshot.cursor)
+          queryProjection && BigInt(queryProjection.cursor) >= BigInt(snapshot.cursor)
             ? queryProjection
             : snapshot
         liveProjection.current = projection
-        void queryClient.cancelQueries({ queryKey: queryKey(null), exact: true })
         queryClient.setQueryData(queryKey(null), projection)
         return { snapshot: projection, accepted: projection === snapshot }
       },
@@ -144,9 +146,11 @@ export function AttentionSurface({
     setAfter(null)
   }
   const restartMonitor = () => {
-    void attention.refetch()
-    setMonitorGeneration((generation) => generation + 1)
+    void attention.refetch().then(() => {
+      setMonitorGeneration((generation) => generation + 1)
+    })
   }
+  const monitorCanRestart = phase === 'failed' || phase === 'stale'
 
   return (
     <div className="surface-body attention-live-surface">
@@ -156,7 +160,7 @@ export function AttentionSurface({
         </span>
         <button
           type="button"
-          onClick={phase === 'failed' ? restartMonitor : () => void attention.refetch()}
+          onClick={monitorCanRestart ? restartMonitor : () => void attention.refetch()}
         >
           <RefreshCw aria-hidden="true" />
           {phase === 'failed' ? 'Restart monitor' : 'Refresh snapshot'}
