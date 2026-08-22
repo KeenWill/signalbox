@@ -395,13 +395,13 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
     Ok(())
 }
 
-/// INV-015: compaction validates the current model-visible boundary through
-/// typed entry keys and trusts previously committed immutable compactions.
+/// INV-015: compaction validates a successor from its immutable predecessor
+/// and bounded typed suffix while retaining root/import compatibility replay.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv015_context_compaction_validation_is_current_and_typed() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let validator_shape: (bool, bool, bool) = sqlx::query_as(
+    let validator_shape: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         "SELECT
             position(
                 'stored compaction summary leaves a tool exchange open'
@@ -416,7 +416,25 @@ async fn inv015_context_compaction_validation_is_current_and_typed() -> Result<(
                 )
             ) = 0,
             position(
-                'split_part(visible.reference'
+                'IF NEW.predecessor_compaction_id IS NULL THEN'
+                IN pg_get_functiondef(
+                    'require_context_compaction_exact_evidence()'::regprocedure
+                )
+            ) > 0,
+            position(
+                'WITH RECURSIVE visible_chain AS MATERIALIZED'
+                IN pg_get_functiondef(
+                    'require_context_compaction_exact_evidence()'::regprocedure
+                )
+            ) > 0,
+            position(
+                'context_frontier_preserves_prefix'
+                IN pg_get_functiondef(
+                    'require_context_compaction_exact_evidence()'::regprocedure
+                )
+            ) > 0,
+            position(
+                'context_frontier_member_position'
                 IN pg_get_functiondef(
                     'require_context_compaction_exact_evidence()'::regprocedure
                 )
@@ -425,7 +443,7 @@ async fn inv015_context_compaction_validation_is_current_and_typed() -> Result<(
     .fetch_one(&pool)
     .await?;
 
-    assert_eq!(validator_shape, (true, true, true));
+    assert_eq!(validator_shape, (true, true, true, true, true, true));
 
     pool.close().await;
     drop(container);
