@@ -883,6 +883,18 @@ kbd {
   .window-controls {
     flex-wrap: wrap;
   }
+  .imports-workspace-product .imports-filters {
+    width: 100%;
+  }
+  .imports-workspace-product .imports-filters > label:not(.source-session-filter-toggle) {
+    flex: 1 1 calc(50% - 0.2rem);
+    min-width: 0;
+  }
+  .imports-workspace-product .imports-filters > label > input,
+  .imports-workspace-product .imports-filters > label > select {
+    width: 100%;
+    min-width: 0;
+  }
   .import-inspector-body {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(180px, auto) minmax(260px, 1fr);
