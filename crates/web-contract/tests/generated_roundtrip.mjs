@@ -220,6 +220,23 @@ test("generated search decoder rejects malformed result identities", () => {
   assert.throws(() => decodeWebSearchPage(page), /matching/);
 });
 
+test("generated search decoder rejects contradictory source correlations", () => {
+  const mismatchedSession = searchPage();
+  mismatchedSession.results[0].source.session_id =
+    "00000000-0000-0000-0000-000000000992";
+  assert.throws(
+    () => decodeWebSearchPage(mismatchedSession),
+    /source consistent with the result session and content class/,
+  );
+
+  const mismatchedContent = searchPage();
+  mismatchedContent.results[0].content_class = "tool_result";
+  assert.throws(
+    () => decodeWebSearchPage(mismatchedContent),
+    /source consistent with the result session and content class/,
+  );
+});
+
 test("generated descriptor decoder rejects an invalid session ID", () => {
   assert.throws(
     () =>

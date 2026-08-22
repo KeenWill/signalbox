@@ -814,10 +814,41 @@ export function decodeWebSessionTimelineWindow(value) {{
   return value;
 }}
 
+function validSearchSourceCorrelation(result) {{
+  switch (result.source.kind) {{
+    case "session":
+      return result.source.session_id === result.session_id && result.content_class === "session_metadata";
+    case "accepted_input":
+    case "steering_input":
+      return result.content_class === "user_transcript";
+    case "turn_transcript_entry":
+      return result.content_class === "assistant_transcript";
+    case "session_transcript_entry":
+      return result.content_class === "derived_text_artifact";
+    case "tool_request":
+      return result.content_class === "tool_arguments";
+    case "tool_attempt":
+      return result.content_class === "tool_result";
+    case "attachment":
+      return result.content_class === "attachment_filename" ||
+        result.content_class === "attachment_media_metadata";
+    case "derived_artifact":
+      return result.content_class === "derived_text_artifact";
+    default:
+      return false;
+  }}
+}}
+
 export function decodeWebSearchPage(value) {{
   assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
   const encoder = new TextEncoder();
   value.results.forEach((result, resultIndex) => {{
+    if (!validSearchSourceCorrelation(result)) {{
+      fail(
+        `search_page.results[${{resultIndex}}].source`,
+        "a source consistent with the result session and content class",
+      );
+    }}
     const bytes = encoder.encode(result.snippet);
     if (bytes.length > {max_search_snippet_bytes}) {{
       fail(
