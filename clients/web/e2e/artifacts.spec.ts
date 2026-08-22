@@ -61,7 +61,9 @@ test.afterEach(async ({ page }, testInfo) => {
   })
 })
 
-test('selects an image capability without prefetching original bytes', async ({ page }) => {
+test('selects a bounded image capability without loading unbounded original bytes', async ({
+  page,
+}) => {
   const problems = watchBrowser(page)
 
   const previewResponse = page.waitForResponse(
@@ -82,18 +84,15 @@ test('selects an image capability without prefetching original bytes', async ({ 
     ),
   ).toBe(0)
 
-  const originalResponse = page.waitForResponse(
-    (response) => new URL(response.url()).pathname === originalPath,
-  )
-  await page.getByRole('button', { name: 'Load original' }).click()
-  await expect(page.getByRole('button', { name: 'Original loaded' })).toBeFocused()
-  const original = page.getByRole('img', { name: 'Original of orbital-map.png' })
-  await expect(original).toBeVisible()
-  await expect(original).toHaveAttribute('src', originalPath)
-  await expect
-    .poll(() => original.evaluate((element) => (element as HTMLImageElement).naturalWidth))
-    .toBeGreaterThan(0)
-  expect((await originalResponse).headers()['content-type']).toContain('image/png')
+  await expect(
+    page.getByRole('button', { name: 'Original dimensions unavailable; download only' }),
+  ).toBeDisabled()
+  expect(
+    await page.evaluate(
+      (path) => performance.getEntriesByName(new URL(path, location.href).href).length,
+      originalPath,
+    ),
+  ).toBe(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
