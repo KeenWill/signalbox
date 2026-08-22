@@ -456,8 +456,9 @@ impl PostgresConvergenceSweepStore {
         pull_request: PullRequestNumber,
         observation: Option<&ConvergenceSweepObservation>,
         failure: ConvergenceSweepFailureKind,
-        retry_delay_seconds: u64,
+        retry_delay_seconds: impl Into<Option<u64>>,
     ) -> Result<ConvergenceSweepFailureDisposition, ConvergenceSweepStoreError> {
+        let retry_delay_seconds = retry_delay_seconds.into();
         let mut transaction = self.pool.begin().await?;
         ensure_target(&mut transaction, repository, pull_request).await?;
         let budget: i16 = sqlx::query_scalar("SELECT convergence_sweep_retry_budget()")
@@ -490,6 +491,7 @@ impl PostgresConvergenceSweepStore {
                                 THEN least(consecutive_failures + 1, $5)
                             ELSE 1::smallint END) >= $5
                         THEN NULL
+                        WHEN $6::bigint IS NULL THEN 'infinity'::timestamptz
                         ELSE clock_timestamp() + $6 * interval '1 second' END,
                     parked_at = CASE WHEN
                         (CASE WHEN $4 THEN $5
@@ -515,7 +517,7 @@ impl PostgresConvergenceSweepStore {
         .bind(failure.storage())
         .bind(failure == ConvergenceSweepFailureKind::NoModelActivity)
         .bind(budget)
-        .bind(i64::try_from(retry_delay_seconds).unwrap_or(i64::MAX))
+        .bind(retry_delay_seconds.map(|seconds| i64::try_from(seconds).unwrap_or(i64::MAX)))
         .bind(failure.need())
         .bind(head)
         .bind(threads)

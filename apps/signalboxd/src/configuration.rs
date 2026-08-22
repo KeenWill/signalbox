@@ -473,12 +473,6 @@ pub const DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES: usize = 256 * 1024 * 102
 
 const MAX_WATCHED_REPOSITORIES: usize = 128;
 const MAX_SIGNAL_REVIEWERS: usize = 128;
-// numeric-bound: ceiling - limits credentialed census work retained by one daemon tick
-const MAX_CONVERGENCE_SWEEP_TARGETS: usize = 256;
-// numeric-bound: ceiling - prevents an enabled target from remaining unobserved for too long
-pub const MAX_CONVERGENCE_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
-// numeric-bound: ceiling - bounds starvation after a dispatch that made no durable progress
-pub const MAX_CONVERGENCE_SWEEP_COOL_OFF: Duration = Duration::from_secs(1_800);
 
 /// Loopback-only reference address selected when the webhook listener table
 /// omits `bind_address`.
@@ -1122,7 +1116,7 @@ impl HubModelConfiguration {
         let approval_judge_selection = parse_approval_judge(document.get("approval_judge"))?;
         let repository_watch = document
             .get("repository_watch")
-            .map(parse_repository_watch_configuration)
+            .map(|item| parse_repository_watch_configuration(item, &numeric_bounds))
             .transpose()?;
         let models = document
             .get("models")
@@ -2094,6 +2088,7 @@ pub(crate) fn checked_in_example_configuration()
 
 fn parse_repository_watch_configuration(
     item: &Item,
+    numeric_bounds: &NumericBoundsConfiguration,
 ) -> Result<RepositoryWatchConfiguration, HubModelConfigurationError> {
     let table = item
         .as_table()
@@ -2138,7 +2133,15 @@ fn parse_repository_watch_configuration(
     signal_reviewers.sort();
 
     let webhook = parse_repository_watch_webhook_configuration(table.get("webhook"))?;
-    let convergence_sweep = parse_convergence_sweep_configuration(table.get("convergence_sweep"))?;
+    let convergence_sweep = parse_convergence_sweep_configuration(
+        table.get("convergence_sweep"),
+        numeric_bounds
+            .duration("max_convergence_sweep_interval")
+            .flatten(),
+        numeric_bounds
+            .duration("max_convergence_sweep_cool_off")
+            .flatten(),
+    )?;
 
     let repository_tables = table
         .get("repositories")
@@ -2261,7 +2264,11 @@ fn parse_repository_watch_configuration(
         .iter()
         .map(|repository| repository.convergence_pull_requests.len())
         .sum::<usize>();
-    if convergence_target_count > MAX_CONVERGENCE_SWEEP_TARGETS
+    let convergence_target_limit = numeric_bounds
+        .integer("max_convergence_sweep_targets")
+        .flatten()
+        .and_then(|value| usize::try_from(value).ok());
+    if convergence_target_limit.is_some_and(|limit| convergence_target_count > limit)
         || (convergence_target_count == 0) != convergence_sweep.is_none()
     {
         return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
@@ -2277,6 +2284,8 @@ fn parse_repository_watch_configuration(
 
 fn parse_convergence_sweep_configuration(
     item: Option<&Item>,
+    interval_ceiling: Option<Duration>,
+    cool_off_ceiling: Option<Duration>,
 ) -> Result<Option<ConvergenceSweepConfiguration>, HubModelConfigurationError> {
     let Some(item) = item else {
         return Ok(None);
@@ -2288,10 +2297,8 @@ fn parse_convergence_sweep_configuration(
         .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
     let template = SessionTemplateName::try_new(required_string(table, "template")?.to_owned())
         .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
-    let interval =
-        bounded_positive_duration(table, "interval_seconds", MAX_CONVERGENCE_SWEEP_INTERVAL)?;
-    let cool_off =
-        bounded_positive_duration(table, "cool_off_seconds", MAX_CONVERGENCE_SWEEP_COOL_OFF)?;
+    let interval = bounded_positive_duration(table, "interval_seconds", interval_ceiling)?;
+    let cool_off = bounded_positive_duration(table, "cool_off_seconds", cool_off_ceiling)?;
     Ok(Some(ConvergenceSweepConfiguration {
         template,
         interval,
@@ -2302,7 +2309,7 @@ fn parse_convergence_sweep_configuration(
 fn bounded_positive_duration(
     table: &Table,
     field: &str,
-    ceiling: Duration,
+    ceiling: Option<Duration>,
 ) -> Result<Duration, HubModelConfigurationError> {
     table
         .get(field)
@@ -2310,7 +2317,7 @@ fn bounded_positive_duration(
         .and_then(|value| u64::try_from(value).ok())
         .filter(|value| *value > 0)
         .map(Duration::from_secs)
-        .filter(|value| *value <= ceiling)
+        .filter(|value| ceiling.is_none_or(|ceiling| *value <= ceiling))
         .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
 }
 
@@ -4267,7 +4274,6 @@ mod tests {
         ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES,
         DEFAULT_REPOSITORY_WATCH_WEBHOOK_BIND_ADDRESS, FileCredentialAccess, HubModelConfiguration,
         HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES,
-        MAX_CONVERGENCE_SWEEP_COOL_OFF, MAX_CONVERGENCE_SWEEP_INTERVAL,
         MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, ModelCallInputUsage, UnknownSessionModel,
         absolute_search_entries, credential_bytes, resolved_mcp_bridge_reference,
         validate_alias_count, validate_model_count,
@@ -4275,6 +4281,15 @@ mod tests {
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
     const ANTHROPIC_OVERFLOW_PROFILE: &str = "anthropic-overflow";
+
+    fn example_numeric_duration(field: &'static str) -> Duration {
+        super::checked_in_example_configuration()
+            .expect("checked-in example parses")
+            .numeric_bounds()
+            .duration(field)
+            .flatten()
+            .expect("example field is bounded")
+    }
 
     /// The exact pool block [`CONFIGURATION`] declares, so a test that cares
     /// about pool shape states its own replacement in full.
@@ -4807,8 +4822,8 @@ cool_off_seconds = {}
                     "repository = \"{PROVIDER_WATCH_REPOSITORY}\"\nconvergence_pull_requests = [{CONVERGENCE_PULL_REQUEST}]"
                 ),
             ),
-            MAX_CONVERGENCE_SWEEP_INTERVAL.as_secs(),
-            MAX_CONVERGENCE_SWEEP_COOL_OFF.as_secs(),
+            example_numeric_duration("max_convergence_sweep_interval").as_secs(),
+            example_numeric_duration("max_convergence_sweep_cool_off").as_secs(),
         )
     }
 
@@ -5493,8 +5508,14 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         );
 
         assert_eq!(policy.template().as_str(), WATCH_TEMPLATE);
-        assert_eq!(policy.interval(), MAX_CONVERGENCE_SWEEP_INTERVAL);
-        assert_eq!(policy.cool_off(), MAX_CONVERGENCE_SWEEP_COOL_OFF);
+        assert_eq!(
+            policy.interval(),
+            example_numeric_duration("max_convergence_sweep_interval")
+        );
+        assert_eq!(
+            policy.cool_off(),
+            example_numeric_duration("max_convergence_sweep_cool_off")
+        );
         assert_eq!(repository.convergence_pull_requests(), [pull_request]);
     }
 
@@ -5540,8 +5561,8 @@ template = "{WATCH_TEMPLATE}"
 interval_seconds = {}
 cool_off_seconds = {}
 "#,
-            MAX_CONVERGENCE_SWEEP_INTERVAL.as_secs(),
-            MAX_CONVERGENCE_SWEEP_COOL_OFF.as_secs(),
+            example_numeric_duration("max_convergence_sweep_interval").as_secs(),
+            example_numeric_duration("max_convergence_sweep_cool_off").as_secs(),
         );
         let configured = configuration_with_convergence_sweep().replace(&policy, "");
 
@@ -5556,11 +5577,11 @@ cool_off_seconds = {}
         let configured = configuration_with_convergence_sweep().replace(
             &format!(
                 "interval_seconds = {}",
-                MAX_CONVERGENCE_SWEEP_INTERVAL.as_secs()
+                example_numeric_duration("max_convergence_sweep_interval").as_secs()
             ),
             &format!(
                 "interval_seconds = {}",
-                MAX_CONVERGENCE_SWEEP_INTERVAL.as_secs() + 1
+                example_numeric_duration("max_convergence_sweep_interval").as_secs() + 1
             ),
         );
 
@@ -5575,11 +5596,11 @@ cool_off_seconds = {}
         let configured = configuration_with_convergence_sweep().replace(
             &format!(
                 "cool_off_seconds = {}",
-                MAX_CONVERGENCE_SWEEP_COOL_OFF.as_secs()
+                example_numeric_duration("max_convergence_sweep_cool_off").as_secs()
             ),
             &format!(
                 "cool_off_seconds = {}",
-                MAX_CONVERGENCE_SWEEP_COOL_OFF.as_secs() + 1
+                example_numeric_duration("max_convergence_sweep_cool_off").as_secs() + 1
             ),
         );
 

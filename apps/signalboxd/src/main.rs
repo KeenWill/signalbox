@@ -56,16 +56,18 @@ use signalboxd::runner_protocol_runtime::{
 };
 use signalboxd::{
     ActivatedTurnPass, BaseDaemonCredentialInputs, BlobStoreRegistry,
-    CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError, ConvergenceSweepRuntime,
-    DaemonToolCatalog, DaemonToolComposition, DaemonTools, DaemonToolsConstructionError,
-    FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess,
-    GitHubCodeHostTransport, HubModelConfiguration, HubModelConfigurationError,
-    LocalProcessListener, LocalSocketError, MappedDaemonCredentialInputs, ModelAdapter,
-    OtlpRuntime, PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
+    CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError, ConvergenceSweepNumericBounds,
+    ConvergenceSweepRuntime, DaemonToolCatalog, DaemonToolComposition, DaemonTools,
+    DaemonToolsConstructionError, ExpiredPassRecoveryPolicy, FatalExecutionSupervisor,
+    FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport,
+    GoalModeNumericBounds, HubModelConfiguration, HubModelConfigurationError, LocalProcessListener,
+    LocalSocketError, MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime,
+    PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
     ProcessRuntimeError, PrometheusServer, ReportedUsageCompaction, RepositoryWatchRuntime,
     RepositoryWatchRuntimeError, SessionTemplateConfiguration, SessionTemplateConfigurationError,
     SingleHubGuardError, SystemCurrentTimeClock, TelemetryConfiguration,
-    TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics, TurnLivenessRuntime,
+    TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    TurnLivenessNumericBounds, TurnLivenessRuntime,
     model_adapter::ConfiguredModelRuntime,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
@@ -81,8 +83,6 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-// numeric-bound: tunable - allows runtime components to commit after scheduler work drains
-const GRACEFUL_SHUTDOWN_CLEANUP_WINDOW: Duration = Duration::from_secs(30);
 const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
 const DATABASE_URL_ENVIRONMENT: &str = "DATABASE_URL";
 const TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_TEMPLATE_CONFIG_FILE";
@@ -93,11 +93,16 @@ const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
 const RUNNER_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_SOCKET_PATH";
 const GUARD_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
-fn graceful_shutdown_window(occupancy_bound: SchedulerPassOccupancyBound) -> Duration {
-    occupancy_bound
-        .get()
-        .unwrap_or(Duration::ZERO)
-        .saturating_add(GRACEFUL_SHUTDOWN_CLEANUP_WINDOW)
+fn graceful_shutdown_window(
+    occupancy_bound: SchedulerPassOccupancyBound,
+    cleanup_window: Option<Duration>,
+) -> Option<Duration> {
+    cleanup_window.map(|cleanup_window| {
+        occupancy_bound
+            .get()
+            .unwrap_or(Duration::ZERO)
+            .saturating_add(cleanup_window)
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1030,24 +1035,32 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
 async fn drain_runtime_tasks<GuardLoss>(
     runtime_tasks: &mut JoinSet<RuntimeTaskExit>,
     guard_loss: GuardLoss,
-    grace_window: Duration,
+    grace_window: Option<Duration>,
 ) -> (RuntimeDrainOutcome, RuntimeTaskCompletion)
 where
     GuardLoss: Future<Output = ()>,
 {
     let completion = Cell::new(RuntimeTaskCompletion::Clean);
-    let drain = select! {
-        () = guard_loss => RuntimeDrainOutcome::GuardLost,
-        result = timeout(grace_window, async {
-            while let Some(completed) = runtime_tasks.join_next().await {
-                completion.set(completion.get().combine(runtime_task_completion(completed)));
-            }
-        }) => match result {
-            Ok(()) => RuntimeDrainOutcome::Complete,
-            Err(_) => RuntimeDrainOutcome::GraceWindowExpired,
+    let drain = async {
+        while let Some(completed) = runtime_tasks.join_next().await {
+            completion.set(completion.get().combine(runtime_task_completion(completed)));
         }
     };
-    (drain, completion.get())
+    tokio::pin!(drain);
+    let outcome = match grace_window {
+        Some(grace_window) => select! {
+            () = guard_loss => RuntimeDrainOutcome::GuardLost,
+            result = timeout(grace_window, &mut drain) => match result {
+                Ok(()) => RuntimeDrainOutcome::Complete,
+                Err(_) => RuntimeDrainOutcome::GraceWindowExpired,
+            }
+        },
+        None => select! {
+            () = guard_loss => RuntimeDrainOutcome::GuardLost,
+            () = &mut drain => RuntimeDrainOutcome::Complete,
+        },
+    };
+    (outcome, completion.get())
 }
 
 const fn completed_runtime_outcome(
@@ -1177,6 +1190,19 @@ async fn run_hub(
                 )
             })
     };
+    let configured_u32 = |field| {
+        numeric_bounds
+            .integer(field)
+            .flatten()
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("configured_numeric_bound_exceeds_u32"),
+                )
+            })
+    };
     let scheduler_pass_occupancy_bound = configured_duration("scheduler_pass_occupancy_bound")
         .map(SchedulerPassOccupancyBound::try_new)
         .transpose()
@@ -1187,7 +1213,10 @@ async fn run_hub(
             )
         })?
         .unwrap_or_else(SchedulerPassOccupancyBound::unbounded);
-    let shutdown_grace_window = graceful_shutdown_window(scheduler_pass_occupancy_bound);
+    let shutdown_grace_window = graceful_shutdown_window(
+        scheduler_pass_occupancy_bound,
+        configured_duration("graceful_shutdown_cleanup_window"),
+    );
     let stale_active_turn_bound = configured_duration("stale_active_turn_bound")
         .map(StaleActiveTurnBound::try_new)
         .transpose()
@@ -1251,6 +1280,33 @@ async fn run_hub(
         configured_duration("automatic_reconciliation_base_backoff");
     let automatic_reconciliation_backoff_cap =
         configured_duration("automatic_reconciliation_backoff_cap");
+    let expired_pass_recovery_policy = ExpiredPassRecoveryPolicy::new(
+        configured_u32("expired_pass_recovery_attempts")?,
+        configured_duration("expired_pass_recovery_attempt_bound"),
+        configured_duration("expired_pass_recovery_lock_retry_delay"),
+        configured_duration("expired_pass_recovery_conservative_retry_delay"),
+    );
+    let repository_reconciliation_quantum = configured_usize("repository_reconciliation_quantum")?;
+    let convergence_sweep_numeric_bounds = ConvergenceSweepNumericBounds::new(
+        configured_duration("convergence_sweep_request_timeout"),
+        configured_usize("max_convergence_sweep_connection_pages")?,
+        configured_usize("max_concurrent_convergence_sweep_targets")?,
+        configured_usize("max_convergence_sweep_request_attempts")?,
+        configured_duration("convergence_sweep_request_retry_delay"),
+        configured_duration("convergence_sweep_retry_backoff_base"),
+        configured_duration("convergence_sweep_retry_backoff_cap"),
+    );
+    let turn_liveness_numeric_bounds = TurnLivenessNumericBounds::new(
+        configured_usize("terminalizations_per_liveness_scan")?,
+        configured_duration("turn_liveness_recovery_attempt_bound"),
+        configured_usize("automatic_reconciliations_per_liveness_scan")?,
+    );
+    let goal_mode_numeric_bounds = GoalModeNumericBounds::new(
+        configured_duration("automatic_resume_base_backoff"),
+        configured_duration("automatic_resume_backoff_cap"),
+        configured_u32("automatic_resume_attempt_budget")?,
+        configured_duration("automatic_resume_startup_retry_delay"),
+    );
     if configuration.repository_watch_credential_conflicts(&model_configuration) {
         let error = HubConfigurationError::new(
             GITHUB_TOKEN_FILE_ENVIRONMENT,
@@ -1751,6 +1807,7 @@ async fn run_hub(
             model_configuration.clone(),
             model_configuration.session_credential_pin(),
             eligibility_nudge.clone(),
+            repository_reconciliation_quantum,
         ) {
             Ok(runtime) => Some(runtime),
             Err(_) => {
@@ -1775,6 +1832,7 @@ async fn run_hub(
             template_configuration.clone(),
             model_configuration.clone(),
             eligibility_nudge.clone(),
+            convergence_sweep_numeric_bounds,
         ) {
             Ok(runtime) => runtime,
             Err(_) => {
@@ -1892,7 +1950,11 @@ async fn run_hub(
         execution,
     )
     .with_reported_usage_compaction(reported_usage_compaction)
-    .with_occupancy_recovery(scheduler_pool.clone(), eligibility_nudge.clone());
+    .with_occupancy_recovery(
+        scheduler_pool.clone(),
+        eligibility_nudge.clone(),
+        expired_pass_recovery_policy,
+    );
     let turn_liveness_runtime = TurnLivenessRuntime::new(
         scheduler_pool.clone(),
         stale_active_turn_bound,
@@ -1900,11 +1962,13 @@ async fn run_hub(
         automatic_reconciliation_attempt_budget,
         automatic_reconciliation_base_backoff,
         automatic_reconciliation_backoff_cap,
+        turn_liveness_numeric_bounds,
     );
     let goal_disposition = PostgresGoalPassDisposition::new(
         scheduler_pool,
         model_configuration.clone(),
         eligibility_nudge,
+        goal_mode_numeric_bounds,
     );
     match goal_disposition
         .reconcile_automatic_resumptions_after_restart()
@@ -3141,11 +3205,11 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn adr0044_shutdown_drain_outlives_the_old_thirty_second_window() {
+    async fn adr0044_shutdown_drain_includes_the_configured_cleanup_window() {
         let (entered_sender, entered_receiver) = oneshot::channel();
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         let session = SessionId::from_uuid(Uuid::from_u128(1));
-        let pass_duration = Duration::from_secs(31);
+        let pass_duration = Duration::from_secs(2);
         let scheduler = SchedulerLoop::new(
             OneHintThenPending {
                 hints: VecDeque::from([session]),
@@ -3162,9 +3226,11 @@ mod tests {
                 SchedulerStopCause::Requested
             },
             graceful_shutdown_window(
-                SchedulerPassOccupancyBound::try_new(Duration::from_secs(900))
+                SchedulerPassOccupancyBound::try_new(Duration::from_secs(3))
                     .expect("the test occupancy bound is valid"),
-            ),
+                Some(Duration::from_secs(1)),
+            )
+            .expect("the fixture cleanup window is bounded"),
         ));
 
         entered_receiver
@@ -3423,7 +3489,7 @@ mod tests {
         runtime_tasks.spawn(pending::<RuntimeTaskExit>());
 
         let (drain, completion) =
-            drain_runtime_tasks(&mut runtime_tasks, pending(), Duration::from_secs(5)).await;
+            drain_runtime_tasks(&mut runtime_tasks, pending(), Some(Duration::from_secs(5))).await;
         let cause = combine_runtime_stop_cause(RuntimeStopCause::Requested, completion);
 
         assert_eq!(drain, RuntimeDrainOutcome::GraceWindowExpired);
@@ -3443,7 +3509,7 @@ mod tests {
         runtime_tasks.spawn(pending::<RuntimeTaskExit>());
 
         let (drain, completion) =
-            drain_runtime_tasks(&mut runtime_tasks, pending(), Duration::from_secs(5)).await;
+            drain_runtime_tasks(&mut runtime_tasks, pending(), Some(Duration::from_secs(5))).await;
         let cause = combine_runtime_stop_cause(RuntimeStopCause::Requested, completion);
 
         assert_eq!(drain, RuntimeDrainOutcome::GraceWindowExpired);

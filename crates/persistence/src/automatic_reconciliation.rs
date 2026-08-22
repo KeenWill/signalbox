@@ -35,7 +35,7 @@ use crate::{
 /// attempt deadline while earlier session-locked transactions run. The daemon
 /// still drains a bounded multi-operation scan by returning here after each
 /// completed attempt and claiming the next one just in time.
-// numeric-bound: ceiling - prevents durable attempt deadlines expiring before work starts
+// numeric-bound: guard - prevents a durable claim deadline from expiring before work starts
 const CLAIM_WINDOW: i64 = 1;
 
 fn decode_operation(

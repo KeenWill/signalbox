@@ -99,9 +99,10 @@ use signalbox_process_protocol::{
 };
 use signalboxd::{
     ActivatedTurnPass, BlobStorageClass, BlobStoreRegistry, ContextGuardedTurnPass,
-    ContextGuardedTurnPassError, FatalExecutionSupervisor, HubModelConfiguration,
-    LocalProcessListener, PostgresProviderModelExecution, ProcessProviderTextDeltaSink,
-    ProcessRuntime, ProcessRuntimeError, SessionTemplateConfiguration, TurnLivenessRuntime,
+    ContextGuardedTurnPassError, ExpiredPassRecoveryPolicy, FatalExecutionSupervisor,
+    HubModelConfiguration, LocalProcessListener, PostgresProviderModelExecution,
+    ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError,
+    SessionTemplateConfiguration, TurnLivenessNumericBounds, TurnLivenessRuntime,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tempfile::TempDir;
@@ -2454,6 +2455,55 @@ fn start_fleet_scheduler(
     occupancy_bound: SchedulerPassOccupancyBound,
 ) -> Result<FleetRuntimeTasks, Box<dyn Error>> {
     let configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    let bounds = configuration.numeric_bounds();
+    let expired_pass_recovery_policy = ExpiredPassRecoveryPolicy::new(
+        bounds
+            .integer("expired_pass_recovery_attempts")
+            .flatten()
+            .and_then(|value| u32::try_from(value).ok()),
+        bounds
+            .duration("expired_pass_recovery_attempt_bound")
+            .flatten(),
+        bounds
+            .duration("expired_pass_recovery_lock_retry_delay")
+            .flatten(),
+        bounds
+            .duration("expired_pass_recovery_conservative_retry_delay")
+            .flatten(),
+    );
+    let turn_liveness_numeric_bounds = TurnLivenessNumericBounds::new(
+        bounds
+            .integer("terminalizations_per_liveness_scan")
+            .flatten()
+            .and_then(|value| usize::try_from(value).ok()),
+        bounds
+            .duration("turn_liveness_recovery_attempt_bound")
+            .flatten(),
+        bounds
+            .integer("automatic_reconciliations_per_liveness_scan")
+            .flatten()
+            .and_then(|value| usize::try_from(value).ok()),
+    );
+    let stale_active_turn_bound = bounds
+        .duration("stale_active_turn_bound")
+        .flatten()
+        .map(StaleActiveTurnBound::try_new)
+        .transpose()?;
+    let turn_liveness_scan_interval = bounds
+        .duration("turn_liveness_scan_interval")
+        .flatten()
+        .map(TurnLivenessScanInterval::try_new)
+        .transpose()?;
+    let automatic_reconciliation_attempt_budget = bounds
+        .integer("automatic_reconciliation_attempt_budget")
+        .flatten()
+        .and_then(|value| u32::try_from(value).ok());
+    let automatic_reconciliation_base_backoff = bounds
+        .duration("automatic_reconciliation_base_backoff")
+        .flatten();
+    let automatic_reconciliation_backoff_cap = bounds
+        .duration("automatic_reconciliation_backoff_cap")
+        .flatten();
     let provider = RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog())
         .with_text_delta_sink(runtime.provider_text_delta_sink());
     let (execution, fatal_execution) =
@@ -2473,16 +2523,21 @@ fn start_fleet_scheduler(
         ),
         execution,
     )
-    .with_occupancy_recovery(runtime.pool.clone(), runtime.eligibility_nudge.clone());
+    .with_occupancy_recovery(
+        runtime.pool.clone(),
+        runtime.eligibility_nudge.clone(),
+        expired_pass_recovery_policy,
+    );
     let mut scheduler =
         SchedulerLoop::new(runtime.take_work_source(), pass).with_occupancy_bound(occupancy_bound);
     let turn_liveness = TurnLivenessRuntime::new(
         runtime.pool.clone(),
-        Some(StaleActiveTurnBound::try_new(Duration::from_secs(1_800))?),
-        Some(TurnLivenessScanInterval::try_new(Duration::from_secs(60))?),
-        None,
-        Some(Duration::from_secs(120)),
-        Some(Duration::from_secs(1_800)),
+        stale_active_turn_bound,
+        turn_liveness_scan_interval,
+        automatic_reconciliation_attempt_budget,
+        automatic_reconciliation_base_backoff,
+        automatic_reconciliation_backoff_cap,
+        turn_liveness_numeric_bounds,
     );
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let scheduler_shutdown = shutdown_receiver.clone();
