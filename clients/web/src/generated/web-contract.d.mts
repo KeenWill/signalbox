@@ -110,8 +110,10 @@ type WebSessionWorkFacts = {
 };
 
 type WebTimelineAddress = {
-  readonly event_sequence: string;
+  readonly event_sequence: WebTimelineEventSequence;
 };
+
+type WebTimelineEventSequence = string;
 
 export type WebContractBootstrap = {
   readonly capabilities: WebContractCapabilities;
