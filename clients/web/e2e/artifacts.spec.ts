@@ -94,6 +94,8 @@ test('selects an image capability without prefetching original bytes', async ({ 
     .poll(() => original.evaluate((element) => (element as HTMLImageElement).naturalWidth))
     .toBeGreaterThan(0)
   expect((await originalResponse).headers()['content-type']).toContain('image/png')
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('region', { name: 'Blob evidence' })).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

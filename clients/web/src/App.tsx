@@ -91,10 +91,12 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
       focusTimeline: () => {
         const active = document.activeElement
         if (active instanceof HTMLElement) active.blur()
-        document.querySelector<HTMLElement>('[aria-label="Session timeline"]')?.focus()
+        const target =
+          knownId === 'blobs' ? '[data-command-focus-target]' : '[aria-label="Session timeline"]'
+        document.querySelector<HTMLElement>(target)?.focus()
       },
     }),
-    [dispatch, timelineIds],
+    [dispatch, knownId, timelineIds],
   )
   useCommandHotkeys(commandContext)
 

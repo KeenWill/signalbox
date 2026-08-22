@@ -14,6 +14,14 @@ export const selectImageView = (descriptor: WebBlobDescriptor): WebBlobAvailable
     descriptor.available_views.find((view) => view.kind === kind),
   ).find((view) => view !== undefined)
 
+export const imageViewLabel = (kind: WebBlobViewKind): string =>
+  ({
+    browser_native: 'Original',
+    preview: 'Preview',
+    thumbnail: 'Thumbnail',
+    download: 'Download',
+  })[kind]
+
 const viewByKind = (
   descriptor: WebBlobDescriptor,
   kind: WebBlobViewKind,
@@ -36,7 +44,7 @@ function ArtifactRenderer({ descriptor }: { descriptor: WebBlobDescriptor }) {
         {rendered ? (
           <img
             src={rendered.content_url}
-            alt={`${rendered.kind === 'browser_native' ? 'Original' : 'Preview'} of ${displayName(descriptor)}`}
+            alt={`${imageViewLabel(rendered.kind)} of ${displayName(descriptor)}`}
             loading="lazy"
           />
         ) : (
@@ -89,7 +97,12 @@ function ArtifactRenderer({ descriptor }: { descriptor: WebBlobDescriptor }) {
 
 export function ArtifactWorkbench() {
   return (
-    <section className="artifact-panel" aria-labelledby="artifact-heading">
+    <section
+      className="artifact-panel"
+      aria-label="Blob evidence"
+      data-command-focus-target
+      tabIndex={-1}
+    >
       <header className="section-header">
         <div>
           <span className="eyebrow">Capability projection</span>

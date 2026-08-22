@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use image::{GenericImageView as _, ImageFormat, ImageReader, Limits};
+use image::{ImageFormat, ImageReader, Limits};
 use sha2::{Digest as _, Sha256};
 use signalbox_application::{
     BlobDerivationServiceOutcome, DeterministicBlobDerivationRequest,
@@ -505,7 +505,13 @@ fn worker_transform(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> 
     if arguments.next().is_some() {
         return Err(());
     }
-    let mut reader = ImageReader::open(input)
+    let reader = ImageReader::open(&input)
+        .map_err(|_| ())?
+        .with_guessed_format()
+        .map_err(|_| ())?;
+    let (width, height) = reader.into_dimensions().map_err(|_| ())?;
+    validate_encoded_dimensions(width, height)?;
+    let mut reader = ImageReader::open(&input)
         .map_err(|_| ())?
         .with_guessed_format()
         .map_err(|_| ())?;
@@ -515,15 +521,18 @@ fn worker_transform(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> 
     limits.max_alloc = Some(MAX_DECODER_ALLOCATION_BYTES);
     reader.limits(limits);
     let image = reader.decode().map_err(|_| ())?;
-    let (width, height) = image.dimensions();
-    let pixels = u64::from(width).checked_mul(u64::from(height)).ok_or(())?;
-    if pixels > MAX_IMAGE_PIXELS {
-        return Err(());
-    }
     image
         .thumbnail(edge, edge)
         .save_with_format(output, ImageFormat::Png)
         .map_err(|_| ())
+}
+
+fn validate_encoded_dimensions(width: u32, height: u32) -> Result<(), ()> {
+    let pixels = u64::from(width).checked_mul(u64::from(height)).ok_or(())?;
+    if width > MAX_IMAGE_AXIS || height > MAX_IMAGE_AXIS || pixels > MAX_IMAGE_PIXELS {
+        return Err(());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -540,7 +549,7 @@ mod tests {
 
     use super::{
         CandidateCopyError, MAX_DERIVATIVE_BYTES, copy_input_candidate, expected_output,
-        worker_transform,
+        validate_encoded_dimensions, worker_transform,
     };
 
     struct FailingReader {
@@ -584,6 +593,13 @@ mod tests {
         let decoded = image::open(output).expect("worker output is a decodable PNG");
 
         assert_eq!(decoded.dimensions(), (256, 128));
+    }
+
+    #[test]
+    fn image_worker_rejects_oversized_encoded_pixel_count_before_decode() {
+        let result = validate_encoded_dimensions(8_193, 8_192);
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]
