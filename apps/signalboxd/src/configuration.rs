@@ -4427,12 +4427,12 @@ terminalization_acquire_wait = "250ms"
 terminalization_write_lock_wait = "1s"
 disposable_postgres_state_ceiling_bytes = 536870912
 diagnostic_model_identity_limit = 128
-code_host_request_timeout = "30s"
-max_job_log_bytes = 65536
-max_stack_comparisons_in_flight = 8
-max_code_host_result_text_bytes = 65536
-max_code_host_result_items = 100
-max_repository_file_content_bytes = 65536
+code_host_request_timeout = "none"
+max_job_log_bytes = "none"
+max_stack_comparisons_in_flight = "none"
+max_code_host_result_text_bytes = "none"
+max_code_host_result_items = "none"
+max_repository_file_content_bytes = "none"
 
 [[credential_profiles]]
 name = "anthropic-primary"

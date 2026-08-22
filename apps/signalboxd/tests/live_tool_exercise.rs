@@ -48,6 +48,7 @@ use signalbox_process_protocol::{
     encode_client_line,
 };
 use signalbox_tools_basic::SESSION_STATUS_UPDATE_NAME;
+use signalbox_tools_code_host::CodeHostNumericBounds;
 use signalbox_tools_conversations::{
     LIST_CONVERSATIONS_NAME, READ_CONVERSATION_NAME, READ_IMPORTED_CONVERSATION_NAME,
     READ_OWN_CONVERSATION_NAME,
@@ -232,6 +233,24 @@ async fn run_live_smoke() -> SmokeResult {
         .exec_supervisor_executable()
         .to_path_buf();
     let web_fetch_egress_policy = model_configuration.web_fetch_egress_policy();
+    let numeric_bounds = model_configuration.numeric_bounds();
+    let configured_usize = |field| {
+        numeric_bounds
+            .integer(field)
+            .flatten()
+            .map(usize::try_from)
+            .transpose()
+    };
+    let code_host_numeric_bounds = CodeHostNumericBounds::new(
+        numeric_bounds
+            .duration("code_host_request_timeout")
+            .flatten(),
+        configured_usize("max_job_log_bytes")?,
+        configured_usize("max_stack_comparisons_in_flight")?,
+        configured_usize("max_code_host_result_text_bytes")?,
+        configured_usize("max_code_host_result_items")?,
+        configured_usize("max_repository_file_content_bytes")?,
+    );
 
     let listener = LocalProcessListener::bind(&socket)?;
     let (eligibility_nudge, _work_source) =
@@ -268,7 +287,7 @@ async fn run_live_smoke() -> SmokeResult {
             code_host: credentials.clone(),
             github: credentials,
         },
-        GitHubCodeHostTransport::try_new()?,
+        GitHubCodeHostTransport::try_new(code_host_numeric_bounds)?,
         github_egress_policy,
         &configured_workspace,
         git_identity,
