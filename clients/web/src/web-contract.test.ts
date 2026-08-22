@@ -95,10 +95,10 @@ describe('generated timeline detail decoder', () => {
             ],
             goal_events: [],
           },
-          projected_body_bytes: 128,
+          projected_body_bytes: 148,
         },
       ],
-      projected_body_bytes: 128,
+      projected_body_bytes: 148,
     }
 
     expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)

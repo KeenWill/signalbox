@@ -7,9 +7,36 @@ import {
   MAX_TIMELINE_HTTP_RESPONSE_BYTES,
   SESSION_FOUNDATION_TOTAL,
   type SessionTimelineSource,
+  TIMELINE_DETAIL_BODY_ENVELOPE_BYTES,
 } from './model'
 
 const sessionId = '00000000-0000-0000-0000-000000000991'
+const timelineBootstrap = {
+  contract: { name: 'signalbox.web-http', version: '1' },
+  capabilities: {
+    bounded_json: true,
+    same_origin_json_mutations: true,
+    ndjson_streaming: true,
+    bounded_session_timeline: true,
+    bounded_session_timeline_detail: true,
+  },
+  limits: {
+    max_json_body_bytes: 1024,
+    max_ndjson_item_bytes: 1024,
+    max_timeline_window_items: 256,
+    max_timeline_window_bytes: 64 * 1024,
+    max_timeline_detail_items: 128,
+    max_timeline_detail_bytes: 64 * 1024,
+  },
+}
+
+const detailSource = async (detail: unknown): Promise<HttpSessionTimelineSource> => {
+  const request = vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(new Response(JSON.stringify(timelineBootstrap)))
+    .mockResolvedValueOnce(new Response(JSON.stringify(detail)))
+  return HttpSessionTimelineSource.connect(request)
+}
 
 describe('BoundedSessionHistory', () => {
   it('navigates an enormous session without retaining lifetime history', async () => {
@@ -164,6 +191,8 @@ describe('BoundedSessionHistory', () => {
       limits: {
         max_timeline_window_items: 1_000_000,
         max_timeline_window_bytes: 1_000_000_000,
+        max_timeline_detail_items: 128,
+        max_timeline_detail_bytes: 64 * 1024,
       },
       readDescriptor: scenario.readDescriptor.bind(scenario),
       readWindow: async (requestedSessionId, anchor, limits) => {
@@ -190,6 +219,8 @@ describe('BoundedSessionHistory', () => {
       limits: {
         max_timeline_window_items: Number.NaN,
         max_timeline_window_bytes: Number.POSITIVE_INFINITY,
+        max_timeline_detail_items: 128,
+        max_timeline_detail_bytes: 64 * 1024,
       },
       readDescriptor: scenario.readDescriptor.bind(scenario),
       readWindow: async (requestedSessionId, anchor, limits) => {
@@ -391,6 +422,62 @@ describe('BoundedSessionHistory', () => {
 
     await expect(HttpSessionTimelineSource.connect(request)).rejects.toThrow(
       'timeline limits are invalid',
+    )
+  })
+
+  it('rejects an advertised detail item ceiling below one', async () => {
+    const invalidDetailRequest = async () =>
+      new Response(
+        JSON.stringify({
+          contract: { name: 'signalbox.web-http', version: '1' },
+          capabilities: {
+            bounded_json: true,
+            same_origin_json_mutations: true,
+            ndjson_streaming: true,
+            bounded_session_timeline: true,
+            bounded_session_timeline_detail: true,
+          },
+          limits: {
+            max_json_body_bytes: 1024,
+            max_ndjson_item_bytes: 1024,
+            max_timeline_window_items: 256,
+            max_timeline_window_bytes: 64 * 1024,
+            max_timeline_detail_items: 0,
+            max_timeline_detail_bytes: 64 * 1024,
+          },
+        }),
+      )
+
+    await expect(HttpSessionTimelineSource.connect(invalidDetailRequest)).rejects.toThrow(
+      'timeline detail limits are invalid',
+    )
+  })
+
+  it('rejects an advertised detail byte ceiling below 256', async () => {
+    const invalidDetailRequest = async () =>
+      new Response(
+        JSON.stringify({
+          contract: { name: 'signalbox.web-http', version: '1' },
+          capabilities: {
+            bounded_json: true,
+            same_origin_json_mutations: true,
+            ndjson_streaming: true,
+            bounded_session_timeline: true,
+            bounded_session_timeline_detail: true,
+          },
+          limits: {
+            max_json_body_bytes: 1024,
+            max_ndjson_item_bytes: 1024,
+            max_timeline_window_items: 256,
+            max_timeline_window_bytes: 64 * 1024,
+            max_timeline_detail_items: 128,
+            max_timeline_detail_bytes: 255,
+          },
+        }),
+      )
+
+    await expect(HttpSessionTimelineSource.connect(invalidDetailRequest)).rejects.toThrow(
+      'timeline detail limits are invalid',
     )
   })
 
@@ -637,6 +724,56 @@ describe('BoundedSessionHistory', () => {
     ).rejects.toThrow('cannot continue after')
   })
 
+  it('rejects first and latest windows that contradict the descriptor snapshot', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const firstSource: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => descriptor,
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '2' },
+            kind: 'turn_activated',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 78,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    }
+    const firstHistory = new BoundedSessionHistory(sessionId, firstSource)
+    await firstHistory.describe()
+    await expect(
+      firstHistory.load({ kind: 'first' }, { maxItems: 1, maxBytes: 256 }),
+    ).rejects.toThrow('descriptor boundary')
+
+    const latestSource: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => descriptor,
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '999999' },
+            kind: 'turn_completed',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 78,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    }
+    const latestHistory = new BoundedSessionHistory(sessionId, latestSource)
+    await latestHistory.describe()
+    await expect(
+      latestHistory.load({ kind: 'latest' }, { maxItems: 1, maxBytes: 256 }),
+    ).rejects.toThrow('regressed behind the descriptor boundary')
+  })
+
   it('rejects a window on the wrong side of a strict anchor', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const source: SessionTimelineSource = {
@@ -758,5 +895,665 @@ describe('BoundedSessionHistory', () => {
         error: { kind: 'application', code: 'projection_failed', message: 'projection failed' },
       },
     })
+  })
+
+  it('reads typed item detail and carries an explicit body continuation', async () => {
+    const detailAddress = '41'
+    const detailLimits = { maxItems: 1, maxBytes: 1024 }
+    const bodyContinuation = {
+      type: 'more_body',
+      body: {
+        address: { event_sequence: detailAddress },
+        field: 'input_text',
+        member_index: 0,
+        offset_bytes: '5',
+      },
+    } as const
+    const firstPageFixture = {
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: detailAddress },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: {
+              text: 'hello',
+              offset_bytes: '0',
+              total_bytes: '11',
+              continuation: bodyContinuation.body,
+            },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+      continuation: bodyContinuation,
+    } as const
+    const secondPageFixture = {
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: detailAddress },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: firstPageFixture.items[0].body.turn_id,
+            text: {
+              text: ' world',
+              offset_bytes: bodyContinuation.body.offset_bytes,
+              total_bytes: firstPageFixture.items[0].body.text.total_bytes,
+              continuation: null,
+            },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 6,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 6,
+      continuation: null,
+    } as const
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            contract: { name: 'signalbox.web-http', version: '1' },
+            capabilities: {
+              bounded_json: true,
+              same_origin_json_mutations: true,
+              ndjson_streaming: true,
+              bounded_session_timeline: true,
+              bounded_session_timeline_detail: true,
+            },
+            limits: {
+              max_json_body_bytes: 1024,
+              max_ndjson_item_bytes: 1024,
+              max_timeline_window_items: 256,
+              max_timeline_window_bytes: 64 * 1024,
+              max_timeline_detail_items: 128,
+              max_timeline_detail_bytes: 64 * 1024,
+            },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(firstPageFixture)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(secondPageFixture)))
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    const first = await source.readItemDetail(sessionId, detailAddress, detailLimits)
+    const second = await source.readItemDetail(
+      sessionId,
+      detailAddress,
+      detailLimits,
+      first.continuation ?? undefined,
+    )
+    const firstUrl = new URL(String(request.mock.calls[1]?.[0]), 'http://signalbox.test')
+    const secondUrl = new URL(String(request.mock.calls[2]?.[0]), 'http://signalbox.test')
+
+    expect(first).toEqual(firstPageFixture)
+    expect(second).toEqual(secondPageFixture)
+    expect(firstUrl.pathname).toBe(`/api/sessions/${sessionId}/timeline/${detailAddress}/detail`)
+    expect(firstUrl.searchParams.get('max_items')).toBe(String(detailLimits.maxItems))
+    expect(firstUrl.searchParams.get('max_bytes')).toBe(String(detailLimits.maxBytes))
+    expect(secondUrl.searchParams.get('cursor_address')).toBe(
+      bodyContinuation.body.address.event_sequence,
+    )
+    expect(secondUrl.searchParams.get('cursor_field')).toBe(bodyContinuation.body.field)
+    expect(secondUrl.searchParams.get('cursor_member')).toBe(
+      String(bodyContinuation.body.member_index),
+    )
+    expect(secondUrl.searchParams.get('cursor_offset')).toBe(bodyContinuation.body.offset_bytes)
+  })
+
+  it('rejects detail continuations that change the stable address', async () => {
+    const bootstrap = {
+      contract: { name: 'signalbox.web-http', version: '1' },
+      capabilities: {
+        bounded_json: true,
+        same_origin_json_mutations: true,
+        ndjson_streaming: true,
+        bounded_session_timeline: true,
+        bounded_session_timeline_detail: true,
+      },
+      limits: {
+        max_json_body_bytes: 1024,
+        max_ndjson_item_bytes: 1024,
+        max_timeline_window_items: 256,
+        max_timeline_window_bytes: 64 * 1024,
+        max_timeline_detail_items: 128,
+        max_timeline_detail_bytes: 64 * 1024,
+      },
+    }
+    const detail = {
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: { text: 'hello', offset_bytes: '0', total_bytes: '5', continuation: null },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+      continuation: {
+        type: 'more_body',
+        body: {
+          address: { event_sequence: '42' },
+          field: 'input_text',
+          member_index: 0,
+          offset_bytes: '5',
+        },
+      },
+    }
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify(bootstrap)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(detail)))
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('changed the stable address')
+  })
+
+  it('rejects item-detail more-at continuations', async () => {
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: { text: 'hello', offset_bytes: '0', total_bytes: '5', continuation: null },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+      continuation: { type: 'more_at', address: { event_sequence: '42' } },
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('cannot continue at another timeline item')
+  })
+
+  it('rejects an out-of-range model-call request context count', async () => {
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'model_call_transition',
+          body: {
+            type: 'model_call',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            model_call_id: '00000000-0000-0000-0000-000000000042',
+            state: { type: 'prepared' },
+            model_identity_id: 'anthropic:claude-sonnet',
+            request_context_items: '18446744073709551616',
+            usage: {},
+            cause_code: null,
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES,
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow()
+  })
+
+  it('rejects an incomplete excerpt without a continuation', async () => {
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: { text: 'hello', offset_bytes: '0', total_bytes: '11', continuation: null },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+      continuation: null,
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('complete when no continuation is present')
+  })
+
+  it('computes continuation offsets from exact UTF-8 bytes', async () => {
+    const continuation = {
+      address: { event_sequence: '41' },
+      field: 'input_text',
+      member_index: 0,
+      offset_bytes: '1',
+    }
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: { text: 'é', offset_bytes: '0', total_bytes: '4', continuation },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 2,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 2,
+      continuation: { type: 'more_body', body: continuation },
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('the byte immediately after the excerpt')
+  })
+
+  it('rejects a continuation field that is impossible for its body variant', async () => {
+    const excerptContinuation = {
+      address: { event_sequence: '41' },
+      field: 'input_text',
+      member_index: 0,
+      offset_bytes: '5',
+    }
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: {
+              text: 'hello',
+              offset_bytes: '0',
+              total_bytes: '11',
+              continuation: excerptContinuation,
+            },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+      continuation: {
+        type: 'more_body',
+        body: { ...excerptContinuation, field: 'model_response' },
+      },
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('the excerpt body continuation')
+  })
+
+  it('accepts a canonical tool continuation from arguments to result', async () => {
+    const continuation = {
+      address: { event_sequence: '41' },
+      field: 'tool_result',
+      member_index: 0,
+      offset_bytes: '0',
+    } as const
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000141',
+            state: 'proposed',
+            tools: [
+              {
+                request_id: '00000000-0000-0000-0000-000000000241',
+                tool_name: 'workspace_read',
+                approval_posture: 'auto',
+                approval_judge_escalated: false,
+                operator_required: false,
+                arguments: {
+                  text: '{}',
+                  offset_bytes: '0',
+                  total_bytes: '2',
+                  continuation: null,
+                },
+                attempt_id: null,
+                state: null,
+                effect_posture: null,
+                sandbox_posture: null,
+                result: null,
+                failure: null,
+                cause_code: null,
+              },
+            ],
+            goal_events: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 2,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 2,
+      continuation: { type: 'more_body', body: continuation },
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).resolves.toMatchObject({ continuation: { type: 'more_body', body: continuation } })
+  })
+
+  it('accepts a canonical continuation to the next goal member', async () => {
+    const cursor = {
+      type: 'more_body',
+      body: {
+        address: { event_sequence: '41' },
+        field: 'goal_text',
+        member_index: 0,
+        offset_bytes: '0',
+      },
+    } as const
+    const continuation = {
+      address: { event_sequence: '41' },
+      field: 'goal_text',
+      member_index: 1,
+      offset_bytes: '0',
+    } as const
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000141',
+            state: 'results_projected',
+            tools: [],
+            goal_events: [
+              {
+                generation: '1',
+                event_kind: 'achieved',
+                text: {
+                  text: 'done',
+                  offset_bytes: '0',
+                  total_bytes: '4',
+                  continuation: null,
+                },
+              },
+            ],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 4,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 4,
+      continuation: { type: 'more_body', body: continuation },
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }, cursor),
+    ).resolves.toMatchObject({ continuation: { type: 'more_body', body: continuation } })
+  })
+
+  it('rejects advancing fields before the current tool excerpt completes', async () => {
+    const excerptContinuation = {
+      address: { event_sequence: '41' },
+      field: 'tool_arguments',
+      member_index: 0,
+      offset_bytes: '2',
+    } as const
+    const pageContinuation = {
+      address: { event_sequence: '41' },
+      field: 'tool_result',
+      member_index: 0,
+      offset_bytes: '0',
+    } as const
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000141',
+            state: 'proposed',
+            tools: [
+              {
+                request_id: '00000000-0000-0000-0000-000000000241',
+                tool_name: 'workspace_read',
+                approval_posture: 'auto',
+                approval_judge_escalated: false,
+                operator_required: false,
+                arguments: {
+                  text: '{}',
+                  offset_bytes: '0',
+                  total_bytes: '4',
+                  continuation: excerptContinuation,
+                },
+                attempt_id: null,
+                state: null,
+                effect_posture: null,
+                sandbox_posture: null,
+                result: null,
+                failure: null,
+                cause_code: null,
+              },
+            ],
+            goal_events: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 2,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 2,
+      continuation: { type: 'more_body', body: pageContinuation },
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('the excerpt body continuation')
+  })
+
+  it('rejects a same-field continuation whose excerpt restarts before the request cursor', async () => {
+    const cursor = {
+      type: 'more_body',
+      body: {
+        address: { event_sequence: '41' },
+        field: 'input_text',
+        member_index: 0,
+        offset_bytes: '10',
+      },
+    } as const
+    const continuation = { ...cursor.body, offset_bytes: '5' }
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: { text: 'hello', offset_bytes: '0', total_bytes: '11', continuation },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+      continuation: { type: 'more_body', body: continuation },
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }, cursor),
+    ).rejects.toThrow('regressed from its request cursor')
+  })
+
+  it('rejects an incomplete excerpt without a matching page continuation', async () => {
+    const continuation = {
+      address: { event_sequence: '41' },
+      field: 'input_text',
+      member_index: 0,
+      offset_bytes: '5',
+    }
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: { text: 'hello', offset_bytes: '0', total_bytes: '11', continuation },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+      continuation: null,
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('the excerpt body continuation')
+  })
+
+  it('rejects a body-page continuation when no excerpt continues', async () => {
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: { text: 'hello', offset_bytes: '0', total_bytes: '5', continuation: null },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+      continuation: {
+        type: 'more_body',
+        body: {
+          address: { event_sequence: '41' },
+          field: 'input_text',
+          member_index: 0,
+          offset_bytes: '5',
+        },
+      },
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('disagrees with its excerpt')
+  })
+
+  it('rejects a detail item below the fixed body envelope charge', async () => {
+    const bootstrap = {
+      contract: { name: 'signalbox.web-http', version: '1' },
+      capabilities: {
+        bounded_json: true,
+        same_origin_json_mutations: true,
+        ndjson_streaming: true,
+        bounded_session_timeline: true,
+        bounded_session_timeline_detail: true,
+      },
+      limits: {
+        max_json_body_bytes: 1024,
+        max_ndjson_item_bytes: 1024,
+        max_timeline_window_items: 256,
+        max_timeline_window_bytes: 64 * 1024,
+        max_timeline_detail_items: 128,
+        max_timeline_detail_bytes: 64 * 1024,
+      },
+    }
+    const detail = {
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'turn_completed',
+          body: {
+            type: 'turn_lifecycle',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            lifecycle: 'terminalized',
+            cause_code: 'completed',
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES - 1,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES - 1,
+      continuation: null,
+    }
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify(bootstrap)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(detail)))
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('the computed 128 bytes')
+  })
+
+  it('fails closed when item detail capability is unavailable', async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          contract: { name: 'signalbox.web-http', version: '1' },
+          capabilities: {
+            bounded_json: true,
+            same_origin_json_mutations: true,
+            ndjson_streaming: true,
+            bounded_session_timeline: true,
+            bounded_session_timeline_detail: false,
+          },
+          limits: {
+            max_json_body_bytes: 1024,
+            max_ndjson_item_bytes: 1024,
+            max_timeline_window_items: 256,
+            max_timeline_window_bytes: 64 * 1024,
+            max_timeline_detail_items: 128,
+            max_timeline_detail_bytes: 64 * 1024,
+          },
+        }),
+      ),
+    )
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('detail capability is unavailable')
+    expect(request).toHaveBeenCalledTimes(1)
   })
 })

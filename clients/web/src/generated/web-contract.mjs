@@ -2039,7 +2039,7 @@ function sameBodyContinuation(left, right) {
   );
 }
 
-function assertTimelineExcerpt(excerpt, address, field, path) {
+function assertTimelineExcerpt(excerpt, address, field, memberIndex, path) {
   const offset = BigInt(excerpt.offset_bytes);
   const total = BigInt(excerpt.total_bytes);
   const end = offset + BigInt(new TextEncoder().encode(excerpt.text).byteLength);
@@ -2056,8 +2056,12 @@ function assertTimelineExcerpt(excerpt, address, field, path) {
   if (end >= total) {
     fail(`${path}.continuation`, "present only before the declared body end");
   }
-  if (!sameTimelineAddress(continuation.address, address) || continuation.field !== field) {
-    fail(`${path}.continuation`, "the same body field at the same address");
+  if (
+    !sameTimelineAddress(continuation.address, address) ||
+    continuation.field !== field ||
+    continuation.member_index !== memberIndex
+  ) {
+    fail(`${path}.continuation`, "the same body member at the same address");
   }
   if (BigInt(continuation.offset_bytes) !== end) {
     fail(`${path}.continuation.offset_bytes`, "the byte immediately after the excerpt");
@@ -2091,33 +2095,60 @@ function assertTimelineDetailPage(value) {
       fail(`${path}.address`, "strictly increasing after the previous item");
     }
     previousAddress = address;
-    let continuation = null;
-    let textBytes = 0;
+    const excerpts = [];
     switch (item.body.type) {
       case "user_input":
         if (item.kind !== "input_accepted") {
           fail(`${path}.kind`, "input_accepted for a user_input body");
         }
-        continuation = assertTimelineExcerpt(
-          item.body.text,
-          item.address,
-          "input_text",
-          `${path}.body.text`,
-        );
-        textBytes = new TextEncoder().encode(item.body.text.text).byteLength;
+        excerpts.push([item.body.text, "input_text", 0, `${path}.body.text`]);
         break;
       case "model_call":
         if (item.kind !== "model_call_transition") {
           fail(`${path}.kind`, "model_call_transition for a model_call body");
         }
         if (item.body.response !== undefined && item.body.response !== null) {
-          continuation = assertTimelineExcerpt(
-            item.body.response,
-            item.address,
-            "model_response",
-            `${path}.body.response`,
-          );
-          textBytes = new TextEncoder().encode(item.body.response.text).byteLength;
+          excerpts.push([item.body.response, "model_response", 0, `${path}.body.response`]);
+        }
+        break;
+      case "tool_batch":
+        item.body.tools.forEach((tool, memberIndex) => {
+          if (tool.arguments !== undefined && tool.arguments !== null) {
+            excerpts.push([tool.arguments, "tool_arguments", memberIndex, `${path}.body.tools[${memberIndex}].arguments`]);
+          }
+          if (tool.result !== undefined && tool.result !== null) {
+            excerpts.push([tool.result, "tool_result", memberIndex, `${path}.body.tools[${memberIndex}].result`]);
+          }
+          if (tool.failure !== undefined && tool.failure !== null) {
+            excerpts.push([tool.failure, "tool_failure", memberIndex, `${path}.body.tools[${memberIndex}].failure`]);
+          }
+        });
+        item.body.goal_events.forEach((event, memberIndex) => {
+          if (event.text !== undefined && event.text !== null) {
+            excerpts.push([event.text, "goal_text", memberIndex, `${path}.body.goal_events[${memberIndex}].text`]);
+          }
+        });
+        break;
+      case "tool_approval_decision":
+        if (item.body.rationale !== undefined && item.body.rationale !== null) {
+          excerpts.push([item.body.rationale, "approval_rationale", 0, `${path}.body.rationale`]);
+        }
+        break;
+      case "goal_event":
+        if (item.body.event.text !== undefined && item.body.event.text !== null) {
+          excerpts.push([item.body.event.text, "goal_text", 0, `${path}.body.event.text`]);
+        }
+        break;
+      case "context_compaction":
+        excerpts.push([item.body.summary, "compaction_summary", 0, `${path}.body.summary`]);
+        break;
+      case "delegation":
+        if (
+          (item.body.detail.type === "child_result" || item.body.detail.type === "session_message") &&
+          item.body.detail.content !== undefined &&
+          item.body.detail.content !== null
+        ) {
+          excerpts.push([item.body.detail.content, "delegation_content", 0, `${path}.body.detail.content`]);
         }
         break;
       case "turn_lifecycle":
@@ -2134,6 +2165,23 @@ function assertTimelineDetailPage(value) {
         }
         break;
     }
+    let textBytes = 0;
+    excerpts.forEach(([excerpt, field, memberIndex, excerptPath]) => {
+      const continuation = assertTimelineExcerpt(
+        excerpt,
+        item.address,
+        field,
+        memberIndex,
+        excerptPath,
+      );
+      textBytes += new TextEncoder().encode(excerpt.text).byteLength;
+      if (continuation !== null) {
+        if (expectedBodyContinuation !== null) {
+          fail(path, "at most one continued body per page");
+        }
+        expectedBodyContinuation = continuation;
+      }
+    });
     const computedItemBytes = detailEnvelopeBytes + textBytes;
     if (item.projected_body_bytes !== computedItemBytes) {
       fail(`${path}.projected_body_bytes`, `the computed ${computedItemBytes} bytes`);
@@ -2141,12 +2189,6 @@ function assertTimelineDetailPage(value) {
     computedProjectedBodyBytes += computedItemBytes;
     if (computedProjectedBodyBytes > maxProjectedBodyBytes) {
       fail("timeline_detail_page.projected_body_bytes", `at most ${maxProjectedBodyBytes} bytes`);
-    }
-    if (continuation !== null) {
-      if (expectedBodyContinuation !== null) {
-        fail(path, "at most one continued body per page");
-      }
-      expectedBodyContinuation = continuation;
     }
   });
   if (value.projected_body_bytes !== computedProjectedBodyBytes) {
@@ -2164,7 +2206,7 @@ function assertTimelineDetailPage(value) {
   }
   if (value.continuation.type === "more_body") {
     if (
-      expectedBodyContinuation === null ||
+      expectedBodyContinuation !== null &&
       !sameBodyContinuation(value.continuation.body, expectedBodyContinuation)
     ) {
       fail("timeline_detail_page.continuation.body", "the excerpt body continuation");

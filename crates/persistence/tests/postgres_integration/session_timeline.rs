@@ -205,6 +205,27 @@ async fn tool_detail_selects_one_lease_generation_for_sandbox_posture() -> Resul
         .authorize_attempt(fixture.session, fixture.turn, attempt)
         .await?;
 
+    let runner = Uuid::from_u128(seed + 0xe3);
+    sqlx::query("ALTER TABLE runner_session_placement_record DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id, directory_selection_kind,
+             workspace_requirement_kind, requested_sandbox_profile,
+             permission_override_count, state_kind, pinned_tool_count)
+         VALUES ($1, 1, 1, 'created', 'identity', $2, 'runner_default',
+                 'none', 'workspace_restricted', 0, 'unpinned', 0)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(runner)
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_session_placement_record ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
     let lease = Uuid::from_u128(seed + 0xe2);
     let runner = Uuid::from_u128(seed + 0xe3);
     sqlx::query("ALTER TABLE runner_session_placement_record DISABLE TRIGGER ALL")
