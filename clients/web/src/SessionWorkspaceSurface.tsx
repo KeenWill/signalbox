@@ -265,7 +265,9 @@ export function SessionWorkspaceSurface({
                 <li key={id} className={selected === id ? 'selected' : undefined}>
                   <button
                     type="button"
-                    className={`session-item-summary${detailAvailable ? '' : ' no-detail'}`}
+                    className={
+                      detailAvailable ? 'session-item-summary' : 'no-detail session-item-summary'
+                    }
                     data-timeline-id={id}
                     aria-expanded={detailAvailable ? isExpanded : undefined}
                     onClick={() => {

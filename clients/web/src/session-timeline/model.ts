@@ -510,11 +510,7 @@ export class BoundedSessionHistory {
     const observedThrough = decimalU64(descriptor.observed_through)
     const itemCount = decimalU64(descriptor.sizes.item_count)
     const addressSpan = latestAddress - firstAddress + 1n
-    if (
-      itemCount === 0n ||
-      firstAddress > latestAddress ||
-      latestAddress > observedThrough
-    ) {
+    if (itemCount === 0n || firstAddress > latestAddress || latestAddress > observedThrough) {
       throw new TypeError('descriptor timeline boundaries are contradictory')
     }
     if ((itemCount === 1n) !== (firstAddress === latestAddress) || itemCount > addressSpan) {
@@ -602,7 +598,11 @@ export class BoundedSessionHistory {
     if (projectedStructuredBytes > maxBytes) {
       throw new TypeError('timeline window exceeds the requested byte ceiling')
     }
-    if (anchorKind === 'around' && 'eventSequence' in anchor && !incoming.has(anchor.eventSequence)) {
+    if (
+      anchorKind === 'around' &&
+      'eventSequence' in anchor &&
+      !incoming.has(anchor.eventSequence)
+    ) {
       throw new TypeError('around timeline window does not contain its requested anchor')
     }
     const firstItemAddress = window.items[0]?.address.event_sequence
