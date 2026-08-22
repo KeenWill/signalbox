@@ -88,6 +88,23 @@ describe('BoundedSessionHistory', () => {
     )
   })
 
+  it('rejects a zero-item descriptor with durable bounds', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        sizes: { ...descriptor.sizes, item_count: '0' },
+      }),
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+
+    await expect(new BoundedSessionHistory(sessionId, source).describe()).rejects.toThrow(
+      'item count contradicts its durable bounds',
+    )
+  })
+
   it('compares canonical UUID identities', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const descriptor = await scenario.readDescriptor(sessionId)
@@ -283,6 +300,38 @@ describe('BoundedSessionHistory', () => {
     await expect(history.load({ kind: 'latest' }, { maxItems: 4, maxBytes: 1024 })).rejects.toThrow(
       'impossibly empty',
     )
+  })
+
+  it('passes the owning query signal to the bootstrap request', async () => {
+    const controller = new AbortController()
+    let receivedSignal: AbortSignal | null | undefined
+    const request: typeof fetch = async (_input, init) => {
+      receivedSignal = init?.signal
+      return new Response(
+        JSON.stringify({
+          contract: { name: 'signalbox.web-http', version: '2' },
+          capabilities: {
+            bounded_json: true,
+            same_origin_json_mutations: true,
+            ndjson_streaming: true,
+            immutable_blob_content: false,
+            blob_derivations: false,
+            image_derivatives: false,
+            bounded_session_timeline: true,
+          },
+          limits: {
+            max_json_body_bytes: 1024,
+            max_ndjson_item_bytes: 1024,
+            max_timeline_window_items: 80,
+            max_timeline_window_bytes: 65536,
+          },
+        }),
+      )
+    }
+
+    await HttpSessionTimelineSource.connect(request, controller.signal)
+
+    expect(receivedSignal).toBe(controller.signal)
   })
 
   it('rejects oversized timeline bodies before JSON materialization', async () => {

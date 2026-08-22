@@ -15,7 +15,7 @@ import {
   Minimize2,
   ShieldAlert,
 } from 'lucide-react'
-import { type ComponentType, type ReactNode, useState } from 'react'
+import { type ComponentType, type KeyboardEvent, type ReactNode, useState } from 'react'
 import { type CommandContext, invokeCommand } from '../../commands'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import { actions, selectApp, useAppDispatch, useAppSelector } from '../../state'
@@ -103,6 +103,13 @@ const invokeArtifactAction = (
   invokeCommand(commandId, commandContext)
 }
 
+const scrollArtifactPreviewByPage = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+  if (event.key !== 'PageDown' && event.key !== 'PageUp') return
+  event.preventDefault()
+  const direction = event.key === 'PageDown' ? 1 : -1
+  event.currentTarget.scrollBy({ top: direction * event.currentTarget.clientHeight })
+}
+
 function TextBody({ artifact, commandContext }: RendererProps<TextArtifact>) {
   const expanded = useAppSelector((state) => Boolean(state.app.expandedArtifacts[artifact.id]))
   const bounded = boundArtifactText(
@@ -118,6 +125,7 @@ function TextBody({ artifact, commandContext }: RendererProps<TextArtifact>) {
         className="artifact-scroll"
         aria-label={`Bounded preview of ${artifact.displayName}`}
         onFocusCapture={() => selectArtifact(commandContext, artifact.id)}
+        onKeyDown={scrollArtifactPreviewByPage}
         readOnly
         value={bounded.content}
       />
@@ -156,6 +164,7 @@ function CodeBody({ artifact, commandContext }: RendererProps<CodeArtifact>) {
         className="artifact-scroll"
         aria-label={`Bounded preview of ${artifact.displayName}`}
         onFocusCapture={() => selectArtifact(commandContext, artifact.id)}
+        onKeyDown={scrollArtifactPreviewByPage}
         readOnly
         value={bounded.content}
       />
@@ -393,12 +402,13 @@ function DocumentBody({ artifact }: RendererProps<DocumentArtifact>) {
 }
 
 function DerivativeBody({ artifact }: RendererProps<DerivativeArtifact>) {
+  const [loadFailed, setLoadFailed] = useState(false)
   const rendered = selectBlobView(artifact.source.descriptor, artifact.viewKind)
   const derivation = rendered
     ? selectViewDerivation(artifact.source.descriptor, rendered)
     : undefined
 
-  if (!rendered || !derivation) {
+  if (!rendered || !derivation || loadFailed) {
     return (
       <div className="artifact-state blocked" role="status">
         <ShieldAlert aria-hidden="true" />
@@ -417,6 +427,7 @@ function DerivativeBody({ artifact }: RendererProps<DerivativeArtifact>) {
           src={rendered.content_url}
           alt={`Derived ${artifact.viewKind} of ${artifact.displayName}`}
           loading="lazy"
+          onError={() => setLoadFailed(true)}
         />
       </div>
       <ArtifactMetadata

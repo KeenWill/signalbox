@@ -128,8 +128,11 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     private readonly request: typeof fetch,
   ) {}
 
-  static async connect(request: typeof fetch = fetch): Promise<HttpSessionTimelineSource> {
-    const response = await request('/api/bootstrap')
+  static async connect(
+    request: typeof fetch = fetch,
+    signal?: AbortSignal,
+  ): Promise<HttpSessionTimelineSource> {
+    const response = await request('/api/bootstrap', { signal })
     if (!response.ok) return throwApiError(response)
     const bootstrap = decodeWebContractBootstrap(
       await readBoundedJson(response, MAX_ERROR_RESPONSE_BYTES),
@@ -208,7 +211,9 @@ export class BoundedSessionHistory {
     if (firstAddress > latestAddress || latestAddress > observedThrough) {
       throw new TypeError('timeline descriptor carries contradictory bounds')
     }
-    decimalU64(descriptor.sizes.item_count)
+    if (decimalU64(descriptor.sizes.item_count) === 0n) {
+      throw new TypeError('timeline descriptor item count contradicts its durable bounds')
+    }
     decimalU64(descriptor.sizes.projected_text_bytes)
     decimalU64(descriptor.sizes.projected_structured_bytes)
     decimalU64(descriptor.sizes.referenced_blob_count)

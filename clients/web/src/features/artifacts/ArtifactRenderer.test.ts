@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import { boundAttachments, MAX_VISIBLE_ATTACHMENTS } from './ArtifactAttachments'
+import { boundAttachments } from './ArtifactAttachments'
 import {
   imageViewLabel,
   registeredArtifactKinds,
@@ -138,8 +138,8 @@ describe('artifact renderer compatibility', () => {
 
     const bounded = boundAttachments(source)
 
-    expect(bounded.visible).toHaveLength(MAX_VISIBLE_ATTACHMENTS)
-    expect(bounded.omitted).toBe(source.length - MAX_VISIBLE_ATTACHMENTS)
+    expect(bounded.visible).toHaveLength(12)
+    expect(bounded.omitted).toBe(4)
   })
 
   it('bounds the initial text projection by characters', () => {

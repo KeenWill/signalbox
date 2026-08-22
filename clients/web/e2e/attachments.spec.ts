@@ -83,6 +83,21 @@ test('selects an admitted derivative without loading original bytes', async ({ p
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('fails closed when an admitted derivative cannot load', async ({ page }) => {
+  await page.route(`**${previewPath}`, (route) => route.fulfill({ status: 404 }))
+  await page.goto('/scenario/attachments')
+
+  await page
+    .getByRole('region', { name: 'Transcript attachments' })
+    .getByRole('button', { name: /orbital-map\.preview\.png/ })
+    .click()
+
+  await expect(page.getByRole('status').getByText('Derivative unavailable')).toBeVisible()
+  await expect(
+    page.getByRole('img', { name: 'Derived preview of orbital-map.preview.png' }),
+  ).toHaveCount(0)
+})
+
 test('renders media placeholders and removes a composer attachment by keyboard', async ({
   page,
 }) => {
@@ -102,6 +117,7 @@ test('renders media placeholders and removes a composer attachment by keyboard',
   await page.keyboard.press('Enter')
   await expect(composer.getByText('architecture.pdf')).toHaveCount(0)
   await expect(transcript.getByText('architecture.pdf')).toBeVisible()
+  await expect(composer.locator('.attachment-select').first()).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

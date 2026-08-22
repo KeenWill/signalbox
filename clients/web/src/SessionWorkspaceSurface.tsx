@@ -32,6 +32,12 @@ export const visibleSessionItems = (
       )
     : items
 
+export const reconcileTimelineSelection = (
+  selected: string | null,
+  visibleIds: readonly string[],
+): string | null =>
+  selected !== null && !visibleIds.includes(selected) ? (visibleIds[0] ?? null) : selected
+
 export function SessionWorkspaceSurface({
   onFirstWindowAction,
   onLatestWindowAction,
@@ -54,7 +60,7 @@ export function SessionWorkspaceSurface({
   const session = useQuery({
     queryKey: ['production', 'session-workspace', sessionId, manualAnchor],
     queryFn: async ({ signal }) => {
-      const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window))
+      const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window), signal)
       const history = new BoundedSessionHistory(sessionId ?? '', source)
       const descriptor = await history.describe(signal)
       const active = BigInt(descriptor.work.active_turn_count) !== BigInt(0)
@@ -92,6 +98,11 @@ export function SessionWorkspaceSurface({
       return retained.size === current.size ? current : retained
     })
   }, [timelineIds])
+  useEffect(() => {
+    if (!session.data) return
+    const reconciled = reconcileTimelineSelection(selected, timelineIds)
+    if (reconciled !== selected) dispatch(actions.timelineSelected(reconciled))
+  }, [dispatch, selected, session.data, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   useEffect(() => onSessionId(sessionId), [onSessionId, sessionId])
   useEffect(() => () => onSessionId(null), [onSessionId])

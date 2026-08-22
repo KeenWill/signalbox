@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { decodeWebSessionTimelineWindow } from './generated/web-contract.mjs'
-import { isCanonicalSessionId, visibleSessionItems } from './SessionWorkspaceSurface'
+import {
+  isCanonicalSessionId,
+  reconcileTimelineSelection,
+  visibleSessionItems,
+} from './SessionWorkspaceSurface'
 
 const fixture = decodeWebSessionTimelineWindow({
   session_id: '00000000-0000-0000-0000-000000000991',
@@ -42,5 +46,11 @@ describe('Session Workspace projection', () => {
     const results = visibleSessionItems(fixture.items, 'results')
 
     expect(results).toEqual(fixture.items)
+  })
+
+  it('reconciles a hidden selection to the first visible timeline row', () => {
+    expect(reconcileTimelineSelection('42', ['41', '43'])).toBe('41')
+    expect(reconcileTimelineSelection('43', ['41', '43'])).toBe('43')
+    expect(reconcileTimelineSelection('42', [])).toBeNull()
   })
 })

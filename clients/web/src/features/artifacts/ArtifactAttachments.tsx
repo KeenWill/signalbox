@@ -38,7 +38,7 @@ function AttachmentList({
   const bounded = boundAttachments(items)
 
   return (
-    <section className="attachment-surface" aria-label={label}>
+    <section className="attachment-surface" aria-label={label} tabIndex={-1}>
       <header>
         <div>
           <Paperclip aria-hidden="true" />
@@ -69,7 +69,18 @@ function AttachmentList({
                   type="button"
                   className="attachment-remove"
                   aria-label={`Remove ${artifact.displayName}`}
-                  onClick={() => onRemove(artifact)}
+                  onClick={(event) => {
+                    const item = event.currentTarget.closest('li')
+                    const surface = event.currentTarget.closest<HTMLElement>('.attachment-surface')
+                    const focusTarget =
+                      item?.nextElementSibling?.querySelector<HTMLElement>('.attachment-select') ??
+                      item?.previousElementSibling?.querySelector<HTMLElement>(
+                        '.attachment-select',
+                      ) ??
+                      surface
+                    onRemove(artifact)
+                    requestAnimationFrame(() => focusTarget?.focus())
+                  }}
                 >
                   <X aria-hidden="true" />
                 </button>
