@@ -445,7 +445,9 @@ and are unique. They cannot name runner control or model-provider variables, any
 `HTTPS_PROXY`, `LANG`, `LC_ALL`, and `PATH` entries. Absolute paths are
 canonicalized without following a final credential symlink; duplicate, nested,
 writable/read-only-overlapping, or runner-root-overlapping allowlist paths fail
-closed. Configuration may narrow network entries but cannot add a hostname.
+closed. A read-only path also cannot be an ancestor of the reserved
+`/run/signalbox/restricted-environment` delivery file. Configuration may narrow
+network entries but cannot add a hostname.
 
 The shipped example contains exactly one credential entry:
 `credentials.github-runner`, whose `file` names a fine-grained repository-scoped
