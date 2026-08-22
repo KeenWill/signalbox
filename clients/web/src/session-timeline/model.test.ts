@@ -166,6 +166,8 @@ describe('BoundedSessionHistory', () => {
       limits: {
         max_timeline_window_items: 1_000_000,
         max_timeline_window_bytes: 1_000_000_000,
+        max_timeline_detail_items: 128,
+        max_timeline_detail_bytes: 64 * 1024,
       },
       readDescriptor: scenario.readDescriptor.bind(scenario),
       readWindow: async (requestedSessionId, anchor, limits) => {
@@ -192,6 +194,8 @@ describe('BoundedSessionHistory', () => {
       limits: {
         max_timeline_window_items: Number.NaN,
         max_timeline_window_bytes: Number.POSITIVE_INFINITY,
+        max_timeline_detail_items: 128,
+        max_timeline_detail_bytes: 64 * 1024,
       },
       readDescriptor: scenario.readDescriptor.bind(scenario),
       readWindow: async (requestedSessionId, anchor, limits) => {
