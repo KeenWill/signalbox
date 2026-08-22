@@ -21,6 +21,7 @@ const bootstrapFixture = {
 
 const sessionWorkspaceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
+  descriptorFirstAddress: '1',
   firstAddress: '41',
   latestAddress: '43',
   itemCount: '1000000',
@@ -167,7 +168,7 @@ const useDeterministicSession = async (page: Page) => {
           referenced_blob_count: '0',
           referenced_blob_bytes: '0',
         },
-        first_address: { event_sequence: sessionWorkspaceFixture.firstAddress },
+        first_address: { event_sequence: sessionWorkspaceFixture.descriptorFirstAddress },
         latest_address: { event_sequence: sessionWorkspaceFixture.latestAddress },
         work: { active_turn_count: '1', queued_turn_count: '2' },
         observed_through: sessionWorkspaceFixture.latestAddress,
