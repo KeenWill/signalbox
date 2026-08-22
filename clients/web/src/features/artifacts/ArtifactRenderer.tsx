@@ -66,9 +66,14 @@ function ArtifactRenderer({ descriptor }: { descriptor: WebBlobDescriptor }) {
           </div>
         </dl>
         <div className="artifact-actions">
-          {original && !originalRequested && (
-            <button type="button" onClick={() => setOriginalRequested(true)}>
-              <Maximize2 aria-hidden="true" /> Load original
+          {original && (
+            <button
+              type="button"
+              aria-pressed={originalRequested}
+              onClick={() => setOriginalRequested(true)}
+            >
+              <Maximize2 aria-hidden="true" />
+              {originalRequested ? 'Original loaded' : 'Load original'}
             </button>
           )}
           {download && (
