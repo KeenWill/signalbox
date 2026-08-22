@@ -6796,6 +6796,7 @@ where
         )
         .await;
     };
+    let input_includes_cache_tokens = route.adapter().reports_cache_inclusive_input();
     let credential_reference =
         match signalbox_persistence::session_credentials::current_session_credential_with_migration_fallback(
             &services.pool,
@@ -6853,6 +6854,7 @@ where
             defaults_version: defaults.version(),
             selection,
             target,
+            input_includes_cache_tokens,
             credential_reference: credential_reference.clone(),
             call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
             compaction: ContextCompactionId::from_uuid(uuid::Uuid::now_v7()),
@@ -7147,6 +7149,11 @@ pub(crate) async fn compact_automatically(
         .resolve(FrozenModelSelection::Direct(selection))
         .map_err(|_| AutomaticContextCompactionError::Configuration)?
         .target();
+    let input_includes_cache_tokens = model_configuration
+        .resolve_direct_model(selection)
+        .ok_or(AutomaticContextCompactionError::Configuration)?
+        .adapter()
+        .reports_cache_inclusive_input();
     let credential_reference = model_calls
         .resolve_session_credential_reference(session, target)
         .await
@@ -7161,6 +7168,7 @@ pub(crate) async fn compact_automatically(
             defaults_version: defaults.version(),
             selection,
             target,
+            input_includes_cache_tokens,
             credential_reference: credential_reference.as_str().to_owned(),
             call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
             compaction: ContextCompactionId::from_uuid(uuid::Uuid::now_v7()),

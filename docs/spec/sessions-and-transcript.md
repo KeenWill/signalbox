@@ -3,6 +3,9 @@
 The bounded browser session descriptor and historical timeline foundation are
 verified against this PR (`agent/web-session-timeline`).
 
+Dedicated-compaction usage as the next queued-turn headroom baseline is verified
+against this PR (`agent/daemon-live-compaction-source-headroom`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -825,12 +828,13 @@ the ordered subset the selected model sees.
 
 Explicit compaction chooses an optional through position, defaulting to the
 latest safe boundary. The daemon also compacts before activating queued work
-when the latest terminal call's durable provider-reported usage proves that the
-next configured output-token reservation cannot fit in the current selection's
-declared context window. Automatic compaction selects a bounded safe prefix so
-its own summary request does not repeat the complete oversized input. Both paths
-use the required deployment-configured compaction prompt and the session's
-current direct selection. Trigger and configuration mechanics are owned by
+when the newest durable provider-reported usage from either an ordinary call or
+the latest completed dedicated compaction call proves that the next configured
+output-token reservation cannot fit in the current selection's declared context
+window. Automatic compaction selects a bounded safe prefix so its own summary
+request does not repeat the complete oversized input. Both paths use the
+required deployment-configured compaction prompt and the session's current
+direct selection. Trigger and configuration mechanics are owned by
 [model-call-execution](model-call-execution.md).
 
 ### When entries come to exist

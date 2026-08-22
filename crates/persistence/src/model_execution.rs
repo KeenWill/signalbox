@@ -597,7 +597,8 @@ impl PostgresModelCallRepository {
         &self.pool
     }
 
-    /// Reads the newest terminal call with reported input usage for one exact target.
+    /// Reads the newest ordinary or dedicated-compaction call with reported input
+    /// usage for one exact target.
     ///
     /// A later failed call with no usage does not erase the last provider-confirmed
     /// context size. Callers may use this only as a lower bound: later transcript
@@ -609,39 +610,94 @@ impl PostgresModelCallRepository {
         prospective_frontier: ContextFrontierId,
     ) -> Result<Option<ReportedModelCallUsage>, ModelCallRepositoryError> {
         let row = sqlx::query(
-            "WITH latest_call AS (
-                SELECT model_call_id, context_frontier_id,
-                       usage_input_includes_cache_tokens,
-                       terminal_disposition_kind = 'completed' AS output_is_retained,
-                       usage_input_tokens, usage_output_tokens,
-                       usage_cache_creation_input_tokens,
-                       usage_cache_read_input_tokens
-                  FROM model_call
-                 WHERE session_id = $1
-                   AND resolved_provider_model_identity_id = $2
-                   AND state_kind = 'terminal'
-                   AND usage_input_tokens IS NOT NULL
+            "WITH latest_compaction AS MATERIALIZED (
+                SELECT compaction.context_compaction_id,
+                       compaction.source_frontier_id,
+                       compaction.summary_entry_id,
+                       compaction.through_source_session_id,
+                       compaction.through_entry_id,
+                       call.model_call_id,
+                       call.resolved_provider_model_identity_id,
+                       call.state_kind,
+                       call.terminal_disposition_kind,
+                       COALESCE(call.usage_input_includes_cache_tokens, false) AS
+                           usage_input_includes_cache_tokens,
+                       call.input_tokens AS usage_input_tokens,
+                       call.output_tokens AS usage_output_tokens,
+                       call.cache_creation_input_tokens AS
+                           usage_cache_creation_input_tokens,
+                       call.cache_read_input_tokens AS usage_cache_read_input_tokens
+                  FROM context_compaction AS compaction
+                 JOIN context_compaction_model_call AS call
+                    ON call.session_id = compaction.session_id
+                   AND call.model_call_id = compaction.producing_call_id
+                 WHERE compaction.session_id = $1
                    AND NOT EXISTS (
                        SELECT 1
-                         FROM context_compaction AS latest
-                        WHERE latest.session_id = model_call.session_id
-                          AND NOT EXISTS (
-                              SELECT 1
-                                FROM context_compaction AS successor
-                               WHERE successor.session_id = latest.session_id
-                                 AND successor.predecessor_compaction_id =
-                                     latest.context_compaction_id
-                          )
-                          AND NOT EXISTS (
-                              SELECT 1
-                                FROM context_frontier_member AS member
-                               WHERE member.owning_session_id = model_call.session_id
-                                 AND member.context_frontier_id =
-                                     model_call.context_frontier_id
-                                 AND member.source_session_id = latest.session_id
-                                 AND member.semantic_entry_id = latest.summary_entry_id
-                          )
+                         FROM context_compaction AS successor
+                        WHERE successor.session_id = compaction.session_id
+                          AND successor.predecessor_compaction_id =
+                              compaction.context_compaction_id
                    )
+             ), ordinary_candidate AS (
+                SELECT 'ordinary'::text AS call_kind,
+                       model_call.model_call_id,
+                       model_call.context_frontier_id,
+                       model_call.usage_input_includes_cache_tokens,
+                       model_call.terminal_disposition_kind = 'completed' AS output_is_retained,
+                       model_call.usage_input_tokens,
+                       model_call.usage_output_tokens,
+                       model_call.usage_cache_creation_input_tokens,
+                       model_call.usage_cache_read_input_tokens,
+                       NULL::numeric AS reported_through_position,
+                       NULL::uuid AS reported_summary_entry_id
+                  FROM model_call
+                 WHERE model_call.session_id = $1
+                   AND model_call.resolved_provider_model_identity_id = $2
+                   AND model_call.state_kind = 'terminal'
+                   AND model_call.usage_input_tokens IS NOT NULL
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM latest_compaction AS latest
+                        WHERE NOT EXISTS (
+                            SELECT 1
+                              FROM context_frontier_member AS member
+                             WHERE member.owning_session_id = model_call.session_id
+                               AND member.context_frontier_id =
+                                   model_call.context_frontier_id
+                               AND member.source_session_id = model_call.session_id
+                               AND member.semantic_entry_id = latest.summary_entry_id
+                        )
+                   )
+             ), compaction_candidate AS (
+                SELECT 'context_compaction'::text AS call_kind,
+                       latest.model_call_id,
+                       latest.source_frontier_id AS context_frontier_id,
+                       latest.usage_input_includes_cache_tokens,
+                       true AS output_is_retained,
+                       latest.usage_input_tokens,
+                       latest.usage_output_tokens,
+                       latest.usage_cache_creation_input_tokens,
+                       latest.usage_cache_read_input_tokens,
+                       member.member_position AS reported_through_position,
+                       latest.summary_entry_id AS reported_summary_entry_id
+                  FROM latest_compaction AS latest
+                  JOIN context_frontier_member AS member
+                    ON member.owning_session_id = $1
+                   AND member.context_frontier_id = latest.source_frontier_id
+                   AND member.source_session_id = latest.through_source_session_id
+                   AND member.semantic_entry_id = latest.through_entry_id
+                 WHERE latest.resolved_provider_model_identity_id = $2
+                   AND latest.state_kind = 'terminal'
+                   AND latest.terminal_disposition_kind = 'completed'
+                   AND latest.usage_input_tokens IS NOT NULL
+             ), latest_call AS (
+                SELECT *
+                  FROM (
+                      SELECT * FROM ordinary_candidate
+                      UNION ALL
+                      SELECT * FROM compaction_candidate
+                  ) AS candidate
                  ORDER BY model_call_id DESC
                  LIMIT 1
              ), prospective_member AS MATERIALIZED (
@@ -655,6 +711,10 @@ impl PostgresModelCallRepository {
                   JOIN context_frontier_member AS member
                     ON member.owning_session_id = $1
                    AND member.context_frontier_id = latest_call.context_frontier_id
+                   AND (
+                       latest_call.call_kind = 'ordinary'
+                       OR member.member_position <= latest_call.reported_through_position
+                   )
              ), unreported_member AS MATERIALIZED (
                 SELECT prospective.source_session_id,
                        prospective.semantic_entry_id
@@ -726,9 +786,24 @@ impl PostgresModelCallRepository {
                             ON child_result.spawning_tool_request_id =
                                entry.delegation_result_spawning_tool_request_id
                          WHERE NOT (
-                               entry.payload_kind IN ('assistant_text', 'assistant_tool_use')
-                               AND entry.producing_model_call_id = latest_call.model_call_id
-                               AND latest_call.usage_output_tokens IS NOT NULL
+                                   latest_call.usage_output_tokens IS NOT NULL
+                               AND (
+                                      (
+                                          latest_call.call_kind = 'ordinary'
+                                          AND entry.payload_kind IN (
+                                              'assistant_text',
+                                              'assistant_tool_use'
+                                          )
+                                          AND entry.producing_model_call_id =
+                                              latest_call.model_call_id
+                                      )
+                                      OR (
+                                          latest_call.call_kind = 'context_compaction'
+                                          AND entry.source_session_id = $1
+                                          AND entry.semantic_entry_id =
+                                              latest_call.reported_summary_entry_id
+                                      )
+                               )
                            )
                     ) AS projected_unreported_content_bytes
                FROM latest_call",
