@@ -1,7 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import { imageViewLabel, selectImageView } from './ArtifactRenderer'
-import { imageArtifact } from './artifactScenario'
+import { imageViewLabel, registeredArtifactKinds, selectImageView } from './ArtifactRenderer'
+import {
+  artifactOriginalIds,
+  artifactPreviewIds,
+  imageArtifact,
+  imageDownloadView,
+  imageOriginalView,
+  imagePreviewView,
+} from './artifactScenario'
+import {
+  ARTIFACT_EXPANDED_CHARACTERS,
+  ARTIFACT_PREVIEW_CHARACTERS,
+  boundArtifactText,
+} from './artifactTypes'
+import { admitRemoteMediaUrl } from './remoteMediaPreference'
 
 const download = imageArtifact.available_views[0]
 const browserNative = imageArtifact.available_views[1]
@@ -11,7 +24,20 @@ if (!download || !browserNative || !preview) {
 }
 
 describe('artifact renderer compatibility', () => {
+  it('derives preview command IDs only from artifacts with omitted preview content', () => {
+    expect(artifactPreviewIds).toEqual(['incident-notes', 'renderer-source'])
+  })
+
+  it('derives original-capable artifact IDs from admitted descriptor views', () => {
+    expect(artifactOriginalIds).toEqual(['orbital-map'])
+  })
+
+  it('registers the closed text, code, and image renderer set', () => {
+    expect(registeredArtifactKinds).toEqual(['blob', 'code', 'image', 'text'])
+  })
+
   it('selects the admitted view kind without interpreting its MIME string', () => {
+    expect(imagePreviewView.kind).toBe('preview')
     const descriptor: WebBlobDescriptor = {
       ...imageArtifact,
       available_views: [
@@ -43,7 +69,7 @@ describe('artifact renderer compatibility', () => {
           kind: 'download',
           media_type: 'image/png',
           byte_length: imageArtifact.byte_length,
-          content_url: imageArtifact.available_views[0]?.content_url ?? '',
+          content_url: imageDownloadView.content_url,
           derivations: [],
         },
       ],
@@ -53,13 +79,73 @@ describe('artifact renderer compatibility', () => {
   })
 
   it('keeps a browser-native original behind explicit loading', () => {
+    expect(imageOriginalView.kind).toBe('browser_native')
+    expect(imageDownloadView.kind).toBe('download')
     const descriptor: WebBlobDescriptor = {
       ...imageArtifact,
-      available_views: imageArtifact.available_views.filter(
-        (view) => view.kind === 'browser_native' || view.kind === 'download',
-      ),
+      available_views: [imageOriginalView, imageDownloadView],
     }
 
     expect(selectImageView(descriptor)).toBeUndefined()
+  })
+
+  it('bounds the initial text projection by characters', () => {
+    const content = 'x'.repeat(20_000)
+
+    const bounded = boundArtifactText(content, Array.from(content).length, 'preview')
+
+    expect(bounded.content).toHaveLength(ARTIFACT_PREVIEW_CHARACTERS)
+    expect(bounded.omittedCharacters).toBe(content.length - ARTIFACT_PREVIEW_CHARACTERS)
+  })
+
+  it('keeps expansion within the larger effective character ceiling', () => {
+    const content = 'x'.repeat(20_000)
+
+    const bounded = boundArtifactText(content, Array.from(content).length, 'expanded')
+
+    expect(bounded.content).toHaveLength(ARTIFACT_EXPANDED_CHARACTERS)
+    expect(bounded.omittedCharacters).toBe(content.length - ARTIFACT_EXPANDED_CHARACTERS)
+  })
+
+  it('counts and truncates Unicode by code point without splitting surrogate pairs', () => {
+    const content = `${'😀'.repeat(ARTIFACT_PREVIEW_CHARACTERS)}z`
+
+    const bounded = boundArtifactText(content, Array.from(content).length, 'preview')
+
+    expect(Array.from(bounded.content)).toHaveLength(ARTIFACT_PREVIEW_CHARACTERS)
+    expect(bounded.content.endsWith('😀')).toBe(true)
+    expect(bounded.omittedCharacters).toBe(1)
+  })
+
+  it('bounds the expanded projection by lines and reports the remainder', () => {
+    const content = Array.from({ length: 220 }, (_, index) => `line ${index + 1}`).join('\n')
+
+    const bounded = boundArtifactText(content, Array.from(content).length, 'expanded')
+
+    expect(bounded.content.split('\n')).toHaveLength(200)
+    expect(bounded.omittedLines).toBe(true)
+    expect(bounded.omittedCharacters).toBeGreaterThan(0)
+  })
+
+  it('counts bare carriage returns toward the expanded line ceiling', () => {
+    const content = Array.from({ length: 220 }, (_, index) => `line ${index + 1}`).join('\r')
+
+    const bounded = boundArtifactText(content, Array.from(content).length, 'expanded')
+
+    expect(bounded.content.split('\n')).toHaveLength(200)
+    expect(bounded.omittedLines).toBe(true)
+    expect(bounded.omittedCharacters).toBeGreaterThan(0)
+  })
+
+  it('labels thumbnail capabilities as thumbnails', () => {
+    expect(imageViewLabel('thumbnail')).toBe('Thumbnail')
+  })
+
+  it('admits only credential-free HTTPS remote media', () => {
+    expect(admitRemoteMediaUrl('https://media.example.test/status.png')).toBe(
+      'https://media.example.test/status.png',
+    )
+    expect(admitRemoteMediaUrl('http://media.example.test/status.png')).toBeNull()
+    expect(admitRemoteMediaUrl('https://token@media.example.test/status.png')).toBeNull()
   })
 })

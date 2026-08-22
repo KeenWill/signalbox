@@ -11,9 +11,40 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds,
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
     })
 
     expect(selectApp(store.getState()).selectedTimeline).toBe(timelineIds[0])
+  })
+
+  it('lets the registered artifact command own expansion state', () => {
+    store.dispatch(actions.artifactSelected('artifact-1'))
+
+    invokeCommand('artifact.preview.expand', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      artifactPreviewIds: ['artifact-1'],
+      artifactOriginalIds: [],
+      focusTimeline: () => undefined,
+    })
+
+    expect(selectApp(store.getState()).expandedArtifacts['artifact-1']).toBe(true)
+  })
+
+  it('lets the registered artifact command own selection state', () => {
+    invokeCommand('artifact.select', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      artifactSelectionTarget: 'artifact-2',
+      focusTimeline: () => undefined,
+    })
+
+    expect(selectApp(store.getState()).selectedArtifact).toBe('artifact-2')
   })
 })
