@@ -19,27 +19,47 @@ const HEADLINE_START: &str = "\u{e000}";
 const HEADLINE_END: &str = "\u{e001}";
 
 const SEARCH_SQL: &str = "
-SELECT projection_id, session_id, event_sequence, item_kind, item_id,
+WITH lexical_query AS (
+    SELECT plainto_tsquery('simple'::regconfig, $1) AS value
+)
+SELECT projection.projection_id, projection.session_id,
+       projection.event_sequence, projection.item_kind, projection.item_id,
        turn_id, content_class,
        left(
            ts_headline(
                'simple'::regconfig,
-               replace(replace(content_text, chr(57344), ''), chr(57345), ''),
-               plainto_tsquery('simple'::regconfig, $1),
+               replace(
+                   replace(projection.content_text, chr(57344), ''),
+                   chr(57345), ''
+               ),
+               lexical_query.value,
                'StartSel=' || chr(57344) || ', StopSel=' || chr(57345) ||
                ', MaxWords=32, MinWords=8, ShortWord=1, MaxFragments=1'
            ),
            2048
        ) AS marked_snippet
-  FROM web_search_projection
- WHERE search_vector @@ plainto_tsquery('simple'::regconfig, $1)
-   AND ($2::uuid IS NULL OR session_id = $2)
+  FROM web_search_projection AS projection
+ CROSS JOIN lexical_query
+ WHERE projection.search_vector @@ lexical_query.value
+   AND NOT EXISTS (
+       SELECT 1
+         FROM web_search_projection AS earlier_chunk
+        WHERE earlier_chunk.source_kind = projection.source_kind
+          AND earlier_chunk.source_id = projection.source_id
+          AND earlier_chunk.content_class = projection.content_class
+          AND earlier_chunk.projection_ordinal < projection.projection_ordinal
+          AND earlier_chunk.search_vector @@ lexical_query.value
+   )
+   AND ($2::uuid IS NULL OR projection.session_id = $2)
    AND (
        $3::numeric IS NULL
-       OR event_sequence < $3
-       OR (event_sequence = $3 AND projection_id < $4)
+       OR projection.event_sequence < $3
+       OR (
+           projection.event_sequence = $3
+           AND projection.projection_id < $4
+       )
    )
- ORDER BY event_sequence DESC, projection_id DESC
+ ORDER BY projection.event_sequence DESC, projection.projection_id DESC
  LIMIT $5";
 
 const PUBLISH_ARTIFACT_SQL: &str = "
@@ -47,7 +67,9 @@ INSERT INTO web_search_projection (
     source_kind, source_id, session_id, event_sequence,
     item_kind, item_id, turn_id, content_class, content_text
 ) VALUES ($1, $2, $3, $4, $1, $2, NULL, $5, $6)
-ON CONFLICT (source_kind, source_id, content_class) DO UPDATE
+ON CONFLICT (
+    source_kind, source_id, content_class, projection_ordinal
+) DO UPDATE
        SET content_text = web_search_projection.content_text
      WHERE web_search_projection.session_id = EXCLUDED.session_id
        AND web_search_projection.event_sequence = EXCLUDED.event_sequence

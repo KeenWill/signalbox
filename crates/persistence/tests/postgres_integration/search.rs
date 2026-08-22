@@ -6,10 +6,12 @@ use signalbox_application::{
     SearchArtifactId, SearchArtifactProjection, SearchArtifactProjectionClass, SearchContentClass,
     SearchPageLimit, SearchProjectionText, SearchQuery, SearchResultSource, SearchScope,
     SearchStrategy, SearchText, TimelineAddress, TimelineWindowAnchor, TimelineWindowLimits,
+    max_search_projection_text_bytes,
 };
 use signalbox_domain::{
-    AcceptedInputId, ModelSelectionOverride, SessionId, SubmitInputAppliedResult,
-    SubmitInputResult, TurnId,
+    AcceptedInputId, DirectModelSelection, ModelSelectionOverride, ModelTargetCatalog,
+    ModelTargetDefinition, ProviderModelIdentity, ResolvedProviderTarget, SessionId,
+    SubmitInputAppliedResult, SubmitInputResult, TurnId,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
@@ -21,8 +23,9 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use super::{
-    TestSubmitInputHandle, direct, migrated_postgres, prepared, start_input,
-    test_session_credential_pin,
+    EarliestQueuedTurnActivation, TestSubmitInputHandle, activate_earliest_queued_turn,
+    complete_text_turn, direct, migrated_postgres, model_credential_reference, prepared,
+    start_input, test_session_credential_pin,
 };
 
 const SEARCH_FIXTURE_SEED: u128 = 0x994_0000;
@@ -226,6 +229,92 @@ async fn derived_text_is_searchable_only_after_its_durable_publisher_runs()
     assert_eq!(
         after.results[0].source,
         SearchResultSource::DerivedArtifact { artifact }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn oversized_canonical_assistant_text_preserves_a_searchable_tail()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session_offset = 0x280;
+    let session_seed = SEARCH_FIXTURE_SEED + session_offset;
+    let session = create_search_session(&pool, session_offset).await?;
+    let turn = TurnId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x281));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                SEARCH_FIXTURE_SEED + 0x282,
+                session.as_uuid().as_u128(),
+                "search an oversized assistant reply",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x283)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x284),
+            starting_frontier: Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x285),
+            initial_attempt: Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x286),
+        },
+    )
+    .await?;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(session_seed + 2));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+            SEARCH_FIXTURE_SEED + 0x287,
+        ))),
+    )])
+    .expect("fixture selection resolves to one target");
+    let response = format!(
+        "{} tail-chunk-needle",
+        "x".repeat(max_search_projection_text_bytes() + 1)
+    );
+    complete_text_turn(
+        &pool,
+        session,
+        targets,
+        model_credential_reference(),
+        SEARCH_FIXTURE_SEED + 0x290,
+        &response,
+    )
+    .await?;
+    let page = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "tail chunk needle",
+            SearchScope::Session(session),
+            10,
+            None,
+        ))
+        .await?;
+    let chunk_bounds: (i64, i32) = sqlx::query_as(
+        "SELECT count(*), max(octet_length(content_text))
+           FROM web_search_projection
+          WHERE session_id = $1 AND content_class = 'assistant_transcript'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(page.results.len(), 1);
+    assert_eq!(
+        page.results[0].content_class,
+        SearchContentClass::AssistantTranscript
+    );
+    assert!(chunk_bounds.0 > 1);
+    assert!(
+        usize::try_from(chunk_bounds.1).expect("fixture chunk size fits")
+            <= max_search_projection_text_bytes()
     );
 
     pool.close().await;
