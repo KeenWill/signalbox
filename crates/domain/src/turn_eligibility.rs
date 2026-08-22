@@ -6861,6 +6861,16 @@ fn reconstitute_inner(
         let authoritative_lineage_matches = initial_seed_frontier
             .into_iter()
             .chain(latest_compaction_result)
+            .chain(assistant_call_snapshots.iter().copied())
+            .chain(model_calls.values().filter_map(|call| match call {
+                ReconstitutedModelCall::Current(call) => Some(call.frontier().snapshot()),
+                ReconstitutedModelCall::Ended(_) => None,
+            }))
+            .chain(
+                active_executing_tool_batch
+                    .iter()
+                    .map(|batch| batch.yielded_frontier),
+            )
             .map(|candidate| &snapshots[&candidate])
             .chain(
                 turns
@@ -16497,6 +16507,47 @@ mod tests {
         let revision =
             RunnerGeneration::try_from_u64(2).expect("the fixture placement revision is positive");
         let mut facts = FailedTerminalReconstitutionFacts::matching(&session, failed);
+        facts
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                placement_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: revision,
+                },
+            ));
+        let placement_snapshot = facts.snapshots[0].derive_appending(
+            placement_frontier.id(),
+            vec![placement_entry.reference(&session)],
+        );
+        facts.snapshots.push(placement_snapshot);
+        let input = facts
+            .input()
+            .with_runner_placement_frontier(placement_frontier.id());
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMismatch {
+                snapshot: placement_frontier.id(),
+            }
+        );
+    }
+
+    /// S02 / S08 / S32 / INV-015 / INV-044: a placement boundary cannot
+    /// branch from an active turn's starting frontier once its current call
+    /// has observed a newer authoritative frontier.
+    #[test]
+    fn s02_s08_s32_inv015_inv044_reconstitution_rejects_placement_divergent_from_current_call() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let consumed = accepted_origin(2);
+        let placement_entry = semantic_entry(33);
+        let placement_frontier = frontier(42);
+        let revision =
+            RunnerGeneration::try_from_u64(2).expect("the fixture placement revision is positive");
+        let mut facts = ConsumedSteeringReconstitutionFacts::matching(&session, active, consumed);
         facts
             .semantic_entries
             .push(SemanticTranscriptEntryReconstitutionInput::new(
