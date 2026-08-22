@@ -499,10 +499,12 @@ fn portable_path_component(component: &str) -> bool {
         .any(|byte| matches!(byte, b'<' | b'>' | b':' | b'\"' | b'|' | b'?' | b'*'));
     let stem = component.split('.').next().unwrap_or_default();
     let uppercase_stem = stem.to_ascii_uppercase();
-    let is_reserved_device = matches!(uppercase_stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || uppercase_stem
-            .strip_prefix("COM")
-            .is_some_and(is_reserved_device_number)
+    let is_reserved_device = matches!(
+        uppercase_stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || uppercase_stem
+        .strip_prefix("COM")
+        .is_some_and(is_reserved_device_number)
         || uppercase_stem
             .strip_prefix("LPT")
             .is_some_and(is_reserved_device_number);
@@ -893,8 +895,14 @@ mod tests {
     fn repository_source_symlink_must_remain_inside_checkout() {
         use std::os::unix::fs::symlink;
 
-        let fixture =
-            std::env::temp_dir().join(format!("signalbox-corpus-symlink-{}", std::process::id()));
+        let fixture = std::env::temp_dir().join(format!(
+            "signalbox-corpus-symlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the system clock follows the Unix epoch")
+                .as_nanos()
+        ));
         let checkout = fixture.join("checkout");
         let outside = fixture.join("outside.json");
         fs::create_dir_all(checkout.join(".git")).expect("the synthetic checkout is created");
@@ -1078,6 +1086,14 @@ mod tests {
             decode_manifest(&encoded).expect_err("a Windows reserved device component is rejected");
 
         assert!(error.to_string().contains("not a portable relative path"));
+    }
+
+    #[test]
+    fn repository_manifest_rejects_windows_console_device_names() {
+        assert!(!super::portable_path_component("CONIN$"));
+        assert!(!super::portable_path_component("CONIN$.json"));
+        assert!(!super::portable_path_component("CONOUT$"));
+        assert!(!super::portable_path_component("CONOUT$.json"));
     }
 
     #[test]

@@ -39,6 +39,8 @@ const DATABASE_NAME: &str = "signalbox_eval_corpus";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const PROVIDER_MODEL: &str = "offline-fixture-judge";
+const FIXTURE_MAX_OUTPUT_TOKENS: u32 = 256;
+const FIXTURE_CONTEXT_WINDOW_TOKENS: u32 = 4_096;
 
 fn seed_manifest_path() -> &'static Path {
     Path::new(concat!(
@@ -354,6 +356,34 @@ async fn repository_registration_requires_portable_relative_path() -> Result<(),
     .execute(&pool)
     .await
     .expect_err("a durable repository registration with parent traversal is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_registration_rejects_windows_console_device_path() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = migrated_postgres().await?;
+    let corpus_digest = [0_u8; 32];
+    let replay_digest = [0_u8; 32];
+    let source_digest = [0_u8; 32];
+
+    sqlx::query(
+        "INSERT INTO evaluation_corpus (
+            corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
+            source_kind, source_repository, source_path, source_sha256
+         ) VALUES ('invalid-console-device-path', 'v1', 1, $1, $2, 1,
+                   'repository', 'KeenWill/signalbox', 'corpora/CONIN$.json', $3)",
+    )
+    .bind(corpus_digest.as_slice())
+    .bind(replay_digest.as_slice())
+    .bind(source_digest.as_slice())
+    .execute(&pool)
+    .await
+    .expect_err("a durable Windows console-device path is rejected");
 
     pool.close().await;
     drop(container);
@@ -710,8 +740,8 @@ fn fixture_model() -> (
     let catalog = RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
         target,
         String::from(PROVIDER_MODEL),
-        256,
-        4_096,
+        FIXTURE_MAX_OUTPUT_TOKENS,
+        FIXTURE_CONTEXT_WINDOW_TOKENS,
     )
     .expect("the fixture model definition is request-safe")])
     .expect("the fixture catalog names one target once");

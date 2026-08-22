@@ -58,7 +58,7 @@ CREATE TABLE evaluation_corpus (
                 AND source_path !~ '//'
                 AND source_path !~ '(^|/)\.{1,2}(/|$)'
                 AND source_path !~ '(^|/)[^/]*[. ](/|$)'
-                AND source_path !~* '(^|/)(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(\.|/|$)'
+                AND source_path !~* '(^|/)(CON|PRN|AUX|NUL|CONIN[$]|CONOUT[$]|COM[1-9¹²³]|LPT[1-9¹²³])(\.|/|$)'
                 AND source_sha256 IS NOT NULL
                 AND octet_length(source_sha256) = 32
                 AND source_blob_store IS NULL
