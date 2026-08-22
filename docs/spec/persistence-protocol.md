@@ -20,7 +20,9 @@ and ordered page read were verified against this PR
 propagation transaction and cursor completion were verified against this PR
 (`agent/runner-loss-session-transaction`). Daemon paging after terminal loss and
 startup resumption of every pending cursor were verified against this PR
-(`agent/runner-loss-daemon-propagation`).
+(`agent/runner-loss-daemon-propagation`). The registration-reconciliation
+cursor, exact registration-loss cause, and per-session transaction were verified
+against this PR (`agent/runner-registration-reconciliation`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -35,10 +37,6 @@ recorded-migration immutability rule was verified against this PR
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
-
-The multipart accepted-input persistence paragraph below is the foundation
-proposal from PR `#553` (`agent/blob-storage-foundation`) and becomes verified
-with its implementing child stack.
 
 The baseline persistence protocol was verified through PR #175
 (`agent/stop-requests`); the prefix-reservation discipline was added in PR #235
@@ -67,11 +65,9 @@ was verified against this PR (`agent/domain-cleanup`); the session-plan event
 sequence was verified through PR #380 (`agent/plan-tool`) and its dependency
 extension against PR #385 (`agent/plan-dependencies`); and the goal event
 transaction, trigger lock, and goal-turn outbox provenance were verified through
-PR #384 (`agent/goal-mode-runtime`), with the appends owed when a generation
-binds an already-accepted turn verified against this PR
-(`agent/commission-binding`); and the approval-judge call, decision, and posture
-storage were verified through PR #420 (`agent/approval-judge-storage`); the
-approval-judge lifecycle transactions were verified through this PR
+PR #384 (`agent/goal-mode-runtime`); and the approval-judge call, decision, and
+posture storage were verified through PR #420 (`agent/approval-judge-storage`);
+the approval-judge lifecycle transactions were verified through this PR
 (`agent/approval-judge-execution-support`); the approval-decision outbox is
 verified against this implementing change; the session-placement event, current
 head, and creation transaction were verified through PR #415
@@ -334,7 +330,7 @@ Representation rules, all enforced in the schema:
   ([sessions-and-transcript](sessions-and-transcript.md)).
 - Migration `202608030003` advances native creation to storage version 7,
   imported creation to version 5, defaults replacement to version 4, and
-  submit-input to version 2 for their settings-bearing command payloads. Rust
+  submit-input to version 3 for their settings-bearing command payloads. Rust
   decoders require provider-default full settings or an inherit-all overlay on
   every earlier supported version. Imported-creation version 4 remains
   unsupported and reserved for its committed runner-placement shape. Existing
@@ -434,6 +430,25 @@ Representation rules, all enforced in the schema:
   transaction cannot strand session projection. **Committed unimplemented
   functionality.** No present daemon transaction retires an unacknowledged
   workspace release.
+- Migration `202608210001` gives every changed registration beyond revision one
+  a pending reconciliation cursor in its registration transaction. An ordered
+  page returns at most 64 still-pinned sessions whose pinned registration is
+  older, excluding sessions with an exact immutable observation. The
+  scheduler-first per-session transaction locks enrollment, connection/loss,
+  registration, cursor, placement, and any current lease in runner order. It
+  applies domain availability reconciliation and records `preserved`,
+  `runner_lost`, or `superseded`; registration loss stores an exact foreign key
+  to the incompatible registration and a deferred exact loss observation. A
+  current lease and active turn use the same attempt-loss and
+  `awaiting_runner_recovery` transition as connection loss. SQL independently
+  checks selector, sandbox, runner-required tools, credential profile, and
+  repository/worktree availability against the named cause revision, and loads
+  repeat that authentication instead of trusting a loss-source label. Cursor
+  advancement cannot skip a current candidate or complete while one remains, and
+  a newer registration cannot start while the current cursor retains a
+  candidate. The daemon drains the cursor before acknowledging a changed
+  registration and drains any crash-retained cursor before startup classifies
+  old physical connections lost.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -1040,6 +1055,17 @@ Locks per transaction, in acquisition order:
   `session_scheduler`, placement, grant, or lease lock because it changes none
   of them, and commits its claim, activation, and terminal result together.
 
+- **Runner registration reconciliation**: the registration append locks the
+  enrollment and current registration head, refuses a newer revision while the
+  prior cursor still owns a candidate, and creates the next cursor before
+  advancing the registration head. It does not take a session lock. Each
+  restartable session projection takes `session_scheduler` first, then
+  enrollment, current connection/loss, current registration, the exact cursor,
+  placement, and a current lease when present. It records the exact registration
+  observation and cursor advance in that transaction. Completion takes the same
+  enrollment-through-registration prefix and the cursor but no session lock,
+  after proving that no unobserved candidate remains.
+
 - **Runner dispatch and result**: `session_scheduler` is the first lock,
   followed by enrollment, current runner connection/loss, registration,
   placement, current credential grant when present, and lease heads in the total
@@ -1241,15 +1267,8 @@ that look individually valid while their cross-record correlations are not, so
 authority comes only from complete validated projections, never from raw
 identifiers.
 
-Startup recovery terminalizes an evidence-free lost active turn as failed and
-atomically reclassifies its pending steering to successor origins. A turn
-holding a `Prepared` call proves that no send authorization existed, so startup
-validates its exact stored frontier and leaves the call, attempt, and turn
-unchanged for scheduler retry; an in-flight call recovers into the
-`awaiting_model_call_recovery` wait. A persisted `stop_requested` attempt and
-`cancellation_requested` call reconstruct through their exact applied interrupt,
-end the abandoned attempt `after_cancellation/lost`, and terminalize
-proof-bearing reconciliation for the ambiguous call without erasing stop intent.
+Startup recovery follows the state-specific lifecycle rules owned by
+[turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md#startup-scan-and-recovery).
 The schema guard (`turn_lifecycle_pending_steering_closed`) independently
 requires every pending row to be consumed or reclassified before
 terminalization. The same finite startup inventory includes every nonterminal
@@ -1626,20 +1645,16 @@ successor turn and appends that correlated `input_accepted`; an applied
 stopped issued work becomes ambiguous; terminal reclassification of pending
 steering appends its correlated `input_accepted`. Goal-owned turn creation
 appends the same correlated `input_accepted`; dispatch authenticates its exact
-`goal_turn` provenance instead of requiring a synthetic `SubmitInput` command.
-Binding an already-accepted turn to a generation appends nothing, because the
-command that accepted that turn appended its correlated `input_accepted`
-already; dispatch authenticates that command, and the `goal_turn` row recording
-which generation the turn runs under does not disqualify it. A stop or supersede
-that makes a queued goal turn ineligible appends `goal_turn_retired` in the same
-transaction; supersede appends retirement before the replacement
-`input_accepted`. The typed record names the exact queued, now-ineligible
-`goal_turn`, and dispatch rechecks that durable correlation. Model-call state
-transitions append `model_call_transition`, tool-round creation appends
-`tool_batch_transition { proposed }`, all-resolved result projection appends
-`tool_batch_transition { results_projected }`, and an external-effect ambiguity
-appends `tool_batch_transition { recovery_required }`. Completion closure
-appends `turn_completed`, refusal closure appends `turn_refused`, and
+`goal_turn` provenance instead of requiring a synthetic `SubmitInput` command. A
+stop or supersede that makes a queued goal turn ineligible appends
+`goal_turn_retired` in the same transaction; supersede appends retirement before
+the replacement `input_accepted`. The typed record names the exact queued,
+now-ineligible `goal_turn`, and dispatch rechecks that durable correlation.
+Model-call state transitions append `model_call_transition`, tool-round creation
+appends `tool_batch_transition { proposed }`, all-resolved result projection
+appends `tool_batch_transition { results_projected }`, and an external-effect
+ambiguity appends `tool_batch_transition { recovery_required }`. Completion
+closure appends `turn_completed`, refusal closure appends `turn_refused`, and
 known-failure closure appends `turn_failed`; interrupt-confirmed cancellation
 appends `turn_cancelled`, and live stopped ambiguity appends
 `turn_reconciliation_required`; completion of a context compaction appends

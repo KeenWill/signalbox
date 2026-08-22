@@ -103,6 +103,9 @@ impl PostgresRunnerRegistrationService {
     pub async fn mark_orphaned_connections_lost(
         &self,
     ) -> Result<Vec<AppliedRunnerConnectionTransition>, RunnerProtocolStoreError> {
+        let _admission = self.registration_admission.lock().await;
+        self.propagate_pending_registration_reconciliations()
+            .await?;
         let connections = self.store.load_nonterminal_connection_heads().await?;
         let mut transitions = Vec::new();
         for connection in connections {
@@ -127,6 +130,46 @@ impl PostgresRunnerRegistrationService {
         }
         self.propagate_pending_connection_losses(None).await?;
         Ok(transitions)
+    }
+
+    async fn propagate_pending_registration_reconciliations(
+        &self,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        for reconciliation in self
+            .store
+            .load_pending_registration_reconciliations()
+            .await?
+        {
+            loop {
+                let page = self
+                    .store
+                    .load_registration_reconciliation_page(reconciliation)
+                    .await?;
+                if page.is_complete() {
+                    break;
+                }
+                if page.sessions().is_empty() {
+                    self.store
+                        .complete_registration_reconciliation(reconciliation)
+                        .await?;
+                    break;
+                }
+                for session in page.sessions() {
+                    let disposition = self
+                        .store
+                        .reconcile_registration_session(reconciliation, *session)
+                        .await?;
+                    tracing::info!(
+                        enrollment_id = %reconciliation.enrollment().into_uuid(),
+                        registration_revision = reconciliation.registration_revision().get(),
+                        session_id = %session.into_uuid(),
+                        ?disposition,
+                        "runner registration reconciled against session placement"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn propagate_pending_connection_losses(
@@ -323,6 +366,11 @@ impl PostgresRunnerRegistrationService {
             .map_err(|error| {
                 store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
             })?;
+        self.propagate_pending_registration_reconciliations()
+            .await
+            .map_err(|error| {
+                store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
+            })?;
         if previous_registration_revision == Some(prior)
             && receipt.registration().revision() != prior
         {
@@ -455,6 +503,15 @@ impl PostgresRunnerRegistrationService {
             .map_err(|error| {
                 store_failure(RunnerInboundFrameKind::Advertise, correlation, error)
             })?;
+        self.propagate_pending_registration_reconciliations()
+            .await
+            .map_err(|error| {
+                store_failure(
+                    RunnerInboundFrameKind::Advertise,
+                    AvailableCorrelation::Registration(request.registration_revision),
+                    error,
+                )
+            })?;
         tracing::info!(
             enrollment_id = %enrollment.enrollment().into_uuid(),
             runner_id = %enrollment.runner().into_uuid(),
@@ -475,6 +532,28 @@ impl PostgresRunnerRegistrationService {
     ) -> Result<RunnerConnectionTransitionOutcome, RunnerRegistrationFailure> {
         let wire_epoch = epoch;
         let operation_kind = transition_operation_kind(transition);
+        let terminal_loss = matches!(
+            transition,
+            RunnerConnectionTransition::HeartbeatTimeout
+                | RunnerConnectionTransition::TransportClosed
+                | RunnerConnectionTransition::ProtocolFailure
+        );
+        let _registration_admission = if terminal_loss {
+            Some(self.registration_admission.lock().await)
+        } else {
+            None
+        };
+        if terminal_loss {
+            self.propagate_pending_registration_reconciliations()
+                .await
+                .map_err(|error| {
+                    store_failure(
+                        operation_kind,
+                        AvailableCorrelation::ConnectionEpoch(wire_epoch),
+                        error,
+                    )
+                })?;
+        }
         let epoch = RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(|| {
             RunnerRegistrationFailure::new(
                 operation_kind,
@@ -2016,6 +2095,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
+    use rust_decimal::Decimal;
     use signalbox_domain::{
         CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
         RunnerLostBeforePin, RunnerSandboxProfile, RunnerSelector, RunnerToolPermissionOverrides,
@@ -3526,6 +3606,58 @@ mod tests {
             registration.revision().get(),
             resumed.registration_revision.get()
         );
+    }
+
+    /// INV-042 / INV-044: the daemon does not acknowledge a changed
+    /// advertisement until its durable registration cursor is complete.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn s31_inv042_inv044_advertise_completes_registration_reconciliation_before_ack() {
+        let (_container, database_url, _empty_store) = postgres_store().await;
+        let pool = fresh_pool(&database_url).await;
+        let store = RunnerProtocolStore::new(pool.clone(), configured_catalog());
+        let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let enrolled = service
+            .enroll(Enroll {
+                request_id: identity(1),
+                digest_version: DIGEST_VERSION,
+                advertisement: configured_advertisement(),
+            })
+            .await
+            .expect("the configured runner enrolls");
+
+        let registered = service
+            .advertise(
+                enrolled.enrollment_id,
+                Advertise {
+                    enrollment_id: enrolled.enrollment_id,
+                    runner_id: enrolled.runner_id,
+                    authentication_id: enrolled.authentication_id,
+                    registration_revision: enrolled.registration_revision,
+                    advertisement: empty_advertisement(),
+                },
+                enrolled.connection_epoch,
+            )
+            .await
+            .expect("the changed advertisement is acknowledged after reconciliation");
+        let state: String = sqlx::query_scalar(
+            "SELECT state_kind
+               FROM runner_registration_reconciliation
+              WHERE enrollment_id = $1 AND registration_revision = $2",
+        )
+        .bind(enrolled.enrollment_id.into_uuid())
+        .bind(Decimal::from(registered.registration_revision.get()))
+        .fetch_one(&pool)
+        .await
+        .expect("the exact registration cursor loads");
+        let pending = store
+            .load_pending_registration_reconciliations()
+            .await
+            .expect("the pending registration inventory loads");
+
+        assert_eq!(registered.registration_revision.get(), 2);
+        assert_eq!(state, "completed");
+        assert_eq!(pending, []);
     }
 
     #[tokio::test]

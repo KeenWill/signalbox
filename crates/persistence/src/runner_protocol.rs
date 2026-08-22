@@ -38,14 +38,17 @@ use signalbox_domain::{
     WorkspaceRecovery, WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement,
     WorkspaceRevision,
 };
-use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
+use sqlx::{
+    PgConnection, PgPool, Postgres, QueryBuilder, Row, Transaction, postgres::PgRow, types::Uuid,
+};
 
 use crate::lock_inventory::{
     RUNNER_CONNECTION_LOSS_HEAD, RUNNER_CONNECTION_LOSS_PROPAGATION, RUNNER_ENROLLMENT,
     RUNNER_GRANT, RUNNER_LEASE_ENROLLMENT_AUTHORITY, RUNNER_LEASE_GRANT_AUTHORITY,
     RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_CONNECTION_AUTHORITY,
     RUNNER_PLACEMENT_CURRENT_LOSS, RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER, RUNNER_PLACEMENT_HEAD,
-    RUNNER_REGISTRATION_HEAD, RUNNER_RETRY_REPLACEMENT_SCHEDULER,
+    RUNNER_REGISTRATION_HEAD, RUNNER_REGISTRATION_RECONCILIATION,
+    RUNNER_REGISTRATION_RECONCILIATION_STATE, RUNNER_RETRY_REPLACEMENT_SCHEDULER,
 };
 use crate::mapping::{
     RunnerLossPropagationStateStorageKind, ToolAttemptDispositionStorageKind,
@@ -216,6 +219,36 @@ pub struct RunnerConnectionLossPropagationPage {
     complete: bool,
 }
 
+/// Exact registration revision whose availability must be reconciled against
+/// every older pinned placement for its enrollment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RunnerRegistrationReconciliationSnapshot {
+    enrollment: RunnerEnrollmentId,
+    registration_revision: RunnerRegistrationRevision,
+}
+
+/// One bounded restart page for a durable registration reconciliation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerRegistrationReconciliationPage {
+    reconciliation: RunnerRegistrationReconciliationSnapshot,
+    propagated_through: Option<SessionId>,
+    sessions: Vec<SessionId>,
+    complete: bool,
+}
+
+/// Durable effect of reconciling one session against a current registration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnerRegistrationReconciliationDisposition {
+    /// The current registration no longer preserves the pinned snapshot.
+    RunnerLost,
+    /// The current registration preserves every runner-required pinned fact.
+    Preserved,
+    /// A serialized placement change removed this cursor's candidate.
+    Superseded,
+    /// The exact session was already committed at or behind this cursor.
+    Replayed,
+}
+
 /// Durable effect of applying one connection-loss cursor to one session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunnerConnectionLossSessionDisposition {
@@ -249,6 +282,40 @@ impl RunnerConnectionLossPropagationPage {
     }
 
     /// Reports that this loss cursor has durably completed.
+    pub const fn is_complete(&self) -> bool {
+        self.complete
+    }
+}
+
+impl RunnerRegistrationReconciliationSnapshot {
+    /// Returns the enrollment whose current availability is being reconciled.
+    pub const fn enrollment(self) -> RunnerEnrollmentId {
+        self.enrollment
+    }
+
+    /// Returns the exact durable registration revision being reconciled.
+    pub const fn registration_revision(self) -> RunnerRegistrationRevision {
+        self.registration_revision
+    }
+}
+
+impl RunnerRegistrationReconciliationPage {
+    /// Returns the exact durable registration reconciliation for this page.
+    pub const fn reconciliation(&self) -> RunnerRegistrationReconciliationSnapshot {
+        self.reconciliation
+    }
+
+    /// Returns the last session atomically committed before this page.
+    pub const fn propagated_through(&self) -> Option<SessionId> {
+        self.propagated_through
+    }
+
+    /// Returns at most 64 pinned session identities in canonical order.
+    pub fn sessions(&self) -> &[SessionId] {
+        &self.sessions
+    }
+
+    /// Reports that this registration cursor has durably completed.
     pub const fn is_complete(&self) -> bool {
         self.complete
     }
@@ -1234,9 +1301,12 @@ impl RunnerProtocolStore {
             event_ordinal,
             event_kind,
             &lost,
-            stored_registration_identity(registration.as_ref()),
-            grant_origin,
-            interrupted_tool_attempt,
+            PlacementRecordEvidence {
+                registration_identity: stored_registration_identity(registration.as_ref()),
+                grant_origin,
+                interrupted_tool_attempt,
+                loss_registration_revision: None,
+            },
         )
         .await?;
         let changed = sqlx::query(
@@ -1256,53 +1326,8 @@ impl RunnerProtocolStore {
 
         if let Some(lease) = current_lease {
             persist_runner_loss_lease_and_wait(&mut transaction, &lost, lease).await?;
-        } else {
-            let has_active_runner_boundary: bool = sqlx::query_scalar(
-                "SELECT EXISTS (
-                     SELECT 1
-                       FROM turn_lifecycle AS lifecycle
-                       JOIN turn_attempt AS turn_attempt
-                         ON turn_attempt.turn_attempt_id =
-                            lifecycle.current_attempt_id
-                        AND turn_attempt.turn_id = lifecycle.turn_id
-                        AND turn_attempt.session_id = lifecycle.session_id
-                       JOIN tool_request AS request
-                         ON request.producing_model_call_id =
-                            lifecycle.active_tool_round_call_id
-                        AND request.turn_id = lifecycle.turn_id
-                        AND request.session_id = lifecycle.session_id
-                       JOIN runner_current_session_placement AS placement_head
-                         ON placement_head.session_id = lifecycle.session_id
-                       JOIN runner_session_placement_tool AS required
-                         ON required.session_id = placement_head.session_id
-                        AND required.event_ordinal = placement_head.event_ordinal
-                        AND required.tool_name = request.tool_name
-                        AND required.runner_required
-                      WHERE lifecycle.session_id = $1
-                        AND lifecycle.state_kind = 'active'
-                        AND lifecycle.active_phase_kind = 'running'
-                        AND lifecycle.active_tool_round_call_id IS NOT NULL
-                        AND turn_attempt.state_kind = 'running'
-                        AND NOT EXISTS (
-                            SELECT 1
-                              FROM tool_approval_decision AS denied
-                             WHERE denied.request_id = request.request_id
-                               AND denied.decision_kind = 'deny'
-                        )
-                        AND NOT EXISTS (
-                            SELECT 1
-                              FROM tool_attempt AS finished
-                             WHERE finished.request_id = request.request_id
-                               AND finished.state_kind = 'terminal'
-                        )
-                 )",
-            )
-            .bind(session.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
-            if has_active_runner_boundary {
-                yield_turn_to_runner_recovery_without_lease(&mut transaction, &lost).await?;
-            }
+        } else if has_active_runner_boundary(&mut transaction, session).await? {
+            yield_turn_to_runner_recovery_without_lease(&mut transaction, &lost).await?;
         }
         outbox::append(
             transaction.as_mut(),
@@ -1349,6 +1374,334 @@ impl RunnerProtocolStore {
         )
         .bind(loss.enrollment().into_uuid())
         .bind(Decimal::from(loss.loss_epoch().get()))
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        commit_mutation(transaction).await
+    }
+
+    async fn lock_registration_reconciliation_authority(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        reconciliation: RunnerRegistrationReconciliationSnapshot,
+    ) -> Result<StoredValidatedRunnerRegistration, RunnerProtocolStoreError> {
+        let enrollment_id = reconciliation.enrollment();
+        let locked = sqlx::query(RUNNER_ENROLLMENT)
+            .bind(enrollment_id.into_uuid())
+            .fetch_optional(&mut **transaction)
+            .await?;
+        if locked.is_none() {
+            return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+        }
+        sqlx::query_scalar::<_, Decimal>(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
+            .bind(enrollment_id.into_uuid())
+            .fetch_optional(&mut **transaction)
+            .await?;
+        sqlx::query_scalar::<_, Decimal>(RUNNER_PLACEMENT_CURRENT_LOSS)
+            .bind(enrollment_id.into_uuid())
+            .fetch_optional(&mut **transaction)
+            .await?;
+        let current = sqlx::query_scalar::<_, Decimal>(RUNNER_REGISTRATION_HEAD)
+            .bind(enrollment_id.into_uuid())
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        if decode_registration_revision(current)? != reconciliation.registration_revision() {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        let enrollment = load_enrollment_in(transaction.as_mut(), enrollment_id)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
+        load_registration_in(
+            transaction.as_mut(),
+            enrollment_id,
+            reconciliation.registration_revision(),
+            Some(&enrollment),
+            &self.catalog,
+        )
+        .await?
+        .ok_or_else(|| RunnerProtocolCorruption::MissingCanonicalRegistration.into())
+    }
+
+    /// Loads every current registration whose bounded placement reconciliation
+    /// remains pending.
+    pub async fn load_pending_registration_reconciliations(
+        &self,
+    ) -> Result<Vec<RunnerRegistrationReconciliationSnapshot>, RunnerProtocolStoreError> {
+        let rows = sqlx::query(
+            "SELECT reconciliation.enrollment_id,
+                    reconciliation.registration_revision
+               FROM runner_registration_reconciliation AS reconciliation
+               JOIN runner_current_registration AS current_registration
+                 ON current_registration.enrollment_id = reconciliation.enrollment_id
+                AND current_registration.registration_revision =
+                    reconciliation.registration_revision
+              WHERE reconciliation.state_kind = 'pending'
+              ORDER BY reconciliation.enrollment_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(RunnerRegistrationReconciliationSnapshot {
+                    enrollment: runner_enrollment_id(row.decode_column("enrollment_id")?),
+                    registration_revision: decode_registration_revision(
+                        row.decode_column("registration_revision")?,
+                    )?,
+                })
+            })
+            .collect()
+    }
+
+    /// Loads the next bounded, ordered session page for one registration
+    /// reconciliation cursor.
+    pub async fn load_registration_reconciliation_page(
+        &self,
+        reconciliation: RunnerRegistrationReconciliationSnapshot,
+    ) -> Result<RunnerRegistrationReconciliationPage, RunnerProtocolStoreError> {
+        const PAGE_LIMIT: i64 = 64;
+
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let cursor = sqlx::query(
+            "SELECT reconciliation.propagated_through_session_id,
+                    reconciliation.state_kind,
+                    current_registration.registration_revision AS current_revision
+               FROM runner_registration_reconciliation AS reconciliation
+               JOIN runner_current_registration AS current_registration
+                 ON current_registration.enrollment_id = reconciliation.enrollment_id
+              WHERE reconciliation.enrollment_id = $1
+                AND reconciliation.registration_revision = $2",
+        )
+        .bind(reconciliation.enrollment().into_uuid())
+        .bind(Decimal::from(reconciliation.registration_revision().get()))
+        .fetch_optional(transaction.as_mut())
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        let current = decode_registration_revision(cursor.decode_column("current_revision")?)?;
+        if current != reconciliation.registration_revision() {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        let propagated_through = cursor
+            .decode_column::<Option<Uuid>>("propagated_through_session_id")?
+            .map(session_id);
+        let state: String = cursor.decode_column("state_kind")?;
+        let complete = match state.as_str() {
+            "pending" => false,
+            "completed" => true,
+            _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+        };
+        let sessions = if complete {
+            Vec::new()
+        } else {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT placement.session_id
+                   FROM runner_current_session_placement AS current_placement
+                   JOIN runner_session_placement_record AS placement
+                     ON placement.session_id = current_placement.session_id
+                    AND placement.event_ordinal = current_placement.event_ordinal
+                   LEFT JOIN runner_registration_reconciliation_observation AS observed
+                     ON observed.enrollment_id = $1
+                    AND observed.registration_revision = $2
+                    AND observed.session_id = placement.session_id
+                  WHERE placement.state_kind = 'pinned'
+                    AND placement.registration_enrollment_id = $1
+                    AND placement.registration_revision < $2
+                    AND observed.session_id IS NULL
+                    AND ($3::uuid IS NULL OR placement.session_id > $3)
+                  ORDER BY placement.session_id
+                  LIMIT $4",
+            )
+            .bind(reconciliation.enrollment().into_uuid())
+            .bind(Decimal::from(reconciliation.registration_revision().get()))
+            .bind(propagated_through.map(SessionId::into_uuid))
+            .bind(PAGE_LIMIT)
+            .fetch_all(transaction.as_mut())
+            .await?
+            .into_iter()
+            .map(session_id)
+            .collect()
+        };
+        transaction.commit().await?;
+        Ok(RunnerRegistrationReconciliationPage {
+            reconciliation,
+            propagated_through,
+            sessions,
+            complete,
+        })
+    }
+
+    /// Reconciles one current pinned placement against one exact current
+    /// registration and advances the restart cursor atomically.
+    pub async fn reconcile_registration_session(
+        &self,
+        reconciliation: RunnerRegistrationReconciliationSnapshot,
+        session: SessionId,
+    ) -> Result<RunnerRegistrationReconciliationDisposition, RunnerProtocolStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        require_runner_loss_session_scheduler(&mut transaction, session).await?;
+        let registration = self
+            .lock_registration_reconciliation_authority(&mut transaction, reconciliation)
+            .await?;
+        let cursor = lock_registration_reconciliation(&mut transaction, reconciliation).await?;
+        if cursor
+            .propagated_through
+            .is_some_and(|committed| committed.as_uuid() >= session.as_uuid())
+        {
+            transaction.rollback().await?;
+            return Ok(RunnerRegistrationReconciliationDisposition::Replayed);
+        }
+        if cursor.complete {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+
+        let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
+            .bind(session.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+        let prior_event_ordinal = decode_u64(prior.decode_column("event_ordinal")?)?;
+        if !placement_is_registration_reconciliation_candidate(&prior, reconciliation)? {
+            insert_registration_reconciliation_observation(
+                &mut transaction,
+                reconciliation,
+                session,
+                prior_event_ordinal,
+                "superseded",
+            )
+            .await?;
+            advance_registration_reconciliation_cursor(&mut transaction, reconciliation, session)
+                .await?;
+            commit_mutation(transaction).await?;
+            return Ok(RunnerRegistrationReconciliationDisposition::Superseded);
+        }
+
+        let stored = self
+            .decode_stored_placement_in(&mut transaction, &prior)
+            .await?;
+        let (
+            stored_event_ordinal,
+            placement,
+            pinned_registration,
+            _grant,
+            prior_interrupted_attempt,
+        ) = stored.into_parts();
+        if stored_event_ordinal != prior_event_ordinal || prior_interrupted_attempt.is_some() {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        let current_lease = self
+            .load_current_loss_lease_in(&mut transaction, session)
+            .await?;
+        let interrupted_attempt = current_lease.as_ref().map(RunnerLease::attempt);
+        let reconciled = placement
+            .reconcile_registration(registration.registration())
+            .map_err(RunnerProtocolStoreError::Domain)?;
+        if matches!(reconciled.state(), SessionRunnerPlacementState::Pinned(_)) {
+            insert_registration_reconciliation_observation(
+                &mut transaction,
+                reconciliation,
+                session,
+                prior_event_ordinal,
+                "preserved",
+            )
+            .await?;
+            advance_registration_reconciliation_cursor(&mut transaction, reconciliation, session)
+                .await?;
+            commit_mutation(transaction).await?;
+            return Ok(RunnerRegistrationReconciliationDisposition::Preserved);
+        }
+
+        let event_ordinal = prior_event_ordinal
+            .checked_add(1)
+            .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
+        let grant_origin = placement_grant_origin(Some(&prior), event_ordinal, &reconciled)?;
+        insert_placement_record(
+            &mut transaction,
+            event_ordinal,
+            "runner_lost",
+            &reconciled,
+            PlacementRecordEvidence {
+                registration_identity: stored_registration_identity(pinned_registration.as_ref()),
+                grant_origin,
+                interrupted_tool_attempt: interrupted_attempt,
+                loss_registration_revision: Some(reconciliation.registration_revision()),
+            },
+        )
+        .await?;
+        let changed = sqlx::query(
+            "UPDATE runner_current_session_placement
+                SET event_ordinal = $2
+              WHERE session_id = $1 AND event_ordinal = $3",
+        )
+        .bind(session.into_uuid())
+        .bind(Decimal::from(event_ordinal))
+        .bind(Decimal::from(prior_event_ordinal))
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        if let Some(lease) = current_lease {
+            persist_runner_loss_lease_and_wait(&mut transaction, &reconciled, lease).await?;
+        } else if has_active_runner_boundary(&mut transaction, session).await? {
+            yield_turn_to_runner_recovery_without_lease(&mut transaction, &reconciled).await?;
+        }
+        insert_registration_reconciliation_observation(
+            &mut transaction,
+            reconciliation,
+            session,
+            event_ordinal,
+            "runner_lost",
+        )
+        .await?;
+        outbox::append(
+            transaction.as_mut(),
+            OutboxEvent::RunnerStateTransition(RunnerStateOutboxEvent {
+                session,
+                runner: placement_loss_fence_runner(&reconciled)
+                    .ok_or(RunnerProtocolCorruption::CrossWiredReference)?,
+                placement_revision: reconciled.revision(),
+                sandbox: reconciled.request().sandbox,
+                working_directory: lost_runner_working_directory(&reconciled),
+                state: DispatchedRunnerState::RunnerLost,
+                source: RunnerStateOutboxSource {
+                    placement_event_ordinal: event_ordinal,
+                    connection: None,
+                },
+            }),
+        )
+        .await?;
+        advance_registration_reconciliation_cursor(&mut transaction, reconciliation, session)
+            .await?;
+        commit_mutation(transaction).await?;
+        Ok(RunnerRegistrationReconciliationDisposition::RunnerLost)
+    }
+
+    /// Marks one registration cursor complete after every candidate session
+    /// committed an authenticated observation.
+    pub async fn complete_registration_reconciliation(
+        &self,
+        reconciliation: RunnerRegistrationReconciliationSnapshot,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        self.lock_registration_reconciliation_authority(&mut transaction, reconciliation)
+            .await?;
+        let cursor = lock_registration_reconciliation(&mut transaction, reconciliation).await?;
+        if cursor.complete {
+            transaction.rollback().await?;
+            return Ok(());
+        }
+        let changed = sqlx::query(
+            "UPDATE runner_registration_reconciliation
+                SET state_kind = 'completed'
+              WHERE enrollment_id = $1 AND registration_revision = $2
+                AND state_kind = 'pending'",
+        )
+        .bind(reconciliation.enrollment().into_uuid())
+        .bind(Decimal::from(reconciliation.registration_revision().get()))
         .execute(&mut *transaction)
         .await?
         .rows_affected();
@@ -1591,6 +1944,12 @@ impl RunnerProtocolStore {
             }
             Ordering::Equal => {
                 let (_, enrollment, _) = receipt.into_parts();
+                require_completed_registration_reconciliation(
+                    &mut transaction,
+                    enrollment.enrollment(),
+                    current,
+                )
+                .await?;
                 let pending = enrollment
                     .prepare_registration(advertisement, &self.catalog)
                     .map_err(RunnerProtocolStoreError::Domain)?;
@@ -1607,6 +1966,12 @@ impl RunnerProtocolStore {
                     ));
                 }
                 insert_registration(&mut transaction, revision, pending.registration()).await?;
+                insert_registration_reconciliation(
+                    &mut transaction,
+                    enrollment.enrollment(),
+                    revision,
+                )
+                .await?;
                 sqlx::query(
                     "UPDATE runner_current_registration
                         SET registration_revision = $2
@@ -1694,6 +2059,18 @@ impl RunnerProtocolStore {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::CorrelationMismatch,
             ));
+        }
+        let current: Option<Decimal> = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
+            .bind(enrollment_id.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if let Some(current) = current {
+            require_completed_registration_reconciliation(
+                &mut transaction,
+                enrollment_id,
+                decode_registration_revision(current)?,
+            )
+            .await?;
         }
         terminalize_connection_for_revocation(&mut transaction, enrollment_id).await?;
         let runner = enrollment.runner();
@@ -1801,6 +2178,14 @@ impl RunnerProtocolStore {
                 RunnerDomainError::CorrelationMismatch,
             ));
         }
+        if let Some(previous) = previous {
+            require_completed_registration_reconciliation(
+                &mut transaction,
+                enrollment_id,
+                previous,
+            )
+            .await?;
+        }
         let pending = enrollment
             .prepare_registration(advertisement, &self.catalog)
             .map_err(RunnerProtocolStoreError::Domain)?;
@@ -1819,6 +2204,7 @@ impl RunnerProtocolStore {
             ));
         }
         insert_registration(&mut transaction, revision, pending.registration()).await?;
+        insert_registration_reconciliation(&mut transaction, enrollment_id, revision).await?;
         sqlx::query(
             "INSERT INTO runner_current_registration
                 (enrollment_id, registration_revision)
@@ -2075,9 +2461,12 @@ impl RunnerProtocolStore {
             event_ordinal,
             event_kind,
             placement,
-            registration_identity,
-            grant_origin,
-            None,
+            PlacementRecordEvidence {
+                registration_identity,
+                grant_origin,
+                interrupted_tool_attempt: None,
+                loss_registration_revision: None,
+            },
         )
         .await?;
         if let (Some(grant), Some(registration)) = (grant, registration) {
@@ -2152,6 +2541,16 @@ impl RunnerProtocolStore {
                 ));
             }
         }
+        let current: Option<Decimal> = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
+            .bind(enrollment.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let current = current.ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        if decode_registration_revision(current)? != registration.revision() {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::RegistrationChanged,
+            ));
+        }
         match load_connection_head_in(transaction.as_mut(), enrollment).await? {
             None
             | Some(RunnerConnectionSnapshot {
@@ -2193,9 +2592,12 @@ impl RunnerProtocolStore {
             event_ordinal,
             event_kind,
             &pin.placement,
-            stored_registration_identity(Some(registration)),
-            grant_origin,
-            None,
+            PlacementRecordEvidence {
+                registration_identity: stored_registration_identity(Some(registration)),
+                grant_origin,
+                interrupted_tool_attempt: None,
+                loss_registration_revision: None,
+            },
         )
         .await?;
         if let Some(grant) = pin.grant.as_ref() {
@@ -3172,6 +3574,97 @@ struct LockedRunnerLossPropagation {
     complete: bool,
 }
 
+#[derive(Clone, Copy)]
+struct LockedRunnerRegistrationReconciliation {
+    propagated_through: Option<SessionId>,
+    complete: bool,
+}
+
+async fn lock_registration_reconciliation(
+    transaction: &mut Transaction<'_, Postgres>,
+    reconciliation: RunnerRegistrationReconciliationSnapshot,
+) -> Result<LockedRunnerRegistrationReconciliation, RunnerProtocolStoreError> {
+    let row = sqlx::query(RUNNER_REGISTRATION_RECONCILIATION)
+        .bind(reconciliation.enrollment().into_uuid())
+        .bind(Decimal::from(reconciliation.registration_revision().get()))
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+    let state: String = row.decode_column("state_kind")?;
+    let complete = match state.as_str() {
+        "pending" => false,
+        "completed" => true,
+        _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+    };
+    Ok(LockedRunnerRegistrationReconciliation {
+        propagated_through: row
+            .decode_column::<Option<Uuid>>("propagated_through_session_id")?
+            .map(session_id),
+        complete,
+    })
+}
+
+fn placement_is_registration_reconciliation_candidate(
+    placement: &PgRow,
+    reconciliation: RunnerRegistrationReconciliationSnapshot,
+) -> Result<bool, RunnerProtocolStoreError> {
+    let state: String = placement.decode_column("state_kind")?;
+    let enrollment = placement.decode_column::<Option<Uuid>>("registration_enrollment_id")?;
+    let revision = placement
+        .decode_column::<Option<Decimal>>("registration_revision")?
+        .map(decode_registration_revision)
+        .transpose()?;
+    Ok(state == "pinned"
+        && enrollment == Some(reconciliation.enrollment().into_uuid())
+        && revision.is_some_and(|revision| revision < reconciliation.registration_revision()))
+}
+
+async fn insert_registration_reconciliation_observation(
+    transaction: &mut Transaction<'_, Postgres>,
+    reconciliation: RunnerRegistrationReconciliationSnapshot,
+    session: SessionId,
+    placement_event_ordinal: u64,
+    disposition: &str,
+) -> Result<(), RunnerProtocolStoreError> {
+    sqlx::query(
+        "INSERT INTO runner_registration_reconciliation_observation
+            (enrollment_id, registration_revision, session_id,
+             placement_event_ordinal, disposition_kind)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(reconciliation.enrollment().into_uuid())
+    .bind(Decimal::from(reconciliation.registration_revision().get()))
+    .bind(session.into_uuid())
+    .bind(Decimal::from(placement_event_ordinal))
+    .bind(disposition)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn advance_registration_reconciliation_cursor(
+    transaction: &mut Transaction<'_, Postgres>,
+    reconciliation: RunnerRegistrationReconciliationSnapshot,
+    session: SessionId,
+) -> Result<(), RunnerProtocolStoreError> {
+    let changed = sqlx::query(
+        "UPDATE runner_registration_reconciliation
+            SET propagated_through_session_id = $3
+          WHERE enrollment_id = $1 AND registration_revision = $2
+            AND state_kind = 'pending'",
+    )
+    .bind(reconciliation.enrollment().into_uuid())
+    .bind(Decimal::from(reconciliation.registration_revision().get()))
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if changed != 1 {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    Ok(())
+}
+
 async fn require_runner_loss_session_scheduler(
     transaction: &mut Transaction<'_, Postgres>,
     session: SessionId,
@@ -3362,6 +3855,53 @@ async fn persist_runner_loss_lease_and_wait(
     yield_turn_to_runner_recovery(transaction, placement, &correlation).await
 }
 
+async fn has_active_runner_boundary(
+    transaction: &mut Transaction<'_, Postgres>,
+    session: SessionId,
+) -> Result<bool, RunnerProtocolStoreError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM turn_lifecycle AS lifecycle
+               JOIN turn_attempt AS turn_attempt
+                 ON turn_attempt.turn_attempt_id = lifecycle.current_attempt_id
+                AND turn_attempt.turn_id = lifecycle.turn_id
+                AND turn_attempt.session_id = lifecycle.session_id
+               JOIN tool_request AS request
+                 ON request.producing_model_call_id = lifecycle.active_tool_round_call_id
+                AND request.turn_id = lifecycle.turn_id
+                AND request.session_id = lifecycle.session_id
+               JOIN runner_current_session_placement AS placement_head
+                 ON placement_head.session_id = lifecycle.session_id
+               JOIN runner_session_placement_tool AS required
+                 ON required.session_id = placement_head.session_id
+                AND required.event_ordinal = placement_head.event_ordinal
+                AND required.tool_name = request.tool_name
+                AND required.runner_required
+              WHERE lifecycle.session_id = $1
+                AND lifecycle.state_kind = 'active'
+                AND lifecycle.active_phase_kind = 'running'
+                AND lifecycle.active_tool_round_call_id IS NOT NULL
+                AND turn_attempt.state_kind = 'running'
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM tool_approval_decision AS denied
+                     WHERE denied.request_id = request.request_id
+                       AND denied.decision_kind = 'deny'
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM tool_attempt AS finished
+                     WHERE finished.request_id = request.request_id
+                       AND finished.state_kind = 'terminal'
+                )
+         )",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await?)
+}
+
 async fn yield_turn_to_runner_recovery_without_lease(
     transaction: &mut Transaction<'_, Postgres>,
     placement: &SessionRunnerPlacement,
@@ -3388,7 +3928,7 @@ async fn yield_turn_to_runner_recovery_without_lease(
             AND attempt.request_id = request.request_id
             AND attempt.turn_id = request.turn_id
             AND attempt.session_id = request.session_id
-            AND attempt.state_kind = 'prepared'
+            AND attempt.state_kind IN ('prepared', 'in_flight')
             AND placement_head.session_id = lifecycle.session_id
             AND required.session_id = placement_head.session_id
             AND required.event_ordinal = placement_head.event_ordinal
@@ -4181,6 +4721,84 @@ async fn load_enrollment_in(
     .map_err(RunnerProtocolStoreError::Domain)
 }
 
+async fn insert_registration_reconciliation(
+    transaction: &mut Transaction<'_, Postgres>,
+    enrollment: RunnerEnrollmentId,
+    revision: RunnerRegistrationRevision,
+) -> Result<(), RunnerProtocolStoreError> {
+    if revision == RunnerRegistrationRevision::first() {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO runner_registration_reconciliation
+            (enrollment_id, registration_revision,
+             propagated_through_session_id, state_kind)
+         VALUES ($1, $2, NULL, 'pending')",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn require_completed_registration_reconciliation(
+    transaction: &mut Transaction<'_, Postgres>,
+    enrollment: RunnerEnrollmentId,
+    revision: RunnerRegistrationRevision,
+) -> Result<(), RunnerProtocolStoreError> {
+    if revision == RunnerRegistrationRevision::first() {
+        return Ok(());
+    }
+    let state = sqlx::query_scalar::<_, String>(RUNNER_REGISTRATION_RECONCILIATION_STATE)
+        .bind(enrollment.into_uuid())
+        .bind(Decimal::from(revision.get()))
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+    match state.as_str() {
+        "completed" => return Ok(()),
+        "pending" => {}
+        _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+    }
+    let has_candidate = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM runner_current_session_placement AS current_placement
+              JOIN runner_session_placement_record AS placement
+                ON placement.session_id = current_placement.session_id
+               AND placement.event_ordinal = current_placement.event_ordinal
+              LEFT JOIN runner_registration_reconciliation_observation AS observed
+                ON observed.enrollment_id = $1
+               AND observed.registration_revision = $2
+               AND observed.session_id = placement.session_id
+             WHERE placement.state_kind = 'pinned'
+               AND placement.registration_enrollment_id = $1
+               AND placement.registration_revision < $2
+               AND observed.session_id IS NULL
+        )",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .fetch_one(&mut **transaction)
+    .await?;
+    if has_candidate {
+        return Err(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::RegistrationInProgress,
+        ));
+    }
+    sqlx::query(
+        "UPDATE runner_registration_reconciliation
+            SET state_kind = 'completed'
+          WHERE enrollment_id = $1 AND registration_revision = $2",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 async fn insert_registration(
     transaction: &mut Transaction<'_, Postgres>,
     revision: RunnerRegistrationRevision,
@@ -4626,14 +5244,19 @@ fn stored_registration_identity(
         .unwrap_or((None, None))
 }
 
+struct PlacementRecordEvidence {
+    registration_identity: (Option<Uuid>, Option<Decimal>),
+    grant_origin: Option<Decimal>,
+    interrupted_tool_attempt: Option<ToolAttemptId>,
+    loss_registration_revision: Option<RunnerRegistrationRevision>,
+}
+
 async fn insert_placement_record(
     transaction: &mut Transaction<'_, Postgres>,
     event_ordinal: u64,
     event_kind: &str,
     placement: &SessionRunnerPlacement,
-    registration_identity: (Option<Uuid>, Option<Decimal>),
-    grant_origin: Option<Decimal>,
-    interrupted_tool_attempt: Option<ToolAttemptId>,
+    evidence: PlacementRecordEvidence,
 ) -> Result<(), RunnerProtocolStoreError> {
     let request = placement.request();
     let (selector_kind, selector_runner, selector_class) = encode_selector(&request.selector);
@@ -4641,8 +5264,8 @@ async fn insert_placement_record(
     let (workspace_kind, requested_repository) = encode_workspace_requirement(&request.workspace);
     let state = encode_placement_state(placement.state());
     let permission_overrides: Vec<_> = request.permission_overrides.iter().collect();
-    let (registration_enrollment, registration_revision) = registration_identity;
-    sqlx::query(
+    let (registration_enrollment, registration_revision) = evidence.registration_identity;
+    let mut insert = QueryBuilder::<Postgres>::new(
         "INSERT INTO runner_session_placement_record
             (session_id, event_ordinal, placement_revision, event_kind,
              selector_kind, selector_runner_id, selector_capability_class,
@@ -4650,7 +5273,14 @@ async fn insert_placement_record(
              requested_credential_profile_name, workspace_requirement_kind,
              requested_repository_key, requested_sandbox_profile,
              permission_override_count, state_kind, lost_runner_id,
-             loss_source_kind, pinned_runner_id, interrupted_tool_attempt_id,
+             loss_source_kind",
+    );
+    if evidence.loss_registration_revision.is_some() {
+        insert.push(", loss_registration_revision");
+    }
+    insert.push(
+        ", pinned_runner_id,
+             interrupted_tool_attempt_id,
              pinned_working_directory, pinned_credential_profile_name,
              registration_enrollment_id, registration_revision,
              pinned_tool_count, workspace_repository_key,
@@ -4661,66 +5291,69 @@ async fn insert_placement_record(
              workspace_recovery_kind, workspace_branch_name, workspace_revision,
              credential_grant_runner_id,
              credential_grant_lineage_origin_ordinal, credential_grant_revision)
-         VALUES (
-             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-             $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-             $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
-             $32, $33, $34, $35, $36, $37, $38
-         )",
-    )
-    .bind(placement.session().into_uuid())
-    .bind(Decimal::from(event_ordinal))
-    .bind(Decimal::from(placement.revision().get()))
-    .bind(event_kind)
-    .bind(selector_kind)
-    .bind(selector_runner)
-    .bind(selector_class)
-    .bind(directory_kind)
-    .bind(requested_directory)
-    .bind(
+         VALUES (",
+    );
+    let mut values = insert.separated(", ");
+    values.push_bind(placement.session().into_uuid());
+    values.push_bind(Decimal::from(event_ordinal));
+    values.push_bind(Decimal::from(placement.revision().get()));
+    values.push_bind(event_kind);
+    values.push_bind(selector_kind);
+    values.push_bind(selector_runner);
+    values.push_bind(selector_class);
+    values.push_bind(directory_kind);
+    values.push_bind(requested_directory);
+    values.push_bind(
         request
             .credential_profile
             .as_ref()
             .map(CredentialProfileName::as_str),
-    )
-    .bind(workspace_kind)
-    .bind(requested_repository)
-    .bind(runner_sandbox_to_str(request.sandbox))
-    .bind(count_decimal(permission_overrides.len())?)
-    .bind(state.kind)
-    .bind(state.lost_runner)
-    .bind(state.loss_source)
-    .bind(state.pinned_runner)
-    .bind(interrupted_tool_attempt.map(ToolAttemptId::into_uuid))
-    .bind(state.pinned_directory)
-    .bind(state.pinned_profile)
-    .bind(registration_enrollment)
-    .bind(registration_revision)
-    .bind(count_decimal(state.tools.len())?)
-    .bind(state.workspace_repository)
-    .bind(state.workspace_directory)
-    .bind(state.workspace_manifest)
-    .bind(state.workspace_placement_revision)
-    .bind(state.workspace_clone_url_digest)
-    .bind(state.workspace_credential_profile)
-    .bind(state.workspace_sandbox)
-    .bind(state.workspace_relative_path)
-    .bind(state.workspace_recovery_kind)
-    .bind(state.workspace_branch_name)
-    .bind(state.workspace_revision)
-    .bind(
+    );
+    values.push_bind(workspace_kind);
+    values.push_bind(requested_repository);
+    values.push_bind(runner_sandbox_to_str(request.sandbox));
+    values.push_bind(count_decimal(permission_overrides.len())?);
+    values.push_bind(state.kind);
+    values.push_bind(state.lost_runner);
+    values.push_bind(state.loss_source);
+    if let Some(revision) = evidence.loss_registration_revision {
+        values.push_bind(Decimal::from(revision.get()));
+    }
+    values.push_bind(state.pinned_runner);
+    values.push_bind(
+        evidence
+            .interrupted_tool_attempt
+            .map(ToolAttemptId::into_uuid),
+    );
+    values.push_bind(state.pinned_directory);
+    values.push_bind(state.pinned_profile);
+    values.push_bind(registration_enrollment);
+    values.push_bind(registration_revision);
+    values.push_bind(count_decimal(state.tools.len())?);
+    values.push_bind(state.workspace_repository);
+    values.push_bind(state.workspace_directory);
+    values.push_bind(state.workspace_manifest);
+    values.push_bind(state.workspace_placement_revision);
+    values.push_bind(state.workspace_clone_url_digest);
+    values.push_bind(state.workspace_credential_profile);
+    values.push_bind(state.workspace_sandbox);
+    values.push_bind(state.workspace_relative_path);
+    values.push_bind(state.workspace_recovery_kind);
+    values.push_bind(state.workspace_branch_name);
+    values.push_bind(state.workspace_revision);
+    values.push_bind(
         state
             .grant_lineage
             .map(|lineage| lineage.runner.into_uuid()),
-    )
-    .bind(grant_origin)
-    .bind(
+    );
+    values.push_bind(evidence.grant_origin);
+    values.push_bind(
         state
             .grant_lineage
             .map(|lineage| Decimal::from(lineage.revision.get())),
-    )
-    .execute(&mut **transaction)
-    .await?;
+    );
+    values.push_unseparated(")");
+    insert.build().execute(&mut **transaction).await?;
     for tool in state.tools {
         sqlx::query(
             "INSERT INTO runner_session_placement_tool
@@ -5252,6 +5885,7 @@ async fn authenticate_loss_predecessor(
     }
     let (predecessor, predecessor_request, pinned) =
         load_authenticated_pinned_loss_predecessor(connection, row, request, state).await?;
+    authenticate_registration_loss_cause(connection, row, &predecessor).await?;
     authenticate_pinned_predecessor(
         connection,
         &predecessor,
@@ -5319,6 +5953,68 @@ async fn load_authenticated_pinned_loss_predecessor(
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
     Ok((predecessor, predecessor_request, pinned))
+}
+
+async fn authenticate_registration_loss_cause(
+    connection: &mut PgConnection,
+    loss: &PgRow,
+    predecessor: &PgRow,
+) -> Result<(), RunnerProtocolStoreError> {
+    let source = loss
+        .decode_column::<Option<String>>("loss_source_kind")?
+        .map(|source| {
+            runner_placement_loss_source_from_str(&source)
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)
+        })
+        .transpose()?
+        .ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+    let cause = loss
+        .decode_column::<Option<Decimal>>("loss_registration_revision")?
+        .map(decode_registration_revision)
+        .transpose()?;
+    if source == RunnerPlacementLossSource::Connection {
+        return match cause {
+            None => Ok(()),
+            Some(_) => Err(RunnerProtocolCorruption::CrossWiredReference.into()),
+        };
+    }
+    let cause = cause.ok_or(RunnerProtocolCorruption::IncompleteInventory)?;
+    let (enrollment, pinned_revision) = decode_pinned_registration_identity(loss)?;
+    if cause <= pinned_revision {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let session = session_id(loss.decode_column("session_id")?);
+    let predecessor_event = predecessor.decode_column::<Decimal>("event_ordinal")?;
+    let preserves = sqlx::query_scalar::<_, bool>(
+        "SELECT runner_registration_preserves_placement($1, $2, $3, $4)",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(cause.get()))
+    .bind(session.into_uuid())
+    .bind(predecessor_event)
+    .fetch_one(&mut *connection)
+    .await?;
+    let observed = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM runner_registration_reconciliation_observation
+             WHERE enrollment_id = $1
+               AND registration_revision = $2
+               AND session_id = $3
+               AND placement_event_ordinal = $4
+               AND disposition_kind = 'runner_lost'
+        )",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(cause.get()))
+    .bind(session.into_uuid())
+    .bind(loss.decode_column::<Decimal>("event_ordinal")?)
+    .fetch_one(&mut *connection)
+    .await?;
+    if preserves || !observed {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    Ok(())
 }
 
 async fn authenticate_pre_pin_loss_predecessor(
@@ -5490,6 +6186,7 @@ async fn authenticate_pinned_predecessor(
                         &lost,
                     )
                     .await?;
+                authenticate_registration_loss_cause(connection, &predecessor, &prior_row).await?;
                 current_row = Some(prior_row);
                 current_request = prior_request;
                 current_pinned = prior_pinned;
@@ -5850,7 +6547,14 @@ async fn authenticate_abandonment_predecessor(
             .await?;
             let predecessor_registration = decode_pinned_registration_identity(&predecessor)?;
             let abandonment_registration = decode_pinned_registration_identity(row)?;
-            if pinned != *lost.pinned() || predecessor_registration != abandonment_registration {
+            let predecessor_loss_registration =
+                predecessor.decode_column::<Option<Decimal>>("loss_registration_revision")?;
+            let abandonment_loss_registration =
+                row.decode_column::<Option<Decimal>>("loss_registration_revision")?;
+            if pinned != *lost.pinned()
+                || predecessor_registration != abandonment_registration
+                || predecessor_loss_registration != abandonment_loss_registration
+            {
                 return Err(RunnerProtocolCorruption::CrossWiredReference.into());
             }
             let loss = SessionRunnerPlacementState::RunnerLost(lost.as_ref().clone());
@@ -5862,6 +6566,7 @@ async fn authenticate_abandonment_predecessor(
                     &loss,
                 )
                 .await?;
+            authenticate_registration_loss_cause(connection, &predecessor, &prior_row).await?;
             authenticate_pinned_predecessor(
                 connection,
                 &prior_row,
@@ -5960,6 +6665,9 @@ fn placement_row_has_invalid_pre_pin_loss_facts(
     Ok(row
         .decode_column::<Option<String>>("loss_source_kind")?
         .is_some()
+        || row
+            .decode_column::<Option<Decimal>>("loss_registration_revision")?
+            .is_some()
         || placement_row_has_pinned_facts(row)?)
 }
 
@@ -5969,6 +6677,9 @@ fn placement_row_has_loss_facts(row: &PgRow) -> Result<bool, RunnerProtocolStore
         .is_some()
         || row
             .decode_column::<Option<String>>("loss_source_kind")?
+            .is_some()
+        || row
+            .decode_column::<Option<Decimal>>("loss_registration_revision")?
             .is_some())
 }
 

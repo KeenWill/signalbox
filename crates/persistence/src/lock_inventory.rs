@@ -419,6 +419,17 @@ pub(crate) const RUNNER_REGISTRATION_HEAD: &str = "SELECT registration_revision
               WHERE enrollment_id = $1
               FOR UPDATE";
 
+pub(crate) const RUNNER_REGISTRATION_RECONCILIATION: &str =
+    "SELECT propagated_through_session_id, state_kind
+       FROM runner_registration_reconciliation
+      WHERE enrollment_id = $1 AND registration_revision = $2
+      FOR UPDATE";
+
+pub(crate) const RUNNER_REGISTRATION_RECONCILIATION_STATE: &str = "SELECT state_kind
+       FROM runner_registration_reconciliation
+      WHERE enrollment_id = $1 AND registration_revision = $2
+      FOR UPDATE";
+
 pub(crate) const RUNNER_PLACEMENT_HEAD: &str = "SELECT record.*
                FROM runner_current_session_placement AS current_placement
                JOIN runner_session_placement_record AS record
