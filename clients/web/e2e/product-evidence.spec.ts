@@ -16,7 +16,7 @@ const bootstrapFixture = {
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 262_144 },
+  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 65_536 },
 } as const
 
 const attentionEvidence = { path: '/attention', title: 'Attention', snapshot: 'attention' } as const

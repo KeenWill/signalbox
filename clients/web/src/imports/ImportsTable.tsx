@@ -22,10 +22,12 @@ export function ImportsTable({
   rows,
   selectedId,
   onSelect,
+  density,
 }: {
   rows: readonly WebImportSummary[]
   selectedId: string | null
   onSelect: (id: string) => void
+  density: 'compact' | 'comfortable'
 }) {
   'use no memo'
   const columns = useMemo<LegacyColumnDef<WebImportSummary>[]>(
@@ -77,7 +79,7 @@ export function ImportsTable({
   const virtualizer = useVirtualizer({
     count: tableRows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 42,
+    estimateSize: () => (density === 'comfortable' ? 54 : 42),
     overscan: IMPORT_TABLE_OVERSCAN_ROWS,
     getItemKey: (index) => tableRows[index]?.original.imported_conversation_id ?? index,
   })

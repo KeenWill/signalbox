@@ -79,7 +79,11 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    return decodeWebContractBootstrap(await response.json())
+    const bootstrap = decodeWebContractBootstrap(await response.json())
+    if (Object.values(bootstrap.capabilities).some((enabled) => !enabled)) {
+      throw new Error('incompatible web contract capabilities')
+    }
+    return bootstrap
   }
 }
 

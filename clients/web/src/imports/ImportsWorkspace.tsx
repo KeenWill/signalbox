@@ -19,7 +19,7 @@ import type {
 } from '../generated/web-contract.mjs'
 import { ScenarioNavigation } from '../ScenarioNavigation'
 import { type DiagnosticSnapshot, IconCommand, OverlaySurfaces } from '../Surfaces'
-import { store } from '../state'
+import { selectApp, store, useAppSelector } from '../state'
 import { type ImportApi, ImportApiError, ImportReceiptCorrelationError } from './api'
 import { ImportedEntries } from './ImportedEntries'
 import { ImportsTable } from './ImportsTable'
@@ -66,6 +66,7 @@ export function ImportsWorkspace({
   onNavigationDisabledChange?: (disabled: boolean) => void
 }) {
   const queryClient = useQueryClient()
+  const density = useAppSelector(selectApp).density
   const queryScope = scenario ? 'scenario' : 'production'
   const [format, setFormat] = useState<FormatFilter>(EMPTY_FILTER)
   const [sourceSession, setSourceSession] = useState('')
@@ -434,6 +435,7 @@ export function ImportsWorkspace({
                 rows={imports.items}
                 selectedId={selectedImport}
                 onSelect={selectImport}
+                density={density}
               />
             )}
           </section>
@@ -660,6 +662,7 @@ export function ImportsWorkspace({
                     }
                     selected={selectedFrontier}
                     commandContext={commandContext}
+                    density={density}
                   />
                 )}
               </div>

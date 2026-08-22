@@ -10,7 +10,7 @@ const bootstrapFixture = {
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 262_144 },
+  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 65_536 },
 } as const
 
 const settingsPreferenceFixture = {
@@ -248,6 +248,26 @@ test('serves exact source-session searches through the deterministic adapter', a
   await page.getByRole('checkbox', { name: 'Use exact source session filter' }).check()
 
   await expect(rows).toHaveAttribute('data-total-loaded', '1')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('applies product density to Imports virtual rows', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto('/imports')
+
+  const row = page
+    .getByRole('rowgroup', { name: 'Imported conversation rows' })
+    .getByRole('row')
+    .first()
+  await expect(row).toBeVisible()
+  const compactHeight = await row.evaluate((element) => element.getBoundingClientRect().height)
+  await page.getByRole('button', { name: 'Use comfortable density' }).click()
+  await expect(page.locator('html')).toHaveAttribute('data-density', 'comfortable')
+  await expect
+    .poll(() => row.evaluate((element) => element.getBoundingClientRect().height))
+    .toBeGreaterThan(compactHeight)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

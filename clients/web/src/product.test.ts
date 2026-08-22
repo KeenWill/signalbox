@@ -10,7 +10,7 @@ const bootstrapFixture = {
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 262_144 },
+  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 65_536 },
 } as const
 
 afterEach(() => vi.unstubAllGlobals())
@@ -54,6 +54,25 @@ describe('SameOriginProductTransport', () => {
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
       'incompatible web contract',
+    )
+  })
+
+  it('fails closed when the daemon disables a required capability', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...bootstrapFixture,
+              capabilities: { ...bootstrapFixture.capabilities, import_discovery: false },
+            }),
+          ),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'incompatible web contract capabilities',
     )
   })
 
