@@ -1572,21 +1572,6 @@ async fn run_hub(
             return Err(failure);
         }
     };
-    let web_http_runtime = match WebHttpRuntime::bind(web_configuration, pool.clone()).await {
-        Ok(runtime) => runtime,
-        Err(_) => {
-            let failure = erase_startup_cause(
-                RuntimePhase::SocketBinding,
-                SanitizedStartupCause::Static("web_http_listener_bind_failed"),
-            );
-            let _ = listener.cleanup();
-            let _ = runner_listener.cleanup();
-            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
-            drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
-        }
-    };
     tracing::info!(
         phase = ?RuntimePhase::SocketBinding,
         "daemon startup phase completed"
@@ -1688,7 +1673,6 @@ async fn run_hub(
             return Ok(ShutdownOutcome::GuardLost);
         }
     }
-    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
         scheduler_pool.clone(),
@@ -1706,6 +1690,27 @@ async fn run_hub(
         Some(ref registry) => process_runtime.with_blob_store_registry(Arc::clone(registry)),
         None => process_runtime,
     };
+    let web_http_runtime = match WebHttpRuntime::bind(
+        web_configuration,
+        pool.clone(),
+        process_runtime.monitor(),
+    )
+    .await
+    {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::SocketBinding,
+                SanitizedStartupCause::Static("web_http_listener_bind_failed"),
+            );
+            let _ = runner_listener.cleanup();
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Err(failure);
+        }
+    };
+    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
     let model_repository = PostgresModelCallRepository::new(
         scheduler_pool.clone(),

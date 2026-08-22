@@ -20,6 +20,7 @@ mod review_orchestration;
 mod review_workflow;
 mod scheduler;
 mod session_delegation;
+mod session_live;
 mod session_metadata;
 mod session_timeline;
 mod start_eligible_turn;
@@ -151,6 +152,11 @@ pub use scheduler::{
     ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit, scheduler_pass_admission_cap,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;
+pub use session_live::{
+    ReadSessionLiveService, SessionLiveActiveState, SessionLiveActiveTurn, SessionLiveReader,
+    SessionLiveReconciliation, SessionLiveRunner, SessionLiveRunnerConnectionHealth,
+    SessionLiveRunnerState, SessionLiveSnapshot, max_session_live_queued_turns,
+};
 pub use session_metadata::{
     ListSessionMetadataService, LoadSessionMetadataService, ReplaceSessionMetadataOutcome,
     ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,

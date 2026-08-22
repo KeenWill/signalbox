@@ -39,6 +39,7 @@ pub mod scheduler;
 pub mod session;
 pub mod session_credentials;
 pub mod session_delegation;
+pub mod session_live;
 pub mod session_metadata;
 pub mod session_placement;
 pub mod session_timeline;
