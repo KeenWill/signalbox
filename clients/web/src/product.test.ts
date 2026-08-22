@@ -61,6 +61,12 @@ const fullActivityPageFixture = () => {
   }
 }
 
+const activityPageBoundary = (page: ReturnType<typeof fullActivityPageFixture>) => {
+  const boundary = page.summaries.at(-1)
+  if (!boundary) throw new Error('full activity fixture has a boundary')
+  return boundary
+}
+
 const sessionRequestPath = `/api/sessions?sort=last_activity_desc&include_archived=true&search=release&after_session_id=${sessionId}&after_activity_unix_microseconds=1724200000000000`
 const errorFixture = {
   error: {
@@ -326,6 +332,36 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('precedes its identity continuation')
   })
 
+  it('rejects activity pages that precede the exclusive request cursor', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+              summaries: [
+                {
+                  ...sessionPageFixture.summaries[0],
+                  last_activity: { kind: 'turn', unix_milliseconds: '1724200000001' },
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+        afterSession: sessionId,
+        afterActivity: '1724200000000999',
+      }),
+    ).rejects.toThrow('precedes its activity continuation')
+  })
+
   it('rejects archived rows when the request excludes them', async () => {
     vi.stubGlobal(
       'fetch',
@@ -386,6 +422,59 @@ describe('SameOriginProductTransport', () => {
         includeArchived: false,
       }),
     ).rejects.toThrow('contradictory state and action')
+  })
+
+  it('rejects blocked rows without blocked-goal evidence', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+              summaries: [
+                {
+                  ...sessionPageFixture.summaries[0],
+                  state: 'blocked',
+                  action: 'provide_goal_need',
+                  goal_block: null,
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('missing blocked-goal evidence')
+  })
+
+  it('rejects impossible title truncation flags', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+              summaries: [{ ...sessionPageFixture.summaries[0], title_truncated: true }],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('contradictory title truncation flag')
   })
 
   it('rejects summaries beyond the daemon scalar ceilings', async () => {
@@ -637,8 +726,7 @@ describe('SameOriginProductTransport', () => {
 
   it('accepts exact continuation precision within the displayed millisecond', async () => {
     const pageFixture = fullActivityPageFixture()
-    const boundary = pageFixture.summaries.at(-1)
-    if (!boundary) throw new Error('full activity fixture has a boundary')
+    const boundary = activityPageBoundary(pageFixture)
     const precisePage = {
       ...pageFixture,
       continuation: {

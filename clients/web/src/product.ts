@@ -170,9 +170,19 @@ const validateSessionPage = (
     if (summary.action !== expectedActionByState[summary.state]) {
       throw new Error('session catalog response contains a contradictory state and action')
     }
+    if (summary.state === 'blocked' && summary.goal_block == null) {
+      throw new Error('session catalog blocked row is missing blocked-goal evidence')
+    }
+    const titleScalars =
+      typeof summary.title_summary === 'string' ? Array.from(summary.title_summary).length : 0
     if (
-      (typeof summary.title_summary === 'string' &&
-        Array.from(summary.title_summary).length > MAX_SESSION_SUMMARY_SCALARS) ||
+      summary.title_truncated &&
+      (summary.title_summary == null || titleScalars !== MAX_SESSION_SUMMARY_SCALARS)
+    ) {
+      throw new Error('session catalog response contains a contradictory title truncation flag')
+    }
+    if (
+      titleScalars > MAX_SESSION_SUMMARY_SCALARS ||
       (summary.goal_block !== null &&
         summary.goal_block !== undefined &&
         Array.from(summary.goal_block.need_summary).length > MAX_SESSION_SUMMARY_SCALARS)
@@ -197,6 +207,14 @@ const validateSessionPage = (
     first.session_id <= request.afterSession
   ) {
     throw new Error('session catalog response precedes its identity continuation')
+  }
+  if (
+    request.sort === 'activity' &&
+    request.afterActivity !== undefined &&
+    first !== undefined &&
+    BigInt(first.last_activity.unix_milliseconds) > BigInt(request.afterActivity) / 1000n
+  ) {
+    throw new Error('session catalog response precedes its activity continuation')
   }
   for (let index = 1; index < page.summaries.length; index += 1) {
     const previous = page.summaries[index - 1]

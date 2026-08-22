@@ -82,7 +82,7 @@ const secondPage = {
       queued_turn_count: '0',
       session_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c8f',
       state: 'idle',
-      title_summary: 'Archived investigation',
+      title_summary: 'A'.repeat(128),
       title_truncated: true,
     },
   ],

@@ -88,6 +88,22 @@ test('keeps product sequences suspended while the command palette is open', asyn
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('Escape closes only the active palette over a selected session', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  const sessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
+  await page.goto(`/sessions?session=${sessionId}`)
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeHidden()
+  await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(sessionId)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('clears scenario-owned help when browser history returns to the product', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)

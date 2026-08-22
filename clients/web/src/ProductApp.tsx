@@ -337,10 +337,14 @@ export function ProductApp({
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
-      callback: () => {
-        if (binding.commandId === 'surface.escape' || store.getState().app.overlay === null) {
-          invokeCommand(binding.commandId, context)
-        }
+      callback: (event) => {
+        const target = event.target
+        const escapeHandledByOverlay =
+          binding.commandId === 'surface.escape' &&
+          target instanceof Element &&
+          target.closest('.product-palette, .mobile-navigation') !== null
+        if (store.getState().app.overlay !== null || escapeHandledByOverlay) return
+        invokeCommand(binding.commandId, context)
       },
     })),
   )
@@ -412,7 +416,7 @@ export function ProductApp({
         </div>
         {content}
       </main>
-      {app.layout === 'workbench' && (
+      {app.layout === 'workbench' && surface !== 'sessions' && (
         <aside className="product-inspector" aria-label="Inspector">
           <span className="eyebrow">Inspector</span>
           <h2>Selection details</h2>
