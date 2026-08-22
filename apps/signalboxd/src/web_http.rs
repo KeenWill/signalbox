@@ -963,9 +963,6 @@ async fn serve_blob(
         }
     };
     let method = request.method().clone();
-    if exceeds_web_blob_range_limit(partial, length) {
-        return range_not_satisfiable(total, &etag);
-    }
     let body = if method == Method::HEAD {
         Body::empty()
     } else {
@@ -988,10 +985,29 @@ async fn serve_blob(
                 };
             reader_body(reader, length.get(), permit)
         } else {
-            match open_recorded_blob_verified(runtime.registry(), &entry).await {
-                Ok(reader) => reader_body(reader, length.get(), permit),
+            let mut reader = match open_recorded_blob_verified(runtime.registry(), &entry).await {
+                Ok(reader) => reader,
                 Err(error) => return blob_read_error_response(error),
+            };
+            let skipped = match tokio::io::copy(
+                &mut (&mut reader).take(offset),
+                &mut tokio::io::sink(),
+            )
+            .await
+            {
+                Ok(skipped) => skipped,
+                Err(_) => {
+                    return blob_read_error_response(
+                        crate::blob_read_runtime::BlobReadError::Unavailable,
+                    );
+                }
+            };
+            if skipped != offset {
+                return blob_read_error_response(
+                    crate::blob_read_runtime::BlobReadError::Integrity,
+                );
             }
+            reader_body(reader, length.get(), permit)
         }
     };
     let mut response = Response::new(body);
@@ -1018,10 +1034,6 @@ async fn serve_blob(
 
 fn try_acquire_web_blob_read_permit(budget: Arc<Semaphore>) -> Option<OwnedSemaphorePermit> {
     budget.try_acquire_owned().ok()
-}
-
-fn exceeds_web_blob_range_limit(partial: bool, length: u64) -> bool {
-    partial && length > MAX_BLOB_RANGE_BYTES
 }
 
 fn reader_body(
@@ -1490,7 +1502,6 @@ mod tests {
         http::{Request, StatusCode, header},
     };
     use http_body_util::BodyExt as _;
-    use signalbox_blob_store::MAX_BLOB_RANGE_BYTES;
     use signalbox_web_contract::{
         MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebContractBootstrap, WebContractExample,
     };
@@ -1501,8 +1512,8 @@ mod tests {
     use super::{
         DEFAULT_WEB_BIND_ADDRESS, MAX_CONCURRENT_WEB_BLOB_READS, WebHttpConfiguration,
         WebHttpConfigurationError, WebHttpRuntime, content_disposition, deterministic_test_router,
-        exceeds_web_blob_range_limit, if_none_match, ndjson_response, parse_byte_range,
-        production_router, single_range_header, try_acquire_web_blob_read_permit,
+        if_none_match, ndjson_response, parse_byte_range, production_router, single_range_header,
+        try_acquire_web_blob_read_permit,
     };
 
     fn loopback_ephemeral() -> SocketAddr {
@@ -1543,11 +1554,11 @@ mod tests {
     }
 
     #[test]
-    fn full_downloads_are_not_subject_to_the_partial_range_ceiling() {
-        let oversized = MAX_BLOB_RANGE_BYTES + 1;
+    fn open_ended_ranges_can_exceed_one_storage_chunk() {
+        let total = signalbox_blob_store::MAX_BLOB_RANGE_BYTES + 2;
+        let range = parse_byte_range(&header::HeaderValue::from_static("bytes=1-"), total);
 
-        assert!(!exceeds_web_blob_range_limit(false, oversized));
-        assert!(exceeds_web_blob_range_limit(true, oversized));
+        assert_eq!(range, Ok((1, total - 1, true)));
     }
 
     #[test]

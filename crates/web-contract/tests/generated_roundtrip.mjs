@@ -122,6 +122,54 @@ test("generated blob decoder rejects off-origin content URLs", () => {
   );
 });
 
+test("generated blob decoder rejects invalid download media metadata", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        digest,
+        byte_length: "1",
+        declared_media_type: "application/octet-stream",
+        display_filename: [],
+        available_views: [
+          {
+            kind: "download",
+            content_url: `/api/blobs/${digest}/download?media_type=%00`,
+            media_type: "application/octet-stream",
+            byte_length: "1",
+            derivations: [],
+          },
+        ],
+      }),
+    /MIME value/,
+  );
+});
+
+test("generated blob decoder bounds declared media types", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        digest,
+        byte_length: "1",
+        declared_media_type: `text/${"x".repeat(251)}`,
+        display_filename: [],
+        available_views: [
+          {
+            kind: "download",
+            content_url: `/api/blobs/${digest}/download?media_type=application%2Foctet-stream`,
+            media_type: "application/octet-stream",
+            byte_length: "1",
+            derivations: [],
+          },
+        ],
+      }),
+    /declared_media_type must be/,
+  );
+});
+
 test("generated blob decoder rejects multiple display filenames", () => {
   assert.throws(
     () =>
@@ -316,6 +364,51 @@ test("generated blob decoder rejects noncanonical transformation parameters", ()
                   class: "deterministic",
                   implementation_digest: digest,
                   cache_key: digest,
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    /parameters_json must be canonical JSON/,
+  );
+});
+
+test("generated blob decoder rejects lone surrogates in canonical parameters", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        digest,
+        byte_length: "1",
+        declared_media_type: "image/png",
+        display_filename: [],
+        available_views: [
+          {
+            kind: "download",
+            content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
+            media_type: "image/png",
+            byte_length: "1",
+            derivations: [],
+          },
+          {
+            kind: "preview",
+            content_url: `/api/blobs/${digest}/content/image-png`,
+            media_type: "image/png",
+            byte_length: "1",
+            derivations: [
+              {
+                derivation_id: "01990f5f-55c0-7000-8000-000000000001",
+                input_digests: [digest],
+                output_digests: [digest],
+                transformation_name: "image.preview",
+                transformation_version: 1,
+                parameters_json: String.raw`"\ud800"`,
+                producer: {
+                  class: "executed",
+                  execution_id: "01990f5f-55c0-7000-8000-000000000002",
+                  implementation_digest: digest,
                 },
               },
             ],
