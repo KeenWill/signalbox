@@ -5785,6 +5785,7 @@ pub enum AttentionState {
     Blocked,
     AwaitingApproval,
     Ambiguous,
+    AwaitingToolRecovery,
     AwaitingReconciliation,
     RunnerLost,
     Idle,
