@@ -34,6 +34,8 @@ const INVALID_READ_ARGUMENTS: &str = "expected a canonical digest, view, optiona
 const RESULT_TOO_LARGE_DETAIL: &str = r#"{"status":"result_too_large"}"#;
 // numeric-bound: ceiling - reserves processor-frame space for validated evidence and framing
 const MAX_INITIAL_OPTIONS_BYTES: usize = MAX_PROCESSOR_FRAME_BYTES / 4;
+// numeric-bound: hard safety ceiling - bounds recursive JSON serialization and destruction work
+const MAX_FILE_READ_ARGUMENT_DEPTH: usize = 256;
 
 /// Checked service request for `file_inspect`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -320,6 +322,9 @@ fn decode_inspect(
 fn decode_read(
     arguments: &NormalizedToolArguments,
 ) -> Result<FileReadServiceRequest, InvalidFileMediaArguments> {
+    if !json_container_depth_fits(arguments.as_str(), MAX_FILE_READ_ARGUMENT_DEPTH) {
+        return Err(InvalidFileMediaArguments);
+    }
     let decoded: FileReadArguments = decode_without_recursion_limit(arguments.as_str())?;
     let continuation = decoded
         .continuation
@@ -361,6 +366,41 @@ fn decode_without_recursion_limit<T: for<'de> Deserialize<'de>>(
 
 fn initial_options_fit(options: &BTreeMap<String, Value>) -> bool {
     serde_json::to_vec(options).is_ok_and(|encoded| encoded.len() <= MAX_INITIAL_OPTIONS_BYTES)
+}
+
+fn json_container_depth_fits(encoded: &str, maximum_depth: usize) -> bool {
+    let mut depth = 0_usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in encoded.bytes() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth = match depth.checked_add(1) {
+                    Some(depth) if depth <= maximum_depth => depth,
+                    _ => return false,
+                };
+            }
+            b'}' | b']' => {
+                depth = match depth.checked_sub(1) {
+                    Some(depth) => depth,
+                    None => return false,
+                };
+            }
+            _ => {}
+        }
+    }
+    depth == 0 && !in_string && !escaped
 }
 
 /// Generic executor for both file/media tools.
@@ -670,6 +710,17 @@ mod tests {
         )
     }
 
+    fn excessively_nested_initial_options(digest: FileDigest) -> String {
+        let nested = format!(
+            "{}0{}",
+            "[".repeat(MAX_FILE_READ_ARGUMENT_DEPTH),
+            "]".repeat(MAX_FILE_READ_ARGUMENT_DEPTH)
+        );
+        format!(
+            r#"{{\"digest\":\"{digest}\",\"view\":\"body_text\",\"options\":{{\"nested\":{nested}}},\"visible_part\":null}}"#
+        )
+    }
+
     fn many_long_media_types() -> Vec<CanonicalMediaType> {
         (0..32)
             .map(|index| {
@@ -764,6 +815,15 @@ mod tests {
             .expect("deep bounded options remain available to the selected adapter");
 
         assert!(decoded.options().is_some());
+    }
+
+    #[test]
+    fn read_arguments_reject_options_beyond_the_contract_depth_ceiling() {
+        let supplied = excessively_nested_initial_options(FileDigest::from_bytes([0x55; 32]));
+
+        let outcome = decode_read(&arguments(&supplied));
+
+        assert_eq!(outcome, Err(InvalidFileMediaArguments));
     }
 
     #[test]
