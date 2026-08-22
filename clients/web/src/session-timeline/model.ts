@@ -14,8 +14,8 @@ import {
 } from '../generated/web-contract.mjs'
 
 export const MAX_RETAINED_SESSION_ITEMS = 768
-const MAX_CONTRACT_TIMELINE_WINDOW_ITEMS = 256
-const MAX_CONTRACT_TIMELINE_WINDOW_BYTES = 64 * 1024
+export const MAX_CONTRACT_TIMELINE_WINDOW_ITEMS = 256
+export const MAX_CONTRACT_TIMELINE_WINDOW_BYTES = 64 * 1024
 const PROJECTED_ITEM_ENVELOPE_BYTES = 64
 // Hard safety ceiling preventing a regressed endpoint from materializing an
 // unbounded JSON response before the generated decoder can reject its shape.
@@ -418,15 +418,15 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     if (!this.detailAvailable) {
       throw new TypeError('bounded session timeline detail capability is unavailable')
     }
+    if (cursor?.type === 'more_at') {
+      throw new TypeError('item detail cannot continue at another timeline item')
+    }
     const address = String(decimalAddress(eventSequence))
     const bounded = boundedDetailLimits(limits, this.limits)
     const query = new URLSearchParams({
       max_items: String(bounded.maxItems),
       max_bytes: String(bounded.maxBytes),
     })
-    if (cursor?.type === 'more_at') {
-      query.set('cursor_address', cursor.address.event_sequence)
-    }
     if (cursor?.type === 'more_body') {
       query.set('cursor_address', cursor.body.address.event_sequence)
       query.set('cursor_field', cursor.body.field)
@@ -467,13 +467,13 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       throw new TypeError('timeline detail exceeds the requested byte ceiling')
     }
     if (page.continuation) {
+      if (page.continuation.type === 'more_at') {
+        throw new TypeError('item detail cannot continue at another timeline item')
+      }
       if (cursor && sameDetailContinuation(cursor, page.continuation)) {
         throw new TypeError('timeline detail continuation did not advance')
       }
-      const continuationAddress =
-        page.continuation.type === 'more_at'
-          ? page.continuation.address.event_sequence
-          : page.continuation.body.address.event_sequence
+      const continuationAddress = page.continuation.body.address.event_sequence
       if (continuationAddress !== address) {
         throw new TypeError('timeline detail continuation changed the stable address')
       }

@@ -45,6 +45,13 @@ const compatibleKinds = {
 } as const satisfies Record<DetailBody['type'], readonly DetailKind[]>
 
 export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): boolean => {
+  if (body.type === 'model_settings') {
+    return kind === 'session_model_settings_changed'
+      ? body.turn_id === null && body.cause_code === 'session_defaults_changed'
+      : kind === 'turn_model_settings_resolved'
+        ? body.turn_id !== null && body.cause_code === 'turn_settings_resolved'
+        : false
+  }
   if (body.type === 'turn_lifecycle') {
     const lifecycleByKind = {
       turn_activated: ['activated', 'activated'],

@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { decodeWebSessionTimelineWindow } from './generated/web-contract.mjs'
+import {
+  decodeWebContractBootstrap,
+  decodeWebSessionTimelineWindow,
+} from './generated/web-contract.mjs'
 import { isCompatibleDetailBody } from './SessionItemDetail'
 import {
+  hasUsableSessionTimeline,
   isCanonicalSessionId,
   restoredTimelineSelection,
   sameSessionWindowAnchor,
@@ -103,6 +107,41 @@ describe('Session Workspace projection', () => {
     expect(timelineArrowTarget(ids, '42', 'Enter')).toBeUndefined()
   })
 
+  it('rejects readiness when advertised window limits exceed client ceilings', () => {
+    const bootstrap = decodeWebContractBootstrap({
+      contract: { name: 'signalbox.web-http', version: '1' },
+      capabilities: {
+        bounded_json: true,
+        same_origin_json_mutations: true,
+        ndjson_streaming: true,
+        bounded_session_timeline: true,
+        bounded_session_timeline_detail: true,
+      },
+      limits: {
+        max_json_body_bytes: 1024,
+        max_ndjson_item_bytes: 1024,
+        max_timeline_window_items: 256,
+        max_timeline_window_bytes: 64 * 1024,
+        max_timeline_detail_items: 128,
+        max_timeline_detail_bytes: 64 * 1024,
+      },
+    })
+
+    expect(hasUsableSessionTimeline(bootstrap)).toBe(true)
+    expect(
+      hasUsableSessionTimeline({
+        ...bootstrap,
+        limits: { ...bootstrap.limits, max_timeline_window_items: 257 },
+      }),
+    ).toBe(false)
+    expect(
+      hasUsableSessionTimeline({
+        ...bootstrap,
+        limits: { ...bootstrap.limits, max_timeline_window_bytes: 64 * 1024 + 1 },
+      }),
+    ).toBe(false)
+  })
+
   it('rejects detail bodies that do not belong to the advertised event kind', () => {
     const lifecycleBody = {
       type: 'turn_lifecycle',
@@ -130,5 +169,26 @@ describe('Session Workspace projection', () => {
     expect(
       isCompatibleDetailBody('turn_cancelled', { ...lifecycleBody, cause_code: 'cancelled' }),
     ).toBe(true)
+
+    const sessionSettings = {
+      type: 'model_settings',
+      turn_id: null,
+      cause_code: 'session_defaults_changed',
+    } as const
+    expect(isCompatibleDetailBody('session_model_settings_changed', sessionSettings)).toBe(true)
+    expect(
+      isCompatibleDetailBody('session_model_settings_changed', {
+        ...sessionSettings,
+        turn_id: '00000000-0000-0000-0000-000000000041',
+      }),
+    ).toBe(false)
+    expect(
+      isCompatibleDetailBody('turn_model_settings_resolved', {
+        ...sessionSettings,
+        turn_id: '00000000-0000-0000-0000-000000000041',
+        cause_code: 'turn_settings_resolved',
+      }),
+    ).toBe(true)
+    expect(isCompatibleDetailBody('turn_model_settings_resolved', sessionSettings)).toBe(false)
   })
 })

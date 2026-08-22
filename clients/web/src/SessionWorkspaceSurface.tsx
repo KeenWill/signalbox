@@ -7,6 +7,8 @@ import { SessionItemDetail } from './SessionItemDetail'
 import {
   BoundedSessionHistory,
   HttpSessionTimelineSource,
+  MAX_CONTRACT_TIMELINE_WINDOW_BYTES,
+  MAX_CONTRACT_TIMELINE_WINDOW_ITEMS,
   type SessionWindowAnchor,
 } from './session-timeline/model'
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
@@ -23,7 +25,9 @@ export const hasUsableSessionTimeline = (bootstrap: WebContractBootstrap | undef
   bootstrap?.capabilities.bounded_session_timeline === true &&
   bootstrap.capabilities.bounded_session_timeline_detail === true &&
   bootstrap.limits.max_timeline_window_items >= 1 &&
+  bootstrap.limits.max_timeline_window_items <= MAX_CONTRACT_TIMELINE_WINDOW_ITEMS &&
   bootstrap.limits.max_timeline_window_bytes >= 256 &&
+  bootstrap.limits.max_timeline_window_bytes <= MAX_CONTRACT_TIMELINE_WINDOW_BYTES &&
   bootstrap.limits.max_timeline_detail_items >= 1 &&
   bootstrap.limits.max_timeline_detail_bytes >= 256
 
@@ -374,10 +378,18 @@ export function SessionWorkspaceSurface({
             className="session-timeline"
             aria-label="Session timeline"
             onKeyDown={(event) => {
+              if (event.key === 'Home' || event.key === 'End') {
+                event.preventDefault()
+                openTimelineWindow(event.key === 'Home' ? 'first' : 'latest')
+                return
+              }
               const target = timelineArrowTarget(timelineIds, selected, event.key)
               if (!target) return
               event.preventDefault()
               select(target)
+              event.currentTarget
+                .querySelector<HTMLButtonElement>(`[data-timeline-id="${target}"]`)
+                ?.focus()
             }}
           >
             {items.map((item) => {
@@ -388,6 +400,7 @@ export function SessionWorkspaceSurface({
                   <button
                     type="button"
                     className="session-item-summary"
+                    data-timeline-id={id}
                     aria-expanded={isExpanded}
                     aria-current={selected === id ? 'true' : undefined}
                     onClick={() => {

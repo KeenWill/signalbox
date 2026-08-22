@@ -964,6 +964,31 @@ describe('BoundedSessionHistory', () => {
     ).rejects.toThrow('changed the stable address')
   })
 
+  it('rejects item-detail more-at continuations', async () => {
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: { text: 'hello', offset_bytes: '0', total_bytes: '5', continuation: null },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+      continuation: { type: 'more_at', address: { event_sequence: '41' } },
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('cannot continue at another timeline item')
+  })
+
   it('rejects an out-of-range model-call request context count', async () => {
     const source = await detailSource({
       session_id: sessionId,
