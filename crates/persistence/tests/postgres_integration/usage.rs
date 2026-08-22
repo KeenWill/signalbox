@@ -333,3 +333,79 @@ async fn usage_projection_has_session_terminal_order_index() -> Result<(), Box<d
     drop(container);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_approval_judge_usage_enters_dedicated_call_evidence() -> Result<(), Box<dyn Error>>
+{
+    const JUDGE_INPUT_TOKENS: u64 = 31;
+    const JUDGE_OUTPUT_TOKENS: u64 = 7;
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x96_000;
+    let (fixture, model_repository, _, _) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let repository = model_repository.approval_judge_repository();
+    let judge_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe0));
+    let prepared = ready_approval_judge(
+        repository
+            .prepare(fixture.session, fixture.turn, judge_call, None)
+            .await?,
+    );
+    let rationale = ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?;
+
+    repository.authorize(&prepared).await?;
+    repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Approve,
+            rationale,
+            ProviderReportedTokenUsage::unreported()
+                .with_input_tokens(Some(JUDGE_INPUT_TOKENS))
+                .with_output_tokens(Some(JUDGE_OUTPUT_TOKENS)),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0xe2)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xe3)),
+            ),
+            |request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    request.as_uuid().as_u128() + 0x2_000_000,
+                ))
+            },
+        )
+        .await?;
+    let page = UsageRepository::new(pool.clone())
+        .calls(UsageCallQuery {
+            scope: UsageQuery {
+                time: UsageTimeRange::all(),
+                selection: UsageSelection {
+                    session: Some(fixture.session),
+                    turn: Some(fixture.turn),
+                    model: None,
+                    provenance: Some(UsageProvenance::Reported),
+                    call_kind: Some(signalbox_application::UsageCallKind::ApprovalJudge),
+                },
+            },
+            order: UsageCallOrder::NewestFirst,
+            limit: UsageCallPageLimit::new(1).expect("fixture page limit fits"),
+            after: None,
+        })
+        .await?;
+
+    assert_eq!(page.calls.len(), 1);
+    assert_eq!(page.calls[0].call, judge_call);
+    assert_eq!(page.calls[0].tokens.input, Some(JUDGE_INPUT_TOKENS));
+    assert_eq!(page.calls[0].tokens.output, Some(JUDGE_OUTPUT_TOKENS));
+    assert_eq!(page.calls[0].tokens.cache_creation_input, None);
+    assert_eq!(page.calls[0].tokens.cache_read_input, None);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
