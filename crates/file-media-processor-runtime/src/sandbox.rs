@@ -17,7 +17,6 @@ use rustix::{
     fd::AsFd as _,
     process::{Resource, Rlimit, geteuid, getuid},
 };
-use sha2::{Digest as _, Sha256};
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProcessCeilings, FileMediaProcessor, FileMediaProcessorFuture,
     FileMediaProviderDeclaration, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
@@ -45,12 +44,12 @@ const BWRAP_PROBE_ARGUMENT: &str = "--signalbox-file-media-isolation-probe";
 const CANCELLATION_POLL: Duration = Duration::from_millis(5);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const WRITABLE_TMPFS_BUDGET_DIVISOR: u64 = 2;
+const MAX_EXECUTABLE_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// One checked mapping from a provider declaration to its worker executable.
 #[derive(Clone, Debug)]
 pub struct WorkerBinding {
     source: PathBuf,
-    program: Arc<PinnedExecutable>,
     declaration: FileMediaProviderDeclaration,
 }
 
@@ -58,13 +57,6 @@ pub struct WorkerBinding {
 struct PinnedExecutable {
     _file: fs::File,
     proc_path: PathBuf,
-    digest: [u8; 32],
-}
-
-impl PinnedExecutable {
-    fn same_file(&self, other: &Self) -> bool {
-        self.digest == other.digest
-    }
 }
 
 impl WorkerBinding {
@@ -74,10 +66,11 @@ impl WorkerBinding {
         declaration: FileMediaProviderDeclaration,
     ) -> Result<Self, SandboxedFileMediaProcessorConstructionError> {
         let source = program.into();
-        let program = Arc::new(open_worker_executable(&source)?);
+        validate_executable(&source, ConstructionTarget::Worker)?;
+        let source = fs::canonicalize(source)
+            .map_err(|_| SandboxedFileMediaProcessorConstructionError::Worker)?;
         Ok(Self {
             source,
-            program,
             declaration,
         })
     }
@@ -91,7 +84,7 @@ impl WorkerBinding {
 /// Fresh-worker implementation of the registry's untrusted processor port.
 #[derive(Clone, Debug)]
 pub struct SandboxedFileMediaProcessor {
-    bubblewrap: PathBuf,
+    bubblewrap: Arc<PinnedExecutable>,
     workers:
         Arc<BTreeMap<signalbox_file_media_runtime::FileReaderProviderName, Arc<PinnedExecutable>>>,
     worker_declarations: Arc<Vec<(Arc<PinnedExecutable>, Vec<FileMediaProviderDeclaration>)>>,
@@ -115,20 +108,31 @@ impl SandboxedFileMediaProcessor {
         if !FileMediaProcessCeilings::version_one().admits(ceilings) {
             return Err(SandboxedFileMediaProcessorConstructionError::Ceilings);
         }
-        let bubblewrap = bubblewrap.into();
-        validate_executable(&bubblewrap, ConstructionTarget::Bubblewrap)?;
+        let bubblewrap = Arc::new(open_executable_snapshot(
+            &bubblewrap.into(),
+            ConstructionTarget::Bubblewrap,
+            MAX_EXECUTABLE_SNAPSHOT_BYTES,
+        )?);
+        let worker_snapshot_limit = worker_memory_budget(ceilings.memory_bytes())
+            .address_space_bytes
+            .min(MAX_EXECUTABLE_SNAPSHOT_BYTES);
         let mut workers = BTreeMap::new();
         let mut worker_declarations =
             BTreeMap::<PathBuf, (Arc<PinnedExecutable>, Vec<FileMediaProviderDeclaration>)>::new();
         let mut readers = BTreeMap::new();
         for binding in bindings {
             let provider = binding.declaration.provider().clone();
-            let group = worker_declarations
-                .entry(binding.source)
-                .or_insert_with(|| (binding.program.clone(), Vec::new()));
-            if !group.0.same_file(&binding.program) {
-                return Err(SandboxedFileMediaProcessorConstructionError::Worker);
-            }
+            let group = match worker_declarations.entry(binding.source) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let program = Arc::new(open_executable_snapshot(
+                        entry.key(),
+                        ConstructionTarget::Worker,
+                        worker_snapshot_limit,
+                    )?);
+                    entry.insert((program, Vec::new()))
+                }
+            };
             if workers.insert(provider, group.0.clone()).is_some() {
                 return Err(SandboxedFileMediaProcessorConstructionError::DuplicateProvider);
             }
@@ -338,7 +342,7 @@ impl SandboxedFileMediaProcessor {
             probe_declarations,
         );
         let probe = probe_declarations.is_some();
-        let mut command = Command::new(&self.bubblewrap);
+        let mut command = Command::new(&self.bubblewrap.proc_path);
         command
             .args(profile)
             .current_dir("/")
@@ -1047,43 +1051,62 @@ fn validate_executable(
             ConstructionTarget::Bubblewrap => {
                 SandboxedFileMediaProcessorConstructionError::Bubblewrap
             }
+            ConstructionTarget::Worker => SandboxedFileMediaProcessorConstructionError::Worker,
         })
     }
 }
 
+#[cfg(test)]
 fn open_worker_executable(
     path: &Path,
 ) -> Result<PinnedExecutable, SandboxedFileMediaProcessorConstructionError> {
+    open_executable_snapshot(
+        path,
+        ConstructionTarget::Worker,
+        MAX_EXECUTABLE_SNAPSHOT_BYTES,
+    )
+}
+
+fn open_executable_snapshot(
+    path: &Path,
+    target: ConstructionTarget,
+    maximum_bytes: u64,
+) -> Result<PinnedExecutable, SandboxedFileMediaProcessorConstructionError> {
+    let invalid = || match target {
+        ConstructionTarget::Bubblewrap => SandboxedFileMediaProcessorConstructionError::Bubblewrap,
+        ConstructionTarget::Worker => SandboxedFileMediaProcessorConstructionError::Worker,
+    };
     if !path.is_absolute() {
-        return Err(SandboxedFileMediaProcessorConstructionError::Worker);
+        return Err(invalid());
     }
-    let mut source =
-        fs::File::open(path).map_err(|_| SandboxedFileMediaProcessorConstructionError::Worker)?;
-    let metadata = source
-        .metadata()
-        .map_err(|_| SandboxedFileMediaProcessorConstructionError::Worker)?;
-    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
-        return Err(SandboxedFileMediaProcessorConstructionError::Worker);
+    let mut source = fs::File::open(path).map_err(|_| invalid())?;
+    let metadata = source.metadata().map_err(|_| invalid())?;
+    if !metadata.is_file()
+        || metadata.permissions().mode() & 0o111 == 0
+        || metadata.len() > maximum_bytes
+    {
+        return Err(invalid());
     }
-    let mut file = create_executable_snapshot()?;
-    let mut digest = Sha256::new();
+    let mut file = create_executable_snapshot().map_err(|_| invalid())?;
     let mut buffer = [0_u8; 64 * 1_024];
+    let mut copied = 0_u64;
     loop {
-        let read = source
-            .read(&mut buffer)
-            .map_err(|_| SandboxedFileMediaProcessorConstructionError::Worker)?;
+        let read = source.read(&mut buffer).map_err(|_| invalid())?;
         if read == 0 {
             break;
         }
-        file.write_all(&buffer[..read])
-            .map_err(|_| SandboxedFileMediaProcessorConstructionError::Worker)?;
-        digest.update(&buffer[..read]);
+        copied = copied
+            .checked_add(u64::try_from(read).map_err(|_| invalid())?)
+            .ok_or_else(invalid)?;
+        if copied > maximum_bytes {
+            return Err(invalid());
+        }
+        file.write_all(&buffer[..read]).map_err(|_| invalid())?;
     }
-    file.flush()
-        .map_err(|_| SandboxedFileMediaProcessorConstructionError::Worker)?;
+    file.flush().map_err(|_| invalid())?;
     file.set_permissions(fs::Permissions::from_mode(0o500))
-        .map_err(|_| SandboxedFileMediaProcessorConstructionError::Worker)?;
-    seal_executable_snapshot(&file)?;
+        .map_err(|_| invalid())?;
+    seal_executable_snapshot(&file).map_err(|_| invalid())?;
     let proc_path = PathBuf::from(format!(
         "/proc/{}/fd/{}",
         std::process::id(),
@@ -1092,7 +1115,6 @@ fn open_worker_executable(
     Ok(PinnedExecutable {
         _file: file,
         proc_path,
-        digest: digest.finalize().into(),
     })
 }
 
@@ -1131,6 +1153,7 @@ fn seal_executable_snapshot(
 #[derive(Clone, Copy)]
 enum ConstructionTarget {
     Bubblewrap,
+    Worker,
 }
 
 /// Checked sandbox configuration could not be constructed.
@@ -1177,8 +1200,9 @@ mod tests {
     };
 
     use super::{
-        CompletedOutput, admit_completed, open_worker_executable, sandbox_arguments,
-        seccomp_instructions, task_ceiling_is_enforceable, worker_memory_budget,
+        CompletedOutput, ConstructionTarget, MAX_EXECUTABLE_SNAPSHOT_BYTES, admit_completed,
+        open_executable_snapshot, open_worker_executable, sandbox_arguments, seccomp_instructions,
+        task_ceiling_is_enforceable, worker_memory_budget,
     };
 
     struct Cancelled;
@@ -1448,6 +1472,25 @@ mod tests {
             fs::read(worker).expect("rewritten path is readable"),
             b"replacement"
         );
+    }
+
+    #[test]
+    fn executable_snapshot_rejects_bytes_above_its_bound() {
+        let directory = tempfile::tempdir().expect("temporary directory is available");
+        let worker = directory.path().join("worker");
+        let file = fs::File::create(&worker).expect("fixture worker is created");
+        file.set_len(MAX_EXECUTABLE_SNAPSHOT_BYTES + 1)
+            .expect("fixture worker is enlarged");
+        fs::set_permissions(&worker, fs::Permissions::from_mode(0o700))
+            .expect("fixture worker is executable");
+        assert!(matches!(
+            open_executable_snapshot(
+                &worker,
+                ConstructionTarget::Worker,
+                MAX_EXECUTABLE_SNAPSHOT_BYTES,
+            ),
+            Err(super::SandboxedFileMediaProcessorConstructionError::Worker)
+        ));
     }
 
     #[cfg(target_arch = "x86_64")]

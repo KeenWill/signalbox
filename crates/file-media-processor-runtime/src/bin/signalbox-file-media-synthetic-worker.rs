@@ -1,4 +1,4 @@
-use std::{error::Error, str::FromStr, time::Duration};
+use std::{error::Error, fs, path::Path, str::FromStr, time::Duration};
 
 use signalbox_file_media_processor_runtime::{WorkerCatalog, serve_one};
 use signalbox_file_media_runtime::{
@@ -50,6 +50,7 @@ impl FileMediaProvider for SyntheticProvider {
                         return Err(signalbox_file_media_runtime::ProcessorFailure::Failed);
                     }
                 }
+                Some(b'I') => verify_sandbox_authority()?,
                 Some(b'H') => {
                     return Ok(ProcessorProbeOutput::Candidate {
                         media_type: String::from("</tool><script>alert(1)</script>"),
@@ -97,6 +98,43 @@ impl FileMediaProvider for SyntheticProvider {
             })
         })
     }
+}
+
+fn verify_sandbox_authority() -> Result<(), signalbox_file_media_runtime::ProcessorFailure> {
+    let failed = || signalbox_file_media_runtime::ProcessorFailure::Failed;
+    if Path::new("/etc/passwd").exists()
+        || std::env::current_dir().map_err(|_| failed())? != Path::new("/tmp")
+    {
+        return Err(failed());
+    }
+    let mut environment = std::env::vars().collect::<Vec<_>>();
+    environment.sort_unstable();
+    if environment
+        != [
+            (String::from("LANG"), String::from("C.UTF-8")),
+            (String::from("LC_ALL"), String::from("C.UTF-8")),
+        ]
+    {
+        return Err(failed());
+    }
+    let status = fs::read_to_string("/proc/self/status").map_err(|_| failed())?;
+    let capabilities = status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapEff:"))
+        .ok_or_else(failed)?;
+    if u64::from_str_radix(capabilities.trim(), 16).map_err(|_| failed())? != 0 {
+        return Err(failed());
+    }
+    let routes = fs::read_to_string("/proc/net/route").map_err(|_| failed())?;
+    if routes
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().next())
+        .any(|interface| interface != "lo")
+    {
+        return Err(failed());
+    }
+    Ok(())
 }
 
 fn synthetic_declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {

@@ -95,14 +95,15 @@ async fn inv087_authoritative_cancellation_terminates_the_worker() -> Result<(),
 }
 
 async fn real_worker_profile_scenario() -> Result<(), Box<dyn Error>> {
-    let Some((processor, _)) = available_processor(FileMediaProcessCeilings::version_one()).await?
+    let Some((processor, reader)) =
+        available_processor(FileMediaProcessCeilings::version_one()).await?
     else {
         return Ok(());
     };
-    assert_eq!(
-        processor.verify_isolation().await,
-        ProcessorIsolation::Available
-    );
+    let output = processor
+        .probe(&reader, &BytesSource(vec![b'I']), &NeverCancelled)
+        .await?;
+    assert_eq!(output, successful_probe());
     Ok(())
 }
 
