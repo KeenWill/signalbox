@@ -491,7 +491,7 @@ kbd {
   background: var(--surface-1);
 }
 
-@media (max-width: 1080px) {
+@media (max-width: 1260px) {
   .product-shell {
     grid-template-columns: var(--product-navigation-width, 218px) minmax(400px, 1fr);
   }

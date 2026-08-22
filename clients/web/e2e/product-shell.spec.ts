@@ -251,6 +251,10 @@ test('opens and inspects a bounded production session without a mouse', async ({
   const completed = page.getByRole('option', { name: /43 turn completed/ })
   await completed.click()
   await expect(timeline).toBeFocused()
+  await expect(completed).toHaveAttribute('aria-controls', 'session-timeline-detail-43')
+  await expect(completed).toHaveAttribute('aria-describedby', 'session-timeline-disclosure-43')
+  await expect(page.locator('#session-timeline-disclosure-43')).toHaveText('Expanded')
+  await expect(page.locator('#session-timeline-detail-43')).toBeVisible()
   await expect(page.getByText('Header only; rich event detail is not exposed')).toBeVisible()
 
   await page.getByRole('button', { name: /First/ }).click()
@@ -283,6 +287,21 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   await reopenedSessionId.press('Enter')
 
   await expect(page.locator('.session-item-summary small').first()).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('keeps maximum pane widths inside the viewport', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 1180, height: 800 })
+  await page.goto('/settings')
+
+  const paneWidths = page.locator('.pane-preferences input[type="range"]')
+  await paneWidths.nth(0).fill('360')
+  await paneWidths.nth(1).fill('480')
+
+  await expect(page.locator('.product-inspector')).toBeHidden()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1180)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

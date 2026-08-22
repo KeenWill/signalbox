@@ -351,6 +351,8 @@ export function SessionWorkspaceSurface({
                   id={`session-timeline-option-${id}`}
                   key={id}
                   role="option"
+                  aria-controls={`session-timeline-detail-${id}`}
+                  aria-describedby={`session-timeline-disclosure-${id}`}
                   aria-selected={selected === id}
                   tabIndex={-1}
                   ref={(node) => {
@@ -372,6 +374,9 @@ export function SessionWorkspaceSurface({
                     timelineRef.current?.focus()
                   }}
                 >
+                  <span id={`session-timeline-disclosure-${id}`} className="sr-only">
+                    {isExpanded ? 'Expanded' : 'Collapsed'}
+                  </span>
                   <div className="session-item-summary">
                     {isExpanded ? (
                       <ChevronDown aria-hidden="true" />
@@ -383,7 +388,7 @@ export function SessionWorkspaceSurface({
                     <small>{item.projected_structured_bytes} B</small>
                   </div>
                   {isExpanded && (
-                    <dl className="session-item-detail">
+                    <dl id={`session-timeline-detail-${id}`} className="session-item-detail">
                       <div>
                         <dt>Address</dt>
                         <dd>
