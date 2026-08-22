@@ -12,11 +12,12 @@ use signalbox_application::{
     TimelineDetailCursor, TimelineDetailLimits, TimelineGoalEvent, TimelineImportedEvidence,
     TimelineModelCallDisposition, TimelineModelCallState, TimelineModelUsage,
     TimelineRunnerSandboxPosture, TimelineRunnerState, TimelineTextExcerpt, TimelineToolAttempt,
-    TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
+    TimelineToolBatchState, TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor,
+    TimelineWindowLimits,
 };
 use signalbox_domain::{
-    ModelCallId, RunnerSandboxProfile, SessionId, ToolApprovalDecider, ToolApprovalDecision,
-    ToolApprovalResolution, ToolDecisionSource, TurnId,
+    ModelCallId, ProviderModelIdentity, RunnerSandboxProfile, SessionId, ToolApprovalDecider,
+    ToolApprovalDecision, ToolApprovalResolution, ToolDecisionSource, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
@@ -78,6 +79,7 @@ impl Error for SessionTimelineCorruption {}
 #[derive(Debug)]
 pub enum SessionTimelineRepositoryError {
     Database(sqlx::Error),
+    InvalidDetailQuery,
     Corruption(SessionTimelineCorruption),
     Outbox(OutboxDispatchError),
 }
@@ -87,6 +89,9 @@ impl fmt::Display for SessionTimelineRepositoryError {
         match self {
             Self::Database(error) => {
                 write!(formatter, "session timeline database failure: {error}")
+            }
+            Self::InvalidDetailQuery => {
+                formatter.write_str("invalid session timeline detail query")
             }
             Self::Corruption(error) => error.fmt(formatter),
             Self::Outbox(error) => {
@@ -100,6 +105,7 @@ impl Error for SessionTimelineRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database(error) => Some(error),
+            Self::InvalidDetailQuery => None,
             Self::Corruption(error) => Some(error),
             Self::Outbox(error) => Some(error),
         }
@@ -258,7 +264,7 @@ impl SessionTimelineRepository {
         limits: TimelineDetailLimits,
     ) -> Result<Option<SessionTimelineDetailPage>, SessionTimelineRepositoryError> {
         if cursor.is_some_and(|cursor| cursor.address != address) {
-            return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+            return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
         }
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -334,7 +340,7 @@ impl SessionTimelineRepository {
         if first > through
             || cursor.is_some_and(|cursor| cursor.address < first || cursor.address > through)
         {
-            return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+            return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
         }
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -425,6 +431,13 @@ WITH turn_events AS (
     SELECT event_sequence FROM input_accepted_outbox_event
      WHERE session_id = $1 AND turn_id = $2
     UNION ALL
+    SELECT event.event_sequence
+      FROM turn_model_settings_resolved_outbox_event AS event
+      JOIN turn_model_settings_resolved AS settings
+        ON settings.accepted_input_id = event.accepted_input_id
+       AND settings.session_id = event.session_id
+     WHERE settings.session_id = $1 AND settings.turn_id = $2
+    UNION ALL
     SELECT event_sequence FROM goal_turn_retired_outbox_event
      WHERE session_id = $1 AND turn_id = $2
     UNION ALL
@@ -461,6 +474,28 @@ WITH turn_events AS (
     UNION ALL
     SELECT event_sequence FROM turn_reconciliation_required_outbox_event
      WHERE session_id = $1 AND turn_id = $2
+    UNION ALL
+    SELECT wake.event_sequence
+      FROM session_delegation_wake_turn_origin AS origin
+      JOIN session_pending_delivery AS delivery
+        ON delivery.recipient_session_id = origin.recipient_session_id
+       AND delivery.delivery_sequence BETWEEN origin.first_delivery_sequence
+                                          AND origin.through_delivery_sequence
+      LEFT JOIN session_message_delivery AS message_delivery
+        ON message_delivery.recipient_session_id = delivery.recipient_session_id
+       AND message_delivery.delivery_sequence = delivery.delivery_sequence
+       AND delivery.delivery_kind = 'message'
+      LEFT JOIN session_child_result_delivery AS result_delivery
+        ON result_delivery.parent_session_id = delivery.recipient_session_id
+       AND result_delivery.delivery_sequence = delivery.delivery_sequence
+       AND delivery.delivery_kind = 'background_result'
+      JOIN delegation_wake_outbox_event AS wake
+        ON wake.session_id = delivery.recipient_session_id
+       AND (
+            wake.message_id = message_delivery.message_id
+            OR wake.spawning_tool_request_id = result_delivery.spawning_tool_request_id
+       )
+     WHERE origin.recipient_session_id = $1 AND origin.turn_id = $2
 )
 SELECT event_sequence FROM turn_events
  WHERE event_sequence >= $3
@@ -525,7 +560,7 @@ async fn project_address_page(
     limits: TimelineDetailLimits,
 ) -> Result<SessionTimelineDetailPage, SessionTimelineRepositoryError> {
     if cursor.is_some_and(|cursor| addresses.first().copied() != Some(cursor.address)) {
-        return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+        return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
     }
     let item_limit = usize::from(limits.max_items());
     let next_by_count = addresses.get(item_limit).copied();
@@ -597,7 +632,7 @@ async fn project_detail_event(
             .ok_or(SessionTimelineCorruption::InvalidOrdinal("detail address"))?,
     );
     if cursor.is_some_and(|cursor| cursor.address != address) {
-        return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+        return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
     }
     let kind = dispatched_event_kind(event.kind());
     let mut remaining = max_bytes - DETAIL_ENVELOPE_BYTES;
@@ -643,7 +678,7 @@ async fn project_detail_event(
             let continuation = text.continuation.map(TimelineDetailContinuation::MoreBody);
             (
                 SessionTimelineDetailBody::UserInput {
-                    turn_id: turn.into_uuid().to_string(),
+                    turn_id: *turn,
                     text,
                     attachments: Vec::new(),
                 },
@@ -652,18 +687,12 @@ async fn project_detail_event(
         }
         DispatchedOutboxEventKind::ModelCallTransition { turn, call, state } => {
             require_cursor_field(cursor, TimelineBodyField::ModelResponse, 0)?;
-            let row = load_model_detail(transaction, *call).await?;
+            let response_offset = cursor.map_or(0, |cursor| cursor.offset_bytes);
+            let row = load_model_detail(transaction, *call, response_offset, remaining).await?;
             let response = match row.response {
-                Some(response) => Some(excerpt_text(
-                    &response,
-                    address,
-                    TimelineBodyField::ModelResponse,
-                    0,
-                    cursor.map_or(0, |cursor| cursor.offset_bytes),
-                    &mut remaining,
-                )?),
-                None if cursor.is_none() => None,
-                None => return Err(SessionTimelineCorruption::InvalidDetailCursor.into()),
+                Some(response) => Some(response_excerpt(response, address, &mut remaining)?),
+                None if cursor.is_none() || cursor.is_some_and(is_item_start_cursor) => None,
+                None => return Err(SessionTimelineRepositoryError::InvalidDetailQuery),
             };
             let continuation = response
                 .as_ref()
@@ -671,8 +700,8 @@ async fn project_detail_event(
                 .map(TimelineDetailContinuation::MoreBody);
             (
                 SessionTimelineDetailBody::ModelCall {
-                    turn_id: turn.into_uuid().to_string(),
-                    model_call_id: call.into_uuid().to_string(),
+                    turn_id: *turn,
+                    model_call_id: *call,
                     state: model_call_state(*state),
                     model_identity_id: row.model_identity_id,
                     request_context_items: row.request_context_items,
@@ -773,7 +802,7 @@ async fn project_detail_event(
             require_no_body_cursor(cursor)?;
             (
                 SessionTimelineDetailBody::TurnLifecycle {
-                    turn_id: turn.into_uuid().to_string(),
+                    turn_id: *turn,
                     lifecycle: TimelineTurnLifecycleKind::Activated,
                     cause_code: String::from("activated"),
                 },
@@ -868,7 +897,7 @@ fn terminal_turn_body(
     require_no_body_cursor(cursor)?;
     Ok((
         SessionTimelineDetailBody::TurnLifecycle {
-            turn_id: turn.into_uuid().to_string(),
+            turn_id: turn,
             lifecycle: TimelineTurnLifecycleKind::Terminalized,
             cause_code: cause_code.to_owned(),
         },
@@ -1011,11 +1040,16 @@ async fn project_tool_batch(
               FROM tool_request AS request
               LEFT JOIN tool_attempt AS attempt
                 ON attempt.request_id = request.request_id
-              LEFT JOIN runner_physical_attempt_lease_binding AS binding
-                ON binding.attempt_id = attempt.attempt_id
-              LEFT JOIN runner_lease_generation AS generation
-                ON generation.lease_id = binding.lease_id
-               AND generation.attempt_id = attempt.attempt_id
+              LEFT JOIN LATERAL (
+                    SELECT lease.generation
+                      FROM runner_physical_attempt_lease_binding AS binding
+                      JOIN runner_lease_generation AS lease
+                        ON lease.lease_id = binding.lease_id
+                       AND lease.attempt_id = binding.attempt_id
+                     WHERE binding.attempt_id = attempt.attempt_id
+                     ORDER BY lease.generation DESC
+                     LIMIT 1
+              ) AS generation ON TRUE
              WHERE request.producing_model_call_id = $1
         ), selected_member AS (
             SELECT request_id, attempt_id
@@ -1058,6 +1092,8 @@ async fn project_tool_batch(
                         ON placement.session_id = lease.session_id
                        AND placement.event_ordinal = lease.placement_event_ordinal
                      WHERE physical_binding.attempt_id = attempt.attempt_id
+                     ORDER BY lease.generation DESC
+                     LIMIT 1
                 ) AS sandbox_posture,
                 EXISTS (
                     SELECT 1 FROM tool_approval_judge_model_call AS judge
@@ -1209,11 +1245,15 @@ fn tool_state(
     }
 }
 
-fn tool_batch_state(state: DispatchedToolBatchState) -> String {
+const fn tool_batch_state(state: DispatchedToolBatchState) -> TimelineToolBatchState {
     match state {
-        DispatchedToolBatchState::Proposed { .. } => String::from("proposed"),
-        DispatchedToolBatchState::ResultsProjected { .. } => String::from("results_projected"),
-        DispatchedToolBatchState::RecoveryRequired { .. } => String::from("recovery_required"),
+        DispatchedToolBatchState::Proposed { .. } => TimelineToolBatchState::Proposed,
+        DispatchedToolBatchState::ResultsProjected { .. } => {
+            TimelineToolBatchState::ResultsProjected
+        }
+        DispatchedToolBatchState::RecoveryRequired { .. } => {
+            TimelineToolBatchState::RecoveryRequired
+        }
     }
 }
 
@@ -1643,7 +1683,7 @@ fn require_no_body_cursor(
     if cursor.is_some_and(|cursor| {
         cursor.field.is_some() || cursor.member_index != 0 || cursor.offset_bytes != 0
     }) {
-        return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+        return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
     }
     Ok(())
 }
@@ -1654,13 +1694,16 @@ fn require_cursor_field(
     member_index: u32,
 ) -> Result<(), SessionTimelineRepositoryError> {
     if let Some(cursor) = cursor {
-        let item_start =
-            cursor.field.is_none() && cursor.member_index == 0 && cursor.offset_bytes == 0;
+        let item_start = is_item_start_cursor(cursor);
         if !item_start && (cursor.field != Some(field) || cursor.member_index != member_index) {
-            return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+            return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
         }
     }
     Ok(())
+}
+
+const fn is_item_start_cursor(cursor: TimelineDetailCursor) -> bool {
+    cursor.field.is_none() && cursor.member_index == 0 && cursor.offset_bytes == 0
 }
 
 fn excerpt_text(
@@ -1672,9 +1715,9 @@ fn excerpt_text(
     remaining: &mut u32,
 ) -> Result<TimelineTextExcerpt, SessionTimelineRepositoryError> {
     let start = usize::try_from(offset_bytes)
-        .map_err(|_| SessionTimelineCorruption::InvalidDetailCursor)?;
+        .map_err(|_| SessionTimelineRepositoryError::InvalidDetailQuery)?;
     if start > value.len() || !value.is_char_boundary(start) {
-        return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+        return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
     }
     let available = usize::try_from(*remaining)
         .map_err(|_| SessionTimelineCorruption::DetailProjectionOverflow)?;
@@ -1705,20 +1748,29 @@ fn excerpt_text(
 }
 
 struct ModelDetailRow {
-    model_identity_id: String,
+    model_identity_id: ProviderModelIdentity,
     request_context_items: u64,
-    response: Option<String>,
+    response: Option<ModelResponseSlice>,
     usage: TimelineModelUsage,
     cause_code: Option<String>,
+}
+
+struct ModelResponseSlice {
+    bytes: Vec<u8>,
+    offset_bytes: u64,
+    total_bytes: u64,
 }
 
 async fn load_model_detail(
     transaction: &mut Transaction<'_, Postgres>,
     call: signalbox_domain::ModelCallId,
+    response_offset: u64,
+    max_response_bytes: u32,
 ) -> Result<ModelDetailRow, SessionTimelineRepositoryError> {
     let row = sqlx::query(
         r#"
-SELECT call.resolved_provider_model_identity_id,
+SELECT call.session_id,
+       call.resolved_provider_model_identity_id,
        frontier.member_count,
        call.usage_input_tokens,
        call.usage_output_tokens,
@@ -1726,19 +1778,12 @@ SELECT call.resolved_provider_model_identity_id,
        call.usage_cache_read_input_tokens,
        call.terminal_provider_failure_cause,
        (
-           SELECT string_agg(part.assistant_text_value, '' ORDER BY part.member_position)
-             FROM (
-                 SELECT entry.semantic_entry_id, entry.assistant_text_value,
-                        min(member.member_position) AS member_position
-                   FROM semantic_transcript_entry AS entry
-                   JOIN context_frontier_member AS member
-                     ON member.source_session_id = entry.source_session_id
-                    AND member.semantic_entry_id = entry.semantic_entry_id
-                  WHERE entry.producing_model_call_id = call.model_call_id
-                    AND entry.payload_kind = 'assistant_text'
-                  GROUP BY entry.semantic_entry_id, entry.assistant_text_value
-             ) AS part
-       ) AS response_text
+           SELECT sum(octet_length(entry.assistant_text_value))::numeric
+             FROM semantic_transcript_entry AS entry
+            WHERE entry.source_session_id = call.session_id
+              AND entry.producing_model_call_id = call.model_call_id
+              AND entry.payload_kind = 'assistant_text'
+       ) AS response_total_bytes
   FROM model_call AS call
   JOIN context_frontier AS frontier
     ON frontier.owning_session_id = call.session_id
@@ -1750,12 +1795,74 @@ SELECT call.resolved_provider_model_identity_id,
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(SessionTimelineCorruption::MissingDetailRecord)?;
+    let response_total_bytes = optional_nonnegative(
+        row.try_get("response_total_bytes")?,
+        "model response byte length",
+    )?;
+    let response = match response_total_bytes {
+        None => None,
+        Some(total_bytes) => {
+            if response_offset > total_bytes {
+                return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
+            }
+            let slice_end = response_offset
+                .saturating_add(u64::from(max_response_bytes))
+                .saturating_add(3)
+                .min(total_bytes);
+            let rows: Vec<Vec<u8>> = sqlx::query_scalar(
+                r#"
+WITH response_part AS (
+    SELECT entry.assistant_response_part_ordinal AS part_ordinal,
+           convert_to(entry.assistant_text_value, 'UTF8') AS part_bytes,
+           octet_length(entry.assistant_text_value)::numeric AS part_length
+      FROM semantic_transcript_entry AS entry
+     WHERE entry.source_session_id = $1
+       AND entry.producing_model_call_id = $2
+       AND entry.payload_kind = 'assistant_text'
+), positioned_part AS (
+    SELECT part_ordinal, part_bytes, part_length,
+           coalesce(
+               sum(part_length) OVER (
+                   ORDER BY part_ordinal
+                   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+               ),
+               0
+           ) AS part_start
+      FROM response_part
+)
+SELECT substring(
+           part_bytes
+           FROM (greatest($3::numeric, part_start) - part_start + 1)::integer
+           FOR (
+               least(part_start + part_length, $4::numeric)
+               - greatest($3::numeric, part_start)
+           )::integer
+       )
+  FROM positioned_part
+ WHERE part_start < $4::numeric
+   AND part_start + part_length > $3::numeric
+ ORDER BY part_ordinal
+"#,
+            )
+            .bind(call_session_uuid(&row)?)
+            .bind(call.into_uuid())
+            .bind(Decimal::from(response_offset))
+            .bind(Decimal::from(slice_end))
+            .fetch_all(&mut **transaction)
+            .await?;
+            Some(ModelResponseSlice {
+                bytes: rows.into_iter().flatten().collect(),
+                offset_bytes: response_offset,
+                total_bytes,
+            })
+        }
+    };
     Ok(ModelDetailRow {
-        model_identity_id: row
-            .try_get::<uuid::Uuid, _>("resolved_provider_model_identity_id")?
-            .to_string(),
+        model_identity_id: ProviderModelIdentity::from_uuid(
+            row.try_get::<uuid::Uuid, _>("resolved_provider_model_identity_id")?,
+        ),
         request_context_items: nonnegative(row.try_get("member_count")?, "context item count")?,
-        response: row.try_get("response_text")?,
+        response,
         usage: TimelineModelUsage {
             input_tokens: optional_nonnegative(row.try_get("usage_input_tokens")?, "input usage")?,
             output_tokens: optional_nonnegative(
@@ -1772,6 +1879,55 @@ SELECT call.resolved_provider_model_identity_id,
             )?,
         },
         cause_code: row.try_get("terminal_provider_failure_cause")?,
+    })
+}
+
+fn call_session_uuid(row: &sqlx::postgres::PgRow) -> Result<uuid::Uuid, sqlx::Error> {
+    row.try_get("session_id")
+}
+
+fn response_excerpt(
+    response: ModelResponseSlice,
+    address: TimelineAddress,
+    remaining: &mut u32,
+) -> Result<TimelineTextExcerpt, SessionTimelineRepositoryError> {
+    let valid_bytes = match std::str::from_utf8(&response.bytes) {
+        Ok(_) => response.bytes.len(),
+        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        Err(_) => return Err(SessionTimelineRepositoryError::InvalidDetailQuery),
+    };
+    let available = usize::try_from(*remaining)
+        .map_err(|_| SessionTimelineCorruption::DetailProjectionOverflow)?;
+    let mut selected = valid_bytes.min(available);
+    while selected > 0 && std::str::from_utf8(&response.bytes[..selected]).is_err() {
+        selected -= 1;
+    }
+    let text = std::str::from_utf8(&response.bytes[..selected])
+        .map_err(|_| SessionTimelineRepositoryError::InvalidDetailQuery)?
+        .to_owned();
+    let charged =
+        u32::try_from(selected).map_err(|_| SessionTimelineCorruption::DetailProjectionOverflow)?;
+    *remaining = remaining
+        .checked_sub(charged)
+        .ok_or(SessionTimelineCorruption::DetailProjectionOverflow)?;
+    let next_offset = response
+        .offset_bytes
+        .checked_add(
+            u64::try_from(selected)
+                .map_err(|_| SessionTimelineCorruption::DetailProjectionOverflow)?,
+        )
+        .ok_or(SessionTimelineCorruption::DetailProjectionOverflow)?;
+    let continuation = (next_offset < response.total_bytes).then_some(TimelineBodyContinuation {
+        address,
+        field: TimelineBodyField::ModelResponse,
+        member_index: 0,
+        offset_bytes: next_offset,
+    });
+    Ok(TimelineTextExcerpt {
+        text,
+        offset_bytes: response.offset_bytes,
+        total_bytes: response.total_bytes,
+        continuation,
     })
 }
 
@@ -2136,9 +2292,47 @@ mod tests {
 
         assert!(matches!(
             error,
-            SessionTimelineRepositoryError::Corruption(
-                SessionTimelineCorruption::InvalidDetailCursor
-            )
+            SessionTimelineRepositoryError::InvalidDetailQuery
+        ));
+    }
+
+    #[test]
+    fn model_response_slice_stays_bounded_at_a_utf8_boundary() {
+        let address =
+            TimelineAddress::new(NonZeroU64::new(9).expect("fixture address is positive"));
+        let response = ModelResponseSlice {
+            bytes: "éz".as_bytes().to_vec(),
+            offset_bytes: 0,
+            total_bytes: 4,
+        };
+        let mut budget = 2;
+        let excerpt = response_excerpt(response, address, &mut budget)
+            .expect("the bounded response slice is valid UTF-8");
+        let continuation = excerpt
+            .continuation
+            .expect("the response has one byte remaining");
+
+        assert_eq!(excerpt.text, "é");
+        assert_eq!(excerpt.offset_bytes, 0);
+        assert_eq!(excerpt.total_bytes, 4);
+        assert_eq!(continuation.offset_bytes, 2);
+        assert_eq!(budget, 0);
+    }
+
+    #[test]
+    fn model_response_slice_rejects_invalid_interior_utf8() {
+        let address =
+            TimelineAddress::new(NonZeroU64::new(10).expect("fixture address is positive"));
+        let response = ModelResponseSlice {
+            bytes: vec![0xff],
+            offset_bytes: 1,
+            total_bytes: 2,
+        };
+        let mut budget = 1;
+
+        assert!(matches!(
+            response_excerpt(response, address, &mut budget),
+            Err(SessionTimelineRepositoryError::InvalidDetailQuery)
         ));
     }
 

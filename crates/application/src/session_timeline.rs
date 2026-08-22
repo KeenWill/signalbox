@@ -6,7 +6,7 @@
 
 use std::{fmt, future::Future, num::NonZeroU64};
 
-use signalbox_domain::{SessionId, TurnId};
+use signalbox_domain::{ModelCallId, ProviderModelIdentity, SessionId, TurnId};
 
 /// Returns the hard ceiling on records in one historical window.
 #[must_use]
@@ -470,6 +470,14 @@ pub struct TimelineToolAttempt {
     pub cause_code: Option<String>,
 }
 
+/// Closed tool-batch projection state exposed by timeline detail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineToolBatchState {
+    Proposed,
+    ResultsProjected,
+    RecoveryRequired,
+}
+
 /// Typed provenance of an approval decision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimelineApprovalSource {
@@ -540,16 +548,16 @@ pub enum SessionTimelineDetailBody {
     },
     /// Exact accepted user input and reference-only attachments.
     UserInput {
-        turn_id: String,
+        turn_id: TurnId,
         text: TimelineTextExcerpt,
         attachments: Vec<TimelineBlobReference>,
     },
     /// One model-call checkpoint enriched with request, response, and usage facts.
     ModelCall {
-        turn_id: String,
-        model_call_id: String,
+        turn_id: TurnId,
+        model_call_id: ModelCallId,
         state: TimelineModelCallState,
-        model_identity_id: String,
+        model_identity_id: ProviderModelIdentity,
         request_context_items: u64,
         response: Option<TimelineTextExcerpt>,
         usage: TimelineModelUsage,
@@ -559,7 +567,7 @@ pub enum SessionTimelineDetailBody {
     ToolBatch {
         turn_id: String,
         producing_model_call_id: String,
-        state: String,
+        state: TimelineToolBatchState,
         tools: Vec<TimelineToolAttempt>,
         goal_events: Vec<TimelineGoalEvent>,
     },
@@ -590,7 +598,7 @@ pub enum SessionTimelineDetailBody {
     },
     /// Activated or terminalized turn boundary with a stable cause code.
     TurnLifecycle {
-        turn_id: String,
+        turn_id: TurnId,
         lifecycle: TimelineTurnLifecycleKind,
         cause_code: String,
     },

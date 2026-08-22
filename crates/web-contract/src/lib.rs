@@ -299,7 +299,7 @@ pub struct WebTimelineBodyContinuation {
     pub address: WebTimelineAddress,
     pub field: WebTimelineBodyField,
     pub member_index: u32,
-    pub offset_bytes: String,
+    pub offset_bytes: WebU64,
 }
 
 /// Bounded UTF-8 excerpt with explicit completeness evidence.
@@ -307,8 +307,8 @@ pub struct WebTimelineBodyContinuation {
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineTextExcerpt {
     pub text: String,
-    pub offset_bytes: String,
-    pub total_bytes: String,
+    pub offset_bytes: WebU64,
+    pub total_bytes: WebU64,
     pub continuation: Option<WebTimelineBodyContinuation>,
 }
 
@@ -317,7 +317,7 @@ pub struct WebTimelineTextExcerpt {
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineBlobReference {
     pub blob_id: String,
-    pub length_bytes: String,
+    pub length_bytes: WebU64,
     pub media_type: Option<String>,
 }
 
@@ -348,10 +348,10 @@ pub enum WebTimelineModelCallDisposition {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineModelUsage {
-    pub input_tokens: Option<String>,
-    pub output_tokens: Option<String>,
-    pub cache_creation_input_tokens: Option<String>,
-    pub cache_read_input_tokens: Option<String>,
+    pub input_tokens: Option<WebU64>,
+    pub output_tokens: Option<WebU64>,
+    pub cache_creation_input_tokens: Option<WebU64>,
+    pub cache_read_input_tokens: Option<WebU64>,
 }
 
 /// Closed turn lifecycle boundary.
@@ -370,6 +370,14 @@ pub enum WebTimelineToolState {
     Completed,
     KnownFailed,
     Ambiguous,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineToolBatchState {
+    Proposed,
+    ResultsProjected,
+    RecoveryRequired,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -433,7 +441,7 @@ pub enum WebTimelineRunnerState {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineGoalEvent {
-    pub generation: String,
+    pub generation: WebU64,
     pub event_kind: String,
     pub reason: Option<String>,
     pub text: Option<WebTimelineTextExcerpt>,
@@ -443,7 +451,7 @@ pub struct WebTimelineGoalEvent {
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineImportedEvidence {
     pub imported_entry_id: String,
-    pub imported_position: String,
+    pub imported_position: WebU64,
 }
 
 /// Typed browser body, distinct from application and persistence projections.
@@ -467,7 +475,7 @@ pub enum WebSessionTimelineDetailBody {
         model_call_id: String,
         state: WebTimelineModelCallState,
         model_identity_id: String,
-        request_context_items: String,
+        request_context_items: WebU64,
         response: Option<WebTimelineTextExcerpt>,
         usage: WebTimelineModelUsage,
         cause_code: Option<String>,
@@ -475,7 +483,7 @@ pub enum WebSessionTimelineDetailBody {
     ToolBatch {
         turn_id: String,
         producing_model_call_id: String,
-        state: String,
+        state: WebTimelineToolBatchState,
         tools: Vec<WebTimelineToolAttempt>,
         goal_events: Vec<WebTimelineGoalEvent>,
     },
@@ -496,7 +504,7 @@ pub enum WebSessionTimelineDetailBody {
     ContextCompaction {
         compaction_id: String,
         model_call_id: String,
-        through_position: String,
+        through_position: WebU64,
         summary_entry_id: String,
         result_frontier_id: String,
         summary: WebTimelineTextExcerpt,
@@ -510,14 +518,14 @@ pub enum WebSessionTimelineDetailBody {
         turn_id: String,
         operation_kind: String,
         operation_id: String,
-        attempt_count: String,
+        attempt_count: WebU64,
         exhausted: bool,
         operator_required: bool,
         cause_code: String,
     },
     Runner {
         runner_id: String,
-        placement_revision: String,
+        placement_revision: WebU64,
         sandbox_posture: WebTimelineRunnerSandboxPosture,
         working_directory: Option<String>,
         state: WebTimelineRunnerState,

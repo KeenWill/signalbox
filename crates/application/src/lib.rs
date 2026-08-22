@@ -158,10 +158,10 @@ pub use session_timeline::{
     TimelineDetailLimitError, TimelineDetailLimits, TimelineGoalEvent, TimelineImportedEvidence,
     TimelineModelCallDisposition, TimelineModelCallState, TimelineModelUsage,
     TimelineRunnerSandboxPosture, TimelineRunnerState, TimelineTextExcerpt, TimelineToolAttempt,
-    TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimitError,
-    TimelineWindowLimits, max_timeline_detail_bytes, max_timeline_detail_items,
-    max_timeline_window_bytes, max_timeline_window_items, min_timeline_detail_bytes,
-    min_timeline_window_bytes,
+    TimelineToolBatchState, TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor,
+    TimelineWindowLimitError, TimelineWindowLimits, max_timeline_detail_bytes,
+    max_timeline_detail_items, max_timeline_window_bytes, max_timeline_window_items,
+    min_timeline_detail_bytes, min_timeline_window_bytes,
 };
 pub use start_eligible_turn::{
     StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
