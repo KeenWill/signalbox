@@ -1,10 +1,19 @@
 import { expect, type Page, test } from '@playwright/test'
+import {
+  richItemPage,
+  richRegionPage,
+  richSessionId,
+  richTimelineWindow,
+  richTurnId,
+  richTurnPage,
+} from './session-detail-fixture'
 
 const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '1' },
   capabilities: {
     bounded_json: true,
     bounded_session_timeline: true,
+    bounded_session_timeline_detail: true,
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
@@ -13,15 +22,17 @@ const bootstrapFixture = {
     max_ndjson_item_bytes: 262_144,
     max_timeline_window_items: 256,
     max_timeline_window_bytes: 65_536,
+    max_timeline_detail_items: 128,
+    max_timeline_detail_bytes: 65_536,
   },
 } as const
 
 const sessionWorkspaceFixture = {
-  id: '00000000-0000-0000-0000-000000000991',
-  firstAddress: '41',
-  latestAddress: '43',
+  id: richSessionId,
+  firstAddress: '89',
+  latestAddress: '101',
   itemCount: '1000000',
-  projectedBytes: 288,
+  projectedBytes: richTimelineWindow.projected_structured_bytes,
 } as const
 
 const settingsPreferenceFixture = {
@@ -36,33 +47,18 @@ const useDeterministicBootstrap = (page: Page) =>
 
 const useDeterministicSession = async (page: Page) => {
   await page.route('**/api/sessions/**', (route) => {
-    if (new URL(route.request().url()).pathname.endsWith('/timeline')) {
-      return route.fulfill({
-        json: {
-          session_id: sessionWorkspaceFixture.id,
-          items: [
-            {
-              address: { event_sequence: '41' },
-              kind: 'input_accepted',
-              projected_structured_bytes: 96,
-            },
-            {
-              address: { event_sequence: '42' },
-              kind: 'turn_activated',
-              projected_structured_bytes: 96,
-            },
-            {
-              address: { event_sequence: '43' },
-              kind: 'turn_completed',
-              projected_structured_bytes: 96,
-            },
-          ],
-          projected_structured_bytes: sessionWorkspaceFixture.projectedBytes,
-          continuation_before: { event_sequence: sessionWorkspaceFixture.firstAddress },
-          continuation_after: null,
-        },
-      })
+    const url = new URL(route.request().url())
+    if (url.pathname.includes(`/turns/${richTurnId}/`)) {
+      return route.fulfill({ json: richTurnPage() })
     }
+    if (url.pathname.endsWith('/timeline-detail')) {
+      return route.fulfill({ json: richRegionPage(url.searchParams.has('cursor_address')) })
+    }
+    if (url.pathname.endsWith('/detail')) {
+      const address = url.pathname.split('/').at(-2) ?? ''
+      return route.fulfill({ json: richItemPage(address) })
+    }
+    if (url.pathname.endsWith('/timeline')) return route.fulfill({ json: richTimelineWindow })
     return route.fulfill({
       json: {
         session_id: sessionWorkspaceFixture.id,
@@ -172,7 +168,7 @@ test('changes and restores a Settings preference without a mouse', async ({ page
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('opens and inspects a bounded production session without a mouse', async ({ page }) => {
+test('uses typed item and turn expansion without a mouse', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await useDeterministicSession(page)
@@ -184,10 +180,44 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
-  const completed = page.getByRole('button', { name: /43 turn completed/ })
-  await completed.focus()
+  const failed = page.getByRole('button', { name: /101 turn failed/ })
+  await failed.focus()
   await page.keyboard.press('Enter')
-  await expect(completed).toHaveAttribute('aria-expanded', 'true')
-  await expect(page.getByText('Header only; rich event detail is not exposed')).toBeVisible()
+  await expect(page.getByText('parked_for_operator_after_ambiguous_effect')).toBeVisible()
+  await page.keyboard.press('l')
+  await expect(failed).toHaveAttribute('aria-expanded', 'false')
+  await page.keyboard.press('l')
+  await expect(failed).toHaveAttribute('aria-expanded', 'true')
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('button', { name: /Expand or collapse selected item/ })).toBeVisible()
+  await page.keyboard.press('Escape')
+  const turn = page.getByRole('button', { name: `Expand turn ${richTurnId}` })
+  await turn.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByText('provider_boundary_lost_after_send')).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('progressively reads one contiguous region without loading the lifetime corpus', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  const requestedDetails: string[] = []
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  page.on('request', (request) => requestedDetails.push(request.url()))
+  await page.goto('/sessions')
+  await page.getByRole('textbox', { name: 'Exact session ID' }).fill(sessionWorkspaceFixture.id)
+  await page.getByRole('button', { name: 'Open workspace' }).click()
+  await page.getByRole('button', { name: 'Inspect loaded region' }).click()
+  await expect(page.getByText('Denied: the release window has closed.')).toBeVisible()
+  await page.getByRole('button', { name: 'Continue region' }).click()
+  await expect(
+    page.getByText('Delegated analysis returned three verified deployment facts.'),
+  ).toBeVisible()
+  expect(
+    requestedDetails.filter((url) => new URL(url).pathname.endsWith('/timeline-detail')),
+  ).toHaveLength(2)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

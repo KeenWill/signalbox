@@ -1372,10 +1372,113 @@ kbd {
 }
 .session-item-detail {
   display: grid;
-  grid-template-columns: minmax(180px, 0.8fr) 1fr;
-  gap: 18px;
+  gap: 8px;
   margin: 0;
   padding: 2px 34px 10px 98px;
+}
+.session-item-detail > button,
+.timeline-turn-detail > button,
+.timeline-region > button {
+  justify-self: start;
+  padding: 6px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--surface-3);
+  color: var(--text);
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+.timeline-detail-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface-1);
+}
+.timeline-detail-card > header,
+.timeline-excerpt > header,
+.timeline-region > header {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+.timeline-detail-card > header small,
+.timeline-excerpt header small,
+.timeline-region header small {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.58rem;
+}
+.timeline-detail-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 1px;
+  margin: 0;
+  background: var(--border);
+}
+.timeline-detail-facts div {
+  min-width: 0;
+  padding: 6px 7px;
+  background: var(--surface-2);
+}
+.timeline-detail-facts dt {
+  color: var(--text-muted);
+  font-size: 0.54rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.timeline-detail-facts dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.63rem;
+}
+.timeline-excerpt {
+  min-width: 0;
+  border-left: 2px solid var(--accent);
+  background: var(--surface-2);
+}
+.timeline-excerpt header {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.timeline-excerpt pre {
+  max-height: 240px;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font:
+    0.68rem / 1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+}
+.timeline-tool,
+.timeline-turn-detail {
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.timeline-tool h4 {
+  margin: 0;
+  font-size: 0.72rem;
+}
+.timeline-region {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid var(--border-strong);
+  background: var(--surface-1);
+}
+.timeline-region h3 {
+  margin: 2px 0 0;
+  font-size: 0.78rem;
 }
 
 @media (max-width: 760px) {
@@ -1401,7 +1504,9 @@ kbd {
     display: none;
   }
   .session-item-detail {
-    grid-template-columns: 1fr;
-    padding-left: 84px;
+    padding: 4px 8px 10px;
+  }
+  .timeline-detail-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

@@ -1,4 +1,12 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import {
+  richItemPage,
+  richRegionPage,
+  richSessionId,
+  richTimelineWindow,
+  richTurnId,
+  richTurnPage,
+} from './session-detail-fixture'
 
 interface RouteEvidence {
   path: string
@@ -11,6 +19,7 @@ const bootstrapFixture = {
   capabilities: {
     bounded_json: true,
     bounded_session_timeline: true,
+    bounded_session_timeline_detail: true,
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
@@ -19,11 +28,13 @@ const bootstrapFixture = {
     max_ndjson_item_bytes: 262_144,
     max_timeline_window_items: 256,
     max_timeline_window_bytes: 65_536,
+    max_timeline_detail_items: 128,
+    max_timeline_detail_bytes: 65_536,
   },
 } as const
 
 const sessionEvidenceFixture = {
-  id: '00000000-0000-0000-0000-000000000991',
+  id: richSessionId,
   itemCount: '1000000',
 } as const
 
@@ -58,33 +69,16 @@ const watchBrowser = (page: Page) => {
 
 const useDeterministicSession = (page: Page) =>
   page.route('**/api/sessions/**', (route) => {
-    if (new URL(route.request().url()).pathname.endsWith('/timeline')) {
-      return route.fulfill({
-        json: {
-          session_id: sessionEvidenceFixture.id,
-          items: [
-            {
-              address: { event_sequence: '999998' },
-              kind: 'tool_batch_transition',
-              projected_structured_bytes: 96,
-            },
-            {
-              address: { event_sequence: '999999' },
-              kind: 'turn_activated',
-              projected_structured_bytes: 96,
-            },
-            {
-              address: { event_sequence: '1000000' },
-              kind: 'turn_completed',
-              projected_structured_bytes: 96,
-            },
-          ],
-          projected_structured_bytes: 288,
-          continuation_before: { event_sequence: '999998' },
-          continuation_after: null,
-        },
-      })
+    const url = new URL(route.request().url())
+    if (url.pathname.includes(`/turns/${richTurnId}/`))
+      return route.fulfill({ json: richTurnPage() })
+    if (url.pathname.endsWith('/timeline-detail')) {
+      return route.fulfill({ json: richRegionPage(url.searchParams.has('cursor_address')) })
     }
+    if (url.pathname.endsWith('/detail')) {
+      return route.fulfill({ json: richItemPage(url.pathname.split('/').at(-2) ?? '') })
+    }
+    if (url.pathname.endsWith('/timeline')) return route.fulfill({ json: richTimelineWindow })
     return route.fulfill({
       json: {
         session_id: sessionEvidenceFixture.id,
@@ -95,10 +89,10 @@ const useDeterministicSession = (page: Page) =>
           referenced_blob_count: '24000',
           referenced_blob_bytes: '96000000000',
         },
-        first_address: { event_sequence: '1' },
-        latest_address: { event_sequence: '1000000' },
+        first_address: { event_sequence: '89' },
+        latest_address: { event_sequence: '101' },
         work: { active_turn_count: '1', queued_turn_count: '4' },
-        observed_through: '1000037',
+        observed_through: '101',
       },
     })
   })
@@ -136,12 +130,32 @@ const captureSessionEvidence = async (page: Page) => {
   await page.getByRole('button', { name: 'Open workspace' }).click()
   await expect(page.getByRole('heading', { name: sessionEvidenceFixture.id })).toBeVisible()
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
+  await page.getByRole('button', { name: 'Inspect loaded region' }).click()
+  await expect(page.getByText('Denied: the release window has closed.')).toBeVisible()
+  await page.getByText('provider_boundary_lost_after_send').scrollIntoViewIfNeeded()
   await expect(page).toHaveScreenshot('sessions-desktop-dark.png', { animations: 'disabled' })
+  await expect(
+    page.locator('.timeline-detail-card').filter({ hasText: 'model call transition' }),
+  ).toHaveScreenshot('sessions-detail-desktop-dark.png', { animations: 'disabled' })
   await page.getByRole('button', { name: 'Use light theme' }).click()
+  await page.getByText('Denied: the release window has closed.').scrollIntoViewIfNeeded()
   await expect(page).toHaveScreenshot('sessions-desktop-light.png', { animations: 'disabled' })
+  await expect(
+    page.locator('.timeline-detail-card').filter({ hasText: 'tool approval decided' }),
+  ).toHaveScreenshot('sessions-detail-desktop-light.png', { animations: 'disabled' })
+  await page.getByRole('button', { name: 'Continue region' }).click()
+  await expect(
+    page.getByText('Earlier investigation evidence compacted through transcript position 88.'),
+  ).toBeVisible()
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
+  await page
+    .getByText('Earlier investigation evidence compacted through transcript position 88.')
+    .scrollIntoViewIfNeeded()
   await expect(page).toHaveScreenshot('sessions-mobile-light.png', { animations: 'disabled' })
+  await expect(
+    page.locator('.timeline-detail-card').filter({ hasText: 'context compacted' }),
+  ).toHaveScreenshot('sessions-detail-mobile-light.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 }
 

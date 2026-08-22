@@ -2,23 +2,30 @@ import type {
   WebApiErrorResponse,
   WebContractBootstrap,
   WebSessionTimelineDescriptor,
+  WebSessionTimelineDetailPage,
   WebSessionTimelineWindow,
 } from '../generated/web-contract.mjs'
 import {
   decodeWebApiErrorResponse,
   decodeWebContractBootstrap,
   decodeWebSessionTimelineDescriptor,
+  decodeWebSessionTimelineDetailPage,
   decodeWebSessionTimelineWindow,
 } from '../generated/web-contract.mjs'
 
 export const MAX_RETAINED_SESSION_ITEMS = 768
+// Hard safety ceiling: detail retention follows the inspected region, never session lifetime.
+export const MAX_RETAINED_SESSION_DETAIL_ITEMS = 128
 // Hard safety ceiling preventing a regressed endpoint from materializing an
 // unbounded JSON response before the generated decoder can reject its shape.
 export const MAX_TIMELINE_HTTP_RESPONSE_BYTES = 256 * 1024
 
 type TimelineContractLimits = Pick<
   WebContractBootstrap['limits'],
-  'max_timeline_window_items' | 'max_timeline_window_bytes'
+  | 'max_timeline_window_items'
+  | 'max_timeline_window_bytes'
+  | 'max_timeline_detail_items'
+  | 'max_timeline_detail_bytes'
 >
 
 export type SessionWindowAnchor =
@@ -30,6 +37,13 @@ export interface SessionWindowLimits {
   maxBytes: number
 }
 
+export interface SessionDetailLimits {
+  maxItems: number
+  maxBytes: number
+}
+
+export type SessionDetailContinuation = NonNullable<WebSessionTimelineDetailPage['continuation']>
+
 export interface SessionTimelineSource {
   readonly limits: TimelineContractLimits
   readDescriptor(sessionId: string, signal?: AbortSignal): Promise<WebSessionTimelineDescriptor>
@@ -39,6 +53,28 @@ export interface SessionTimelineSource {
     limits: SessionWindowLimits,
     signal?: AbortSignal,
   ): Promise<WebSessionTimelineWindow>
+  readItemDetails?(
+    sessionId: string,
+    address: string,
+    continuation: SessionDetailContinuation | null,
+    limits: SessionDetailLimits,
+    signal?: AbortSignal,
+  ): Promise<WebSessionTimelineDetailPage>
+  readTurnDetails?(
+    sessionId: string,
+    turnId: string,
+    continuation: SessionDetailContinuation | null,
+    limits: SessionDetailLimits,
+    signal?: AbortSignal,
+  ): Promise<WebSessionTimelineDetailPage>
+  readRegionDetails?(
+    sessionId: string,
+    first: string,
+    through: string,
+    continuation: SessionDetailContinuation | null,
+    limits: SessionDetailLimits,
+    signal?: AbortSignal,
+  ): Promise<WebSessionTimelineDetailPage>
 }
 
 const MAX_U64 = (1n << 64n) - 1n
@@ -66,6 +102,34 @@ const boundedLimits = (
   maxItems: boundedLimit(limits.maxItems, 1, contract.max_timeline_window_items),
   maxBytes: boundedLimit(limits.maxBytes, 256, contract.max_timeline_window_bytes),
 })
+
+const boundedDetailLimits = (
+  limits: SessionDetailLimits,
+  contract: TimelineContractLimits,
+): SessionDetailLimits => ({
+  maxItems: boundedLimit(limits.maxItems, 1, contract.max_timeline_detail_items),
+  maxBytes: boundedLimit(limits.maxBytes, 256, contract.max_timeline_detail_bytes),
+})
+
+const detailQuery = (
+  limits: SessionDetailLimits,
+  continuation: SessionDetailContinuation | null,
+): URLSearchParams => {
+  const query = new URLSearchParams({
+    max_items: String(limits.maxItems),
+    max_bytes: String(limits.maxBytes),
+  })
+  if (continuation?.type === 'more_at') {
+    query.set('cursor_address', continuation.address.event_sequence)
+  }
+  if (continuation?.type === 'more_body') {
+    query.set('cursor_address', continuation.body.address.event_sequence)
+    query.set('cursor_field', continuation.body.field)
+    query.set('cursor_member', String(continuation.body.member_index))
+    query.set('cursor_offset', continuation.body.offset_bytes)
+  }
+  return query
+}
 
 const canonicalSessionId = (value: string): string => {
   const simple = /^[0-9a-f]{32}$/i
@@ -138,9 +202,14 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     if (!bootstrap.capabilities.bounded_session_timeline) {
       throw new TypeError('bounded session timeline capability is unavailable')
     }
+    if (!bootstrap.capabilities.bounded_session_timeline_detail) {
+      throw new TypeError('bounded session timeline detail capability is unavailable')
+    }
     if (
       bootstrap.limits.max_timeline_window_items < 1 ||
-      bootstrap.limits.max_timeline_window_bytes < 256
+      bootstrap.limits.max_timeline_window_bytes < 256 ||
+      bootstrap.limits.max_timeline_detail_items < 1 ||
+      bootstrap.limits.max_timeline_detail_bytes < 256
     ) {
       throw new TypeError('bounded session timeline limits are invalid')
     }
@@ -178,6 +247,114 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     if (!response.ok) return throwApiError(response)
     return decodeWebSessionTimelineWindow(await readBoundedJson(response))
   }
+
+  async readItemDetails(
+    sessionId: string,
+    address: string,
+    continuation: SessionDetailContinuation | null,
+    limits: SessionDetailLimits,
+    signal?: AbortSignal,
+  ): Promise<WebSessionTimelineDetailPage> {
+    decimalAddress(address)
+    const query = detailQuery(boundedDetailLimits(limits, this.limits), continuation)
+    const response = await this.request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/timeline/${address}/detail?${query}`,
+      { signal },
+    )
+    if (!response.ok) return throwApiError(response)
+    return decodeWebSessionTimelineDetailPage(await readBoundedJson(response))
+  }
+
+  async readTurnDetails(
+    sessionId: string,
+    turnId: string,
+    continuation: SessionDetailContinuation | null,
+    limits: SessionDetailLimits,
+    signal?: AbortSignal,
+  ): Promise<WebSessionTimelineDetailPage> {
+    const query = detailQuery(boundedDetailLimits(limits, this.limits), continuation)
+    const response = await this.request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}/timeline-detail?${query}`,
+      { signal },
+    )
+    if (!response.ok) return throwApiError(response)
+    return decodeWebSessionTimelineDetailPage(await readBoundedJson(response))
+  }
+
+  async readRegionDetails(
+    sessionId: string,
+    first: string,
+    through: string,
+    continuation: SessionDetailContinuation | null,
+    limits: SessionDetailLimits,
+    signal?: AbortSignal,
+  ): Promise<WebSessionTimelineDetailPage> {
+    if (decimalAddress(first) > decimalAddress(through)) {
+      throw new TypeError('timeline region must be ordered')
+    }
+    const query = detailQuery(boundedDetailLimits(limits, this.limits), continuation)
+    query.set('first', first)
+    query.set('through', through)
+    const response = await this.request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/timeline-detail?${query}`,
+      { signal },
+    )
+    if (!response.ok) return throwApiError(response)
+    return decodeWebSessionTimelineDetailPage(await readBoundedJson(response))
+  }
+}
+
+export const assertBoundedDetailPage = (
+  sessionId: string,
+  page: WebSessionTimelineDetailPage,
+  limits: SessionDetailLimits,
+): WebSessionTimelineDetailPage => {
+  if (canonicalSessionId(page.session_id) !== canonicalSessionId(sessionId)) {
+    throw new TypeError('timeline detail session mismatch')
+  }
+  if (page.items.length > limits.maxItems) {
+    throw new TypeError('timeline detail exceeds the requested item ceiling')
+  }
+  if (page.projected_body_bytes > limits.maxBytes) {
+    throw new TypeError('timeline detail exceeds the requested byte ceiling')
+  }
+  const projected = page.items.reduce((total, item) => total + item.projected_body_bytes, 0)
+  if (!Number.isSafeInteger(projected) || projected !== page.projected_body_bytes) {
+    throw new TypeError('timeline detail byte total does not match its items')
+  }
+  page.items.reduce<bigint | undefined>((previous, item) => {
+    const address = decimalAddress(item.address.event_sequence)
+    if (previous !== undefined && address < previous) {
+      throw new TypeError('timeline detail addresses must not decrease')
+    }
+    return address
+  }, undefined)
+  return page
+}
+
+export const retainBoundedDetailPages = (
+  pages: ReadonlyMap<string, WebSessionTimelineDetailPage>,
+  key: string,
+  page: WebSessionTimelineDetailPage,
+): ReadonlyMap<string, WebSessionTimelineDetailPage> => {
+  if (page.items.length > MAX_RETAINED_SESSION_DETAIL_ITEMS) {
+    throw new TypeError('one timeline detail page exceeds the retained item ceiling')
+  }
+  const retained = new Map(pages)
+  retained.delete(key)
+  retained.set(key, page)
+  let retainedItems = [...retained.values()].reduce((total, value) => total + value.items.length, 0)
+  while (retainedItems > MAX_RETAINED_SESSION_DETAIL_ITEMS) {
+    const oldest = retained.keys().next().value
+    if (oldest === undefined || oldest === key) break
+    const removed = retained.get(oldest)
+    retained.delete(oldest)
+    retainedItems -= removed?.items.length ?? 0
+  }
+  if (retainedItems > MAX_RETAINED_SESSION_DETAIL_ITEMS) {
+    throw new TypeError('timeline detail retention exceeds its item ceiling')
+  }
+  return retained
 }
 
 export class BoundedSessionHistory {
@@ -313,6 +490,8 @@ const SCENARIO_ITEM_BYTES = 96
 const SCENARIO_TIMELINE_LIMITS: TimelineContractLimits = {
   max_timeline_window_items: 256,
   max_timeline_window_bytes: 64 * 1024,
+  max_timeline_detail_items: 128,
+  max_timeline_detail_bytes: 64 * 1024,
 }
 
 export class EnormousSessionScenarioSource implements SessionTimelineSource {
@@ -396,6 +575,18 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
           ? { event_sequence: lastItem.address.event_sequence }
           : null,
     })
+  }
+
+  async readItemDetails(): Promise<WebSessionTimelineDetailPage> {
+    throw new TypeError('scenario detail reads are unavailable')
+  }
+
+  async readTurnDetails(): Promise<WebSessionTimelineDetailPage> {
+    throw new TypeError('scenario detail reads are unavailable')
+  }
+
+  async readRegionDetails(): Promise<WebSessionTimelineDetailPage> {
+    throw new TypeError('scenario detail reads are unavailable')
   }
 }
 

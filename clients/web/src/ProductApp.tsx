@@ -261,8 +261,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
+  const timelineToggleRef = useRef<(() => void) | null>(null)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
+  const updateTimelineToggle = useCallback((toggle: (() => void) | null) => {
+    timelineToggleRef.current = toggle
+  }, [])
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -274,6 +278,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       getState: store.getState,
       timelineIds,
       focusTimeline: () => primaryRef.current?.focus(),
+      toggleTimelineExpansion: () => timelineToggleRef.current?.(),
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
     }),
     [dispatch, navigate, timelineIds],
@@ -295,7 +300,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     surface === 'attention' ? (
       <AttentionSurface />
     ) : surface === 'sessions' ? (
-      <SessionWorkspaceSurface onTimelineIds={updateTimelineIds} />
+      <SessionWorkspaceSurface
+        onTimelineIds={updateTimelineIds}
+        onToggleReady={updateTimelineToggle}
+      />
     ) : surface === 'settings' ? (
       <SettingsSurface />
     ) : (

@@ -761,8 +761,7 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
                 &descriptor_schema,
                 &window_schema,
                 &detail_schema,
-                &attention_snapshot_schema,
-                &attention_event_schema,
+                (&attention_snapshot_schema, &attention_event_schema),
             )?,
         },
         GeneratedArtifact {
@@ -774,8 +773,7 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
                 &descriptor_schema,
                 &window_schema,
                 &detail_schema,
-                &attention_snapshot_schema,
-                &attention_event_schema,
+                (&attention_snapshot_schema, &attention_event_schema),
             )?,
         },
         GeneratedArtifact {
@@ -800,9 +798,9 @@ fn runtime_module(
     descriptor_schema: &Value,
     window_schema: &Value,
     detail_schema: &Value,
-    attention_snapshot_schema: &Value,
-    attention_event_schema: &Value,
+    attention_schemas: (&Value, &Value),
 ) -> Result<String, GenerateWebContractError> {
+    let (attention_snapshot_schema, attention_event_schema) = attention_schemas;
     let mut schemas = json!({
         "WebContractBootstrap": bootstrap_schema,
         "WebContractExample": example_schema,
@@ -1023,9 +1021,9 @@ fn declaration_module(
     descriptor_schema: &Value,
     window_schema: &Value,
     detail_schema: &Value,
-    attention_snapshot_schema: &Value,
-    attention_event_schema: &Value,
+    attention_schemas: (&Value, &Value),
 ) -> Result<String, GenerateWebContractError> {
+    let (attention_snapshot_schema, attention_event_schema) = attention_schemas;
     let mut definitions = BTreeMap::new();
     let bootstrap = typescript_type(bootstrap_schema, bootstrap_schema, &mut definitions)?;
     let example = typescript_type(example_schema, example_schema, &mut definitions)?;

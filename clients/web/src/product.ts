@@ -32,7 +32,11 @@ export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> =
   sessions: {
     kind: 'server-backed',
     owningTrack: '#991 session projections',
-    facts: ['bounded session descriptors', 'stable-address timeline windows'],
+    facts: [
+      'bounded session descriptors',
+      'stable-address timeline windows',
+      'typed item, turn, and region details',
+    ],
   },
   search: {
     kind: 'committed-unimplemented',
