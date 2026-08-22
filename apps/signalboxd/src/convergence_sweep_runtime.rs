@@ -87,7 +87,7 @@ query PullRequestConvergence($namespace: String!, $name: String!, $number: Int!)
 
 const THREADS_QUERY: &str = r#"
 query PullRequestConvergenceThreads(
-  $namespace: String!, $name: String!, $number: Int!, $after: String!
+  $namespace: String!, $name: String!, $number: Int!, $after: String
 ) {
   repository(owner: $namespace, name: $name) {
     pullRequest(number: $number) {
@@ -604,6 +604,9 @@ impl ConvergenceSweepRuntime {
             tracing::error!(repository = %target.repository.as_str(),
                 pull_request = target.pull_request.get(), cause = %error,
                 "convergence sweep decision could not be recorded");
+            if error.commit_ambiguous() {
+                return;
+            }
             self.record_failure(
                 target,
                 Some(observation),
@@ -682,7 +685,7 @@ impl ConvergenceSweepRuntime {
         let base_branch = branch_at(pull, "baseRefName")?;
         let base_sha = commit_at(pull, "baseRefOid")?;
         let checked_head_sha = checked_head_at(pull)?;
-        let mut unresolved = unresolved_threads(
+        let mut thread_states = review_thread_states(
             pull.pointer("/reviewThreads/nodes")
                 .and_then(Value::as_array)
                 .ok_or(CensusError::Shape)?,
@@ -699,14 +702,47 @@ impl ConvergenceSweepRuntime {
             next["after"] = Value::String(thread_page.cursor.ok_or(CensusError::Shape)?);
             let page = self.graphql(THREADS_QUERY, next, &authorization).await?;
             let connection = threads_page(&page, &head_sha, &base_branch, &base_sha)?;
-            unresolved += unresolved_threads(
+            thread_states.extend(review_thread_states(
+                connection
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .ok_or(CensusError::Shape)?,
+            )?);
+            thread_page = page_info(connection.get("pageInfo"))?;
+        }
+        if thread_pages > 1 {
+            let mut next = variables.clone();
+            next["after"] = Value::Null;
+            let page = self.graphql(THREADS_QUERY, next, &authorization).await?;
+            let connection = threads_page(&page, &head_sha, &base_branch, &base_sha)?;
+            let mut revalidated = review_thread_states(
                 connection
                     .get("nodes")
                     .and_then(Value::as_array)
                     .ok_or(CensusError::Shape)?,
             )?;
-            thread_page = page_info(connection.get("pageInfo"))?;
+            let mut revalidation_page = page_info(connection.get("pageInfo"))?;
+            let mut revalidation_pages = 1usize;
+            while revalidation_page.has_next {
+                revalidation_pages += 1;
+                if revalidation_pages > MAX_CONNECTION_PAGES {
+                    return Err(CensusError::Pagination);
+                }
+                let mut next = variables.clone();
+                next["after"] = Value::String(revalidation_page.cursor.ok_or(CensusError::Shape)?);
+                let page = self.graphql(THREADS_QUERY, next, &authorization).await?;
+                let connection = threads_page(&page, &head_sha, &base_branch, &base_sha)?;
+                revalidated.extend(review_thread_states(
+                    connection
+                        .get("nodes")
+                        .and_then(Value::as_array)
+                        .ok_or(CensusError::Shape)?,
+                )?);
+                revalidation_page = page_info(connection.get("pageInfo"))?;
+            }
+            ensure_threads_stable(&thread_states, &revalidated)?;
         }
+        let unresolved = unresolved_threads(&thread_states);
         let mut check_pages = 1usize;
         while check_page.has_next {
             check_pages += 1;
@@ -725,7 +761,7 @@ impl ConvergenceSweepRuntime {
             )?);
             check_page = page_info(connection.get("pageInfo"))?;
         }
-        if check_pages > 1 {
+        if checks_require_revalidation(thread_pages, check_pages) {
             let mut next = variables.clone();
             next["after"] = Value::Null;
             let page = self.graphql(CHECKS_QUERY, next, &authorization).await?;
@@ -776,11 +812,14 @@ impl ConvergenceSweepRuntime {
             facts: PullRequestConvergenceFacts::new(
                 head_sha,
                 checked_head_sha,
-                signalbox_application::PullRequestDraftState::from_provider_flag(
-                    pull.get("isDraft")
-                        .and_then(Value::as_bool)
-                        .ok_or(CensusError::Shape)?,
-                ),
+                match pull
+                    .get("isDraft")
+                    .and_then(Value::as_bool)
+                    .ok_or(CensusError::Shape)?
+                {
+                    true => signalbox_application::PullRequestDraftState::Draft,
+                    false => signalbox_application::PullRequestDraftState::ReadyForReview,
+                },
                 unresolved,
                 mergeable_state,
                 checks,
@@ -891,14 +930,32 @@ fn page_info(value: Option<&Value>) -> Result<PageInfo, CensusError> {
     })
 }
 
-fn unresolved_threads(values: &[Value]) -> Result<u64, CensusError> {
-    values.iter().try_fold(0u64, |count, value| {
-        let resolved = value
-            .get("isResolved")
-            .and_then(Value::as_bool)
-            .ok_or(CensusError::Shape)?;
-        Ok(count + u64::from(!resolved))
-    })
+fn review_thread_states(values: &[Value]) -> Result<Vec<bool>, CensusError> {
+    values
+        .iter()
+        .map(|value| {
+            value
+                .get("isResolved")
+                .and_then(Value::as_bool)
+                .ok_or(CensusError::Shape)
+        })
+        .collect()
+}
+
+fn unresolved_threads(states: &[bool]) -> u64 {
+    states.iter().filter(|resolved| !**resolved).count() as u64
+}
+
+fn ensure_threads_stable(observed: &[bool], revalidated: &[bool]) -> Result<(), CensusError> {
+    if observed == revalidated {
+        Ok(())
+    } else {
+        Err(CensusError::State)
+    }
+}
+
+const fn checks_require_revalidation(thread_pages: usize, check_pages: usize) -> bool {
+    thread_pages > 1 || check_pages > 1
 }
 
 fn checks_page<'a>(
@@ -1375,7 +1432,29 @@ mod tests {
             .and_then(Value::as_array)
             .expect("fixture carries thread nodes");
 
-        assert_eq!(unresolved_threads(nodes), Ok(1));
+        assert_eq!(
+            unresolved_threads(&review_thread_states(nodes).expect("thread states decode")),
+            1
+        );
+    }
+
+    #[test]
+    fn mutable_paginated_review_thread_states_are_rejected() {
+        assert_eq!(
+            ensure_threads_stable(&[true, false], &[false, true]),
+            Err(CensusError::State)
+        );
+        assert_eq!(
+            ensure_threads_stable(&[true, false], &[true, false]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn thread_pagination_revalidates_the_initial_checks() {
+        assert!(checks_require_revalidation(2, 1));
+        assert!(checks_require_revalidation(1, 2));
+        assert!(!checks_require_revalidation(1, 1));
     }
 
     #[test]

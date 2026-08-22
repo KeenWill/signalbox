@@ -9,7 +9,7 @@ use std::{
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_domain::{CommitSha, DurableCommandId, PullRequestNumber, RepositorySlug, SessionId};
 use sqlx::{
-    PgConnection, PgPool, Row,
+    PgConnection, PgPool,
     types::{Uuid, time::OffsetDateTime},
 };
 
@@ -175,6 +175,57 @@ struct FailureTransitionRow {
     parking_kind: String,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct TargetStateRow {
+    state_kind: String,
+    failure_kind: Option<String>,
+    consecutive_failures: i16,
+    retry_readiness: String,
+    cool_off_readiness: String,
+    pending_command_id: Option<Uuid>,
+    pending_head_sha: Option<String>,
+    pending_unresolved_threads: Option<Decimal>,
+    last_head_sha: Option<String>,
+    last_unresolved_threads: Option<Decimal>,
+    latest_dispatch_head_sha: Option<String>,
+    latest_dispatch_unresolved_threads: Option<Decimal>,
+    pending_dispatch_id: Option<Uuid>,
+    pending_session_id: Option<Uuid>,
+    pending_recorded_at: Option<OffsetDateTime>,
+    pending_live: Option<bool>,
+    pending_has_model_activity: Option<bool>,
+    dispatch_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    recorded_at: Option<OffsetDateTime>,
+    live: Option<bool>,
+    has_model_activity: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Readiness {
+    Ready,
+    Waiting,
+}
+
+impl Readiness {
+    fn decode(value: &str) -> Result<Self, ConvergenceSweepStoreError> {
+        match value {
+            "ready" => Ok(Self::Ready),
+            "waiting" => Ok(Self::Waiting),
+            _ => Err(ConvergenceSweepStoreError::Corruption(
+                "invalid target readiness kind",
+            )),
+        }
+    }
+
+    const fn is_ready(self) -> bool {
+        match self {
+            Self::Ready => true,
+            Self::Waiting => false,
+        }
+    }
+}
+
 struct FailureRecord<'a> {
     observation: Option<&'a ConvergenceSweepObservation>,
     failure: ConvergenceSweepFailureKind,
@@ -203,6 +254,7 @@ impl FailureParking {
 #[derive(Debug)]
 pub enum ConvergenceSweepStoreError {
     Database(sqlx::Error),
+    CommitAmbiguous(sqlx::Error),
     Corruption(&'static str),
 }
 
@@ -210,6 +262,9 @@ impl fmt::Display for ConvergenceSweepStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Database(_) => formatter.write_str("convergence sweep database operation failed"),
+            Self::CommitAmbiguous(_) => {
+                formatter.write_str("convergence sweep commit outcome is ambiguous")
+            }
             Self::Corruption(reason) => write!(
                 formatter,
                 "convergence sweep state is inconsistent: {reason}"
@@ -221,7 +276,7 @@ impl fmt::Display for ConvergenceSweepStoreError {
 impl Error for ConvergenceSweepStoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Database(error) => Some(error),
+            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
             Self::Corruption(_) => None,
         }
     }
@@ -230,6 +285,12 @@ impl Error for ConvergenceSweepStoreError {
 impl From<sqlx::Error> for ConvergenceSweepStoreError {
     fn from(value: sqlx::Error) -> Self {
         Self::Database(value)
+    }
+}
+
+impl ConvergenceSweepStoreError {
+    pub const fn commit_ambiguous(&self) -> bool {
+        matches!(self, Self::CommitAmbiguous(_))
     }
 }
 
@@ -309,15 +370,18 @@ impl PostgresConvergenceSweepStore {
     ) -> Result<Option<ConvergenceSweepTargetState>, ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
         ensure_target(&mut transaction, repository, pull_request).await?;
-        let row = sqlx::query(
+        let row: Option<TargetStateRow> = sqlx::query_as(
             "SELECT target.state_kind, target.failure_kind,
                     target.consecutive_failures,
-                    target.retry_not_before IS NULL
-                      OR target.retry_not_before <= clock_timestamp() AS retry_ready,
-                    coalesce(
+                    CASE WHEN target.retry_not_before IS NULL
+                              OR target.retry_not_before <= clock_timestamp()
+                         THEN 'ready' ELSE 'waiting'
+                    END AS retry_readiness,
+                    CASE WHEN coalesce(
                         latest.recorded_at + $3 * interval '1 second' <= clock_timestamp(),
                         true
-                    ) AS cool_off_elapsed,
+                    ) THEN 'ready' ELSE 'waiting'
+                    END AS cool_off_readiness,
                     target.pending_command_id, target.pending_head_sha,
                     target.pending_unresolved_threads,
                     target.last_head_sha, target.last_unresolved_threads,
@@ -558,8 +622,21 @@ impl PostgresConvergenceSweepStore {
             None,
         )
         .await?;
-        transaction.commit().await?;
-        Ok(())
+        match transaction.commit().await {
+            Ok(()) => Ok(()),
+            Err(error) if crate::commit_failure_is_ambiguous(&error) => {
+                let event_exists = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM convergence_sweep_event WHERE event_id = $1
+                    )",
+                )
+                .bind(event_id)
+                .fetch_one(&self.pool)
+                .await;
+                resolve_ambiguous_decision_commit(error, event_exists)
+            }
+            Err(error) => Err(ConvergenceSweepStoreError::Database(error)),
+        }
     }
 
     /// Advances one typed failure lineage, scheduling retry or parking atomically.
@@ -572,6 +649,11 @@ impl PostgresConvergenceSweepStore {
         failure: ConvergenceSweepFailureKind,
         retry_policy: ConvergenceSweepRetryPolicy,
     ) -> Result<ConvergenceSweepFailureDisposition, ConvergenceSweepStoreError> {
+        if failure == ConvergenceSweepFailureKind::NoModelActivity {
+            return Err(ConvergenceSweepStoreError::Corruption(
+                "no-model-activity failure requires an expected session",
+            ));
+        }
         self.record_failure_guarded(
             event_id,
             repository,
@@ -873,53 +955,50 @@ async fn insert_event(
 }
 
 fn decode_target_state(
-    row: sqlx::postgres::PgRow,
+    row: TargetStateRow,
 ) -> Result<ConvergenceSweepTargetState, ConvergenceSweepStoreError> {
-    let state = convergence_sweep_state_from_str(&row.try_get::<String, _>("state_kind")?).ok_or(
+    let state = convergence_sweep_state_from_str(&row.state_kind).ok_or(
         ConvergenceSweepStoreError::Corruption("invalid sweep state kind"),
     )?;
     let failure_kind = row
-        .try_get::<Option<String>, _>("failure_kind")?
+        .failure_kind
         .map(|value| {
             convergence_sweep_failure_from_str(&value).ok_or(
                 ConvergenceSweepStoreError::Corruption("invalid failure kind"),
             )
         })
         .transpose()?;
-    let pending_command: Option<Uuid> = row.try_get("pending_command_id")?;
-    let pending_head: Option<String> = row.try_get("pending_head_sha")?;
-    let pending_threads: Option<Decimal> = row.try_get("pending_unresolved_threads")?;
-    let last_head: Option<String> = row.try_get("last_head_sha")?;
-    let last_threads: Option<Decimal> = row.try_get("last_unresolved_threads")?;
-    let dispatch_head: Option<String> = row.try_get("latest_dispatch_head_sha")?;
-    let dispatch_threads: Option<Decimal> = row.try_get("latest_dispatch_unresolved_threads")?;
-    let pending_observation = decode_observation(pending_head, pending_threads)?;
-    let last_observation = decode_observation(last_head, last_threads)?;
-    let latest_dispatch_observation = decode_observation(dispatch_head, dispatch_threads)?;
+    let pending_observation =
+        decode_observation(row.pending_head_sha, row.pending_unresolved_threads)?;
+    let last_observation = decode_observation(row.last_head_sha, row.last_unresolved_threads)?;
+    let latest_dispatch_observation = decode_observation(
+        row.latest_dispatch_head_sha,
+        row.latest_dispatch_unresolved_threads,
+    )?;
     let pending_dispatch = decode_dispatch_state(
-        row.try_get("pending_dispatch_id")?,
-        row.try_get("pending_session_id")?,
-        row.try_get("pending_recorded_at")?,
-        row.try_get("pending_live")?,
-        row.try_get("pending_has_model_activity")?,
+        row.pending_dispatch_id,
+        row.pending_session_id,
+        row.pending_recorded_at,
+        row.pending_live,
+        row.pending_has_model_activity,
         "partial pending dispatch",
     )?;
     let latest_dispatch = decode_dispatch_state(
-        row.try_get("dispatch_id")?,
-        row.try_get("session_id")?,
-        row.try_get("recorded_at")?,
-        row.try_get("live")?,
-        row.try_get("has_model_activity")?,
+        row.dispatch_id,
+        row.session_id,
+        row.recorded_at,
+        row.live,
+        row.has_model_activity,
         "partial latest dispatch",
     )?;
     Ok(ConvergenceSweepTargetState {
         parked: state == ConvergenceSweepStateStorageKind::Parked,
-        retry_ready: row.try_get("retry_ready")?,
-        cool_off_elapsed: row.try_get("cool_off_elapsed")?,
+        retry_ready: Readiness::decode(&row.retry_readiness)?.is_ready(),
+        cool_off_elapsed: Readiness::decode(&row.cool_off_readiness)?.is_ready(),
         failure_kind,
-        consecutive_failures: u16::try_from(row.try_get::<i16, _>("consecutive_failures")?)
+        consecutive_failures: u16::try_from(row.consecutive_failures)
             .map_err(|_| ConvergenceSweepStoreError::Corruption("invalid failure count"))?,
-        pending_command: pending_command.map(DurableCommandId::from_uuid),
+        pending_command: row.pending_command_id.map(DurableCommandId::from_uuid),
         pending_observation,
         last_observation,
         latest_dispatch_observation,
@@ -969,5 +1048,37 @@ fn decode_observation(
         _ => Err(ConvergenceSweepStoreError::Corruption(
             "partial observation",
         )),
+    }
+}
+
+fn resolve_ambiguous_decision_commit(
+    commit_error: sqlx::Error,
+    event_exists: Result<bool, sqlx::Error>,
+) -> Result<(), ConvergenceSweepStoreError> {
+    match event_exists {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(ConvergenceSweepStoreError::Database(commit_error)),
+        Err(_) => Err(ConvergenceSweepStoreError::CommitAmbiguous(commit_error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConvergenceSweepStoreError, resolve_ambiguous_decision_commit};
+
+    #[test]
+    fn ambiguous_decision_commit_is_resolved_by_event_identity() {
+        assert!(resolve_ambiguous_decision_commit(sqlx::Error::PoolClosed, Ok(true)).is_ok());
+        assert!(matches!(
+            resolve_ambiguous_decision_commit(sqlx::Error::PoolClosed, Ok(false)),
+            Err(ConvergenceSweepStoreError::Database(_))
+        ));
+        assert!(matches!(
+            resolve_ambiguous_decision_commit(
+                sqlx::Error::PoolClosed,
+                Err(sqlx::Error::PoolClosed),
+            ),
+            Err(ConvergenceSweepStoreError::CommitAmbiguous(_))
+        ));
     }
 }

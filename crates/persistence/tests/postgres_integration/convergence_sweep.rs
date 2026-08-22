@@ -608,13 +608,13 @@ async fn pull_request_dispatch_census_has_its_target_ordering_index() -> Result<
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn no_model_activity_parks_immediately_with_its_typed_need() -> Result<(), Box<dyn Error>> {
+async fn generic_failure_recording_rejects_no_model_activity() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
     let store = PostgresConvergenceSweepStore::new(pool.clone());
     let repository = repository()?;
     let observation = observation()?;
 
-    let disposition = store
+    let error = store
         .record_failure(
             Uuid::from_u128(7),
             &repository,
@@ -626,10 +626,10 @@ async fn no_model_activity_parks_immediately_with_its_typed_need() -> Result<(),
                 backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
             },
         )
-        .await?;
-    let parked: (String, String) = sqlx::query_as(
-        "SELECT failure_kind, operator_need
-           FROM convergence_sweep_parked_target
+        .await
+        .expect_err("generic recording must reject inactivity failures");
+    let target_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM convergence_sweep_target
           WHERE repository = $1 AND pull_request_number = $2",
     )
     .bind(repository.as_str())
@@ -637,14 +637,8 @@ async fn no_model_activity_parks_immediately_with_its_typed_need() -> Result<(),
     .fetch_one(&pool)
     .await?;
 
-    assert_eq!(disposition, ConvergenceSweepFailureDisposition::Parked);
-    assert_eq!(
-        parked,
-        (
-            String::from("no_model_activity"),
-            String::from("inspect_inactive_session")
-        )
-    );
+    assert!(error.to_string().contains("expected session"));
+    assert_eq!(target_count, 0, "rejection must precede durable mutation");
     Ok(())
 }
 
@@ -656,19 +650,21 @@ async fn configured_target_reenrollment_clears_a_durable_park() -> Result<(), Bo
     let repository = repository()?;
     let observation = observation()?;
 
-    store
-        .record_failure(
-            Uuid::from_u128(0x89_215),
-            &repository,
-            inactive_pull_request(),
-            Some(&observation),
-            ConvergenceSweepFailureKind::NoModelActivity,
-            ConvergenceSweepRetryPolicy {
-                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
-                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
-            },
-        )
-        .await?;
+    for event in 0..RETRY_BUDGET {
+        store
+            .record_failure(
+                Uuid::from_u128(0x89_215 + u128::from(event as u16)),
+                &repository,
+                inactive_pull_request(),
+                Some(&observation),
+                ConvergenceSweepFailureKind::FactsFetch,
+                ConvergenceSweepRetryPolicy {
+                    backoff_base: Duration::ZERO,
+                    backoff_cap: Duration::ZERO,
+                },
+            )
+            .await?;
+    }
     store
         .reenroll_target(&repository, inactive_pull_request())
         .await?;
@@ -724,19 +720,21 @@ async fn removed_targets_leave_the_parked_operator_view() -> Result<(), Box<dyn 
     let store = PostgresConvergenceSweepStore::new(pool.clone());
     let repository = repository()?;
     let observation = observation()?;
-    store
-        .record_failure(
-            Uuid::from_u128(0x89_218),
-            &repository,
-            inactive_pull_request(),
-            Some(&observation),
-            ConvergenceSweepFailureKind::NoModelActivity,
-            ConvergenceSweepRetryPolicy {
-                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
-                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
-            },
-        )
-        .await?;
+    for event in 0..RETRY_BUDGET {
+        store
+            .record_failure(
+                Uuid::from_u128(0x89_218 + u128::from(event as u16)),
+                &repository,
+                inactive_pull_request(),
+                Some(&observation),
+                ConvergenceSweepFailureKind::FactsFetch,
+                ConvergenceSweepRetryPolicy {
+                    backoff_base: Duration::ZERO,
+                    backoff_cap: Duration::ZERO,
+                },
+            )
+            .await?;
+    }
 
     store.reconcile_configured_targets(&[]).await?;
 
@@ -758,7 +756,7 @@ async fn removed_targets_leave_the_parked_operator_view() -> Result<(), Box<dyn 
     .await?;
 
     assert_eq!(parked, 0);
-    assert_eq!(retained_events, 1);
+    assert_eq!(retained_events, i64::from(RETRY_BUDGET));
     Ok(())
 }
 

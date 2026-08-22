@@ -12,15 +12,6 @@ pub enum PullRequestDraftState {
 }
 
 impl PullRequestDraftState {
-    /// Constructs the named state from the provider flag.
-    pub const fn from_provider_flag(draft: bool) -> Self {
-        if draft {
-            Self::Draft
-        } else {
-            Self::ReadyForReview
-        }
-    }
-
     /// Returns the provider-compatible draft flag.
     pub const fn is_draft(self) -> bool {
         match self {
