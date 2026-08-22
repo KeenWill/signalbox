@@ -2968,28 +2968,20 @@ struct MultipartReplayFixture {
     repository: SubmitInputRepository,
     command: SubmitInput,
     first: SubmitInputHandlingOutcome,
+    before: UserContentPart,
+    attachment: UserContentPart,
+    after: UserContentPart,
+    digest: BlobDigest,
 }
 
-const MULTIPART_SESSION_COMMAND_ID: u128 = 0x324;
-const MULTIPART_SESSION_ID: u128 = 0x724;
-const MULTIPART_MODEL_SELECTION_ID: u128 = 0x824;
-const MULTIPART_BLOB_NAMESPACE_ID: u128 = 0xb24;
-const MULTIPART_SUBMIT_COMMAND_ID: u128 = 0x325;
-const MULTIPART_ACCEPTED_INPUT_ID: u128 = 0x925;
-const MULTIPART_TURN_ID: u128 = 0xa25;
-const MULTIPART_REPLAY_ACCEPTED_INPUT_ID: u128 = 0x926;
-const MULTIPART_REPLAY_TURN_ID: u128 = 0xa26;
-const MULTIPART_REORDERED_ACCEPTED_INPUT_ID: u128 = 0x927;
-const MULTIPART_REORDERED_TURN_ID: u128 = 0xa27;
-const MULTIPART_METADATA_ACCEPTED_INPUT_ID: u128 = 0x928;
-const MULTIPART_METADATA_TURN_ID: u128 = 0xa28;
-const MULTIPART_ATTACHMENT_PAYLOAD: &[u8] = b"multipart attachment";
-
-#[derive(sqlx::FromRow)]
-struct MultipartProjectionFacts {
-    command_projection: Value,
-    accepted_projection: Value,
-}
+const INITIAL_MULTIPART_ACCEPTED_INPUT_ID: u128 = 0x925;
+const INITIAL_MULTIPART_TURN_ID: u128 = 0xa25;
+const EQUAL_REPLAY_ACCEPTED_INPUT_ID: u128 = 0x926;
+const EQUAL_REPLAY_TURN_ID: u128 = 0xa26;
+const REORDERED_REPLAY_ACCEPTED_INPUT_ID: u128 = 0x927;
+const REORDERED_REPLAY_TURN_ID: u128 = 0xa27;
+const CHANGED_METADATA_REPLAY_ACCEPTED_INPUT_ID: u128 = 0x928;
+const CHANGED_METADATA_REPLAY_TURN_ID: u128 = 0xa28;
 
 impl MultipartReplayFixture {
     async fn finish(self) {
@@ -2998,31 +2990,24 @@ impl MultipartReplayFixture {
     }
 }
 
-async fn multipart_replay_fixture(
-    command: SubmitInput,
-    attachment_payload: &[u8],
-) -> Result<MultipartReplayFixture, Box<dyn Error>> {
+async fn multipart_replay_fixture() -> Result<MultipartReplayFixture, Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(prepared(
-            MULTIPART_SESSION_COMMAND_ID,
-            MULTIPART_SESSION_ID,
-            direct(MULTIPART_MODEL_SELECTION_ID),
-        ))
+        .handle(prepared(0x324, 0x724, direct(0x824)))
         .await?;
 
-    let digest = BlobDigest::digest(attachment_payload);
+    let digest = BlobDigest::digest(b"multipart attachment");
     let mut catalog = pool.begin().await?;
     sqlx::query(
         "INSERT INTO blob_store_binding (store_name, namespace_id)
          VALUES ('multipart_test', $1)",
     )
-    .bind(Uuid::from_u128(MULTIPART_BLOB_NAMESPACE_ID))
+    .bind(Uuid::from_u128(0xb24))
     .execute(&mut *catalog)
     .await?;
     sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, $2)")
         .bind(digest.as_bytes().as_slice())
-        .bind(Decimal::from(attachment_payload.len()))
+        .bind(Decimal::from(20_u8))
         .execute(&mut *catalog)
         .await?;
     sqlx::query(
@@ -3034,14 +3019,40 @@ async fn multipart_replay_fixture(
     .await?;
     catalog.commit().await?;
 
+    let attachment = UserContentPart::Attachment {
+        digest,
+        kind: AttachmentKind::Document,
+        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+            .expect("the fixture media type is valid"),
+        display_filename: Some(
+            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
+                .expect("the fixture display filename is valid"),
+        ),
+    };
+    let before = UserContentPart::try_text(String::from("before"))
+        .expect("the fixture leading text is valid");
+    let after = UserContentPart::try_text(String::from("after"))
+        .expect("the fixture trailing text is valid");
+    let content = UserContent::try_parts(vec![before.clone(), attachment.clone(), after.clone()])
+        .expect("the fixture parts are canonical");
+    let command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x325)),
+        SessionId::from_uuid(Uuid::from_u128(0x724)),
+        content,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
     let repository = SubmitInputRepository::new(pool.clone()).with_maximum_attachment_bytes(
         NonZeroU64::new(20).expect("the fixture attachment bound is positive"),
     );
     let first = repository
         .handle(
             command.clone(),
-            AcceptedInputId::from_uuid(Uuid::from_u128(MULTIPART_ACCEPTED_INPUT_ID)),
-            Some(TurnId::from_uuid(Uuid::from_u128(MULTIPART_TURN_ID))),
+            AcceptedInputId::from_uuid(Uuid::from_u128(INITIAL_MULTIPART_ACCEPTED_INPUT_ID)),
+            Some(TurnId::from_uuid(Uuid::from_u128(
+                INITIAL_MULTIPART_TURN_ID,
+            ))),
         )
         .await?;
 
@@ -3051,6 +3062,10 @@ async fn multipart_replay_fixture(
         repository,
         command,
         first,
+        before,
+        attachment,
+        after,
+        digest,
     })
 }
 
@@ -3059,39 +3074,14 @@ async fn multipart_replay_fixture(
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
 -> Result<(), Box<dyn Error>> {
-    let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
-    let before = UserContentPart::try_text(String::from("before"))
-        .expect("the fixture leading text is valid");
-    let attachment = UserContentPart::Attachment {
-        digest,
-        kind: AttachmentKind::Document,
-        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
-            .expect("the fixture media type is valid"),
-        display_filename: Some(
-            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
-                .expect("the fixture display filename is valid"),
-        ),
-    };
-    let after = UserContentPart::try_text(String::from("after"))
-        .expect("the fixture trailing text is valid");
-    let content = UserContent::try_parts(vec![before, attachment, after])
-        .expect("the fixture parts are canonical");
-    let command = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(MULTIPART_SUBMIT_COMMAND_ID)),
-        SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
-        content,
-        DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
-        },
-    );
-    let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
+    let fixture = multipart_replay_fixture().await?;
     assert_eq!(
         fixture
             .repository
             .handle(
                 fixture.command.clone(),
-                AcceptedInputId::from_uuid(Uuid::from_u128(MULTIPART_REPLAY_ACCEPTED_INPUT_ID)),
-                Some(TurnId::from_uuid(Uuid::from_u128(MULTIPART_REPLAY_TURN_ID))),
+                AcceptedInputId::from_uuid(Uuid::from_u128(EQUAL_REPLAY_ACCEPTED_INPUT_ID)),
+                Some(TurnId::from_uuid(Uuid::from_u128(EQUAL_REPLAY_TURN_ID))),
             )
             .await?,
         fixture.first
@@ -3100,37 +3090,12 @@ async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
     Ok(())
 }
 
-/// INV-012: loading a durable multipart command reconstructs its exact value.
+/// INV-012: loading a multipart command reconstructs its exact ordered value.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_durable_multipart_command_reconstructs_the_original_value()
--> Result<(), Box<dyn Error>> {
-    let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
-    let before = UserContentPart::try_text(String::from("before"))
-        .expect("the fixture leading text is valid");
-    let attachment = UserContentPart::Attachment {
-        digest,
-        kind: AttachmentKind::Document,
-        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
-            .expect("the fixture media type is valid"),
-        display_filename: Some(
-            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
-                .expect("the fixture display filename is valid"),
-        ),
-    };
-    let after = UserContentPart::try_text(String::from("after"))
-        .expect("the fixture trailing text is valid");
-    let content = UserContent::try_parts(vec![before, attachment, after])
-        .expect("the fixture parts are canonical");
-    let command = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(MULTIPART_SUBMIT_COMMAND_ID)),
-        SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
-        content,
-        DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
-        },
-    );
-    let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
+async fn inv012_multipart_submit_load_reconstructs_the_exact_command() -> Result<(), Box<dyn Error>>
+{
+    let fixture = multipart_replay_fixture().await?;
     assert_eq!(
         fixture
             .repository
@@ -3148,37 +3113,16 @@ async fn inv012_durable_multipart_command_reconstructs_the_original_value()
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_reordered_multipart_submit_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
-    let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
-    let before = UserContentPart::try_text(String::from("before"))
-        .expect("the fixture leading text is valid");
-    let attachment = UserContentPart::Attachment {
-        digest,
-        kind: AttachmentKind::Document,
-        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
-            .expect("the fixture media type is valid"),
-        display_filename: Some(
-            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
-                .expect("the fixture display filename is valid"),
-        ),
-    };
-    let after = UserContentPart::try_text(String::from("after"))
-        .expect("the fixture trailing text is valid");
-    let content = UserContent::try_parts(vec![before.clone(), attachment.clone(), after.clone()])
-        .expect("the fixture parts are canonical");
-    let command = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(MULTIPART_SUBMIT_COMMAND_ID)),
-        SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
-        content,
-        DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
-        },
-    );
-    let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
+    let fixture = multipart_replay_fixture().await?;
     let reordered = SubmitInput::new(
         fixture.command.command_id(),
         fixture.command.session(),
-        UserContent::try_parts(vec![after, attachment, before])
-            .expect("the reordered fixture parts are canonical"),
+        UserContent::try_parts(vec![
+            fixture.after.clone(),
+            fixture.attachment.clone(),
+            fixture.before.clone(),
+        ])
+        .expect("the reordered fixture parts are canonical"),
         fixture.command.delivery(),
     );
     assert_eq!(
@@ -3186,10 +3130,10 @@ async fn inv012_reordered_multipart_submit_is_conflicting_reuse() -> Result<(), 
             .repository
             .handle(
                 reordered,
-                AcceptedInputId::from_uuid(Uuid::from_u128(MULTIPART_REORDERED_ACCEPTED_INPUT_ID)),
-                Some(TurnId::from_uuid(Uuid::from_u128(
-                    MULTIPART_REORDERED_TURN_ID
-                ))),
+                AcceptedInputId::from_uuid(Uuid::from_u128(REORDERED_REPLAY_ACCEPTED_INPUT_ID)),
+                Some(TurnId::from_uuid(
+                    Uuid::from_u128(REORDERED_REPLAY_TURN_ID,)
+                )),
             )
             .await?,
         SubmitInputHandlingOutcome::ConflictingReuse {
@@ -3205,34 +3149,9 @@ async fn inv012_reordered_multipart_submit_is_conflicting_reuse() -> Result<(), 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
-    let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
-    let before = UserContentPart::try_text(String::from("before"))
-        .expect("the fixture leading text is valid");
-    let attachment = UserContentPart::Attachment {
-        digest,
-        kind: AttachmentKind::Document,
-        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
-            .expect("the fixture media type is valid"),
-        display_filename: Some(
-            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
-                .expect("the fixture display filename is valid"),
-        ),
-    };
-    let after = UserContentPart::try_text(String::from("after"))
-        .expect("the fixture trailing text is valid");
-    let content = UserContent::try_parts(vec![before.clone(), attachment, after.clone()])
-        .expect("the fixture parts are canonical");
-    let command = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(MULTIPART_SUBMIT_COMMAND_ID)),
-        SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
-        content,
-        DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
-        },
-    );
-    let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
+    let fixture = multipart_replay_fixture().await?;
     let changed_attachment = UserContentPart::Attachment {
-        digest,
+        digest: fixture.digest,
         kind: AttachmentKind::Document,
         media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
             .expect("the fixture media type is valid"),
@@ -3244,8 +3163,12 @@ async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(),
     let changed_metadata = SubmitInput::new(
         fixture.command.command_id(),
         fixture.command.session(),
-        UserContent::try_parts(vec![before, changed_attachment, after])
-            .expect("the changed-metadata fixture parts are canonical"),
+        UserContent::try_parts(vec![
+            fixture.before.clone(),
+            changed_attachment,
+            fixture.after.clone(),
+        ])
+        .expect("the changed-metadata fixture parts are canonical"),
         fixture.command.delivery(),
     );
     assert_eq!(
@@ -3253,9 +3176,11 @@ async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(),
             .repository
             .handle(
                 changed_metadata,
-                AcceptedInputId::from_uuid(Uuid::from_u128(MULTIPART_METADATA_ACCEPTED_INPUT_ID)),
+                AcceptedInputId::from_uuid(Uuid::from_u128(
+                    CHANGED_METADATA_REPLAY_ACCEPTED_INPUT_ID,
+                )),
                 Some(TurnId::from_uuid(Uuid::from_u128(
-                    MULTIPART_METADATA_TURN_ID
+                    CHANGED_METADATA_REPLAY_TURN_ID,
                 ))),
             )
             .await?,
@@ -3273,33 +3198,13 @@ async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(),
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_multipart_command_and_accepted_satellites_are_identical()
 -> Result<(), Box<dyn Error>> {
-    let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
-    let before = UserContentPart::try_text(String::from("before"))
-        .expect("the fixture leading text is valid");
-    let attachment = UserContentPart::Attachment {
-        digest,
-        kind: AttachmentKind::Document,
-        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
-            .expect("the fixture media type is valid"),
-        display_filename: Some(
-            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
-                .expect("the fixture display filename is valid"),
-        ),
-    };
-    let after = UserContentPart::try_text(String::from("after"))
-        .expect("the fixture trailing text is valid");
-    let content = UserContent::try_parts(vec![before, attachment, after])
-        .expect("the fixture parts are canonical");
-    let command = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(MULTIPART_SUBMIT_COMMAND_ID)),
-        SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
-        content,
-        DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
-        },
-    );
-    let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
-    let mirrored: MultipartProjectionFacts = sqlx::query_as(
+    let fixture = multipart_replay_fixture().await?;
+    #[derive(sqlx::FromRow)]
+    struct MultipartProjectionFacts {
+        command_projection: Value,
+        accepted_input_projection: Value,
+    }
+    let mirrored = sqlx::query_as::<_, MultipartProjectionFacts>(
         "SELECT
             (SELECT jsonb_agg(
                 jsonb_build_array(position, part_kind, text_value,
@@ -3316,12 +3221,16 @@ async fn inv012_multipart_command_and_accepted_satellites_are_identical()
                FROM accepted_input_content_part AS part
                JOIN accepted_input AS accepted
                  ON accepted.accepted_input_id = part.accepted_input_id
-              WHERE accepted.accepting_command_id = $1) AS accepted_projection",
+              WHERE accepted.accepting_command_id = $1)
+                    AS accepted_input_projection",
     )
     .bind(fixture.command.command_id().as_uuid())
     .fetch_one(&fixture.pool)
     .await?;
-    assert_eq!(mirrored.command_projection, mirrored.accepted_projection);
+    assert_eq!(
+        mirrored.command_projection,
+        mirrored.accepted_input_projection
+    );
 
     fixture.finish().await;
     Ok(())
@@ -3651,15 +3560,14 @@ async fn inv071_distinct_attachment_bytes_above_the_maximum_are_rejected()
             }
         ))
     );
-    let (durable_maximum, durable_observed): (Decimal, Decimal) = sqlx::query_as(
-        "SELECT result_maximum_attachment_bytes, result_observed_attachment_bytes
+    let durable_maximum: Decimal = sqlx::query_scalar(
+        "SELECT result_maximum_attachment_bytes
            FROM submit_input_command WHERE command_id = $1",
     )
     .bind(distinct_command_id.into_uuid())
     .fetch_one(&fixture.pool)
     .await?;
     assert_eq!(durable_maximum, Decimal::from(fixture.maximum.get()));
-    assert_eq!(durable_observed, Decimal::from(33_u64));
     fixture.finish().await;
     Ok(())
 }
@@ -3703,13 +3611,24 @@ async fn inv012_attachment_byte_bound_rejection_replays_exactly() -> Result<(), 
     Ok(())
 }
 
-/// INV-071: a newly queued input is rejected when the complete prospective
-/// rendered frontier, rather than either input alone, exceeds the attachment
-/// verification bound.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn inv071_queued_input_checks_the_complete_prospective_attachment_frontier()
--> Result<(), Box<dyn Error>> {
+struct QueuedFrontierFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    repository: SubmitInputRepository,
+    session: SessionId,
+    first_digest: BlobDigest,
+    second_digest: BlobDigest,
+    maximum: NonZeroU64,
+}
+
+impl QueuedFrontierFixture {
+    async fn finish(self) {
+        self.pool.close().await;
+        drop(self.container);
+    }
+}
+
+async fn queued_frontier_fixture() -> Result<QueuedFrontierFixture, Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_digest = BlobDigest::digest(b"first prospective attachment");
     let second_digest = BlobDigest::digest(b"second prospective attachment");
@@ -3742,46 +3661,116 @@ async fn inv071_queued_input_checks_the_complete_prospective_attachment_frontier
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0xb332, 0xb331, direct(0xb333)))
         .await?;
+    let repository =
+        SubmitInputRepository::new(pool.clone()).with_maximum_attachment_bytes(maximum);
+    Ok(QueuedFrontierFixture {
+        container,
+        pool,
+        repository,
+        session,
+        first_digest,
+        second_digest,
+        maximum,
+    })
+}
+
+/// INV-071: a newly queued input is rejected when the complete prospective
+/// rendered frontier, rather than either input alone, exceeds the attachment
+/// verification bound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv071_queued_input_checks_the_complete_prospective_attachment_frontier()
+-> Result<(), Box<dyn Error>> {
+    let fixture = queued_frontier_fixture().await?;
     let delivery = DeliveryRequest::StartWhenNoActiveTurn {
         configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
     };
-    let repository =
-        SubmitInputRepository::new(pool.clone()).with_maximum_attachment_bytes(maximum);
     let first = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb334)),
-        session,
-        attachment_content(first_digest),
+        fixture.session,
+        attachment_content(fixture.first_digest),
         delivery,
     );
-    assert!(matches!(
-        repository
-            .handle(
-                first,
-                AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
-                Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
-            )
-            .await?,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::TurnOrigin(_)
-        ))
-    ));
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(_),
+    )) = fixture
+        .repository
+        .handle(
+            first,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
+        )
+        .await?
+    else {
+        panic!("the first seven-byte attachment must remain within the ten-byte bound");
+    };
     let second = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb337)),
-        session,
-        attachment_content(second_digest),
+        fixture.session,
+        attachment_content(fixture.second_digest),
+        delivery,
+    );
+
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                second,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb338)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentBytesTooLarge {
+                session: fixture.session,
+                maximum_bytes: fixture.maximum,
+                observed_bytes: NonZeroU64::new(14).expect("the aggregate is positive"),
+            },
+        ))
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: a prospective queued-frontier rejection replays exactly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_queued_frontier_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+    let fixture = queued_frontier_fixture().await?;
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn {
+        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+    };
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb334)),
+                fixture.session,
+                attachment_content(fixture.first_digest),
+                delivery,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
+        )
+        .await?;
+    let rejected = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb337)),
+        fixture.session,
+        attachment_content(fixture.second_digest),
         delivery,
     );
     let expected = SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
         SubmitInputRejectedResult::AttachmentBytesTooLarge {
-            session,
-            maximum_bytes: maximum,
+            session: fixture.session,
+            maximum_bytes: fixture.maximum,
             observed_bytes: NonZeroU64::new(14).expect("the aggregate is positive"),
         },
     ));
     assert_eq!(
-        repository
+        fixture
+            .repository
             .handle(
-                second.clone(),
+                rejected.clone(),
                 AcceptedInputId::from_uuid(Uuid::from_u128(0xb338)),
                 Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
             )
@@ -3789,35 +3778,96 @@ async fn inv071_queued_input_checks_the_complete_prospective_attachment_frontier
         expected
     );
     assert_eq!(
-        repository
+        fixture
+            .repository
             .handle(
-                second,
+                rejected,
                 AcceptedInputId::from_uuid(Uuid::from_u128(0xb33a)),
                 Some(TurnId::from_uuid(Uuid::from_u128(0xb33b))),
             )
             .await?,
         expected
     );
-    let effects: (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1),
-                (SELECT count(*) FROM queued_input_origin WHERE session_id = $1)",
-    )
-    .bind(session.into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(effects, (1, 1));
-
-    pool.close().await;
-    drop(container);
+    fixture.finish().await;
     Ok(())
 }
 
-/// INV-071: pending steering is rejected when it would make a queued
-/// successor's eventual rendered frontier exceed the attachment bound.
+/// INV-071: a rejected queued frontier rolls back every provisional accepted
+/// input and queue-origin effect.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv071_pending_steering_rechecks_affected_queued_attachment_frontiers()
+async fn inv071_queued_frontier_rejection_rolls_back_provisional_effects()
 -> Result<(), Box<dyn Error>> {
+    let fixture = queued_frontier_fixture().await?;
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn {
+        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+    };
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb334)),
+                fixture.session,
+                attachment_content(fixture.first_digest),
+                delivery,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
+        )
+        .await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb337)),
+                fixture.session,
+                attachment_content(fixture.second_digest),
+                delivery,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb338)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
+        )
+        .await?;
+    #[derive(sqlx::FromRow)]
+    struct QueuedFrontierEffectCounts {
+        accepted_inputs: i64,
+        queued_origins: i64,
+    }
+    let effects = sqlx::query_as::<_, QueuedFrontierEffectCounts>(
+        "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1)
+                    AS accepted_inputs,
+                (SELECT count(*) FROM queued_input_origin WHERE session_id = $1)
+                    AS queued_origins",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(effects.accepted_inputs, 1);
+    assert_eq!(effects.queued_origins, 1);
+
+    fixture.finish().await;
+    Ok(())
+}
+
+struct SteeringFrontierFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    repository: SubmitInputRepository,
+    session: SessionId,
+    active_turn: TurnId,
+    queued_digest: BlobDigest,
+    steering_digest: BlobDigest,
+    maximum: NonZeroU64,
+}
+
+impl SteeringFrontierFixture {
+    async fn finish(self) {
+        self.pool.close().await;
+        drop(self.container);
+    }
+}
+
+async fn steering_frontier_fixture() -> Result<SteeringFrontierFixture, Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let queued_digest = BlobDigest::digest(b"queued prospective attachment");
     let steering_digest = BlobDigest::digest(b"steering prospective attachment");
@@ -3876,44 +3926,116 @@ async fn inv071_pending_steering_rechecks_affected_queued_attachment_frontiers()
         },
     )
     .await?;
+    Ok(SteeringFrontierFixture {
+        container,
+        pool,
+        repository,
+        session,
+        active_turn,
+        queued_digest,
+        steering_digest,
+        maximum,
+    })
+}
+
+/// INV-071: pending steering is rejected when it would make a queued
+/// successor's eventual rendered frontier exceed the attachment bound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv071_pending_steering_rechecks_affected_queued_attachment_frontiers()
+-> Result<(), Box<dyn Error>> {
+    let fixture = steering_frontier_fixture().await?;
     let queued = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb34a)),
-        session,
-        attachment_content(queued_digest),
+        fixture.session,
+        attachment_content(fixture.queued_digest),
         DeliveryRequest::AfterCurrentTurn {
-            expected_active_turn: active_turn,
+            expected_active_turn: fixture.active_turn,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
-    assert!(matches!(
-        repository
-            .handle(
-                queued,
-                AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
-                Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
-            )
-            .await?,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::TurnOrigin(_)
-        ))
-    ));
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(_),
+    )) = fixture
+        .repository
+        .handle(
+            queued,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
+        )
+        .await?
+    else {
+        panic!("the queued seven-byte attachment must remain within the ten-byte bound");
+    };
     let steering = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
-        session,
-        attachment_content(steering_digest),
+        fixture.session,
+        attachment_content(fixture.steering_digest),
         DeliveryRequest::NextSafePoint {
-            expected_active_turn: active_turn,
+            expected_active_turn: fixture.active_turn,
+        },
+    );
+
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                steering,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb34e)),
+                None,
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentBytesTooLarge {
+                session: fixture.session,
+                maximum_bytes: fixture.maximum,
+                observed_bytes: NonZeroU64::new(14).expect("the aggregate is positive"),
+            },
+        ))
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: a prospective steering-frontier rejection replays exactly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_steering_frontier_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+    let fixture = steering_frontier_fixture().await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb34a)),
+                fixture.session,
+                attachment_content(fixture.queued_digest),
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: fixture.active_turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
+        )
+        .await?;
+    let steering = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
+        fixture.session,
+        attachment_content(fixture.steering_digest),
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: fixture.active_turn,
         },
     );
     let expected = SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
         SubmitInputRejectedResult::AttachmentBytesTooLarge {
-            session,
-            maximum_bytes: maximum,
+            session: fixture.session,
+            maximum_bytes: fixture.maximum,
             observed_bytes: NonZeroU64::new(14).expect("the aggregate is positive"),
         },
     ));
     assert_eq!(
-        repository
+        fixture
+            .repository
             .handle(
                 steering.clone(),
                 AcceptedInputId::from_uuid(Uuid::from_u128(0xb34e)),
@@ -3923,7 +4045,8 @@ async fn inv071_pending_steering_rechecks_affected_queued_attachment_frontiers()
         expected
     );
     assert_eq!(
-        repository
+        fixture
+            .repository
             .handle(
                 steering,
                 AcceptedInputId::from_uuid(Uuid::from_u128(0xb34f)),
@@ -3932,21 +4055,71 @@ async fn inv071_pending_steering_rechecks_affected_queued_attachment_frontiers()
             .await?,
         expected
     );
-    let effects: (i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1),
-                (SELECT count(*) FROM queued_input_origin WHERE session_id = $1
-                    AND turn_id <> $2),
-                (SELECT count(*) FROM accepted_input WHERE session_id = $1
-                    AND disposition_kind = 'pending_steering')",
-    )
-    .bind(session.into_uuid())
-    .bind(active_turn.into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(effects, (2, 1, 0));
+    fixture.finish().await;
+    Ok(())
+}
 
-    pool.close().await;
-    drop(container);
+/// INV-071: a rejected steering frontier rolls back the provisional pending
+/// steering while preserving the active and queued origins.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv071_steering_frontier_rejection_rolls_back_provisional_effects()
+-> Result<(), Box<dyn Error>> {
+    let fixture = steering_frontier_fixture().await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb34a)),
+                fixture.session,
+                attachment_content(fixture.queued_digest),
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: fixture.active_turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
+        )
+        .await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
+                fixture.session,
+                attachment_content(fixture.steering_digest),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: fixture.active_turn,
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34e)),
+            None,
+        )
+        .await?;
+    #[derive(sqlx::FromRow)]
+    struct SteeringFrontierEffectCounts {
+        accepted_inputs: i64,
+        queued_successor_origins: i64,
+        pending_steering: i64,
+    }
+    let effects = sqlx::query_as::<_, SteeringFrontierEffectCounts>(
+        "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1)
+                    AS accepted_inputs,
+                (SELECT count(*) FROM queued_input_origin WHERE session_id = $1
+                    AND turn_id <> $2) AS queued_successor_origins,
+                (SELECT count(*) FROM accepted_input WHERE session_id = $1
+                    AND disposition_kind = 'pending_steering') AS pending_steering",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.active_turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(effects.accepted_inputs, 2);
+    assert_eq!(effects.queued_successor_origins, 1);
+    assert_eq!(effects.pending_steering, 0);
+
+    fixture.finish().await;
     Ok(())
 }
 

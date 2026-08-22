@@ -4428,6 +4428,7 @@ fn decode_delegated_active_phase(
                     revision,
                     row.try_get::<Option<Uuid>, _>("runner_recovery_tool_attempt_id")?
                         .map(signalbox_domain::ToolAttemptId::from_uuid),
+                    None,
                 ),
             )
         }
@@ -4830,7 +4831,7 @@ async fn load_availability_predecessor_snapshot(
         .map(Some)
 }
 
-async fn load_call_snapshot(
+pub(crate) async fn load_call_snapshot(
     connection: &mut PgConnection,
     session: SessionId,
     frontier: signalbox_domain::ContextFrontierId,

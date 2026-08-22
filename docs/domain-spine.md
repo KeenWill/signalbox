@@ -3156,6 +3156,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
         runner: RunnerId,
         placement_revision: RunnerGeneration,
         interrupted_tool_attempt: Option<ToolAttemptId>,
+        source_frontier: Option<ContextFrontierId>,
     ) -> Self;
     // accessor: owning_turn()
 }
@@ -3504,6 +3505,9 @@ impl AcceptedInputSchedulingProjection {
     ) -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn active_turn(&self) -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn active_turn_execution(&self) -> Option<ActivatedAcceptedInputTurn>;
+    pub fn active_rendered_frontier_origins(
+        &self,
+    ) -> Option<Vec<AcceptedInputId>>;
     pub fn apply_interrupt_to_model_call_recovery(
         self,
         interrupt: AppliedInterruptCommandResult,
@@ -3551,6 +3555,10 @@ impl AcceptedInputSchedulingProjection {
         -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn earliest_queued_rendered_base_origins(
         &self,
+    ) -> Option<Vec<AcceptedInputId>>;
+    pub fn external_predecessor_rendered_base_origins(
+        &self,
+        turn: TurnId,
     ) -> Option<Vec<AcceptedInputId>>;
     pub fn resolved_snapshot(
         &self,

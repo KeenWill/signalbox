@@ -18,21 +18,22 @@ use signalbox_domain::{
     ConsumedSteeringReconstitutionInput, ContextCompactionId,
     ContextCompactionModelCallReconstitutionInput, ContextCompactionModelCallState,
     ContextCompactionRange, ContextCompactionReconstitutionInput, ContextCompactionTokenUsage,
-    ContextFrontierId, ContinuationRoundReconstitutionInput, DelegatedTurnSchedulingFact,
-    DelegatedTurnSchedulingState, DelegationContent, DelegationMessageId, DelegationOutcome,
-    DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenanceReconstitutionInput,
-    DelegationWaitMode, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
-    DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
-    FrozenModelSelection, GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput,
-    GoalTurnSource, IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId,
-    ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-    ModelCallTerminalOutcome, ModelCapabilityCatalog, ModelSelectionOverride,
-    ModelSelectionRequest, NonAcceptedTurnPredecessorReconstitutionInput,
-    NonEmptyUnicodeTextFailure, OriginConfiguration, OriginConfigurationReconstitutionInput,
-    OriginModelSettingsError, PerInputConfigurationChoices,
+    ContextFrontierId, ContextFrontierProjection, ContinuationRoundReconstitutionInput,
+    DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState, DelegationContent,
+    DelegationMessageId, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
+    DelegationProvenanceReconstitutionInput, DelegationWaitMode, DeliveryRequest,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
+    GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput, GoalTurnSource,
+    IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId, ModelCallInterruptOutcome,
+    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCallTerminalOutcome,
+    ModelCapabilityCatalog, ModelSelectionOverride, ModelSelectionRequest,
+    NonAcceptedTurnPredecessorReconstitutionInput, NonEmptyUnicodeTextFailure, OriginConfiguration,
+    OriginConfigurationReconstitutionInput, OriginModelSettingsError, PerInputConfigurationChoices,
     PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
-    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
-    RunnerGeneration, RunnerId, SemanticTranscriptEntryId,
+    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
+    ResolvedContextFrontierSnapshot, ResolvedProviderTarget, RunnerGeneration, RunnerId,
+    SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -69,7 +70,8 @@ use crate::{
         self, CommandKind, RegistryCorruption, RegistryInspectionError, SUBMIT_INPUT_KIND,
     },
     mapping::{
-        PositiveOrdinalMappingError, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        ActiveTurnPhaseStorageKind, PositiveOrdinalMappingError, accepted_input_id_from_uuid,
+        accepted_input_id_to_uuid, active_turn_phase_from_str,
         dangerous_tool_auto_approval_from_str, dangerous_tool_auto_approval_to_str,
         defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
         durable_command_id_to_uuid, input_position_from_numeric, input_position_to_numeric,
@@ -79,11 +81,12 @@ use crate::{
         turn_id_to_uuid,
     },
     model_execution::{
-        ModelCallRepositoryError, attach_interrupt_reclassification_candidates,
+        ModelCallCorruption, ModelCallRepositoryError,
+        attach_interrupt_reclassification_candidates,
         attach_interrupt_reclassification_candidates_for_activated,
         attach_interrupt_reclassification_candidates_for_active,
         attach_recovery_interrupt_reclassification_candidates,
-        attach_recovery_interrupt_reclassification_candidates_for_activated,
+        attach_recovery_interrupt_reclassification_candidates_for_activated, load_call_snapshot,
         load_delegated_runner_recovery_for_interrupt, lock_delegated_child_endpoint_sessions,
         persist_stop_requested, persist_terminal_outcome, persist_tool_reconciliation_required,
         require_live_execution_for_restart,
@@ -254,6 +257,13 @@ mod tests {
     #[test]
     fn attachment_byte_aggregation_saturates_at_the_durable_evidence_bound() {
         assert_eq!(saturating_attachment_byte_sum(u64::MAX, 1), u64::MAX,);
+    }
+
+    #[test]
+    fn attachment_byte_maximum_rejects_a_bound_without_exceeded_evidence_space() {
+        let maximum = NonZeroU64::new(u64::MAX).expect("the maximum is positive");
+
+        assert!(validate_attachment_byte_maximum(maximum).is_err());
     }
 
     #[test]
@@ -658,7 +668,7 @@ impl SubmitInputRepository {
             ) + Send,
     {
         let mut transaction = self.pool.begin().await?;
-        let decision = handle_in_transaction(
+        let decision = Box::pin(handle_in_transaction(
             &mut transaction,
             command,
             accepted_input,
@@ -669,7 +679,7 @@ impl SubmitInputRepository {
             select_definition,
             self.model_capabilities.as_ref(),
             self.maximum_attachment_bytes,
-        )
+        ))
         .await;
 
         match decision {
@@ -1682,13 +1692,13 @@ where
     }
     if let Some(maximum_bytes) = maximum_attachment_bytes {
         if let Some(observed_bytes) = if matches!(recorded, SubmitInputResult::Applied(_)) {
-            prospective_attachment_frontier_exceeds_bound(
+            Box::pin(prospective_attachment_frontier_exceeds_bound(
                 connection,
                 frontier_command.session(),
                 &prior_queued_inputs,
                 &recorded,
                 maximum_bytes,
-            )
+            ))
             .await?
         } else {
             None
@@ -1724,6 +1734,7 @@ async fn prospective_attachment_frontier_exceeds_bound(
     result: &SubmitInputResult,
     maximum_bytes: NonZeroU64,
 ) -> Result<Option<NonZeroU64>, SubmitInputRepositoryError> {
+    let maximum_bytes = validate_attachment_byte_maximum(maximum_bytes)?;
     let current = match load_session_from_connection(connection, session).await {
         Ok(Some(session)) => session,
         Ok(None) => {
@@ -1737,14 +1748,43 @@ async fn prospective_attachment_frontier_exceeds_bound(
             return Err(SubmitInputCorruption::CurrentSession(error).into());
         }
     };
-    let scheduling = load_scheduling_projection(connection, current).await?;
-    let (base_origins, check_base) =
-        match require_live_execution_for_restart(connection, session).await {
-            Ok(execution) => {
-                let mut distinct = BTreeSet::new();
-                let mut origins = execution
-                    .frontier_entries()
-                    .filter_map(|entry| match entry.payload() {
+    let delegated_parked_frontier =
+        load_delegated_parked_attachment_frontier(connection, session).await?;
+    let supplemental_semantic_frontiers = delegated_parked_frontier
+        .as_ref()
+        .map(|frontier| vec![frontier.snapshot.frontier().snapshot()])
+        .unwrap_or_default();
+    let scheduling = load_scheduling_projection_with_semantic_frontiers(
+        connection,
+        current,
+        &supplemental_semantic_frontiers,
+    )
+    .await?;
+    let live_execution = match require_live_execution_for_restart(connection, session).await {
+        Err(ModelCallRepositoryError::Corruption(ModelCallCorruption::Unsupported {
+            field: "delegated turn attempt state",
+            value,
+        })) if value == "stop_requested" => Err(ModelCallRepositoryError::NoLiveExecution),
+        result => result,
+    };
+    let (base_origins, check_base) = match live_execution {
+        Ok(execution) => {
+            let complete_entries = execution.frontier_entries().cloned().collect::<Vec<_>>();
+            let projection = ContextFrontierProjection::from_complete_entries(&complete_entries)
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent(
+                        "prospective attachment frontier projection",
+                    )
+                })?;
+            let entries_by_reference = complete_entries
+                .iter()
+                .map(|entry| (entry.reference(), entry))
+                .collect::<BTreeMap<_, _>>();
+            let mut distinct = BTreeSet::new();
+            let mut origins = projection
+                .ordered_entries()
+                .filter_map(
+                    |reference| match entries_by_reference[&reference].payload() {
                         InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
                             accepted_input,
                         }
@@ -1766,11 +1806,100 @@ async fn prospective_attachment_frontier_exceeds_bound(
                         | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
                         | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. }
                         | InitialSemanticTranscriptEntryPayload::Imported { .. } => None,
-                    })
-                    .collect::<Vec<_>>();
+                    },
+                )
+                .collect::<Vec<_>>();
+            origins.extend(
+                execution
+                    .active_turn()
+                    .pending_steering()
+                    .iter()
+                    .map(|pending| pending.accepted_input())
+                    .filter(|accepted_input| distinct.insert(*accepted_input)),
+            );
+            (
+                origins,
+                matches!(
+                    result,
+                    SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
+                ),
+            )
+        }
+        Err(ModelCallRepositoryError::NoLiveExecution) => {
+            if let Some(active) = scheduling.active_turn_execution() {
+                let mut distinct = BTreeSet::new();
+                let mut origins =
+                    if matches!(
+                        active.phase(),
+                        signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+                    ) {
+                        let snapshot = load_runner_recovery_source_snapshot(
+                            connection,
+                            session,
+                            active.turn(),
+                        )
+                        .await
+                        .map_err(map_tool_loop_error)?
+                        .ok_or(SubmitInputCorruption::Inconsistent(
+                            "runner recovery prospective attachment frontier missing",
+                        ))?;
+                        let complete_entries = snapshot
+                            .ordered_entries()
+                            .map(|reference| scheduling.semantic_entry(reference).cloned())
+                            .collect::<Option<Vec<_>>>()
+                            .ok_or(SubmitInputCorruption::Inconsistent(
+                                "runner recovery prospective attachment frontier entry missing",
+                            ))?;
+                        let projection = ContextFrontierProjection::from_complete_entries(
+                            &complete_entries,
+                        )
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent(
+                                "runner recovery prospective attachment frontier projection",
+                            )
+                        })?;
+                        let entries_by_reference = complete_entries
+                            .iter()
+                            .map(|entry| (entry.reference(), entry))
+                            .collect::<BTreeMap<_, _>>();
+                        projection
+                            .ordered_entries()
+                            .filter_map(|reference| {
+                                match entries_by_reference[&reference].payload() {
+                                InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
+                                    accepted_input,
+                                }
+                                | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                                    accepted_input,
+                                    ..
+                                } => distinct.insert(*accepted_input).then_some(*accepted_input),
+                                InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
+                                | InitialSemanticTranscriptEntryPayload::DelegatedTask { .. }
+                                | InitialSemanticTranscriptEntryPayload::DelegationMessage { .. }
+                                | InitialSemanticTranscriptEntryPayload::DelegationResult { .. }
+                                | InitialSemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+                                | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
+                                | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
+                                | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
+                                | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
+                                | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+                                | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
+                                | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
+                                | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. }
+                                | InitialSemanticTranscriptEntryPayload::Imported { .. } => None,
+                            }
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        scheduling.active_rendered_frontier_origins().ok_or(
+                            SubmitInputCorruption::Inconsistent(
+                                "active prospective attachment frontier missing",
+                            ),
+                        )?
+                    };
+                distinct.extend(origins.iter().copied());
                 origins.extend(
-                    execution
-                        .active_turn()
+                    active
                         .pending_steering()
                         .iter()
                         .map(|pending| pending.accepted_input())
@@ -1783,20 +1912,47 @@ async fn prospective_attachment_frontier_exceeds_bound(
                         SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
                     ),
                 )
+            } else if let Some(frontier) = delegated_parked_frontier.as_ref() {
+                let origins = delegated_parked_attachment_frontier_origins(
+                    connection,
+                    session,
+                    &scheduling,
+                    frontier,
+                )
+                .await?;
+                (
+                    origins,
+                    matches!(
+                        result,
+                        SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
+                    ),
+                )
+            } else {
+                (
+                    scheduling
+                        .earliest_queued_rendered_base_origins()
+                        .unwrap_or_default(),
+                    false,
+                )
             }
-            Err(ModelCallRepositoryError::NoLiveExecution) => (
-                scheduling
-                    .earliest_queued_rendered_base_origins()
-                    .unwrap_or_default(),
-                false,
-            ),
-            Err(error) => return Err(error.into()),
-        };
+        }
+        Err(error) => return Err(error.into()),
+    };
     let queued_inputs = scheduling
         .turns()
         .filter(|turn| turn.status() == AcceptedInputTurnSchedulingStatus::Queued)
         .map(|turn| turn.accepted_input().id())
         .collect::<Vec<_>>();
+    let queued_reset_origins = scheduling
+        .turns()
+        .filter(|turn| turn.status() == AcceptedInputTurnSchedulingStatus::Queued)
+        .enumerate()
+        .filter_map(|(index, turn)| {
+            scheduling
+                .external_predecessor_rendered_base_origins(turn.turn())
+                .map(|origins| (index, origins))
+        })
+        .collect::<BTreeMap<_, _>>();
     let first_changed_queue = if check_base {
         0
     } else {
@@ -1816,6 +1972,7 @@ async fn prospective_attachment_frontier_exceeds_bound(
     let all_origins = base_origins
         .iter()
         .chain(&queued_inputs)
+        .chain(queued_reset_origins.values().flatten())
         .map(|accepted_input| accepted_input.into_uuid())
         .collect::<Vec<_>>();
     let rows = sqlx::query(
@@ -1864,6 +2021,20 @@ async fn prospective_attachment_frontier_exceeds_bound(
         return Ok(NonZeroU64::new(total));
     }
     for (index, accepted_input) in queued_inputs.iter().enumerate() {
+        if let Some(reset_origins) = queued_reset_origins.get(&index) {
+            digests.clear();
+            total = 0;
+            for reset_origin in reset_origins {
+                add_prospective_attachment_lengths(
+                    &mut digests,
+                    &mut total,
+                    attachments
+                        .get(reset_origin)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
+                )?;
+            }
+        }
         add_prospective_attachment_lengths(
             &mut digests,
             &mut total,
@@ -1877,6 +2048,195 @@ async fn prospective_attachment_frontier_exceeds_bound(
         }
     }
     Ok(None)
+}
+
+struct DelegatedParkedAttachmentFrontier {
+    turn: TurnId,
+    snapshot: ResolvedContextFrontierSnapshot,
+}
+
+async fn load_delegated_parked_attachment_frontier(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<Option<DelegatedParkedAttachmentFrontier>, SubmitInputRepositoryError> {
+    let row = sqlx::query(
+        "SELECT turn_id, active_phase_kind, recovery_model_call_id,
+                (
+                    SELECT call.model_call_id
+                      FROM model_call AS call
+                     WHERE call.session_id = turn_lifecycle.session_id
+                       AND call.turn_id = turn_lifecycle.turn_id
+                       AND call.state_kind = 'cancellation_requested'
+                ) AS stop_requested_model_call_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND origin_kind = 'delegation'
+            AND state_kind = 'active'
+            AND NOT delegation_runtime_terminal
+            AND goal_turn_is_runtime_relevant(session_id, turn_id)",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let turn = turn_id_from_uuid(required(&row, "turn_id")?);
+    let phase_spelling: String = required(&row, "active_phase_kind")?;
+    let phase = active_turn_phase_from_str(&phase_spelling).ok_or({
+        SubmitInputCorruption::Unsupported {
+            field: "delegated parked active phase",
+            value: phase_spelling,
+        }
+    })?;
+    let snapshot = match phase {
+        ActiveTurnPhaseStorageKind::AwaitingToolApproval
+        | ActiveTurnPhaseStorageKind::AwaitingChild
+        | ActiveTurnPhaseStorageKind::AwaitingToolRecovery => {
+            load_active_batch_from_connection(connection, session, turn)
+                .await
+                .map_err(map_tool_loop_error)?
+                .map(|batch| batch.yielded_snapshot().clone())
+                .ok_or(SubmitInputCorruption::Inconsistent(
+                    "delegated parked tool frontier missing",
+                ))?
+        }
+        ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery => {
+            let recovery_call: Uuid = required(&row, "recovery_model_call_id")?;
+            let frontier = sqlx::query_scalar::<_, Uuid>(
+                "SELECT context_frontier_id
+                   FROM model_call
+                  WHERE model_call_id = $1
+                    AND session_id = $2
+                    AND turn_id = $3",
+            )
+            .bind(recovery_call)
+            .bind(session_id_to_uuid(session))
+            .bind(turn_id_to_uuid(turn))
+            .fetch_optional(&mut *connection)
+            .await?
+            .ok_or(SubmitInputCorruption::Inconsistent(
+                "delegated model recovery frontier missing",
+            ))?;
+            load_call_snapshot(connection, session, ContextFrontierId::from_uuid(frontier))
+                .await
+                .map_err(|error| SubmitInputRepositoryError::ModelExecution(Box::new(error)))?
+                .reconstitute()
+                .ok_or(SubmitInputCorruption::Inconsistent(
+                    "delegated model recovery snapshot invalid",
+                ))?
+        }
+        ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery => {
+            load_runner_recovery_source_snapshot(connection, session, turn)
+                .await
+                .map_err(map_tool_loop_error)?
+                .ok_or(SubmitInputCorruption::Inconsistent(
+                    "delegated runner recovery prospective attachment frontier missing",
+                ))?
+        }
+        ActiveTurnPhaseStorageKind::Running => {
+            let stop_requested_call: Option<Uuid> = row.try_get("stop_requested_model_call_id")?;
+            let Some(stop_requested_call) = stop_requested_call else {
+                return Ok(None);
+            };
+            let frontier = sqlx::query_scalar::<_, Uuid>(
+                "SELECT context_frontier_id
+                   FROM model_call
+                  WHERE model_call_id = $1
+                    AND session_id = $2
+                    AND turn_id = $3
+                    AND state_kind = 'cancellation_requested'",
+            )
+            .bind(stop_requested_call)
+            .bind(session_id_to_uuid(session))
+            .bind(turn_id_to_uuid(turn))
+            .fetch_optional(&mut *connection)
+            .await?
+            .ok_or(SubmitInputCorruption::Inconsistent(
+                "delegated stop-requested frontier missing",
+            ))?;
+            load_call_snapshot(connection, session, ContextFrontierId::from_uuid(frontier))
+                .await
+                .map_err(|error| SubmitInputRepositoryError::ModelExecution(Box::new(error)))?
+                .reconstitute()
+                .ok_or(SubmitInputCorruption::Inconsistent(
+                    "delegated stop-requested snapshot invalid",
+                ))?
+        }
+    };
+    Ok(Some(DelegatedParkedAttachmentFrontier { turn, snapshot }))
+}
+
+async fn delegated_parked_attachment_frontier_origins(
+    connection: &mut PgConnection,
+    session: SessionId,
+    scheduling: &AcceptedInputSchedulingProjection,
+    frontier: &DelegatedParkedAttachmentFrontier,
+) -> Result<Vec<AcceptedInputId>, SubmitInputRepositoryError> {
+    let complete_entries = frontier
+        .snapshot
+        .ordered_entries()
+        .map(|reference| scheduling.semantic_entry(reference).cloned())
+        .collect::<Option<Vec<_>>>()
+        .ok_or(SubmitInputCorruption::Inconsistent(
+            "delegated parked prospective attachment frontier entry missing",
+        ))?;
+    let projection =
+        ContextFrontierProjection::from_complete_entries(&complete_entries).map_err(|_| {
+            SubmitInputCorruption::Inconsistent(
+                "delegated parked prospective attachment frontier projection",
+            )
+        })?;
+    let entries_by_reference = complete_entries
+        .iter()
+        .map(|entry| (entry.reference(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut distinct = BTreeSet::new();
+    let mut origins = projection
+        .ordered_entries()
+        .filter_map(
+            |reference| match entries_by_reference[&reference].payload() {
+                InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+                | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                    accepted_input,
+                    ..
+                } => distinct.insert(*accepted_input).then_some(*accepted_input),
+                InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
+                | InitialSemanticTranscriptEntryPayload::DelegatedTask { .. }
+                | InitialSemanticTranscriptEntryPayload::DelegationMessage { .. }
+                | InitialSemanticTranscriptEntryPayload::DelegationResult { .. }
+                | InitialSemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+                | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
+                | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
+                | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
+                | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
+                | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+                | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
+                | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
+                | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. }
+                | InitialSemanticTranscriptEntryPayload::Imported { .. } => None,
+            },
+        )
+        .collect::<Vec<_>>();
+    let pending = sqlx::query_scalar::<_, Uuid>(
+        "SELECT accepted_input_id
+           FROM accepted_input
+          WHERE session_id = $1
+            AND disposition_kind = 'pending_steering'
+            AND expected_active_turn_id = $2
+          ORDER BY acceptance_position",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(frontier.turn))
+    .fetch_all(&mut *connection)
+    .await?;
+    origins.extend(
+        pending
+            .into_iter()
+            .map(accepted_input_id_from_uuid)
+            .filter(|accepted_input| distinct.insert(*accepted_input)),
+    );
+    Ok(origins)
 }
 
 fn add_prospective_attachment_lengths(
@@ -1904,6 +2264,18 @@ fn add_prospective_attachment_lengths(
 
 const fn saturating_attachment_byte_sum(total: u64, length: u64) -> u64 {
     total.saturating_add(length)
+}
+
+fn validate_attachment_byte_maximum(
+    maximum_bytes: NonZeroU64,
+) -> Result<NonZeroU64, SubmitInputRepositoryError> {
+    if maximum_bytes.get() == u64::MAX {
+        return Err(SubmitInputCorruption::Inconsistent(
+            "attachment byte maximum cannot encode exceeded evidence",
+        )
+        .into());
+    }
+    Ok(maximum_bytes)
 }
 
 async fn prepare_attachment_admission(
@@ -1960,14 +2332,15 @@ async fn prepare_attachment_admission(
     if let Some(digest) = digests.iter().find(|digest| !lengths.contains_key(digest)) {
         return Ok(Some(command.prepare_blob_not_found(*digest)));
     }
-    let maximum_bytes =
-        maximum_attachment_bytes.ok_or(SubmitInputCorruption::AttachmentConfigurationMissing)?;
+    let maximum_bytes = validate_attachment_byte_maximum(
+        maximum_attachment_bytes.ok_or(SubmitInputCorruption::AttachmentConfigurationMissing)?,
+    )?;
     let aggregate = lengths.values().fold(0_u64, |total, length| {
         saturating_attachment_byte_sum(total, *length)
     });
     if aggregate > maximum_bytes.get() {
         let observed_bytes = NonZeroU64::new(aggregate).ok_or(
-            SubmitInputCorruption::Inconsistent("attachment byte length sum"),
+            SubmitInputCorruption::Inconsistent("attachment byte length sum is not positive"),
         )?;
         return Ok(Some(command.prepare_attachment_bytes_too_large(
             maximum_bytes,
@@ -2570,6 +2943,14 @@ pub(crate) async fn load_scheduling_projection(
     connection: &mut PgConnection,
     session: Session,
 ) -> Result<AcceptedInputSchedulingProjection, SubmitInputRepositoryError> {
+    load_scheduling_projection_with_semantic_frontiers(connection, session, &[]).await
+}
+
+async fn load_scheduling_projection_with_semantic_frontiers(
+    connection: &mut PgConnection,
+    session: Session,
+    supplemental_semantic_frontiers: &[ContextFrontierId],
+) -> Result<AcceptedInputSchedulingProjection, SubmitInputRepositoryError> {
     let session_id = session.id();
     let imported_session = if matches!(
         session.creation_provenance().ancestry(),
@@ -3010,11 +3391,24 @@ pub(crate) async fn load_scheduling_projection(
                             .ok_or(SubmitInputCorruption::Inconsistent(
                                 "runner recovery placement revision",
                             ))?;
+                        let source_snapshot = load_runner_recovery_source_snapshot(
+                            connection,
+                            lifecycle_session,
+                            lifecycle_turn,
+                        )
+                        .await
+                        .map_err(map_tool_loop_error)?
+                        .ok_or(SubmitInputCorruption::Inconsistent(
+                            "runner recovery source snapshot missing",
+                        ))?;
+                        required_frontiers
+                            .insert(source_snapshot.frontier().snapshot().into_uuid());
                         ActiveTurnSchedulingReconstitutionInput::awaiting_runner_recovery(
                             lifecycle_turn,
                             RunnerId::from_uuid(runner),
                             revision,
                             runner_recovery_tool_attempt.map(ToolAttemptId::from_uuid),
+                            Some(source_snapshot.frontier().snapshot()),
                         )
                     }
                     Some("running") if recovery_model_call.is_none() => {
@@ -3265,6 +3659,7 @@ pub(crate) async fn load_scheduling_projection(
                                 "tool recovery wait evidence",
                             ))?;
                         required_model_calls.insert(round_call);
+                        required_frontiers.insert(wait.yielded_frontier().into_uuid());
                         match (end_variant.as_deref(), end_disposition.as_deref()) {
                             (Some("without_stop"), Some("ambiguous")) => {
                                 ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery(
@@ -4567,6 +4962,12 @@ pub(crate) async fn load_scheduling_projection(
         return Err(SubmitInputCorruption::Missing("delegated turn scheduling fact").into());
     }
 
+    let scheduling_frontier_ids = required_frontiers.iter().copied().collect::<Vec<_>>();
+    required_frontiers.extend(
+        supplemental_semantic_frontiers
+            .iter()
+            .map(|frontier| frontier.into_uuid()),
+    );
     let required_frontier_ids = required_frontiers.iter().copied().collect::<Vec<_>>();
     let frontier_rows = sqlx::query(
         "WITH RECURSIVE frontier_ids (context_frontier_id) AS (
@@ -5467,7 +5868,7 @@ pub(crate) async fn load_scheduling_projection(
     if reconstructed.len() != stored_frontiers.len() {
         return Err(SubmitInputCorruption::Inconsistent("context frontier prefix cycle").into());
     }
-    let snapshots = required_frontier_ids
+    let snapshots = scheduling_frontier_ids
         .iter()
         .map(|frontier| {
             reconstructed
@@ -6100,6 +6501,13 @@ async fn insert_prepared_command(
     let actor = encode_actor(command.actor());
     let delivery = encode_delivery(command.delivery());
     let result = encode_result(prepared.result(), command.delivery());
+    let result_observed_attachment_bytes = match prepared.result() {
+        SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentBytesTooLarge {
+            observed_bytes,
+            ..
+        }) => Some(Decimal::from(observed_bytes.get())),
+        SubmitInputResult::Applied(_) | SubmitInputResult::Rejected(_) => None,
+    };
 
     sqlx::query(
         "INSERT INTO submit_input_command
@@ -6153,7 +6561,7 @@ async fn insert_prepared_command(
     .bind(result.existing_interrupt_command)
     .bind(result.blob_digest)
     .bind(result.maximum_attachment_bytes)
-    .bind(result.observed_attachment_bytes)
+    .bind(result_observed_attachment_bytes)
     .execute(&mut *connection)
     .await?;
 
@@ -6602,7 +7010,6 @@ struct EncodedResult {
     existing_interrupt_command: Option<Uuid>,
     blob_digest: Option<Vec<u8>>,
     maximum_attachment_bytes: Option<Decimal>,
-    observed_attachment_bytes: Option<Decimal>,
 }
 
 fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> EncodedResult {
@@ -6623,7 +7030,6 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             existing_interrupt_command: None,
             blob_digest: None,
             maximum_attachment_bytes: None,
-            observed_attachment_bytes: None,
         },
         SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(result)) => {
             EncodedResult {
@@ -6642,7 +7048,6 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
                 existing_interrupt_command: None,
                 blob_digest: None,
                 maximum_attachment_bytes: None,
-                observed_attachment_bytes: None,
             }
         }
         SubmitInputResult::Rejected(SubmitInputRejectedResult::BlobNotFound {
@@ -6664,12 +7069,11 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             existing_interrupt_command: None,
             blob_digest: Some(digest.as_bytes().to_vec()),
             maximum_attachment_bytes: None,
-            observed_attachment_bytes: None,
         },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentBytesTooLarge {
             session,
             maximum_bytes,
-            observed_bytes,
+            observed_bytes: _,
         }) => EncodedResult {
             kind: REJECTED,
             rejection_kind: Some("attachment_byte_budget_exceeded"),
@@ -6686,7 +7090,6 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             existing_interrupt_command: None,
             blob_digest: None,
             maximum_attachment_bytes: Some(Decimal::from(maximum_bytes.get())),
-            observed_attachment_bytes: Some(Decimal::from(observed_bytes.get())),
         },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnPresent {
             session,
@@ -6707,7 +7110,6 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             existing_interrupt_command: None,
             blob_digest: None,
             maximum_attachment_bytes: None,
-            observed_attachment_bytes: None,
         },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnMismatch {
             session,
@@ -6729,7 +7131,6 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             existing_interrupt_command: None,
             blob_digest: None,
             maximum_attachment_bytes: None,
-            observed_attachment_bytes: None,
         },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::SessionNotFound { session }) => {
             EncodedResult {
@@ -6748,7 +7149,6 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
                 existing_interrupt_command: None,
                 blob_digest: None,
                 maximum_attachment_bytes: None,
-                observed_attachment_bytes: None,
             }
         }
         SubmitInputResult::Rejected(SubmitInputRejectedResult::NoActiveTurn {
@@ -6770,7 +7170,6 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             existing_interrupt_command: None,
             blob_digest: None,
             maximum_attachment_bytes: None,
-            observed_attachment_bytes: None,
         },
         SubmitInputResult::Rejected(
             SubmitInputRejectedResult::SessionDefaultsVersionMismatch {
@@ -6794,7 +7193,6 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             existing_interrupt_command: None,
             blob_digest: None,
             maximum_attachment_bytes: None,
-            observed_attachment_bytes: None,
         },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::UnknownModelAlias {
             session,
@@ -6816,7 +7214,6 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             existing_interrupt_command: None,
             blob_digest: None,
             maximum_attachment_bytes: None,
-            observed_attachment_bytes: None,
         },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::AcceptancePositionExhausted {
             session,
@@ -6837,7 +7234,6 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             existing_interrupt_command: None,
             blob_digest: None,
             maximum_attachment_bytes: None,
-            observed_attachment_bytes: None,
         },
         SubmitInputResult::Rejected(
             SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
@@ -6861,7 +7257,6 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             existing_interrupt_command: Some(durable_command_id_to_uuid(*existing_command)),
             blob_digest: None,
             maximum_attachment_bytes: None,
-            observed_attachment_bytes: None,
         },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::InterruptAlreadyApplied {
             session,
@@ -6883,7 +7278,6 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             existing_interrupt_command: Some(durable_command_id_to_uuid(*existing_command)),
             blob_digest: None,
             maximum_attachment_bytes: None,
-            observed_attachment_bytes: None,
         },
         SubmitInputResult::Rejected(
             SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
@@ -6906,7 +7300,6 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             existing_interrupt_command: None,
             blob_digest: None,
             maximum_attachment_bytes: None,
-            observed_attachment_bytes: None,
         },
     }
 }
@@ -8509,7 +8902,7 @@ fn decode_rejected(
         && (maximum_attachment_bytes.is_some() || observed_attachment_bytes.is_some())
     {
         return Err(
-            SubmitInputCorruption::Inconsistent("unexpected attachment aggregate result").into(),
+            SubmitInputCorruption::Inconsistent("unexpected attachment byte result").into(),
         );
     }
     match rejection_kind {
@@ -8564,11 +8957,11 @@ fn decode_rejected(
                     SubmitInputCorruption::Missing("result_observed_attachment_bytes"),
                 )?)
                 .map_err(|_| {
-                    SubmitInputCorruption::Inconsistent("result observed attachment bytes")
+                    SubmitInputCorruption::Inconsistent("result attachment observed bytes")
                 })?,
             )
             .ok_or(SubmitInputCorruption::Inconsistent(
-                "result observed attachment bytes",
+                "result attachment observed bytes",
             ))?;
             Ok(
                 SubmitInputReconstitutionInput::rejected_attachment_bytes_too_large(
