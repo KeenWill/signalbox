@@ -179,6 +179,19 @@ test('uses the displayed product navigation sequence', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('moves focus before focus layout hides product navigation', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('link', { name: /Sessions/ }).focus()
+  await page.keyboard.press('Shift+W')
+
+  await expect(page.getByRole('main')).toBeFocused()
+  await expect(page.getByRole('navigation', { name: 'Product' })).toBeHidden()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('suspends product hotkeys while the command palette owns input', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
