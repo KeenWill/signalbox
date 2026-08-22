@@ -441,7 +441,7 @@ const schemas = {
                 "type": "string"
               },
               "request_context_items": {
-                "type": "string"
+                "$ref": "#/$defs/WebU64"
               },
               "response": {
                 "anyOf": [
@@ -491,7 +491,7 @@ const schemas = {
                 "type": "string"
               },
               "state": {
-                "type": "string"
+                "$ref": "#/$defs/WebTimelineToolBatchState"
               },
               "tools": {
                 "items": {
@@ -608,7 +608,7 @@ const schemas = {
                 "type": "string"
               },
               "through_position": {
-                "type": "string"
+                "$ref": "#/$defs/WebU64"
               },
               "type": {
                 "const": "context_compaction",
@@ -655,7 +655,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "attempt_count": {
-                "type": "string"
+                "$ref": "#/$defs/WebU64"
               },
               "cause_code": {
                 "type": "string"
@@ -696,7 +696,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "placement_revision": {
-                "type": "string"
+                "$ref": "#/$defs/WebU64"
               },
               "runner_id": {
                 "type": "string"
@@ -874,7 +874,7 @@ const schemas = {
             "type": "string"
           },
           "length_bytes": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           },
           "media_type": {
             "type": [
@@ -905,7 +905,7 @@ const schemas = {
             "type": "integer"
           },
           "offset_bytes": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           }
         },
         "required": [
@@ -982,7 +982,7 @@ const schemas = {
             "type": "string"
           },
           "generation": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           },
           "reason": {
             "type": [
@@ -1014,7 +1014,7 @@ const schemas = {
             "type": "string"
           },
           "imported_position": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           }
         },
         "required": [
@@ -1096,27 +1096,43 @@ const schemas = {
         "description": "Independently optional provider-reported usage counts.",
         "properties": {
           "cache_creation_input_tokens": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "cache_read_input_tokens": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "input_tokens": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "output_tokens": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
             ]
           }
         },
@@ -1157,13 +1173,13 @@ const schemas = {
             ]
           },
           "offset_bytes": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           },
           "text": {
             "type": "string"
           },
           "total_bytes": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           }
         },
         "required": [
@@ -1265,6 +1281,14 @@ const schemas = {
         ],
         "type": "object"
       },
+      "WebTimelineToolBatchState": {
+        "enum": [
+          "proposed",
+          "results_projected",
+          "recovery_required"
+        ],
+        "type": "string"
+      },
       "WebTimelineToolState": {
         "enum": [
           "prepared",
@@ -1281,6 +1305,11 @@ const schemas = {
           "activated",
           "terminalized"
         ],
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
         "type": "string"
       }
     },

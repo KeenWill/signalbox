@@ -5,27 +5,31 @@
     reason = "this standalone integration-test crate uses explicit fixture expectations"
 )]
 
-use std::error::Error;
+use std::{error::Error, num::NonZeroU64};
 
 use signalbox_application::{
-    SessionTimelineDetailBody, TimelineContinuation, TimelineDetailLimits, TimelineWindowAnchor,
-    TimelineWindowLimits,
+    SessionTimelineDetailBody, TimelineAddress, TimelineContinuation, TimelineDetailLimits,
+    TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::{
     CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    TranscriptAncestry,
+    ToolApprovalDecision, ToolAttemptId, ToolEffectClass, TranscriptAncestry, TurnAttemptId,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
     session_timeline::{
         SessionTimelineCorruption, SessionTimelineRepository, SessionTimelineRepositoryError,
     },
+    tool_loop::PostgresToolLoopRepository,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{migrated_postgres, test_session_credential_pin};
+use super::{
+    checkpoint_confirmed_tool_round, decide_tool_request, migrated_postgres,
+    test_session_credential_pin,
+};
 
 fn credential_pin() -> signalbox_persistence::SessionCredentialPin {
     test_session_credential_pin()
@@ -161,6 +165,116 @@ async fn item_and_region_details_share_the_stable_creation_address() -> Result<(
     assert!(item.projected_body_bytes <= limits.max_projected_bytes());
     assert_eq!(item.continuation, None);
     assert_eq!(region, item);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tool_detail_selects_one_lease_generation_for_sandbox_posture() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x99a0;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+    let tool_loop = PostgresToolLoopRepository::new(pool.clone());
+    tool_loop
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe0)),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1));
+    tool_loop
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the approved request prepares its physical attempt");
+    tool_loop
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+
+    let lease = Uuid::from_u128(seed + 0xe2);
+    sqlx::query("ALTER TABLE runner_lease_generation DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_generation
+            (lease_id, generation, attempt_id, session_id, runner_id,
+             tool_name, effect_class, placement_event_ordinal,
+             registration_enrollment_id, registration_revision,
+             predecessor_generation)
+         VALUES
+            ($1, 1, $2, $3, $4, 'current_time', 'pure', 1, $5, 1, NULL),
+            ($1, 2, $2, $3, $4, 'current_time', 'pure', 1, $5, 1, 1)",
+    )
+    .bind(lease)
+    .bind(attempt.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(Uuid::from_u128(seed + 0xe3))
+    .bind(Uuid::from_u128(seed + 0xe4))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_lease_generation ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE runner_physical_attempt_lease_binding DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_physical_attempt_lease_binding (attempt_id, lease_id)
+         VALUES ($1, $2)",
+    )
+    .bind(attempt.into_uuid())
+    .bind(lease)
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_physical_attempt_lease_binding ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let sequence: i64 = sqlx::query_scalar(
+        "SELECT event_sequence::bigint
+           FROM tool_batch_transition_outbox_event
+          WHERE producing_model_call_id = $1
+            AND transition_kind = 'proposed'",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let address = TimelineAddress::new(
+        NonZeroU64::new(u64::try_from(sequence)?).expect("the durable event sequence is positive"),
+    );
+    let page = SessionTimelineRepository::new(pool.clone())
+        .read_item_details(
+            fixture.session,
+            address,
+            None,
+            TimelineDetailLimits::new(1, 512).expect("fixture limits are bounded"),
+        )
+        .await?
+        .expect("the tool-batch detail exists");
+    let SessionTimelineDetailBody::ToolBatch { tools, .. } = &page.items[0].body else {
+        panic!("the selected event projects a tool-batch body");
+    };
+    let expected_attempt = attempt.into_uuid().to_string();
+
+    assert_eq!(tools.len(), 1);
+    assert_eq!(
+        tools[0].attempt_id.as_deref(),
+        Some(expected_attempt.as_str())
+    );
+    assert!(tools[0].sandbox_posture.is_some());
 
     pool.close().await;
     drop(container);

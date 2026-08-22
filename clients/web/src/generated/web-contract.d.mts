@@ -54,7 +54,7 @@ type WebSessionTimelineDetailBody = {
   readonly cause_code?: string | null;
   readonly model_call_id: string;
   readonly model_identity_id: string;
-  readonly request_context_items: string;
+  readonly request_context_items: WebU64;
   readonly response?: WebTimelineTextExcerpt | null;
   readonly state: WebTimelineModelCallState;
   readonly turn_id: string;
@@ -63,7 +63,7 @@ type WebSessionTimelineDetailBody = {
 } | {
   readonly goal_events: ReadonlyArray<WebTimelineGoalEvent>;
   readonly producing_model_call_id: string;
-  readonly state: string;
+  readonly state: WebTimelineToolBatchState;
   readonly tools: ReadonlyArray<WebTimelineToolAttempt>;
   readonly turn_id: string;
   readonly type: "tool_batch";
@@ -87,7 +87,7 @@ type WebSessionTimelineDetailBody = {
   readonly result_frontier_id: string;
   readonly summary: WebTimelineTextExcerpt;
   readonly summary_entry_id: string;
-  readonly through_position: string;
+  readonly through_position: WebU64;
   readonly type: "context_compaction";
 } | {
   readonly cause_code: string;
@@ -95,7 +95,7 @@ type WebSessionTimelineDetailBody = {
   readonly turn_id: string;
   readonly type: "turn_lifecycle";
 } | {
-  readonly attempt_count: string;
+  readonly attempt_count: WebU64;
   readonly cause_code: string;
   readonly exhausted: boolean;
   readonly operation_id: string;
@@ -104,7 +104,7 @@ type WebSessionTimelineDetailBody = {
   readonly turn_id: string;
   readonly type: "reconciliation";
 } | {
-  readonly placement_revision: string;
+  readonly placement_revision: WebU64;
   readonly runner_id: string;
   readonly sandbox_posture: WebTimelineRunnerSandboxPosture;
   readonly state: WebTimelineRunnerState;
@@ -158,7 +158,7 @@ type WebTimelineApprovalSource = "policy" | "delegate" | "user";
 
 type WebTimelineBlobReference = {
   readonly blob_id: string;
-  readonly length_bytes: string;
+  readonly length_bytes: WebU64;
   readonly media_type?: string | null;
 };
 
@@ -166,7 +166,7 @@ type WebTimelineBodyContinuation = {
   readonly address: WebTimelineAddress;
   readonly field: WebTimelineBodyField;
   readonly member_index: number;
-  readonly offset_bytes: string;
+  readonly offset_bytes: WebU64;
 };
 
 type WebTimelineBodyField = "input_text" | "model_response" | "tool_arguments" | "tool_result" | "tool_failure" | "approval_rationale" | "goal_text" | "compaction_summary" | "delegation_content";
@@ -183,14 +183,14 @@ type WebTimelineEventSequence = string;
 
 type WebTimelineGoalEvent = {
   readonly event_kind: string;
-  readonly generation: string;
+  readonly generation: WebU64;
   readonly reason?: string | null;
   readonly text?: WebTimelineTextExcerpt | null;
 };
 
 type WebTimelineImportedEvidence = {
   readonly imported_entry_id: string;
-  readonly imported_position: string;
+  readonly imported_position: WebU64;
 };
 
 type WebTimelineModelCallDisposition = "completed" | "known_failed" | "refused" | "cancelled" | "ambiguous";
@@ -207,10 +207,10 @@ type WebTimelineModelCallState = {
 };
 
 type WebTimelineModelUsage = {
-  readonly cache_creation_input_tokens?: string | null;
-  readonly cache_read_input_tokens?: string | null;
-  readonly input_tokens?: string | null;
-  readonly output_tokens?: string | null;
+  readonly cache_creation_input_tokens?: WebU64 | null;
+  readonly cache_read_input_tokens?: WebU64 | null;
+  readonly input_tokens?: WebU64 | null;
+  readonly output_tokens?: WebU64 | null;
 };
 
 type WebTimelineRunnerSandboxPosture = "unsandboxed" | "sandboxed";
@@ -219,9 +219,9 @@ type WebTimelineRunnerState = "pinned" | "suspect" | "connected" | "runner_lost_
 
 type WebTimelineTextExcerpt = {
   readonly continuation?: WebTimelineBodyContinuation | null;
-  readonly offset_bytes: string;
+  readonly offset_bytes: WebU64;
   readonly text: string;
-  readonly total_bytes: string;
+  readonly total_bytes: WebU64;
 };
 
 type WebTimelineToolAttempt = {
@@ -239,6 +239,8 @@ type WebTimelineToolAttempt = {
   readonly state?: WebTimelineToolState | null;
   readonly tool_name: string;
 };
+
+type WebTimelineToolBatchState = "proposed" | "results_projected" | "recovery_required";
 
 type WebTimelineToolState = "prepared" | "in_flight" | "completed" | "known_failed" | "ambiguous";
 

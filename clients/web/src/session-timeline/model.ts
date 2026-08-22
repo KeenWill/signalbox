@@ -14,6 +14,9 @@ import {
 } from '../generated/web-contract.mjs'
 
 export const MAX_RETAINED_SESSION_ITEMS = 768
+const MAX_CONTRACT_TIMELINE_WINDOW_ITEMS = 256
+const MAX_CONTRACT_TIMELINE_WINDOW_BYTES = 64 * 1024
+const PROJECTED_ITEM_ENVELOPE_BYTES = 64
 // Hard safety ceiling preventing a regressed endpoint from materializing an
 // unbounded JSON response before the generated decoder can reject its shape.
 export const MAX_TIMELINE_HTTP_RESPONSE_BYTES = 256 * 1024
@@ -70,6 +73,9 @@ const decimalAddress = (value: string): bigint => {
   if (parsed === 0n) throw new TypeError('timeline address must be positive decimal')
   return parsed
 }
+
+const projectedItemBytes = (kind: string): number =>
+  PROJECTED_ITEM_ENVELOPE_BYTES + new TextEncoder().encode(kind).byteLength
 
 const boundedLimit = (value: number, minimum: number, maximum: number): number =>
   Number.isFinite(value) ? Math.min(Math.max(Math.trunc(value), minimum), maximum) : minimum
@@ -244,7 +250,9 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     }
     if (
       bootstrap.limits.max_timeline_window_items < 1 ||
-      bootstrap.limits.max_timeline_window_bytes < 256
+      bootstrap.limits.max_timeline_window_items > MAX_CONTRACT_TIMELINE_WINDOW_ITEMS ||
+      bootstrap.limits.max_timeline_window_bytes < 256 ||
+      bootstrap.limits.max_timeline_window_bytes > MAX_CONTRACT_TIMELINE_WINDOW_BYTES
     ) {
       throw new TypeError('bounded session timeline limits are invalid')
     }
@@ -434,6 +442,12 @@ export class BoundedSessionHistory {
     if (window.items.length > bounded.maxItems) {
       throw new TypeError('timeline window exceeds the requested item ceiling')
     }
+    if (
+      window.items.length === 0 &&
+      (anchor.kind === 'first' || anchor.kind === 'latest' || anchor.kind === 'around')
+    ) {
+      throw new TypeError('timeline anchor requires a nonempty window')
+    }
     const incoming = new Map<string, (typeof window.items)[number]>()
     let previousAddress: bigint | undefined
     let projectedStructuredBytes = 0
@@ -458,6 +472,9 @@ export class BoundedSessionHistory {
         throw new TypeError('timeline window addresses must be strictly increasing')
       }
       if (incoming.has(address)) throw new TypeError('timeline window repeats an address')
+      if (item.projected_structured_bytes !== projectedItemBytes(item.kind)) {
+        throw new TypeError('timeline item byte charge does not match its event kind')
+      }
       incoming.set(address, cloneTimelineItem(item))
       previousAddress = parsedAddress
       projectedStructuredBytes += item.projected_structured_bytes
@@ -577,10 +594,12 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
               'tool_batch_transition',
               'turn_completed',
             ] as const
+            const kind = kinds[sequence % kinds.length]
+            if (kind === undefined) throw new TypeError('timeline event kind is unavailable')
             return {
               address: { event_sequence: String(sequence) },
-              kind: kinds[sequence % kinds.length],
-              projected_structured_bytes: SCENARIO_ITEM_BYTES,
+              kind,
+              projected_structured_bytes: projectedItemBytes(kind),
             }
           })
     const firstItem = items[0]
@@ -588,7 +607,10 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
     return decodeWebSessionTimelineWindow({
       session_id: sessionId,
       items,
-      projected_structured_bytes: items.length * SCENARIO_ITEM_BYTES,
+      projected_structured_bytes: items.reduce(
+        (total, item) => total + item.projected_structured_bytes,
+        0,
+      ),
       continuation_before:
         firstItem && start > 1 ? { event_sequence: firstItem.address.event_sequence } : null,
       continuation_after:
