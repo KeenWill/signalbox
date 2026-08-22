@@ -130,6 +130,49 @@ fn canonical_u64(value: &str) -> Option<u64> {
     canonical.then(|| value.parse::<u64>().ok()).flatten()
 }
 
+fn canonical_session_id(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+        })
+}
+
+/// Checked canonical UUID used for browser-visible session identities.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebSessionId(
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    String,
+);
+
+impl WebSessionId {
+    /// Constructs a session identity from its canonical lowercase UUID spelling.
+    #[must_use]
+    pub fn from_canonical(value: String) -> Option<Self> {
+        canonical_session_id(&value).then_some(Self(value))
+    }
+
+    /// Returns the canonical lowercase UUID spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebSessionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_canonical(value)
+            .ok_or_else(|| de::Error::custom("session ID must be a canonical lowercase UUID"))
+    }
+}
+
 impl WebTimelineEventSequence {
     /// Encodes one already-validated positive durable-event sequence.
     #[must_use]
@@ -225,7 +268,7 @@ pub struct WebSessionWorkFacts {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineDescriptor {
-    pub session_id: String,
+    pub session_id: WebSessionId,
     pub sizes: WebSessionTimelineSizeFacts,
     pub first_address: WebTimelineAddress,
     pub latest_address: WebTimelineAddress,
@@ -270,7 +313,7 @@ pub struct WebSessionTimelineItem {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineWindow {
-    pub session_id: String,
+    pub session_id: WebSessionId,
     pub items: Vec<WebSessionTimelineItem>,
     pub projected_structured_bytes: u32,
     pub continuation_before: Option<WebTimelineAddress>,
@@ -381,6 +424,21 @@ pub enum WebTimelineToolBatchState {
     RecoveryRequired,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineToolApprovalPosture {
+    Auto,
+    Delegated,
+    Human,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineToolEffectPosture {
+    EffectFree,
+    ExternalEffect,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineToolAttempt {
@@ -390,10 +448,10 @@ pub struct WebTimelineToolAttempt {
     pub arguments: Option<WebTimelineTextExcerpt>,
     pub result: Option<WebTimelineTextExcerpt>,
     pub failure: Option<WebTimelineTextExcerpt>,
-    pub approval_posture: String,
+    pub approval_posture: WebTimelineToolApprovalPosture,
     pub approval_judge_escalated: bool,
     pub operator_required: bool,
-    pub effect_posture: Option<String>,
+    pub effect_posture: Option<WebTimelineToolEffectPosture>,
     pub sandbox_posture: Option<String>,
     pub state: Option<WebTimelineToolState>,
     pub cause_code: Option<String>,
@@ -405,6 +463,13 @@ pub enum WebTimelineApprovalSource {
     Policy,
     Delegate,
     User,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineApprovalDecision {
+    Approve,
+    Deny,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -486,6 +551,103 @@ pub enum WebTimelineDelegationPolicy {
     },
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineDelegationWaitMode {
+    Foreground,
+    Background,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineDelegationOutcome {
+    ResultReturned,
+    ChildFailed,
+    ChildStopped,
+    ChildCancelled,
+    ContinueRunning,
+    AlreadyTerminal,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineDelegationReason {
+    ChildCompleted,
+    ChildExecutionFailed,
+    ChildResultUnavailable,
+    ChildCancelled,
+    ParentStoppedWithDescendants,
+    ParentCancelledWithDescendants,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineDelegationProvenance {
+    ChildTurn {
+        session_id: String,
+        turn_id: String,
+    },
+    ParentTurnCommand {
+        session_id: String,
+        turn_id: String,
+        command_id: String,
+    },
+    ParentGoalCommand {
+        session_id: String,
+        goal_generation: WebU64,
+        command_id: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineDelegationDetail {
+    ChildSpawned {
+        relationship_id: String,
+        child_session_id: String,
+        policy: WebTimelineDelegationPolicy,
+    },
+    ChildWaiting {
+        relationship_id: String,
+        child_session_id: String,
+        awaiting_request_id: String,
+        mode: WebTimelineDelegationWaitMode,
+    },
+    ChildLifecycleDisposition {
+        relationship_id: String,
+        child_session_id: String,
+        event_ordinal: WebU64,
+        outcome: WebTimelineDelegationOutcome,
+        reason: WebTimelineDelegationReason,
+        provenance: WebTimelineDelegationProvenance,
+    },
+    ChildResult {
+        relationship_id: String,
+        child_session_id: String,
+        outcome: WebTimelineDelegationOutcome,
+        reason: WebTimelineDelegationReason,
+        provenance: WebTimelineDelegationProvenance,
+        content: Option<WebTimelineTextExcerpt>,
+    },
+    SessionMessage {
+        relationship_id: String,
+        message_id: String,
+        sender_session_id: String,
+        recipient_session_id: String,
+        message_ordinal: WebU64,
+        delivery_sequence: WebU64,
+        content: WebTimelineTextExcerpt,
+    },
+    ResultWake {
+        relationship_id: String,
+        awaiting_request_id: Option<String>,
+    },
+    MessageWake {
+        relationship_id: String,
+        message_id: String,
+    },
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineImportedEvidence {
@@ -523,14 +685,16 @@ pub enum WebSessionTimelineDetailBody {
         turn_id: String,
         producing_model_call_id: String,
         state: WebTimelineToolBatchState,
+        #[schemars(length(max = 1))]
         tools: Vec<WebTimelineToolAttempt>,
+        #[schemars(length(max = 1))]
         goal_events: Vec<WebTimelineGoalEvent>,
     },
     ToolApprovalDecision {
         turn_id: String,
         request_id: String,
         tool_name: String,
-        decision: String,
+        decision: WebTimelineApprovalDecision,
         source: WebTimelineApprovalSource,
         decider: WebTimelineApprovalDecider,
         rationale: Option<WebTimelineTextExcerpt>,
@@ -570,13 +734,7 @@ pub enum WebSessionTimelineDetailBody {
         state: WebTimelineRunnerState,
     },
     Delegation {
-        event_kind: String,
-        relationship_id: String,
-        subject_id: Option<String>,
-        policy: Option<WebTimelineDelegationPolicy>,
-        outcome: Option<String>,
-        reason: Option<String>,
-        content: Option<WebTimelineTextExcerpt>,
+        detail: WebTimelineDelegationDetail,
     },
 }
 
@@ -603,6 +761,7 @@ pub enum WebTimelineDetailContinuation {
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineDetailPage {
     pub session_id: String,
+    #[schemars(length(max = 128))]
     pub items: Vec<WebSessionTimelineDetail>,
     pub projected_body_bytes: u32,
     pub continuation: Option<WebTimelineDetailContinuation>,
@@ -871,6 +1030,9 @@ function assertSchema(root, schema, value, path) {{
     if (!Array.isArray(value)) {{
       fail(path, "an array");
     }}
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {{
+      fail(path, `at most ${{schema.maxItems}} items`);
+    }}
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${{path}}[${{index}}]`));
     return;
   }}
@@ -910,6 +1072,204 @@ function assertSchema(root, schema, value, path) {{
   }}
 }}
 
+function sameTimelineAddress(left, right) {{
+  return left.event_sequence === right.event_sequence;
+}}
+
+function sameBodyContinuation(left, right) {{
+  return (
+    sameTimelineAddress(left.address, right.address) &&
+    left.field === right.field &&
+    left.member_index === right.member_index &&
+    left.offset_bytes === right.offset_bytes
+  );
+}}
+
+function assertTimelineExcerpt(excerpt, address, field, memberIndex, path) {{
+  const offset = BigInt(excerpt.offset_bytes);
+  const total = BigInt(excerpt.total_bytes);
+  const end = offset + BigInt(new TextEncoder().encode(excerpt.text).byteLength);
+  if (offset > total || end > total) {{
+    fail(path, "an excerpt within its declared byte range");
+  }}
+  if (excerpt.continuation === undefined || excerpt.continuation === null) {{
+    if (end !== total) {{
+      fail(path, "complete when no continuation is present");
+    }}
+    return null;
+  }}
+  const continuation = excerpt.continuation;
+  if (end >= total) {{
+    fail(`${{path}}.continuation`, "present only before the declared body end");
+  }}
+  if (
+    !sameTimelineAddress(continuation.address, address) ||
+    continuation.field !== field ||
+    continuation.member_index !== memberIndex
+  ) {{
+    fail(`${{path}}.continuation`, "the same body member at the same address");
+  }}
+  if (BigInt(continuation.offset_bytes) !== end) {{
+    fail(`${{path}}.continuation.offset_bytes`, "the byte immediately after the excerpt");
+  }}
+  return continuation;
+}}
+
+function assertTimelineDetailPage(value) {{
+  const maxProjectedBodyBytes = 65536;
+  const detailEnvelopeBytes = 128;
+  const terminalKinds = new Set([
+    "turn_failed",
+    "turn_completed",
+    "turn_refused",
+    "turn_cancelled",
+    "turn_reconciliation_required",
+  ]);
+  const bodyOwnedKinds = new Set([
+    "input_accepted",
+    "model_call_transition",
+    "turn_activated",
+    ...terminalKinds,
+  ]);
+  let expectedBodyContinuation = null;
+  let computedProjectedBodyBytes = 0;
+  let previousAddress = null;
+  value.items.forEach((item, index) => {{
+    const path = `timeline_detail_page.items[${{index}}]`;
+    const address = BigInt(item.address.event_sequence);
+    if (previousAddress !== null && address <= previousAddress) {{
+      fail(`${{path}}.address`, "strictly increasing after the previous item");
+    }}
+    previousAddress = address;
+    const excerpts = [];
+    switch (item.body.type) {{
+      case "user_input":
+        if (item.kind !== "input_accepted") {{
+          fail(`${{path}}.kind`, "input_accepted for a user_input body");
+        }}
+        excerpts.push([item.body.text, "input_text", 0, `${{path}}.body.text`]);
+        break;
+      case "model_call":
+        if (item.kind !== "model_call_transition") {{
+          fail(`${{path}}.kind`, "model_call_transition for a model_call body");
+        }}
+        if (item.body.response !== undefined && item.body.response !== null) {{
+          excerpts.push([item.body.response, "model_response", 0, `${{path}}.body.response`]);
+        }}
+        break;
+      case "tool_batch":
+        item.body.tools.forEach((tool, memberIndex) => {{
+          if (tool.arguments !== undefined && tool.arguments !== null) {{
+            excerpts.push([tool.arguments, "tool_arguments", memberIndex, `${{path}}.body.tools[${{memberIndex}}].arguments`]);
+          }}
+          if (tool.result !== undefined && tool.result !== null) {{
+            excerpts.push([tool.result, "tool_result", memberIndex, `${{path}}.body.tools[${{memberIndex}}].result`]);
+          }}
+          if (tool.failure !== undefined && tool.failure !== null) {{
+            excerpts.push([tool.failure, "tool_failure", memberIndex, `${{path}}.body.tools[${{memberIndex}}].failure`]);
+          }}
+        }});
+        item.body.goal_events.forEach((event, memberIndex) => {{
+          if (event.text !== undefined && event.text !== null) {{
+            excerpts.push([event.text, "goal_text", memberIndex, `${{path}}.body.goal_events[${{memberIndex}}].text`]);
+          }}
+        }});
+        break;
+      case "tool_approval_decision":
+        if (item.body.rationale !== undefined && item.body.rationale !== null) {{
+          excerpts.push([item.body.rationale, "approval_rationale", 0, `${{path}}.body.rationale`]);
+        }}
+        break;
+      case "goal_event":
+        if (item.body.event.text !== undefined && item.body.event.text !== null) {{
+          excerpts.push([item.body.event.text, "goal_text", 0, `${{path}}.body.event.text`]);
+        }}
+        break;
+      case "context_compaction":
+        excerpts.push([item.body.summary, "compaction_summary", 0, `${{path}}.body.summary`]);
+        break;
+      case "delegation":
+        if (
+          (item.body.detail.type === "child_result" || item.body.detail.type === "session_message") &&
+          item.body.detail.content !== undefined &&
+          item.body.detail.content !== null
+        ) {{
+          excerpts.push([item.body.detail.content, "delegation_content", 0, `${{path}}.body.detail.content`]);
+        }}
+        break;
+      case "turn_lifecycle":
+        if (item.body.lifecycle === "activated" && item.kind !== "turn_activated") {{
+          fail(`${{path}}.kind`, "turn_activated for an activated lifecycle");
+        }}
+        if (item.body.lifecycle === "terminalized" && !terminalKinds.has(item.kind)) {{
+          fail(`${{path}}.kind`, "a terminal turn event for a terminalized lifecycle");
+        }}
+        break;
+      case "event_fact":
+        if (item.body.kind !== item.kind || bodyOwnedKinds.has(item.kind)) {{
+          fail(`${{path}}.body.kind`, "the matching header-only event kind");
+        }}
+        break;
+    }}
+    let textBytes = 0;
+    excerpts.forEach(([excerpt, field, memberIndex, excerptPath]) => {{
+      const continuation = assertTimelineExcerpt(
+        excerpt,
+        item.address,
+        field,
+        memberIndex,
+        excerptPath,
+      );
+      textBytes += new TextEncoder().encode(excerpt.text).byteLength;
+      if (continuation !== null) {{
+        if (expectedBodyContinuation !== null) {{
+          fail(path, "at most one continued body per page");
+        }}
+        expectedBodyContinuation = continuation;
+      }}
+    }});
+    const computedItemBytes = detailEnvelopeBytes + textBytes;
+    if (item.projected_body_bytes !== computedItemBytes) {{
+      fail(`${{path}}.projected_body_bytes`, `the computed ${{computedItemBytes}} bytes`);
+    }}
+    computedProjectedBodyBytes += computedItemBytes;
+    if (computedProjectedBodyBytes > maxProjectedBodyBytes) {{
+      fail("timeline_detail_page.projected_body_bytes", `at most ${{maxProjectedBodyBytes}} bytes`);
+    }}
+  }});
+  if (value.projected_body_bytes !== computedProjectedBodyBytes) {{
+    fail(
+      "timeline_detail_page.projected_body_bytes",
+      `the computed ${{computedProjectedBodyBytes}} bytes`,
+    );
+  }}
+
+  if (value.continuation === undefined || value.continuation === null) {{
+    if (expectedBodyContinuation !== null) {{
+      fail("timeline_detail_page.continuation", "the excerpt body continuation");
+    }}
+    return;
+  }}
+  if (value.continuation.type === "more_body") {{
+    if (
+      expectedBodyContinuation !== null &&
+      !sameBodyContinuation(value.continuation.body, expectedBodyContinuation)
+    ) {{
+      fail("timeline_detail_page.continuation.body", "the excerpt body continuation");
+    }}
+  }} else {{
+    if (expectedBodyContinuation !== null) {{
+      fail("timeline_detail_page.continuation", "more_body for a continued excerpt");
+    }}
+    if (
+      previousAddress !== null &&
+      BigInt(value.continuation.address.event_sequence) <= previousAddress
+    ) {{
+      fail("timeline_detail_page.continuation.address", "after the final returned item");
+    }}
+  }}
+}}
+
 export function decodeWebContractBootstrap(value) {{
   assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "bootstrap");
   if (value.contract.name !== {contract_name:?} || value.contract.version !== {contract_version:?}) {{
@@ -940,6 +1300,7 @@ export function decodeWebSessionTimelineWindow(value) {{
 
 export function decodeWebSessionTimelineDetailPage(value) {{
   assertSchema(schemas.WebSessionTimelineDetailPage, schemas.WebSessionTimelineDetailPage, value, "timeline_detail_page");
+  assertTimelineDetailPage(value);
   return value;
 }}
 "##,
@@ -1095,7 +1456,7 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        WebContractBootstrap, WebContractExample, WebTimelineEventSequence,
+        WebContractBootstrap, WebContractExample, WebSessionId, WebTimelineEventSequence,
         WebTimelineModelCallState, WebU64, generated_artifacts,
     };
 
@@ -1184,5 +1545,14 @@ mod tests {
         assert!(serde_json::from_str::<WebU64>(r#""18446744073709551616""#).is_err());
         assert!(serde_json::from_str::<WebU64>(r#""0""#).is_ok());
         assert!(serde_json::from_str::<WebU64>(r#""18446744073709551615""#).is_ok());
+    }
+
+    #[test]
+    fn session_id_rejects_noncanonical_uuid_spellings() {
+        assert!(serde_json::from_str::<WebSessionId>(r#""not-a-uuid""#).is_err());
+        assert!(
+            serde_json::from_str::<WebSessionId>(r#""00000000-0000-0000-0000-000000000991""#)
+                .is_ok()
+        );
     }
 }

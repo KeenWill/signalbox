@@ -153,6 +153,25 @@ describe('BoundedSessionHistory', () => {
     )
   })
 
+  it('rejects a descriptor count larger than its address span', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        sizes: { ...descriptor.sizes, item_count: '2' },
+        first_address: { event_sequence: '100' },
+        latest_address: { event_sequence: '100' },
+      }),
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+
+    await expect(new BoundedSessionHistory(sessionId, source).describe()).rejects.toThrow(
+      'boundaries are contradictory',
+    )
+  })
+
   it('normalizes non-finite limits to their safe minima', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const window = await new BoundedSessionHistory(sessionId, scenario).load(
@@ -241,6 +260,37 @@ describe('BoundedSessionHistory', () => {
         { maxItems: 1, maxBytes: 256 },
       ),
     ).rejects.toThrow('requested item ceiling')
+  })
+
+  it('preserves an immutable anchor when a source mutates its request anchor', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async (_requestedSessionId, anchor) => {
+        Object.assign(anchor, { kind: 'around', eventSequence: '100' })
+        return {
+          session_id: sessionId,
+          items: [
+            {
+              address: { event_sequence: '100' },
+              kind: 'input_accepted',
+              projected_structured_bytes: 78,
+            },
+          ],
+          projected_structured_bytes: 78,
+          continuation_before: null,
+          continuation_after: null,
+        }
+      },
+    }
+
+    await expect(
+      new BoundedSessionHistory(sessionId, source).load(
+        { kind: 'after', eventSequence: '500' },
+        { maxItems: 1, maxBytes: 256 },
+      ),
+    ).rejects.toThrow('strictly after')
   })
 
   it('budgets scenario windows and descriptors from exact event-kind charges', async () => {
@@ -1031,7 +1081,7 @@ describe('BoundedSessionHistory', () => {
         },
       ],
       projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
-      continuation: { type: 'more_at', address: { event_sequence: '41' } },
+      continuation: { type: 'more_at', address: { event_sequence: '42' } },
     })
 
     await expect(
@@ -1089,7 +1139,7 @@ describe('BoundedSessionHistory', () => {
 
     await expect(
       source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
-    ).rejects.toThrow('requires a continuation')
+    ).rejects.toThrow('complete when no continuation is present')
   })
 
   it('computes continuation offsets from exact UTF-8 bytes', async () => {
@@ -1120,7 +1170,7 @@ describe('BoundedSessionHistory', () => {
 
     await expect(
       source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
-    ).rejects.toThrow('does not follow its text')
+    ).rejects.toThrow('the byte immediately after the excerpt')
   })
 
   it('rejects a continuation field that is impossible for its body variant', async () => {
@@ -1159,7 +1209,7 @@ describe('BoundedSessionHistory', () => {
 
     await expect(
       source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
-    ).rejects.toThrow('continuation field does not match its body')
+    ).rejects.toThrow('the excerpt body continuation')
   })
 
   it('accepts a canonical tool continuation from arguments to result', async () => {
@@ -1326,7 +1376,7 @@ describe('BoundedSessionHistory', () => {
 
     await expect(
       source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
-    ).rejects.toThrow('disagrees with its excerpt')
+    ).rejects.toThrow('the excerpt body continuation')
   })
 
   it('rejects a same-field continuation whose excerpt restarts before the request cursor', async () => {
@@ -1392,7 +1442,7 @@ describe('BoundedSessionHistory', () => {
 
     await expect(
       source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
-    ).rejects.toThrow('requires a page continuation')
+    ).rejects.toThrow('the excerpt body continuation')
   })
 
   it('rejects a body-page continuation when no excerpt continues', async () => {
@@ -1473,7 +1523,7 @@ describe('BoundedSessionHistory', () => {
 
     await expect(
       source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
-    ).rejects.toThrow('body charge does not match')
+    ).rejects.toThrow('the computed 128 bytes')
   })
 
   it('fails closed when item detail capability is unavailable', async () => {

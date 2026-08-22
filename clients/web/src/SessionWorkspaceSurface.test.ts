@@ -200,31 +200,33 @@ describe('Session Workspace projection', () => {
 
     const delegation = {
       type: 'delegation',
-      event_kind: 'child_spawned',
-      relationship_id: '00000000-0000-0000-0000-000000000041',
-      subject_id: '00000000-0000-0000-0000-000000000042',
-      policy: { type: 'background' },
-      outcome: null,
-      reason: null,
-      content: null,
+      detail: {
+        type: 'child_spawned',
+        relationship_id: '00000000-0000-0000-0000-000000000041',
+        child_session_id: '00000000-0000-0000-0000-000000000042',
+        policy: { type: 'background' },
+      },
     } as const
     expect(isCompatibleDetailBody('delegation_update', delegation)).toBe(true)
-    expect(isCompatibleDetailBody('delegation_update', { ...delegation, subject_id: null })).toBe(
-      false,
-    )
     expect(
-      isCompatibleDetailBody('delegation_update', { ...delegation, event_kind: 'result_wake' }),
+      isCompatibleDetailBody('delegation_update', {
+        ...delegation,
+        detail: {
+          type: 'result_wake',
+          relationship_id: delegation.detail.relationship_id,
+        },
+      }),
     ).toBe(false)
     expect(
       isCompatibleDetailBody('delegation_wake', {
         ...delegation,
-        event_kind: 'message_wake',
-        policy: null,
+        detail: {
+          type: 'message_wake',
+          relationship_id: delegation.detail.relationship_id,
+          message_id: '00000000-0000-0000-0000-000000000043',
+        },
       }),
     ).toBe(true)
-    expect(
-      isCompatibleDetailBody('delegation_wake', { ...delegation, event_kind: 'invented' }),
-    ).toBe(false)
 
     const goalEvent = {
       type: 'goal_event',
@@ -351,7 +353,10 @@ describe('Session Workspace projection', () => {
       true,
     )
     expect(
-      isCompatibleDetailBody('tool_approval_decided', { ...approval, decision: 'defer' }),
+      isCompatibleDetailBody('tool_approval_decided', {
+        ...approval,
+        decision: 'defer',
+      } as unknown as typeof approval),
     ).toBe(false)
   })
 })

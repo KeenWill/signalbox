@@ -6530,12 +6530,18 @@ pub enum TimelineTurnLifecycleKind { Activated, Terminalized }
 pub enum TimelineToolState {
     Prepared, InFlight, AwaitingChild, Completed, KnownFailed, Ambiguous,
 }
+pub enum TimelineToolApprovalPosture { Auto, Delegated, Human }
+pub enum TimelineToolEffectPosture { EffectFree, ExternalEffect }
 pub enum TimelineToolBatchState { Proposed, ResultsProjected, RecoveryRequired }
 pub struct TimelineToolAttempt { /* fields */ }
+pub enum TimelineApprovalDecision { Approve, Deny }
 pub enum TimelineApprovalSource { Policy, Delegate, User }
 pub enum TimelineApprovalDecider {
-    User { command_id: String },
-    Delegate { model_selection_id: String, model_call_id: String },
+    User { command_id: DurableCommandId },
+    Delegate {
+        model_selection_id: DirectModelSelection,
+        model_call_id: ModelCallId,
+    },
 }
 pub enum TimelineRunnerSandboxPosture { Unsandboxed, Sandboxed }
 pub enum TimelineRunnerState {
@@ -6558,7 +6564,42 @@ pub enum TimelineDelegationPolicy {
         on_parent_cancelled: TimelineBoundChildAction,
     },
 }
+pub enum TimelineDelegationWaitMode { Foreground, Background }
+pub enum TimelineDelegationOutcome {
+    ResultReturned, ChildFailed, ChildStopped, ChildCancelled, ContinueRunning,
+    AlreadyTerminal,
+}
+pub enum TimelineDelegationReason {
+    ChildCompleted, ChildExecutionFailed, ChildResultUnavailable, ChildCancelled,
+    ParentStoppedWithDescendants, ParentCancelledWithDescendants,
+}
+pub enum TimelineDelegationProvenance {
+    ChildTurn { session: SessionId, turn: TurnId },
+    ParentTurnCommand {
+        session: SessionId,
+        turn: TurnId,
+        command: DurableCommandId,
+    },
+    ParentGoalCommand {
+        session: SessionId,
+        goal_generation: u64,
+        command: DurableCommandId,
+    },
+}
+pub enum TimelineDelegationDetail {
+    ChildSpawned { /* fields */ },
+    ChildWaiting { /* fields */ },
+    ChildLifecycleDisposition { /* fields */ },
+    ChildResult { /* fields */ },
+    SessionMessage { /* fields */ },
+    ResultWake { /* fields */ },
+    MessageWake { /* fields */ },
+}
 pub struct TimelineImportedEvidence { /* fields */ }
+pub enum TimelineReconciliationOperation {
+    ModelCall(ModelCallId),
+    ToolAttempt(ToolAttemptId),
+}
 pub enum SessionTimelineDetailBody {
     SessionCreated { /* fields */ },
     ModelSettings { /* fields */ },
@@ -6571,7 +6612,7 @@ pub enum SessionTimelineDetailBody {
     TurnLifecycle { /* fields */ },
     Reconciliation { /* fields */ },
     Runner { /* fields */ },
-    Delegation { policy: Option<TimelineDelegationPolicy>, /* other fields */ },
+    Delegation(TimelineDelegationDetail),
 }
 pub struct SessionTimelineDetail {
     pub address: TimelineAddress,
@@ -11362,7 +11403,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)               |
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
-| application: session_timeline                      | 42 (+6 free fn) (incl. 1 trait)  |
+| application: session_timeline                      | 51 (+6 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 35 (incl. 8 traits)              |
 | application: tool_loop                             | 26 (incl. 5 traits)              |
 | application: operator_failure                      | 2 (incl. 1 trait)                |
@@ -11381,4 +11422,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
 | application: turn_liveness                         | 7                                |
-| **signalbox-application total**                    | **337 (+12 free fn)**            |
+| **signalbox-application total**                    | **346 (+12 free fn)**            |

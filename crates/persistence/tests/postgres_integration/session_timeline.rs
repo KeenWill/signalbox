@@ -8,8 +8,8 @@
 use std::{error::Error, num::NonZeroU64};
 
 use signalbox_application::{
-    SessionTimelineDetailBody, TimelineAddress, TimelineContinuation, TimelineDetailLimits,
-    TimelineWindowAnchor, TimelineWindowLimits,
+    SessionTimelineDetailBody, TimelineAddress, TimelineContinuation, TimelineDelegationDetail,
+    TimelineDetailLimits, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::{
     CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
@@ -289,14 +289,39 @@ async fn tool_detail_selects_one_lease_generation_for_sandbox_posture() -> Resul
     let SessionTimelineDetailBody::ToolBatch { tools, .. } = &page.items[0].body else {
         panic!("the selected event projects a tool-batch body");
     };
-    let expected_attempt = attempt.into_uuid().to_string();
-
     assert_eq!(tools.len(), 1);
-    assert_eq!(
-        tools[0].attempt_id.as_deref(),
-        Some(expected_attempt.as_str())
-    );
+    assert_eq!(tools[0].attempt_id, Some(attempt));
     assert!(tools[0].sandbox_posture.is_some());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn item_detail_returns_absent_for_an_unallocated_future_address() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x996);
+    create_session(&pool, identity).await?;
+    let allocated: i64 = sqlx::query_scalar(
+        "SELECT last_sequence::bigint FROM outbox_sequence_state WHERE singleton",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let future_sequence = u64::try_from(allocated)?
+        .checked_add(1)
+        .expect("fixture sequence has room");
+    let address = TimelineAddress::new(
+        NonZeroU64::new(future_sequence).expect("future sequence is positive"),
+    );
+    let limits = TimelineDetailLimits::new(1, 256).expect("fixture limits are bounded");
+    let detail = SessionTimelineRepository::new(pool.clone())
+        .read_item_details(identity, address, None, limits)
+        .await?;
+
+    assert_eq!(detail, None);
 
     pool.close().await;
     drop(container);
@@ -370,10 +395,12 @@ async fn delegation_detail_validates_body_shape_without_projecting_body_text()
         .read_item_details(fixture.child, address, None, limits)
         .await?
         .expect("the delegation detail exists");
+    let SessionTimelineDetailBody::Delegation(delegation) = &detail.items[0].body else {
+        panic!("expected delegation detail");
+    };
     assert!(matches!(
-        &detail.items[0].body,
-        SessionTimelineDetailBody::Delegation { event_kind, .. }
-            if event_kind == "session_message"
+        delegation,
+        TimelineDelegationDetail::SessionMessage { .. }
     ));
 
     sqlx::query(
@@ -404,49 +431,69 @@ async fn delegation_detail_validates_body_shape_without_projecting_body_text()
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn assistant_response_text_positions_reject_gaps_and_overlaps() -> Result<(), Box<dyn Error>>
-{
-    let (container, pool, fixture) = prepared_complete_delegation_outbox(0x9980).await?;
+async fn rejected_response_text_position_constraint(
+    fixture_seed: u128,
+    entry_seed: u128,
+    second_start: i64,
+) -> Result<Option<String>, Box<dyn Error>> {
+    let (container, pool, fixture) = prepared_complete_delegation_outbox(fixture_seed).await?;
     let call: Uuid =
         sqlx::query_scalar("SELECT model_call_id FROM model_call WHERE session_id = $1 LIMIT 1")
             .bind(fixture.parent.into_uuid())
             .fetch_one(&pool)
             .await?;
-
-    for (seed, second_start) in [(0x9981_u128, 4_i64), (0x9983_u128, 2_i64)] {
-        let mut transaction = pool.begin().await?;
-        sqlx::query(
-            "INSERT INTO semantic_transcript_entry
-                (source_session_id, semantic_entry_id, payload_kind,
-                 assistant_text_value, producing_model_call_id,
-                 assistant_response_part_ordinal,
-                 assistant_response_text_start_bytes)
-             VALUES ($1, $2, 'assistant_text', 'abc', $4, 100, 0),
-                    ($1, $3, 'assistant_text', 'def', $4, 101, $5)",
-        )
-        .bind(fixture.parent.into_uuid())
-        .bind(Uuid::from_u128(seed))
-        .bind(Uuid::from_u128(seed + 1))
-        .bind(call)
-        .bind(second_start)
-        .execute(&mut *transaction)
-        .await?;
-        let error = transaction
-            .commit()
-            .await
-            .expect_err("non-contiguous response text positions must not commit");
-        assert_eq!(
-            error
-                .as_database_error()
-                .and_then(sqlx::error::DatabaseError::constraint),
-            Some("semantic_transcript_response_text_positions_contiguous")
-        );
-    }
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             assistant_text_value, producing_model_call_id,
+             assistant_response_part_ordinal,
+             assistant_response_text_start_bytes)
+         VALUES ($1, $2, 'assistant_text', 'abc', $4, 100, 0),
+                ($1, $3, 'assistant_text', 'def', $4, 101, $5)",
+    )
+    .bind(fixture.parent.into_uuid())
+    .bind(Uuid::from_u128(entry_seed))
+    .bind(Uuid::from_u128(entry_seed + 1))
+    .bind(call)
+    .bind(second_start)
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("non-contiguous response text positions must not commit");
+    let constraint = error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::constraint)
+        .map(str::to_owned);
 
     pool.close().await;
     drop(container);
+    Ok(constraint)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn assistant_response_text_positions_reject_gaps() -> Result<(), Box<dyn Error>> {
+    let constraint = rejected_response_text_position_constraint(0x9980, 0x9981, 4).await?;
+
+    assert_eq!(
+        constraint.as_deref(),
+        Some("semantic_transcript_response_text_positions_contiguous")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn assistant_response_text_positions_reject_overlaps() -> Result<(), Box<dyn Error>> {
+    let constraint = rejected_response_text_position_constraint(0x9990, 0x9991, 2).await?;
+
+    assert_eq!(
+        constraint.as_deref(),
+        Some("semantic_transcript_response_text_positions_contiguous")
+    );
     Ok(())
 }
 
@@ -530,6 +577,33 @@ async fn empty_projection_facts_are_corruption() -> Result<(), Box<dyn Error>> {
         error,
         SessionTimelineRepositoryError::Corruption(SessionTimelineCorruption::InvalidOrdinal(
             "item count"
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn projection_count_larger_than_address_span_is_corruption() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x996);
+    create_session(&pool, identity).await?;
+    sqlx::query("UPDATE session_timeline_fact SET item_count = 2 WHERE session_id = $1")
+        .bind(identity.into_uuid())
+        .execute(&pool)
+        .await?;
+    let error = SessionTimelineRepository::new(pool.clone())
+        .read_descriptor(identity)
+        .await
+        .expect_err("a count larger than the address span is durable corruption");
+
+    assert!(matches!(
+        error,
+        SessionTimelineRepositoryError::Corruption(SessionTimelineCorruption::InvalidOrdinal(
+            "timeline bounds"
         ))
     ));
 

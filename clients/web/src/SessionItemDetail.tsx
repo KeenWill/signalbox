@@ -58,74 +58,11 @@ const modelFailureCauses = new Set([
   'provider_internal',
   'unrecognized',
 ])
-const delegationOutcomes = new Set([
-  'result_returned',
-  'child_failed',
-  'child_stopped',
-  'child_cancelled',
-  'continue_running',
-  'already_terminal',
-])
-const delegationReasons = new Set([
-  'child_completed',
-  'child_execution_failed',
-  'child_result_unavailable',
-  'child_cancelled',
-  'parent_stopped_with_descendants',
-  'parent_cancelled_with_descendants',
-])
-
 const hasCompatibleGoalReason = (event: GoalEvent): boolean =>
   goalEventKinds.has(event.event_kind) &&
   (event.event_kind === 'blocked'
     ? typeof event.reason === 'string' && goalBlockedReasons.has(event.reason)
     : event.reason == null)
-
-const hasCompatibleDelegationFacts = (
-  body: Extract<DetailBody, { type: 'delegation' }>,
-): boolean => {
-  const absent = (...values: unknown[]) => values.every((value) => value == null)
-  switch (body.event_kind) {
-    case 'child_spawned':
-      return (
-        body.subject_id != null &&
-        body.policy != null &&
-        absent(body.outcome, body.reason, body.content)
-      )
-    case 'child_waiting':
-      return body.subject_id != null && absent(body.policy, body.outcome, body.reason, body.content)
-    case 'child_lifecycle_disposition':
-      return (
-        body.subject_id != null &&
-        body.outcome != null &&
-        delegationOutcomes.has(body.outcome) &&
-        body.reason != null &&
-        delegationReasons.has(body.reason) &&
-        absent(body.policy, body.content)
-      )
-    case 'child_result':
-      return (
-        body.subject_id != null &&
-        body.outcome != null &&
-        delegationOutcomes.has(body.outcome) &&
-        body.reason != null &&
-        delegationReasons.has(body.reason) &&
-        body.policy == null
-      )
-    case 'session_message':
-      return (
-        body.subject_id != null &&
-        body.content != null &&
-        absent(body.policy, body.outcome, body.reason)
-      )
-    case 'result_wake':
-      return absent(body.policy, body.outcome, body.reason, body.content)
-    case 'message_wake':
-      return body.subject_id != null && absent(body.policy, body.outcome, body.reason, body.content)
-    default:
-      return false
-  }
-}
 
 const compatibleKinds = {
   session_created: ['session_created'],
@@ -168,14 +105,11 @@ export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): bool
     return expected?.[0] === body.lifecycle && expected[1] === body.cause_code
   }
   if (body.type === 'delegation') {
-    return (
-      hasCompatibleDelegationFacts(body) &&
-      (kind === 'delegation_update'
-        ? delegationUpdateKinds.has(body.event_kind)
-        : kind === 'delegation_wake'
-          ? delegationWakeKinds.has(body.event_kind)
-          : false)
-    )
+    return kind === 'delegation_update'
+      ? delegationUpdateKinds.has(body.detail.type)
+      : kind === 'delegation_wake'
+        ? delegationWakeKinds.has(body.detail.type)
+        : false
   }
   if (body.type === 'model_call') {
     const knownFailure = body.state.type === 'terminal' && body.state.disposition === 'known_failed'
@@ -496,29 +430,34 @@ const detailContent = (body: DetailBody): ReactNode => {
         />
       )
     case 'delegation': {
+      const detail = body.detail
       const policyFacts: ReadonlyArray<readonly [string, ReactNode]> =
-        body.policy?.type === 'bound'
+        detail.type === 'child_spawned' && detail.policy.type === 'bound'
           ? [
               ['Policy', 'bound'],
-              ['On parent stopped', body.policy.on_parent_stopped.replaceAll('_', ' ')],
-              ['On parent cancelled', body.policy.on_parent_cancelled.replaceAll('_', ' ')],
+              ['On parent stopped', detail.policy.on_parent_stopped.replaceAll('_', ' ')],
+              ['On parent cancelled', detail.policy.on_parent_cancelled.replaceAll('_', ' ')],
             ]
-          : body.policy?.type === 'background'
+          : detail.type === 'child_spawned' && detail.policy.type === 'background'
             ? [['Policy', 'background']]
             : [['Policy', 'not recorded']]
+      const childSession = 'child_session_id' in detail ? detail.child_session_id : 'not recorded'
+      const outcome = 'outcome' in detail ? detail.outcome.replaceAll('_', ' ') : 'not recorded'
+      const reason = 'reason' in detail ? detail.reason : 'not recorded'
+      const content = 'content' in detail ? detail.content : null
       return (
         <>
           <Facts
             facts={[
-              ['Event', body.event_kind.replaceAll('_', ' ')],
-              ['Relationship', body.relationship_id],
-              ['Subject', body.subject_id ?? 'not recorded'],
-              ['Outcome', body.outcome?.replaceAll('_', ' ') ?? 'not recorded'],
-              ['Reason', body.reason ?? 'not recorded'],
+              ['Event', detail.type.replaceAll('_', ' ')],
+              ['Relationship', detail.relationship_id],
+              ['Subject', childSession],
+              ['Outcome', outcome],
+              ['Reason', reason],
               ...policyFacts,
             ]}
           />
-          {body.content && <TextDetail label="Delegation content" excerpt={body.content} />}
+          {content && <TextDetail label="Delegation content" excerpt={content} />}
         </>
       )
     }
