@@ -74,8 +74,7 @@ impl DatabaseCorpusStore {
         let format_version = i32::try_from(registration.format_version()).map_err(|_| {
             CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::FormatVersionOutOfRange)
         })?;
-        let (source_kind, repository, path, blob_store, blob_digest, blob_byte_length) =
-            encode_source(registration.source());
+        let source = encode_source(registration.source());
         let mut transaction = self.pool.begin().await?;
         let inserted = sqlx::query(
             "INSERT INTO evaluation_corpus (
@@ -91,13 +90,13 @@ impl DatabaseCorpusStore {
         .bind(registration.corpus_sha256().as_bytes().as_slice())
         .bind(replay_sha256.as_bytes().as_slice())
         .bind(case_count)
-        .bind(source_kind)
-        .bind(repository)
-        .bind(path)
+        .bind(source.kind)
+        .bind(source.repository)
+        .bind(source.path)
         .bind(source_sha256.map(|digest| digest.as_bytes().to_vec()))
-        .bind(blob_store)
-        .bind(blob_digest)
-        .bind(blob_byte_length)
+        .bind(source.blob_store)
+        .bind(source.blob_digest)
+        .bind(source.blob_byte_length)
         .execute(&mut *transaction)
         .await?
         .rows_affected();
@@ -320,45 +319,47 @@ fn replay_digest(corpus: &ApprovalJudgeCorpus) -> Result<Sha256Digest, CorpusSto
     Ok(Sha256Digest::from_bytes(hasher.finalize().into()))
 }
 
-type EncodedSource<'a> = (
-    &'static str,
-    Option<&'a str>,
-    Option<&'a str>,
-    Option<&'a str>,
-    Option<&'a [u8]>,
-    Option<String>,
-);
+struct EncodedSource<'a> {
+    kind: &'static str,
+    repository: Option<&'a str>,
+    path: Option<&'a str>,
+    blob_store: Option<&'a str>,
+    blob_digest: Option<&'a [u8]>,
+    blob_byte_length: Option<String>,
+}
 
 fn encode_source(source: &CorpusSourceDescriptor) -> EncodedSource<'_> {
     match source {
-        CorpusSourceDescriptor::Repository { repository, path } => (
-            evaluation_corpus_source_to_str(EvaluationCorpusSourceStorageKind::Repository),
-            Some(repository),
-            Some(path),
-            None,
-            None,
-            None,
-        ),
-        CorpusSourceDescriptor::DatabaseNative => (
-            evaluation_corpus_source_to_str(EvaluationCorpusSourceStorageKind::DatabaseNative),
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
+        CorpusSourceDescriptor::Repository { repository, path } => EncodedSource {
+            kind: evaluation_corpus_source_to_str(EvaluationCorpusSourceStorageKind::Repository),
+            repository: Some(repository),
+            path: Some(path),
+            blob_store: None,
+            blob_digest: None,
+            blob_byte_length: None,
+        },
+        CorpusSourceDescriptor::DatabaseNative => EncodedSource {
+            kind: evaluation_corpus_source_to_str(
+                EvaluationCorpusSourceStorageKind::DatabaseNative,
+            ),
+            repository: None,
+            path: None,
+            blob_store: None,
+            blob_digest: None,
+            blob_byte_length: None,
+        },
         CorpusSourceDescriptor::BlobReference {
             store,
             digest,
             byte_length,
-        } => (
-            evaluation_corpus_source_to_str(EvaluationCorpusSourceStorageKind::BlobReference),
-            None,
-            None,
-            store.as_deref(),
-            Some(digest.as_bytes()),
-            Some(byte_length.to_string()),
-        ),
+        } => EncodedSource {
+            kind: evaluation_corpus_source_to_str(EvaluationCorpusSourceStorageKind::BlobReference),
+            repository: None,
+            path: None,
+            blob_store: store.as_deref(),
+            blob_digest: Some(digest.as_bytes()),
+            blob_byte_length: Some(byte_length.to_string()),
+        },
     }
 }
 

@@ -719,7 +719,24 @@ impl Error for ManifestError {
             Self::Read { source, .. } => Some(source),
             Self::Json(source) => Some(source),
             Self::Corpus(source) => Some(source),
-            _ => None,
+            Self::UnsupportedManifestVersion { .. }
+            | Self::UnsupportedCorpusVersion { .. }
+            | Self::InvalidIdentity(_)
+            | Self::NonPortablePath(_)
+            | Self::RepositoryRootUnavailable(_)
+            | Self::RepositorySourceOutsideCheckout(_)
+            | Self::MissingSourceDigest
+            | Self::UnexpectedSourceDigest
+            | Self::InvalidBlobByteLength
+            | Self::InvalidBlobStore
+            | Self::SourceDigestMismatch { .. }
+            | Self::CorpusVersionMismatch { .. }
+            | Self::DuplicateCaseId(_)
+            | Self::CaseIntegrityMismatch
+            | Self::MissingCaseIntegrity
+            | Self::CorpusDigestMismatch { .. }
+            | Self::BlobBackendUnavailable
+            | Self::LengthOverflow => None,
         }
     }
 }

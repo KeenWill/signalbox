@@ -603,7 +603,15 @@ async fn stored_blob_registration_is_rejected_before_case_loading() -> Result<()
 async fn stored_blob_registration_metadata_can_be_looked_up() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let digest = [0_u8; 32];
-    insert_blob_registration(&pool, "metadata-only-blob", Some(&digest), Some("1")).await?;
+    let blob_byte_length = "1";
+    let expected_blob_byte_length = blob_byte_length.parse::<u64>()?;
+    insert_blob_registration(
+        &pool,
+        "metadata-only-blob",
+        Some(&digest),
+        Some(blob_byte_length),
+    )
+    .await?;
     let database = DatabaseCorpusStore::new(pool.clone());
     let key = CorpusKey {
         name: String::from("constraint-fixture"),
@@ -615,7 +623,8 @@ async fn stored_blob_registration_metadata_can_be_looked_up() -> Result<(), Box<
     assert_eq!(registration.key(), &key);
     assert!(matches!(
         registration.source(),
-        CorpusSourceDescriptor::BlobReference { byte_length: 1, .. }
+        CorpusSourceDescriptor::BlobReference { byte_length, .. }
+            if *byte_length == expected_blob_byte_length
     ));
 
     pool.close().await;
