@@ -17,16 +17,19 @@ WITH completed_part AS (
     SELECT entry.source_session_id, entry.semantic_entry_id,
            row_number() OVER (
                PARTITION BY entry.producing_model_call_id
-               ORDER BY min(member.member_position), entry.semantic_entry_id
+               ORDER BY member.member_position
            ) - 1 AS part_ordinal
       FROM semantic_transcript_entry AS entry
+      JOIN turn_completed_outbox_event AS completed
+        ON completed.session_id = entry.source_session_id
+       AND completed.model_call_id = entry.producing_model_call_id
       JOIN context_frontier_member AS member
-        ON member.source_session_id = entry.source_session_id
+        ON member.owning_session_id = completed.session_id
+       AND member.context_frontier_id = completed.terminal_frontier_id
+       AND member.source_session_id = entry.source_session_id
        AND member.semantic_entry_id = entry.semantic_entry_id
      WHERE entry.payload_kind = 'assistant_text'
        AND entry.assistant_response_part_ordinal IS NULL
-     GROUP BY entry.source_session_id, entry.semantic_entry_id,
-              entry.producing_model_call_id
 )
 UPDATE semantic_transcript_entry AS entry
    SET assistant_response_part_ordinal = completed_part.part_ordinal
@@ -79,3 +82,46 @@ CREATE UNIQUE INDEX semantic_transcript_response_text_position_once
         producing_model_call_id, assistant_response_text_start_bytes
     )
     WHERE payload_kind = 'assistant_text';
+
+CREATE FUNCTION require_contiguous_assistant_response_text_positions()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM (
+              SELECT entry.assistant_response_text_start_bytes AS actual_start,
+                     coalesce(
+                         sum(octet_length(entry.assistant_text_value)) OVER (
+                             ORDER BY entry.assistant_response_part_ordinal
+                             ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                         ),
+                         0
+                     )::numeric AS expected_start
+                FROM semantic_transcript_entry AS entry
+               WHERE entry.producing_model_call_id =
+                     NEW.producing_model_call_id
+                 AND entry.payload_kind = 'assistant_text'
+          ) AS positioned
+         WHERE positioned.actual_start <> positioned.expected_start
+    ) THEN
+        RAISE EXCEPTION
+            'assistant response text positions are not contiguous for model call %',
+            NEW.producing_model_call_id
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT =
+                    'semantic_transcript_response_text_positions_contiguous';
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER semantic_transcript_response_text_positions_contiguous
+AFTER INSERT ON semantic_transcript_entry
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+WHEN (NEW.payload_kind = 'assistant_text')
+EXECUTE FUNCTION require_contiguous_assistant_response_text_positions();

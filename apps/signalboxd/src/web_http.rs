@@ -1125,10 +1125,10 @@ fn tool_attempt_dto(attempt: TimelineToolAttempt) -> WebTimelineToolAttempt {
 
 fn model_call_state_dto(state: TimelineModelCallState) -> WebTimelineModelCallState {
     match state {
-        TimelineModelCallState::Prepared => WebTimelineModelCallState::Prepared,
-        TimelineModelCallState::InFlight => WebTimelineModelCallState::InFlight,
+        TimelineModelCallState::Prepared => WebTimelineModelCallState::Prepared {},
+        TimelineModelCallState::InFlight => WebTimelineModelCallState::InFlight {},
         TimelineModelCallState::CancellationRequested => {
-            WebTimelineModelCallState::CancellationRequested
+            WebTimelineModelCallState::CancellationRequested {}
         }
         TimelineModelCallState::Terminal(disposition) => WebTimelineModelCallState::Terminal {
             disposition: match disposition {

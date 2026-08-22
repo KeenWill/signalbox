@@ -60,6 +60,12 @@ type OutboxSlotRow = (
     Option<Uuid>,
 );
 
+pub(crate) struct ValidatedOutboxHeader {
+    pub(crate) session: SessionId,
+    stored_session: Uuid,
+    pub(crate) discriminator: OutboxEventDiscriminator,
+}
+
 type ToolBatchTransitionRow = (Uuid, Uuid, String, Option<Uuid>, Option<Uuid>, bool);
 
 #[derive(sqlx::FromRow)]
@@ -739,10 +745,10 @@ async fn load_allocated_sequence(
         .map_err(Into::into)
 }
 
-pub(crate) async fn load_event(
+pub(crate) async fn load_event_header(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     expected_sequence: u64,
-) -> Result<(u64, bool, Option<DispatchedOutboxEvent>), OutboxDispatchError> {
+) -> Result<(u64, bool, Option<ValidatedOutboxHeader>), OutboxDispatchError> {
     let row: Option<OutboxSlotRow> = sqlx::query_as(
         "SELECT
             allocator.last_sequence,
@@ -799,10 +805,31 @@ pub(crate) async fn load_event(
     if storage_version != STORAGE_VERSION {
         return Err(OutboxCorruption::UnsupportedStorageVersion.into());
     }
-    let session = session_id_from_uuid(stored_session);
     let discriminator = outbox_event_discriminator_from_str(&event_kind)
         .ok_or(OutboxCorruption::UnsupportedEventKind)?;
-    let kind = match discriminator {
+    Ok((
+        allocated,
+        event_beyond_allocated,
+        Some(ValidatedOutboxHeader {
+            session: session_id_from_uuid(stored_session),
+            stored_session,
+            discriminator,
+        }),
+    ))
+}
+
+pub(crate) async fn load_event(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    expected_sequence: u64,
+) -> Result<(u64, bool, Option<DispatchedOutboxEvent>), OutboxDispatchError> {
+    let (allocated, event_beyond_allocated, header) =
+        load_event_header(transaction, expected_sequence).await?;
+    let Some(header) = header else {
+        return Ok((allocated, event_beyond_allocated, None));
+    };
+    let session = header.session;
+    let stored_session = header.stored_session;
+    let kind = match header.discriminator {
         OutboxEventDiscriminator::SessionCreated => {
             require_typed_record(
                 transaction,
@@ -1985,7 +2012,7 @@ pub(crate) async fn load_event(
             load_runner_state_transition(transaction, expected_sequence, stored_session).await?
         }
         OutboxEventDiscriminator::DelegationUpdate => DispatchedOutboxEventKind::DelegationUpdate(
-            load_delegation_update(transaction, expected_sequence, stored_session).await?,
+            load_delegation_update(transaction, expected_sequence, stored_session, true).await?,
         ),
         OutboxEventDiscriminator::DelegationWake => DispatchedOutboxEventKind::DelegationWake(
             load_delegation_wake(transaction, expected_sequence, stored_session).await?,
@@ -2223,6 +2250,7 @@ async fn load_delegation_update(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     expected_sequence: u64,
     stored_session: Uuid,
+    materialize_content: bool,
 ) -> Result<DispatchedDelegationUpdate, OutboxDispatchError> {
     let row = sqlx::query(
         "SELECT event.update_kind, event.spawning_tool_request_id,
@@ -2235,7 +2263,9 @@ async fn load_delegation_update(
                 event.provenance_goal_generation, event.provenance_command_id,
                 event.message_id, event.sender_session_id,
                 event.recipient_session_id, event.message_ordinal,
-                event.content_text, delivery.delivery_sequence
+                CASE WHEN $3 THEN event.content_text END AS content_text,
+                event.content_text IS NOT NULL AS content_present,
+                delivery.delivery_sequence
            FROM delegation_update_outbox_event AS event
            LEFT JOIN session_message_delivery AS delivery
              ON delivery.message_id = event.message_id
@@ -2246,6 +2276,7 @@ async fn load_delegation_update(
     )
     .bind(Decimal::from(expected_sequence))
     .bind(stored_session)
+    .bind(materialize_content)
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(OutboxCorruption::MissingTypedRecord)?;
@@ -2310,23 +2341,37 @@ async fn load_delegation_update(
                 provenance: decode_delegation_provenance(&row)?,
             })
         }
-        DelegationUpdateStorageKind::ChildResult => Ok(DispatchedDelegationUpdate::ChildResult {
-            spawning_request,
-            child: required_session(&row, "child_session_id")?,
-            outcome: decode_delegation_outcome(
+        DelegationUpdateStorageKind::ChildResult => {
+            let outcome = decode_delegation_outcome(
                 row.try_get::<Option<String>, _>("outcome_kind")?
                     .as_deref()
                     .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
-            )?,
-            reason: decode_delegation_reason(
-                row.try_get::<Option<String>, _>("reason_kind")?
-                    .as_deref()
-                    .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
-            )?,
-            provenance: decode_delegation_provenance(&row)?,
-            content: row.try_get("content_text")?,
-        }),
+            )?;
+            let content_present: bool = row.try_get("content_present")?;
+            if content_present != (outcome == DispatchedDelegationOutcome::ResultReturned) {
+                return Err(OutboxCorruption::InvalidDelegationEvent.into());
+            }
+            Ok(DispatchedDelegationUpdate::ChildResult {
+                spawning_request,
+                child: required_session(&row, "child_session_id")?,
+                outcome,
+                reason: decode_delegation_reason(
+                    row.try_get::<Option<String>, _>("reason_kind")?
+                        .as_deref()
+                        .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
+                )?,
+                provenance: decode_delegation_provenance(&row)?,
+                content: if materialize_content {
+                    row.try_get("content_text")?
+                } else {
+                    content_present.then(String::new)
+                },
+            })
+        }
         DelegationUpdateStorageKind::SessionMessage => {
+            if !row.try_get::<bool, _>("content_present")? {
+                return Err(OutboxCorruption::InvalidDelegationEvent.into());
+            }
             Ok(DispatchedDelegationUpdate::SessionMessage {
                 spawning_request,
                 message: DelegationMessageId::from_uuid(required_uuid(&row, "message_id")?),
@@ -2334,12 +2379,24 @@ async fn load_delegation_update(
                 recipient: required_session(&row, "recipient_session_id")?,
                 message_ordinal: required_positive_sequence(&row, "message_ordinal")?,
                 delivery_sequence: required_positive_sequence(&row, "delivery_sequence")?,
-                content: row
-                    .try_get::<Option<String>, _>("content_text")?
-                    .ok_or(OutboxCorruption::InvalidDelegationEvent)?,
+                content: if materialize_content {
+                    row.try_get::<Option<String>, _>("content_text")?
+                        .ok_or(OutboxCorruption::InvalidDelegationEvent)?
+                } else {
+                    String::new()
+                },
             })
         }
     }
+}
+
+pub(crate) async fn validate_delegation_update_fact(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    expected_sequence: u64,
+    session: SessionId,
+) -> Result<(), OutboxDispatchError> {
+    load_delegation_update(transaction, expected_sequence, session.into_uuid(), false).await?;
+    Ok(())
 }
 
 async fn load_delegation_wake(
