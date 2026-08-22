@@ -213,6 +213,13 @@ test("generated search decoder rejects too many highlight ranges", () => {
   );
 });
 
+test("generated search decoder rejects malformed result identities", () => {
+  const page = searchPage();
+  page.results[0].session_id = "not-a-uuid";
+
+  assert.throws(() => decodeWebSearchPage(page), /matching/);
+});
+
 test("generated descriptor decoder rejects an invalid session ID", () => {
   assert.throws(
     () =>

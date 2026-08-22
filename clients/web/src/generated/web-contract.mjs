@@ -296,7 +296,7 @@ const schemas = {
             "type": "array"
           },
           "session_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebSessionId"
           },
           "snippet": {
             "maxLength": 512,
@@ -327,7 +327,7 @@ const schemas = {
                 "type": "string"
               },
               "session_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               }
             },
             "required": [
@@ -340,14 +340,14 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "accepted_input_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               },
               "kind": {
                 "const": "accepted_input",
                 "type": "string"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               }
             },
             "required": [
@@ -360,15 +360,36 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
+              "accepted_input_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "kind": {
+                "const": "steering_input",
+                "type": "string"
+              },
+              "source_turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "accepted_input_id",
+              "source_turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
               "kind": {
                 "const": "turn_transcript_entry",
                 "type": "string"
               },
               "semantic_entry_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               }
             },
             "required": [
@@ -386,7 +407,7 @@ const schemas = {
                 "type": "string"
               },
               "semantic_entry_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               }
             },
             "required": [
@@ -403,10 +424,10 @@ const schemas = {
                 "type": "string"
               },
               "tool_request_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               }
             },
             "required": [
@@ -424,10 +445,10 @@ const schemas = {
                 "type": "string"
               },
               "tool_attempt_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               }
             },
             "required": [
@@ -441,7 +462,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "attachment_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               },
               "kind": {
                 "const": "attachment",
@@ -458,7 +479,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "artifact_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               },
               "kind": {
                 "const": "derived_artifact",
@@ -472,6 +493,11 @@ const schemas = {
             "type": "object"
           }
         ]
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
       },
       "WebTimelineAddress": {
         "additionalProperties": false,
@@ -490,6 +516,11 @@ const schemas = {
       "WebTimelineEventSequence": {
         "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
         "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebUuid": {
+        "description": "Checked canonical UUID used for browser-visible non-session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
         "type": "string"
       }
     },

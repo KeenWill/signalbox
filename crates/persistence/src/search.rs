@@ -278,6 +278,25 @@ impl SearchRepository {
             }
         };
         let mut transaction = self.pool.begin().await?;
+        let address_belongs_to_session = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM outbox_event
+                  WHERE session_id = $1 AND event_sequence = $2
+                 UNION ALL
+                 SELECT 1
+                   FROM delegation_outbox_event
+                  WHERE session_id = $1 AND event_sequence = $2
+             )",
+        )
+        .bind(projection.session.into_uuid())
+        .bind(Decimal::from(projection.address.sequence().get()))
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !address_belongs_to_session {
+            transaction.rollback().await?;
+            return Err(SearchProjectionCorruption::Invalid("artifact timeline address").into());
+        }
         sqlx::query(
             "SELECT pg_advisory_xact_lock(
                  hashtextextended(
@@ -367,7 +386,7 @@ fn decode_row(row: PgRow) -> Result<(SearchCursor, SearchResult), SearchReposito
         turn_id,
         content_class,
     )?;
-    let source = decode_source(&item_kind, item_id, turn_id, session)?;
+    let source = decode_source(&source_kind, &item_kind, item_id, turn_id, session)?;
     let (snippet, highlights) = decode_headline(row.try_get("marked_snippet")?)?;
     Ok((
         SearchCursor::new(address, projection),
@@ -395,6 +414,11 @@ fn validate_source_correlation(
             (source_kind, item_kind, turn_id, content_class),
             (
                 "accepted_input",
+                "accepted_input",
+                Some(_),
+                SearchContentClass::UserTranscript
+            ) | (
+                "steering_input",
                 "accepted_input",
                 Some(_),
                 SearchContentClass::UserTranscript
@@ -448,48 +472,60 @@ fn validate_source_correlation(
 }
 
 fn decode_source(
-    kind: &str,
+    source_kind: &str,
+    item_kind: &str,
     source: Uuid,
     turn: Option<Uuid>,
     session: SessionId,
 ) -> Result<SearchResultSource, SearchProjectionCorruption> {
-    match (kind, turn) {
-        ("session", None) if source == session.into_uuid() => {
+    match (source_kind, item_kind, turn) {
+        ("session_metadata", "session", None) if source == session.into_uuid() => {
             Ok(SearchResultSource::Session(session))
         }
-        ("accepted_input", Some(turn)) => Ok(SearchResultSource::AcceptedInput {
+        ("accepted_input", "accepted_input", Some(turn)) => Ok(SearchResultSource::AcceptedInput {
             input: AcceptedInputId::from_uuid(source),
             turn: TurnId::from_uuid(turn),
         }),
-        ("transcript_entry", Some(turn)) => Ok(SearchResultSource::TurnTranscriptEntry {
-            entry: SemanticTranscriptEntryId::from_uuid(source),
-            turn: TurnId::from_uuid(turn),
-        }),
-        ("transcript_entry", None) => Ok(SearchResultSource::SessionTranscriptEntry {
-            entry: SemanticTranscriptEntryId::from_uuid(source),
-        }),
-        ("tool_request", Some(turn)) => Ok(SearchResultSource::ToolRequest {
+        ("steering_input", "accepted_input", Some(source_turn)) => {
+            Ok(SearchResultSource::SteeringInput {
+                input: AcceptedInputId::from_uuid(source),
+                source_turn: TurnId::from_uuid(source_turn),
+            })
+        }
+        ("semantic_entry", "transcript_entry", Some(turn)) => {
+            Ok(SearchResultSource::TurnTranscriptEntry {
+                entry: SemanticTranscriptEntryId::from_uuid(source),
+                turn: TurnId::from_uuid(turn),
+            })
+        }
+        ("semantic_entry", "transcript_entry", None) => {
+            Ok(SearchResultSource::SessionTranscriptEntry {
+                entry: SemanticTranscriptEntryId::from_uuid(source),
+            })
+        }
+        ("tool_request", "tool_request", Some(turn)) => Ok(SearchResultSource::ToolRequest {
             request: ToolRequestId::from_uuid(source),
             turn: TurnId::from_uuid(turn),
         }),
-        ("tool_attempt", Some(turn)) => Ok(SearchResultSource::ToolAttempt {
+        ("tool_attempt", "tool_attempt", Some(turn)) => Ok(SearchResultSource::ToolAttempt {
             attempt: ToolAttemptId::from_uuid(source),
             turn: TurnId::from_uuid(turn),
         }),
-        ("attachment", None) => Ok(SearchResultSource::Attachment {
+        ("attachment", "attachment", None) => Ok(SearchResultSource::Attachment {
             attachment: SearchArtifactId::from_uuid(source),
         }),
-        ("derived_artifact", None) => Ok(SearchResultSource::DerivedArtifact {
+        ("derived_artifact", "derived_artifact", None) => Ok(SearchResultSource::DerivedArtifact {
             artifact: SearchArtifactId::from_uuid(source),
         }),
         (
-            "session" | "accepted_input" | "tool_request" | "tool_attempt" | "attachment"
-            | "derived_artifact",
+            "session_metadata" | "accepted_input" | "steering_input" | "semantic_entry"
+            | "tool_request" | "tool_attempt" | "attachment" | "derived_artifact",
+            _,
             _,
         ) => Err(SearchProjectionCorruption::SourceShape),
         _ => Err(SearchProjectionCorruption::Unsupported {
             field: "source kind",
-            value: kind.to_owned(),
+            value: source_kind.to_owned(),
         }),
     }
 }

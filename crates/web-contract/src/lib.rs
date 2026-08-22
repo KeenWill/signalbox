@@ -176,6 +176,35 @@ impl<'de> Deserialize<'de> for WebSessionId {
     }
 }
 
+/// Checked canonical UUID used for browser-visible non-session identities.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebUuid(
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    String,
+);
+
+impl WebUuid {
+    /// Constructs an identity from its canonical lowercase UUID spelling.
+    #[must_use]
+    pub fn from_canonical(value: String) -> Option<Self> {
+        canonical_session_id(&value).then_some(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for WebUuid {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_canonical(value)
+            .ok_or_else(|| de::Error::custom("identity must be a canonical lowercase UUID"))
+    }
+}
+
 impl WebTimelineEventSequence {
     /// Encodes one already-validated positive durable-event sequence.
     #[must_use]
@@ -342,32 +371,36 @@ pub enum WebSearchContentClass {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebSearchResultSource {
     Session {
-        session_id: String,
+        session_id: WebSessionId,
     },
     AcceptedInput {
-        accepted_input_id: String,
-        turn_id: String,
+        accepted_input_id: WebUuid,
+        turn_id: WebUuid,
+    },
+    SteeringInput {
+        accepted_input_id: WebUuid,
+        source_turn_id: WebUuid,
     },
     TurnTranscriptEntry {
-        semantic_entry_id: String,
-        turn_id: String,
+        semantic_entry_id: WebUuid,
+        turn_id: WebUuid,
     },
     SessionTranscriptEntry {
-        semantic_entry_id: String,
+        semantic_entry_id: WebUuid,
     },
     ToolRequest {
-        tool_request_id: String,
-        turn_id: String,
+        tool_request_id: WebUuid,
+        turn_id: WebUuid,
     },
     ToolAttempt {
-        tool_attempt_id: String,
-        turn_id: String,
+        tool_attempt_id: WebUuid,
+        turn_id: WebUuid,
     },
     Attachment {
-        attachment_id: String,
+        attachment_id: WebUuid,
     },
     DerivedArtifact {
-        artifact_id: String,
+        artifact_id: WebUuid,
     },
 }
 
@@ -423,7 +456,7 @@ pub struct WebSearchCursor {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSearchResult {
-    pub session_id: String,
+    pub session_id: WebSessionId,
     pub address: WebTimelineAddress,
     pub source: WebSearchResultSource,
     pub content_class: WebSearchContentClass,

@@ -316,6 +316,13 @@ pub enum SearchResultSource {
         /// Exact origin turn identity.
         turn: TurnId,
     },
+    /// Consumed next-safe-point steering input and the turn that supplied it.
+    SteeringInput {
+        /// Exact accepted input identity.
+        input: AcceptedInputId,
+        /// Exact turn from which the steering input was supplied.
+        source_turn: TurnId,
+    },
     /// Semantic transcript entry owned by one turn.
     TurnTranscriptEntry {
         /// Exact semantic entry identity.

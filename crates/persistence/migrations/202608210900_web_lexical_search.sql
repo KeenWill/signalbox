@@ -43,8 +43,9 @@ CREATE TABLE web_search_projection (
         )),
     CONSTRAINT web_search_projection_source_closed
         CHECK (source_kind IN (
-            'accepted_input', 'semantic_entry', 'tool_request', 'tool_attempt',
-            'session_metadata', 'attachment', 'derived_artifact'
+            'accepted_input', 'steering_input', 'semantic_entry',
+            'tool_request', 'tool_attempt', 'session_metadata', 'attachment',
+            'derived_artifact'
         )),
     CONSTRAINT web_search_projection_item_shape
         CHECK (
@@ -60,7 +61,7 @@ CREATE TABLE web_search_projection (
             'attachment_media_metadata', 'derived_text_artifact'
         )),
     CONSTRAINT web_search_projection_ordinal_bound
-        CHECK (projection_ordinal BETWEEN 0 AND 4095),
+        CHECK (projection_ordinal >= 0),
     CONSTRAINT web_search_projection_text_bound
         CHECK (octet_length(content_text) BETWEEN 1 AND 65536)
 );
@@ -114,7 +115,7 @@ BEGIN
         item_kind, item_id, turn_id, content_class,
         projection_ordinal, content_text
     )
-    SELECT 'accepted_input', input.accepted_input_id, input.session_id,
+    SELECT 'steering_input', input.accepted_input_id, input.session_id,
            event.event_sequence, 'accepted_input', input.accepted_input_id,
            NEW.steering_source_turn_id, 'user_transcript',
            chunk.ordinal, chunk.content_text
@@ -339,7 +340,7 @@ INSERT INTO web_search_projection (
     item_kind, item_id, turn_id, content_class,
     projection_ordinal, content_text
 )
-SELECT 'accepted_input', input.accepted_input_id, input.session_id,
+SELECT 'steering_input', input.accepted_input_id, input.session_id,
        event.event_sequence, 'accepted_input', input.accepted_input_id,
        entry.steering_source_turn_id, 'user_transcript',
        chunk.ordinal, chunk.content_text
