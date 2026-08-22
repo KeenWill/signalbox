@@ -14,7 +14,9 @@ Same-turn tool-continuation headroom closure is verified against this PR
 headroom is verified against this PR
 (`agent/daemon-live-post-usage-transcript-headroom`). Dedicated-compaction usage
 as the next queued-turn baseline is verified against this PR
-(`agent/daemon-live-compaction-source-headroom`).
+(`agent/daemon-live-compaction-source-headroom`). Automatic compaction's
+content-weighted boundary is verified against this PR
+(`agent/daemon-live-compaction-byte-boundary`).
 
 Non-ambiguous execution-failure containment is verified against this PR
 (`agent/daemon-live-nonambiguous-execution-containment`).
@@ -395,13 +397,16 @@ closed. The daemon retries database and ambiguous-commit outcomes at this seam;
 it does not start provider interaction until authorization is resolved. The
 automatic preparation path retries transient database failures while loading its
 selected transcript range, retaining the live `Prepared` call as provably unsent
-rather than consuming that queued turn's sole automatic attempt. It selects a
-safe prefix at or before the model-visible midpoint, or the first safe boundary
-after that midpoint when an open tool exchange crosses it, so the summary
-request does not repeat the complete oversized input. An integrity failure still
-terminalizes the unsent call. After a successful provider result, the daemon
-retains the summary and its usage in memory until the exact completion is
-durably applied or replayed.
+rather than consuming that queued turn's sole automatic attempt. It weights each
+model-visible entry by its durable content bytes, with unit weight for an empty
+entry, and selects the first safe boundary at or beyond half the total weight.
+An open tool exchange extends the prefix through its first safe closing
+boundary. This keeps a few large entries from remaining indefinitely in a
+count-light tail while still preventing the summary request from repeating the
+complete oversized input unless one indivisible entry or tool exchange itself
+spans the midpoint. An integrity failure still terminalizes the unsent call.
+After a successful provider result, the daemon retains the summary and its usage
+in memory until the exact completion is durably applied or replayed.
 
 The explicit `compact_session` request names a session and an optional semantic
 transcript position. Absence selects the latest safe terminal or pre-call
