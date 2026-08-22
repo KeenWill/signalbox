@@ -31,10 +31,8 @@ const validateAttentionSnapshot = (snapshot: WebAttentionSnapshot): WebAttention
     }
   }
   const lastSessionId = snapshot.summaries.at(-1)?.session_id ?? null
-  if (
-    snapshot.continuation_after_session_id !== null &&
-    snapshot.continuation_after_session_id !== lastSessionId
-  ) {
+  const continuation = snapshot.continuation_after_session_id ?? null
+  if (continuation !== null && continuation !== lastSessionId) {
     throw new TypeError('attention snapshot continuation does not match its last session identity')
   }
   return snapshot

@@ -19,14 +19,16 @@ const phaseCopy: Record<AttentionSyncPhase, string> = {
 
 const label = (value: string) => value.replaceAll('_', ' ')
 
-const activityTime = (unixMilliseconds: string) => {
+export const activityTime = (unixMilliseconds: string) => {
   const value = Number(unixMilliseconds)
   if (!Number.isSafeInteger(value)) return unixMilliseconds
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return unixMilliseconds
   return new Intl.DateTimeFormat('en-US', {
     dateStyle: 'medium',
     timeStyle: 'short',
     timeZone: 'UTC',
-  }).format(new Date(value))
+  }).format(date)
 }
 
 const queryKey = (after: string | null) => ['production', 'attention', after] as const

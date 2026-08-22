@@ -242,6 +242,21 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('accepts an omitted optional continuation', async () => {
+    const withoutContinuation = {
+      cursor: attentionFixture.cursor,
+      summaries: attentionFixture.summaries,
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(withoutContinuation))),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).resolves.toEqual(
+      withoutContinuation,
+    )
+  })
+
   it('classifies an attention response-body read failure as a transport failure', async () => {
     const body = new ReadableStream<Uint8Array>({
       pull() {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { activityTime } from './AttentionSurface'
 import { reduceAttentionEvent, synchronizeAttention } from './attention'
 import type { WebAttentionSnapshot, WebAttentionStreamEvent } from './generated/web-contract.mjs'
 import type { ProductTransport } from './product'
@@ -45,6 +46,10 @@ const streamTransport = (
 }
 
 describe('attention projection recovery', () => {
+  it('preserves timestamps outside the JavaScript date range', () => {
+    expect(activityTime('9000000000000000')).toBe('9000000000000000')
+  })
+
   it('replaces only summaries already present in the bounded page', () => {
     const reduction = reduceAttentionEvent(snapshot, {
       kind: 'update',
@@ -73,6 +78,16 @@ describe('attention projection recovery', () => {
       kind: 'update',
       cursor: '16',
       summaries: [replacement],
+    })
+
+    expect(reduction).toEqual({ kind: 'resync' })
+  })
+
+  it('requests resynchronization for duplicate identities in an update', () => {
+    const reduction = reduceAttentionEvent(snapshot, {
+      kind: 'update',
+      cursor: '18',
+      summaries: [replacement, { ...replacement, state: 'blocked' }],
     })
 
     expect(reduction).toEqual({ kind: 'resync' })
