@@ -2425,6 +2425,7 @@ impl SubmitInput {
     pub fn prepare_attachment_bytes_too_large(
         self,
         maximum_bytes: NonZeroU64,
+        observed_bytes: NonZeroU64,
     ) -> PreparedSubmitInput;
     pub fn prepare_when_no_active_turn(
         self,
