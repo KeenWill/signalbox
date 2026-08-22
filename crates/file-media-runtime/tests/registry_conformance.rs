@@ -680,6 +680,20 @@ fn oversized_reader_inventory(provider: &FileReaderProviderName) -> Vec<ReaderDe
         .collect()
 }
 
+fn inspection_probe_inventory(
+    provider: &FileReaderProviderName,
+    count: usize,
+    probe: ProbeDeclaration,
+) -> Vec<ReaderDeclaration> {
+    (0..count)
+        .map(|index| {
+            let reader = format!("probe-reader-{index:03}");
+            let owned_media_type = format!("application/x-probe-synthetic-{index:03}");
+            reader_declaration_with_probe(provider, &reader, &owned_media_type, probe)
+        })
+        .collect()
+}
+
 fn oversized_inspection_view_inventory() -> Vec<ReadViewDeclaration> {
     (0..17)
         .map(|index| {
@@ -721,6 +735,48 @@ fn oversized_provider_reader_inventory_is_rejected() {
     assert!(matches!(
         outcome,
         Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::Inventory)
+    ));
+}
+
+#[test]
+fn oversized_inspection_probe_byte_budget_is_rejected() {
+    let provider =
+        FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
+    let probe = ProbeDeclaration::new(1, 0, 0, 262_144);
+    let readers = inspection_probe_inventory(&provider, 65, probe);
+    let declaration = FileMediaProviderDeclaration::try_new(provider, readers)
+        .expect("the provider constructor defers probe budgets to the registry");
+
+    let outcome = FileMediaRegistry::try_new(
+        vec![declaration],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    );
+
+    assert!(matches!(
+        outcome,
+        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::ProbeBounds)
+    ));
+}
+
+#[test]
+fn oversized_inspection_probe_request_budget_is_rejected() {
+    let provider =
+        FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
+    let probe = ProbeDeclaration::new(1, 1, 16, 2);
+    let readers = inspection_probe_inventory(&provider, 57, probe);
+    let declaration = FileMediaProviderDeclaration::try_new(provider, readers)
+        .expect("the provider constructor defers probe budgets to the registry");
+
+    let outcome = FileMediaRegistry::try_new(
+        vec![declaration],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    );
+
+    assert!(matches!(
+        outcome,
+        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::ProbeBounds)
     ));
 }
 
@@ -888,12 +944,26 @@ fn reader_declaration(
     reader: &str,
     owned_media_type: &str,
 ) -> ReaderDeclaration {
+    reader_declaration_with_probe(
+        provider,
+        reader,
+        owned_media_type,
+        ProbeDeclaration::new(4, 0, 0, 4),
+    )
+}
+
+fn reader_declaration_with_probe(
+    provider: &FileReaderProviderName,
+    reader: &str,
+    owned_media_type: &str,
+    probe: ProbeDeclaration,
+) -> ReaderDeclaration {
     ReaderDeclaration::try_new(ReaderDeclarationInput {
         provider: provider.clone(),
         reader: FileReaderName::try_new(reader).expect("fixture reader name is valid"),
         revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
         media_types: vec![media_type(owned_media_type)],
-        probe: ProbeDeclaration::new(4, 0, 0, 4),
+        probe,
         views: vec![text_view()],
         reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
         streaming_text_fallback: StreamingTextFallback::Disabled,

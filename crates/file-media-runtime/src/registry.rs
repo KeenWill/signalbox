@@ -34,6 +34,10 @@ const MAX_REGISTRY_SCHEMA_BYTES: usize = 16 * 1_024 * 1_024;
 const MAX_REASON_CODES_PER_READER: usize = 256;
 // numeric-bound: ceiling - bounds aggregate process-lifetime reason inventory memory
 const MAX_REGISTRY_REASON_CODES: usize = 4_096;
+// numeric-bound: ceiling - bounds one inspection's aggregate probe source I/O
+const MAX_INSPECTION_PROBE_BYTES: u64 = 16 * 1_024 * 1_024;
+// numeric-bound: ceiling - bounds one inspection's aggregate probe request fan-out
+const MAX_INSPECTION_PROBE_READS: u32 = 1_024;
 /// Immutable process-lifetime registry snapshot.
 #[derive(Clone, Debug)]
 pub struct FileMediaRegistry {
@@ -76,6 +80,7 @@ impl FileMediaRegistry {
             return Err(FileMediaRegistryConstructionError::Inventory);
         }
         validate_aggregate_inventory(&providers)?;
+        validate_aggregate_probe_budget(&providers)?;
         providers.sort_by(|left, right| left.provider().cmp(right.provider()));
         for provider in &mut providers {
             provider.sort_readers();
@@ -919,6 +924,30 @@ fn validate_aggregate_inventory(
                     return Err(FileMediaRegistryConstructionError::Inventory);
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_aggregate_probe_budget(
+    providers: &[FileMediaProviderDeclaration],
+) -> Result<(), FileMediaRegistryConstructionError> {
+    let mut bytes = 0_u64;
+    let mut reads = 0_u32;
+    for reader in providers.iter().flat_map(|provider| provider.readers()) {
+        let probe = reader.probe();
+        bytes = bytes
+            .checked_add(probe.cumulative_bytes())
+            .ok_or(FileMediaRegistryConstructionError::ProbeBounds)?;
+        let fixed_reads = u32::from(probe.prefix_bytes() > 0)
+            .checked_add(u32::from(probe.suffix_bytes() > 0))
+            .ok_or(FileMediaRegistryConstructionError::ProbeBounds)?;
+        reads = reads
+            .checked_add(probe.range_count())
+            .and_then(|total| total.checked_add(fixed_reads))
+            .ok_or(FileMediaRegistryConstructionError::ProbeBounds)?;
+        if bytes > MAX_INSPECTION_PROBE_BYTES || reads > MAX_INSPECTION_PROBE_READS {
+            return Err(FileMediaRegistryConstructionError::ProbeBounds);
         }
     }
     Ok(())
