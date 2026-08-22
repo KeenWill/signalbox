@@ -256,6 +256,35 @@ describe('BoundedSessionHistory', () => {
     )
   })
 
+  it('rejects an oversized bootstrap before JSON materialization', async () => {
+    const request = async () => new Response('{}', { headers: { 'content-length': '65537' } })
+
+    await expect(HttpSessionTimelineSource.connect(request)).rejects.toThrow(
+      'exceeds the browser byte ceiling',
+    )
+  })
+
+  it('rejects an impossible empty window for an existing session', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async (requestedSessionId) => ({
+        session_id: requestedSessionId,
+        items: [],
+        projected_structured_bytes: 0,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(history.load({ kind: 'latest' }, { maxItems: 4, maxBytes: 1024 })).rejects.toThrow(
+      'impossibly empty',
+    )
+  })
+
   it('rejects oversized timeline bodies before JSON materialization', async () => {
     const bootstrap = {
       contract: { name: 'signalbox.web-http', version: '2' },

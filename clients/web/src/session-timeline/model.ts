@@ -131,7 +131,9 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
   static async connect(request: typeof fetch = fetch): Promise<HttpSessionTimelineSource> {
     const response = await request('/api/bootstrap')
     if (!response.ok) return throwApiError(response)
-    const bootstrap = decodeWebContractBootstrap(await response.json())
+    const bootstrap = decodeWebContractBootstrap(
+      await readBoundedJson(response, MAX_ERROR_RESPONSE_BYTES),
+    )
     if (!bootstrap.capabilities.bounded_session_timeline) {
       throw new TypeError('bounded session timeline capability is unavailable')
     }
@@ -272,6 +274,13 @@ export class BoundedSessionHistory {
     }
     const firstAddress = window.items[0]?.address.event_sequence
     const lastAddress = window.items.at(-1)?.address.event_sequence
+    if (
+      this.descriptorValue &&
+      window.items.length === 0 &&
+      (anchor.kind === 'first' || anchor.kind === 'latest' || anchor.kind === 'around')
+    ) {
+      throw new TypeError('timeline window is impossibly empty for its requested anchor')
+    }
     if (window.continuation_before) {
       decimalAddress(window.continuation_before.event_sequence)
       if (window.continuation_before.event_sequence !== firstAddress) {

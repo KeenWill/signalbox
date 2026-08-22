@@ -14,6 +14,7 @@ export type DensityMode = 'compact' | 'comfortable'
 export type DetailMode = 'full' | 'condensed' | 'results'
 export type ThemeMode = 'light' | 'dark'
 export type Overlay = 'palette' | 'help' | 'navigation' | null
+export type ArtifactOriginalState = 'loading' | 'loaded' | 'failed'
 
 export interface VisibleRange {
   start: number
@@ -29,7 +30,7 @@ interface AppState extends BrowserPreferences {
   selectedTimeline: string | null
   selectedArtifact: string | null
   expandedArtifacts: Record<string, boolean>
-  originalArtifacts: Record<string, boolean>
+  originalArtifacts: Record<string, ArtifactOriginalState>
   transcriptRange: VisibleRange
   tableRange: VisibleRange
   activitySequence: number
@@ -109,7 +110,14 @@ const appSlice = createSlice({
       state.activitySequence += 1
     },
     artifactOriginalRequested(state, action: { payload: string }) {
-      state.originalArtifacts[action.payload] = true
+      state.originalArtifacts[action.payload] = 'loading'
+      state.activitySequence += 1
+    },
+    artifactOriginalSettled(
+      state,
+      action: { payload: { id: string; result: 'loaded' | 'failed' } },
+    ) {
+      state.originalArtifacts[action.payload.id] = action.payload.result
       state.activitySequence += 1
     },
     transcriptRangeSet(state, action: { payload: VisibleRange }) {

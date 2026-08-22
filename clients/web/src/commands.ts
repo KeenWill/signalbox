@@ -103,10 +103,12 @@ export const commandRegistry = [
     bindings: [],
     available: (context) => {
       const id = selectedArtifact(context)
+      const originalState = id === null ? undefined : context.getState().app.originalArtifacts[id]
       return (
         id !== null &&
         context.artifactOriginalIds.includes(id) &&
-        !context.getState().app.originalArtifacts[id]
+        originalState !== 'loading' &&
+        originalState !== 'loaded'
       )
     },
     run: (context) => {

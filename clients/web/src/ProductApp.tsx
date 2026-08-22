@@ -315,16 +315,16 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
-  const firstTimelineWindowRef = useRef<(() => void) | null>(null)
-  const latestTimelineWindowRef = useRef<(() => void) | null>(null)
+  const [firstTimelineWindow, setFirstTimelineWindow] = useState<(() => void) | null>(null)
+  const [latestTimelineWindow, setLatestTimelineWindow] = useState<(() => void) | null>(null)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineSessionId, setTimelineSessionId] = useState<string | null>(null)
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
   const updateFirstTimelineWindow = useCallback((action: (() => void) | null) => {
-    firstTimelineWindowRef.current = action
+    setFirstTimelineWindow(() => action)
   }, [])
   const updateLatestTimelineWindow = useCallback((action: (() => void) | null) => {
-    latestTimelineWindowRef.current = action
+    setLatestTimelineWindow(() => action)
   }, [])
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
@@ -339,8 +339,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       artifactPreviewIds: [],
       artifactOriginalIds: [],
       focusTimeline: () => primaryRef.current?.focus(),
-      openFirstTimelineWindow: () => firstTimelineWindowRef.current?.(),
-      openLatestTimelineWindow: () => latestTimelineWindowRef.current?.(),
+      openFirstTimelineWindow: firstTimelineWindow ?? undefined,
+      openLatestTimelineWindow: latestTimelineWindow ?? undefined,
       onTimelineSelected: (eventSequence) => {
         if (timelineSessionId !== null) {
           dispatch(
@@ -353,7 +353,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       },
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
     }),
-    [dispatch, navigate, timelineIds, timelineSessionId],
+    [dispatch, firstTimelineWindow, latestTimelineWindow, navigate, timelineIds, timelineSessionId],
   )
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({

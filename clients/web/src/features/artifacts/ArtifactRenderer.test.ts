@@ -27,8 +27,11 @@ import { admitRemoteMediaUrl } from './remoteMediaPreference'
 const download = imageArtifact.available_views[0]
 const browserNative = imageArtifact.available_views[1]
 const preview = imageArtifact.available_views[2]
-if (!download || !browserNative || !preview) {
-  throw new Error('the image artifact fixture must contain download, original, and preview views')
+const authoritativeDerivation = imagePreviewView.derivations[0]
+if (!download || !browserNative || !preview || !authoritativeDerivation) {
+  throw new Error(
+    'the image artifact fixture must contain download, original, preview, and provenance',
+  )
 }
 
 describe('artifact renderer compatibility', () => {
@@ -67,18 +70,19 @@ describe('artifact renderer compatibility', () => {
   })
 
   it('selects the derivation that binds the descriptor input to the rendered output', () => {
-    const authoritative = imagePreviewView.derivations[0]
-    if (authoritative === undefined) throw new Error('fixture derivation missing')
     const unrelated = {
-      ...authoritative,
+      ...authoritativeDerivation,
       derivation_id: '0198f321-2300-7000-8000-000000000002',
       input_digests: [`sha256:${'9a'.repeat(32)}`],
       output_digests: [`sha256:${'9b'.repeat(32)}`],
     }
-    const view = { ...imagePreviewView, derivations: [unrelated, authoritative] }
+    const view = {
+      ...imagePreviewView,
+      derivations: [unrelated, authoritativeDerivation],
+    }
 
     expect(selectViewDerivation(imageArtifact, view)?.derivation_id).toBe(
-      authoritative?.derivation_id,
+      authoritativeDerivation.derivation_id,
     )
   })
 
