@@ -231,23 +231,32 @@ jobs:
       - name: Use the node-local cargo target cache
         # Self-hosted runners expose a persistent per-node cache directory
         # through /home/runner/_work/_ci-cache, provisioned by the runner pod
-        # template outside this repository. Keying the target dir by
-        # lockfile hash and job keeps compiled dependencies warm across runs on
-        # the same node without two concurrent jobs sharing one cargo lock.
-        # GitHub-hosted runners have no such directory and keep the default.
+        # template outside this repository. Each run gets its own target dir,
+        # cloned copy-on-write (reflink, same XFS filesystem) from the last
+        # successful run with the same lockfile/toolchain key, so concurrent
+        # runs never share a cargo lock and nothing one run writes leaks into
+        # another. GitHub-hosted runners have no such directory and keep the
+        # default. Run dirs untouched for a day are pruned at job start.
         id: nodecache
         shell: bash
         run: |
           cache=/home/runner/_work/_ci-cache
           if [ -d "$cache/target" ]; then
-            find "$cache/target" -mindepth 2 -maxdepth 2 -type d -mtime +3 -exec rm -rf {} + 2>/dev/null || true
             key="${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}"
             job="${{ github.job }}${{ strategy.job-index != '' && format('-{0}', strategy.job-index) || '' }}"
-            target="$cache/target/$key/$job"
-            mkdir -p "$target"
+            base="$cache/target/$key/$job"
+            mkdir -p "$base/runs"
+            find "$base/runs" -mindepth 1 -maxdepth 1 -type d -mtime +0 -exec rm -rf {} + 2>/dev/null || true
+            target="$base/runs/${{ github.run_id }}-${{ github.run_attempt }}"
+            if [ -d "$base/latest" ] && cp --reflink=always -a "$base/latest/." "$target" 2>/dev/null; then
+              echo "seeded $target from the last successful run (reflink)"
+            else
+              rm -rf "$target"; mkdir -p "$target"
+              echo "no seed available; fresh target dir $target"
+            fi
             echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+            echo "NODECACHE_BASE=$base" >> "$GITHUB_ENV"
             echo "active=true" >> "$GITHUB_OUTPUT"
-            echo "node-local target dir: $target"
           else
             echo "active=false" >> "$GITHUB_OUTPUT"
             echo "no node-local cache directory; using the default target dir"
@@ -272,6 +281,12 @@ jobs:
   # repository contracts, checker tests, formatting, and Rust compilation run
   # concurrently. This aggregate keeps the required `validate` check bound to
   # every command it covered before the split.
+      - name: Publish this run's target dir as the cache seed
+        if: success() && steps.nodecache.outputs.active == 'true'
+        shell: bash
+        run: |
+          ln -sfn "$CARGO_TARGET_DIR" "$NODECACHE_BASE/latest.tmp" && mv -T "$NODECACHE_BASE/latest.tmp" "$NODECACHE_BASE/latest"
+          echo "cache seed -> $CARGO_TARGET_DIR"
   validate-checks:
     if: ${{ always() }}
     needs:
@@ -373,23 +388,32 @@ jobs:
       - name: Use the node-local cargo target cache
         # Self-hosted runners expose a persistent per-node cache directory
         # through /home/runner/_work/_ci-cache, provisioned by the runner pod
-        # template outside this repository. Keying the target dir by
-        # lockfile hash and job keeps compiled dependencies warm across runs on
-        # the same node without two concurrent jobs sharing one cargo lock.
-        # GitHub-hosted runners have no such directory and keep the default.
+        # template outside this repository. Each run gets its own target dir,
+        # cloned copy-on-write (reflink, same XFS filesystem) from the last
+        # successful run with the same lockfile/toolchain key, so concurrent
+        # runs never share a cargo lock and nothing one run writes leaks into
+        # another. GitHub-hosted runners have no such directory and keep the
+        # default. Run dirs untouched for a day are pruned at job start.
         id: nodecache
         shell: bash
         run: |
           cache=/home/runner/_work/_ci-cache
           if [ -d "$cache/target" ]; then
-            find "$cache/target" -mindepth 2 -maxdepth 2 -type d -mtime +3 -exec rm -rf {} + 2>/dev/null || true
             key="${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}"
             job="${{ github.job }}${{ strategy.job-index != '' && format('-{0}', strategy.job-index) || '' }}"
-            target="$cache/target/$key/$job"
-            mkdir -p "$target"
+            base="$cache/target/$key/$job"
+            mkdir -p "$base/runs"
+            find "$base/runs" -mindepth 1 -maxdepth 1 -type d -mtime +0 -exec rm -rf {} + 2>/dev/null || true
+            target="$base/runs/${{ github.run_id }}-${{ github.run_attempt }}"
+            if [ -d "$base/latest" ] && cp --reflink=always -a "$base/latest/." "$target" 2>/dev/null; then
+              echo "seeded $target from the last successful run (reflink)"
+            else
+              rm -rf "$target"; mkdir -p "$target"
+              echo "no seed available; fresh target dir $target"
+            fi
             echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+            echo "NODECACHE_BASE=$base" >> "$GITHUB_ENV"
             echo "active=true" >> "$GITHUB_OUTPUT"
-            echo "node-local target dir: $target"
           else
             echo "active=false" >> "$GITHUB_OUTPUT"
             echo "no node-local cache directory; using the default target dir"
@@ -437,6 +461,12 @@ jobs:
   # directories, and the linked search paths, which is everything the run job
   # needs; it deliberately does not carry the source tree, so the run job
   # checks the sources out and passes `--workspace-remap`.
+      - name: Publish this run's target dir as the cache seed
+        if: success() && steps.nodecache.outputs.active == 'true'
+        shell: bash
+        run: |
+          ln -sfn "$CARGO_TARGET_DIR" "$NODECACHE_BASE/latest.tmp" && mv -T "$NODECACHE_BASE/latest.tmp" "$NODECACHE_BASE/latest"
+          echo "cache seed -> $CARGO_TARGET_DIR"
   postgres-integration-build:
     name: postgres-integration (build)
     needs: rust-change-scope
@@ -466,23 +496,32 @@ jobs:
       - name: Use the node-local cargo target cache
         # Self-hosted runners expose a persistent per-node cache directory
         # through /home/runner/_work/_ci-cache, provisioned by the runner pod
-        # template outside this repository. Keying the target dir by
-        # lockfile hash and job keeps compiled dependencies warm across runs on
-        # the same node without two concurrent jobs sharing one cargo lock.
-        # GitHub-hosted runners have no such directory and keep the default.
+        # template outside this repository. Each run gets its own target dir,
+        # cloned copy-on-write (reflink, same XFS filesystem) from the last
+        # successful run with the same lockfile/toolchain key, so concurrent
+        # runs never share a cargo lock and nothing one run writes leaks into
+        # another. GitHub-hosted runners have no such directory and keep the
+        # default. Run dirs untouched for a day are pruned at job start.
         id: nodecache
         shell: bash
         run: |
           cache=/home/runner/_work/_ci-cache
           if [ -d "$cache/target" ]; then
-            find "$cache/target" -mindepth 2 -maxdepth 2 -type d -mtime +3 -exec rm -rf {} + 2>/dev/null || true
             key="${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}"
             job="${{ github.job }}${{ strategy.job-index != '' && format('-{0}', strategy.job-index) || '' }}"
-            target="$cache/target/$key/$job"
-            mkdir -p "$target"
+            base="$cache/target/$key/$job"
+            mkdir -p "$base/runs"
+            find "$base/runs" -mindepth 1 -maxdepth 1 -type d -mtime +0 -exec rm -rf {} + 2>/dev/null || true
+            target="$base/runs/${{ github.run_id }}-${{ github.run_attempt }}"
+            if [ -d "$base/latest" ] && cp --reflink=always -a "$base/latest/." "$target" 2>/dev/null; then
+              echo "seeded $target from the last successful run (reflink)"
+            else
+              rm -rf "$target"; mkdir -p "$target"
+              echo "no seed available; fresh target dir $target"
+            fi
             echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+            echo "NODECACHE_BASE=$base" >> "$GITHUB_ENV"
             echo "active=true" >> "$GITHUB_OUTPUT"
-            echo "node-local target dir: $target"
           else
             echo "active=false" >> "$GITHUB_OUTPUT"
             echo "no node-local cache directory; using the default target dir"
@@ -582,6 +621,12 @@ jobs:
   # replaces. The run matrix currently expands to twelve shards after the one
   # shared build. The shards compile nothing and run for minutes; the build's
   # single cache key replaces the old per-suite keys that evicted one another.
+      - name: Publish this run's target dir as the cache seed
+        if: success() && steps.nodecache.outputs.active == 'true'
+        shell: bash
+        run: |
+          ln -sfn "$CARGO_TARGET_DIR" "$NODECACHE_BASE/latest.tmp" && mv -T "$NODECACHE_BASE/latest.tmp" "$NODECACHE_BASE/latest"
+          echo "cache seed -> $CARGO_TARGET_DIR"
   postgres-integration-run:
     name: >-
       postgres-integration
