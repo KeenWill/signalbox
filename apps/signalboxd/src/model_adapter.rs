@@ -98,6 +98,7 @@ impl<A, O> ConfiguredModelRuntime<A, O> {
         anthropic: Option<A>,
         openai: Option<O>,
         configuration: &HubModelConfiguration,
+        model_exchange_timeout: Option<Duration>,
         post_kill_reap_bound: Option<Duration>,
         native_message_limit: Option<usize>,
     ) -> Result<Self, ConfiguredAdapterConstructionError> {
@@ -105,11 +106,15 @@ impl<A, O> ConfiguredModelRuntime<A, O> {
             anthropic: anthropic.map(Arc::new),
             openai: openai.map(Arc::new),
             claude_cli: configuration
-                .claude_cli_runtime(post_kill_reap_bound, native_message_limit)
+                .claude_cli_runtime(
+                    model_exchange_timeout,
+                    post_kill_reap_bound,
+                    native_message_limit,
+                )
                 .map_err(ConfiguredAdapterConstructionError::ClaudeCli)?
                 .map(Arc::new),
             codex_cli: configuration
-                .codex_cli_runtime(post_kill_reap_bound)
+                .codex_cli_runtime(model_exchange_timeout, post_kill_reap_bound)
                 .map_err(ConfiguredAdapterConstructionError::CodexCli)?
                 .map(Arc::new),
             routes: configuration.adapter_routes(),
@@ -463,6 +468,7 @@ context_window_tokens = 200000
             &configuration,
             None,
             None,
+            None,
         )
         .expect("Anthropic-only runtime constructs");
         let operation = ModelOperation::new(
@@ -583,9 +589,15 @@ service_tiers = ["priority"]
             "claude-example",
         )));
         let unrouted = anthropic.clone();
-        let runtime =
-            ConfiguredModelRuntime::new(Some(anthropic), Some(openai), &configuration, None, None)
-                .expect("configured adapters construct");
+        let runtime = ConfiguredModelRuntime::new(
+            Some(anthropic),
+            Some(openai),
+            &configuration,
+            None,
+            None,
+            None,
+        )
+        .expect("configured adapters construct");
 
         let prepared = prepared(
             runtime
@@ -614,6 +626,7 @@ service_tiers = ["priority"]
             None::<ScriptedModel<String>>,
             None::<ScriptedModel<String>>,
             &configuration,
+            None,
             None,
             None,
         )
@@ -746,6 +759,7 @@ fast_mode = "request_control"
             &configuration,
             None,
             None,
+            None,
         )
         .expect("configured adapters construct");
         assert!(format!("{runtime:?}").contains("claude_cli: Some"));
@@ -874,6 +888,7 @@ service_tiers = ["priority"]
             None::<ScriptedModel<String>>,
             None::<ScriptedModel<String>>,
             &configuration,
+            None,
             None,
             None,
         )

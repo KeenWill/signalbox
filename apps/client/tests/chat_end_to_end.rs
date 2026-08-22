@@ -407,6 +407,7 @@ context_window_tokens = {CONTEXT_WINDOW_TOKENS}
                 ),
                 InProcessAttemptDispatchGate::default(),
                 provider,
+                None,
             )
             .with_tool_loop(
                 tool_dispatch_gate,

@@ -95,15 +95,12 @@ const RUNNER_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_SOCKET_PATH";
 const GUARD_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 fn graceful_shutdown_window(
-    occupancy_bound: SchedulerPassOccupancyBound,
+    model_exchange_timeout: Option<Duration>,
     cleanup_window: Option<Duration>,
 ) -> Option<Duration> {
-    cleanup_window.map(|cleanup_window| {
-        occupancy_bound
-            .get()
-            .unwrap_or(Duration::ZERO)
-            .saturating_add(cleanup_window)
-    })
+    model_exchange_timeout
+        .zip(cleanup_window)
+        .map(|(exchange, cleanup)| exchange.saturating_add(cleanup))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1204,6 +1201,7 @@ async fn run_hub(
                 )
             })
     };
+    let model_exchange_timeout = configured_duration("model_exchange_timeout");
     let scheduler_pass_occupancy_bound = configured_duration("scheduler_pass_occupancy_bound")
         .map(SchedulerPassOccupancyBound::try_new)
         .transpose()
@@ -1215,7 +1213,7 @@ async fn run_hub(
         })?
         .unwrap_or_else(SchedulerPassOccupancyBound::unbounded);
     let shutdown_grace_window = graceful_shutdown_window(
-        scheduler_pass_occupancy_bound,
+        model_exchange_timeout,
         configured_duration("graceful_shutdown_cleanup_window"),
     );
     let stale_active_turn_bound = configured_duration("stale_active_turn_bound")
@@ -1315,6 +1313,7 @@ async fn run_hub(
         configured_duration("automatic_resume_startup_retry_delay"),
     );
     let diagnostic_model_identity_limit = configured_usize("diagnostic_model_identity_limit")?;
+    let automatic_tool_round_limit = configured_usize("max_automatic_tool_rounds_per_turn")?;
     let post_kill_reap_bound = configured_duration("post_kill_reap_bound");
     let native_message_limit = configured_usize("max_native_message_bytes")?;
     let code_host_numeric_bounds = CodeHostNumericBounds::new(
@@ -1413,10 +1412,9 @@ async fn run_hub(
     let compaction_anthropic = anthropic_credential_access
         .clone()
         .map(|credential_access| {
-            AnthropicRuntime::new(
-                AnthropicConfig::new(native_message_limit),
-                credential_access,
-            )
+            let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = model_exchange_timeout;
+            AnthropicRuntime::new(adapter_configuration, credential_access)
         })
         .transpose()
         .map_err(|error| {
@@ -1428,7 +1426,9 @@ async fn run_hub(
     let compaction_openai = openai_credential_access
         .clone()
         .map(|credential_access| {
-            OpenAiRuntime::new(OpenAiConfig::new(native_message_limit), credential_access)
+            let mut adapter_configuration = OpenAiConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = model_exchange_timeout;
+            OpenAiRuntime::new(adapter_configuration, credential_access)
         })
         .transpose()
         .map_err(|error| {
@@ -1444,6 +1444,7 @@ async fn run_hub(
         .then(|| anthropic_model_credentials.clone())
         .map(|credential_access| {
             let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = model_exchange_timeout;
             adapter_configuration.model_capabilities = anthropic_model_capabilities;
             AnthropicRuntime::new(adapter_configuration, credential_access)
         })
@@ -1457,6 +1458,7 @@ async fn run_hub(
     let openai = openai_credential_access
         .map(|credential_access| {
             let mut adapter_configuration = OpenAiConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = model_exchange_timeout;
             adapter_configuration.model_capabilities = openai_model_capabilities;
             OpenAiRuntime::new(adapter_configuration, credential_access)
         })
@@ -1479,6 +1481,7 @@ async fn run_hub(
         compaction_anthropic,
         compaction_openai,
         &model_configuration,
+        model_exchange_timeout,
         post_kill_reap_bound,
         native_message_limit,
     )
@@ -1492,6 +1495,7 @@ async fn run_hub(
         anthropic,
         openai,
         &model_configuration,
+        model_exchange_timeout,
         post_kill_reap_bound,
         native_message_limit,
     )
@@ -1780,7 +1784,7 @@ async fn run_hub(
             return Err(failure);
         }
     };
-    let web_http_runtime = match WebHttpRuntime::bind(web_configuration).await {
+    let web_http_runtime = match WebHttpRuntime::bind(web_configuration, pool.clone()).await {
         Ok(runtime) => runtime,
         Err(_) => {
             let failure = erase_startup_cause(
@@ -1954,7 +1958,8 @@ async fn run_hub(
     )
     .with_session_credentials(model_configuration.credential_family_catalog())
     .with_credential_pools(model_configuration.credential_pool_runtime_catalog())
-    .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets());
+    .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets())
+    .with_continuation_usage_limits(model_configuration.tool_continuation_usage_limits());
     let reported_usage_compaction = ReportedUsageCompaction::new(
         StartEligibleTurnRepository::new(scheduler_pool.clone()),
         model_repository.clone(),
@@ -1963,18 +1968,21 @@ async fn run_hub(
         model_configuration.clone(),
         Arc::clone(&context_compaction_model),
     );
+    let (turn_execution_shutdown, turn_execution_shutdown_receiver) = watch::channel(false);
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(
             model_repository,
             InProcessAttemptDispatchGate::default(),
             UsageLimitedModelCallProvider::new(provider, &model_configuration),
+            automatic_tool_round_limit,
         )
         .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor)
         .with_approval_judge(
             approval_judge_model,
             model_configuration.configured_approval_judge_selection(),
             model_configuration.clone(),
-        ),
+        )
+        .with_shutdown_checkpoint(turn_execution_shutdown_receiver),
     );
     // The connection runtime has no execution role, so it reaches the same
     // fatal recovery signal through this handle rather than ending an
@@ -2185,6 +2193,7 @@ async fn run_hub(
             while runtime_tasks.join_next().await.is_some() {}
             ShutdownOutcome::GuardLost
         } else {
+            let _ = turn_execution_shutdown.send(true);
             let _ = scheduler_shutdown.send(());
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
@@ -2517,7 +2526,7 @@ mod tests {
     use expect_test::expect;
     use signalbox_application::{
         ClassifyOperatorFailure, EligibilityPass, EligibilityWorkSource, OperatorFailureClass,
-        SchedulerLoop, SchedulerPassOccupancyBound,
+        SchedulerLoop,
     };
     use signalbox_domain::{
         RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleVersion, SessionId, TurnId,
@@ -3264,12 +3273,8 @@ mod tests {
                 shutdown_receiver.await.expect("the test requests shutdown");
                 SchedulerStopCause::Requested
             },
-            graceful_shutdown_window(
-                SchedulerPassOccupancyBound::try_new(Duration::from_secs(3))
-                    .expect("the test occupancy bound is valid"),
-                Some(Duration::from_secs(1)),
-            )
-            .expect("the fixture cleanup window is bounded"),
+            graceful_shutdown_window(Some(Duration::from_secs(3)), Some(Duration::from_secs(1)))
+                .expect("the fixture cleanup window is bounded"),
         ));
 
         entered_receiver

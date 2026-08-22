@@ -1275,6 +1275,10 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
     ModelCallExecutionService<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
 {
     /// Composes every purpose-specific effect role.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the service keeps each effect role and the required deployment policy explicit"
+    )]
     pub fn new(
         ids: Ids,
         prepare: Prepare,
@@ -1283,6 +1287,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         observation: Observation,
         provider: Provider,
         gate: Gate,
+        max_automatic_tool_rounds_per_turn: Option<usize>,
     ) -> Self {
         Self {
             ids,
@@ -1294,19 +1299,13 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             gate,
             catalog: Arc::new(NoToolCatalog),
             retained_state: None,
-            max_automatic_tool_rounds_per_turn: None,
+            max_automatic_tool_rounds_per_turn,
         }
     }
 
     /// Replaces the empty compatibility catalog with one tool-capable port.
     pub fn with_tool_catalog(mut self, catalog: impl ToolCatalog + 'static) -> Self {
         self.catalog = Arc::new(catalog);
-        self
-    }
-
-    /// Applies the deployment's optional automatic tool-round policy.
-    pub const fn with_automatic_tool_round_limit(mut self, limit: Option<usize>) -> Self {
-        self.max_automatic_tool_rounds_per_turn = limit;
         self
     }
 
@@ -3887,6 +3886,7 @@ mod tests {
             UnusedObservation,
             UnusedProvider,
             InProcessAttemptDispatchGate::default(),
+            None,
         )
         .with_tool_catalog(catalog);
         let observation = tool_response();
@@ -4703,6 +4703,7 @@ mod tests {
             UnusedObservation,
             UnusedProvider,
             InProcessAttemptDispatchGate::default(),
+            None,
         );
         assert_eq!(
             service
@@ -4735,6 +4736,7 @@ mod tests {
             UnusedObservation,
             UnusedProvider,
             InProcessAttemptDispatchGate::default(),
+            None,
         );
         assert_eq!(
             service
@@ -4764,6 +4766,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert_eq!(
@@ -4808,6 +4811,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
             InProcessAttemptDispatchGate::default(),
+            None,
         )
         .with_tool_catalog(catalog);
 
@@ -4852,6 +4856,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
         assert_eq!(
             service
@@ -4877,6 +4882,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
         assert_eq!(
             promptless_service
@@ -4913,6 +4919,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -5011,6 +5018,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert_eq!(
@@ -5070,6 +5078,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert_eq!(
@@ -5144,8 +5153,8 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([]),
             InProcessAttemptDispatchGate::default(),
-        )
-        .with_automatic_tool_round_limit(Some(CONFIGURED_TOOL_ROUND_LIMIT));
+            Some(CONFIGURED_TOOL_ROUND_LIMIT),
+        );
 
         assert_eq!(
             service
@@ -5204,6 +5213,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -5252,6 +5262,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -5300,6 +5311,7 @@ mod tests {
                 ModelCallTerminalObservation::KnownFailed,
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -5337,6 +5349,7 @@ mod tests {
                 ModelCallTerminalObservation::KnownFailed,
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert_eq!(
@@ -5375,6 +5388,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::InteractionOperatorFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
         let error = service
             .execute(identity(1, SessionId::from_uuid))
@@ -5427,6 +5441,7 @@ mod tests {
                 ModelCallTerminalObservation::KnownFailed,
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         let error = service
@@ -5515,6 +5530,7 @@ mod tests {
                 },
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         let error = service
@@ -5573,6 +5589,7 @@ mod tests {
                 ModelCallTerminalObservation::KnownFailed,
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert_eq!(
@@ -5634,6 +5651,7 @@ mod tests {
                 },
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -5747,6 +5765,7 @@ mod tests {
                 ModelCallTerminalObservation::KnownFailed,
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -5807,6 +5826,7 @@ mod tests {
                 interaction_count: 0,
             },
             gate,
+            None,
         );
         {
             let execution = service.execute(session);

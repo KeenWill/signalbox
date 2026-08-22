@@ -131,7 +131,7 @@ async fn the_pinned_claude_cli_completes_one_exchange() {
         None,
         None,
     );
-    config.exchange_timeout = Duration::from_secs(4 * 60);
+    config.exchange_timeout = Some(Duration::from_secs(4 * 60));
     let runtime = ClaudeCliRuntime::new_with_file_delivery(
         config,
         credentials,

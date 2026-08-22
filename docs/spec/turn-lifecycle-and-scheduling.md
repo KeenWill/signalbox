@@ -10,7 +10,12 @@ ceiling was re-verified against this PR
 claiming and shutdown-preemptible watchdog batches are verified against this PR
 (`agent/daemon-live-restart-recovery-accounting`). Signal-driven scheduler
 draining is verified against this PR
-(`agent/daemon-live-graceful-shutdown-drain`).
+(`agent/daemon-live-graceful-shutdown-drain`). Suspension of admitted-pass
+occupancy deadlines during that bounded drain is verified against this PR
+(`agent/daemon-live-shutdown-pass-drain`). The sixty-minute occupancy ceiling
+and model-exchange-derived shutdown drain are verified against this PR
+(`agent/daemon-live-runtime-bounds`). Operation-boundary shutdown checkpointing
+is verified against this PR (`agent/daemon-live-shutdown-checkpoint`).
 
 The expired-pass recovery lock classification and retry budgets were re-verified
 against this PR (`agent/daemon-live-reconciliation-lock-cadence`). Exact
@@ -21,7 +26,9 @@ The runner-recovery active-phase algebra, checked persistence reconstitution,
 and preserved interrupt/stop authority were verified against this PR
 (`agent/runner-awaiting-recovery-persistence`). The atomic persistence
 transition into runner recovery was verified against this PR
-(`agent/runner-loss-session-transaction`).
+(`agent/runner-loss-session-transaction`). Daemon invocation and startup
+resumption of that transition were verified against this PR
+(`agent/runner-loss-daemon-propagation`).
 
 The active-tail predecessor-steering correction was verified against this PR
 (`agent/daemon-ops-overnight`).
@@ -470,10 +477,10 @@ the sweep (INV-007).
   wrapper. A lock refusal is preserved as its typed turn-liveness cause even
   when the shared startup transition raises it from its nested session or turn
   work. When a fresh observation proves that the same exact turn still owns a
-  live operation, the refusal is a concurrent live owner and the handoff leaves
-  it alone rather than spending recovery attempts. Other lock refusals retry
-  after six seconds, spacing the four attempts across tens-of-seconds commit
-  handoffs under outbox contention. Any other database, ambiguous, or
+  live operation, the refusal is concurrent live execution and the handoff
+  leaves it alone rather than spending recovery attempts. Other lock refusals
+  retry after six seconds, spacing the four attempts across tens-of-seconds
+  commit handoffs under outbox contention. Any other database, ambiguous, or
   non-infrastructure failure retains the two-minute cadence. Three retries bound
   the detached work, and the outer watchdog below remains responsible if all
   attempts fail. Every terminal handoff nudges the session back into eligibility
@@ -571,7 +578,9 @@ transaction reconstitutes and classifies the exact current durable shape; the
 watchdog invents no parallel terminal transition. This is the outer backstop for
 pass-expiry recovery whose bounded database attempts all failed and for a
 prior-process running turn that survives startup classification. The
-fifteen-minute scheduler-pass ceiling remains the tighter same-process bound.
+sixty-minute scheduler-pass ceiling is a final same-process safety bound; the
+liveness watchdog remains responsible for reclaiming a wedged pass from
+unchanged durable evidence before that ceiling.
 
 **Staleness.** No lifecycle table stores an activity timestamp, and this page
 introduces none: a stored clock would be one more thing to keep true. Staleness
@@ -817,19 +826,20 @@ After configuration and database connection, signalboxd acquires the dedicated
 single-daemon advisory guard specified by
 [process-protocol](process-protocol.md). The registration-only startup order is
 embedded migrations, the generic startup scan to completion, prior-process
-runner connections marked lost, runner-socket bind, process-socket bind, then
-concurrent runner enrollment, client request admission, outbox dispatch, and
-scheduling. Runner admission cannot begin before the migration that creates
-durable request receipts, the generic scan, or connection-loss classification.
+runner connections marked lost and every pending runner-loss cursor completed,
+runner-socket bind, process-socket bind, then concurrent runner enrollment,
+client request admission, outbox dispatch, and scheduling. Runner admission
+cannot begin before the migration that creates durable request receipts, the
+generic scan, connection-loss classification, or session propagation.
 
 **Committed unimplemented functionality.** No present surface performs retained
-runner recovery. When recovery is implemented, startup must instead bind the
-runner socket in recovery-only mode after migrations, reconcile retained runner
-inventory, evidence, and nonterminal replacement commands, complete the generic
-startup scan, bind the process socket, and only then enable ordinary runner
-enrollment and scheduling. This compatibility constraint prevents generic
-recovery from terminalizing authority that retained runner evidence resolves
-(INV-034).
+runner reconnect or replacement recovery. When recovery is implemented, startup
+must instead bind the runner socket in recovery-only mode after migrations,
+reconcile retained runner inventory, evidence, and nonterminal replacement
+commands, complete the generic startup scan, bind the process socket, and only
+then enable ordinary runner enrollment and scheduling. This compatibility
+constraint prevents generic recovery from terminalizing authority that retained
+runner evidence resolves (INV-034).
 
 The runner recovery phase admits only `resume` for a recorded active or pending
 identity and frames needed to reconcile its bounded inventory; it creates no new
@@ -1019,9 +1029,11 @@ call is repeated merely to project runner loss. A queued turn remains queued and
 cannot activate while its placement is lost. An unpinned capability-class
 request names no selected runner and is unaffected until a live registration can
 satisfy it. Locking, page bounds, and crash recovery are owned by
-[persistence-protocol](persistence-protocol.md). **Committed unimplemented
-functionality.** No present daemon service pages pending losses or invokes that
-adapter, and no runner execution surface yet depends on the projected state.
+[persistence-protocol](persistence-protocol.md). The daemon invokes the bounded
+adapter after an applied terminal connection transition or an exact replay of
+its current lost state, and resumes every pending cursor during startup before
+runner admission. **Committed unimplemented functionality.** No runner execution
+surface yet depends on the projected state.
 
 Only two user commands consume that state. `ReplaceLostRunner` requires the
 expected current placement revision and either a different live exact runner,
@@ -1314,17 +1326,21 @@ closed, the dispatcher stops starting transactions, the scheduler stops
 admitting passes, and the turn-liveness pass stops scanning. Finite request
 handlers, the current dispatcher transaction, in-flight scheduler passes, and an
 in-flight turn-liveness inventory read or terminalization share a bounded grace
-window equal to the fifteen-minute scheduler-pass occupancy ceiling plus thirty
-seconds for component cleanup. This lets every admitted pass finish or reach its
-ordinary occupancy terminalization before shutdown may abort it. A clean exit
-closes the fenced pool, waits on the guard session's exclusive
-current-generation fence so even detached pool sessions have ended, removes only
-this daemon's identity-pinned and revalidated socket, and releases the advisory
-locks by closing its dedicated guard connection. Window expiry abandons
-remaining tasks, warns, and skips the unbounded pool drain; process exit
-releases its sessions. Why signal-driven shutdown is polish, not correctness:
-abrupt exit at any point is safe because durable rows plus the next guarded
-startup scan recover work and the durable outbox cursor redelivers an
+window equal to the configured longest expected model exchange plus thirty
+seconds for component cleanup. Once shutdown is observed, an admitted scheduler
+pass stops spending its ordinary occupancy deadline and may use the shared grace
+window to finish the model or tool operation it has already issued; the
+occupancy handler cannot cancel it during that drain. After that operation's
+result reaches its durable boundary, the pass checkpoints the active turn and
+returns without issuing another operation. A successor resumes the same active
+turn from that boundary. A clean exit closes the fenced pool, waits on the guard
+session's exclusive current-generation fence so even detached pool sessions have
+ended, removes only this daemon's identity-pinned and revalidated socket, and
+releases the advisory locks by closing its dedicated guard connection. Window
+expiry abandons remaining tasks, warns, and skips the unbounded pool drain;
+process exit releases its sessions. Why signal-driven shutdown is polish, not
+correctness: abrupt exit at any point is safe because durable rows plus the next
+guarded startup scan recover work and the durable outbox cursor redelivers an
 uncommitted offer (INV-032, INV-034), so the grace window buys only latency.
 Repositories and services are cheap per-invocation clones over the shared pool;
 no shared locked service instance exists.

@@ -139,8 +139,8 @@ pub struct CliProcessRequest<D> {
     pub prompt: Vec<u8>,
     /// Provider-specific event decoder.
     pub decoder: D,
-    /// Whole-exchange deadline.
-    pub exchange_timeout: Duration,
+    /// Whole-exchange deadline, or no deadline when explicitly unbounded.
+    pub exchange_timeout: Option<Duration>,
     /// Grace between interrupt and forced cleanup.
     pub interrupt_grace: Duration,
     /// Maximum wait after process-group cleanup for the leader or stderr
@@ -345,20 +345,29 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
     if request.interrupt_grace.is_zero() {
         return invalid_process_request(labels, "interrupt grace must be nonzero");
     }
-    if request.exchange_timeout.is_zero() {
+    if request
+        .exchange_timeout
+        .is_some_and(|timeout| timeout.is_zero())
+    {
         return invalid_process_request(labels, "exchange timeout must be nonzero");
     }
     // Establish the usable deadline before command conversion, environment
     // access, SendCommenced, or spawn. `CliProcessRequest` is public and may
     // therefore carry a duration the runtime clock cannot represent even
     // though the bundled adapter constructors validate their configurations.
-    let Some(deadline) = tokio::time::Instant::now().checked_add(request.exchange_timeout) else {
-        return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
-            cause: UnsentCause::ConnectFailed(TransportFacts::new(format!(
-                "{} exchange timeout cannot be represented by the runtime clock",
-                labels.process
-            ))),
-        });
+    let deadline = match request.exchange_timeout {
+        Some(timeout) => match tokio::time::Instant::now().checked_add(timeout) {
+            Some(deadline) => Some(deadline),
+            None => {
+                return TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+                    cause: UnsentCause::ConnectFailed(TransportFacts::new(format!(
+                        "{} exchange timeout cannot be represented by the runtime clock",
+                        labels.process
+                    ))),
+                });
+            }
+        },
+        None => None,
     };
     let CliProcessRequest {
         command,
@@ -432,7 +441,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
             cause: UnsentCause::CancelledBeforeSend,
         });
     }
-    if tokio::time::Instant::now() >= deadline {
+    if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
         return invalid_process_request(labels, "exchange deadline elapsed before spawn");
     }
 
@@ -496,7 +505,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
             biased;
             result = &mut send_prompt => InputStep::Written(result),
             () = &mut *cancellation => InputStep::Cancelled,
-            () = tokio::time::sleep_until(deadline) => InputStep::TimedOut,
+            () = wait_for_deadline(deadline) => InputStep::TimedOut,
         }
     };
     let input_error = match input_step {
@@ -556,7 +565,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
             biased;
             result = read_bounded_line(&mut stdout, event_limit, labels, &mut line_progress) => ProcessStep::Line(result),
             () = &mut *cancellation => ProcessStep::Cancelled,
-            () = tokio::time::sleep_until(deadline) => ProcessStep::TimedOut,
+            () = wait_for_deadline(deadline) => ProcessStep::TimedOut,
         };
         match next {
             ProcessStep::Line(Ok(Some(line))) => {
@@ -611,7 +620,9 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                 // stdout keeps the biased read arm always ready AND the
                 // buffer non-empty, which would otherwise starve the deadline
                 // (and the cancellation check above) indefinitely.
-                if !decoder.terminal_observed() && tokio::time::Instant::now() >= deadline {
+                if !decoder.terminal_observed()
+                    && deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                {
                     // Work-first, as in the cancellation arm: a leader that
                     // already exited on its own is definitive evidence this
                     // synchronous deadline check must not discard — a nonzero
@@ -782,7 +793,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                 return evidence;
             }
         },
-        () = tokio::time::sleep_until(deadline) => {
+        () = wait_for_deadline(deadline) => {
             let process_group_id = child.id();
             // A leader that already exited on its own — even by a kill
             // signal, as under an out-of-memory kill — is observed on the
@@ -873,7 +884,7 @@ pub async fn execute_cli_process<C: Clone + Send + Sync, D: CliSession<C>>(
                             return decoder.boundary_loss(LossCause::CancellationRequested);
                         }
                     },
-                    () = tokio::time::sleep_until(deadline) => {
+                    () = wait_for_deadline(deadline) => {
                         // Re-probe before timeout cleanup so a leader that
                         // exited while the waiter scheduled keeps its status.
                         if leader_exited_without_reaping(child.id()) {
@@ -1565,8 +1576,17 @@ async fn interrupt_then_kill(child: &mut SupervisedChild, grace: Duration) {
     force_kill(child).await;
 }
 
-fn remaining_interrupt_grace(grace: Duration, deadline: tokio::time::Instant) -> Duration {
-    grace.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
+async fn wait_for_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+fn remaining_interrupt_grace(grace: Duration, deadline: Option<tokio::time::Instant>) -> Duration {
+    deadline.map_or(grace, |deadline| {
+        grace.min(deadline.saturating_duration_since(tokio::time::Instant::now()))
+    })
 }
 
 async fn force_kill(child: &mut SupervisedChild) {
@@ -2008,7 +2028,7 @@ mod tests {
             command: std::process::Command::new("signalbox-test-command-must-not-spawn"),
             prompt: Vec::new(),
             decoder: UnusedSession { correlation: 7 },
-            exchange_timeout,
+            exchange_timeout: Some(exchange_timeout),
             interrupt_grace: std::time::Duration::from_millis(1),
             post_kill_reap_bound: None,
             event_limit: 1_024,
@@ -2198,7 +2218,7 @@ mod tests {
     #[tokio::test]
     async fn zero_public_exchange_timeout_is_rejected_before_send_or_spawn() {
         let mut request = direct_request(std::time::Duration::ZERO);
-        request.exchange_timeout = std::time::Duration::ZERO;
+        request.exchange_timeout = Some(std::time::Duration::ZERO);
         let mut observed = Vec::new();
         let mut cancellation = CancellationSignal::never();
 

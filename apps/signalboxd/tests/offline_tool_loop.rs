@@ -220,6 +220,7 @@ context_window_tokens = 200000
 #[derive(Clone, Debug)]
 struct RecordingScriptedModel {
     inner: Arc<ScriptedModel<ModelCallId>>,
+    shutdown_after_execute: Option<watch::Sender<bool>>,
 }
 
 type FixtureProvider = RuntimeModelCallProvider<RecordingScriptedModel>;
@@ -267,7 +268,11 @@ impl ModelRuntime<ModelCallId> for RecordingScriptedModel {
         sink: &mut (dyn ObservationSink<ModelCallId> + Send),
         cancellation: CancellationSignal,
     ) -> TerminalReport<ModelCallId> {
-        self.inner.execute(prepared, sink, cancellation).await
+        let report = self.inner.execute(prepared, sink, cancellation).await;
+        if let Some(shutdown) = &self.shutdown_after_execute {
+            shutdown.send_replace(true);
+        }
+        report
     }
 }
 
@@ -394,10 +399,76 @@ impl ToolLoopFixture {
         FixtureExecution<Catalog, Executor>,
         Arc<ScriptedModel<ModelCallId>>,
     ) {
+        self.execution_with_model_shutdown(scripts, catalog, executor, None)
+    }
+
+    fn execution_requesting_shutdown<Catalog, Executor>(
+        &self,
+        scripts: impl IntoIterator<Item = Script>,
+        catalog: Catalog,
+        executor: Executor,
+        shutdown: watch::Sender<bool>,
+    ) -> (
+        FixtureExecution<Catalog, Executor>,
+        Arc<ScriptedModel<ModelCallId>>,
+    ) {
+        self.execution_with_model_shutdown(scripts, catalog, executor, Some(shutdown))
+    }
+
+    fn execution_with_model_shutdown<Catalog, Executor>(
+        &self,
+        scripts: impl IntoIterator<Item = Script>,
+        catalog: Catalog,
+        executor: Executor,
+        shutdown_after_execute: Option<watch::Sender<bool>>,
+    ) -> (
+        FixtureExecution<Catalog, Executor>,
+        Arc<ScriptedModel<ModelCallId>>,
+    ) {
+        self.execution_with_model_shutdown_and_limit(
+            scripts,
+            catalog,
+            executor,
+            shutdown_after_execute,
+            None,
+        )
+    }
+
+    fn execution_with_tool_round_limit<Catalog, Executor>(
+        &self,
+        scripts: impl IntoIterator<Item = Script>,
+        catalog: Catalog,
+        executor: Executor,
+        automatic_tool_round_limit: Option<usize>,
+    ) -> (
+        FixtureExecution<Catalog, Executor>,
+        Arc<ScriptedModel<ModelCallId>>,
+    ) {
+        self.execution_with_model_shutdown_and_limit(
+            scripts,
+            catalog,
+            executor,
+            None,
+            automatic_tool_round_limit,
+        )
+    }
+
+    fn execution_with_model_shutdown_and_limit<Catalog, Executor>(
+        &self,
+        scripts: impl IntoIterator<Item = Script>,
+        catalog: Catalog,
+        executor: Executor,
+        shutdown_after_execute: Option<watch::Sender<bool>>,
+        automatic_tool_round_limit: Option<usize>,
+    ) -> (
+        FixtureExecution<Catalog, Executor>,
+        Arc<ScriptedModel<ModelCallId>>,
+    ) {
         let runtime = Arc::new(ScriptedModel::<ModelCallId>::following(scripts));
         let provider = RuntimeModelCallProvider::new(
             RecordingScriptedModel {
                 inner: Arc::clone(&runtime),
+                shutdown_after_execute,
             },
             self.runtime_models.clone(),
             None,
@@ -411,6 +482,7 @@ impl ToolLoopFixture {
                 ),
                 InProcessAttemptDispatchGate::default(),
                 provider,
+                automatic_tool_round_limit,
             )
             .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor),
             runtime,
@@ -434,6 +506,7 @@ impl ToolLoopFixture {
         let provider = RuntimeModelCallProvider::new(
             RecordingScriptedModel {
                 inner: Arc::clone(&runtime),
+                shutdown_after_execute: None,
             },
             self.runtime_models.clone(),
             None,
@@ -441,6 +514,7 @@ impl ToolLoopFixture {
         let judge: Arc<dyn ApprovalJudgeModel> = Arc::new(RuntimeApprovalJudgeModel::new(
             RecordingScriptedModel {
                 inner: Arc::clone(&judge_runtime),
+                shutdown_after_execute: None,
             },
             self.runtime_models.clone(),
         ));
@@ -454,6 +528,7 @@ impl ToolLoopFixture {
                 ),
                 InProcessAttemptDispatchGate::default(),
                 provider,
+                None,
             )
             .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor)
             .with_approval_judge(judge, None, configuration),
@@ -933,6 +1008,7 @@ struct RecordingExecutor {
     events: Arc<Mutex<Vec<String>>>,
     arguments: Arc<Mutex<Vec<String>>>,
     correlations: Arc<Mutex<Vec<ToolAttemptDispatchCorrelation>>>,
+    shutdown: Option<watch::Sender<bool>>,
 }
 
 impl RecordingExecutor {
@@ -942,6 +1018,17 @@ impl RecordingExecutor {
             events: Arc::new(Mutex::new(Vec::new())),
             arguments: Arc::new(Mutex::new(Vec::new())),
             correlations: Arc::new(Mutex::new(Vec::new())),
+            shutdown: None,
+        }
+    }
+
+    fn completing_and_requesting_shutdown(shutdown: watch::Sender<bool>) -> Self {
+        Self {
+            mode: ExecutorMode::Complete,
+            events: Arc::new(Mutex::new(Vec::new())),
+            arguments: Arc::new(Mutex::new(Vec::new())),
+            correlations: Arc::new(Mutex::new(Vec::new())),
+            shutdown: Some(shutdown),
         }
     }
 
@@ -951,6 +1038,7 @@ impl RecordingExecutor {
             events: Arc::new(Mutex::new(Vec::new())),
             arguments: Arc::new(Mutex::new(Vec::new())),
             correlations: Arc::new(Mutex::new(Vec::new())),
+            shutdown: None,
         }
     }
 
@@ -2056,6 +2144,9 @@ impl ToolExecutor for RecordingExecutor {
             .expect("fixture argument lock is available")
             .push(invocation.request().arguments().as_str().to_owned());
         let name = invocation.request().name().as_str().to_owned();
+        if let Some(shutdown) = &self.shutdown {
+            shutdown.send_replace(true);
+        }
         match self.mode {
             ExecutorMode::Complete => Ok(invocation.bind(ToolExecutorEvidence::CompletedText(
                 format!("completed:{name}"),
@@ -2308,6 +2399,191 @@ async fn delegated_escalation_retains_park_for_user_resolution() -> Result<(), B
     assert_eq!(
         model_call_history_count(&fixture.pool, fixture.session).await?,
         3
+    );
+    Ok(())
+}
+
+/// A shutdown requested during an issued tool operation waits for its durable
+/// result, checkpoints there, and lets a successor finish without repeating
+/// the tool or beginning an extra model call before restart.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn shutdown_checkpoints_after_the_issued_tool_before_the_next_model_call()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let tool_catalog = catalog([tool(
+        "checkpointed",
+        ToolPermissionDefault::Auto,
+        ToolEffectClass::EffectFree,
+    )]);
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let executor = RecordingExecutor::completing_and_requesting_shutdown(shutdown_sender);
+    let (execution, first_runtime) = fixture.execution(
+        [
+            tool_use_script(&[("checkpointed", "{}")]),
+            completion_script("must remain unused before restart"),
+        ],
+        tool_catalog.clone(),
+        executor.clone(),
+    );
+
+    execution
+        .with_shutdown_checkpoint(shutdown_receiver)
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let active: (String, String) = sqlx::query_as(
+        "SELECT state_kind, active_phase_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(executor.events(), vec![String::from("checkpointed")]);
+    assert_eq!(first_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        1
+    );
+    assert_eq!(active, (String::from("active"), String::from("running")));
+
+    let resumed_executor = RecordingExecutor::completing();
+    let (resumed, second_runtime) = fixture.execution(
+        [completion_script("resumed after the shutdown checkpoint")],
+        tool_catalog,
+        resumed_executor.clone(),
+    );
+    resumed.resume_active(fixture.session).await?;
+
+    assert!(resumed_executor.events().is_empty());
+    assert_eq!(second_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        2
+    );
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_execution_result",
+            "assistant_text",
+            "turn_completed",
+        ]
+    );
+    Ok(())
+}
+
+/// A shutdown requested during an issued model operation waits for its durable
+/// result, checkpoints there, and lets a successor execute the requested tool
+/// without beginning that tool operation before restart.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn shutdown_checkpoints_after_the_issued_model_before_the_next_tool()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let tool_catalog = catalog([tool(
+        "checkpointed",
+        ToolPermissionDefault::Auto,
+        ToolEffectClass::EffectFree,
+    )]);
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let executor = RecordingExecutor::completing();
+    let (execution, first_runtime) = fixture.execution_requesting_shutdown(
+        [tool_use_script(&[("checkpointed", "{}")])],
+        tool_catalog.clone(),
+        executor.clone(),
+        shutdown_sender,
+    );
+
+    execution
+        .with_shutdown_checkpoint(shutdown_receiver)
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let active: (String, String) = sqlx::query_as(
+        "SELECT state_kind, active_phase_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(executor.events().is_empty());
+    assert_eq!(first_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        1
+    );
+    assert_eq!(active, (String::from("active"), String::from("running")));
+
+    let (resumed, second_runtime) = fixture.execution(
+        [completion_script("resumed after the shutdown checkpoint")],
+        tool_catalog,
+        executor.clone(),
+    );
+    resumed.resume_active(fixture.session).await?;
+
+    assert_eq!(executor.events(), vec![String::from("checkpointed")]);
+    assert_eq!(second_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        2
+    );
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_execution_result",
+            "assistant_text",
+            "turn_completed",
+        ]
+    );
+    Ok(())
+}
+
+/// The daemon's required automatic tool-round policy reaches the production
+/// PostgreSQL tool loop and terminalizes before a disallowed provider call.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn configured_automatic_tool_round_limit_stops_before_the_next_provider_call()
+-> Result<(), Box<dyn Error>> {
+    const TOOL_NAME: &str = "effect_free";
+    const AUTOMATIC_TOOL_ROUND_LIMIT: usize = 1;
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let executor = RecordingExecutor::completing();
+    let (execution, runtime) = fixture.execution_with_tool_round_limit(
+        [
+            tool_use_script(&[(TOOL_NAME, "{}")]),
+            completion_script("must not be observed"),
+        ],
+        catalog([tool(
+            TOOL_NAME,
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::EffectFree,
+        )]),
+        executor.clone(),
+        Some(AUTOMATIC_TOOL_ROUND_LIMIT),
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+
+    assert_eq!(executor.events(), vec![String::from(TOOL_NAME)]);
+    assert_eq!(runtime.received_operations().len(), 1);
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_execution_result",
+            "turn_failed",
+        ]
     );
     Ok(())
 }

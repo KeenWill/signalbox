@@ -59,7 +59,9 @@ fence and unattended escalation release described below are verified against
 this PR (`agent/headless-approval-escalation`). The operator-commissioned
 dispatch fence is verified against this PR
 (`agent/commissioned-dispatch-fence`); its attended escalation park is verified
-against this PR (`agent/daemon-live-headless-approval-park`).
+against this PR (`agent/daemon-live-headless-approval-park`). Bounded cleanup of
+cancelled complete-poll fetches is verified against this PR
+(`agent/daemon-live-webhook-cancelled-fetch-bound`).
 
 ## Configuration and credential boundary
 
@@ -172,9 +174,12 @@ task makes and starve the durable webhook drain. A webhook wake serializes with
 the same repository task, but may preempt the read-only provider sweep of an
 in-flight complete poll so admitted durable work cannot wait behind that slow
 sweep. Rule activation, dispatch, webhook projection, and cursor commit remain
-outside that cancellation region. The task joins the cancelled poll's spawned
-fetches, invalidates its partial pull-request freshness, drains webhook work,
-and returns the still-due complete poll through a fresh interruptible scheduler
+outside that cancellation region. The task gives the cancelled poll's spawned
+fetches at most five seconds to finish, invalidates its partial pull-request
+freshness, and drains webhook work. A fetch that cannot finish cancellation
+within that bound remains owned by the poller and is joined before another
+complete-poll fetch set can start; it cannot hold the webhook-aware scheduler.
+The still-due complete poll returns through a fresh interruptible scheduler
 pass. Each bounded drain page re-arms that pass while durable remainder exists,
 so a long provider sweep cannot become uninterruptible after the first wake;
 once a page observes no remainder, it leaves no continuation wake and the
@@ -1134,29 +1139,30 @@ that task indefinitely either. Its cancellation drains child provider fetches
 for at most five seconds, invalidates partial freshness, emits the closed
 `webhook_attempt_timed_out` cause, and enters the same retry backoff. A cleanup
 that exceeds its own bound emits `webhook_cancelled_fetch_drain_timed_out`
-instead of preventing that retry from being scheduled. A terminal commit whose
-result is lost in transit is resolved by reading whether the row is already
-terminal, which cannot itself be ambiguous: if it is, the delivery counts as
-recorded and the shadow advances; if it is not, the record is re-attempted a
-bounded number of times before the delivery is left pending for the next drain.
-If every settling read is itself unavailable, the shadow is discarded rather
-than trusted, because a disposition may have landed without being reflected in
-that baseline. A durable disposition the shadow never accounted for is what this
-avoids. A delivery whose target-specific processing fails is deferred for the
-rest of that drain rather than failing it, so one persistently unprocessable
-receipt cannot pin the head of the queue and starve every later one; the attempt
-still reports the first such failure. Credential, transport, provider-throttle,
-and provider-outage failures stop the current page instead: they prove later
-targeted requests cannot make independent progress, so issuing one for every
-loaded peer would amplify the same outage. Those receipts remain durably pending
-for the bounded retry backoff. A signature-valid delivery whose event or action
-is outside the mapped set, including a broadly subscribed `workflow_job`, is
-still acknowledged successfully and is cheaply logged and recorded as ignored
-rather than treated as an intake failure. A webhook-enabled shadow wake may also
-preempt the read-only provider sweep of an in-flight complete poll without
-resetting that poll's deadline. After the delivery's bounded page drains, the
-still-due poll returns through the same interruptible scheduler path rather than
-entering an uninterruptible resumed sweep.
+instead of preventing that retry from being scheduled. The same cleanup bound
+applies when an admission wake or retry cancels a complete provider sweep. A
+terminal commit whose result is lost in transit is resolved by reading whether
+the row is already terminal, which cannot itself be ambiguous: if it is, the
+delivery counts as recorded and the shadow advances; if it is not, the record is
+re-attempted a bounded number of times before the delivery is left pending for
+the next drain. If every settling read is itself unavailable, the shadow is
+discarded rather than trusted, because a disposition may have landed without
+being reflected in that baseline. A durable disposition the shadow never
+accounted for is what this avoids. A delivery whose target-specific processing
+fails is deferred for the rest of that drain rather than failing it, so one
+persistently unprocessable receipt cannot pin the head of the queue and starve
+every later one; the attempt still reports the first such failure. Credential,
+transport, provider-throttle, and provider-outage failures stop the current page
+instead: they prove later targeted requests cannot make independent progress, so
+issuing one for every loaded peer would amplify the same outage. Those receipts
+remain durably pending for the bounded retry backoff. A signature-valid delivery
+whose event or action is outside the mapped set, including a broadly subscribed
+`workflow_job`, is still acknowledged successfully and is cheaply logged and
+recorded as ignored rather than treated as an intake failure. A webhook-enabled
+shadow wake may also preempt the read-only provider sweep of an in-flight
+complete poll without resetting that poll's deadline. After the delivery's
+bounded page drains, the still-due poll returns through the same interruptible
+scheduler path rather than entering an uninterruptible resumed sweep.
 
 **Implemented behavior.** A drain page attempts every loaded delivery after a
 target-specific or persistence failure, but stops at the first repository-wide

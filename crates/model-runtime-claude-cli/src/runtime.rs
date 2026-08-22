@@ -144,7 +144,7 @@ pub struct ClaudeCliRuntime {
     working_directory: PathBuf,
     credential_reference: CredentialReference,
     credential_delivery: ClaudeCredentialDelivery,
-    exchange_timeout: Duration,
+    exchange_timeout: Option<Duration>,
     interrupt_grace: Duration,
     post_kill_reap_bound: Option<Duration>,
     event_limit: usize,
@@ -166,7 +166,7 @@ pub struct ClaudeCliPreparedRequest<C> {
     resolved_target: String,
     delivery: DeliveryMode,
     translated: crate::translate::TranslatedOperation,
-    exchange_timeout: Duration,
+    exchange_timeout: Option<Duration>,
     interrupt_grace: Duration,
     post_kill_reap_bound: Option<Duration>,
     event_limit: usize,
@@ -327,11 +327,9 @@ impl ClaudeCliRuntime {
         if !config.working_directory.is_dir() {
             return Err(ClaudeCliConstructionError::InvalidWorkingDirectory);
         }
-        if config.exchange_timeout.is_zero()
-            || tokio::time::Instant::now()
-                .checked_add(config.exchange_timeout)
-                .is_none()
-        {
+        if config.exchange_timeout.is_some_and(|timeout| {
+            timeout.is_zero() || tokio::time::Instant::now().checked_add(timeout).is_none()
+        }) {
             return Err(ClaudeCliConstructionError::InvalidExchangeTimeout);
         }
         if config.interrupt_grace.is_zero() {

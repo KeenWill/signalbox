@@ -5898,7 +5898,7 @@ pub struct RunnerWorkingDirectory(String);
 
 impl RunnerWorkingDirectory {
     /// Maximum UTF-8 bytes admitted by the runner domain and process wire.
-    // numeric-bound: tunable - mirrors the domain's exact runner-value grammar
+    // numeric-bound: guard - mirrors the domain's exact runner-value wire grammar
     pub const MAX_UTF8_BYTES: usize = DomainRunnerWorkingDirectory::MAX_BYTES;
 
     /// Admits nonempty, NUL-free text within the exact byte bound.

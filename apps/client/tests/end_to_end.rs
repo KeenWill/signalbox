@@ -1798,6 +1798,7 @@ context_window_tokens = 200000
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2050,6 +2051,7 @@ context_window_tokens = 200000
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2436,6 +2438,7 @@ context_window_tokens = 200000
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     execution.execute(activated).await?;
     assert!(!fatal_execution.is_triggered());
@@ -2819,6 +2822,7 @@ context_window_tokens = 200000
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         )
         .with_tool_loop(tool_dispatch_gate, tool_catalog, CompletingFixtureExecutor),
     );
@@ -2986,6 +2990,7 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
                 .with_session_credentials(credential_families),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(

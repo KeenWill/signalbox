@@ -2648,7 +2648,7 @@ async fn cancellation_kills_descendants_after_the_group_leader_exits() {
         CredentialReference::new(CREDENTIAL_REFERENCE),
         None,
     );
-    config.exchange_timeout = Duration::from_secs(5);
+    config.exchange_timeout = Some(Duration::from_secs(5));
     config.interrupt_grace = Duration::from_millis(100);
     let runtime = CodexCliRuntime::new(config).expect("offline runtime configuration is valid");
     let prepared = prepare(
@@ -2722,7 +2722,7 @@ async fn cancellation_grace_cannot_extend_the_exchange_deadline() {
         CredentialReference::new(CREDENTIAL_REFERENCE),
         None,
     );
-    config.exchange_timeout = Duration::from_secs(5);
+    config.exchange_timeout = Some(Duration::from_secs(5));
     config.interrupt_grace = Duration::from_secs(10);
     let runtime = CodexCliRuntime::new(config).expect("offline runtime configuration is valid");
     let prepared = prepare(
@@ -3753,7 +3753,7 @@ fn unrepresentable_exchange_timeout_is_rejected_at_construction() {
         CredentialReference::new(CREDENTIAL_REFERENCE),
         None,
     );
-    config.exchange_timeout = Duration::MAX;
+    config.exchange_timeout = Some(Duration::MAX);
 
     let error = CodexCliRuntime::new(config)
         .expect_err("execution must never panic while constructing its process deadline");
@@ -3869,7 +3869,7 @@ fn runtime_with_timeout(
         CredentialReference::new(CREDENTIAL_REFERENCE),
         None,
     );
-    config.exchange_timeout = exchange_timeout;
+    config.exchange_timeout = Some(exchange_timeout);
     config.interrupt_grace = Duration::from_millis(100);
     CodexCliRuntime::new(config).expect("offline runtime configuration is valid")
 }

@@ -48,7 +48,7 @@ use signalbox_persistence::{
     ModelCredentialFamilyCatalog, SessionCredentialPin, SessionModelCredential,
     model_execution::{
         CredentialPoolRuntimeAction, CredentialPoolRuntimeCatalog, CredentialPoolRuntimeExhaustion,
-        CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy,
+        CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy, ToolContinuationUsageLimit,
     },
     process_read::ProcessModelCallInputTokenSemantics,
 };
@@ -739,6 +739,7 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         "graceful_shutdown_cleanup_window",
         NumericBoundKind::Duration,
     ),
+    ("model_exchange_timeout", NumericBoundKind::Duration),
     ("expired_pass_recovery_attempts", NumericBoundKind::Integer),
     (
         "expired_pass_recovery_attempt_bound",
@@ -949,6 +950,7 @@ pub struct HubModelConfiguration {
     numeric_bounds: NumericBoundsConfiguration,
     targets: ModelTargetCatalog,
     runtime_models: RuntimeModelCatalog,
+    tool_continuation_usage_limits: Vec<ToolContinuationUsageLimit>,
     direct_selections: HashSet<DirectModelSelection>,
     aliases: HashMap<ModelAlias, FrozenAliasDefinition>,
     routes: HashMap<DirectModelSelection, ResolvedModelRoute>,
@@ -1602,6 +1604,23 @@ impl HubModelConfiguration {
         )?;
         let runtime_models = RuntimeModelCatalog::try_from_definitions(runtime_definitions)
             .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
+        let mut tool_continuation_usage_limits = Vec::with_capacity(routes.len().saturating_mul(2));
+        for route in routes.values() {
+            let definition = runtime_models
+                .resolve(route.target)
+                .ok_or(HubModelConfigurationError::ConflictingTarget)?;
+            for fast_mode in [FastMode::Disabled, FastMode::Enabled] {
+                let effective = runtime_models
+                    .effective_definition(definition, fast_mode)
+                    .ok_or(HubModelConfigurationError::ConflictingTarget)?;
+                tool_continuation_usage_limits.push(ToolContinuationUsageLimit::new(
+                    route.target,
+                    fast_mode,
+                    u64::from(effective.max_output_tokens()),
+                    u64::from(effective.context_window_tokens()),
+                ));
+            }
+        }
         let billing_rates = target_billing_rates
             .into_iter()
             .filter_map(|(target, rates)| rates.map(|rates| (target, rates)))
@@ -1620,6 +1639,7 @@ impl HubModelConfiguration {
             numeric_bounds,
             targets,
             runtime_models,
+            tool_continuation_usage_limits,
             direct_selections,
             aliases,
             routes,
@@ -1716,6 +1736,12 @@ impl HubModelConfiguration {
     /// Returns the exact runtime delivery catalog used by the provider bridge.
     pub fn runtime_model_catalog(&self) -> RuntimeModelCatalog {
         self.runtime_models.clone()
+    }
+
+    /// Returns configured output reservations and context ceilings for every
+    /// same-turn continuation mode.
+    pub fn tool_continuation_usage_limits(&self) -> Vec<ToolContinuationUsageLimit> {
+        self.tool_continuation_usage_limits.clone()
     }
 
     /// Returns the adapter route for one configured direct selection.
@@ -1908,6 +1934,7 @@ impl HubModelConfiguration {
 
     pub(crate) fn codex_cli_runtime(
         &self,
+        model_exchange_timeout: Option<Duration>,
         post_kill_reap_bound: Option<Duration>,
     ) -> Result<Option<CodexCliRuntime>, CodexCliConstructionError> {
         self.codex_cli
@@ -1923,6 +1950,7 @@ impl HubModelConfiguration {
                     CredentialReference::new(credential_profile),
                     post_kill_reap_bound,
                 );
+                runtime_configuration.exchange_timeout = model_exchange_timeout;
                 runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
                 CodexCliRuntime::new(runtime_configuration)
             })
@@ -1936,6 +1964,7 @@ impl HubModelConfiguration {
 
     pub(crate) fn claude_cli_runtime(
         &self,
+        model_exchange_timeout: Option<Duration>,
         post_kill_reap_bound: Option<Duration>,
         native_message_limit: Option<usize>,
     ) -> Result<Option<ClaudeCliRuntime>, ClaudeCliConstructionError> {
@@ -1954,6 +1983,7 @@ impl HubModelConfiguration {
                     post_kill_reap_bound,
                     native_message_limit,
                 );
+                runtime_configuration.exchange_timeout = model_exchange_timeout;
                 runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
                 let credentials = FileCredentialAccess::from_files(
                     self.file_credential_profiles(ModelAdapter::ClaudeCli).map(
@@ -4383,6 +4413,7 @@ max_imported_text_preview_utf8_bytes = 256
 max_review_orchestration_concerns = 32
 max_imported_conversation_display_title_scalars = 256
 graceful_shutdown_cleanup_window = "30s"
+model_exchange_timeout = "600s"
 expired_pass_recovery_attempts = 4
 expired_pass_recovery_attempt_bound = "3s"
 expired_pass_recovery_lock_retry_delay = "6s"
@@ -4395,7 +4426,7 @@ convergence_sweep_request_retry_delay = "250ms"
 convergence_sweep_retry_backoff_base = "60s"
 convergence_sweep_retry_backoff_cap = "900s"
 terminalizations_per_liveness_scan = 64
-turn_liveness_recovery_attempt_bound = "10s"
+turn_liveness_recovery_attempt_bound = "60s"
 automatic_reconciliations_per_liveness_scan = 64
 max_convergence_sweep_targets = 256
 max_convergence_sweep_interval = "300s"
@@ -4420,7 +4451,7 @@ max_required_tags = 256
 reconciliation_sweep_interval = "1s"
 nudge_buffer_capacity = 1024
 scheduler_pass_admission_cap = 16
-scheduler_pass_occupancy_bound = "900s"
+scheduler_pass_occupancy_bound = "3600s"
 max_native_message_bytes = 2048
 terminalization_lock_wait = "250ms"
 terminalization_acquire_wait = "250ms"
@@ -8097,7 +8128,7 @@ context_window_tokens = 200000
         );
         assert!(
             configuration
-                .codex_cli_runtime(None)
+                .codex_cli_runtime(None, None)
                 .expect("the stored profile constructs the runtime")
                 .is_some()
         );
@@ -8301,7 +8332,7 @@ context_window_tokens = 200000
         );
         assert!(
             configuration
-                .claude_cli_runtime(None, None)
+                .claude_cli_runtime(None, None, None)
                 .expect("the stored profile constructs the runtime")
                 .is_some()
         );

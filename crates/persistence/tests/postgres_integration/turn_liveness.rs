@@ -129,6 +129,7 @@ async fn checkpoint_model_call(
             },
         )]),
         InProcessAttemptDispatchGate::default(),
+        None,
     );
     assert_eq!(
         service.execute(fixture.session).await?,

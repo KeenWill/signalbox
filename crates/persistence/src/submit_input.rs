@@ -1629,20 +1629,63 @@ where
             persist_stop_requested(connection, &stopped).await?;
         }
         Some(ModelCallInterruptOutcome::ReconciliationRequired(reconciliation)) => {
+            let session = reconciliation.session();
+            let turn = reconciliation.turn();
             persist_terminal_outcome(
                 connection,
                 &ModelCallTerminalOutcome::ReconciliationRequired(reconciliation),
             )
             .await?;
+            supersede_automatic_reconciliation(connection, session, turn).await?;
         }
         Some(ModelCallInterruptOutcome::ToolReconciliationRequired(reconciliation)) => {
             persist_tool_reconciliation_required(connection, &reconciliation).await?;
+            supersede_automatic_reconciliation(
+                connection,
+                reconciliation.session(),
+                reconciliation.turn(),
+            )
+            .await?;
         }
         None => {}
     }
     Ok(TransactionDecision::Commit(
         SubmitInputHandlingOutcome::Recorded(recorded),
     ))
+}
+
+async fn supersede_automatic_reconciliation(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<(), SubmitInputRepositoryError> {
+    sqlx::query(
+        "UPDATE automatic_reconciliation_attempt AS attempt
+            SET outcome_kind = 'superseded', finished_at = statement_timestamp()
+           FROM automatic_reconciliation AS recovery
+          WHERE recovery.turn_id = $1
+            AND recovery.session_id = $2
+            AND recovery.state_kind = 'attempting'
+            AND attempt.turn_id = recovery.turn_id
+            AND attempt.attempt_ordinal = recovery.attempt_count
+            AND attempt.outcome_kind = 'attempting'",
+    )
+    .bind(turn_id_to_uuid(turn))
+    .bind(session_id_to_uuid(session))
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "UPDATE automatic_reconciliation
+            SET state_kind = 'superseded', exhausted_at = NULL
+          WHERE turn_id = $1
+            AND session_id = $2
+            AND state_kind IN ('scheduled', 'attempting', 'exhausted')",
+    )
+    .bind(turn_id_to_uuid(turn))
+    .bind(session_id_to_uuid(session))
+    .execute(connection)
+    .await?;
+    Ok(())
 }
 
 async fn terminalize_retryable_runner_recovery_attempt(

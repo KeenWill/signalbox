@@ -880,17 +880,14 @@ fn assert_openai_plain_http_rejected(base_url: &str) {
 }
 
 #[test]
-fn the_default_exchange_timeout_is_ten_minutes() {
-    assert_eq!(
-        OpenAiConfig::new(None).exchange_timeout,
-        Duration::from_secs(10 * 60)
-    );
+fn exchange_timeout_is_unbounded_until_the_composition_root_sets_policy() {
+    assert_eq!(OpenAiConfig::new(None).exchange_timeout, None);
 }
 
 #[test]
 fn a_zero_exchange_timeout_is_rejected_at_construction() {
     let mut config = OpenAiConfig::new(None);
-    config.exchange_timeout = Duration::ZERO;
+    config.exchange_timeout = Some(Duration::ZERO);
 
     assert!(matches!(
         OpenAiRuntime::new(config, FixedKey),

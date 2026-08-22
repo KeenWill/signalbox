@@ -2816,7 +2816,7 @@ mod tests {
             None,
             None,
         );
-        config.exchange_timeout = BRIDGE_RESPONSE_TIMEOUT;
+        config.exchange_timeout = Some(BRIDGE_RESPONSE_TIMEOUT);
         let runtime = ClaudeCliRuntime::new(config)
             .expect("offline Claude catalog capture runtime constructs");
         let mut operation = ModelOperation::new(

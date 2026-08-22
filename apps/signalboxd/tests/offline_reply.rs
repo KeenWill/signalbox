@@ -374,6 +374,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         )
         .with_tool_loop(tool_dispatch_gate, NoToolCatalog, UnexpectedToolExecutor),
     );
@@ -571,6 +572,7 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         )
         .with_tool_loop(tool_dispatch_gate, NoToolCatalog, UnexpectedToolExecutor),
     );
