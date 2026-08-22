@@ -217,6 +217,7 @@ pub struct WebAttentionSummary {
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionSnapshot {
     pub cursor: String,
+    #[schemars(length(max = 64))]
     pub summaries: Vec<WebAttentionSummary>,
     pub continuation_after_session_id: Option<String>,
 }
@@ -229,11 +230,369 @@ pub enum WebAttentionStreamEvent {
     },
     Update {
         cursor: String,
+        #[schemars(length(max = 64))]
         summaries: Vec<WebAttentionSummary>,
     },
     ResyncRequired {
         cursor: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepoWatchEventKind {
+    PullRequestOpened,
+    PullRequestClosed,
+    PullRequestMerged,
+    HeadChanged,
+    MergeableStateChanged,
+    ChecksCompleted,
+    CheckRunCompleted,
+    BranchWorkflowRunCompleted,
+    ReviewSubmitted,
+    ThreadOpened,
+    ThreadResolved,
+    Labeled,
+    Unlabeled,
+    BaseAdvanced,
+    ReactionChanged,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchEvent {
+    pub id: String,
+    pub cursor_generation: String,
+    pub event_ordinal: u32,
+    pub kind: WebRepoWatchEventKind,
+    pub pull_request: Option<String>,
+    pub observed_at_unix_milliseconds: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchDispatch {
+    pub id: String,
+    pub event_id: String,
+    pub rule: String,
+    pub attempted_at_unix_milliseconds: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchSettlement {
+    pub dispatch_id: String,
+    pub event_id: String,
+    pub settled_at_unix_milliseconds: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchLatestWebhook {
+    pub receipt_sequence: String,
+    pub event_name: String,
+    pub action_name: Option<String>,
+    pub received_at_unix_milliseconds: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchWebhookWindow {
+    pub seconds: u32,
+    pub received: String,
+    pub projected: String,
+    pub terminal: String,
+    pub quarantined: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchEventKindCount {
+    pub kind: WebRepoWatchEventKind,
+    pub count: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchRepositoryStatus {
+    pub repository: String,
+    pub cursor_generation: Option<String>,
+    pub observed_at_unix_milliseconds: Option<String>,
+    pub latest_webhook: Option<WebRepoWatchLatestWebhook>,
+    pub previous_five_minutes: WebRepoWatchWebhookWindow,
+    pub previous_hour: WebRepoWatchWebhookWindow,
+    pub latest_projection_latency_milliseconds: Option<String>,
+    pub maximum_projection_latency_milliseconds_previous_hour: Option<String>,
+    pub event_kind_counts_previous_hour: Vec<WebRepoWatchEventKindCount>,
+    pub last_observed_event: Option<WebRepoWatchEvent>,
+    pub last_actionable_event: Option<WebRepoWatchEvent>,
+    pub last_dispatch_attempt: Option<WebRepoWatchDispatch>,
+    pub last_automation_settlement: Option<WebRepoWatchSettlement>,
+    pub held_slot_count: String,
+    pub queued_obligation_count: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchRepositoryStatusPage {
+    #[schemars(length(max = 64))]
+    pub repositories: Vec<WebRepoWatchRepositoryStatus>,
+    pub continuation_after_repository: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepoWatchLifecycle {
+    Open,
+    Closed,
+    Merged,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepoWatchMergeable {
+    Mergeable,
+    Conflicting,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepoWatchDraftStatus {
+    Draft,
+    ReadyForReview,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepoWatchChecksStatus {
+    NoCompletedSuites,
+    Passing,
+    Failing,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepoWatchReviewDecision {
+    None,
+    Commented,
+    Approved,
+    ChangesRequested,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebRepoWatchAutomationStatus {
+    Unattempted {},
+    Held {
+        dispatch_id: String,
+    },
+    Queued {
+        latest_event_id: String,
+    },
+    NonConverged {
+        dispatch_id: String,
+    },
+    StaleSeal {
+        dispatch_id: String,
+        sealed_event_id: String,
+    },
+    CurrentHeadSealed {
+        dispatch_id: String,
+        sealed_event_id: String,
+        settled_at_unix_milliseconds: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchPullRequest {
+    pub number: String,
+    pub title: String,
+    pub head: String,
+    pub head_repository: String,
+    pub head_branch: String,
+    pub base_branch: String,
+    pub lifecycle: WebRepoWatchLifecycle,
+    pub mergeable: WebRepoWatchMergeable,
+    pub draft: WebRepoWatchDraftStatus,
+    pub checks: WebRepoWatchChecksStatus,
+    pub review_decision: WebRepoWatchReviewDecision,
+    pub stale_review_count: String,
+    pub unresolved_thread_count: String,
+    pub open_parent: Option<String>,
+    pub open_child_count: String,
+    pub automation: WebRepoWatchAutomationStatus,
+    pub last_observed_event: Option<WebRepoWatchEvent>,
+    pub last_actionable_event: Option<WebRepoWatchEvent>,
+    pub last_dispatch_attempt: Option<WebRepoWatchDispatch>,
+    pub last_automation_settlement: Option<WebRepoWatchSettlement>,
+    pub held_slot_count: String,
+    pub queued_obligation_count: String,
+    pub commissioned_session_count: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchPullRequestPage {
+    pub repository: String,
+    #[schemars(length(max = 64))]
+    pub pull_requests: Vec<WebRepoWatchPullRequest>,
+    pub continuation_after_pull_request: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepoWatchHeldSlotBlocker {
+    UndeliveredAction,
+    DeliveryTurnRuntimeRelevant,
+    LiveRuntimeTurn,
+    PursuingGoal,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchHeldSlot {
+    pub dispatch_id: String,
+    pub pull_request: Option<String>,
+    pub rule: String,
+    pub held_since_unix_milliseconds: String,
+    pub session_ids: Vec<String>,
+    pub blockers: Vec<WebRepoWatchHeldSlotBlocker>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebRepoWatchObligationReadiness {
+    Ready {},
+    Occupied {
+        dispatch_id: String,
+        session_ids: Vec<String>,
+    },
+    Cooldown {
+        eligible_at_unix_milliseconds: Option<String>,
+    },
+    Parked {
+        parked_at_unix_milliseconds: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchQueuedObligation {
+    pub id: String,
+    pub pull_request: Option<String>,
+    pub rule: String,
+    pub first_event_id: String,
+    pub latest_event_id: String,
+    pub matched_event_count: String,
+    pub owed_since_unix_milliseconds: String,
+    pub latest_match_at_unix_milliseconds: String,
+    pub failed_attempts: String,
+    pub readiness: WebRepoWatchObligationReadiness,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchHeldCursor {
+    pub held_since_unix_milliseconds: String,
+    pub dispatch_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchObligationCursor {
+    pub owed_since_unix_milliseconds: String,
+    pub obligation_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchWorkPage {
+    #[schemars(length(max = 64))]
+    pub held_slots: Vec<WebRepoWatchHeldSlot>,
+    pub held_continuation_after: Option<WebRepoWatchHeldCursor>,
+    #[schemars(length(max = 64))]
+    pub queued_obligations: Vec<WebRepoWatchQueuedObligation>,
+    pub obligation_continuation_after: Option<WebRepoWatchObligationCursor>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebRepoWatchSessionPurpose {
+    RuleDispatch {
+        dispatch_id: String,
+        event_id: String,
+        rule: String,
+        template: String,
+    },
+    OperatorCommission {
+        dispatch_id: String,
+        template: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchPullRequestSession {
+    pub commissioned_at_unix_milliseconds: String,
+    pub purpose: WebRepoWatchSessionPurpose,
+    pub attention: WebAttentionSummary,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchSessionCursor {
+    pub commissioned_at_unix_milliseconds: String,
+    pub session_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchPullRequestSessionPage {
+    #[schemars(length(max = 64))]
+    pub sessions: Vec<WebRepoWatchPullRequestSession>,
+    pub continuation_before: Option<WebRepoWatchSessionCursor>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepoWatchWebhookDisposition {
+    Projected,
+    DuplicateState,
+    Superseded,
+    Ignored,
+    Quarantined,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchWebhookActivity {
+    pub receipt_sequence: String,
+    pub event_name: String,
+    pub action_name: Option<String>,
+    pub received_at_unix_milliseconds: String,
+    pub projection_count: String,
+    pub latest_projected_at_unix_milliseconds: Option<String>,
+    pub disposition: Option<WebRepoWatchWebhookDisposition>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchEventCursor {
+    pub cursor_generation: String,
+    pub event_ordinal: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchActivityPage {
+    #[schemars(length(max = 100))]
+    pub events: Vec<WebRepoWatchEvent>,
+    pub event_continuation_before: Option<WebRepoWatchEventCursor>,
+    #[schemars(length(max = 100))]
+    pub webhooks: Vec<WebRepoWatchWebhookActivity>,
+    pub webhook_continuation_before_receipt_sequence: Option<String>,
 }
 
 /// One generated file and its repository-relative destination.
@@ -274,13 +633,28 @@ impl Error for GenerateWebContractError {}
 /// Returns a closed build-time error when serde cannot encode a generated value
 /// or a DTO schema grows beyond the generator's focused supported shapes.
 pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContractError> {
-    let bootstrap_schema = canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value());
-    let example_schema = canonical_schema(schemars::schema_for!(WebContractExample).to_value());
-    let error_schema = canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value());
-    let attention_snapshot_schema =
-        canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value());
-    let attention_event_schema =
-        canonical_schema(schemars::schema_for!(WebAttentionStreamEvent).to_value());
+    let schema_set = GeneratedSchemaSet {
+        bootstrap: canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value()),
+        example: canonical_schema(schemars::schema_for!(WebContractExample).to_value()),
+        error: canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value()),
+        attention_snapshot: canonical_schema(
+            schemars::schema_for!(WebAttentionSnapshot).to_value(),
+        ),
+        attention_event: canonical_schema(
+            schemars::schema_for!(WebAttentionStreamEvent).to_value(),
+        ),
+        repository_status_page: canonical_schema(
+            schemars::schema_for!(WebRepoWatchRepositoryStatusPage).to_value(),
+        ),
+        pull_request_page: canonical_schema(
+            schemars::schema_for!(WebRepoWatchPullRequestPage).to_value(),
+        ),
+        work_page: canonical_schema(schemars::schema_for!(WebRepoWatchWorkPage).to_value()),
+        pull_request_session_page: canonical_schema(
+            schemars::schema_for!(WebRepoWatchPullRequestSessionPage).to_value(),
+        ),
+        activity_page: canonical_schema(schemars::schema_for!(WebRepoWatchActivityPage).to_value()),
+    };
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -292,29 +666,30 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     Ok(vec![
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.mjs",
-            contents: runtime_module(
-                &bootstrap_schema,
-                &example_schema,
-                &error_schema,
-                &attention_snapshot_schema,
-                &attention_event_schema,
-            )?,
+            contents: runtime_module(&schema_set)?,
         },
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.d.mts",
-            contents: declaration_module(
-                &bootstrap_schema,
-                &example_schema,
-                &error_schema,
-                &attention_snapshot_schema,
-                &attention_event_schema,
-            )?,
+            contents: declaration_module(&schema_set)?,
         },
         GeneratedArtifact {
             path: "crates/web-contract/tests/fixtures/example.json",
             contents: example_json,
         },
     ])
+}
+
+struct GeneratedSchemaSet {
+    bootstrap: Value,
+    example: Value,
+    error: Value,
+    attention_snapshot: Value,
+    attention_event: Value,
+    repository_status_page: Value,
+    pull_request_page: Value,
+    work_page: Value,
+    pull_request_session_page: Value,
+    activity_page: Value,
 }
 
 fn canonical_schema(mut schema: Value) -> Value {
@@ -325,19 +700,18 @@ fn canonical_schema(mut schema: Value) -> Value {
     schema
 }
 
-fn runtime_module(
-    bootstrap_schema: &Value,
-    example_schema: &Value,
-    error_schema: &Value,
-    attention_snapshot_schema: &Value,
-    attention_event_schema: &Value,
-) -> Result<String, GenerateWebContractError> {
+fn runtime_module(schema_set: &GeneratedSchemaSet) -> Result<String, GenerateWebContractError> {
     let mut schemas = json!({
-        "WebContractBootstrap": bootstrap_schema,
-        "WebContractExample": example_schema,
-        "WebApiErrorResponse": error_schema,
-        "WebAttentionSnapshot": attention_snapshot_schema,
-        "WebAttentionStreamEvent": attention_event_schema,
+        "WebContractBootstrap": schema_set.bootstrap,
+        "WebContractExample": schema_set.example,
+        "WebApiErrorResponse": schema_set.error,
+        "WebAttentionSnapshot": schema_set.attention_snapshot,
+        "WebAttentionStreamEvent": schema_set.attention_event,
+        "WebRepoWatchRepositoryStatusPage": schema_set.repository_status_page,
+        "WebRepoWatchPullRequestPage": schema_set.pull_request_page,
+        "WebRepoWatchWorkPage": schema_set.work_page,
+        "WebRepoWatchPullRequestSessionPage": schema_set.pull_request_session_page,
+        "WebRepoWatchActivityPage": schema_set.activity_page,
     });
     schemas.sort_all_objects();
     let schemas = serde_json::to_string_pretty(&schemas)
@@ -455,6 +829,9 @@ function assertSchema(root, schema, value, path) {{
     if (!Array.isArray(value)) {{
       fail(path, "an array");
     }}
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {{
+      fail(path, `at most ${{schema.maxItems}} items`);
+    }}
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${{path}}[${{index}}]`));
     return;
   }}
@@ -511,31 +888,79 @@ export function decodeWebAttentionStreamEvent(value) {{
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
   return value;
 }}
+
+export function decodeWebRepoWatchRepositoryStatusPage(value) {{
+  assertSchema(schemas.WebRepoWatchRepositoryStatusPage, schemas.WebRepoWatchRepositoryStatusPage, value, "repository_status_page");
+  return value;
+}}
+
+export function decodeWebRepoWatchPullRequestPage(value) {{
+  assertSchema(schemas.WebRepoWatchPullRequestPage, schemas.WebRepoWatchPullRequestPage, value, "pull_request_page");
+  return value;
+}}
+
+export function decodeWebRepoWatchWorkPage(value) {{
+  assertSchema(schemas.WebRepoWatchWorkPage, schemas.WebRepoWatchWorkPage, value, "work_page");
+  return value;
+}}
+
+export function decodeWebRepoWatchPullRequestSessionPage(value) {{
+  assertSchema(schemas.WebRepoWatchPullRequestSessionPage, schemas.WebRepoWatchPullRequestSessionPage, value, "pull_request_session_page");
+  return value;
+}}
+
+export function decodeWebRepoWatchActivityPage(value) {{
+  assertSchema(schemas.WebRepoWatchActivityPage, schemas.WebRepoWatchActivityPage, value, "activity_page");
+  return value;
+}}
 "##,
         contract_name = WEB_CONTRACT_NAME,
         contract_version = WEB_CONTRACT_VERSION,
     ))
 }
 
-fn declaration_module(
-    bootstrap_schema: &Value,
-    example_schema: &Value,
-    error_schema: &Value,
-    attention_snapshot_schema: &Value,
-    attention_event_schema: &Value,
-) -> Result<String, GenerateWebContractError> {
+fn declaration_module(schema_set: &GeneratedSchemaSet) -> Result<String, GenerateWebContractError> {
     let mut definitions = BTreeMap::new();
-    let bootstrap = typescript_type(bootstrap_schema, bootstrap_schema, &mut definitions)?;
-    let example = typescript_type(example_schema, example_schema, &mut definitions)?;
-    let error = typescript_type(error_schema, error_schema, &mut definitions)?;
+    let bootstrap = typescript_type(
+        &schema_set.bootstrap,
+        &schema_set.bootstrap,
+        &mut definitions,
+    )?;
+    let example = typescript_type(&schema_set.example, &schema_set.example, &mut definitions)?;
+    let error = typescript_type(&schema_set.error, &schema_set.error, &mut definitions)?;
     let attention_snapshot = typescript_type(
-        attention_snapshot_schema,
-        attention_snapshot_schema,
+        &schema_set.attention_snapshot,
+        &schema_set.attention_snapshot,
         &mut definitions,
     )?;
     let attention_event = typescript_type(
-        attention_event_schema,
-        attention_event_schema,
+        &schema_set.attention_event,
+        &schema_set.attention_event,
+        &mut definitions,
+    )?;
+    let repository_status_page = typescript_type(
+        &schema_set.repository_status_page,
+        &schema_set.repository_status_page,
+        &mut definitions,
+    )?;
+    let pull_request_page = typescript_type(
+        &schema_set.pull_request_page,
+        &schema_set.pull_request_page,
+        &mut definitions,
+    )?;
+    let work_page = typescript_type(
+        &schema_set.work_page,
+        &schema_set.work_page,
+        &mut definitions,
+    )?;
+    let pull_request_session_page = typescript_type(
+        &schema_set.pull_request_session_page,
+        &schema_set.pull_request_session_page,
+        &mut definitions,
+    )?;
+    let activity_page = typescript_type(
+        &schema_set.activity_page,
+        &schema_set.activity_page,
         &mut definitions,
     )?;
     for root_name in [
@@ -564,8 +989,23 @@ fn declaration_module(
     output.push_str(&format!(
         "export type WebAttentionStreamEvent = {attention_event};\n\n"
     ));
+    output.push_str(&format!(
+        "export type WebRepoWatchRepositoryStatusPage = {repository_status_page};\n\n"
+    ));
+    output.push_str(&format!(
+        "export type WebRepoWatchPullRequestPage = {pull_request_page};\n\n"
+    ));
+    output.push_str(&format!(
+        "export type WebRepoWatchWorkPage = {work_page};\n\n"
+    ));
+    output.push_str(&format!(
+        "export type WebRepoWatchPullRequestSessionPage = {pull_request_session_page};\n\n"
+    ));
+    output.push_str(&format!(
+        "export type WebRepoWatchActivityPage = {activity_page};\n\n"
+    ));
     output.push_str(
-        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebAttentionSnapshot(value: unknown): WebAttentionSnapshot;\nexport function decodeWebAttentionStreamEvent(value: unknown): WebAttentionStreamEvent;\n",
+        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebAttentionSnapshot(value: unknown): WebAttentionSnapshot;\nexport function decodeWebAttentionStreamEvent(value: unknown): WebAttentionStreamEvent;\nexport function decodeWebRepoWatchRepositoryStatusPage(value: unknown): WebRepoWatchRepositoryStatusPage;\nexport function decodeWebRepoWatchPullRequestPage(value: unknown): WebRepoWatchPullRequestPage;\nexport function decodeWebRepoWatchWorkPage(value: unknown): WebRepoWatchWorkPage;\nexport function decodeWebRepoWatchPullRequestSessionPage(value: unknown): WebRepoWatchPullRequestSessionPage;\nexport function decodeWebRepoWatchActivityPage(value: unknown): WebRepoWatchActivityPage;\n",
     );
     Ok(output)
 }
@@ -681,7 +1121,9 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        WebAttentionStreamEvent, WebContractBootstrap, WebContractExample, generated_artifacts,
+        WebAttentionStreamEvent, WebContractBootstrap, WebContractExample,
+        WebRepoWatchAutomationStatus, WebRepoWatchObligationReadiness, WebRepoWatchSessionPurpose,
+        generated_artifacts,
     };
 
     #[track_caller]
@@ -740,5 +1182,27 @@ mod tests {
         let encoded = r#"{"kind":"resync_required","cursor":"1","unexpected":true}"#;
 
         assert!(serde_json::from_str::<WebAttentionStreamEvent>(encoded).is_err());
+    }
+
+    #[test]
+    fn repository_tagged_variants_reject_unknown_fields() {
+        assert!(
+            serde_json::from_str::<WebRepoWatchAutomationStatus>(
+                r#"{"kind":"held","dispatch_id":"dispatch","future_field":true}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<WebRepoWatchObligationReadiness>(
+                r#"{"kind":"ready","future_field":true}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<WebRepoWatchSessionPurpose>(
+                r#"{"kind":"operator_commission","dispatch_id":"dispatch","template":"template","future_field":true}"#,
+            )
+            .is_err()
+        );
     }
 }

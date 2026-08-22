@@ -1,5 +1,13 @@
 import { configureStore, createSlice, type Middleware } from '@reduxjs/toolkit'
 import { useDispatch, useSelector } from 'react-redux'
+import type { AttentionSyncPhase } from './attention'
+import {
+  type BrowserPreferences,
+  loadBrowserPreferences,
+  MAX_SAVED_LOGICAL_POSITIONS,
+  type RemoteMediaPolicy,
+  saveBrowserPreferences,
+} from './preferences'
 
 export type LayoutMode = 'focus' | 'workbench'
 export type DensityMode = 'compact' | 'comfortable'
@@ -12,12 +20,13 @@ export interface VisibleRange {
   end: number
 }
 
-interface AppState {
+interface AppState extends BrowserPreferences {
   layout: LayoutMode
   density: DensityMode
   detail: DetailMode
   theme: ThemeMode
   overlay: Overlay
+  attentionSync: AttentionSyncPhase
   selectedTimeline: string | null
   transcriptRange: VisibleRange
   tableRange: VisibleRange
@@ -25,11 +34,9 @@ interface AppState {
 }
 
 const initialState: AppState = {
-  layout: 'workbench',
-  density: 'compact',
-  detail: 'condensed',
-  theme: 'dark',
+  ...loadBrowserPreferences(),
   overlay: null,
+  attentionSync: 'idle',
   selectedTimeline: null,
   transcriptRange: { start: 0, end: 0 },
   tableRange: { start: 0, end: 0 },
@@ -61,8 +68,29 @@ const appSlice = createSlice({
       state.theme = action.payload
       state.activitySequence += 1
     },
+    paneSizesSet(state, action: { payload: BrowserPreferences['paneSizes'] }) {
+      state.paneSizes = action.payload
+      state.activitySequence += 1
+    },
+    remoteMediaSet(state, action: { payload: RemoteMediaPolicy }) {
+      state.remoteMedia = action.payload
+      state.activitySequence += 1
+    },
+    logicalPositionRecorded(state, action: { payload: { sessionId: string; position: string } }) {
+      delete state.lastLogicalPositions[action.payload.sessionId]
+      state.lastLogicalPositions[action.payload.sessionId] = action.payload.position
+      const retained = Object.entries(state.lastLogicalPositions).slice(
+        -MAX_SAVED_LOGICAL_POSITIONS,
+      )
+      state.lastLogicalPositions = Object.fromEntries(retained)
+    },
     overlaySet(state, action: { payload: Overlay }) {
       state.overlay = action.payload
+      state.activitySequence += 1
+    },
+    attentionSyncSet(state, action: { payload: AttentionSyncPhase }) {
+      if (state.attentionSync === action.payload) return
+      state.attentionSync = action.payload
       state.activitySequence += 1
     },
     timelineSelected(state, action: { payload: string | null }) {
@@ -93,9 +121,42 @@ const traceMiddleware: Middleware = () => (next) => (action) => {
   return next(action)
 }
 
+const preferenceActionTypes = new Set<string>([
+  appSlice.actions.layoutSet.type,
+  appSlice.actions.densitySet.type,
+  appSlice.actions.detailSet.type,
+  appSlice.actions.themeSet.type,
+  appSlice.actions.paneSizesSet.type,
+  appSlice.actions.remoteMediaSet.type,
+  appSlice.actions.logicalPositionRecorded.type,
+])
+const preferenceMiddleware: Middleware = (api) => (next) => (action) => {
+  const result = next(action)
+  if (
+    typeof action === 'object' &&
+    action !== null &&
+    'type' in action &&
+    preferenceActionTypes.has(String(action.type))
+  ) {
+    const app = (api.getState() as { app: AppState }).app
+    saveBrowserPreferences({
+      layout: app.layout,
+      density: app.density,
+      detail: app.detail,
+      theme: app.theme,
+      paneSizes: app.paneSizes,
+      remoteMedia: app.remoteMedia,
+      lastLogicalPositions: app.lastLogicalPositions,
+      keyOverrides: app.keyOverrides,
+    })
+  }
+  return result
+}
+
 export const store = configureStore({
   reducer: { app: appSlice.reducer },
-  middleware: (getDefaultMiddleware) => getDefaultMiddleware().concat(traceMiddleware),
+  middleware: (getDefaultMiddleware) =>
+    getDefaultMiddleware().concat(traceMiddleware, preferenceMiddleware),
   devTools: { maxAge: REDUX_DEVTOOLS_ACTIONS, trace: false },
 })
 
