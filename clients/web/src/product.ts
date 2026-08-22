@@ -128,9 +128,22 @@ export class ProductRequestError extends Error {
   }
 }
 
+const fetchProductResource = async (input: string, init: RequestInit): Promise<Response> => {
+  try {
+    return await fetch(input, init)
+  } catch (error) {
+    if (init.signal?.aborted) throw error
+    throw new ProductRequestError(
+      'transport_unavailable',
+      'transport',
+      'Network request failed before a response was received.',
+    )
+  }
+}
+
 export class SameOriginProductTransport implements ProductTransport {
   async readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap> {
-    const response = await fetch('/api/bootstrap', {
+    const response = await fetchProductResource('/api/bootstrap', {
       headers: { accept: 'application/json' },
       credentials: 'same-origin',
       signal,
@@ -148,7 +161,7 @@ export class SameOriginProductTransport implements ProductTransport {
     const query = new URLSearchParams()
     if (afterSessionId) query.set('after_session_id', afterSessionId)
     const path = query.size === 0 ? '/api/attention' : `/api/attention?${query}`
-    const response = await fetch(path, {
+    const response = await fetchProductResource(path, {
       headers: { accept: 'application/json' },
       credentials: 'same-origin',
       signal,
@@ -160,7 +173,7 @@ export class SameOriginProductTransport implements ProductTransport {
   }
 
   async *followAttention(signal?: AbortSignal): AsyncGenerator<WebAttentionStreamEvent> {
-    const response = await fetch('/api/attention/follow', {
+    const response = await fetchProductResource('/api/attention/follow', {
       headers: { accept: 'application/x-ndjson' },
       credentials: 'same-origin',
       signal,

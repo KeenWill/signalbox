@@ -278,6 +278,9 @@ kbd {
   display: grid;
   gap: 0.35rem;
 }
+.surface-empty > :only-child {
+  grid-column: 1 / -1;
+}
 .surface-empty h2 {
   font-size: 0.74rem;
 }
@@ -450,7 +453,7 @@ kbd {
 .attention-list li > button {
   display: grid;
   width: 100%;
-  min-height: 60px;
+  min-height: var(--row-block);
   grid-template-columns: 4px minmax(170px, 1.25fr) minmax(105px, 0.8fr) minmax(90px, 0.8fr) 108px 18px;
   align-items: center;
   gap: 0.65rem;

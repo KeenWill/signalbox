@@ -170,3 +170,14 @@ test('does not start Attention reads when bootstrap validation fails', async ({ 
   await expect(page.getByRole('heading', { name: 'Attention contract unavailable' })).toBeVisible()
   expect(attentionRequests).toBe(0)
 })
+
+test('gives iconless Attention contract errors the full empty-state width', async ({ page }) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+  await page.goto('/attention')
+
+  const message = page
+    .getByRole('heading', { name: 'Attention contract unavailable' })
+    .locator('..')
+  await expect(message).toHaveCSS('grid-column-start', '1')
+  await expect(message).toHaveCSS('grid-column-end', '-1')
+})

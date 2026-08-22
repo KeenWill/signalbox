@@ -70,9 +70,15 @@ export function AttentionSurface({
       signal: controller.signal,
       onPhase: (next) => dispatch(actions.attentionSyncSet(next)),
       onProjection: (snapshot) => {
-        liveProjection.current = snapshot
+        const queryProjection = queryClient.getQueryData<WebAttentionSnapshot>(queryKey(null))
+        const projection =
+          queryProjection && BigInt(queryProjection.cursor) > BigInt(snapshot.cursor)
+            ? queryProjection
+            : snapshot
+        liveProjection.current = projection
         void queryClient.cancelQueries({ queryKey: queryKey(null), exact: true })
-        queryClient.setQueryData(queryKey(null), snapshot)
+        queryClient.setQueryData(queryKey(null), projection)
+        return projection
       },
     })
     return () => {

@@ -227,3 +227,13 @@ test('captures the focused phone inspector', async ({ page }, testInfo) => {
   await expect(page).toHaveScreenshot('attention-mobile-dark.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
+
+test('applies the density preference to Attention rows', async ({ page }) => {
+  await installAttentionScenario(page)
+  await page.goto('/attention')
+
+  const row = page.getByRole('listitem').first().getByRole('button')
+  await expect(row).toHaveCSS('min-height', '62px')
+  await page.getByRole('button', { name: 'Use comfortable density' }).click()
+  await expect(row).toHaveCSS('min-height', '78px')
+})

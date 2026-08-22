@@ -119,6 +119,21 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('classifies a rejected attention fetch as a transport failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Promise.reject(new TypeError('Failed to fetch'))),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).rejects.toEqual(
+      new ProductRequestError(
+        'transport_unavailable',
+        'transport',
+        'Network request failed before a response was received.',
+      ),
+    )
+  })
+
   it('rejects a typed error before buffering beyond the JSON byte ceiling', async () => {
     vi.stubGlobal(
       'fetch',

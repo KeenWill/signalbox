@@ -45,7 +45,7 @@ export const synchronizeAttention = async ({
   transport: ProductTransport
   signal: AbortSignal
   onPhase: (phase: AttentionSyncPhase) => void
-  onProjection: (snapshot: WebAttentionSnapshot) => void
+  onProjection: (snapshot: WebAttentionSnapshot) => WebAttentionSnapshot
 }): Promise<void> => {
   let resyncs = 0
   let projection: WebAttentionSnapshot | undefined
@@ -72,9 +72,8 @@ export const synchronizeAttention = async ({
           restart = true
           break
         }
-        projection = reduction.snapshot
+        projection = onProjection(reduction.snapshot)
         if (event.kind === 'snapshot') resyncs = 0
-        onProjection(projection)
         transition('live')
       }
       if (!restart) {

@@ -94,7 +94,10 @@ describe('attention projection recovery', () => {
       transport,
       signal: controller.signal,
       onPhase: (phase) => phases.push(phase),
-      onProjection: (projection) => projections.push(projection),
+      onProjection: (projection) => {
+        projections.push(projection)
+        return projection
+      },
     })
 
     expect(phases).toEqual(['connecting', 'live', 'resyncing', 'live', 'stale'])
@@ -110,7 +113,7 @@ describe('attention projection recovery', () => {
       transport: streamTransport([[resync], [resync], [resync], [resync]]),
       signal: controller.signal,
       onPhase: (phase) => phases.push(phase),
-      onProjection: () => undefined,
+      onProjection: (projection) => projection,
     })
 
     expect(phases).toEqual(['connecting', 'resyncing', 'failed'])
@@ -131,9 +134,36 @@ describe('attention projection recovery', () => {
       ]),
       signal: new AbortController().signal,
       onPhase: (phase) => phases.push(phase),
-      onProjection: () => undefined,
+      onProjection: (projection) => projection,
     })
 
     expect(phases.at(-1)).toBe('stale')
+  })
+
+  it('uses the projection accepted by the cache as the follower baseline', async () => {
+    const newerSnapshot = { ...snapshot, cursor: '19' }
+    const projections: WebAttentionSnapshot[] = []
+
+    await synchronizeAttention({
+      transport: streamTransport([
+        [
+          { kind: 'snapshot', snapshot },
+          { kind: 'update', cursor: '20', summaries: [replacement] },
+        ],
+      ]),
+      signal: new AbortController().signal,
+      onPhase: () => undefined,
+      onProjection: (projection) => {
+        const accepted =
+          BigInt(projection.cursor) < BigInt(newerSnapshot.cursor) ? newerSnapshot : projection
+        projections.push(accepted)
+        return accepted
+      },
+    })
+
+    expect(projections).toEqual([
+      newerSnapshot,
+      { ...newerSnapshot, cursor: '20', summaries: [replacement] },
+    ])
   })
 })
