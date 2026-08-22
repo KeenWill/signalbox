@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
-import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { type FormEvent, type RefObject, useEffect, useMemo, useRef, useState } from 'react'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import {
   BoundedSessionHistory,
@@ -10,6 +10,7 @@ import {
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const NATIVE_SESSION_ID_PATTERN = String.raw`\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*`
 const SESSION_WINDOW_ITEMS = 80
 const SESSION_WINDOW_BYTES = 64 * 1024
 
@@ -33,9 +34,13 @@ export const visibleSessionItems = (
 
 export function SessionWorkspaceSurface({
   onTimelineIds,
+  onWindowRequestConsumed,
+  timelineRef,
   windowRequest,
 }: {
   onTimelineIds: (ids: readonly string[]) => void
+  onWindowRequestConsumed: () => void
+  timelineRef: RefObject<HTMLOListElement | null>
   windowRequest: { anchor: 'first' | 'latest'; attempt: number } | null
 }) {
   const dispatch = useAppDispatch()
@@ -87,7 +92,18 @@ export function SessionWorkspaceSurface({
     if (windowRequest === null || sessionId === null) return
     setManualAnchor({ kind: windowRequest.anchor })
     setAttempt((current) => current + 1)
-  }, [sessionId, windowRequest])
+    onWindowRequestConsumed()
+  }, [onWindowRequestConsumed, sessionId, windowRequest])
+  useEffect(() => {
+    if (sessionId !== null && app.selectedTimeline !== null) {
+      dispatch(
+        actions.logicalPositionRecorded({
+          sessionId,
+          position: app.selectedTimeline,
+        }),
+      )
+    }
+  }, [app.selectedTimeline, dispatch, sessionId])
   useEffect(() => {
     if (app.selectedTimeline !== null) {
       rowRefs.current.get(app.selectedTimeline)?.scrollIntoView({ block: 'nearest' })
@@ -108,9 +124,6 @@ export function SessionWorkspaceSurface({
   const selected = app.selectedTimeline
   const select = (eventSequence: string) => {
     dispatch(actions.timelineSelected(eventSequence))
-    if (sessionId !== null) {
-      dispatch(actions.logicalPositionRecorded({ sessionId, position: eventSequence }))
-    }
   }
   const toggleExpanded = (eventSequence: string) => {
     const next = new Set(expanded)
@@ -129,7 +142,7 @@ export function SessionWorkspaceSurface({
             placeholder="00000000-0000-0000-0000-000000000000"
             value={draftId}
             onChange={(event) => setDraftId(event.target.value)}
-            pattern={SESSION_ID_PATTERN.source}
+            pattern={NATIVE_SESSION_ID_PATTERN}
             required
           />
         </label>
@@ -214,7 +227,12 @@ export function SessionWorkspaceSurface({
               {session.data.window.projected_structured_bytes} B
             </span>
           </div>
-          <ol className="session-timeline" aria-label="Session timeline">
+          <ol
+            className="session-timeline"
+            aria-label="Session timeline"
+            ref={timelineRef}
+            tabIndex={-1}
+          >
             {items.map((item) => {
               const id = item.address.event_sequence
               const isExpanded = expanded.has(id)

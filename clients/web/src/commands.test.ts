@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { invokeCommand } from './commands'
+import { productCommandRegistry } from './productCommands'
 import { actions, selectApp, store } from './state'
 
 describe('command registry', () => {
+  it('omits scenario navigation from the product command registry', () => {
+    const productCommandIds: readonly string[] = productCommandRegistry.map((command) => command.id)
+    expect(productCommandIds).not.toContain('navigation.open')
+  })
+
   it('selects the first timeline item when next starts from a missing selection', () => {
     const timelineIds = ['event-0', 'event-1'] as const
     store.dispatch(actions.timelineSelected('filtered-out-event'))

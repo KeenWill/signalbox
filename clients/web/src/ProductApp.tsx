@@ -317,12 +317,14 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
+  const timelineRef = useRef<HTMLOListElement>(null)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [windowRequest, setWindowRequest] = useState<{
     anchor: 'first' | 'latest'
     attempt: number
   } | null>(null)
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
+  const consumeWindowRequest = useCallback(() => setWindowRequest(null), [])
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -333,7 +335,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       dispatch,
       getState: store.getState,
       timelineIds,
-      focusTimeline: () => primaryRef.current?.focus(),
+      focusTimeline: () => (timelineRef.current ?? primaryRef.current)?.focus(),
       loadTimelineWindow: (anchor) =>
         setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 })),
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
@@ -371,7 +373,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     surface === 'attention' ? (
       <AttentionSurface />
     ) : surface === 'sessions' ? (
-      <SessionWorkspaceSurface onTimelineIds={updateTimelineIds} windowRequest={windowRequest} />
+      <SessionWorkspaceSurface
+        onTimelineIds={updateTimelineIds}
+        onWindowRequestConsumed={consumeWindowRequest}
+        timelineRef={timelineRef}
+        windowRequest={windowRequest}
+      />
     ) : surface === 'settings' ? (
       <SettingsSurface />
     ) : (

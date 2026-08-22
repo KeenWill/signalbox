@@ -103,9 +103,9 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
 
 export const loadBrowserPreferences = (): BrowserPreferences => {
   if (typeof localStorage === 'undefined') return createDefaultBrowserPreferences()
-  const stored = localStorage.getItem(BROWSER_PREFERENCES_KEY)
-  if (stored === null) return createDefaultBrowserPreferences()
   try {
+    const stored = localStorage.getItem(BROWSER_PREFERENCES_KEY)
+    if (stored === null) return createDefaultBrowserPreferences()
     return decodeBrowserPreferences(JSON.parse(stored))
   } catch {
     return createDefaultBrowserPreferences()
@@ -114,5 +114,9 @@ export const loadBrowserPreferences = (): BrowserPreferences => {
 
 export const saveBrowserPreferences = (preferences: BrowserPreferences): void => {
   if (typeof localStorage === 'undefined') return
-  localStorage.setItem(BROWSER_PREFERENCES_KEY, JSON.stringify(preferences))
+  try {
+    localStorage.setItem(BROWSER_PREFERENCES_KEY, JSON.stringify(preferences))
+  } catch {
+    // Browser storage is optional; Redux remains the in-memory authority for this page lifetime.
+  }
 }

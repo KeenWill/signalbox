@@ -96,7 +96,10 @@ const productNavigationCommands = [
   },
 ] as const
 
-export const productCommandRegistry = [...productNavigationCommands, ...commandRegistry]
+export const productCommandRegistry = [
+  ...productNavigationCommands,
+  ...commandRegistry.filter((command) => command.id !== 'navigation.open'),
+]
 export type ProductCommandId = (typeof productCommandRegistry)[number]['id']
 
 export const productHotkeyBindings = productCommandRegistry.flatMap((command) => {

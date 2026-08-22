@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { productRoutes, productSurfaceStates, SameOriginProductTransport } from './product'
+import {
+  MAX_BOOTSTRAP_RESPONSE_BYTES,
+  productRoutes,
+  productSurfaceStates,
+  SameOriginProductTransport,
+} from './product'
 
 const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '1' },
@@ -49,6 +54,17 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow('status 503')
+  })
+
+  it('rejects an oversized bootstrap before JSON decoding', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(' '.repeat(MAX_BOOTSTRAP_RESPONSE_BYTES + 1))),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'encoded byte ceiling',
+    )
   })
 })
 

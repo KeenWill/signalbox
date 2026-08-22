@@ -1,10 +1,14 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   decodeBrowserPreferences,
   defaultBrowserPreferences,
+  loadBrowserPreferences,
   MAX_KEY_OVERRIDES,
   MAX_SAVED_LOGICAL_POSITIONS,
+  saveBrowserPreferences,
 } from './preferences'
+
+afterEach(() => vi.unstubAllGlobals())
 
 describe('browser preferences', () => {
   it('fails closed to defaults for an unrelated stored value', () => {
@@ -44,5 +48,19 @@ describe('browser preferences', () => {
 
     expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
     expect(Object.keys(decoded.keyOverrides)).toHaveLength(MAX_KEY_OVERRIDES)
+  })
+
+  it('falls back to in-memory preferences when browser storage is unavailable', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => {
+        throw new DOMException('blocked', 'SecurityError')
+      }),
+      setItem: vi.fn(() => {
+        throw new DOMException('full', 'QuotaExceededError')
+      }),
+    })
+
+    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+    expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
   })
 })
