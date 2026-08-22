@@ -2395,7 +2395,13 @@ impl UserContent {
     // accessors: parts(), single_text()
 }
 
-pub enum UserContentError {
+pub struct UserContentError { /* private */ }
+impl UserContentError {
+    pub fn into_parts(self) -> (Vec<UserContentPart>, UserContentFailure);
+    // accessors: failure(), parts()
+}
+
+pub enum UserContentFailure {
     Empty,
     TooManyParts,
     AdjacentTextParts,
@@ -11138,7 +11144,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: model_settings                             | 25                               |
 | domain: accepted_input                             | 5                                |
 | domain: delivery_request                           | 2                                |
-| domain: user_content                               | 13                               |
+| domain: user_content                               | 14                               |
 | domain: submit_input                               | 36                               |
 | domain: queue_order                                | 5 (+1 free fn)                   |
 | domain: repo_watch                                 | 51                               |
@@ -11163,7 +11169,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                               |
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
-| **signalbox-domain total**                         | **817 (+12 free fn)**            |
+| **signalbox-domain total**                         | **818 (+12 free fn)**            |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
