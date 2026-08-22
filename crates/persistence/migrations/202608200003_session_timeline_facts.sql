@@ -45,9 +45,13 @@ SELECT s.session_id,
                           AND entry.context_summary_value IS NOT NULL), 0)
        ),
        (SELECT count(*)::numeric FROM turn_lifecycle AS turn
-         WHERE turn.session_id = s.session_id AND turn.state_kind = 'active'),
+         WHERE turn.session_id = s.session_id
+           AND turn.state_kind = 'active'
+           AND NOT turn.delegation_runtime_terminal),
        (SELECT count(*)::numeric FROM turn_lifecycle AS turn
-         WHERE turn.session_id = s.session_id AND turn.state_kind = 'queued')
+         WHERE turn.session_id = s.session_id
+           AND turn.state_kind = 'queued'
+           AND NOT turn.delegation_runtime_terminal)
   FROM session AS s
   LEFT JOIN (
       SELECT event_sequence, event_kind, session_id FROM outbox_event
@@ -130,21 +134,24 @@ CREATE FUNCTION update_session_timeline_work_fact()
 RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$
 BEGIN
+    -- Outbox appends acquire the allocator before this session fact. Taking the
+    -- same locks in the same order prevents lifecycle updates from inverting it.
+    PERFORM 1 FROM outbox_sequence_state WHERE singleton FOR UPDATE;
     IF TG_OP = 'UPDATE' THEN
         UPDATE session_timeline_fact
            SET active_turn_count = active_turn_count
-                   - (OLD.state_kind = 'active')::integer
-                   + (NEW.state_kind = 'active')::integer,
+                   - (OLD.state_kind = 'active' AND NOT OLD.delegation_runtime_terminal)::integer
+                   + (NEW.state_kind = 'active' AND NOT NEW.delegation_runtime_terminal)::integer,
                queued_turn_count = queued_turn_count
-                   - (OLD.state_kind = 'queued')::integer
-                   + (NEW.state_kind = 'queued')::integer
+                   - (OLD.state_kind = 'queued' AND NOT OLD.delegation_runtime_terminal)::integer
+                   + (NEW.state_kind = 'queued' AND NOT NEW.delegation_runtime_terminal)::integer
          WHERE session_id = NEW.session_id;
     ELSE
         UPDATE session_timeline_fact
            SET active_turn_count = active_turn_count
-                   + (NEW.state_kind = 'active')::integer,
+                   + (NEW.state_kind = 'active' AND NOT NEW.delegation_runtime_terminal)::integer,
                queued_turn_count = queued_turn_count
-                   + (NEW.state_kind = 'queued')::integer
+                   + (NEW.state_kind = 'queued' AND NOT NEW.delegation_runtime_terminal)::integer
          WHERE session_id = NEW.session_id;
     END IF;
     RETURN NULL;
@@ -152,5 +159,5 @@ END
 $$;
 
 CREATE TRIGGER turn_lifecycle_updates_timeline_fact
-AFTER INSERT OR UPDATE OF state_kind ON turn_lifecycle
+AFTER INSERT OR UPDATE OF state_kind, delegation_runtime_terminal ON turn_lifecycle
 FOR EACH ROW EXECUTE FUNCTION update_session_timeline_work_fact();
