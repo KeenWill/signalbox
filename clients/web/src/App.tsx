@@ -92,9 +92,11 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
       artifactPreviewIds: knownId === 'blobs' ? artifactPreviewIds : [],
       artifactOriginalIds: knownId === 'blobs' ? artifactOriginalIds : [],
       focusTimeline: () => {
-        const active = document.activeElement
-        if (active instanceof HTMLElement) active.blur()
-        document.querySelector<HTMLElement>('[aria-label="Session timeline"]')?.focus()
+        const target =
+          document.querySelector<HTMLElement>('[aria-label="Session timeline"]') ??
+          document.querySelector<HTMLElement>('.artifact-heading[aria-pressed="true"]') ??
+          document.querySelector<HTMLElement>('.artifact-heading')
+        target?.focus()
       },
     }),
     [dispatch, knownId, timelineIds],

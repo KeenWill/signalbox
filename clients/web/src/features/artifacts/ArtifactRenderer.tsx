@@ -202,6 +202,7 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
       <ArtifactMetadata
         renderer={rendered?.kind ?? 'metadata fallback'}
         mediaType={descriptor.declared_media_type}
+        byteLength={descriptor.byte_length}
         provenance={derivation?.transformation_name ?? 'original bytes'}
       >
         {original && (
@@ -258,6 +259,7 @@ function GenericBlobBody({ artifact }: RendererProps<GenericBlobArtifact>) {
       <ArtifactMetadata
         renderer="metadata fallback"
         mediaType={artifact.descriptor.declared_media_type}
+        byteLength={artifact.descriptor.byte_length}
         provenance="original bytes"
       >
         {download && (
@@ -288,11 +290,13 @@ function ImageBody({
 function ArtifactMetadata({
   renderer,
   mediaType,
+  byteLength,
   provenance,
   children,
 }: {
   renderer: string
   mediaType: string
+  byteLength?: string
   provenance: string
   children: ReactNode
 }) {
@@ -307,6 +311,12 @@ function ArtifactMetadata({
           <dt>Declared type</dt>
           <dd>{mediaType}</dd>
         </div>
+        {byteLength !== undefined && (
+          <div>
+            <dt>Byte length</dt>
+            <dd>{BigInt(byteLength).toLocaleString()} bytes</dd>
+          </div>
+        )}
         <div>
           <dt>Provenance</dt>
           <dd>{provenance}</dd>

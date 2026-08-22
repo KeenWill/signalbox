@@ -139,6 +139,19 @@ test('keyboard-scrolls overflowing artifact content', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('returns Escape focus to the selected artifact heading', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/blobs')
+
+  const heading = page.getByRole('button', { name: /renderer\.ts/ })
+  await heading.click()
+  const preview = page.getByRole('textbox', { name: 'Bounded preview of renderer.ts' })
+  await preview.focus()
+  await page.keyboard.press('Escape')
+  await expect(heading).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('keeps remote media unavailable without a bounded owning service', async ({ page }) => {
   const problems = watchBrowser(page)
   let requests = 0
@@ -165,6 +178,7 @@ test('keeps a generic descriptor available as metadata and download', async ({ p
   await expect(artifact.getByLabel('No compatible inline renderer')).toBeVisible()
   await expect(artifact.getByText('metadata fallback')).toBeVisible()
   await expect(artifact.getByText('application/octet-stream')).toBeVisible()
+  await expect(artifact.getByText('4,096 bytes')).toBeVisible()
   await expect(artifact.getByRole('link', { name: 'Download' })).toHaveAttribute(
     'href',
     /display_filename=trace\.bin/,

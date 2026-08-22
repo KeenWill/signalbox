@@ -3,6 +3,7 @@ import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import { imageViewLabel, registeredArtifactKinds, selectImageView } from './ArtifactRenderer'
 import {
   artifactOriginalIds,
+  artifactPreviewIds,
   imageArtifact,
   imageDownloadView,
   imageOriginalView,
@@ -16,6 +17,10 @@ import {
 import { admitRemoteMediaUrl } from './remoteMediaPreference'
 
 describe('artifact renderer compatibility', () => {
+  it('derives preview command IDs only from artifacts with omitted preview content', () => {
+    expect(artifactPreviewIds).toEqual(['incident-notes', 'renderer-source'])
+  })
+
   it('derives original-capable artifact IDs from admitted descriptor views', () => {
     expect(artifactOriginalIds).toEqual(['orbital-map'])
   })

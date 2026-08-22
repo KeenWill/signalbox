@@ -1,5 +1,5 @@
 import { decodeWebBlobDescriptor, type WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import type { ArtifactItem } from './artifactTypes'
+import { type ArtifactItem, boundArtifactText } from './artifactTypes'
 
 const sourceDigest = 'sha256:3729b2319da081a0710ba27da7af330c1236325cf8ed0a619cf132375bb0fc1e'
 const previewDigest = 'sha256:071d25f582ba9e6a8725e198dab884d70a3d7ce3ea84a74c66e65a1443c41a8e'
@@ -126,7 +126,11 @@ export const artifactScenario: ReadonlyArray<ArtifactItem> = [
 
 export const imageArtifact = imageDescriptor
 export const artifactPreviewIds = artifactScenario
-  .filter((artifact) => artifact.kind === 'text' || artifact.kind === 'code')
+  .filter(
+    (artifact) =>
+      (artifact.kind === 'text' || artifact.kind === 'code') &&
+      boundArtifactText(artifact.content, artifact.characterCount, 'preview').omittedCharacters > 0,
+  )
   .map((artifact) => artifact.id)
 export const artifactOriginalIds = artifactScenario.flatMap((artifact) =>
   artifact.kind === 'image' &&
