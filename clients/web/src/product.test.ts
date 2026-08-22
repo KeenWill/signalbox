@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { productRoutes, productSurfaceStates, SameOriginProductTransport } from './product'
+import {
+  ProductContractAdmissionError,
+  productRoutes,
+  productSurfaceStates,
+  SameOriginProductTransport,
+} from './product'
 
 const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '2' },
@@ -34,7 +39,7 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      'bootstrap.contract',
+      ProductContractAdmissionError,
     )
   })
 
@@ -53,7 +58,7 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      'incompatible web contract',
+      ProductContractAdmissionError,
     )
   })
 
@@ -72,7 +77,7 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      'incompatible web contract capabilities',
+      ProductContractAdmissionError,
     )
   })
 
@@ -91,7 +96,7 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      'incompatible web contract limits',
+      ProductContractAdmissionError,
     )
   })
 

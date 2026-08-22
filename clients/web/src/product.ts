@@ -5,6 +5,13 @@ const EXPECTED_BOOTSTRAP_LIMITS = {
   max_ndjson_item_bytes: 65_536,
 } as const
 
+export class ProductContractAdmissionError extends Error {
+  constructor(cause: unknown) {
+    super('web contract admission failed', { cause })
+    this.name = 'ProductContractAdmissionError'
+  }
+}
+
 export const productRoutes = [
   { id: 'attention', label: 'Attention', description: 'Actionable work and fleet state' },
   { id: 'sessions', label: 'Sessions', description: 'Conversation activity and history' },
@@ -84,17 +91,21 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    const bootstrap = decodeWebContractBootstrap(await response.json())
-    if (Object.values(bootstrap.capabilities).some((enabled) => !enabled)) {
-      throw new Error('incompatible web contract capabilities')
+    try {
+      const bootstrap = decodeWebContractBootstrap(await response.json())
+      if (Object.values(bootstrap.capabilities).some((enabled) => !enabled)) {
+        throw new Error('incompatible web contract capabilities')
+      }
+      if (
+        bootstrap.limits.max_json_body_bytes !== EXPECTED_BOOTSTRAP_LIMITS.max_json_body_bytes ||
+        bootstrap.limits.max_ndjson_item_bytes !== EXPECTED_BOOTSTRAP_LIMITS.max_ndjson_item_bytes
+      ) {
+        throw new Error('incompatible web contract limits')
+      }
+      return bootstrap
+    } catch (error) {
+      throw new ProductContractAdmissionError(error)
     }
-    if (
-      bootstrap.limits.max_json_body_bytes !== EXPECTED_BOOTSTRAP_LIMITS.max_json_body_bytes ||
-      bootstrap.limits.max_ndjson_item_bytes !== EXPECTED_BOOTSTRAP_LIMITS.max_ndjson_item_bytes
-    ) {
-      throw new Error('incompatible web contract limits')
-    }
-    return bootstrap
   }
 }
 

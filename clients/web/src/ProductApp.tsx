@@ -24,6 +24,7 @@ import {
 import { HttpImportApi } from './imports/api'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import {
+  ProductContractAdmissionError,
   type ProductRouteId,
   productRoutes,
   productSurfaceStates,
@@ -327,6 +328,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
     staleTime: Number.POSITIVE_INFINITY,
   })
+  const focusDestination = useCallback(() => {
+    requestAnimationFrame(() => primaryRef.current?.focus())
+  }, [])
   const context = useMemo<CommandContext>(() => {
     const surfaceContext = surface === 'imports' ? importsCommandContext : null
     return {
@@ -337,9 +341,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       focusTimeline: surfaceContext?.focusTimeline ?? (() => primaryRef.current?.focus()),
       navigate: navigationDisabled
         ? undefined
-        : (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+        : (path) => {
+            void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(
+              focusDestination,
+            )
+          },
     }
-  }, [dispatch, importsCommandContext, navigate, navigationDisabled, surface])
+  }, [dispatch, focusDestination, importsCommandContext, navigate, navigationDisabled, surface])
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
@@ -399,7 +407,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   return (
     <div className={`product-shell layout-${app.layout}`} style={shellStyle}>
       <aside className="product-navigation-pane">
-        <ProductNavigation active={surface} disabled={navigationDisabled} />
+        <ProductNavigation
+          active={surface}
+          disabled={navigationDisabled}
+          onNavigate={(destination) => {
+            if (destination === 'product') focusDestination()
+          }}
+        />
       </aside>
       <main className={`product-main product-main-${surface}`} tabIndex={-1} ref={primaryRef}>
         <header className="product-header">
@@ -419,7 +433,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             {bootstrap.isSuccess
               ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
               : bootstrap.isError
-                ? 'Transport unavailable'
+                ? bootstrap.error instanceof ProductContractAdmissionError
+                  ? 'Contract incompatible'
+                  : 'Transport unavailable'
                 : 'Checking contract…'}
           </span>
         </div>
@@ -492,8 +508,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               active={surface}
               disabled={navigationDisabled}
               onNavigate={(destination) => {
-                restoreNavigationFocusRef.current = destination === 'product'
+                restoreNavigationFocusRef.current = false
                 dispatch(actions.overlaySet(null))
+                if (destination === 'product') focusDestination()
               }}
             />
           </Dialog.Content>

@@ -4,7 +4,6 @@ import {
   type BrowserPreferences,
   createDefaultBrowserPreferences,
   loadBrowserPreferences,
-  MAX_SAVED_LOGICAL_POSITIONS,
   saveBrowserPreferences,
 } from './preferences'
 
@@ -73,14 +72,6 @@ const appSlice = createSlice({
       Object.assign(state, createDefaultBrowserPreferences())
       state.activitySequence += 1
     },
-    logicalPositionRecorded(state, action: { payload: { sessionId: string; position: string } }) {
-      delete state.lastLogicalPositions[action.payload.sessionId]
-      state.lastLogicalPositions[action.payload.sessionId] = action.payload.position
-      const retained = Object.entries(state.lastLogicalPositions).slice(
-        -MAX_SAVED_LOGICAL_POSITIONS,
-      )
-      state.lastLogicalPositions = Object.fromEntries(retained)
-    },
     overlaySet(state, action: { payload: Overlay }) {
       state.overlay = action.payload
       state.activitySequence += 1
@@ -120,7 +111,6 @@ const preferenceActionTypes = new Set<string>([
   appSlice.actions.themeSet.type,
   appSlice.actions.paneSizesSet.type,
   appSlice.actions.preferencesReset.type,
-  appSlice.actions.logicalPositionRecorded.type,
 ])
 const preferenceMiddleware: Middleware = (api) => (next) => (action) => {
   const result = next(action)
@@ -137,8 +127,6 @@ const preferenceMiddleware: Middleware = (api) => (next) => (action) => {
       detail: app.detail,
       theme: app.theme,
       paneSizes: app.paneSizes,
-      lastLogicalPositions: app.lastLogicalPositions,
-      keyOverrides: app.keyOverrides,
     })
   }
   return result

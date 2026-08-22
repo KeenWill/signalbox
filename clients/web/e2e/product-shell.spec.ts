@@ -66,6 +66,7 @@ test('navigates from Attention to Sessions with the shared semantic link', async
   await page.getByRole('link', { name: /Sessions/ }).click()
   await expect(page).toHaveURL(/\/sessions$/)
   await expect(page.getByRole('heading', { name: 'Sessions', level: 1 })).toBeVisible()
+  await expect(page.locator('.product-main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -80,6 +81,7 @@ test('completes route switching from the command palette without a mouse', async
   await page.getByRole('button', { name: /Go to Sessions/ }).focus()
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page.locator('.product-main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -267,6 +269,20 @@ test('withholds Imports until bootstrap admission succeeds', async ({ page }) =>
   ).toBeVisible()
   await expect(page.getByText('Transport unavailable')).toBeVisible()
   expect(importRequests).toBe(0)
+  expect(problems.pageErrors).toEqual([])
+})
+
+test('distinguishes contract rejection from transport failure', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: { ...bootstrapFixture, contract: { name: 'another.web-http', version: '3' } },
+    }),
+  )
+  await page.goto('/imports')
+
+  await expect(page.getByText('Contract incompatible')).toBeVisible()
+  await expect(page.getByText('Transport unavailable')).toHaveCount(0)
   expect(problems.pageErrors).toEqual([])
 })
 

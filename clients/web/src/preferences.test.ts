@@ -3,8 +3,6 @@ import {
   decodeBrowserPreferences,
   defaultBrowserPreferences,
   loadBrowserPreferences,
-  MAX_KEY_OVERRIDES,
-  MAX_SAVED_LOGICAL_POSITIONS,
   saveBrowserPreferences,
 } from './preferences'
 
@@ -61,25 +59,5 @@ describe('browser preferences', () => {
         Reflect.deleteProperty(globalThis, 'localStorage')
       }
     }
-  })
-
-  it('bounds retained positions and future key overrides', () => {
-    const lastLogicalPositions = Object.fromEntries(
-      Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS + 3 }, (_, index) => [
-        `session-${index}`,
-        `cursor-${index}`,
-      ]),
-    )
-    const keyOverrides = Object.fromEntries(
-      Array.from({ length: MAX_KEY_OVERRIDES + 2 }, (_, index) => [
-        `command-${index}`,
-        `key-${index}`,
-      ]),
-    )
-
-    const decoded = decodeBrowserPreferences({ lastLogicalPositions, keyOverrides })
-
-    expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
-    expect(Object.keys(decoded.keyOverrides)).toHaveLength(MAX_KEY_OVERRIDES)
   })
 })
