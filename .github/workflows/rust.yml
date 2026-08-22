@@ -20,6 +20,13 @@ permissions:
 
 env:
   RUSTFLAGS: "-D warnings"
+  # CI never reuses incremental artifacts across runs; they are pure write
+  # amplification on the self-hosted runners' scratch NVMe (measured 2026-08-22).
+  CARGO_INCREMENTAL: "0"
+  # Line tables keep backtraces and coverage useful at a fraction of the
+  # debuginfo bytes written per build.
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
 
 jobs:
   # Keep the required `validate` and `postgres-integration` checks present on
