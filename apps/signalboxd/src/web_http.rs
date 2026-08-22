@@ -796,7 +796,7 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             attachments: attachments
                 .into_iter()
                 .map(|reference| WebTimelineBlobReference {
-                    blob_id: reference.blob_id,
+                    blob_id: reference.blob_id.to_string(),
                     length_bytes: WebU64::from_u64(reference.length_bytes),
                     media_type: reference.media_type,
                 })

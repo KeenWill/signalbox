@@ -45,9 +45,9 @@ verified against this PR (`agent/mcp-bridge-wiring`).
 The rule binding one provider-model spelling to one adapter is verified against
 this PR (`agent/adapter-model-catalogs`).
 
-The blob catalog and input-modality grammar below are the foundation proposal
-from PR #553 (`agent/blob-storage-foundation`) and become verified with its
-implementing child stack.
+The blob catalog and input-modality grammar below are the foundation proposal from
+PR #553 (`agent/blob-storage-foundation`) and become verified with its implementing
+child stack.
 
 The runtime-bridge invalid-schema diagnostic fields and redaction boundary are
 verified against this PR (`agent/tool-evals-mcp`).
