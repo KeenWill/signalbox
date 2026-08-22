@@ -11,6 +11,49 @@ import {
 
 const fixtureUrl = new URL("./fixtures/example.json", import.meta.url);
 
+function assertRustCompatibleFloat(parameters_json, cache_key) {
+  const digest = `sha256:${"a1".repeat(32)}`;
+
+  assert.doesNotThrow(() =>
+    decodeWebBlobDescriptor({
+      digest,
+      byte_length: "1",
+      declared_media_type: "image/png",
+      display_filename: [],
+      available_views: [
+        {
+          kind: "download",
+          content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
+          media_type: "image/png",
+          byte_length: "1",
+          derivations: [],
+        },
+        {
+          kind: "preview",
+          content_url: `/api/blobs/${digest}/content/image-png`,
+          media_type: "image/png",
+          byte_length: "1",
+          derivations: [
+            {
+              derivation_id: "01990f5f-55c0-7000-8000-000000000001",
+              input_digests: [digest],
+              output_digests: [digest],
+              transformation_name: "image.preview",
+              transformation_version: 1,
+              parameters_json,
+              producer: {
+                class: "deterministic",
+                implementation_digest: digest,
+                cache_key,
+              },
+            },
+          ],
+        },
+      ],
+    }),
+  );
+}
+
 test("generated example decoder round trips the Rust fixture", async () => {
   const source = JSON.parse(await readFile(fixtureUrl, "utf8"));
   const decoded = decodeWebContractExample(source);
@@ -136,6 +179,40 @@ test("generated blob decoder rejects invalid download media metadata", () => {
             media_type: "application/octet-stream",
             byte_length: "1",
             derivations: [],
+          },
+        ],
+      }),
+    /MIME value/,
+  );
+});
+
+test("generated blob decoder rejects daemon-invalid quoted MIME values", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const descriptor = {
+    digest,
+    byte_length: "1",
+    declared_media_type: "application/octet-stream",
+    display_filename: [],
+    available_views: [
+      {
+        kind: "download",
+        content_url: `/api/blobs/${digest}/download?media_type=text%2Fplain%3Bfoo%3D%22%00%22`,
+        media_type: "application/octet-stream",
+        byte_length: "1",
+        derivations: [],
+      },
+    ],
+  };
+
+  assert.throws(() => decodeWebBlobDescriptor(descriptor), /MIME value/);
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        ...descriptor,
+        available_views: [
+          {
+            ...descriptor.available_views[0],
+            content_url: `/api/blobs/${digest}/download?media_type=text%2Fplain%3Bfoo%3D%22a%5C%22b%22`,
           },
         ],
       }),
@@ -722,25 +799,32 @@ test("generated blob decoder bounds nested view collections", () => {
   );
 });
 
-test("generated blob decoder accepts Rust-compatible floating-point spellings", () => {
-  const digest = `sha256:${"a1".repeat(32)}`;
-  const cases = [
-    [
-      '{"n":1e+20}',
-      "sha256:086cdb3b3cec1aae2ced395220c6b5c5d5190fc1220a4d3b8d38c9bf20b662b6",
-    ],
-    [
-      '{"n":1e-6}',
-      "sha256:5c124e0dafa4dfba43e7b9b68d356ddfdfe22155fafdee5e59d5b44236c1e596",
-    ],
-    [
-      '{"n":-0.0}',
-      "sha256:fcf3b35e58c2865942ffa068ce9d78ab58211cc3c7684f1c586ff117b34f7ff5",
-    ],
-  ];
+test("generated blob decoder accepts Rust large-exponent spelling", () => {
+  assertRustCompatibleFloat(
+    '{"n":1e+20}',
+    "sha256:086cdb3b3cec1aae2ced395220c6b5c5d5190fc1220a4d3b8d38c9bf20b662b6",
+  );
+});
 
-  for (const [parameters_json, cache_key] of cases) {
-    assert.doesNotThrow(() =>
+test("generated blob decoder accepts Rust small-exponent spelling", () => {
+  assertRustCompatibleFloat(
+    '{"n":1e-6}',
+    "sha256:5c124e0dafa4dfba43e7b9b68d356ddfdfe22155fafdee5e59d5b44236c1e596",
+  );
+});
+
+test("generated blob decoder accepts Rust negative-zero spelling", () => {
+  assertRustCompatibleFloat(
+    '{"n":-0.0}',
+    "sha256:fcf3b35e58c2865942ffa068ce9d78ab58211cc3c7684f1c586ff117b34f7ff5",
+  );
+});
+
+test("generated blob decoder rejects download routes for derivative views", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+
+  assert.throws(
+    () =>
       decodeWebBlobDescriptor({
         digest,
         byte_length: "1",
@@ -756,7 +840,7 @@ test("generated blob decoder accepts Rust-compatible floating-point spellings", 
           },
           {
             kind: "preview",
-            content_url: `/api/blobs/${digest}/content/image-png`,
+            content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
             media_type: "image/png",
             byte_length: "1",
             derivations: [
@@ -766,19 +850,19 @@ test("generated blob decoder accepts Rust-compatible floating-point spellings", 
                 output_digests: [digest],
                 transformation_name: "image.preview",
                 transformation_version: 1,
-                parameters_json,
+                parameters_json: "{}",
                 producer: {
-                  class: "deterministic",
+                  class: "executed",
+                  execution_id: "01990f5f-55c0-7000-8000-000000000002",
                   implementation_digest: digest,
-                  cache_key,
                 },
               },
             ],
           },
         ],
       }),
-    );
-  }
+    /content_url must be an image-content route for a derivative view/,
+  );
 });
 
 test("generated blob decoder rejects unsupported routes and incomplete download metadata", () => {
