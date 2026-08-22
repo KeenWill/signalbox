@@ -6,7 +6,28 @@ import {
 } from './preferences'
 import { actions, selectApp, store } from './state'
 
+const recordLogicalPositionFixture = (
+  prefix: string,
+  count: number,
+  position: (index: number) => string,
+) => {
+  const sessionIds = Array.from({ length: count }, (_, index) => `${prefix}-${index}`)
+  for (const [index, sessionId] of sessionIds.entries()) {
+    store.dispatch(actions.logicalPositionRecorded({ sessionId, position: position(index) }))
+  }
+  return sessionIds
+}
+
 describe('application state', () => {
+  it('records logical-position fixtures in declared order', () => {
+    const sessionIds = recordLogicalPositionFixture('fixture', 2, (index) => `cursor-${index}`)
+
+    const positions = selectApp(store.getState()).lastLogicalPositions
+    expect(sessionIds).toEqual(['fixture-0', 'fixture-1'])
+    expect(positions['fixture-0']).toBe('cursor-0')
+    expect(positions['fixture-1']).toBe('cursor-1')
+  })
+
   it('rejects oversized logical-position keys and values before persistence', () => {
     const oversizedSession = 'é'.repeat(MAX_LOGICAL_POSITION_KEY_BYTES)
     const oversizedPosition = 'é'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES)
@@ -26,14 +47,7 @@ describe('application state', () => {
   })
 
   it('retains a re-recorded session at the capacity boundary', () => {
-    for (let index = 0; index < 128; index += 1) {
-      store.dispatch(
-        actions.logicalPositionRecorded({
-          sessionId: `recent-${index}`,
-          position: `cursor-${index}`,
-        }),
-      )
-    }
+    recordLogicalPositionFixture('recent', 128, (index) => `cursor-${index}`)
 
     store.dispatch(
       actions.logicalPositionRecorded({ sessionId: 'recent-0', position: 'refreshed' }),
@@ -49,14 +63,9 @@ describe('application state', () => {
   })
 
   it('rejects logical positions that would exceed the serialized preference ceiling', () => {
-    for (let index = 0; index < 128; index += 1) {
-      store.dispatch(
-        actions.logicalPositionRecorded({
-          sessionId: `escaped-${index}`,
-          position: '\0'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES),
-        }),
-      )
-    }
+    recordLogicalPositionFixture('escaped', 128, () =>
+      '\0'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES),
+    )
 
     const app = selectApp(store.getState())
     const serialized = serializeBrowserPreferences({

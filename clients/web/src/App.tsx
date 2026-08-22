@@ -193,7 +193,12 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
           <Toolbar context={commandContext} />
         </header>
         <div className="primary-stack">
-          <Transcript key={`timeline-${knownId}`} items={timeline.items} context={commandContext} />
+          <Transcript
+            key={`timeline-${knownId}`}
+            items={timeline.items}
+            context={commandContext}
+            autoFocus
+          />
           {app.layout === 'workbench' && (
             <FleetTable key={`fleet-${knownId}`} rows={fleet.items} totalCount={fleet.totalCount} />
           )}
