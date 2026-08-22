@@ -23,12 +23,14 @@ const incompatibleDescriptorMessage =
   'The descriptor response did not match the generated web contract.'
 const admittedOriginalArtifact = decodeWebBlobDescriptor({
   ...imageArtifact,
+  byte_length: '1048576',
   available_views: imageArtifact.available_views.map((view) =>
     view.kind === 'browser_native' ? { ...view, byte_length: '1048576' } : view,
   ),
 })
 const oversizedOriginalArtifact = decodeWebBlobDescriptor({
   ...imageArtifact,
+  byte_length: '16777217',
   available_views: imageArtifact.available_views.map((view) =>
     view.kind === 'browser_native' ? { ...view, byte_length: '16777217' } : view,
   ),
@@ -248,6 +250,71 @@ test('keeps an oversized browser-native original download-only', async ({ page }
   await expect(
     page.getByRole('img', { name: `Preview of ${imageArtifact.display_filename[0]}` }),
   ).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('retries a transient original header failure', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useArtifactScenario(page, admittedOriginalArtifact)
+  let headerAttempts = 0
+  await page.route('**/api/blobs/**/content/image-png', (route) => {
+    if (route.request().headers().range) {
+      headerAttempts += 1
+      if (headerAttempts === 1) return route.fulfill({ status: 503 })
+      return route.fulfill({
+        status: 206,
+        body: previewFixture.subarray(0, 64 * 1024),
+        contentType: 'image/png',
+      })
+    }
+    return route.fulfill({ body: previewFixture, contentType: 'image/png' })
+  })
+  await page.goto('/sessions')
+
+  await resolveArtifactWithoutMouse(page)
+  await page.getByRole('button', { name: 'Load original' }).click()
+  const retry = page.getByRole('button', { name: 'Retry original check' })
+  await expect(retry).toBeEnabled()
+  await retry.click()
+  await expect(page.getByRole('button', { name: 'Original loaded' })).toBeVisible()
+  expect(headerAttempts).toBe(2)
+  expect(problems.pageErrors).toEqual([])
+  expect(
+    problems.consoleErrors.every(
+      (message) =>
+        message ===
+        'Failed to load resource: the server responded with a status of 503 (Service Unavailable)',
+    ),
+  ).toBe(true)
+})
+
+test('does not steal focus when an original header probe completes', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useArtifactScenario(page, admittedOriginalArtifact)
+  let releaseHeader: (() => void) | undefined
+  const headerBlocked = new Promise<void>((resolve) => {
+    releaseHeader = resolve
+  })
+  await page.route('**/api/blobs/**/content/image-png', async (route) => {
+    if (route.request().headers().range) {
+      await headerBlocked
+      return route.fulfill({
+        status: 206,
+        body: previewFixture.subarray(0, 64 * 1024),
+        contentType: 'image/png',
+      })
+    }
+    return route.fulfill({ body: previewFixture, contentType: 'image/png' })
+  })
+  await page.goto('/sessions')
+
+  await resolveArtifactWithoutMouse(page)
+  await page.getByRole('button', { name: 'Load original' }).click()
+  const download = page.getByRole('link', { name: 'Download' })
+  await download.focus()
+  releaseHeader?.()
+  await expect(page.getByRole('button', { name: 'Original loaded' })).toBeVisible()
+  await expect(download).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

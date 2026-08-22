@@ -3,6 +3,7 @@ import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import {
   imageViewLabel,
   isInlineOriginalByteLengthAdmitted,
+  isInlineOriginalLengthAdmitted,
   MAX_INLINE_ORIGINAL_BYTES,
   MAX_INLINE_ORIGINAL_PIXELS,
   readImageDimensions,
@@ -78,6 +79,10 @@ describe('artifact renderer compatibility', () => {
     expect(isInlineOriginalByteLengthAdmitted(String(MAX_INLINE_ORIGINAL_BYTES + 1))).toBe(false)
   })
 
+  it('rejects an original whose view length differs from the immutable blob length', () => {
+    expect(isInlineOriginalLengthAdmitted('16777217', '1024')).toBe(false)
+  })
+
   it('reads bounded PNG dimensions for pixel admission', () => {
     const bytes = new Uint8Array(24)
     const view = new DataView(bytes.buffer)
@@ -115,6 +120,29 @@ describe('artifact renderer compatibility', () => {
     bytes.set(new TextEncoder().encode('VP8X'), 12)
     bytes.set([0x7f, 0x02, 0x00], 24)
     bytes.set([0xdf, 0x01, 0x00], 27)
+
+    expect(readImageDimensions(bytes)).toEqual({ width: 640, height: 480 })
+  })
+
+  it('reads bounded lossy WebP dimensions for pixel admission', () => {
+    const bytes = new Uint8Array(30)
+    bytes.set(new TextEncoder().encode('RIFF'), 0)
+    bytes.set(new TextEncoder().encode('WEBP'), 8)
+    bytes.set(new TextEncoder().encode('VP8 '), 12)
+    bytes.set([0x9d, 0x01, 0x2a], 23)
+    const view = new DataView(bytes.buffer)
+    view.setUint16(26, 640, true)
+    view.setUint16(28, 480, true)
+
+    expect(readImageDimensions(bytes)).toEqual({ width: 640, height: 480 })
+  })
+
+  it('reads bounded lossless WebP dimensions for pixel admission', () => {
+    const bytes = new Uint8Array(25)
+    bytes.set(new TextEncoder().encode('RIFF'), 0)
+    bytes.set(new TextEncoder().encode('WEBP'), 8)
+    bytes.set(new TextEncoder().encode('VP8L'), 12)
+    bytes.set([0x2f, 0x7f, 0xc2, 0x77, 0x00], 20)
 
     expect(readImageDimensions(bytes)).toEqual({ width: 640, height: 480 })
   })

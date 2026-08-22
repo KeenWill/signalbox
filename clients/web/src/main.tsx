@@ -9,7 +9,7 @@ import {
   Outlet,
   RouterProvider,
 } from '@tanstack/react-router'
-import { lazy, StrictMode, Suspense } from 'react'
+import { Component, lazy, type ReactNode, StrictMode, Suspense, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
 import { ProductApp } from './ProductApp'
@@ -19,9 +19,48 @@ import { selectApp, store } from './state'
 import './app.css'
 
 const rootRoute = createRootRoute({ component: () => <Outlet /> })
-const ScenarioWorkspace = lazy(() =>
-  import('./App').then((module) => ({ default: module.Workspace })),
-)
+
+const createScenarioWorkspace = (_attempt: number) =>
+  lazy(() => import('./App').then((module) => ({ default: module.Workspace })))
+
+class ScenarioChunkBoundary extends Component<
+  { children: ReactNode; onRetry: () => void },
+  { failed: boolean }
+> {
+  state = { failed: false }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <main className="loading">
+          <p>Scenario studio could not be loaded.</p>
+          <button type="button" onClick={this.props.onRetry}>
+            Retry scenario studio
+          </button>
+        </main>
+      )
+    }
+    return this.props.children
+  }
+}
+
+function ScenarioRoute() {
+  const scenarioId = scenarioRoute.useParams().scenarioId
+  const [attempt, setAttempt] = useState(0)
+  const ScenarioWorkspace = useMemo(() => createScenarioWorkspace(attempt), [attempt])
+  return (
+    <ScenarioChunkBoundary key={attempt} onRetry={() => setAttempt((value) => value + 1)}>
+      <Suspense fallback={<main className="loading">Loading scenario studio…</main>}>
+        <ScenarioWorkspace scenarioId={scenarioId} />
+      </Suspense>
+    </ScenarioChunkBoundary>
+  )
+}
+
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
@@ -41,11 +80,7 @@ const productRoute = createRoute({
 const scenarioRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/scenario/$scenarioId',
-  component: () => (
-    <Suspense fallback={<main className="loading">Loading scenario studio…</main>}>
-      <ScenarioWorkspace scenarioId={scenarioRoute.useParams().scenarioId} />
-    </Suspense>
-  ),
+  component: ScenarioRoute,
 })
 const router = createRouter({
   routeTree: rootRoute.addChildren([indexRoute, productRoute, scenarioRoute]),

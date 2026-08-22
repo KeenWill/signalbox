@@ -1,5 +1,5 @@
 import { Download, FileQuestion, Image as ImageIcon, Maximize2 } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import { artifactScenario } from './artifactScenario'
 import './artifacts.css'
@@ -17,6 +17,13 @@ const MAX_IMAGE_HEADER_BYTES = 64 * 1024
 
 export const isInlineOriginalByteLengthAdmitted = (byteLength: string): boolean =>
   BigInt(byteLength) <= BigInt(MAX_INLINE_ORIGINAL_BYTES)
+
+export const isInlineOriginalLengthAdmitted = (
+  descriptorByteLength: string,
+  originalByteLength: string,
+): boolean =>
+  descriptorByteLength === originalByteLength &&
+  isInlineOriginalByteLengthAdmitted(originalByteLength)
 
 export const selectImageView = (descriptor: WebBlobDescriptor): WebBlobAvailableView | undefined =>
   IMAGE_VIEW_PRIORITY.map((kind) =>
@@ -78,15 +85,34 @@ export const readImageDimensions = (
     return { width: view.getUint16(6, true), height: view.getUint16(8, true) }
   }
   if (
-    bytes.length >= 30 &&
+    bytes.length >= 25 &&
     new TextDecoder().decode(bytes.subarray(0, 4)) === 'RIFF' &&
     new TextDecoder().decode(bytes.subarray(8, 12)) === 'WEBP'
   ) {
     const kind = new TextDecoder().decode(bytes.subarray(12, 16))
-    if (kind === 'VP8X') {
+    if (kind === 'VP8X' && bytes.length >= 30) {
       return {
         width: 1 + view.getUint8(24) + (view.getUint8(25) << 8) + (view.getUint8(26) << 16),
         height: 1 + view.getUint8(27) + (view.getUint8(28) << 8) + (view.getUint8(29) << 16),
+      }
+    }
+    if (
+      kind === 'VP8 ' &&
+      bytes.length >= 30 &&
+      view.getUint8(23) === 0x9d &&
+      view.getUint8(24) === 0x01 &&
+      view.getUint8(25) === 0x2a
+    ) {
+      return { width: view.getUint16(26, true) & 0x3fff, height: view.getUint16(28, true) & 0x3fff }
+    }
+    if (kind === 'VP8L' && view.getUint8(20) === 0x2f) {
+      return {
+        width: 1 + view.getUint8(21) + ((view.getUint8(22) & 0x3f) << 8),
+        height:
+          1 +
+          (view.getUint8(22) >> 6) +
+          (view.getUint8(23) << 2) +
+          ((view.getUint8(24) & 0x0f) << 10),
       }
     }
   }
@@ -128,12 +154,11 @@ export function ArtifactRenderer({
   const automatic = selectImageView(descriptor)
   const original = viewByKind(descriptor, 'browser_native')
   const originalWithinByteLimit = original
-    ? isInlineOriginalByteLengthAdmitted(original.byte_length)
+    ? isInlineOriginalLengthAdmitted(descriptor.byte_length, original.byte_length)
     : false
   const [originalStatus, setOriginalStatus] = useState<
-    'idle' | 'checking' | 'admitted' | 'rejected'
+    'idle' | 'checking' | 'admitted' | 'rejected' | 'failed'
   >('idle')
-  const originalButtonRef = useRef<HTMLButtonElement>(null)
   const originalAdmitted = originalStatus === 'admitted'
   const download = viewByKind(descriptor, 'download')
   const rendered = originalRequested && originalAdmitted ? original : automatic
@@ -156,9 +181,8 @@ export function ArtifactRenderer({
         }
         setOriginalStatus('admitted')
         onOriginalRequested?.()
-        requestAnimationFrame(() => originalButtonRef.current?.focus())
       })
-      .catch(() => setOriginalStatus('rejected'))
+      .catch(() => setOriginalStatus('failed'))
   }, [onOriginalRequested, original, originalStatus, originalWithinByteLimit])
 
   useEffect(() => {
@@ -208,7 +232,6 @@ export function ArtifactRenderer({
         <div className="artifact-actions">
           {original && (
             <button
-              ref={originalButtonRef}
               type="button"
               aria-pressed={originalRequested && originalAdmitted}
               disabled={
@@ -228,9 +251,11 @@ export function ArtifactRenderer({
                   ? 'Checking original dimensions…'
                   : originalStatus === 'rejected'
                     ? 'Original exceeds safe pixel limit; download only'
-                    : originalWithinByteLimit
-                      ? 'Load original'
-                      : 'Original exceeds 16 MiB inline limit'}
+                    : originalStatus === 'failed'
+                      ? 'Retry original check'
+                      : originalWithinByteLimit
+                        ? 'Load original'
+                        : 'Original exceeds 16 MiB inline limit'}
             </button>
           )}
           {download && (

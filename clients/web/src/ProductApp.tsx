@@ -407,7 +407,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       .filter((binding) => binding.commandId !== 'surface.escape')
       .map((binding) => ({
         hotkey: binding.hotkey,
-        callback: () => invokeCommand(binding.commandId, context),
+        callback: () => {
+          if (store.getState().app.overlay === null) invokeCommand(binding.commandId, context)
+        },
       })),
   )
   useHotkeySequences(
