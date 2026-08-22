@@ -1386,7 +1386,15 @@ async fn load_descriptor(
             .ok_or(SessionTimelineCorruption::Missing("observation cursor"))?,
         "observation cursor",
     )?;
-    if first > latest || latest.sequence().get() > observed_through {
+    let address_span = latest
+        .sequence()
+        .get()
+        .checked_sub(first.sequence().get())
+        .and_then(|span| span.checked_add(1));
+    if first > latest
+        || latest.sequence().get() > observed_through
+        || address_span.is_none_or(|span| item_count > span)
+    {
         return Err(SessionTimelineCorruption::InvalidOrdinal("timeline bounds").into());
     }
     Ok(Some(SessionTimelineDescriptor {
