@@ -517,7 +517,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           }
         case .delegatedTask, .delegationMessage,
           .delegationResult(_, _, _, .background, _, _, _, _, _),
-          .modelIdentityChanged, .imported, .unknown:
+          .modelIdentityChanged, .runnerPlacementChanged, .imported, .unknown:
           break
         }
       case .turn, .modelCallUsage:
@@ -555,7 +555,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           .turnFailed(let turnID), .turnCancelled(let turnID):
           anchor = (turnID, message.entryIndex)
         case .delegatedTask, .delegationMessage, .delegationResult,
-          .toolExecutionResult, .toolDenied, .toolClosed, .imported, .unknown:
+          .runnerPlacementChanged, .toolExecutionResult, .toolDenied, .toolClosed,
+          .imported, .unknown:
           anchor = nil
         }
       case .turn, .modelCallUsage, .content:
@@ -788,6 +789,23 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
             turnID: turnID,
             defaultsVersion: defaultsVersion,
             selectedModelID: selectedModelID
+          )
+        )
+      )
+    case .runnerPlacementChanged(
+      let priorRunnerID,
+      let newRunnerID,
+      let placementRevision,
+      let sandboxProfile
+    ):
+      return try semanticRecord(
+        message,
+        event: .processRunnerPlacement(
+          try SignalboxProcessRunnerPlacementEvent(
+            priorRunnerID: priorRunnerID,
+            newRunnerID: newRunnerID,
+            placementRevision: placementRevision,
+            sandboxProfile: sandboxProfile
           )
         )
       )
@@ -1295,6 +1313,9 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     if case .modelIdentityChanged = message.entry {
       return false
     }
+    if case .runnerPlacementChanged = message.entry {
+      return false
+    }
     switch trigger {
     case .toolBatchTransition(let turnID, let modelCallID, let state):
       switch state {
@@ -1360,7 +1381,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       return false
     case .delegatedTask, .delegationMessage,
       .delegationResult(_, _, _, .background, _, _, _, _, _), .modelIdentityChanged,
-      .turnCompleted, .turnFailed, .turnCancelled, .imported, .unknown:
+      .runnerPlacementChanged, .turnCompleted, .turnFailed, .turnCancelled, .imported,
+      .unknown:
       return false
     }
     let correlation = ToolCorrelation(
@@ -1568,7 +1590,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       )
     case .delegatedTask, .delegationMessage,
       .delegationResult(_, _, _, .background, _, _, _, _, _),
-      .modelIdentityChanged, .assistantToolUse, .turnCompleted, .turnFailed,
+      .modelIdentityChanged, .runnerPlacementChanged, .assistantToolUse, .turnCompleted, .turnFailed,
       .turnCancelled, .imported, .unknown:
       return nil
     }
@@ -1702,7 +1724,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
               )
             case .delegatedTask, .delegationMessage,
               .delegationResult(_, _, _, .background, _, _, _, _, _),
-              .modelIdentityChanged, .assistantToolUse, .turnCompleted, .turnFailed,
+              .modelIdentityChanged, .runnerPlacementChanged, .assistantToolUse, .turnCompleted, .turnFailed,
               .turnCancelled, .imported, .unknown:
               return nil
             }

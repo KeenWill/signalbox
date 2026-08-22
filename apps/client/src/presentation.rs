@@ -2409,6 +2409,21 @@ impl<'a> Output<'a> {
                 entry.source_session_id,
                 entry.entry_id
             ),
+            SnapshotEntryKind::Marker(TranscriptEntry::RunnerPlacementChanged {
+                prior_runner_id,
+                new_runner_id,
+                placement_revision,
+                sandbox_profile,
+            }) => writeln!(
+                self.stdout,
+                "runner_placement_changed prior_runner={prior_runner_id} \
+                 new_runner={new_runner_id} placement_revision={} sandbox={} \
+                 source={} entry={}",
+                placement_revision.value(),
+                runner_sandbox_profile(*sandbox_profile),
+                entry.source_session_id,
+                entry.entry_id
+            ),
             SnapshotEntryKind::Marker(TranscriptEntry::AssistantToolUse {
                 turn_id,
                 model_call_id,
@@ -2798,6 +2813,7 @@ impl SnapshotSelection {
                 SnapshotEntryKind::Text(_)
                 | SnapshotEntryKind::Marker(
                     TranscriptEntry::ModelIdentityChanged { .. }
+                    | TranscriptEntry::RunnerPlacementChanged { .. }
                     | TranscriptEntry::DelegatedTask { .. }
                     | TranscriptEntry::DelegationMessage { .. }
                     | TranscriptEntry::DelegationResult { .. }

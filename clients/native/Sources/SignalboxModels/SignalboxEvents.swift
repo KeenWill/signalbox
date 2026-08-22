@@ -34,6 +34,7 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
     case processMessage(SignalboxProcessMessageEvent)
     case processContextSummary(SignalboxProcessContextSummaryEvent)
     case processModelIdentity(SignalboxProcessModelIdentityEvent)
+    case processRunnerPlacement(SignalboxProcessRunnerPlacementEvent)
     case processModelCallUsage(SignalboxProcessModelCallUsageEvent)
     case processImportedContent(SignalboxProcessImportedContentEvent)
     case processTool(SignalboxProcessToolEvent)
@@ -55,6 +56,8 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
             return "process_context_summary"
         case .processModelIdentity:
             return "process_model_identity"
+        case .processRunnerPlacement:
+            return "process_runner_placement"
         case .processModelCallUsage:
             return "process_model_call_usage"
         case .processImportedContent:
@@ -150,6 +153,20 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
                     )
                 )
             }
+        case "process_runner_placement":
+            do {
+                self = .processRunnerPlacement(
+                    try SignalboxProcessRunnerPlacementEvent(closedFrom: decoder)
+                )
+            } catch {
+                self = .unknown(
+                    try SignalboxUnknownEvent(
+                        kind: kind,
+                        decoder: decoder,
+                        decodingDiagnostic: SignalboxDecodingDiagnostic(error: error)
+                    )
+                )
+            }
         case "process_model_call_usage":
             do {
                 self = .processModelCallUsage(try SignalboxProcessModelCallUsageEvent(closedFrom: decoder))
@@ -230,6 +247,8 @@ public enum SignalboxConversationEvent: Codable, Equatable, Sendable {
         case .processContextSummary(let event):
             try event.encode(to: encoder)
         case .processModelIdentity(let event):
+            try event.encode(to: encoder)
+        case .processRunnerPlacement(let event):
             try event.encode(to: encoder)
         case .processModelCallUsage(let event):
             try event.encode(to: encoder)

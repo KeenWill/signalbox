@@ -56,6 +56,7 @@ use signalbox_persistence::{
     },
     process_read::{
         ProcessReadRepository, ProcessRunnerConnectionHealth, ProcessRunnerProjectionState,
+        ProcessTranscriptEntry,
     },
     runner_protocol::{
         IssuedRunnerEnrollmentIdentities, PristineRunnerEnrollmentRequest, RunnerConnectionCause,
@@ -2892,6 +2893,274 @@ async fn append_denied_request_to_continuing_tool_round_projection(
     Ok(())
 }
 
+/// S32 / INV-015 / INV-044: durable continuation validation treats a runner
+/// placement boundary before a proposal-ordered result as out-of-band.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv015_inv044_continuation_accepts_placement_before_tool_result()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, predecessor_attempt) = insert_running_turn(&pool).await?;
+    let placement = SessionRunnerPlacement::new(
+        session,
+        exact_runner_request(RunnerId::from_uuid(uuid(RUNNER))),
+    );
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    let producing_call = ModelCallId::from_uuid(uuid(0xa171));
+    let request = ToolRequestId::from_uuid(uuid(0xa172));
+    let boundary = ContextFrontierId::from_uuid(uuid(0xa173));
+    attach_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        predecessor_attempt,
+        producing_call,
+        request,
+        boundary,
+    )
+    .await?;
+    let continuation_attempt = TurnAttemptId::from_uuid(uuid(0xa174));
+    let placement_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xa175));
+    let result_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xa176));
+    let result_frontier = ContextFrontierId::from_uuid(uuid(0xa177));
+    let (boundary_count, event_ordinal): (Decimal, Decimal) = sqlx::query_as(
+        "SELECT frontier.member_count, placement.event_ordinal
+           FROM context_frontier AS frontier
+           JOIN runner_current_session_placement AS head
+             ON head.session_id = frontier.owning_session_id
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = head.session_id
+            AND placement.event_ordinal = head.event_ordinal
+          WHERE frontier.owning_session_id = $1
+            AND frontier.context_frontier_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(boundary.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let mut candidate = pool.begin().await?;
+    sqlx::query("ALTER TABLE turn_attempt DISABLE TRIGGER ALL")
+        .execute(&mut *candidate)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(predecessor_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind)
+         VALUES ($1, $2, $3, $4, 'running')",
+    )
+    .bind(continuation_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(predecessor_attempt.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             runner_placement_revision, runner_placement_event_ordinal)
+         VALUES ($1, $2, 'runner_placement_changed', $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(placement_entry.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(event_ordinal)
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             tool_result_request_id)
+         VALUES ($1, $2, 'tool_closed_by_turn_end', $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(result_entry.into_uuid())
+    .bind(request.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id,
+             prefix_context_frontier_id, member_count)
+         VALUES ($1, $2, $3, $4 + 2)",
+    )
+    .bind(session.into_uuid())
+    .bind(result_frontier.into_uuid())
+    .bind(boundary.into_uuid())
+    .bind(boundary_count)
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, $3 + 1, $1, $4),
+                ($1, $2, $3 + 2, $1, $5)",
+    )
+    .bind(session.into_uuid())
+    .bind(result_frontier.into_uuid())
+    .bind(boundary_count)
+    .bind(placement_entry.into_uuid())
+    .bind(result_entry.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    let closes: bool = sqlx::query_scalar(
+        "SELECT continuation_frontier_closes_predecessor_tool_round(
+             $1, $2, $3, $4
+         )",
+    )
+    .bind(continuation_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(result_frontier.into_uuid())
+    .fetch_one(&mut *candidate)
+    .await?;
+
+    assert!(closes);
+    candidate.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-015 / INV-044: durable continuation validation rejects any
+/// additional non-placement entry after the exact proposal-ordered results.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv015_inv044_continuation_rejects_extra_non_placement_suffix()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, predecessor_attempt) = insert_running_turn(&pool).await?;
+    let producing_call = ModelCallId::from_uuid(uuid(0xa178));
+    let request = ToolRequestId::from_uuid(uuid(0xa179));
+    let boundary = ContextFrontierId::from_uuid(uuid(0xa17a));
+    attach_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        predecessor_attempt,
+        producing_call,
+        request,
+        boundary,
+    )
+    .await?;
+    let continuation_attempt = TurnAttemptId::from_uuid(uuid(0xa17b));
+    let result_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xa17c));
+    let extra_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xa17d));
+    let result_frontier = ContextFrontierId::from_uuid(uuid(0xa17e));
+    let boundary_count: Decimal = sqlx::query_scalar(
+        "SELECT member_count
+           FROM context_frontier
+          WHERE owning_session_id = $1 AND context_frontier_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(boundary.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let mut candidate = pool.begin().await?;
+    sqlx::query("ALTER TABLE turn_attempt DISABLE TRIGGER ALL")
+        .execute(&mut *candidate)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(predecessor_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind)
+         VALUES ($1, $2, $3, $4, 'running')",
+    )
+    .bind(continuation_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(predecessor_attempt.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             tool_result_request_id)
+         VALUES ($1, $2, 'tool_closed_by_turn_end', $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(result_entry.into_uuid())
+    .bind(request.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             cancelled_turn_id)
+         VALUES ($1, $2, 'turn_cancelled', $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(extra_entry.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id,
+             prefix_context_frontier_id, member_count)
+         VALUES ($1, $2, $3, $4 + 2)",
+    )
+    .bind(session.into_uuid())
+    .bind(result_frontier.into_uuid())
+    .bind(boundary.into_uuid())
+    .bind(boundary_count)
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, $3 + 1, $1, $4),
+                ($1, $2, $3 + 2, $1, $5)",
+    )
+    .bind(session.into_uuid())
+    .bind(result_frontier.into_uuid())
+    .bind(boundary_count)
+    .bind(result_entry.into_uuid())
+    .bind(extra_entry.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    let closes: bool = sqlx::query_scalar(
+        "SELECT continuation_frontier_closes_predecessor_tool_round(
+             $1, $2, $3, $4
+         )",
+    )
+    .bind(continuation_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(result_frontier.into_uuid())
+    .fetch_one(&mut *candidate)
+    .await?;
+
+    assert!(!closes);
+    candidate.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
 async fn convert_running_turn_to_delegated_runner_recovery(
     pool: &PgPool,
     session: SessionId,
@@ -3116,7 +3385,7 @@ async fn make_accepted_turn_direct_root(
     transaction.commit().await
 }
 
-async fn append_runner_registration_loss_projection(
+async fn complete_runner_lease_projection(
     store: &RunnerProtocolStore,
     registration: &StoredValidatedRunnerRegistration,
     pin: &SessionRunnerPin,
@@ -3129,10 +3398,10 @@ async fn append_runner_registration_loss_projection(
         .complete(pin.lease.correlation())
         .expect("the exact claimed fixture lease correlation completes");
     store.store_lease(&completed).await?;
-    append_runner_registration_loss_projection_after_completed_lease(store, pin).await
+    Ok(())
 }
 
-async fn append_runner_registration_loss_projection_after_completed_lease(
+async fn append_runner_registration_loss_after_completed_lease_projection(
     store: &RunnerProtocolStore,
     pin: &SessionRunnerPin,
 ) -> Result<(), Box<dyn Error>> {
@@ -3144,6 +3413,15 @@ async fn append_runner_registration_loss_projection_after_completed_lease(
         .complete_registration_reconciliation(pending[0])
         .await?;
     Ok(())
+}
+
+async fn append_runner_registration_loss_projection(
+    store: &RunnerProtocolStore,
+    registration: &StoredValidatedRunnerRegistration,
+    pin: &SessionRunnerPin,
+) -> Result<(), Box<dyn Error>> {
+    complete_runner_lease_projection(store, registration, pin).await?;
+    append_runner_registration_loss_after_completed_lease_projection(store, pin).await
 }
 
 async fn append_same_runner_replacement_projection(
@@ -15016,6 +15294,822 @@ async fn s32_inv002_inv045_base_grant_authenticates_policy_placement_identity()
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_placement_boundary_round_trips_exact_successor_facts()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries its issued credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    let session = replacement.placement.session();
+    let revision = replacement.placement.revision();
+    let event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'profile_replaced'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let entry = SemanticTranscriptEntryId::from_uuid(uuid(0xb001));
+    let frontier = ContextFrontierId::from_uuid(uuid(0xb002));
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             runner_placement_revision, runner_placement_event_ordinal)
+         VALUES ($1, $2, 'runner_placement_changed', $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(entry.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(event_ordinal)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 1)",
+    )
+    .bind(session.into_uuid())
+    .bind(frontier.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 1, $1, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(frontier.into_uuid())
+    .bind(entry.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_runner_placement_frontier
+            (session_id, placement_revision, semantic_entry_id,
+             context_frontier_id)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(entry.into_uuid())
+    .bind(frontier.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    let source = signalbox_domain::SemanticTranscriptEntryRef::from_source(session, entry);
+    let loaded = ProcessReadRepository::new(pool.clone())
+        .read_selected_transcript_entries(&[1], &[source])
+        .await?;
+
+    let expected = [ProcessTranscriptEntry::RunnerPlacementChanged {
+        entry_index: 0,
+        source_session: session,
+        entry,
+        prior_runner: registration.registration().runner(),
+        new_runner: registration.registration().runner(),
+        placement_revision: revision,
+        sandbox: RunnerSandboxProfile::Ambient,
+    }];
+    assert_eq!(loaded.as_ref(), &expected);
+
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("the idle session has an authoritative transcript");
+    assert_eq!(transcript.entries(), expected);
+    drop(pool);
+    Ok(())
+}
+
+/// S01 / S32 / INV-015 / INV-044: a queued turn activated after relocation
+/// extends the latest placement boundary instead of branching from the prior
+/// transcript prefix.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s01_s32_inv015_inv044_queued_activation_extends_runner_placement_boundary()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let selection = DirectModelSelection::from_uuid(uuid(0xb030));
+    let creation = CreateSession::new(
+        DurableCommandId::from_uuid(uuid(0xb031)),
+        SessionCreationProvenance::new(
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None,
+        ),
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+    )
+    .prepare(session)
+    .expect("the fixture session creation is preparable");
+    CreateSessionRepository::new(pool.clone(), session_credential_pin())
+        .handle(creation)
+        .await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    set_fixture_physical_attempt_effect(&pool, INITIAL_PHYSICAL_ATTEMPT, "effect_free").await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        session,
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            exact_runner_directory(),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the fixture placement pins on the live runner");
+    store.store_pin(&pin, &registration).await?;
+    let queued_turn = TurnId::from_uuid(uuid(0xb032));
+    let queued = SubmitInput::new(
+        DurableCommandId::from_uuid(uuid(0xb033)),
+        session,
+        UserContent::try_text(String::from("activate after runner relocation"))
+            .expect("the fixture input is valid"),
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::try_from_u64(1)
+                    .expect("the fixture defaults version is positive"),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        },
+    );
+    SubmitInputRepository::new(pool.clone())
+        .handle_with_candidates(
+            queued,
+            AcceptedInputId::from_uuid(uuid(0xb034)),
+            Some(queued_turn),
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(uuid(0xb035)),
+                ContextFrontierId::from_uuid(uuid(0xb036)),
+            ),
+            |_| TurnId::from_uuid(uuid(0xb037)),
+            |_| (Vec::new(), ContextFrontierId::from_uuid(uuid(0xb038))),
+        )
+        .await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries its issued credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    let revision = replacement.placement.revision();
+    let event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'profile_replaced'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let placement_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xb039));
+    let placement_frontier = ContextFrontierId::from_uuid(uuid(0xb03a));
+    let mut boundary = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             runner_placement_revision, runner_placement_event_ordinal)
+         VALUES ($1, $2, 'runner_placement_changed', $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(placement_entry.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(event_ordinal)
+    .execute(&mut *boundary)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 1)",
+    )
+    .bind(session.into_uuid())
+    .bind(placement_frontier.into_uuid())
+    .execute(&mut *boundary)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 1, $1, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(placement_frontier.into_uuid())
+    .bind(placement_entry.into_uuid())
+    .execute(&mut *boundary)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_runner_placement_frontier
+            (session_id, placement_revision, semantic_entry_id,
+             context_frontier_id)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(placement_entry.into_uuid())
+    .bind(placement_frontier.into_uuid())
+    .execute(&mut *boundary)
+    .await?;
+    boundary.commit().await?;
+    let model_identity_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xb03b));
+    let starting_frontier = ContextFrontierId::from_uuid(uuid(0xb03c));
+    let origin_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xb03d));
+    StartEligibleTurnRepository::new(pool.clone())
+        .handle(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                model_identity_entry,
+                origin_entry,
+                starting_frontier,
+                TurnAttemptId::from_uuid(uuid(0xb03e)),
+            ),
+        )
+        .await?;
+    let starting_members = sqlx::query_scalar::<_, Uuid>(
+        "SELECT semantic_entry_id
+           FROM context_frontier_member
+          WHERE owning_session_id = $1 AND context_frontier_id = $2
+          ORDER BY member_position",
+    )
+    .bind(session.into_uuid())
+    .bind(starting_frontier.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+
+    assert_eq!(
+        starting_members,
+        vec![placement_entry.into_uuid(), origin_entry.into_uuid()]
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-015 / INV-044: a new placement boundary cannot be attached to a
+/// historical revision after a newer placement has become current.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv015_inv044_runner_placement_boundary_rejects_historical_revision()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries its issued credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    let session = replacement.placement.session();
+    let historical_revision = replacement.placement.revision();
+    let historical_event: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'profile_replaced'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let successor = duplicate_placement(&replacement.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(&replacement.grant.grant, registration.registration()),
+            registration.registration(),
+            profile(),
+            [tool("inspect")],
+        )
+        .expect("the current replacement permits a later profile revision");
+    store
+        .store_placement(
+            &successor.placement,
+            Some(&registration),
+            Some(&successor.grant.grant),
+        )
+        .await?;
+    let entry = SemanticTranscriptEntryId::from_uuid(uuid(0xb004));
+    let frontier = ContextFrontierId::from_uuid(uuid(0xb005));
+    let mut historical = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             runner_placement_revision, runner_placement_event_ordinal)
+         VALUES ($1, $2, 'runner_placement_changed', $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(entry.into_uuid())
+    .bind(Decimal::from(historical_revision.get()))
+    .bind(historical_event)
+    .execute(&mut *historical)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 1)",
+    )
+    .bind(session.into_uuid())
+    .bind(frontier.into_uuid())
+    .execute(&mut *historical)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 1, $1, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(frontier.into_uuid())
+    .bind(entry.into_uuid())
+    .execute(&mut *historical)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_runner_placement_frontier
+            (session_id, placement_revision, semantic_entry_id,
+             context_frontier_id)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(Decimal::from(historical_revision.get()))
+    .bind(entry.into_uuid())
+    .bind(frontier.into_uuid())
+    .execute(&mut *historical)
+    .await?;
+    let rejected = historical
+        .commit()
+        .await
+        .expect_err("a new boundary cannot target a historical placement revision");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// S28 / S32 / INV-015 / INV-044: inherited semantic history cannot be
+/// discarded by installing a placement boundary as a fresh one-entry root.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s28_s32_inv015_inv044_runner_placement_boundary_rejects_inherited_non_prefix_root()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let conversation = imported_conversation(0xb100, 0xb101);
+    ImportedConversationStore::resolve_or_insert(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+    )
+    .await?;
+    let session = SessionId::from_uuid(uuid(0xb102));
+    let placement_request = SessionRunnerPlacementRequest {
+        selector: RunnerSelector::CapabilityClass(class()),
+        working_directory: WorkingDirectorySelection::RunnerDefault,
+        credential_profile: Some(profile()),
+        workspace: WorkspaceRequirement::None,
+        sandbox: RunnerSandboxProfile::Ambient,
+        permission_overrides: no_permission_overrides(),
+    };
+    let command = CreateSessionFromImportedFrontier::new(
+        DurableCommandId::from_uuid(uuid(0xb103)),
+        conversation
+            .frontiers()
+            .last()
+            .expect("the imported fixture has one addressable frontier"),
+        ImportedSessionRelationship::Fork,
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+            DirectModelSelection::from_uuid(uuid(0xb104)),
+        )),
+    )
+    .with_runner_placement(Some(placement_request));
+    ImportedSessionRepository::new(pool.clone(), session_credential_pin())
+        .handle(
+            command,
+            session,
+            ContextFrontierId::from_uuid(uuid(0xb105)),
+            || SemanticTranscriptEntryId::from_uuid(uuid(0xb106)),
+        )
+        .await?;
+    insert_physical_attempt_for(&pool, session, SECOND_SESSION_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let placement = store
+        .load_placement(session)
+        .await?
+        .expect("the imported session retains its requested runner placement")
+        .placement()
+        .clone();
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            exact_runner_directory(),
+            None,
+            authorized_for_session(session, SECOND_SESSION_PHYSICAL_ATTEMPT),
+            offer_request_for(LEASE + RELATED_IDENTITY_OFFSET),
+        )
+        .expect("the imported session placement pins on its live runner");
+    store.store_pin(&pin, &registration).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries its issued credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    let revision = replacement.placement.revision();
+    let event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'profile_replaced'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let entry = SemanticTranscriptEntryId::from_uuid(uuid(0xb010));
+    let frontier = ContextFrontierId::from_uuid(uuid(0xb011));
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             runner_placement_revision, runner_placement_event_ordinal)
+         VALUES ($1, $2, 'runner_placement_changed', $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(entry.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(event_ordinal)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 1)",
+    )
+    .bind(session.into_uuid())
+    .bind(frontier.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 1, $1, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(frontier.into_uuid())
+    .bind(entry.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_runner_placement_frontier
+            (session_id, placement_revision, semantic_entry_id,
+             context_frontier_id)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(entry.into_uuid())
+    .bind(frontier.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let non_prefix = transaction
+        .commit()
+        .await
+        .expect_err("an existing semantic prefix cannot be replaced by a new root");
+
+    assert_check_violation(non_prefix);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-015 / INV-044: a placement boundary extends the current physical
+/// frontier leaf and cannot branch from an already-extended prefix.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv015_inv044_runner_placement_boundary_rejects_stale_frontier_tip()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries its issued credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    let session = replacement.placement.session();
+    let revision = replacement.placement.revision();
+    let event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'profile_replaced'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let stale_prefix = ContextFrontierId::from_uuid(uuid(0xb020));
+    let authoritative_tip = ContextFrontierId::from_uuid(uuid(0xb021));
+    let entry = SemanticTranscriptEntryId::from_uuid(uuid(0xb022));
+    let stale_successor = ContextFrontierId::from_uuid(uuid(0xb023));
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(session.into_uuid())
+    .bind(stale_prefix.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id,
+             prefix_context_frontier_id, member_count)
+         VALUES ($1, $2, $3, 0)",
+    )
+    .bind(session.into_uuid())
+    .bind(authoritative_tip.into_uuid())
+    .bind(stale_prefix.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             runner_placement_revision, runner_placement_event_ordinal)
+         VALUES ($1, $2, 'runner_placement_changed', $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(entry.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(event_ordinal)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id,
+             prefix_context_frontier_id, member_count)
+         VALUES ($1, $2, $3, 1)",
+    )
+    .bind(session.into_uuid())
+    .bind(stale_successor.into_uuid())
+    .bind(stale_prefix.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 1, $1, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(stale_successor.into_uuid())
+    .bind(entry.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_runner_placement_frontier
+            (session_id, placement_revision, semantic_entry_id,
+             context_frontier_id)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(entry.into_uuid())
+    .bind(stale_successor.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let stale_boundary = transaction
+        .commit()
+        .await
+        .expect_err("a placement boundary cannot branch from a stale frontier tip");
+
+    assert_check_violation(stale_boundary);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_placement_boundary_requires_its_exact_frontier_pointer()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries its issued credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    let session = replacement.placement.session();
+    let revision = replacement.placement.revision();
+    let entry = SemanticTranscriptEntryId::from_uuid(uuid(0xb003));
+    let event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'profile_replaced'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             runner_placement_revision, runner_placement_event_ordinal)
+         VALUES ($1, $2, 'runner_placement_changed', $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(entry.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(event_ordinal)
+    .execute(&mut *transaction)
+    .await?;
+    let missing_pointer = transaction
+        .commit()
+        .await
+        .expect_err("a runner placement semantic entry requires its exact frontier pointer");
+
+    assert_check_violation(missing_pointer);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_placement_readback_rejects_a_missing_frontier_pointer()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries its issued credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await?;
+    let session = replacement.placement.session();
+    let revision = replacement.placement.revision();
+    let entry = SemanticTranscriptEntryId::from_uuid(uuid(0xb004));
+    let event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'profile_replaced'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE semantic_transcript_entry
+         DISABLE TRIGGER runner_placement_semantic_frontier_is_required",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             runner_placement_revision, runner_placement_event_ordinal)
+         VALUES ($1, $2, 'runner_placement_changed', $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(entry.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(event_ordinal)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE semantic_transcript_entry
+         ENABLE TRIGGER runner_placement_semantic_frontier_is_required",
+    )
+    .execute(&pool)
+    .await?;
+    let source = signalbox_domain::SemanticTranscriptEntryRef::from_source(session, entry);
+    let corrupted = ProcessReadRepository::new(pool.clone())
+        .read_selected_transcript_entries(&[1], &[source])
+        .await
+        .expect_err("readback rejects a placement entry without its frontier pointer");
+
+    assert_eq!(
+        corrupted.to_string(),
+        "process read has inconsistent runner placement entry shape"
+    );
+    drop(pool);
+    Ok(())
+}
+
 /// INV-002 / INV-045: a profile replacement cannot derive fresh credential
 /// authority from a predecessor grant that durable audit already revoked.
 #[tokio::test]
@@ -15307,8 +16401,7 @@ async fn s32_inv044_inv045_relational_placement_binds_selected_grant() -> Result
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv044_inv045_cross_runner_grant_predecessor_round_trips() -> Result<(), Box<dyn Error>>
-{
+async fn s32_inv044_inv045_cross_runner_replacement_round_trips() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -15369,13 +16462,85 @@ async fn s32_inv044_inv045_cross_runner_grant_predecessor_round_trips() -> Resul
             replacement.grant.as_ref(),
         )
         .await?;
+    let session = replacement.placement.session();
+    let revision = replacement.placement.revision();
+    let event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'runner_replaced'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let entry = SemanticTranscriptEntryId::from_uuid(uuid(0xb201));
+    let frontier = ContextFrontierId::from_uuid(uuid(0xb202));
+    let mut boundary = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             runner_placement_revision, runner_placement_event_ordinal)
+         VALUES ($1, $2, 'runner_placement_changed', $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(entry.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(event_ordinal)
+    .execute(&mut *boundary)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 1)",
+    )
+    .bind(session.into_uuid())
+    .bind(frontier.into_uuid())
+    .execute(&mut *boundary)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 1, $1, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(frontier.into_uuid())
+    .bind(entry.into_uuid())
+    .execute(&mut *boundary)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_runner_placement_frontier
+            (session_id, placement_revision, semantic_entry_id,
+             context_frontier_id)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(entry.into_uuid())
+    .bind(frontier.into_uuid())
+    .execute(&mut *boundary)
+    .await?;
+    boundary.commit().await?;
     let loaded = store
         .load_placement(SessionId::from_uuid(uuid(SESSION)))
         .await?
         .expect("the cross-runner replacement is durable");
+    let source = signalbox_domain::SemanticTranscriptEntryRef::from_source(session, entry);
+    let transcript_entry = ProcessReadRepository::new(pool.clone())
+        .read_selected_transcript_entries(&[1], &[source])
+        .await?;
+    let expected_entry = ProcessTranscriptEntry::RunnerPlacementChanged {
+        entry_index: 0,
+        source_session: session,
+        entry,
+        prior_runner: first_registration.registration().runner(),
+        new_runner: second_registration.registration().runner(),
+        placement_revision: revision,
+        sandbox: RunnerSandboxProfile::Ambient,
+    };
 
     assert_eq!(loaded.placement(), &replacement.placement);
     assert_eq!(loaded.grant(), replacement.grant.as_ref());
+    assert_eq!(transcript_entry.as_ref(), &[expected_entry]);
     drop(pool);
     Ok(())
 }
@@ -19097,28 +20262,14 @@ async fn s32_inv032_inv044_runner_outbox_rejects_historical_connection_placement
     let session = pin.placement.session();
     let (placement_event_ordinal, placement_revision) =
         placement_outbox_facts(&pool, session, "pinned").await?;
-    let claimed = duplicate_lease(&pin.lease, registration.registration())
-        .claim(pin.lease.correlation())
-        .expect("the exact fixture lease correlation claims");
-    store.store_lease(&claimed).await?;
-    let completed = claimed
-        .complete(pin.lease.correlation())
-        .expect("the exact claimed fixture lease correlation completes");
-    store.store_lease(&completed).await?;
-    let connection_epoch: i64 = sqlx::query_scalar(
-        "SELECT connection_epoch::bigint
-           FROM runner_connection_authority_head
-          WHERE enrollment_id = $1",
-    )
-    .bind(expected_enrollment.enrollment().into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    let connection_epoch = RunnerConnectionEpoch::try_from_u64(u64::try_from(connection_epoch)?)
-        .expect("the fixture current connection epoch is positive");
+    complete_runner_lease_projection(&store, &registration, &pin).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
     store
         .transition_connection(
             expected_enrollment.enrollment(),
-            connection_epoch,
+            connection.epoch(),
             RunnerConnectionTransition::HeartbeatMissed,
         )
         .await?;
@@ -19132,7 +20283,7 @@ async fn s32_inv032_inv044_runner_outbox_rejects_historical_connection_placement
     store
         .register(&expected_enrollment, narrowed_advertisement())
         .await?;
-    append_runner_registration_loss_projection_after_completed_lease(&store, &pin).await?;
+    append_runner_registration_loss_after_completed_lease_projection(&store, &pin).await?;
     let mut replacement = pool.begin().await?;
     append_same_runner_replacement_projection(&mut replacement, session, None).await?;
     replacement.commit().await?;

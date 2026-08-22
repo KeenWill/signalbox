@@ -9,6 +9,9 @@ re-verified through this PR (`agent/daemon-runner-health-events`).
 The `active_awaiting_runner_recovery` transcript-turn vocabulary was verified
 against this PR (`agent/runner-awaiting-recovery-persistence`).
 
+The `runner_placement_changed` transcript entry and daemon/client projection
+were verified against this PR (`agent/runner-placement-semantic-persistence`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 

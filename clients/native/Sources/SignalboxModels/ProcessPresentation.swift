@@ -545,6 +545,79 @@ public struct SignalboxProcessModelIdentityEvent: Codable, Equatable, Sendable {
   }
 }
 
+public struct SignalboxProcessRunnerPlacementEvent: Codable, Equatable, Sendable {
+  public let kind: String
+  public let priorRunnerID: SignalboxCanonicalUUID
+  public let newRunnerID: SignalboxCanonicalUUID
+  public let placementRevision: SignalboxCanonicalUInt64
+  public let sandboxProfile: SignalboxRunnerSandboxProfile
+
+  public init(
+    priorRunnerID: SignalboxCanonicalUUID,
+    newRunnerID: SignalboxCanonicalUUID,
+    placementRevision: SignalboxCanonicalUInt64,
+    sandboxProfile: SignalboxRunnerSandboxProfile
+  ) throws {
+    guard placementRevision.rawValue > 0 else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: [],
+          debugDescription: "Runner-placement revision must be positive."
+        )
+      )
+    }
+    self.kind = "process_runner_placement"
+    self.priorRunnerID = priorRunnerID
+    self.newRunnerID = newRunnerID
+    self.placementRevision = placementRevision
+    self.sandboxProfile = sandboxProfile
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case kind
+    case priorRunnerID = "prior_runner_id"
+    case newRunnerID = "new_runner_id"
+    case placementRevision = "placement_revision"
+    case sandboxProfile = "sandbox_profile"
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let kind = try container.decode(String.self, forKey: .kind)
+    guard kind == "process_runner_placement" else {
+      throw DecodingError.dataCorruptedError(
+        forKey: .kind,
+        in: container,
+        debugDescription: "The value is not runner-placement evidence."
+      )
+    }
+    try self.init(
+      priorRunnerID: container.decode(SignalboxCanonicalUUID.self, forKey: .priorRunnerID),
+      newRunnerID: container.decode(SignalboxCanonicalUUID.self, forKey: .newRunnerID),
+      placementRevision: container.decode(
+        SignalboxCanonicalUInt64.self,
+        forKey: .placementRevision
+      ),
+      sandboxProfile: container.decode(
+        SignalboxRunnerSandboxProfile.self,
+        forKey: .sandboxProfile
+      )
+    )
+  }
+
+  init(closedFrom decoder: Decoder) throws {
+    let payload = try SignalboxUntaggedPayload(from: decoder)
+    try payload.rejectUnadmittedFields(
+      [
+        "kind", "prior_runner_id", "new_runner_id", "placement_revision",
+        "sandbox_profile",
+      ],
+      decoder: decoder
+    )
+    self = try Self(from: decoder)
+  }
+}
+
 public struct SignalboxProcessModelCallUsageEvent: Codable, Equatable, Sendable {
   public let kind: String
   public let turnID: SignalboxCanonicalUUID

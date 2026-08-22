@@ -3792,7 +3792,12 @@ async fn require_runner_loss_authority(
     loss: RunnerConnectionLossSnapshot,
 ) -> Result<(), RunnerProtocolStoreError> {
     let identity = sqlx::query(
-        "SELECT lock_runner_loss_identity(runner_id)
+        "SELECT pg_advisory_xact_lock(
+                    hashtextextended(
+                        'signalbox.runner-loss-identity.' || runner_id::text,
+                        0
+                    )
+                )
            FROM runner_enrollment
           WHERE enrollment_id = $1",
     )
@@ -7854,10 +7859,17 @@ async fn lock_runner_placement_loss_baseline(
     let Some(runner) = placement_loss_fence_runner(placement) else {
         return Ok(());
     };
-    sqlx::query("SELECT lock_runner_loss_identity($1)")
-        .bind(runner.into_uuid())
-        .execute(&mut **transaction)
-        .await?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(
+                    hashtextextended(
+                        'signalbox.runner-loss-identity.' || $1::uuid::text,
+                        0
+                    )
+                )",
+    )
+    .bind(runner.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
     let enrollment = sqlx::query_scalar::<_, Uuid>(RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER)
         .bind(runner.into_uuid())
         .fetch_optional(&mut **transaction)

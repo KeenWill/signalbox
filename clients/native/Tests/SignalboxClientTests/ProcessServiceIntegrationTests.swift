@@ -865,6 +865,27 @@ final class ProcessServiceIntegrationTests: XCTestCase {
     )
   }
 
+  func testRunnerPlacementProjectsAsTypedTimelineNotice() throws {
+    let snapshot = try ProcessProjectionFixture.snapshotWithRunnerPlacementEvidence()
+    var projector = SignalboxProcessTranscriptProjector()
+
+    let projection = try projector.projectAuthoritativeSnapshot(snapshot)
+    let normalizer = try SignalboxIncrementalEventNormalizer(records: projection.records)
+
+    XCTAssertEqual(
+      ProcessProjectionFixture.noticeTitles(in: normalizer.timelineItems),
+      ProcessProjectionFixture.runnerPlacementNoticeTitles
+    )
+    XCTAssertEqual(
+      ProcessProjectionFixture.noticeDetailValues(in: normalizer.timelineItems),
+      ProcessProjectionFixture.runnerPlacementNoticeDetailValues
+    )
+    XCTAssertEqual(
+      projection.records.map(\.event.kind),
+      ProcessProjectionFixture.runnerPlacementEventKinds
+    )
+  }
+
   func testModelUsagePresentationIDsSurviveEarlierInsertion() throws {
     let initialSnapshot = try ProcessProjectionFixture.snapshotWithLaterModelUsageOnly()
     let updatedSnapshot = try ProcessProjectionFixture.snapshotWithEarlierModelUsageInserted()
@@ -6359,6 +6380,15 @@ private enum ProcessProjectionFixture {
   static let modelUsageNoticeTitle = "Model usage"
   static let modelCallDetailLabel = "Model call"
   static let modelNoticeTitles = ["Model changed", modelUsageNoticeTitle]
+  static let runnerPlacementNoticeTitles = ["Runner placement changed"]
+  static let runnerPlacementEventKinds = ["process_runner_placement"]
+  static let priorRunnerID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+  static let newRunnerID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+  static let runnerPlacementEntry = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+  static let runnerPlacementRevision = UInt64(2)
+  static let runnerPlacementNoticeDetailValues = [
+    priorRunnerID, newRunnerID, runnerPlacementRevision.description, "workspace-restricted",
+  ]
   static let noNoticeTitles: [String] = []
   static let modelPresentationEventKinds = [
     "process_model_identity", "process_message", "process_message",
@@ -8431,6 +8461,48 @@ private enum ProcessProjectionFixture {
           "cursor":"1",
           "turn_count":"2",
           "entry_count":"3"
+        }
+        """,
+      ]
+    )
+  }
+
+  static func snapshotWithRunnerPlacementEvidence() throws
+    -> SignalboxSynchronizationSnapshot
+  {
+    try snapshot(
+      messages: [
+        """
+        {
+          "type":"transcript_snapshot_start",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "runner":null
+        }
+        """,
+        emptyModelCallsBoundary,
+        """
+        {
+          "type":"transcript_entry",
+          "entry_index":"0",
+          "source_session_id":"\(ProcessDriverFixture.session)",
+          "entry_id":"\(runnerPlacementEntry)",
+          "entry":{
+            "type":"runner_placement_changed",
+            "prior_runner_id":"\(priorRunnerID)",
+            "new_runner_id":"\(newRunnerID)",
+            "placement_revision":"\(runnerPlacementRevision)",
+            "sandbox_profile":"workspace-restricted"
+          }
+        }
+        """,
+        """
+        {
+          "type":"transcript_snapshot_end",
+          "session_id":"\(ProcessDriverFixture.session)",
+          "cursor":"1",
+          "turn_count":"0",
+          "entry_count":"1"
         }
         """,
       ]

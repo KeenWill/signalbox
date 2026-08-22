@@ -62,7 +62,8 @@ pub use model_execution::{
     ModelCallInputTokenCount, ModelCallInputTokenCounter, ModelCallProvider,
     ModelCallTerminalIdentityCandidates, ModelConversationMessage, ModelFrontierRenderingError,
     ModelToolResultContent, PrepareModelCallOutcome, PrepareModelCallTransaction,
-    PreparedModelOperation, RetainedCapabilityFailureStatus, RetainedModelCallExecutionState,
+    PreparedModelOperation, ResolvedRunnerPlacementConversationEntry,
+    RetainedCapabilityFailureStatus, RetainedModelCallExecutionState,
     RetainedModelCallObservationStatus, ScriptedModelCallCapability, ScriptedModelCallError,
     ScriptedModelCallProvider, ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
 };

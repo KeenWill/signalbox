@@ -18,10 +18,11 @@ use crate::{
     CurrentToolAttemptState, DecideToolRequest, DecideToolRequestResult, DelegateToolApproval,
     EndedToolAttempt, PreparedDecideToolRequest, ReconstitutedToolAttempt,
     ResolvedContextFrontierSnapshot, RunnerToolAttemptAuthorization, SemanticTranscriptEntry,
-    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision,
-    ToolApprovalResolution, ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId,
-    ToolDispatchAuthority, ToolEffectClass, ToolExecutionErrorKind, ToolRequest, ToolRequestId,
-    TurnAttemptId, TurnId, tool::MAX_TOOL_REQUESTS_PER_RESPONSE,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
+    SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, SessionId,
+    ToolApprovalDecision, ToolApprovalResolution, ToolAttemptCrashOutcome, ToolAttemptEnd,
+    ToolAttemptId, ToolDispatchAuthority, ToolEffectClass, ToolExecutionErrorKind, ToolRequest,
+    ToolRequestId, TurnAttemptId, TurnId, tool::MAX_TOOL_REQUESTS_PER_RESPONSE,
     tool_attempt::RUNNER_ISSUANCE_AVAILABLE, tool_attempt::RUNNER_ISSUANCE_ISSUED,
     tool_attempt::RUNNER_ISSUANCE_RETIRED,
 };
@@ -62,6 +63,8 @@ pub struct ToolBatchReconstitutionInput {
     turn: TurnId,
     producing_call: crate::ModelCallId,
     yielded_snapshot: ResolvedContextFrontierSnapshot,
+    projection_base_snapshot: Option<ResolvedContextFrontierSnapshot>,
+    projection_base_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
     requests: Vec<ToolRequest>,
     approvals: Vec<ToolApprovalResolution>,
     attempts: Vec<ReconstitutedToolAttempt>,
@@ -88,6 +91,8 @@ impl ToolBatchReconstitutionInput {
             turn,
             producing_call,
             yielded_snapshot,
+            projection_base_snapshot: None,
+            projection_base_entries: Vec::new(),
             requests,
             approvals,
             attempts,
@@ -95,6 +100,18 @@ impl ToolBatchReconstitutionInput {
             runner_authorized_attempts: Vec::new(),
             phase,
         }
+    }
+
+    /// Supplies the latest compatible session boundary from which result
+    /// entries must be appended.
+    pub fn with_projection_base_snapshot(
+        mut self,
+        projection_base_snapshot: ResolvedContextFrontierSnapshot,
+        projection_base_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+    ) -> Self {
+        self.projection_base_snapshot = Some(projection_base_snapshot);
+        self.projection_base_entries = projection_base_entries;
+        self
     }
 
     /// Supplies the complete durable retired-attempt identity inventory.
@@ -131,6 +148,8 @@ pub enum ToolBatchReconstitutionFailure {
     RequestOrderMismatch,
     /// The yielded snapshot belongs to a different session.
     YieldedSnapshotSessionMismatch,
+    /// The result base diverges from the same-session yielded snapshot.
+    ProjectionBaseMismatch,
     /// A decision is duplicated or names a request outside the batch.
     ApprovalInventoryMismatch,
     /// An attempt is duplicated or names a request outside the batch.
@@ -211,6 +230,7 @@ pub struct ToolBatch {
     turn: TurnId,
     producing_call: crate::ModelCallId,
     yielded_snapshot: ResolvedContextFrontierSnapshot,
+    projection_base_snapshot: ResolvedContextFrontierSnapshot,
     requests: Box<[ToolRequest]>,
     approvals: BTreeMap<ToolRequestId, ToolApprovalResolution>,
     attempts: BTreeMap<ToolRequestId, ReconstitutedToolAttempt>,
@@ -226,6 +246,7 @@ impl PartialEq for ToolBatch {
             && self.turn == other.turn
             && self.producing_call == other.producing_call
             && self.yielded_snapshot == other.yielded_snapshot
+            && self.projection_base_snapshot == other.projection_base_snapshot
             && self.requests == other.requests
             && self.approvals == other.approvals
             && self.attempts == other.attempts
@@ -258,6 +279,11 @@ impl ToolBatch {
     /// Borrows the yielded assistant-content snapshot.
     pub const fn yielded_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
         &self.yielded_snapshot
+    }
+
+    /// Borrows the latest compatible boundary immediately preceding results.
+    pub const fn projection_base_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
+        &self.projection_base_snapshot
     }
 
     /// Returns requests in proposal order.
@@ -959,7 +985,7 @@ impl ToolBatch {
             });
         }
         let mut used = self
-            .yielded_snapshot
+            .projection_base_snapshot
             .ordered_entries()
             .map(|reference| reference.entry())
             .collect::<BTreeSet<_>>();
@@ -1058,7 +1084,7 @@ impl ToolBatch {
             });
         }
         let snapshot = self
-            .yielded_snapshot
+            .projection_base_snapshot
             .derive_appending_candidate(
                 continuation_frontier,
                 entries
@@ -1071,6 +1097,7 @@ impl ToolBatch {
             })?;
         Ok(PreparedToolResultProjection {
             source_frontier: self.yielded_snapshot.frontier().snapshot(),
+            projection_base_snapshot: self.projection_base_snapshot.clone(),
             turn: self.turn,
             producing_call: self.producing_call,
             entries: entries.into_boxed_slice(),
@@ -1172,7 +1199,7 @@ impl ToolBatch {
             });
         }
         let mut used = self
-            .yielded_snapshot
+            .projection_base_snapshot
             .ordered_entries()
             .map(|reference| reference.entry())
             .collect::<BTreeSet<_>>();
@@ -1271,7 +1298,7 @@ impl ToolBatch {
             });
         }
         let snapshot = self
-            .yielded_snapshot
+            .projection_base_snapshot
             .derive_appending_candidate(
                 result_frontier,
                 entries
@@ -1284,6 +1311,7 @@ impl ToolBatch {
             })?;
         Ok(PreparedToolResultProjection {
             source_frontier: self.yielded_snapshot.frontier().snapshot(),
+            projection_base_snapshot: self.projection_base_snapshot.clone(),
             turn: self.turn,
             producing_call: self.producing_call,
             entries: entries.into_boxed_slice(),
@@ -1310,7 +1338,7 @@ impl ToolBatch {
             });
         }
         let mut used = self
-            .yielded_snapshot
+            .projection_base_snapshot
             .ordered_entries()
             .map(|reference| reference.entry())
             .collect::<BTreeSet<_>>();
@@ -1366,7 +1394,7 @@ impl ToolBatch {
             ));
         }
         let snapshot = self
-            .yielded_snapshot
+            .projection_base_snapshot
             .derive_appending_candidate(
                 terminal_frontier,
                 entries
@@ -1379,6 +1407,7 @@ impl ToolBatch {
             })?;
         Ok(PreparedToolResultProjection {
             source_frontier: self.yielded_snapshot.frontier().snapshot(),
+            projection_base_snapshot: self.projection_base_snapshot.clone(),
             turn: self.turn,
             producing_call: self.producing_call,
             entries: entries.into_boxed_slice(),
@@ -1689,6 +1718,7 @@ impl ToolBatchExecutionError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedToolResultProjection {
     source_frontier: crate::ContextFrontierId,
+    projection_base_snapshot: ResolvedContextFrontierSnapshot,
     turn: TurnId,
     producing_call: crate::ModelCallId,
     entries: Box<[SemanticTranscriptEntry]>,
@@ -1699,6 +1729,7 @@ impl PreparedToolResultProjection {
     #[cfg(test)]
     pub(crate) fn from_validated_parts(
         source_frontier: crate::ContextFrontierId,
+        projection_base_snapshot: ResolvedContextFrontierSnapshot,
         turn: TurnId,
         producing_call: crate::ModelCallId,
         entries: Vec<SemanticTranscriptEntry>,
@@ -1706,6 +1737,7 @@ impl PreparedToolResultProjection {
     ) -> Self {
         Self {
             source_frontier,
+            projection_base_snapshot,
             turn,
             producing_call,
             entries: entries.into_boxed_slice(),
@@ -1716,6 +1748,12 @@ impl PreparedToolResultProjection {
     /// Returns the exact yielded frontier from which the results were derived.
     pub(crate) const fn source_frontier(&self) -> crate::ContextFrontierId {
         self.source_frontier
+    }
+
+    /// Borrows the checked placement-aware boundary immediately preceding
+    /// the projected result entries.
+    pub const fn projection_base_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
+        &self.projection_base_snapshot
     }
 
     pub(crate) const fn turn(&self) -> TurnId {
@@ -1795,6 +1833,46 @@ fn reconstitute_batch(
             ToolBatchReconstitutionFailure::YieldedSnapshotSessionMismatch,
         ));
     }
+    let projection_base_snapshot = match input.projection_base_snapshot.clone() {
+        Some(candidate)
+            if candidate.frontier().owning_session() == input.session
+                && input.yielded_snapshot.is_semantic_prefix_of(&candidate)
+                && candidate.entry_count() - input.yielded_snapshot.entry_count()
+                    == input.projection_base_entries.len()
+                && candidate
+                    .ordered_entries()
+                    .skip(input.yielded_snapshot.entry_count())
+                    .zip(&input.projection_base_entries)
+                    .all(|(reference, entry)| {
+                        reference
+                            == SemanticTranscriptEntryRef::from_source(
+                                entry.source_session(),
+                                entry.identity(),
+                            )
+                            && entry.source_session() == input.session
+                            && matches!(
+                                entry.payload(),
+                                SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+                            )
+                    }) =>
+        {
+            candidate
+        }
+        Some(candidate)
+            if candidate.frontier().owning_session() == input.session
+                && candidate.is_semantic_prefix_of(&input.yielded_snapshot)
+                && input.projection_base_entries.is_empty() =>
+        {
+            input.yielded_snapshot.clone()
+        }
+        Some(_) => {
+            return Err(fail(
+                input,
+                ToolBatchReconstitutionFailure::ProjectionBaseMismatch,
+            ));
+        }
+        None => input.yielded_snapshot.clone(),
+    };
     let mut requests = input.requests.clone();
     requests.sort_by_key(ToolRequest::ordinal);
     let mut request_ids = BTreeSet::new();
@@ -2134,6 +2212,7 @@ fn reconstitute_batch(
         turn: input.turn,
         producing_call: input.producing_call,
         yielded_snapshot: input.yielded_snapshot,
+        projection_base_snapshot,
         requests: requests.into_boxed_slice(),
         approvals,
         attempts,
@@ -2179,7 +2258,7 @@ mod tests {
     use crate::{
         DelegationContent, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
         DelegationProvenanceReconstitutionInput, DurableCommandId, NormalizedToolArguments,
-        ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind,
+        SemanticTranscriptEntryRef, ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind,
         ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolDecisionSource,
         ToolDispatchGeneration, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
         ToolResultContent, ToolResultText,
@@ -2222,6 +2301,108 @@ mod tests {
             Vec::new(),
         )
         .expect("an empty fixture snapshot is valid")
+    }
+
+    fn placement_snapshot() -> ResolvedContextFrontierSnapshot {
+        yielded_snapshot()
+            .derive_appending_candidate(
+                context_frontier_id(5),
+                vec![SemanticTranscriptEntryRef::from_source(
+                    session_id(1),
+                    semantic_transcript_entry_id(6),
+                )],
+            )
+            .expect("the placement boundary extends the yielded snapshot")
+    }
+
+    fn placement_entry() -> SemanticTranscriptEntryReconstitutionInput {
+        SemanticTranscriptEntryReconstitutionInput::new(
+            semantic_transcript_entry_id(6),
+            session_id(1),
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                placement_revision: crate::RunnerGeneration::try_from_u64(2)
+                    .expect("the fixture placement revision is positive"),
+            },
+        )
+    }
+
+    #[test]
+    fn placement_projection_base_rejects_divergent_lineage() {
+        let yielded = ResolvedContextFrontierSnapshot::try_from_candidate(
+            session_id(1),
+            context_frontier_id(20),
+            vec![SemanticTranscriptEntryRef::from_source(
+                session_id(1),
+                semantic_transcript_entry_id(21),
+            )],
+        )
+        .expect("the yielded fixture is valid");
+        let divergent = ResolvedContextFrontierSnapshot::try_from_candidate(
+            session_id(1),
+            context_frontier_id(22),
+            vec![SemanticTranscriptEntryRef::from_source(
+                session_id(1),
+                semantic_transcript_entry_id(23),
+            )],
+        )
+        .expect("the divergent fixture is independently valid");
+        let only = request(10, 0);
+        let error = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded,
+            vec![only.clone()],
+            vec![],
+            vec![],
+            ToolBatchPhaseReconstitutionInput::AwaitingApproval { request: only.id() },
+        )
+        .with_projection_base_snapshot(divergent, Vec::new())
+        .reconstitute()
+        .expect_err("divergent placement lineage must fail closed");
+
+        assert_eq!(
+            error.failure(),
+            ToolBatchReconstitutionFailure::ProjectionBaseMismatch
+        );
+    }
+
+    #[test]
+    fn placement_projection_base_rejects_nonplacement_suffix() {
+        let yielded = yielded_snapshot();
+        let unrelated_entry = SemanticTranscriptEntryReconstitutionInput::new(
+            semantic_transcript_entry_id(6),
+            session_id(1),
+            SemanticTranscriptEntryPayload::TurnFailed { turn: turn_id(2) },
+        );
+        let unrelated = yielded
+            .derive_appending_candidate(
+                context_frontier_id(5),
+                vec![SemanticTranscriptEntryRef::from_source(
+                    session_id(1),
+                    semantic_transcript_entry_id(6),
+                )],
+            )
+            .expect("the unrelated suffix is structurally valid");
+        let only = request(10, 0);
+        let error = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded,
+            vec![only.clone()],
+            vec![],
+            vec![],
+            ToolBatchPhaseReconstitutionInput::AwaitingApproval { request: only.id() },
+        )
+        .with_projection_base_snapshot(unrelated, vec![unrelated_entry])
+        .reconstitute()
+        .expect_err("a non-placement projection-base suffix must fail closed");
+
+        assert_eq!(
+            error.failure(),
+            ToolBatchReconstitutionFailure::ProjectionBaseMismatch
+        );
     }
 
     fn awaiting_batch() -> ToolBatch {
@@ -2853,6 +3034,8 @@ mod tests {
     fn s11_inv005_inv027_result_projection_is_reference_only_and_ordered() {
         let executed = request(10, 0);
         let denied = request(11, 1);
+        let yielded = yielded_snapshot();
+        let placement = placement_snapshot();
         let success = ToolAttemptEnd::Completed {
             result: ToolResultContent::Text(
                 ToolResultText::try_new(String::from("ok")).expect("bounded result is valid"),
@@ -2874,7 +3057,7 @@ mod tests {
             session_id(1),
             turn_id(2),
             model_call_id(3),
-            yielded_snapshot(),
+            yielded.clone(),
             vec![executed, denied],
             vec![
                 approval(tool_request_id(10), ToolApprovalDecision::Approve),
@@ -2888,6 +3071,7 @@ mod tests {
                 turn_attempt: turn_attempt_id(13),
             },
         )
+        .with_projection_base_snapshot(placement.clone(), vec![placement_entry()])
         .reconstitute()
         .expect("terminal evidence and denial resolve the batch");
         let projection = batch
@@ -2899,6 +3083,25 @@ mod tests {
                 context_frontier_id(16),
             )
             .expect("all logical results can be projected");
+        let cancellation = batch
+            .prepare_cancellation_projection(
+                vec![
+                    semantic_transcript_entry_id(17),
+                    semantic_transcript_entry_id(18),
+                ],
+                context_frontier_id(19),
+            )
+            .expect("cancellation projects after the placement boundary");
+
+        assert_eq!(projection.source_frontier(), yielded.frontier().snapshot());
+        assert_eq!(projection.projection_base_snapshot(), &placement);
+        assert_eq!(projection.snapshot().entry_count(), 3);
+        assert_eq!(
+            cancellation.source_frontier(),
+            yielded.frontier().snapshot()
+        );
+        assert_eq!(cancellation.projection_base_snapshot(), &placement);
+        assert_eq!(cancellation.snapshot().entry_count(), 3);
 
         assert_eq!(
             projection.entries()[0].payload(),
@@ -3027,6 +3230,8 @@ mod tests {
     fn s06_inv005_inv006_inv025_reconciliation_projection_closes_ambiguity() {
         let ambiguous = request(10, 0);
         let unresolved = request(11, 1);
+        let yielded = yielded_snapshot();
+        let placement = placement_snapshot();
         let attempt = ToolAttemptReconstitutionInput::new(
             tool_attempt_id(12),
             ambiguous.id(),
@@ -3043,7 +3248,7 @@ mod tests {
             session_id(1),
             turn_id(2),
             model_call_id(3),
-            yielded_snapshot(),
+            yielded.clone(),
             vec![ambiguous, unresolved],
             vec![
                 approval(tool_request_id(10), ToolApprovalDecision::Approve),
@@ -3054,6 +3259,7 @@ mod tests {
                 attempt: tool_attempt_id(12),
             },
         )
+        .with_projection_base_snapshot(placement.clone(), vec![placement_entry()])
         .reconstitute()
         .expect("the exact external-effect ambiguity admits recovery");
         let projection = batch
@@ -3081,7 +3287,9 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(projection.snapshot().entry_count(), 2);
+        assert_eq!(projection.source_frontier(), yielded.frontier().snapshot());
+        assert_eq!(projection.projection_base_snapshot(), &placement);
+        assert_eq!(projection.snapshot().entry_count(), 3);
     }
     /// S31 / INV-004 / INV-043: every clone of one checked batch shares one
     /// runner-authorization issuance capability.

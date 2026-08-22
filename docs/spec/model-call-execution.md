@@ -6,6 +6,10 @@ The user-vocabulary surface on this page was re-verified through PR #378
 The durable usage-provenance column and read projection are verified against PR
 `#389` (`agent/cost-accounting`).
 
+The resolved runner-placement boundary and both exact profile-specific provider
+messages were verified against this PR
+(`agent/runner-placement-semantic-persistence`).
+
 Multipart attachment rendering and verification below are the foundation
 proposal from PR #553 (`agent/blob-storage-foundation`) and become verified with
 its implementing child stack.
@@ -54,12 +58,12 @@ implementation were verified through PR #314
 (`agent/context-compaction-protocol`). The daemon does not schedule that
 automatic machinery. Session-delegation semantic rendering and its
 provider-neutral bridge were verified against this PR (`agent/delegation`). The
-runner-placement rendering and executable session-tool snapshot paragraphs are
-the foundation proposal at the bottom of their implementing stack and become
-verified only with those child pull requests. Availability successor calls are
-the foundation proposal at the bottom of their implementing stack and become
-verified only with its child pull requests. Invariant tags cite
-[docs/invariants.md](../invariants.md).
+runner-placement rendering is verified against this PR; the executable
+session-tool snapshot paragraph remains the foundation proposal at the bottom of
+its implementing stack and becomes verified only with its child pull requests.
+Availability successor calls are the foundation proposal at the bottom of their
+implementing stack and become verified only with its child pull requests.
+Invariant tags cite [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 

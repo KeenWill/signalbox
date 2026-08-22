@@ -362,6 +362,23 @@ public enum SignalboxEventNormalizer {
                     ]
                 )
             )
+        case .processRunnerPlacement(let event):
+            return .processEvidence(
+                SignalboxProcessNoticeCard(
+                    eventID: record.eventID,
+                    title: "Runner placement changed",
+                    systemImage: "arrow.triangle.2.circlepath",
+                    details: [
+                        .init(label: "Prior runner", value: event.priorRunnerID.rawValue),
+                        .init(label: "New runner", value: event.newRunnerID.rawValue),
+                        .init(
+                            label: "Placement revision",
+                            value: event.placementRevision.rawValue.description
+                        ),
+                        .init(label: "Sandbox profile", value: event.sandboxProfile.rawValue),
+                    ]
+                )
+            )
         case .processModelCallUsage(let event):
             return .processEvidence(
                 SignalboxProcessNoticeCard(

@@ -26,10 +26,10 @@ use signalbox_domain::{
     ImportedText, ImportedTranscriptContent, ImportedTranscriptEntryId, InitialToolApproval,
     ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
     ModelCallTerminalOutcome, PhysicalCancellationModelCallTurnIdentities,
-    PreparedModelCallRequest, RefusedModelCallTurnIdentities, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef,
-    SessionConfigurationDefaultsVersion, SessionId, SessionSystemPrompt,
-    StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
+    PreparedModelCallRequest, RefusedModelCallTurnIdentities, RunnerGeneration,
+    RunnerSandboxProfile, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
+    SemanticTranscriptEntryRef, SessionConfigurationDefaultsVersion, SessionId,
+    SessionSystemPrompt, StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
     StoppedToolRoundModelCallIdentities, ToolApprovalDecision, ToolAttemptEnd, ToolDenialReason,
     ToolExecutionError, ToolRequest, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
     ToolRoundModelCallIdentities, TurnAttemptId, TurnId, UserContent,
@@ -82,6 +82,15 @@ pub enum ModelConversationMessage {
         summarized: ContextCompactionRange,
         /// Exact model-produced summary text.
         content: AssistantText,
+    },
+    /// Injected session event declaring one successor runner placement active.
+    RunnerPlacementChanged {
+        /// The source-qualified semantic entry being rendered.
+        source: SemanticTranscriptEntryRef,
+        /// The exact positive successor placement revision.
+        placement_revision: RunnerGeneration,
+        /// The sandbox profile that determines the relocation warning.
+        sandbox: RunnerSandboxProfile,
     },
     /// Exact accepted-input origin content rendered with the user role.
     User {
@@ -166,6 +175,44 @@ pub enum ModelConversationMessage {
     },
 }
 
+/// Storage-resolved authority for one runner-placement semantic entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResolvedRunnerPlacementConversationEntry {
+    source: SemanticTranscriptEntryRef,
+    placement_revision: RunnerGeneration,
+    sandbox: RunnerSandboxProfile,
+}
+
+impl ResolvedRunnerPlacementConversationEntry {
+    /// Carries exact placement authority loaded by a durable adapter.
+    pub const fn new(
+        source: SemanticTranscriptEntryRef,
+        placement_revision: RunnerGeneration,
+        sandbox: RunnerSandboxProfile,
+    ) -> Self {
+        Self {
+            source,
+            placement_revision,
+            sandbox,
+        }
+    }
+
+    /// Returns the semantic entry whose reference this evidence resolves.
+    pub const fn source(self) -> SemanticTranscriptEntryRef {
+        self.source
+    }
+
+    /// Returns the exact successor placement revision.
+    pub const fn placement_revision(self) -> RunnerGeneration {
+        self.placement_revision
+    }
+
+    /// Returns the exact successor sandbox profile.
+    pub const fn sandbox(self) -> RunnerSandboxProfile {
+        self.sandbox
+    }
+}
+
 /// Provider-neutral result content resolved from durable request/attempt facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelToolResultContent {
@@ -193,6 +240,7 @@ fn render_frontier_messages<'a>(
     >,
     mut origin_content: impl FnMut(AcceptedInputId) -> Option<UserContent>,
     tool_entries: impl IntoIterator<Item = &'a ResolvedToolConversationEntry>,
+    runner_placement_entries: impl IntoIterator<Item = &'a ResolvedRunnerPlacementConversationEntry>,
 ) -> Result<Box<[ModelConversationMessage]>, ModelFrontierRenderingError> {
     let mut resolved_tools = BTreeMap::new();
     for evidence in tool_entries {
@@ -200,6 +248,19 @@ fn render_frontier_messages<'a>(
             return Err(ModelFrontierRenderingError::DuplicateToolEvidence {
                 entry: evidence.source(),
             });
+        }
+    }
+    let mut resolved_runner_placements = BTreeMap::new();
+    for evidence in runner_placement_entries {
+        if resolved_runner_placements
+            .insert(evidence.source(), evidence)
+            .is_some()
+        {
+            return Err(
+                ModelFrontierRenderingError::DuplicateRunnerPlacementEvidence {
+                    entry: evidence.source(),
+                },
+            );
         }
     }
     let mut messages = Vec::new();
@@ -245,6 +306,27 @@ fn render_frontier_messages<'a>(
                 summarized: *summarized,
                 content: value.clone(),
             }),
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged { placement_revision } => {
+                let Some(evidence) = resolved_runner_placements.remove(&source) else {
+                    return Err(
+                        ModelFrontierRenderingError::MissingOrMismatchedRunnerPlacementEvidence {
+                            entry: source,
+                        },
+                    );
+                };
+                if evidence.placement_revision() != *placement_revision {
+                    return Err(
+                        ModelFrontierRenderingError::MissingOrMismatchedRunnerPlacementEvidence {
+                            entry: source,
+                        },
+                    );
+                }
+                messages.push(ModelConversationMessage::RunnerPlacementChanged {
+                    source,
+                    placement_revision: *placement_revision,
+                    sandbox: evidence.sandbox(),
+                });
+            }
             SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
                 let content = origin_content(*accepted_input).ok_or(
@@ -471,6 +553,9 @@ fn render_frontier_messages<'a>(
     if let Some(entry) = resolved_tools.into_keys().next() {
         return Err(ModelFrontierRenderingError::UnexpectedToolEvidence { entry });
     }
+    if let Some(entry) = resolved_runner_placements.into_keys().next() {
+        return Err(ModelFrontierRenderingError::UnexpectedRunnerPlacementEvidence { entry });
+    }
     Ok(messages.into_boxed_slice())
 }
 
@@ -492,7 +577,9 @@ impl PreparedModelOperation {
         system_prompt: Option<SessionSystemPrompt>,
         tools: Box<[ToolDefinition]>,
         tool_entries: &[ResolvedToolConversationEntry],
+        runner_placement_entries: &[ResolvedRunnerPlacementConversationEntry],
     ) -> Result<Self, ModelFrontierRenderingError> {
+        let receiving_session = request.session();
         let complete_entries = request.frontier_entries().cloned().collect::<Vec<_>>();
         let projection = ContextFrontierProjection::from_complete_entries(&complete_entries)
             .map_err(ModelFrontierRenderingError::InvalidContextProjection)?;
@@ -508,12 +595,23 @@ impl PreparedModelOperation {
                     entry: reference,
                 });
             };
+            if reference.source_session() != receiving_session
+                && matches!(
+                    entry.payload(),
+                    SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+                )
+            {
+                continue;
+            }
             projected_entries.push((reference, entry.payload()));
         }
         let messages = render_frontier_messages(
             projected_entries,
             |accepted_input| request.origin_content(accepted_input).cloned(),
             tool_entries
+                .iter()
+                .filter(|entry| projected_references.contains(&entry.source())),
+            runner_placement_entries
                 .iter()
                 .filter(|entry| projected_references.contains(&entry.source())),
         )?;
@@ -583,6 +681,21 @@ pub enum ModelFrontierRenderingError {
         /// Extra source-qualified entry.
         entry: SemanticTranscriptEntryRef,
     },
+    /// Two storage evidence values claimed the same placement entry.
+    DuplicateRunnerPlacementEvidence {
+        /// Duplicated source-qualified entry.
+        entry: SemanticTranscriptEntryRef,
+    },
+    /// A placement boundary lacks exact correlated durable authority.
+    MissingOrMismatchedRunnerPlacementEvidence {
+        /// Source-qualified entry whose evidence is absent or cross-wired.
+        entry: SemanticTranscriptEntryRef,
+    },
+    /// Storage supplied placement evidence not named by the checked frontier.
+    UnexpectedRunnerPlacementEvidence {
+        /// Extra source-qualified entry.
+        entry: SemanticTranscriptEntryRef,
+    },
     /// A projection named an entry absent from its complete source frontier.
     MissingProjectedEntry {
         /// The absent source-qualified entry.
@@ -614,6 +727,14 @@ impl fmt::Display for ModelFrontierRenderingError {
             }
             Self::UnexpectedToolEvidence { .. } => {
                 formatter.write_str("model frontier tool evidence is not referenced")
+            }
+            Self::DuplicateRunnerPlacementEvidence { .. } => {
+                formatter.write_str("model frontier runner placement evidence is duplicated")
+            }
+            Self::MissingOrMismatchedRunnerPlacementEvidence { .. } => formatter
+                .write_str("model frontier runner placement evidence is missing or mismatched"),
+            Self::UnexpectedRunnerPlacementEvidence { .. } => {
+                formatter.write_str("model frontier runner placement evidence is not referenced")
             }
             Self::MissingProjectedEntry { .. } => {
                 formatter.write_str("context projection entry is missing from its frontier")
@@ -655,6 +776,8 @@ pub enum PrepareModelCallOutcome {
         system_prompt: Option<SessionSystemPrompt>,
         /// Exact durable authority for every tool-related frontier entry.
         tool_entries: Box<[ResolvedToolConversationEntry]>,
+        /// Exact durable authority for every placement boundary in the frontier.
+        runner_placement_entries: Box<[ResolvedRunnerPlacementConversationEntry]>,
     },
     /// Immutable target resolution failed and the turn closed atomically.
     TargetUnavailable(Box<FailedModelCallTurn>),
@@ -1518,6 +1641,7 @@ where
                     dangerous_tool_auto_approval,
                     system_prompt,
                     tool_entries,
+                    runner_placement_entries,
                 }) => {
                     break (
                         request,
@@ -1525,6 +1649,7 @@ where
                         dangerous_tool_auto_approval,
                         system_prompt,
                         tool_entries,
+                        runner_placement_entries,
                     );
                 }
                 Ok(PrepareModelCallOutcome::TargetUnavailable(failed)) => {
@@ -1551,6 +1676,7 @@ where
             dangerous_tool_auto_approval,
             system_prompt,
             tool_entries,
+            runner_placement_entries,
         ) = prepared;
         let call = prepared.call().id();
         let attempt = prepared.attempt();
@@ -1563,6 +1689,7 @@ where
             system_prompt,
             advertised_tools.clone(),
             &tool_entries,
+            &runner_placement_entries,
         )
         .map_err(ModelCallExecutionError::Render)?;
         if automatic_tool_round_limit_reached(turn, operation.messages()) {
@@ -2365,6 +2492,7 @@ mod tests {
             ],
             |_| None,
             [],
+            [],
         )
         .expect("typed delegation entries render without accepted-input evidence");
 
@@ -2400,6 +2528,131 @@ mod tests {
     }
 
     #[test]
+    fn s32_inv015_inv044_runner_placement_renders_exact_resolved_successor_evidence() {
+        let source = SemanticTranscriptEntryRef::from_source(
+            identity(58, SessionId::from_uuid),
+            identity(59, SemanticTranscriptEntryId::from_uuid),
+        );
+        let placement_revision =
+            RunnerGeneration::try_from_u64(2).expect("the fixture placement revision is positive");
+        let payload = SemanticTranscriptEntryPayload::RunnerPlacementChanged { placement_revision };
+        let evidence = ResolvedRunnerPlacementConversationEntry::new(
+            source,
+            placement_revision,
+            RunnerSandboxProfile::WorkspaceRestricted,
+        );
+
+        let rendered = render_frontier_messages([(source, &payload)], |_| None, [], [&evidence])
+            .expect("the exact successor placement evidence renders");
+
+        assert_eq!(
+            rendered.as_ref(),
+            &[ModelConversationMessage::RunnerPlacementChanged {
+                source,
+                placement_revision,
+                sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            }]
+        );
+    }
+
+    #[test]
+    fn s32_inv015_inv044_runner_placement_rejects_missing_successor_evidence() {
+        let source = SemanticTranscriptEntryRef::from_source(
+            identity(60, SessionId::from_uuid),
+            identity(61, SemanticTranscriptEntryId::from_uuid),
+        );
+        let placement_revision =
+            RunnerGeneration::try_from_u64(2).expect("the fixture placement revision is positive");
+        let payload = SemanticTranscriptEntryPayload::RunnerPlacementChanged { placement_revision };
+
+        let error = render_frontier_messages([(source, &payload)], |_| None, [], [])
+            .expect_err("a placement boundary requires resolved successor evidence");
+
+        assert_eq!(
+            error,
+            ModelFrontierRenderingError::MissingOrMismatchedRunnerPlacementEvidence {
+                entry: source,
+            }
+        );
+    }
+
+    #[test]
+    fn s32_inv015_inv044_runner_placement_rejects_mismatched_successor_revision() {
+        let source = SemanticTranscriptEntryRef::from_source(
+            identity(62, SessionId::from_uuid),
+            identity(63, SemanticTranscriptEntryId::from_uuid),
+        );
+        let placement_revision =
+            RunnerGeneration::try_from_u64(2).expect("the fixture placement revision is positive");
+        let other_revision =
+            RunnerGeneration::try_from_u64(3).expect("the other placement revision is positive");
+        let payload = SemanticTranscriptEntryPayload::RunnerPlacementChanged { placement_revision };
+        let evidence = ResolvedRunnerPlacementConversationEntry::new(
+            source,
+            other_revision,
+            RunnerSandboxProfile::WorkspaceRestricted,
+        );
+
+        let error = render_frontier_messages([(source, &payload)], |_| None, [], [&evidence])
+            .expect_err("a placement boundary rejects another revision's evidence");
+
+        assert_eq!(
+            error,
+            ModelFrontierRenderingError::MissingOrMismatchedRunnerPlacementEvidence {
+                entry: source,
+            }
+        );
+    }
+
+    #[test]
+    fn s32_inv015_inv044_runner_placement_rejects_duplicate_successor_evidence() {
+        let source = SemanticTranscriptEntryRef::from_source(
+            identity(64, SessionId::from_uuid),
+            identity(65, SemanticTranscriptEntryId::from_uuid),
+        );
+        let placement_revision =
+            RunnerGeneration::try_from_u64(2).expect("the fixture placement revision is positive");
+        let payload = SemanticTranscriptEntryPayload::RunnerPlacementChanged { placement_revision };
+        let evidence = ResolvedRunnerPlacementConversationEntry::new(
+            source,
+            placement_revision,
+            RunnerSandboxProfile::WorkspaceRestricted,
+        );
+
+        let error =
+            render_frontier_messages([(source, &payload)], |_| None, [], [&evidence, &evidence])
+                .expect_err("a placement boundary rejects duplicate durable evidence");
+
+        assert_eq!(
+            error,
+            ModelFrontierRenderingError::DuplicateRunnerPlacementEvidence { entry: source }
+        );
+    }
+
+    #[test]
+    fn s32_inv015_inv044_runner_placement_rejects_unreferenced_successor_evidence() {
+        let source = SemanticTranscriptEntryRef::from_source(
+            identity(66, SessionId::from_uuid),
+            identity(67, SemanticTranscriptEntryId::from_uuid),
+        );
+        let placement_revision =
+            RunnerGeneration::try_from_u64(2).expect("the fixture placement revision is positive");
+        let evidence = ResolvedRunnerPlacementConversationEntry::new(
+            source,
+            placement_revision,
+            RunnerSandboxProfile::WorkspaceRestricted,
+        );
+
+        let error = render_frontier_messages([], |_| None, [], [&evidence])
+            .expect_err("unreferenced placement evidence fails closed");
+
+        assert_eq!(
+            error,
+            ModelFrontierRenderingError::UnexpectedRunnerPlacementEvidence { entry: source }
+        );
+    }
+
+    #[test]
     fn foreground_delegation_result_renders_as_await_tool_result() {
         let parent = identity(50, SessionId::from_uuid);
         let child = identity(51, SessionId::from_uuid);
@@ -2428,7 +2681,7 @@ mod tests {
             outcome: Box::new(outcome.clone()),
         };
 
-        let rendered = render_frontier_messages([(source, &result)], |_| None, [])
+        let rendered = render_frontier_messages([(source, &result)], |_| None, [], [])
             .expect("foreground delivery is one correlated tool result");
 
         assert_eq!(
@@ -2448,6 +2701,7 @@ mod tests {
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
             system_prompt: None,
             tool_entries: Box::new([]),
+            runner_placement_entries: Box::new([]),
         }
     }
 
@@ -2463,6 +2717,7 @@ mod tests {
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
             system_prompt: None,
             tool_entries,
+            runner_placement_entries: Box::new([]),
         }
     }
 
@@ -3622,6 +3877,7 @@ mod tests {
             None,
             Box::new([]),
             &[],
+            &[],
         )
         .expect("the baseline origin-only frontier renders");
         assert_eq!(operation.credential_reference(), &credential_reference);
@@ -3654,6 +3910,7 @@ mod tests {
             Some(prompt.clone()),
             Box::new([]),
             &[],
+            &[],
         )
         .expect("the baseline origin-only frontier renders");
         assert_eq!(prompted.system_prompt(), Some(prompt.as_str()));
@@ -3663,6 +3920,7 @@ mod tests {
             credential_reference(),
             None,
             Box::new([]),
+            &[],
             &[],
         )
         .expect("the baseline origin-only frontier renders");
@@ -3851,6 +4109,7 @@ mod tests {
             entries.iter().map(|(source, payload)| (*source, payload)),
             |_| panic!("imported text must not request native accepted-input content"),
             std::iter::empty(),
+            std::iter::empty(),
         )
         .expect("attested imported text is conservatively renderable");
 
@@ -3944,6 +4203,7 @@ mod tests {
         let messages = render_frontier_messages(
             entries.iter().map(|(source, payload)| (*source, payload)),
             |_| panic!("imported absence must not request native accepted-input content"),
+            std::iter::empty(),
             std::iter::empty(),
         )
         .expect("typed imported absence is conservatively skipped");
@@ -4079,6 +4339,7 @@ mod tests {
             entries.iter().map(|(source, payload)| (*source, payload)),
             |_| panic!("imported non-text must not request native accepted-input content"),
             std::iter::empty(),
+            std::iter::empty(),
         )
         .expect("imported non-text is conservatively skipped");
 
@@ -4173,6 +4434,7 @@ mod tests {
         let messages = render_frontier_messages(
             entries.iter().map(|(source, payload)| (*source, payload)),
             |accepted_input| origin_contents.get(&accepted_input).cloned(),
+            [],
             [],
         )
         .expect("the admitted mixed text frontier renders");
@@ -4432,6 +4694,7 @@ mod tests {
             entries.iter().map(|(source, payload)| (*source, payload)),
             |_| None,
             evidence.iter(),
+            [],
         )
         .expect("exact tool evidence renders");
 
@@ -4514,7 +4777,7 @@ mod tests {
             attempt: cross_turn_attempt,
         };
 
-        let error = render_frontier_messages([(source, &payload)], |_| None, [&evidence])
+        let error = render_frontier_messages([(source, &payload)], |_| None, [&evidence], [])
             .expect_err("cross-turn tool evidence must fail closed");
 
         assert_eq!(
@@ -4679,6 +4942,7 @@ mod tests {
                     dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
                     system_prompt: Some(prompt.clone()),
                     tool_entries: Box::new([]),
+                    runner_placement_entries: Box::new([]),
                 })]
                 .into(),
                 calls: 0,

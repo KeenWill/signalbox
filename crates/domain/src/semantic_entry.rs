@@ -10,7 +10,7 @@ use crate::{
     AcceptedInputId, ContextCompactionRange, DelegationContent, DelegationMessageId,
     DelegationOutcome, DelegationWaitMode, DirectModelSelection, ImportedSourceAttestation,
     ImportedSpeaker, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelCallId,
-    NonEmptyUnicodeText, NonEmptyUnicodeTextError, SemanticTranscriptEntryId,
+    NonEmptyUnicodeText, NonEmptyUnicodeTextError, RunnerGeneration, SemanticTranscriptEntryId,
     SemanticTranscriptEntryRef, SessionConfigurationDefaultsVersion, SessionId, ToolRequestId,
     TurnId,
 };
@@ -106,6 +106,11 @@ pub enum SemanticTranscriptEntryPayload {
         summarized: ContextCompactionRange,
         /// Exact model-produced summary text.
         value: AssistantText,
+    },
+    /// A checked successor runner placement newly active for this session.
+    RunnerPlacementChanged {
+        /// The exact positive successor placement revision.
+        placement_revision: RunnerGeneration,
     },
     /// An explicit marker for an exact failed turn.
     TurnFailed {

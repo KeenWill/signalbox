@@ -27,15 +27,15 @@ use signalbox_domain::{
     DurableCommandId, EndedToolAttempt, GoalGeneration, NormalizedToolArguments,
     PreparedDecideToolRequest, PreparedToolBatchDecision, PreparedToolResultProjection,
     ReconstitutedToolAttempt, ResolvedContextFrontierReconstitutionInput,
-    ResolvedContextFrontierSnapshot, SemanticTranscriptEntryPayload, SessionId,
-    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind,
-    ToolAttemptDispatchCorrelation, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
-    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
-    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionFailure,
-    ToolBatchReconstitutionInput, ToolDenialReason, ToolDispatchAuthority, ToolDispatchGeneration,
-    ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind,
-    ToolName, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent,
-    ToolResultText, TurnId,
+    ResolvedContextFrontierSnapshot, RunnerGeneration, SemanticTranscriptEntryPayload,
+    SemanticTranscriptEntryReconstitutionInput, SessionId, ToolApprovalDecision,
+    ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind, ToolAttemptDispatchCorrelation,
+    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolAttemptReconstitutionInput,
+    ToolAttemptReconstitutionState, ToolBatch, ToolBatchPhaseReconstitutionInput,
+    ToolBatchReconstitutionFailure, ToolBatchReconstitutionInput, ToolDenialReason,
+    ToolDispatchAuthority, ToolDispatchGeneration, ToolEffectClass, ToolExecutionError,
+    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolRequestId, ToolRequestOrdinal,
+    ToolRequestReconstitutionInput, ToolResultContent, ToolResultText, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -47,8 +47,8 @@ use crate::{
     mapping::{
         ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
         dangerous_tool_auto_approval_from_str, durable_command_id_from_uuid,
-        durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
-        tool_approval_decision_source_from_str, tool_approval_posture_from_str,
+        durable_command_id_to_uuid, positive_u64_from_numeric, session_id_from_uuid,
+        session_id_to_uuid, tool_approval_decision_source_from_str, tool_approval_posture_from_str,
         tool_attempt_disposition_from_str, tool_attempt_disposition_to_str,
         tool_attempt_id_from_uuid, tool_attempt_id_to_uuid, tool_request_id_from_uuid,
         tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
@@ -956,6 +956,7 @@ impl PostgresToolLoopRepository {
                 .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
             if batch.producing_call() != producing_call
                 || batch.yielded_snapshot().frontier().owning_session() != session
+                || projection.projection_base_snapshot() != batch.projection_base_snapshot()
                 || !matches!(
                     batch.phase(),
                     signalbox_domain::ToolBatchPhase::Executing { turn_attempt }
@@ -1391,6 +1392,20 @@ pub(crate) async fn load_active_batch_from_connection(
     let frontier =
         signalbox_domain::ContextFrontierId::from_uuid(required(&round, "boundary_frontier_id")?);
     let yielded_snapshot = load_snapshot(connection, session, frontier).await?;
+    let projection_base_snapshot =
+        load_current_runner_placement_snapshot(connection, session).await?;
+    let projection_base_entries = match &projection_base_snapshot {
+        Some(snapshot) => {
+            load_runner_placement_projection_entries(
+                connection,
+                session,
+                &yielded_snapshot,
+                snapshot,
+            )
+            .await?
+        }
+        None => Vec::new(),
+    };
     let requests = load_requests(connection, producing_call, session, turn).await?;
     let approvals = load_approvals(connection, producing_call).await?;
     let attempts = load_attempts(connection, producing_call).await?;
@@ -1444,7 +1459,7 @@ pub(crate) async fn load_active_batch_from_connection(
             .into());
         }
     };
-    ToolBatchReconstitutionInput::new(
+    let mut input = ToolBatchReconstitutionInput::new(
         session,
         turn,
         producing_call,
@@ -1453,17 +1468,20 @@ pub(crate) async fn load_active_batch_from_connection(
         approvals,
         attempts,
         phase,
-    )
-    .with_retired_attempts(retired_attempts)
-    .with_runner_authorized_attempts(runner_authorized_attempts)
-    .reconstitute()
-    .map(Some)
-    .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
+    );
+    if let Some(snapshot) = projection_base_snapshot {
+        input = input.with_projection_base_snapshot(snapshot, projection_base_entries);
+    }
+    input
+        .with_retired_attempts(retired_attempts)
+        .with_runner_authorized_attempts(runner_authorized_attempts)
+        .reconstitute()
+        .map(Some)
+        .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
 
-/// Loads the exact frontier from which a runner-recovery interrupt must
-/// continue. A recovery wait retaining a tool round uses that round's yielded
-/// boundary; a wait without one uses the turn's starting frontier.
+/// Loads the latest compatible frontier from which a runner-recovery interrupt
+/// must continue, including the authoritative placement boundary when present.
 pub(crate) async fn load_runner_recovery_source_snapshot(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1506,7 +1524,9 @@ pub(crate) async fn load_runner_recovery_source_snapshot(
     } else {
         signalbox_domain::ContextFrontierId::from_uuid(required(&row, "starting_frontier_id")?)
     };
-    load_snapshot(connection, session, frontier).await.map(Some)
+    let source = load_snapshot(connection, session, frontier).await?;
+    let placement = load_current_runner_placement_snapshot(connection, session).await?;
+    select_projection_base_snapshot(source, placement).map(Some)
 }
 
 pub(crate) async fn load_runner_recovery_batch_without_attempt(
@@ -1564,22 +1584,41 @@ pub(crate) async fn load_runner_recovery_cancellation_batch(
         signalbox_domain::ContextFrontierId::from_uuid(required(&round, "boundary_frontier_id")?);
     let mut retired_attempts = load_retired_attempts(connection, producing_call).await?;
     retired_attempts.retain(|attempt| Some(*attempt) != interrupted_attempt);
-    ToolBatchReconstitutionInput::new(
+    let yielded_snapshot = load_snapshot(connection, session, frontier).await?;
+    let projection_base_snapshot =
+        load_current_runner_placement_snapshot(connection, session).await?;
+    let projection_base_entries = match &projection_base_snapshot {
+        Some(snapshot) => {
+            load_runner_placement_projection_entries(
+                connection,
+                session,
+                &yielded_snapshot,
+                snapshot,
+            )
+            .await?
+        }
+        None => Vec::new(),
+    };
+    let mut input = ToolBatchReconstitutionInput::new(
         session,
         turn,
         producing_call,
-        load_snapshot(connection, session, frontier).await?,
+        yielded_snapshot,
         load_requests(connection, producing_call, session, turn).await?,
         load_approvals(connection, producing_call).await?,
         load_runner_recovery_attempts(connection, producing_call, interrupted_attempt).await?,
         ToolBatchPhaseReconstitutionInput::Executing {
             turn_attempt: yielded_attempt,
         },
-    )
-    .with_retired_attempts(retired_attempts)
-    .reconstitute()
-    .map(Some)
-    .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
+    );
+    if let Some(snapshot) = projection_base_snapshot {
+        input = input.with_projection_base_snapshot(snapshot, projection_base_entries);
+    }
+    input
+        .with_retired_attempts(retired_attempts)
+        .reconstitute()
+        .map(Some)
+        .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
 
 pub(crate) async fn load_recovery_batch_by_attempt(
@@ -1624,21 +1663,40 @@ pub(crate) async fn load_recovery_batch_by_attempt(
         signalbox_domain::ContextFrontierId::from_uuid(required(&round, "boundary_frontier_id")?);
     let mut retired_attempts = load_retired_attempts(connection, producing_call).await?;
     retired_attempts.retain(|attempt| *attempt != recovery_attempt);
-    ToolBatchReconstitutionInput::new(
+    let yielded_snapshot = load_snapshot(connection, session, frontier).await?;
+    let projection_base_snapshot =
+        load_current_runner_placement_snapshot(connection, session).await?;
+    let projection_base_entries = match &projection_base_snapshot {
+        Some(snapshot) => {
+            load_runner_placement_projection_entries(
+                connection,
+                session,
+                &yielded_snapshot,
+                snapshot,
+            )
+            .await?
+        }
+        None => Vec::new(),
+    };
+    let mut input = ToolBatchReconstitutionInput::new(
         session,
         turn,
         producing_call,
-        load_snapshot(connection, session, frontier).await?,
+        yielded_snapshot,
         load_requests(connection, producing_call, session, turn).await?,
         load_approvals(connection, producing_call).await?,
         load_runner_recovery_attempts(connection, producing_call, Some(recovery_attempt)).await?,
         ToolBatchPhaseReconstitutionInput::AwaitingRecovery {
             attempt: recovery_attempt,
         },
-    )
-    .with_retired_attempts(retired_attempts)
-    .reconstitute()
-    .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
+    );
+    if let Some(snapshot) = projection_base_snapshot {
+        input = input.with_projection_base_snapshot(snapshot, projection_base_entries);
+    }
+    input
+        .with_retired_attempts(retired_attempts)
+        .reconstitute()
+        .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
 
 /// Identifies the single continuing tool round whose request suffix exactly
@@ -1972,6 +2030,137 @@ async fn load_snapshot(
     ResolvedContextFrontierReconstitutionInput::new(session, frontier, entries)
         .reconstitute()
         .ok_or_else(|| ToolLoopCorruption::Inconsistent("frontier snapshot").into())
+}
+
+async fn load_current_runner_placement_snapshot(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<Option<ResolvedContextFrontierSnapshot>, ToolLoopRepositoryError> {
+    let frontier = sqlx::query_scalar::<_, Uuid>(
+        "SELECT pointer.context_frontier_id
+           FROM runner_current_session_placement AS head
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = head.session_id
+            AND placement.event_ordinal = head.event_ordinal
+           JOIN session_runner_placement_frontier AS pointer
+             ON pointer.session_id = placement.session_id
+            AND pointer.placement_revision = placement.placement_revision
+          WHERE head.session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(frontier) = frontier else {
+        return Ok(None);
+    };
+    load_snapshot(
+        connection,
+        session,
+        signalbox_domain::ContextFrontierId::from_uuid(frontier),
+    )
+    .await
+    .map(Some)
+}
+
+async fn load_runner_placement_projection_entries(
+    connection: &mut PgConnection,
+    session: SessionId,
+    yielded: &ResolvedContextFrontierSnapshot,
+    candidate: &ResolvedContextFrontierSnapshot,
+) -> Result<Vec<SemanticTranscriptEntryReconstitutionInput>, ToolLoopRepositoryError> {
+    if candidate.is_semantic_prefix_of(yielded) {
+        return Ok(Vec::new());
+    }
+    if !yielded.is_semantic_prefix_of(candidate) {
+        return Err(ToolLoopCorruption::Inconsistent(
+            "tool result and runner placement frontier lineage",
+        )
+        .into());
+    }
+    let rows = sqlx::query(
+        "SELECT member.member_position,
+                member.source_session_id,
+                member.semantic_entry_id,
+                entry.runner_placement_revision
+           FROM resolve_context_frontier_members($1, $2) AS member
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = member.source_session_id
+            AND entry.semantic_entry_id = member.semantic_entry_id
+            AND entry.payload_kind = 'runner_placement_changed'
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = entry.source_session_id
+            AND placement.event_ordinal = entry.runner_placement_event_ordinal
+            AND placement.placement_revision = entry.runner_placement_revision
+            AND placement.event_kind IN ('runner_replaced', 'profile_replaced')
+            AND placement.state_kind = 'pinned'
+           JOIN session_runner_placement_frontier AS pointer
+             ON pointer.session_id = entry.source_session_id
+            AND pointer.placement_revision = entry.runner_placement_revision
+            AND pointer.semantic_entry_id = entry.semantic_entry_id
+           JOIN context_frontier AS frontier
+             ON frontier.owning_session_id = pointer.session_id
+            AND frontier.context_frontier_id = pointer.context_frontier_id
+           JOIN context_frontier_member AS final_member
+             ON final_member.owning_session_id = frontier.owning_session_id
+            AND final_member.context_frontier_id = frontier.context_frontier_id
+            AND final_member.member_position = frontier.member_count
+            AND final_member.source_session_id = entry.source_session_id
+            AND final_member.semantic_entry_id = entry.semantic_entry_id
+          WHERE member.member_position > $3
+          ORDER BY member.member_position",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(candidate.frontier().snapshot().into_uuid())
+    .bind(Decimal::from(
+        u64::try_from(yielded.entry_count())
+            .map_err(|_| ToolLoopCorruption::Inconsistent("frontier count"))?,
+    ))
+    .fetch_all(&mut *connection)
+    .await?;
+    if rows.len() != candidate.entry_count() - yielded.entry_count() {
+        return Err(ToolLoopCorruption::Inconsistent("runner placement projection suffix").into());
+    }
+    rows.into_iter()
+        .map(|row| {
+            let source_session = session_id_from_uuid(required(&row, "source_session_id")?);
+            let revision = positive_u64_from_numeric(required(&row, "runner_placement_revision")?)
+                .ok()
+                .and_then(RunnerGeneration::try_from_u64)
+                .ok_or(ToolLoopCorruption::Inconsistent(
+                    "runner placement semantic revision",
+                ))?;
+            if source_session != session {
+                return Err(
+                    ToolLoopCorruption::Inconsistent("runner placement projection suffix").into(),
+                );
+            }
+            Ok(SemanticTranscriptEntryReconstitutionInput::new(
+                signalbox_domain::SemanticTranscriptEntryId::from_uuid(required(
+                    &row,
+                    "semantic_entry_id",
+                )?),
+                source_session,
+                SemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: revision,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn select_projection_base_snapshot(
+    yielded: ResolvedContextFrontierSnapshot,
+    placement: Option<ResolvedContextFrontierSnapshot>,
+) -> Result<ResolvedContextFrontierSnapshot, ToolLoopRepositoryError> {
+    match placement {
+        Some(candidate) if yielded.is_semantic_prefix_of(&candidate) => Ok(candidate),
+        Some(candidate) if candidate.is_semantic_prefix_of(&yielded) => Ok(yielded),
+        Some(_) => Err(ToolLoopCorruption::Inconsistent(
+            "tool result and runner placement frontier lineage",
+        )
+        .into()),
+        None => Ok(yielded),
+    }
 }
 
 async fn load_requests(
