@@ -9,6 +9,42 @@ type WebApiError = {
 
 type WebApiErrorKind = "transport" | "application";
 
+type WebAttentionAction = "provide_goal_need" | "decide_approval" | "reconcile_turn" | "restore_runner";
+
+type WebAttentionActivity = {
+  readonly kind: WebAttentionActivityKind;
+  readonly unix_milliseconds: string;
+};
+
+type WebAttentionActivityKind = "session" | "turn" | "goal" | "approval_judge" | "runner";
+
+type WebAttentionBlockedReason = "user_input_required" | "external_change_required" | "authorization_required" | "execution_failure";
+
+type WebAttentionGoalBlock = {
+  readonly generation: string;
+  readonly need_summary: string;
+  readonly reason: WebAttentionBlockedReason;
+};
+
+type WebAttentionJudgeFacts = {
+  readonly actionable: string;
+  readonly completed: string;
+  readonly escalated: string;
+  readonly failed: string;
+};
+
+type WebAttentionState = "active" | "queued" | "blocked" | "awaiting_approval" | "ambiguous" | "awaiting_tool_recovery" | "awaiting_reconciliation" | "runner_lost" | "idle";
+
+type WebAttentionSummary = {
+  readonly action?: WebAttentionAction | null;
+  readonly current_turn_id?: string | null;
+  readonly goal_block?: WebAttentionGoalBlock | null;
+  readonly judge: WebAttentionJudgeFacts;
+  readonly last_activity: WebAttentionActivity;
+  readonly session_id: string;
+  readonly state: WebAttentionState;
+};
+
 type WebContractCapabilities = {
   readonly bounded_json: boolean;
   readonly ndjson_streaming: boolean;
@@ -39,6 +75,26 @@ export type WebApiErrorResponse = {
   readonly error: WebApiError;
 };
 
+export type WebAttentionSnapshot = {
+  readonly continuation_after_session_id?: string | null;
+  readonly cursor: string;
+  readonly summaries: ReadonlyArray<WebAttentionSummary>;
+};
+
+export type WebAttentionStreamEvent = {
+  readonly kind: "snapshot";
+  readonly snapshot: WebAttentionSnapshot;
+} | {
+  readonly cursor: string;
+  readonly kind: "update";
+  readonly summaries: ReadonlyArray<WebAttentionSummary>;
+} | {
+  readonly cursor: string;
+  readonly kind: "resync_required";
+};
+
 export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;
 export function decodeWebContractExample(value: unknown): WebContractExample;
 export function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;
+export function decodeWebAttentionSnapshot(value: unknown): WebAttentionSnapshot;
+export function decodeWebAttentionStreamEvent(value: unknown): WebAttentionStreamEvent;

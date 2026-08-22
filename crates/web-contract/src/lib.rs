@@ -134,6 +134,111 @@ pub struct WebApiErrorResponse {
     pub error: WebApiError,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionState {
+    Active,
+    Queued,
+    Blocked,
+    AwaitingApproval,
+    Ambiguous,
+    AwaitingToolRecovery,
+    AwaitingReconciliation,
+    RunnerLost,
+    Idle,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionAction {
+    ProvideGoalNeed,
+    DecideApproval,
+    ReconcileTurn,
+    RestoreRunner,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionBlockedReason {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+    ExecutionFailure,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionActivityKind {
+    Session,
+    Turn,
+    Goal,
+    ApprovalJudge,
+    Runner,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionGoalBlock {
+    pub generation: String,
+    pub reason: WebAttentionBlockedReason,
+    /// At most 128 Unicode scalar values; exact text is in session detail.
+    #[schemars(length(max = 128))]
+    pub need_summary: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionJudgeFacts {
+    pub actionable: String,
+    pub completed: String,
+    pub escalated: String,
+    pub failed: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionActivity {
+    pub unix_milliseconds: String,
+    pub kind: WebAttentionActivityKind,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionSummary {
+    pub session_id: String,
+    pub current_turn_id: Option<String>,
+    pub state: WebAttentionState,
+    pub action: Option<WebAttentionAction>,
+    pub goal_block: Option<WebAttentionGoalBlock>,
+    pub judge: WebAttentionJudgeFacts,
+    pub last_activity: WebAttentionActivity,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionSnapshot {
+    pub cursor: String,
+    #[schemars(length(max = 32))]
+    pub summaries: Vec<WebAttentionSummary>,
+    pub continuation_after_session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebAttentionStreamEvent {
+    Snapshot {
+        snapshot: WebAttentionSnapshot,
+    },
+    Update {
+        cursor: String,
+        #[schemars(length(max = 32))]
+        summaries: Vec<WebAttentionSummary>,
+    },
+    ResyncRequired {
+        cursor: String,
+    },
+}
+
 /// One generated file and its repository-relative destination.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GeneratedArtifact {
@@ -175,6 +280,10 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     let bootstrap_schema = canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value());
     let example_schema = canonical_schema(schemars::schema_for!(WebContractExample).to_value());
     let error_schema = canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value());
+    let attention_snapshot_schema =
+        canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value());
+    let attention_event_schema =
+        canonical_schema(schemars::schema_for!(WebAttentionStreamEvent).to_value());
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -186,11 +295,23 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     Ok(vec![
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.mjs",
-            contents: runtime_module(&bootstrap_schema, &example_schema, &error_schema)?,
+            contents: runtime_module(
+                &bootstrap_schema,
+                &example_schema,
+                &error_schema,
+                &attention_snapshot_schema,
+                &attention_event_schema,
+            )?,
         },
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.d.mts",
-            contents: declaration_module(&bootstrap_schema, &example_schema, &error_schema)?,
+            contents: declaration_module(
+                &bootstrap_schema,
+                &example_schema,
+                &error_schema,
+                &attention_snapshot_schema,
+                &attention_event_schema,
+            )?,
         },
         GeneratedArtifact {
             path: "crates/web-contract/tests/fixtures/example.json",
@@ -211,11 +332,15 @@ fn runtime_module(
     bootstrap_schema: &Value,
     example_schema: &Value,
     error_schema: &Value,
+    attention_snapshot_schema: &Value,
+    attention_event_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut schemas = json!({
         "WebContractBootstrap": bootstrap_schema,
         "WebContractExample": example_schema,
         "WebApiErrorResponse": error_schema,
+        "WebAttentionSnapshot": attention_snapshot_schema,
+        "WebAttentionStreamEvent": attention_event_schema,
     });
     schemas.sort_all_objects();
     let schemas = serde_json::to_string_pretty(&schemas)
@@ -273,6 +398,38 @@ function assertSchema(root, schema, value, path) {{
     }}
     return;
   }}
+  if (schema.anyOf !== undefined) {{
+    const accepted = schema.anyOf.some((candidate) => {{
+      try {{
+        assertSchema(root, candidate, value, path);
+        return true;
+      }} catch {{
+        return false;
+      }}
+    }});
+    if (!accepted) {{
+      fail(path, "one recognized variant");
+    }}
+    return;
+  }}
+  if (Array.isArray(schema.type)) {{
+    if (value === null && schema.type.includes("null")) {{
+      return;
+    }}
+    const concrete = schema.type.filter((candidate) => candidate !== "null");
+    const accepted = concrete.some((candidate) => {{
+      try {{
+        assertSchema(root, {{ ...schema, type: candidate }}, value, path);
+        return true;
+      }} catch {{
+        return false;
+      }}
+    }});
+    if (!accepted) {{
+      fail(path, concrete.join(" or "));
+    }}
+    return;
+  }}
   if (schema.type === "object") {{
     if (value === null || typeof value !== "object" || Array.isArray(value)) {{
       fail(path, "an object");
@@ -301,6 +458,9 @@ function assertSchema(root, schema, value, path) {{
     if (!Array.isArray(value)) {{
       fail(path, "an array");
     }}
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {{
+      fail(path, `at most ${{schema.maxItems}} items`);
+    }}
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${{path}}[${{index}}]`));
     return;
   }}
@@ -316,6 +476,21 @@ function assertSchema(root, schema, value, path) {{
     }}
     if (schema.maximum !== undefined && value > schema.maximum) {{
       fail(path, `at most ${{schema.maximum}}`);
+    }}
+    return;
+  }}
+  if (schema.type === "string") {{
+    if (typeof value !== "string") {{
+      fail(path, "string");
+    }}
+    if (schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) {{
+      fail(path, `at most ${{schema.maxLength}} Unicode scalar values`);
+    }}
+    return;
+  }}
+  if (schema.type === "null") {{
+    if (value !== null) {{
+      fail(path, "null");
     }}
     return;
   }}
@@ -341,6 +516,16 @@ export function decodeWebApiErrorResponse(value) {{
   assertSchema(schemas.WebApiErrorResponse, schemas.WebApiErrorResponse, value, "error_response");
   return value;
 }}
+
+export function decodeWebAttentionSnapshot(value) {{
+  assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
+  return value;
+}}
+
+export function decodeWebAttentionStreamEvent(value) {{
+  assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
+  return value;
+}}
 "##,
         contract_name = WEB_CONTRACT_NAME,
         contract_version = WEB_CONTRACT_VERSION,
@@ -351,11 +536,32 @@ fn declaration_module(
     bootstrap_schema: &Value,
     example_schema: &Value,
     error_schema: &Value,
+    attention_snapshot_schema: &Value,
+    attention_event_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut definitions = BTreeMap::new();
     let bootstrap = typescript_type(bootstrap_schema, bootstrap_schema, &mut definitions)?;
     let example = typescript_type(example_schema, example_schema, &mut definitions)?;
     let error = typescript_type(error_schema, error_schema, &mut definitions)?;
+    let attention_snapshot = typescript_type(
+        attention_snapshot_schema,
+        attention_snapshot_schema,
+        &mut definitions,
+    )?;
+    let attention_event = typescript_type(
+        attention_event_schema,
+        attention_event_schema,
+        &mut definitions,
+    )?;
+    for root_name in [
+        "WebContractBootstrap",
+        "WebContractExample",
+        "WebApiErrorResponse",
+        "WebAttentionSnapshot",
+        "WebAttentionStreamEvent",
+    ] {
+        definitions.remove(root_name);
+    }
     let mut output = String::from(
         "// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.\n// Do not edit by hand.\n\n",
     );
@@ -367,8 +573,14 @@ fn declaration_module(
     ));
     output.push_str(&format!("export type WebContractExample = {example};\n\n"));
     output.push_str(&format!("export type WebApiErrorResponse = {error};\n\n"));
+    output.push_str(&format!(
+        "export type WebAttentionSnapshot = {attention_snapshot};\n\n"
+    ));
+    output.push_str(&format!(
+        "export type WebAttentionStreamEvent = {attention_event};\n\n"
+    ));
     output.push_str(
-        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\n",
+        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebAttentionSnapshot(value: unknown): WebAttentionSnapshot;\nexport function decodeWebAttentionStreamEvent(value: unknown): WebAttentionStreamEvent;\n",
     );
     Ok(output)
 }
@@ -409,6 +621,28 @@ fn typescript_type(
             .collect::<Result<Vec<_>, _>>()?
             .join(" | "));
     }
+    if let Some(variants) = schema.get("anyOf").and_then(Value::as_array) {
+        return Ok(variants
+            .iter()
+            .map(|variant| typescript_type(root, variant, definitions))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" | "));
+    }
+    if let Some(types) = schema.get("type").and_then(Value::as_array) {
+        return Ok(types
+            .iter()
+            .map(|kind| match kind.as_str() {
+                Some("null") => Ok("null".to_owned()),
+                Some(kind) => {
+                    let mut concrete = schema.clone();
+                    concrete["type"] = Value::String(kind.to_owned());
+                    typescript_type(root, &concrete, definitions)
+                }
+                None => Err(GenerateWebContractError::UnsupportedSchema),
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" | "));
+    }
     match schema.get("type").and_then(Value::as_str) {
         Some("object") => typescript_object(root, schema, definitions),
         Some("array") => {
@@ -422,6 +656,7 @@ fn typescript_type(
         }
         Some("integer" | "number") => Ok("number".to_owned()),
         Some("boolean") => Ok("boolean".to_owned()),
+        Some("null") => Ok("null".to_owned()),
         Some("string") => Ok("string".to_owned()),
         _ => Err(GenerateWebContractError::UnsupportedSchema),
     }
@@ -460,7 +695,9 @@ fn typescript_object(
 mod tests {
     use std::{fs, path::Path};
 
-    use super::{WebContractBootstrap, WebContractExample, generated_artifacts};
+    use super::{
+        WebAttentionStreamEvent, WebContractBootstrap, WebContractExample, generated_artifacts,
+    };
 
     #[track_caller]
     fn assert_generated_artifact_current(path: &str) {
@@ -511,5 +748,12 @@ mod tests {
             serde_json::from_str(fixture).expect("generated fixture is JSON");
 
         assert_eq!(encoded, fixture_value);
+    }
+
+    #[test]
+    fn attention_stream_event_rejects_unknown_variant_fields() {
+        let encoded = r#"{"kind":"resync_required","cursor":"1","unexpected":true}"#;
+
+        assert!(serde_json::from_str::<WebAttentionStreamEvent>(encoded).is_err());
     }
 }

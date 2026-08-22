@@ -5766,6 +5766,108 @@ impl WorkspaceRecord {
 }
 ```
 
+## application: attention
+
+```rust
+pub const fn max_attention_snapshot_items() -> u16;
+pub const fn max_attention_goal_summary_characters() -> u16;
+pub const fn max_attention_change_items() -> u16;
+
+pub struct AttentionCursor(/* private */);
+impl AttentionCursor {
+    pub const fn new(value: u64) -> Self;
+    pub const fn value(self) -> u64;
+}
+
+pub enum AttentionState {
+    Active,
+    Queued,
+    Blocked,
+    AwaitingApproval,
+    Ambiguous,
+    AwaitingToolRecovery,
+    AwaitingReconciliation,
+    RunnerLost,
+    Idle,
+}
+
+pub enum AttentionAction {
+    ProvideGoalNeed,
+    DecideApproval,
+    ReconcileTurn,
+    RestoreRunner,
+}
+
+pub enum AttentionBlockedReason {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+    ExecutionFailure,
+}
+
+pub struct AttentionGoalBlock {
+    pub generation: u64,
+    pub reason: AttentionBlockedReason,
+    pub need_summary: String,
+}
+
+pub struct AttentionJudgeFacts {
+    pub actionable: u64,
+    pub completed: u64,
+    pub escalated: u64,
+    pub failed: u64,
+}
+
+pub struct AttentionActivity {
+    pub recorded_at: SystemTime,
+    pub kind: AttentionActivityKind,
+}
+
+pub enum AttentionActivityKind {
+    Session,
+    Turn,
+    Goal,
+    ApprovalJudge,
+    Runner,
+}
+
+pub struct AttentionSummary {
+    pub session: SessionId,
+    pub current_turn: Option<TurnId>,
+    pub state: AttentionState,
+    pub action: Option<AttentionAction>,
+    pub goal_block: Option<AttentionGoalBlock>,
+    pub judge: AttentionJudgeFacts,
+    pub last_activity: AttentionActivity,
+}
+
+pub struct AttentionSnapshot {
+    pub cursor: AttentionCursor,
+    pub summaries: Vec<AttentionSummary>,
+    pub continuation_after: Option<SessionId>,
+}
+
+pub enum AttentionChanges {
+    Updated {
+        cursor: AttentionCursor,
+        summaries: Vec<AttentionSummary>,
+    },
+    ResyncRequired { cursor: AttentionCursor },
+}
+
+pub trait AttentionReader {
+    type Error;
+    fn snapshot(
+        &self,
+        after: Option<SessionId>,
+    ) -> impl Future<Output = Result<AttentionSnapshot, Self::Error>> + Send;
+    fn changes_after(
+        &self,
+        cursor: AttentionCursor,
+    ) -> impl Future<Output = Result<AttentionChanges, Self::Error>> + Send;
+}
+```
+
 ## application: approval_judge
 
 ```rust
@@ -11063,6 +11165,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | **signalbox-domain total**                         | **806 (+12 free fn)**            |
+| application: attention                             | 12 (+3 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
@@ -11089,4 +11192,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
 | application: turn_liveness                         | 7                                |
-| **signalbox-application total**                    | **295 (+6 free fn)**             |
+| **signalbox-application total**                    | **307 (+9 free fn)**             |

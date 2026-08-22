@@ -1572,7 +1572,29 @@ async fn run_hub(
             return Err(failure);
         }
     };
-    let web_http_runtime = match WebHttpRuntime::bind(web_configuration).await {
+    let snapshot_reader_budget =
+        match signalboxd::shared_snapshot_reader_budget(pool.options().get_max_connections()) {
+            Some(budget) => budget,
+            None => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("insufficient_snapshot_reader_pool_capacity"),
+                );
+                let _ = listener.cleanup();
+                let _ = runner_listener.cleanup();
+                disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        };
+    let web_http_runtime = match WebHttpRuntime::bind_with_snapshot_reader_budget(
+        web_configuration,
+        pool.clone(),
+        Arc::clone(&snapshot_reader_budget),
+    )
+    .await
+    {
         Ok(runtime) => runtime,
         Err(_) => {
             let failure = erase_startup_cause(
@@ -1697,7 +1719,8 @@ async fn run_hub(
         model_configuration.clone(),
         template_configuration,
     )
-    .with_context_compaction_model(Arc::clone(&context_compaction_model));
+    .with_context_compaction_model(Arc::clone(&context_compaction_model))
+    .with_snapshot_reader_budget(snapshot_reader_budget);
     let process_runtime = match prometheus_runtime.as_ref() {
         Some((metrics, _server)) => process_runtime.with_metrics(metrics.clone()),
         None => process_runtime,

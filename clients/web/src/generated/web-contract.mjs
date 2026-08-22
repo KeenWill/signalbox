@@ -59,6 +59,437 @@ const schemas = {
     "title": "WebApiErrorResponse",
     "type": "object"
   },
+  "WebAttentionSnapshot": {
+    "$defs": {
+      "WebAttentionAction": {
+        "enum": [
+          "provide_goal_need",
+          "decide_approval",
+          "reconcile_turn",
+          "restore_runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WebAttentionActivityKind"
+          },
+          "unix_milliseconds": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "unix_milliseconds",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "WebAttentionActivityKind": {
+        "enum": [
+          "session",
+          "turn",
+          "goal",
+          "approval_judge",
+          "runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure"
+        ],
+        "type": "string"
+      },
+      "WebAttentionGoalBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "type": "string"
+          },
+          "need_summary": {
+            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/WebAttentionBlockedReason"
+          }
+        },
+        "required": [
+          "generation",
+          "reason",
+          "need_summary"
+        ],
+        "type": "object"
+      },
+      "WebAttentionJudgeFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "actionable": {
+            "type": "string"
+          },
+          "completed": {
+            "type": "string"
+          },
+          "escalated": {
+            "type": "string"
+          },
+          "failed": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "actionable",
+          "completed",
+          "escalated",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "WebAttentionState": {
+        "enum": [
+          "active",
+          "queued",
+          "blocked",
+          "awaiting_approval",
+          "ambiguous",
+          "awaiting_tool_recovery",
+          "awaiting_reconciliation",
+          "runner_lost",
+          "idle"
+        ],
+        "type": "string"
+      },
+      "WebAttentionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_turn_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "goal_block": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionGoalBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge": {
+            "$ref": "#/$defs/WebAttentionJudgeFacts"
+          },
+          "last_activity": {
+            "$ref": "#/$defs/WebAttentionActivity"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/WebAttentionState"
+          }
+        },
+        "required": [
+          "session_id",
+          "state",
+          "judge",
+          "last_activity"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "continuation_after_session_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "cursor": {
+        "type": "string"
+      },
+      "summaries": {
+        "items": {
+          "$ref": "#/$defs/WebAttentionSummary"
+        },
+        "maxItems": 32,
+        "type": "array"
+      }
+    },
+    "required": [
+      "cursor",
+      "summaries"
+    ],
+    "title": "WebAttentionSnapshot",
+    "type": "object"
+  },
+  "WebAttentionStreamEvent": {
+    "$defs": {
+      "WebAttentionAction": {
+        "enum": [
+          "provide_goal_need",
+          "decide_approval",
+          "reconcile_turn",
+          "restore_runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WebAttentionActivityKind"
+          },
+          "unix_milliseconds": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "unix_milliseconds",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "WebAttentionActivityKind": {
+        "enum": [
+          "session",
+          "turn",
+          "goal",
+          "approval_judge",
+          "runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure"
+        ],
+        "type": "string"
+      },
+      "WebAttentionGoalBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "type": "string"
+          },
+          "need_summary": {
+            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/WebAttentionBlockedReason"
+          }
+        },
+        "required": [
+          "generation",
+          "reason",
+          "need_summary"
+        ],
+        "type": "object"
+      },
+      "WebAttentionJudgeFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "actionable": {
+            "type": "string"
+          },
+          "completed": {
+            "type": "string"
+          },
+          "escalated": {
+            "type": "string"
+          },
+          "failed": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "actionable",
+          "completed",
+          "escalated",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "WebAttentionSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "continuation_after_session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cursor": {
+            "type": "string"
+          },
+          "summaries": {
+            "items": {
+              "$ref": "#/$defs/WebAttentionSummary"
+            },
+            "maxItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "cursor",
+          "summaries"
+        ],
+        "type": "object"
+      },
+      "WebAttentionState": {
+        "enum": [
+          "active",
+          "queued",
+          "blocked",
+          "awaiting_approval",
+          "ambiguous",
+          "awaiting_tool_recovery",
+          "awaiting_reconciliation",
+          "runner_lost",
+          "idle"
+        ],
+        "type": "string"
+      },
+      "WebAttentionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_turn_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "goal_block": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionGoalBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge": {
+            "$ref": "#/$defs/WebAttentionJudgeFacts"
+          },
+          "last_activity": {
+            "$ref": "#/$defs/WebAttentionActivity"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/WebAttentionState"
+          }
+        },
+        "required": [
+          "session_id",
+          "state",
+          "judge",
+          "last_activity"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "snapshot",
+            "type": "string"
+          },
+          "snapshot": {
+            "$ref": "#/$defs/WebAttentionSnapshot"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshot"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "update",
+            "type": "string"
+          },
+          "summaries": {
+            "items": {
+              "$ref": "#/$defs/WebAttentionSummary"
+            },
+            "maxItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "cursor",
+          "summaries"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "resync_required",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "cursor"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WebAttentionStreamEvent"
+  },
   "WebContractBootstrap": {
     "$defs": {
       "WebContractCapabilities": {
@@ -223,6 +654,38 @@ function assertSchema(root, schema, value, path) {
     }
     return;
   }
+  if (schema.anyOf !== undefined) {
+    const accepted = schema.anyOf.some((candidate) => {
+      try {
+        assertSchema(root, candidate, value, path);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (!accepted) {
+      fail(path, "one recognized variant");
+    }
+    return;
+  }
+  if (Array.isArray(schema.type)) {
+    if (value === null && schema.type.includes("null")) {
+      return;
+    }
+    const concrete = schema.type.filter((candidate) => candidate !== "null");
+    const accepted = concrete.some((candidate) => {
+      try {
+        assertSchema(root, { ...schema, type: candidate }, value, path);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (!accepted) {
+      fail(path, concrete.join(" or "));
+    }
+    return;
+  }
   if (schema.type === "object") {
     if (value === null || typeof value !== "object" || Array.isArray(value)) {
       fail(path, "an object");
@@ -251,6 +714,9 @@ function assertSchema(root, schema, value, path) {
     if (!Array.isArray(value)) {
       fail(path, "an array");
     }
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+      fail(path, `at most ${schema.maxItems} items`);
+    }
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${path}[${index}]`));
     return;
   }
@@ -266,6 +732,21 @@ function assertSchema(root, schema, value, path) {
     }
     if (schema.maximum !== undefined && value > schema.maximum) {
       fail(path, `at most ${schema.maximum}`);
+    }
+    return;
+  }
+  if (schema.type === "string") {
+    if (typeof value !== "string") {
+      fail(path, "string");
+    }
+    if (schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) {
+      fail(path, `at most ${schema.maxLength} Unicode scalar values`);
+    }
+    return;
+  }
+  if (schema.type === "null") {
+    if (value !== null) {
+      fail(path, "null");
     }
     return;
   }
@@ -289,5 +770,15 @@ export function decodeWebContractExample(value) {
 
 export function decodeWebApiErrorResponse(value) {
   assertSchema(schemas.WebApiErrorResponse, schemas.WebApiErrorResponse, value, "error_response");
+  return value;
+}
+
+export function decodeWebAttentionSnapshot(value) {
+  assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
+  return value;
+}
+
+export function decodeWebAttentionStreamEvent(value) {
+  assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
   return value;
 }
