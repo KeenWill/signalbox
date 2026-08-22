@@ -79,6 +79,7 @@ enum ValidationBehavior {
 enum ReadBehavior {
     Text,
     InvalidViewArguments,
+    SourceTooLarge,
     OversizedText,
     MalformedStructured,
     DuplicateStructuredMember,
@@ -170,6 +171,9 @@ impl FileMediaProcessor for SyntheticProcessor {
                     cursor: None,
                 },
                 ReadBehavior::InvalidViewArguments => ProcessorReadOutput::InvalidViewArguments,
+                ReadBehavior::SourceTooLarge => ProcessorReadOutput::SourceTooLarge {
+                    maximum_bytes: 1_024,
+                },
                 ReadBehavior::OversizedText => ProcessorReadOutput::Text {
                     body: "x".repeat(65),
                     truncated: false,
@@ -507,6 +511,28 @@ fn inv076_continuation_invalid_arguments_is_sanitized_to_failure() {
         input: FileReadInput::Continuation {
             cursor: signalbox_file_media_runtime::ReadContinuationCursor::try_new("next-page")
                 .expect("fixture continuation cursor is valid"),
+        },
+    };
+
+    let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
+
+    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
+/// INV-076: a processor cannot report an authenticated in-bounds source as too large.
+#[test]
+fn inv076_false_source_too_large_is_sanitized_to_failure() {
+    let source = MemorySource::synthetic();
+    let registry = registry_with_view(text_view());
+    let processor = SyntheticProcessor {
+        validation: ValidationBehavior::Valid,
+        read: ReadBehavior::SourceTooLarge,
+    };
+    let request = FileReadRequest {
+        inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
+        view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
         },
     };
 

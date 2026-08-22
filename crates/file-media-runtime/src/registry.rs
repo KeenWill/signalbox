@@ -479,7 +479,14 @@ impl FileMediaRegistry {
                 cancellation,
             )
             .await?;
-        sanitize_read(reader, view, self.ceilings, initial_request, raw)
+        sanitize_read(
+            reader,
+            view,
+            self.ceilings,
+            source.byte_length().get(),
+            initial_request,
+            raw,
+        )
     }
 }
 
@@ -608,6 +615,7 @@ fn sanitize_read(
     reader: &ReaderDeclaration,
     view: &crate::ReadViewDeclaration,
     ceilings: FileMediaCeilings,
+    source_bytes: u64,
     initial_request: bool,
     raw: ProcessorReadOutput,
 ) -> Result<FileReadResult, FileMediaFailure> {
@@ -679,7 +687,7 @@ fn sanitize_read(
         ProcessorReadOutput::InvalidViewArguments => Err(FileMediaFailure::ProcessorFailed),
         ProcessorReadOutput::UnsupportedView => Err(FileMediaFailure::ProcessorFailed),
         ProcessorReadOutput::SourceTooLarge { maximum_bytes } => {
-            if maximum_bytes != view.bounds().source_bytes() {
+            if maximum_bytes != view.bounds().source_bytes() || source_bytes <= maximum_bytes {
                 return Err(FileMediaFailure::ProcessorFailed);
             }
             Err(FileMediaFailure::SourceTooLarge { maximum_bytes })
