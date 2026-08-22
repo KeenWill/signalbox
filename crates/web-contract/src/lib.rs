@@ -366,7 +366,7 @@ pub struct WebSessionLiveSnapshot {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WebSessionLiveStreamEvent {
     Snapshot {
-        snapshot: WebSessionLiveSnapshot,
+        snapshot: Box<WebSessionLiveSnapshot>,
     },
     Durable {
         cursor: WebU64,
@@ -580,6 +580,17 @@ impl fmt::Display for GenerateWebContractError {
 
 impl Error for GenerateWebContractError {}
 
+struct GeneratedSchemas {
+    bootstrap: Value,
+    example: Value,
+    error: Value,
+    descriptor: Value,
+    window: Value,
+    attention_snapshot: Value,
+    attention_event: Value,
+    live_event: Value,
+}
+
 /// Produces all checked-in browser contract artifacts.
 ///
 /// # Errors
@@ -587,19 +598,22 @@ impl Error for GenerateWebContractError {}
 /// Returns a closed build-time error when serde cannot encode a generated value
 /// or a DTO schema grows beyond the generator's focused supported shapes.
 pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContractError> {
-    let bootstrap_schema = canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value());
-    let example_schema = canonical_schema(schemars::schema_for!(WebContractExample).to_value());
-    let error_schema = canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value());
-    let descriptor_schema =
-        canonical_schema(schemars::schema_for!(WebSessionTimelineDescriptor).to_value());
-    let window_schema =
-        canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
-    let attention_snapshot_schema =
-        canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value());
-    let attention_event_schema =
-        canonical_schema(schemars::schema_for!(WebAttentionStreamEvent).to_value());
-    let live_event_schema =
-        canonical_schema(schemars::schema_for!(WebSessionLiveStreamEvent).to_value());
+    let schemas = GeneratedSchemas {
+        bootstrap: canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value()),
+        example: canonical_schema(schemars::schema_for!(WebContractExample).to_value()),
+        error: canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value()),
+        descriptor: canonical_schema(
+            schemars::schema_for!(WebSessionTimelineDescriptor).to_value(),
+        ),
+        window: canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value()),
+        attention_snapshot: canonical_schema(
+            schemars::schema_for!(WebAttentionSnapshot).to_value(),
+        ),
+        attention_event: canonical_schema(
+            schemars::schema_for!(WebAttentionStreamEvent).to_value(),
+        ),
+        live_event: canonical_schema(schemars::schema_for!(WebSessionLiveStreamEvent).to_value()),
+    };
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -611,29 +625,11 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     Ok(vec![
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.mjs",
-            contents: runtime_module(
-                &bootstrap_schema,
-                &example_schema,
-                &error_schema,
-                &descriptor_schema,
-                &window_schema,
-                &attention_snapshot_schema,
-                &attention_event_schema,
-                &live_event_schema,
-            )?,
+            contents: runtime_module(&schemas)?,
         },
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.d.mts",
-            contents: declaration_module(
-                &bootstrap_schema,
-                &example_schema,
-                &error_schema,
-                &descriptor_schema,
-                &window_schema,
-                &attention_snapshot_schema,
-                &attention_event_schema,
-                &live_event_schema,
-            )?,
+            contents: declaration_module(&schemas)?,
         },
         GeneratedArtifact {
             path: "crates/web-contract/tests/fixtures/example.json",
@@ -650,25 +646,16 @@ fn canonical_schema(mut schema: Value) -> Value {
     schema
 }
 
-fn runtime_module(
-    bootstrap_schema: &Value,
-    example_schema: &Value,
-    error_schema: &Value,
-    descriptor_schema: &Value,
-    window_schema: &Value,
-    attention_snapshot_schema: &Value,
-    attention_event_schema: &Value,
-    live_event_schema: &Value,
-) -> Result<String, GenerateWebContractError> {
+fn runtime_module(schemas: &GeneratedSchemas) -> Result<String, GenerateWebContractError> {
     let mut schemas = json!({
-        "WebContractBootstrap": bootstrap_schema,
-        "WebContractExample": example_schema,
-        "WebApiErrorResponse": error_schema,
-        "WebSessionTimelineDescriptor": descriptor_schema,
-        "WebSessionTimelineWindow": window_schema,
-        "WebAttentionSnapshot": attention_snapshot_schema,
-        "WebAttentionStreamEvent": attention_event_schema,
-        "WebSessionLiveStreamEvent": live_event_schema,
+        "WebContractBootstrap": schemas.bootstrap,
+        "WebContractExample": schemas.example,
+        "WebApiErrorResponse": schemas.error,
+        "WebSessionTimelineDescriptor": schemas.descriptor,
+        "WebSessionTimelineWindow": schemas.window,
+        "WebAttentionSnapshot": schemas.attention_snapshot,
+        "WebAttentionStreamEvent": schemas.attention_event,
+        "WebSessionLiveStreamEvent": schemas.live_event,
     });
     schemas.sort_all_objects();
     let schemas = serde_json::to_string_pretty(&schemas)
@@ -882,41 +869,33 @@ export function decodeWebSessionLiveStreamEvent(value) {{
     ))
 }
 
-fn declaration_module(
-    bootstrap_schema: &Value,
-    example_schema: &Value,
-    error_schema: &Value,
-    descriptor_schema: &Value,
-    window_schema: &Value,
-    attention_snapshot_schema: &Value,
-    attention_event_schema: &Value,
-    live_event_schema: &Value,
-) -> Result<String, GenerateWebContractError> {
+fn declaration_module(schemas: &GeneratedSchemas) -> Result<String, GenerateWebContractError> {
     let mut definitions = BTreeMap::new();
-    let bootstrap = typescript_type(bootstrap_schema, bootstrap_schema, &mut definitions)?;
-    let example = typescript_type(example_schema, example_schema, &mut definitions)?;
-    let error = typescript_type(error_schema, error_schema, &mut definitions)?;
-    let descriptor = typescript_type(descriptor_schema, descriptor_schema, &mut definitions)?;
-    let window = typescript_type(window_schema, window_schema, &mut definitions)?;
+    let bootstrap = typescript_type(&schemas.bootstrap, &schemas.bootstrap, &mut definitions)?;
+    let example = typescript_type(&schemas.example, &schemas.example, &mut definitions)?;
+    let error = typescript_type(&schemas.error, &schemas.error, &mut definitions)?;
+    let descriptor = typescript_type(&schemas.descriptor, &schemas.descriptor, &mut definitions)?;
+    let window = typescript_type(&schemas.window, &schemas.window, &mut definitions)?;
     let attention_snapshot = typescript_type(
-        attention_snapshot_schema,
-        attention_snapshot_schema,
+        &schemas.attention_snapshot,
+        &schemas.attention_snapshot,
         &mut definitions,
     )?;
     let attention_event = typescript_type(
-        attention_event_schema,
-        attention_event_schema,
+        &schemas.attention_event,
+        &schemas.attention_event,
         &mut definitions,
     )?;
-    let live_snapshot_definition = live_event_schema
+    let live_snapshot_definition = schemas
+        .live_event
         .pointer("/$defs/WebSessionLiveSnapshot")
         .ok_or(GenerateWebContractError::UnsupportedSchema)?;
     let live_snapshot = typescript_type(
-        live_event_schema,
+        &schemas.live_event,
         live_snapshot_definition,
         &mut definitions,
     )?;
-    let live_event = typescript_type(live_event_schema, live_event_schema, &mut definitions)?;
+    let live_event = typescript_type(&schemas.live_event, &schemas.live_event, &mut definitions)?;
     let mut output = String::from(
         "// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.\n// Do not edit by hand.\n\n",
     );

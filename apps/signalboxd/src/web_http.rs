@@ -683,7 +683,7 @@ async fn session_live_follow(
     let queued_at_snapshot = subscription.queued_len();
     let mut pending = VecDeque::new();
     pending.push_back(WebSessionLiveStreamEvent::Snapshot {
-        snapshot: live_snapshot_dto(snapshot),
+        snapshot: Box::new(live_snapshot_dto(snapshot)),
     });
     let source = stream::unfold(
         LiveFollowState {
