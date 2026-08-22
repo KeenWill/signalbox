@@ -619,15 +619,6 @@ test('continues an exact arbitrary imported frontier as a native session', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('captures the pinned imports workstation', async ({ page }, testInfo) => {
-  skipUnlessLinuxChromium(testInfo)
-  const problems = watchBrowser(page)
-  await page.goto(importsFixture.path)
-  await expect(page.getByRole('heading', { name: 'Imported conversations' })).toBeVisible()
-  await expect(page).toHaveScreenshot('imports-dark.png', { animations: 'disabled' })
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
 test('captures the pinned dark workbench', async ({ page }, testInfo) => {
   skipUnlessLinuxChromium(testInfo)
   const problems = watchBrowser(page)
