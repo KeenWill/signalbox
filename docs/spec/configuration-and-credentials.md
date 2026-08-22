@@ -441,7 +441,7 @@ admits anonymous HTTPS access only; it never asks the runner or daemon to select
 a credential. Any repository requires `github.com` in the effective network
 list. Environment names use `[A-Z_][A-Z0-9_]*`, are at most 4,096 UTF-8 bytes,
 and are unique. They cannot name runner control or model-provider variables, any
-`LD_*` dynamic-loader variable, or the process core's fixed `HOME`,
+`LD_*` or `DYLD_*` dynamic-loader variable, or the process core's fixed `HOME`,
 `HTTPS_PROXY`, `LANG`, `LC_ALL`, and `PATH` entries. Absolute paths are
 canonicalized without following a final credential symlink; duplicate, nested,
 writable/read-only-overlapping, or runner-root-overlapping allowlist paths fail
