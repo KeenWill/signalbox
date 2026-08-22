@@ -42,9 +42,12 @@ export function ArtifactRenderer({
 }) {
   const automatic = selectImageView(descriptor)
   const original = viewByKind(descriptor, 'browser_native')
-  const originalAdmitted = original
+  const originalWithinByteLimit = original
     ? isInlineOriginalByteLengthAdmitted(original.byte_length)
     : false
+  // The descriptor does not expose decoded dimensions, so the client cannot prove a
+  // pixel ceiling before assigning the original URL. Originals remain download-only.
+  const originalAdmitted = false
   const download = viewByKind(descriptor, 'download')
   const rendered = originalRequested && originalAdmitted ? original : automatic
   const derivation = rendered?.derivations[0]
@@ -100,7 +103,9 @@ export function ArtifactRenderer({
                 ? originalRequested
                   ? 'Original loaded'
                   : 'Load original'
-                : 'Original exceeds 16 MiB inline limit'}
+                : originalWithinByteLimit
+                  ? 'Original dimensions unavailable; download only'
+                  : 'Original exceeds 16 MiB inline limit'}
             </button>
           )}
           {download && (

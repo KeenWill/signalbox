@@ -69,6 +69,7 @@ test('completes route switching from the command palette without a mouse', async
   await page.getByRole('button', { name: /Go to Sessions/ }).focus()
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page.getByRole('main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -80,6 +81,7 @@ test('runs advertised product navigation sequences', async ({ page }) => {
   await page.keyboard.press('g')
   await page.keyboard.press('s')
   await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page.getByRole('main')).toBeFocused()
   await page.keyboard.press('g')
   await page.keyboard.press(',')
   await expect(page).toHaveURL(/\/settings$/)

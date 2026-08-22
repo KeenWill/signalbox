@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { imageArtifact } from './features/artifacts/artifactScenario'
+import { binaryArtifact, imageArtifact } from './features/artifacts/artifactScenario'
 import {
   MAX_PRODUCT_JSON_BYTES,
   ProductContractError,
@@ -116,6 +116,20 @@ describe('SameOriginProductTransport', () => {
       `/api/blobs/${encodeURIComponent(imageArtifact.digest)}/descriptor?media_type=image%2Fpng&display_filename=orbital-map.png`,
       expect.objectContaining({ credentials: 'same-origin' }),
     )
+  })
+
+  it('rejects a descriptor for a different immutable identity', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(binaryArtifact))),
+    )
+
+    const request = new SameOriginProductTransport().readBlobDescriptor({
+      digest: imageArtifact.digest,
+      mediaType: imageArtifact.declared_media_type,
+    })
+
+    await expect(request).rejects.toThrow('descriptor digest did not match')
   })
 
   it('bounds descriptor error payloads before decoding them', async () => {

@@ -138,7 +138,11 @@ export class SameOriginProductTransport implements ProductTransport {
     if (!response.ok) {
       throw new ProductRequestError(response.status, decodeWebApiErrorResponse(payload))
     }
-    return decodeWebBlobDescriptor(payload)
+    const descriptor = decodeWebBlobDescriptor(payload)
+    if (descriptor.digest !== input.digest) {
+      throw new Error('descriptor digest did not match the requested blob identity')
+    }
+    return descriptor
   }
 }
 

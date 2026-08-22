@@ -139,7 +139,7 @@ function CommandPalette({ context }: { context: CommandContext }) {
     <Dialog.Root
       open={open}
       onOpenChange={(next) => {
-        if (!next) invokeCommand('surface.escape', context)
+        if (!next) context.dispatch(actions.overlaySet(null))
       }}
     >
       <Dialog.Portal>
@@ -367,6 +367,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const artifactButtonRef = useRef<HTMLButtonElement>(null)
   const artifactDigestRef = useRef<HTMLInputElement>(null)
   const artifactSideWasOpen = useRef(false)
+  const [artifactOpen, setArtifactOpen] = useState(false)
   const [artifactInspectorState, setArtifactInspectorState] = useState(emptyArtifactInspectorState)
   const narrowInspector = useNarrowInspector()
   const bootstrap = useQuery({
@@ -390,18 +391,22 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       scenarioSurface: false,
       timelineIds: [],
       focusTimeline: () => primaryRef.current?.focus(),
-      navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
-      openArtifactInspector: artifactAvailable
-        ? () => dispatch(actions.overlaySet('artifact'))
-        : undefined,
+      navigate: (path) => {
+        void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() => {
+          requestAnimationFrame(() => primaryRef.current?.focus())
+        })
+      },
+      openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
     }),
     [artifactAvailable, dispatch, navigate],
   )
   useHotkeys(
-    globalHotkeyBindings.map((binding) => ({
-      hotkey: binding.hotkey,
-      callback: () => invokeCommand(binding.commandId, context),
-    })),
+    globalHotkeyBindings
+      .filter((binding) => binding.commandId !== 'surface.escape')
+      .map((binding) => ({
+        hotkey: binding.hotkey,
+        callback: () => invokeCommand(binding.commandId, context),
+      })),
   )
   useHotkeySequences(
     globalHotkeySequenceBindings.map((binding) => ({
@@ -416,14 +421,32 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   }, [app.density, app.theme])
 
   useEffect(() => {
-    if (app.overlay === 'artifact' && !inspectorInSheet) {
+    if (artifactOpen && !inspectorInSheet && !artifactSideWasOpen.current) {
       artifactSideWasOpen.current = true
       artifactDigestRef.current?.focus()
-    } else if (artifactSideWasOpen.current && !inspectorInSheet) {
+    } else if (!artifactOpen) {
       artifactSideWasOpen.current = false
-      artifactButtonRef.current?.focus()
     }
-  }, [app.overlay, inspectorInSheet])
+  }, [artifactOpen, inspectorInSheet])
+
+  const closeArtifactInspector = () => {
+    artifactSideWasOpen.current = false
+    setArtifactOpen(false)
+    requestAnimationFrame(() => artifactButtonRef.current?.focus())
+  }
+
+  useEffect(() => {
+    if (!artifactOpen) return undefined
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || inspectorInSheet || app.overlay !== null) return
+      event.preventDefault()
+      artifactSideWasOpen.current = false
+      setArtifactOpen(false)
+      requestAnimationFrame(() => artifactButtonRef.current?.focus())
+    }
+    window.addEventListener('keydown', closeOnEscape, true)
+    return () => window.removeEventListener('keydown', closeOnEscape, true)
+  }, [app.overlay, artifactOpen, inspectorInSheet])
 
   const copy = surfaceCopy[surface]
   const content =
@@ -476,11 +499,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       </main>
       {app.layout === 'workbench' && (
         <aside className="product-inspector" aria-label="Inspector">
-          {app.overlay === 'artifact' && !inspectorInSheet ? (
+          {artifactOpen && !inspectorInSheet ? (
             <ArtifactInspector
               available={artifactAvailable}
               digestInputRef={artifactDigestRef}
-              onClose={() => dispatch(actions.overlaySet(null))}
+              onClose={closeArtifactInspector}
               state={artifactInspectorState}
               onStateChange={setArtifactInspectorState}
             />
@@ -518,9 +541,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         </Dialog.Portal>
       </Dialog.Root>
       <Dialog.Root
-        open={app.overlay === 'artifact' && inspectorInSheet}
+        open={artifactOpen && inspectorInSheet && app.overlay === null}
         onOpenChange={(open) => {
-          if (!open) dispatch(actions.overlaySet(null))
+          if (!open && app.overlay === null) closeArtifactInspector()
         }}
       >
         <Dialog.Portal>
@@ -534,7 +557,6 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             }}
             onCloseAutoFocus={(event) => {
               event.preventDefault()
-              artifactButtonRef.current?.focus()
             }}
           >
             <Dialog.Title className="sr-only">Artifact inspector</Dialog.Title>
@@ -544,7 +566,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <ArtifactInspector
               available={artifactAvailable}
               digestInputRef={artifactDigestRef}
-              onClose={() => dispatch(actions.overlaySet(null))}
+              onClose={closeArtifactInspector}
               state={artifactInspectorState}
               onStateChange={setArtifactInspectorState}
             />

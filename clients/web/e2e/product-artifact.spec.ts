@@ -147,10 +147,9 @@ test('preserves an active artifact when the inspector changes composition', asyn
   await page.goto('/sessions')
 
   await resolveArtifactWithoutMouse(page)
-  await page.getByRole('button', { name: 'Load original' }).click()
   await expect(
-    page.getByRole('img', { name: `Original of ${imageArtifact.display_filename[0]}` }),
-  ).toBeVisible()
+    page.getByRole('button', { name: 'Original dimensions unavailable; download only' }),
+  ).toBeDisabled()
   await page.setViewportSize({ width: 1024, height: 900 })
   const sheet = page.getByRole('dialog', { name: 'Artifact inspector' })
   await expect(sheet.getByRole('textbox', { name: 'Digest' })).toHaveValue(imageArtifact.digest)
@@ -158,8 +157,44 @@ test('preserves an active artifact when the inspector changes composition', asyn
     sheet.getByRole('article', { name: `Artifact ${imageArtifact.display_filename[0]}` }),
   ).toBeVisible()
   await expect(
-    sheet.getByRole('img', { name: `Original of ${imageArtifact.display_filename[0]}` }),
+    sheet.getByRole('img', { name: `Preview of ${imageArtifact.display_filename[0]}` }),
   ).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('preserves the side inspector beneath the command palette', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useArtifactScenario(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/sessions')
+
+  await resolveArtifactWithoutMouse(page)
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(
+    page.getByRole('article', { name: `Artifact ${imageArtifact.display_filename[0]}` }),
+  ).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('does not restore stale side-inspector focus after closing a narrow sheet', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useArtifactScenario(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/sessions')
+
+  await page.getByRole('button', { name: 'Open artifact inspector' }).click()
+  await page.setViewportSize({ width: 1024, height: 900 })
+  await expect(page.getByRole('dialog', { name: 'Artifact inspector' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: 'Open artifact inspector' })).toBeFocused()
+  const density = page.getByRole('button', { name: 'Use comfortable density' })
+  await density.focus()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await expect(density).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
