@@ -13,7 +13,7 @@ Non-ambiguous execution-failure containment is verified against this PR
 (`agent/daemon-live-nonambiguous-execution-containment`).
 
 Credential-pool action and outbox allocator lock ordering is verified against
-this PR (`agent/daemon-live-outbox-credential-lock-order`).
+this PR (`agent/daemon-live-outbox-prefix-read`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
