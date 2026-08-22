@@ -84,10 +84,12 @@ function DialogFrame({
 export function OverlaySurfaces({
   context,
   activeId,
+  importsSurface = false,
   navigationDisabled = false,
 }: {
   context: CommandContext
   activeId: string
+  importsSurface?: boolean
   navigationDisabled?: boolean
 }) {
   const overlay = useAppSelector((state) => state.app.overlay)
@@ -96,7 +98,7 @@ export function OverlaySurfaces({
     (command) =>
       command.id !== 'surface.escape' &&
       command.available(context) &&
-      (activeId !== 'imports' || command.category === 'Surface' || command.category === 'Imports'),
+      (!importsSurface || command.category === 'Surface' || command.category === 'Imports'),
   )
 
   return (
@@ -137,7 +139,7 @@ export function OverlaySurfaces({
             .filter(
               (command) =>
                 command.bindings.length > 0 &&
-                (activeId !== 'imports' ||
+                (!importsSurface ||
                   command.category === 'Surface' ||
                   command.category === 'Imports'),
             )

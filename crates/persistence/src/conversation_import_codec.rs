@@ -175,6 +175,51 @@ pub(crate) fn decode_content(
     Ok(content)
 }
 
+/// Validates one content encoding without materializing its potentially large values.
+pub(crate) fn validate_content_structure(
+    bytes: &[u8],
+) -> Result<u8, ImportedConversationEncodingFailure> {
+    let mut decoder = Decoder::new(bytes, CONTENT_PAYLOAD, ENCODING_VERSION_TWO)?;
+    let kind = decoder.byte()?;
+    match kind {
+        0 | 1 | 8 => decoder.skip_attestation(Decoder::skip_text)?,
+        2 => {
+            decoder.skip_attestation(Decoder::skip_text)?;
+            decoder.skip_attestation(Decoder::skip_text)?;
+            decoder.skip_attestation(|decoder| decoder.skip_structured(0))?;
+            decoder.skip_attestation(|decoder| decoder.skip_structured(0))?;
+        }
+        3 => {
+            decoder.skip_attestation(Decoder::skip_text)?;
+            decoder.skip_attestation(Decoder::skip_tool_result_value)?;
+            decoder.skip_attestation(Decoder::skip_boolean)?;
+        }
+        4 => {
+            decoder.skip_attestation(Decoder::skip_text)?;
+            decoder.skip_attestation(Decoder::skip_text)?;
+        }
+        5 => decoder.skip_attestation(Decoder::skip_text)?,
+        6 => decoder.skip_attestation(Decoder::skip_media_source)?,
+        7 => match decoder.byte()? {
+            0..=4 => {}
+            value => {
+                return Err(ImportedConversationEncodingFailure::UnsupportedTag {
+                    kind: "message content absence",
+                    value,
+                });
+            }
+        },
+        value => {
+            return Err(ImportedConversationEncodingFailure::UnsupportedTag {
+                kind: "imported transcript content",
+                value,
+            });
+        }
+    }
+    decoder.finish()?;
+    Ok(kind)
+}
+
 pub(crate) fn encode_source_metadata(
     source: &ImportedSourceMetadata,
 ) -> Result<Vec<u8>, ImportedConversationEncodingFailure> {
@@ -634,6 +679,113 @@ impl<'bytes> Decoder<'bytes> {
             self.attestation(Self::text)?,
         ))
     }
+
+    fn skip_text(&mut self) -> Result<(), ImportedConversationEncodingFailure> {
+        let length = self.length()?;
+        let bytes = self.take(length)?;
+        std::str::from_utf8(bytes)
+            .map(|_| ())
+            .map_err(|_| ImportedConversationEncodingFailure::InvalidUtf8("imported text"))
+    }
+
+    fn skip_boolean(&mut self) -> Result<(), ImportedConversationEncodingFailure> {
+        match self.byte()? {
+            0 | 1 => Ok(()),
+            value => Err(ImportedConversationEncodingFailure::UnsupportedTag {
+                kind: "boolean",
+                value,
+            }),
+        }
+    }
+
+    fn skip_attestation(
+        &mut self,
+        skip_value: impl FnOnce(&mut Self) -> Result<(), ImportedConversationEncodingFailure>,
+    ) -> Result<(), ImportedConversationEncodingFailure> {
+        match self.byte()? {
+            0 | 1 => Ok(()),
+            2 => skip_value(self),
+            value => Err(ImportedConversationEncodingFailure::UnsupportedTag {
+                kind: "source attestation",
+                value,
+            }),
+        }
+    }
+
+    fn skip_structured(&mut self, depth: usize) -> Result<(), ImportedConversationEncodingFailure> {
+        match self.byte()? {
+            0 => Ok(()),
+            1 => self.skip_boolean(),
+            2 => {
+                let length = self.length()?;
+                let bytes = self.take(length)?;
+                let value = std::str::from_utf8(bytes)
+                    .map_err(|_| ImportedConversationEncodingFailure::InvalidUtf8("JSON number"))?;
+                ImportedJsonNumber::try_new(value.to_owned())
+                    .map(|_| ())
+                    .map_err(|_| ImportedConversationEncodingFailure::InvalidJsonNumber)
+            }
+            3 => self.skip_text(),
+            4 => {
+                enter_container(depth)?;
+                let length = self.collection_length()?;
+                for _ in 0..length {
+                    self.skip_structured(depth + 1)?;
+                }
+                Ok(())
+            }
+            5 => {
+                enter_container(depth)?;
+                let length = self.collection_length()?;
+                for _ in 0..length {
+                    self.skip_text()?;
+                    self.skip_structured(depth + 1)?;
+                }
+                Ok(())
+            }
+            value => Err(ImportedConversationEncodingFailure::UnsupportedTag {
+                kind: "structured value",
+                value,
+            }),
+        }
+    }
+
+    fn skip_tool_result_value(&mut self) -> Result<(), ImportedConversationEncodingFailure> {
+        match self.byte()? {
+            0 => self.skip_text(),
+            1 => {
+                let length = self.collection_length()?;
+                for _ in 0..length {
+                    self.skip_tool_result_block()?;
+                }
+                Ok(())
+            }
+            value => Err(ImportedConversationEncodingFailure::UnsupportedTag {
+                kind: "tool-result value",
+                value,
+            }),
+        }
+    }
+
+    fn skip_tool_result_block(&mut self) -> Result<(), ImportedConversationEncodingFailure> {
+        match self.byte()? {
+            0 | 2 => self.skip_attestation(Decoder::skip_text),
+            1 => self.skip_attestation(Decoder::skip_media_source),
+            3 if self.version() >= ENCODING_VERSION_TWO => {
+                self.skip_attestation(Decoder::skip_text)
+            }
+            value => Err(ImportedConversationEncodingFailure::UnsupportedTag {
+                kind: "tool-result block",
+                value,
+            }),
+        }
+    }
+
+    fn skip_media_source(&mut self) -> Result<(), ImportedConversationEncodingFailure> {
+        self.skip_attestation(Decoder::skip_text)?;
+        self.skip_attestation(Decoder::skip_text)?;
+        self.skip_attestation(Decoder::skip_text)
+    }
 }
 
 #[cfg(test)]
@@ -648,6 +800,7 @@ mod tests {
     use super::{
         ImportedConversationEncodingFailure, decode_content, decode_source_metadata,
         decode_structured, encode_content, encode_source_metadata, encode_structured,
+        validate_content_structure,
     };
 
     fn text(value: &str) -> ImportedText {
@@ -1098,6 +1251,32 @@ mod tests {
 
         assert_eq!(
             decode_structured(&encoded),
+            Err(ImportedConversationEncodingFailure::UnexpectedEnd)
+        );
+    }
+
+    #[test]
+    fn large_non_text_structure_preserves_its_normalized_kind() {
+        let content = ImportedTranscriptContent::Thinking {
+            thinking: attested_text(&"x".repeat(128 * 1024)),
+            signature: ImportedSourceAttestation::AttestedAbsent,
+        };
+        let encoded = encode_content(&content).expect("large fixture encodes");
+
+        assert_eq!(validate_content_structure(&encoded), Ok(4));
+    }
+
+    #[test]
+    fn large_non_text_structure_rejects_a_truncated_required_attestation() {
+        let content = ImportedTranscriptContent::Thinking {
+            thinking: attested_text(&"x".repeat(128 * 1024)),
+            signature: ImportedSourceAttestation::AttestedAbsent,
+        };
+        let mut encoded = encode_content(&content).expect("large fixture encodes");
+        encoded.pop();
+
+        assert_eq!(
+            validate_content_structure(&encoded),
             Err(ImportedConversationEncodingFailure::UnexpectedEnd)
         );
     }

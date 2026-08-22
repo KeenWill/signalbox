@@ -8,8 +8,7 @@ use std::{error::Error, fmt, num::NonZeroU32};
 use rust_decimal::Decimal;
 use signalbox_domain::{
     ImportedConversationDisplayTitle, ImportedConversationFormat, ImportedConversationId,
-    ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptContent,
-    ImportedTranscriptEntryId,
+    ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptEntryId,
 };
 use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -18,10 +17,8 @@ use crate::{
         DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_PENDING, DISPLAY_TITLE_STATE_UNDERIVABLE,
         decode_format, decode_source_speaker, encode_format, positive_u64,
     },
-    conversation_import_codec::decode_content,
+    conversation_import_codec::validate_content_structure,
 };
-
-const NON_TEXT_VALIDATION_MAX_BYTES: i64 = 64 * 1024;
 
 /// Exact filters and exclusive keyset position for one imports page.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -470,7 +467,6 @@ impl ImportedConversationDiscoveryRepository {
                          THEN substring(content_encoding FROM 13 FOR $4) END
                          AS content_text_prefix,
                     CASE WHEN get_byte(content_encoding, 2) <> 1
-                              AND octet_length(content_encoding) <= $5
                          THEN content_encoding END AS validated_content_encoding,
                     octet_length(content_encoding)::bigint AS content_bytes,
                     $4::bigint AS content_projected_bytes
@@ -483,7 +479,6 @@ impl ImportedConversationDiscoveryRepository {
         .bind(Decimal::from(first_position))
         .bind(Decimal::from(last_position))
         .bind(i64::from(maximum_text_bytes.get()) + 3)
-        .bind(NON_TEXT_VALIDATION_MAX_BYTES)
         .fetch_all(&self.pool)
         .await?;
         let items = rows
@@ -648,38 +643,19 @@ fn checked_non_text_content(
     projection: ImportedEntryContentProjection,
 ) -> Result<ImportedEntryContentProjection, ImportedConversationDiscoveryError> {
     let encoding: Option<Vec<u8>> = row.try_get("validated_content_encoding")?;
-    let Some(encoding) = encoding else {
-        return Ok(ImportedEntryContentProjection::OpaqueNonText);
-    };
-    let content = decode_content(&encoding)
+    let encoding = encoding.ok_or(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
+    let kind = validate_content_structure(&encoding)
         .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
     let kind_matches = matches!(
-        (&projection, content),
-        (
-            ImportedEntryContentProjection::SourceEvent,
-            ImportedTranscriptContent::SourceEvent { .. }
-        ) | (
-            ImportedEntryContentProjection::ToolCall,
-            ImportedTranscriptContent::ToolCall { .. }
-        ) | (
-            ImportedEntryContentProjection::ToolResult,
-            ImportedTranscriptContent::ToolResult { .. }
-        ) | (
-            ImportedEntryContentProjection::Thinking,
-            ImportedTranscriptContent::Thinking { .. }
-        ) | (
-            ImportedEntryContentProjection::RedactedThinking,
-            ImportedTranscriptContent::RedactedThinking { .. }
-        ) | (
-            ImportedEntryContentProjection::Document,
-            ImportedTranscriptContent::Document { .. }
-        ) | (
-            ImportedEntryContentProjection::MessageContentAbsent,
-            ImportedTranscriptContent::MessageContentAbsent(_)
-        ) | (
-            ImportedEntryContentProjection::SourceMessageBlock,
-            ImportedTranscriptContent::SourceMessageBlock { .. }
-        )
+        (&projection, kind),
+        (ImportedEntryContentProjection::SourceEvent, 0)
+            | (ImportedEntryContentProjection::ToolCall, 2)
+            | (ImportedEntryContentProjection::ToolResult, 3)
+            | (ImportedEntryContentProjection::Thinking, 4)
+            | (ImportedEntryContentProjection::RedactedThinking, 5)
+            | (ImportedEntryContentProjection::Document, 6)
+            | (ImportedEntryContentProjection::MessageContentAbsent, 7)
+            | (ImportedEntryContentProjection::SourceMessageBlock, 8)
     );
     if !kind_matches {
         return Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into());

@@ -46,6 +46,7 @@ pub const DEFAULT_WEB_BIND_ADDRESS: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 37_231);
 
 const JSON_CONTENT_TYPE: &str = "application/json";
+const TEXT_CONTENT_TYPE: &str = "text/plain";
 const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
 const HTTP_DEFAULT_PORT: u16 = 80;
 
@@ -378,6 +379,37 @@ where
     })
 }
 
+/// Decodes one UTF-8 request body after enforcing a caller-owned byte ceiling.
+pub(crate) async fn decode_bounded_utf8(
+    request: Request,
+    maximum_bytes: usize,
+) -> Result<String, Response> {
+    let bytes = to_bytes(request.into_body(), maximum_bytes)
+        .await
+        .map_err(|error| {
+            if error_chain_contains_length_limit(&error) {
+                transport_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "text_body_too_large",
+                    "text request body exceeds the configured import limit",
+                )
+            } else {
+                transport_error(
+                    StatusCode::BAD_REQUEST,
+                    "text_body_read_failed",
+                    "text request body could not be read",
+                )
+            }
+        })?;
+    String::from_utf8(bytes.to_vec()).map_err(|_| {
+        transport_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_utf8",
+            "request body is not valid UTF-8",
+        )
+    })
+}
+
 fn error_chain_contains_length_limit(error: &axum::Error) -> bool {
     let mut current: Option<&(dyn Error + 'static)> = Some(error);
     while let Some(error) = current {
@@ -483,6 +515,31 @@ pub(crate) async fn validate_json_mutation(request: Request, next: Next) -> Resp
     next.run(request).await
 }
 
+pub(crate) async fn validate_text_mutation(request: Request, next: Next) -> Response {
+    if request.method() != Method::POST {
+        return transport_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "mutation_method_not_allowed",
+            "browser mutations use POST",
+        );
+    }
+    if !has_content_type(request.headers(), TEXT_CONTENT_TYPE) {
+        return transport_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "text_content_type_required",
+            "exact import searches require text/plain",
+        );
+    }
+    if validate_supplied_origin(request.headers()).is_err() {
+        return transport_error(
+            StatusCode::FORBIDDEN,
+            "cross_origin_mutation_rejected",
+            "mutation origin does not match request authority",
+        );
+    }
+    next.run(request).await
+}
+
 async fn validate_loopback_host(request: Request, next: Next) -> Response {
     if !has_loopback_host(request.headers(), request.uri()) {
         return transport_error(
@@ -515,11 +572,15 @@ fn is_loopback_authority(authority: &axum::http::uri::Authority) -> bool {
 }
 
 fn has_json_content_type(headers: &HeaderMap) -> bool {
+    has_content_type(headers, JSON_CONTENT_TYPE)
+}
+
+fn has_content_type(headers: &HeaderMap, expected: &str) -> bool {
     headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case(JSON_CONTENT_TYPE))
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
