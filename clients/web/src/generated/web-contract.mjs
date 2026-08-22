@@ -243,7 +243,7 @@ const schemas = {
             "$ref": "#/$defs/WebTimelineAddress"
           },
           "projection_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebSearchProjectionId"
           }
         },
         "required": [
@@ -273,6 +273,11 @@ const schemas = {
         ],
         "type": "object"
       },
+      "WebSearchProjectionId": {
+        "description": "Checked positive PostgreSQL projection identity encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]{0,18}$",
+        "type": "string"
+      },
       "WebSearchResult": {
         "additionalProperties": false,
         "description": "One bounded lexical match with enough identity to reveal unloaded history.",
@@ -293,6 +298,7 @@ const schemas = {
             "type": "string"
           },
           "snippet": {
+            "maxLength": 512,
             "type": "string"
           },
           "source": {
@@ -504,6 +510,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebSearchResult"
         },
+        "maxItems": 100,
         "type": "array"
       }
     },
@@ -845,6 +852,9 @@ function assertSchema(root, schema, value, path) {
     if (!Array.isArray(value)) {
       fail(path, "an array");
     }
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+      fail(path, `at most ${schema.maxItems} items`);
+    }
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${path}[${index}]`));
     return;
   }
@@ -874,6 +884,13 @@ function assertSchema(root, schema, value, path) {
   }
   if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {
     fail(path, `a string matching ${schema.pattern}`);
+  }
+  if (
+    schema.type === "string" &&
+    schema.pattern === "^[1-9][0-9]{0,18}$" &&
+    BigInt(value) > 9223372036854775807n
+  ) {
+    fail(path, "a positive signed 64-bit integer");
   }
   if (
     schema.type === "string" &&
@@ -914,5 +931,33 @@ export function decodeWebSessionTimelineWindow(value) {
 
 export function decodeWebSearchPage(value) {
   assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
+  const encoder = new TextEncoder();
+  value.results.forEach((result, resultIndex) => {
+    const bytes = encoder.encode(result.snippet);
+    if (bytes.length > 512) {
+      fail(
+        `search_page.results[${resultIndex}].snippet`,
+        `at most 512 UTF-8 bytes`,
+      );
+    }
+    let previousEnd = 0;
+    result.highlights.forEach((highlight, highlightIndex) => {
+      const rangePath = `search_page.results[${resultIndex}].highlights[${highlightIndex}]`;
+      if (
+        highlight.start_byte < previousEnd ||
+        highlight.start_byte >= highlight.end_byte ||
+        highlight.end_byte > bytes.length
+      ) {
+        fail(rangePath, "an ordered non-overlapping in-bounds UTF-8 byte range");
+      }
+      if (
+        (highlight.start_byte > 0 && (bytes[highlight.start_byte] & 0xc0) === 0x80) ||
+        (highlight.end_byte < bytes.length && (bytes[highlight.end_byte] & 0xc0) === 0x80)
+      ) {
+        fail(rangePath, "a range on UTF-8 boundaries");
+      }
+      previousEnd = highlight.end_byte;
+    });
+  });
   return value;
 }

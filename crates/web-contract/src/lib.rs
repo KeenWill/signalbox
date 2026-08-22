@@ -336,12 +336,44 @@ pub struct WebSearchHighlight {
     pub end_byte: u32,
 }
 
+/// Checked positive PostgreSQL projection identity encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebSearchProjectionId(#[schemars(regex(pattern = r"^[1-9][0-9]{0,18}$"))] String);
+
+impl WebSearchProjectionId {
+    /// Encodes one already-validated positive projection identity.
+    #[must_use]
+    pub fn from_nonzero(value: std::num::NonZeroU64) -> Self {
+        debug_assert!(i64::try_from(value.get()).is_ok());
+        Self(value.get().to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for WebSearchProjectionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let positive = canonical_u64(&value)
+            .and_then(std::num::NonZeroU64::new)
+            .filter(|value| i64::try_from(value.get()).is_ok());
+        if positive.is_none() {
+            return Err(de::Error::custom(
+                "search projection identity must be a canonical positive i64",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
 /// Stable opaque descending search keyset boundary.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSearchCursor {
     pub address: WebTimelineAddress,
-    pub projection_id: String,
+    pub projection_id: WebSearchProjectionId,
 }
 
 /// One bounded lexical match with enough identity to reveal unloaded history.
@@ -352,6 +384,7 @@ pub struct WebSearchResult {
     pub address: WebTimelineAddress,
     pub source: WebSearchResultSource,
     pub content_class: WebSearchContentClass,
+    #[schemars(length(max = 512))]
     pub snippet: String,
     pub highlights: Vec<WebSearchHighlight>,
 }
@@ -360,6 +393,7 @@ pub struct WebSearchResult {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSearchPage {
+    #[schemars(length(max = 100))]
     pub results: Vec<WebSearchResult>,
     pub continuation: Option<WebSearchCursor>,
 }
@@ -626,6 +660,9 @@ function assertSchema(root, schema, value, path) {{
     if (!Array.isArray(value)) {{
       fail(path, "an array");
     }}
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {{
+      fail(path, `at most ${{schema.maxItems}} items`);
+    }}
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${{path}}[${{index}}]`));
     return;
   }}
@@ -655,6 +692,13 @@ function assertSchema(root, schema, value, path) {{
   }}
   if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {{
     fail(path, `a string matching ${{schema.pattern}}`);
+  }}
+  if (
+    schema.type === "string" &&
+    schema.pattern === "^[1-9][0-9]{{0,18}}$" &&
+    BigInt(value) > 9223372036854775807n
+  ) {{
+    fail(path, "a positive signed 64-bit integer");
   }}
   if (
     schema.type === "string" &&
@@ -695,11 +739,40 @@ export function decodeWebSessionTimelineWindow(value) {{
 
 export function decodeWebSearchPage(value) {{
   assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
+  const encoder = new TextEncoder();
+  value.results.forEach((result, resultIndex) => {{
+    const bytes = encoder.encode(result.snippet);
+    if (bytes.length > {max_search_snippet_bytes}) {{
+      fail(
+        `search_page.results[${{resultIndex}}].snippet`,
+        `at most {max_search_snippet_bytes} UTF-8 bytes`,
+      );
+    }}
+    let previousEnd = 0;
+    result.highlights.forEach((highlight, highlightIndex) => {{
+      const rangePath = `search_page.results[${{resultIndex}}].highlights[${{highlightIndex}}]`;
+      if (
+        highlight.start_byte < previousEnd ||
+        highlight.start_byte >= highlight.end_byte ||
+        highlight.end_byte > bytes.length
+      ) {{
+        fail(rangePath, "an ordered non-overlapping in-bounds UTF-8 byte range");
+      }}
+      if (
+        (highlight.start_byte > 0 && (bytes[highlight.start_byte] & 0xc0) === 0x80) ||
+        (highlight.end_byte < bytes.length && (bytes[highlight.end_byte] & 0xc0) === 0x80)
+      ) {{
+        fail(rangePath, "a range on UTF-8 boundaries");
+      }}
+      previousEnd = highlight.end_byte;
+    }});
+  }});
   return value;
 }}
 "##,
         contract_name = WEB_CONTRACT_NAME,
         contract_version = WEB_CONTRACT_VERSION,
+        max_search_snippet_bytes = max_search_snippet_bytes(),
     ))
 }
 

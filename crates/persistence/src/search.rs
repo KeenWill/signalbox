@@ -21,10 +21,14 @@ const HEADLINE_END: &str = "\u{e001}";
 const SEARCH_SQL: &str = "
 WITH lexical_query AS (
     SELECT plainto_tsquery('simple'::regconfig, $1) AS value
+), query_terms AS (
+    SELECT unnest(
+        tsvector_to_array(to_tsvector('simple'::regconfig, $1))
+    ) AS lexeme
 )
 SELECT projection.projection_id, projection.session_id,
        projection.event_sequence, projection.item_kind, projection.item_id,
-       turn_id, content_class,
+       projection.source_kind, projection.source_id, turn_id, content_class,
        left(
            ts_headline(
                'simple'::regconfig,
@@ -40,15 +44,38 @@ SELECT projection.projection_id, projection.session_id,
        ) AS marked_snippet
   FROM web_search_projection AS projection
  CROSS JOIN lexical_query
- WHERE projection.search_vector @@ lexical_query.value
+ WHERE EXISTS (
+       SELECT 1
+         FROM query_terms AS term
+        WHERE term.lexeme = ANY(tsvector_to_array(projection.search_vector))
+   )
    AND NOT EXISTS (
        SELECT 1
-         FROM web_search_projection AS earlier_chunk
-        WHERE earlier_chunk.source_kind = projection.source_kind
-          AND earlier_chunk.source_id = projection.source_id
-          AND earlier_chunk.content_class = projection.content_class
-          AND earlier_chunk.projection_ordinal < projection.projection_ordinal
-          AND earlier_chunk.search_vector @@ lexical_query.value
+         FROM query_terms AS term
+        WHERE NOT EXISTS (
+            SELECT 1
+              FROM web_search_projection AS matching_chunk
+             WHERE matching_chunk.source_kind = projection.source_kind
+               AND matching_chunk.source_id = projection.source_id
+               AND matching_chunk.content_class = projection.content_class
+               AND term.lexeme = ANY(
+                   tsvector_to_array(matching_chunk.search_vector)
+               )
+        )
+   )
+   AND projection.projection_id = (
+       SELECT min(candidate.projection_id)
+         FROM web_search_projection AS candidate
+        WHERE candidate.source_kind = projection.source_kind
+          AND candidate.source_id = projection.source_id
+          AND candidate.content_class = projection.content_class
+          AND EXISTS (
+              SELECT 1
+                FROM query_terms AS term
+               WHERE term.lexeme = ANY(
+                   tsvector_to_array(candidate.search_vector)
+               )
+          )
    )
    AND ($2::uuid IS NULL OR projection.session_id = $2)
    AND (
@@ -63,10 +90,15 @@ SELECT projection.projection_id, projection.session_id,
  LIMIT $5";
 
 const PUBLISH_ARTIFACT_SQL: &str = "
+WITH chunks AS (
+    SELECT * FROM web_search_projection_chunks($6)
+), published AS (
 INSERT INTO web_search_projection (
     source_kind, source_id, session_id, event_sequence,
-    item_kind, item_id, turn_id, content_class, content_text
-) VALUES ($1, $2, $3, $4, $1, $2, NULL, $5, $6)
+    item_kind, item_id, turn_id, content_class, projection_ordinal, content_text
+) SELECT $1, $2, $3, $4, $1, $2, NULL, $5,
+         chunks.ordinal, chunks.content_text
+    FROM chunks
 ON CONFLICT (
     source_kind, source_id, content_class, projection_ordinal
 ) DO UPDATE
@@ -77,7 +109,9 @@ ON CONFLICT (
        AND web_search_projection.item_id = EXCLUDED.item_id
        AND web_search_projection.turn_id IS NOT DISTINCT FROM EXCLUDED.turn_id
        AND web_search_projection.content_text = EXCLUDED.content_text
-RETURNING projection_id";
+RETURNING projection_ordinal
+)
+SELECT (SELECT count(*) FROM published), (SELECT count(*) FROM chunks)";
 
 /// Integrity failure in the dedicated search projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -206,18 +240,20 @@ impl SearchRepository {
                 ("derived_artifact", "derived_text_artifact")
             }
         };
-        let published = sqlx::query_scalar::<_, i64>(PUBLISH_ARTIFACT_SQL)
+        let (published, expected) = sqlx::query_as::<_, (i64, i64)>(PUBLISH_ARTIFACT_SQL)
             .bind(source_kind)
             .bind(projection.artifact.into_uuid())
             .bind(projection.session.into_uuid())
             .bind(Decimal::from(projection.address.sequence().get()))
             .bind(content_class)
             .bind(projection.text.as_str())
-            .fetch_optional(&self.pool)
+            .fetch_one(&self.pool)
             .await?;
-        published.ok_or(SearchProjectionCorruption::Invalid(
-            "conflicting artifact publication",
-        ))?;
+        if published != expected {
+            return Err(
+                SearchProjectionCorruption::Invalid("conflicting artifact publication").into(),
+            );
+        }
         Ok(())
     }
 }
@@ -266,9 +302,19 @@ fn decode_row(row: PgRow) -> Result<(SearchCursor, SearchResult), SearchReposito
     let session = SessionId::from_uuid(row.try_get("session_id")?);
     let item_kind: String = row.try_get("item_kind")?;
     let item_id: Uuid = row.try_get("item_id")?;
+    let source_kind: String = row.try_get("source_kind")?;
+    let source_id: Uuid = row.try_get("source_id")?;
     let turn_id: Option<Uuid> = row.try_get("turn_id")?;
-    let source = decode_source(&item_kind, item_id, turn_id, session)?;
     let content_class = decode_content_class(row.try_get("content_class")?)?;
+    validate_source_correlation(
+        &source_kind,
+        source_id,
+        &item_kind,
+        item_id,
+        turn_id,
+        content_class,
+    )?;
+    let source = decode_source(&item_kind, item_id, turn_id, session)?;
     let (snippet, highlights) = decode_headline(row.try_get("marked_snippet")?)?;
     Ok((
         SearchCursor::new(address, projection),
@@ -281,6 +327,71 @@ fn decode_row(row: PgRow) -> Result<(SearchCursor, SearchResult), SearchReposito
             highlights,
         },
     ))
+}
+
+fn validate_source_correlation(
+    source_kind: &str,
+    source_id: Uuid,
+    item_kind: &str,
+    item_id: Uuid,
+    turn_id: Option<Uuid>,
+    content_class: SearchContentClass,
+) -> Result<(), SearchProjectionCorruption> {
+    let correlated = source_id == item_id
+        && matches!(
+            (source_kind, item_kind, turn_id, content_class),
+            (
+                "accepted_input",
+                "accepted_input",
+                Some(_),
+                SearchContentClass::UserTranscript
+            ) | (
+                "semantic_entry",
+                "transcript_entry",
+                Some(_),
+                SearchContentClass::AssistantTranscript
+            ) | (
+                "semantic_entry",
+                "transcript_entry",
+                None,
+                SearchContentClass::DerivedTextArtifact
+            ) | (
+                "tool_request",
+                "tool_request",
+                Some(_),
+                SearchContentClass::ToolArguments
+            ) | (
+                "tool_attempt",
+                "tool_attempt",
+                Some(_),
+                SearchContentClass::ToolResult
+            ) | (
+                "session_metadata",
+                "session",
+                None,
+                SearchContentClass::SessionMetadata
+            ) | (
+                "attachment",
+                "attachment",
+                None,
+                SearchContentClass::AttachmentFilename
+            ) | (
+                "attachment",
+                "attachment",
+                None,
+                SearchContentClass::AttachmentMediaMetadata
+            ) | (
+                "derived_artifact",
+                "derived_artifact",
+                None,
+                SearchContentClass::DerivedTextArtifact
+            )
+        );
+    if correlated {
+        Ok(())
+    } else {
+        Err(SearchProjectionCorruption::SourceShape)
+    }
 }
 
 fn decode_source(

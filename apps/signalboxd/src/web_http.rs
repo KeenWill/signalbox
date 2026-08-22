@@ -41,10 +41,10 @@ use signalbox_persistence::session_timeline::{
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
     WebContractBootstrap, WebContractExample, WebSearchContentClass, WebSearchCursor,
-    WebSearchHighlight, WebSearchPage, WebSearchResult, WebSearchResultSource,
-    WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
-    WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
-    WebTimelineEventSequence, WebU64,
+    WebSearchHighlight, WebSearchPage, WebSearchProjectionId, WebSearchResult,
+    WebSearchResultSource, WebSessionTimelineDescriptor, WebSessionTimelineEventKind,
+    WebSessionTimelineItem, WebSessionTimelineSizeFacts, WebSessionTimelineWindow,
+    WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence, WebU64,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -430,7 +430,7 @@ fn search_page_dto(page: signalbox_application::SearchPage) -> WebSearchPage {
         results: page.results.into_iter().map(search_result_dto).collect(),
         continuation: page.next.map(|cursor| WebSearchCursor {
             address: address_dto(cursor.address()),
-            projection_id: cursor.projection().get().to_string(),
+            projection_id: WebSearchProjectionId::from_nonzero(cursor.projection()),
         }),
     }
 }
