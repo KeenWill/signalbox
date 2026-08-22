@@ -252,6 +252,11 @@ mod tests {
     }
 
     #[test]
+    fn attachment_byte_aggregation_saturates_at_the_durable_evidence_bound() {
+        assert_eq!(saturating_attachment_byte_sum(u64::MAX, 1), u64::MAX,);
+    }
+
+    #[test]
     fn delegation_child_result_decoder_restores_exact_typed_outcome() {
         let child = Uuid::from_u128(0xd101);
         let turn = Uuid::from_u128(0xd102);
@@ -2172,16 +2177,16 @@ fn add_prospective_attachment_lengths(
             }
             Some(_) => {}
             None => {
-                *total = total
-                    .checked_add(*length)
-                    .ok_or(SubmitInputCorruption::Inconsistent(
-                        "prospective attachment byte length sum",
-                    ))?;
+                *total = saturating_attachment_byte_sum(*total, *length);
                 digests.insert(*digest, *length);
             }
         }
     }
     Ok(())
+}
+
+const fn saturating_attachment_byte_sum(total: u64, length: u64) -> u64 {
+    total.saturating_add(length)
 }
 
 async fn prepare_attachment_admission(
@@ -2240,13 +2245,9 @@ async fn prepare_attachment_admission(
     }
     let maximum_bytes =
         maximum_attachment_bytes.ok_or(SubmitInputCorruption::AttachmentConfigurationMissing)?;
-    let aggregate = lengths.values().try_fold(0_u64, |total, length| {
-        total
-            .checked_add(*length)
-            .ok_or(SubmitInputCorruption::Inconsistent(
-                "attachment byte length sum",
-            ))
-    })?;
+    let aggregate = lengths.values().fold(0_u64, |total, length| {
+        saturating_attachment_byte_sum(total, *length)
+    });
     if aggregate > maximum_bytes.get() {
         let observed_bytes = NonZeroU64::new(aggregate).ok_or(
             SubmitInputCorruption::Inconsistent("attachment byte length sum is not positive"),
