@@ -627,22 +627,32 @@ impl PostgresConvergenceSweepStore {
             .unwrap_or((None, None));
         let updated: Option<FailureTransitionRow> = sqlx::query_as(
             "WITH selected_dispatch AS (
-                SELECT dispatch.session_id,
+                SELECT target.session_id,
                        coalesce((
                            SELECT event.event_kind IN ('commissioned', 'resumed', 'superseded')
                              FROM goal_event AS event
-                            WHERE event.session_id = dispatch.session_id
+                            WHERE event.session_id = target.session_id
                             ORDER BY event.event_ordinal DESC LIMIT 1
                        ), false) AS live,
                        EXISTS (
                            SELECT 1 FROM model_call AS call
-                            WHERE call.session_id = dispatch.session_id
+                            WHERE call.session_id = target.session_id
                        ) AS has_model_activity
-                  FROM commissioned_dispatch AS dispatch
-                 WHERE dispatch.target_kind = 'pull_request'
-                   AND dispatch.repository = $1
-                   AND dispatch.pull_request_number = $2
-                 ORDER BY live DESC, dispatch.recorded_at DESC, dispatch.dispatch_id DESC
+                  FROM (
+                       SELECT dispatch.session_id, dispatch.recorded_at, dispatch.dispatch_id
+                         FROM commissioned_dispatch AS dispatch
+                        WHERE dispatch.target_kind = 'pull_request'
+                          AND dispatch.repository = $1
+                          AND dispatch.pull_request_number = $2
+                       UNION ALL
+                       SELECT action.session_id, action.recorded_at, action.dispatch_id
+                         FROM repo_watch_dispatch_action AS action
+                         JOIN repo_watch_event AS event ON event.event_id = action.event_id
+                        WHERE event.target_kind = 'pull_request'
+                          AND event.repository = $1
+                          AND event.pull_request_number = $2
+                  ) AS target
+                 ORDER BY live DESC, target.recorded_at DESC, target.dispatch_id DESC
                  LIMIT 1
              )
              UPDATE convergence_sweep_target

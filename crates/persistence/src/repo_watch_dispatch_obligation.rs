@@ -431,6 +431,36 @@ pub(crate) async fn record_dispatch_obligation(
     Ok(())
 }
 
+pub(crate) async fn replace_dispatch_obligation_blocker(
+    transaction: &mut Transaction<'_, Postgres>,
+    obligation: Uuid,
+    blocker: DispatchObligationBlocker,
+) -> Result<(), RepoWatchDispatchRepositoryError> {
+    if matches!(blocker, DispatchObligationBlocker::Existing) {
+        return Err(RepoWatchDispatchRepositoryError::Corruption(
+            "repository-watch obligation blocker replacement lacks a blocker",
+        ));
+    }
+    let updated = sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET blocking_dispatch_id = $2,
+                external_blocking_session_id = $3
+          WHERE obligation_id = $1
+            AND settled_kind IS NULL",
+    )
+    .bind(obligation)
+    .bind(blocker.stored_dispatch())
+    .bind(blocker.stored_external_session())
+    .execute(&mut **transaction)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(RepoWatchDispatchRepositoryError::Corruption(
+            "repository-watch obligation disappeared during blocker replacement",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn load_obligation_admission(
     transaction: &mut Transaction<'_, Postgres>,
     obligation: Uuid,
