@@ -501,6 +501,210 @@ impl InputContent {
     }
 }
 
+/// Maximum number of ordered parts in one process-protocol user input.
+// numeric-bound: ceiling - bounds retained parts in one user input
+pub const MAX_USER_INPUT_PARTS: usize = signalbox_domain::UserContent::MAX_PARTS;
+/// Maximum aggregate UTF-8 bytes across process-protocol text parts.
+// numeric-bound: ceiling - bounds aggregate retained user text
+pub const MAX_USER_INPUT_TEXT_BYTES: usize = signalbox_domain::UserContent::MAX_TEXT_BYTES;
+/// Maximum encoded bytes in one process-protocol attachment media type.
+// numeric-bound: ceiling - bounds retained attachment media types
+pub const MAX_USER_INPUT_MEDIA_TYPE_BYTES: usize = signalbox_domain::DeclaredMediaType::MAX_BYTES;
+/// Maximum encoded bytes in one process-protocol attachment display filename.
+// numeric-bound: ceiling - bounds retained attachment display filenames
+pub const MAX_USER_INPUT_DISPLAY_FILENAME_BYTES: usize =
+    signalbox_domain::AttachmentDisplayFilename::MAX_BYTES;
+
+/// Closed semantic kind declared for one user attachment on the wire.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserAttachmentKind {
+    /// Image content.
+    Image,
+    /// Page- or document-oriented content.
+    Document,
+    /// Other file content.
+    File,
+}
+
+/// One exact part in canonical ordered user input.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UserInputPart {
+    /// Exact decoded text.
+    Text {
+        /// Nonempty text containing no U+0000.
+        text: String,
+    },
+    /// Immutable blob reference and caller-declared metadata.
+    Attachment {
+        /// Canonical global blob identity.
+        digest: CanonicalBlobDigest,
+        /// Closed semantic attachment kind.
+        kind: UserAttachmentKind,
+        /// Exact visible-ASCII media-type declaration.
+        media_type: String,
+        /// Optional display basename, explicitly null when absent.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        display_filename: Option<String>,
+    },
+}
+
+impl fmt::Debug for UserInputPart {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text { .. } => formatter
+                .debug_struct("Text")
+                .field("text", &"<redacted>")
+                .finish(),
+            Self::Attachment {
+                digest,
+                kind,
+                media_type,
+                display_filename,
+            } => formatter
+                .debug_struct("Attachment")
+                .field("digest", digest)
+                .field("kind", kind)
+                .field("media_type", media_type)
+                .field(
+                    "display_filename",
+                    &display_filename.as_ref().map(|_| "<redacted>"),
+                )
+                .finish(),
+        }
+    }
+}
+
+/// Canonical nonempty ordered user-input parts array.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct UserInputContent(Vec<UserInputPart>);
+
+struct UserInputContentVisitor;
+
+impl<'de> Visitor<'de> for UserInputContentVisitor {
+    type Value = UserInputContent;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "at most {MAX_USER_INPUT_PARTS} ordered user-input parts"
+        )
+    }
+
+    fn visit_seq<AccessT>(self, mut sequence: AccessT) -> Result<Self::Value, AccessT::Error>
+    where
+        AccessT: SeqAccess<'de>,
+    {
+        let mut parts = Vec::with_capacity(
+            sequence
+                .size_hint()
+                .unwrap_or_default()
+                .min(MAX_USER_INPUT_PARTS),
+        );
+        while parts.len() < MAX_USER_INPUT_PARTS {
+            match sequence.next_element::<UserInputPart>()? {
+                Some(part) => parts.push(part),
+                None => return Ok(UserInputContent(parts)),
+            }
+        }
+        if sequence.next_element::<IgnoredAny>()?.is_some() {
+            return Err(serde::de::Error::custom("too many user-input parts"));
+        }
+        Ok(UserInputContent(parts))
+    }
+}
+
+impl<'de> Deserialize<'de> for UserInputContent {
+    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
+    where
+        DeserializerT: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(UserInputContentVisitor)
+    }
+}
+
+impl UserInputContent {
+    /// Wraps one text part for text-only clients.
+    pub fn text(value: String) -> Self {
+        Self(vec![UserInputPart::Text { text: value }])
+    }
+
+    /// Wraps a complete parts array for structural validation at frame encode.
+    pub fn from_parts(parts: Vec<UserInputPart>) -> Self {
+        Self(parts)
+    }
+
+    /// Borrows the exact ordered parts.
+    pub fn parts(&self) -> &[UserInputPart] {
+        &self.0
+    }
+
+    /// Borrows text when this is exactly one text part.
+    pub fn single_text(&self) -> Option<&str> {
+        match self.0.as_slice() {
+            [UserInputPart::Text { text }] => Some(text),
+            _ => None,
+        }
+    }
+
+    /// Transfers ownership of the exact ordered parts.
+    pub fn into_parts(self) -> Vec<UserInputPart> {
+        self.0
+    }
+
+    fn validate(&self) -> Result<(), FrameValidationError> {
+        if self.0.is_empty() || self.0.len() > MAX_USER_INPUT_PARTS {
+            return Err(FrameValidationError::UserContentShape);
+        }
+
+        let mut text_bytes = 0_usize;
+        let mut previous_was_text = false;
+        for part in &self.0 {
+            match part {
+                UserInputPart::Text { text } => {
+                    if previous_was_text || text.is_empty() || text.contains('\0') {
+                        return Err(FrameValidationError::UserContentShape);
+                    }
+                    text_bytes = text_bytes
+                        .checked_add(text.len())
+                        .ok_or(FrameValidationError::UserContentShape)?;
+                    if text_bytes > MAX_USER_INPUT_TEXT_BYTES {
+                        return Err(FrameValidationError::UserContentShape);
+                    }
+                    previous_was_text = true;
+                }
+                UserInputPart::Attachment {
+                    media_type,
+                    display_filename,
+                    ..
+                } => {
+                    if media_type.is_empty()
+                        || media_type.len() > MAX_USER_INPUT_MEDIA_TYPE_BYTES
+                        || !media_type.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+                    {
+                        return Err(FrameValidationError::UserContentShape);
+                    }
+                    if display_filename.as_ref().is_some_and(|filename| {
+                        filename.is_empty()
+                            || filename.len() > MAX_USER_INPUT_DISPLAY_FILENAME_BYTES
+                            || filename == "."
+                            || filename == ".."
+                            || filename.contains('/')
+                            || filename.contains('\\')
+                            || filename.contains('\0')
+                    }) {
+                        return Err(FrameValidationError::UserContentShape);
+                    }
+                    previous_was_text = false;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One closed review target subject at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -3241,8 +3445,8 @@ pub enum ClientRequest {
         command_id: CommandId,
         /// Target session.
         session_id: CanonicalUuid,
-        /// Exact user text.
-        content: InputContent,
+        /// Exact ordered user parts.
+        content: UserInputContent,
         /// Caller-observed defaults version, or null for configuration-free
         /// steering.
         #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -3475,8 +3679,8 @@ pub enum ClientRequest {
         session_id: CanonicalUuid,
         /// The turn the caller observed parked awaiting reconciliation.
         expected_active_turn_id: CanonicalUuid,
-        /// Exact user text for the immediate successor turn.
-        content: InputContent,
+        /// Exact ordered user parts for the immediate successor turn.
+        content: UserInputContent,
         /// Caller-observed defaults version.
         expected_defaults_version: CanonicalU64,
         /// Per-call settings contribution for the immediate successor origin.
@@ -3652,8 +3856,8 @@ pub enum ClientRequest {
         session_id: CanonicalUuid,
         /// The turn the caller observed active in the session.
         expected_active_turn_id: CanonicalUuid,
-        /// Exact user text for the immediate successor turn.
-        content: InputContent,
+        /// Exact ordered user parts for the immediate successor turn.
+        content: UserInputContent,
         /// Caller-observed defaults version.
         expected_defaults_version: CanonicalU64,
         /// Explicit delegated-child scope.
@@ -3795,9 +3999,11 @@ impl ClientRequest {
             expected_defaults_version,
             delivery,
             model_settings,
+            content,
             ..
         } = self
         {
+            content.validate()?;
             let valid = matches!(
                 (delivery, expected_defaults_version),
                 (None | Some(InputDelivery::StartWhenIdle {}), Some(_))
@@ -3812,6 +4018,9 @@ impl ClientRequest {
             {
                 return Err(FrameValidationError::ModelSettingsShape);
             }
+        }
+        if let Self::ReconcileTurn { content, .. } | Self::StopTurn { content, .. } = self {
+            content.validate()?;
         }
         if let Self::AppendConversationImport { chunk } = self
             && (chunk.as_bytes().is_empty()
@@ -4835,8 +5044,8 @@ pub enum TurnState {
     Queued {
         /// Accepted input that created the queued turn.
         accepted_input_id: CanonicalUuid,
-        /// Exact accepted user text.
-        content: InputContent,
+        /// Exact ordered accepted user parts.
+        content: UserInputContent,
     },
     /// Delegated work has not activated.
     QueuedDelegated {
@@ -4976,7 +5185,7 @@ pub enum TurnState {
 enum RawTurnState {
     Queued {
         accepted_input_id: CanonicalUuid,
-        content: InputContent,
+        content: UserInputContent,
     },
     QueuedDelegated {
         spawning_request_id: CanonicalUuid,
@@ -5065,10 +5274,13 @@ impl<'de> Deserialize<'de> for TurnState {
             RawTurnState::Queued {
                 accepted_input_id,
                 content,
-            } => Self::Queued {
-                accepted_input_id,
-                content,
-            },
+            } => {
+                content.validate().map_err(serde::de::Error::custom)?;
+                Self::Queued {
+                    accepted_input_id,
+                    content,
+                }
+            }
             RawTurnState::QueuedDelegated {
                 spawning_request_id,
                 parent_session_id,
@@ -6271,8 +6483,8 @@ pub enum SessionEvent {
         turn_id: CanonicalUuid,
         /// Immutable session acceptance position.
         acceptance_position: CanonicalU64,
-        /// Exact accepted user text.
-        content: InputContent,
+        /// Exact ordered accepted user parts.
+        content: UserInputContent,
     },
     /// A queued goal turn became intentionally ineligible.
     GoalTurnRetired {
@@ -6882,8 +7094,8 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
             rationale,
             ..
         } => validate_tool_approval_event_shape(decision, decider, rationale)?,
+        SessionEvent::InputAccepted { content, .. } => content.validate()?,
         SessionEvent::SessionCreated {}
-        | SessionEvent::InputAccepted { .. }
         | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ModelCallTransition { .. }
@@ -7630,21 +7842,26 @@ impl ServerMessage {
             }
             Self::TranscriptTurn {
                 turn_id,
-                model_settings: Some(settings),
+                model_settings,
                 state,
                 ..
             } => {
-                settings.validate()?;
-                if settings.turn_id != *turn_id
-                    || (matches!(
-                        state,
-                        TurnState::Queued {
-                            accepted_input_id,
-                            ..
-                        } if settings.accepted_input_id != *accepted_input_id
-                    ))
-                {
-                    return Err(FrameValidationError::ModelSettingsShape);
+                if let TurnState::Queued { content, .. } = state {
+                    content.validate()?;
+                }
+                if let Some(settings) = model_settings {
+                    settings.validate()?;
+                    if settings.turn_id != *turn_id
+                        || (matches!(
+                            state,
+                            TurnState::Queued {
+                                accepted_input_id,
+                                ..
+                            } if settings.accepted_input_id != *accepted_input_id
+                        ))
+                    {
+                        return Err(FrameValidationError::ModelSettingsShape);
+                    }
                 }
             }
             Self::TranscriptEntry {
@@ -8314,6 +8531,8 @@ pub enum FrameValidationError {
     ImportedFrontierRangeShape,
     /// A submit-input delivery carried forbidden or missing correlated fields.
     InputDeliveryShape,
+    /// Ordered user parts violated their canonical shape or resource bounds.
+    UserContentShape,
     /// A template name or positive version carried an invalid shape.
     TemplateShape,
     /// A review lifecycle or orchestration frame carried an invalid shape.
@@ -8358,6 +8577,7 @@ impl fmt::Display for FrameValidationError {
             Self::ImportedTextPreviewShape => "imported text preview shape is inconsistent",
             Self::ImportedFrontierRangeShape => "imported frontier rejection range is inconsistent",
             Self::InputDeliveryShape => "submit-input delivery shape is inconsistent",
+            Self::UserContentShape => "ordered user content shape is inconsistent",
             Self::TemplateShape => "session-template frame shape is inconsistent",
             Self::ReviewShape => "review workflow frame shape is inconsistent",
             Self::ModelCallUsageShape => "model-call usage frame shape is inconsistent",
@@ -8808,8 +9028,9 @@ mod tests {
         SessionMetadata, SettingOverlay, SystemPromptMember, SystemPromptText,
         ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
         TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnModelSettingsSnapshot,
-        TurnState, UsageProvenance, decode_client_line, decode_server_line, encode_client_line,
-        encode_server_line, validate_adjustments,
+        TurnState, UsageProvenance, UserAttachmentKind, UserInputContent, UserInputPart,
+        decode_client_line, decode_server_line, encode_client_line, encode_server_line,
+        validate_adjustments,
     };
     use signalbox_domain::ToolDecisionRationale;
     use uuid::Uuid;
@@ -9331,7 +9552,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(1)?,
                 session_id: uuid(2),
-                content: InputContent::new("hello".to_owned()),
+                content: UserInputContent::text("hello".to_owned()),
                 expected_defaults_version: Some(CanonicalU64::new(u64::MAX)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -9346,9 +9567,127 @@ mod tests {
         let ClientRequest::SubmitInput { content, .. } = decoded_request else {
             return Err("decoded request changed variant".into());
         };
-        assert_eq!(content.into_string(), "hello");
+        assert_eq!(
+            content.parts(),
+            &[UserInputPart::Text {
+                text: String::from("hello")
+            }]
+        );
         assert!(String::from_utf8(encoded)?.contains("\"request_id\":\"18446744073709551615\""));
         Ok(())
+    }
+
+    /// INV-012 / INV-060: multipart request encoding preserves part order and
+    /// every attachment metadata field in the one canonical array shape.
+    #[test]
+    fn inv012_inv060_multipart_input_wire_is_ordered_and_exact()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            .parse::<CanonicalBlobDigest>()?;
+        let content = UserInputContent::from_parts(vec![
+            UserInputPart::Text {
+                text: String::from("inspect "),
+            },
+            UserInputPart::Attachment {
+                digest,
+                kind: UserAttachmentKind::Image,
+                media_type: String::from("image/png"),
+                display_filename: Some(String::from("chart.png")),
+            },
+            UserInputPart::Text {
+                text: String::from(" carefully"),
+            },
+        ]);
+        let frame = ClientFrame::try_new(
+            request(9)?,
+            ClientRequest::SubmitInput {
+                command_id: command(10)?,
+                session_id: uuid(11),
+                content,
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )?;
+
+        let encoded = encode_client_line(&frame)?;
+
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        assert_eq!(
+            String::from_utf8(encoded)?,
+            concat!(
+                "{\"version\":1,\"request_id\":\"9\",\"request\":{",
+                "\"type\":\"submit_input\",",
+                "\"command_id\":\"00000000-0000-0000-0000-00000000000a\",",
+                "\"session_id\":\"00000000-0000-0000-0000-00000000000b\",",
+                "\"content\":[{\"type\":\"text\",\"text\":\"inspect \"},",
+                "{\"type\":\"attachment\",",
+                "\"digest\":\"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\",",
+                "\"kind\":\"image\",\"media_type\":\"image/png\",",
+                "\"display_filename\":\"chart.png\"},",
+                "{\"type\":\"text\",\"text\":\" carefully\"}],",
+                "\"expected_defaults_version\":\"1\",",
+                "\"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+                "\"fast_mode\":{\"kind\":\"inherit\"},",
+                "\"service_tier\":{\"kind\":\"inherit\"}}}}\n"
+            )
+        );
+        Ok(())
+    }
+
+    /// INV-012: multipart decoding stops at the public retained-parts bound.
+    #[test]
+    fn inv012_multipart_deserialization_stops_after_the_parts_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let oversized = vec![
+            UserInputPart::Text {
+                text: String::from("x"),
+            };
+            super::MAX_USER_INPUT_PARTS + 1
+        ];
+        let encoded = serde_json::to_vec(&oversized)?;
+        let error = serde_json::from_slice::<UserInputContent>(&encoded)
+            .expect_err("one part beyond the retained bound is rejected during decoding");
+
+        assert!(error.to_string().contains("too many user-input parts"));
+        Ok(())
+    }
+
+    #[test]
+    fn user_input_debug_redacts_content_bearing_values() -> Result<(), Box<dyn std::error::Error>> {
+        let private_text = "private user text";
+        let private_filename = "private-filename.txt";
+        let digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            .parse::<CanonicalBlobDigest>()?;
+        let content = UserInputContent::from_parts(vec![
+            UserInputPart::Text {
+                text: String::from(private_text),
+            },
+            UserInputPart::Attachment {
+                digest,
+                kind: UserAttachmentKind::File,
+                media_type: String::from("text/plain"),
+                display_filename: Some(String::from(private_filename)),
+            },
+        ]);
+
+        let debug = format!("{content:?}");
+        assert!(!debug.contains(private_text));
+        assert!(!debug.contains(private_filename));
+        assert!(debug.contains("<redacted>"));
+        Ok(())
+    }
+
+    /// INV-012 / INV-060: attachment display filenames are required-nullable
+    /// in both directions of the version-one wire.
+    #[test]
+    fn inv012_inv060_attachment_requires_display_filename_member() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"1","request":{"type":"submit_input","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png"}],"expected_defaults_version":"1","model_settings":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png"}]}}}"#,
+        );
     }
 
     #[test]
@@ -9950,7 +10289,7 @@ mod tests {
             r#"{"version":1,"request_id":"1","message":{"type":"sessions_start","extra":true}}"#,
         );
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued","extra":true}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"text","text":"queued"}],"extra":true}}}"#,
         );
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"session_created","extra":true}}}"#,
@@ -10477,7 +10816,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(5)?,
                 session_id: uuid(6),
-                content: InputContent::new(String::new()),
+                content: UserInputContent::text(String::from("content")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -11935,7 +12274,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(4)?,
                 session_id: uuid(6),
-                content: InputContent::new(String::from("ordinary work")),
+                content: UserInputContent::text(String::from("ordinary work")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -11957,7 +12296,7 @@ mod tests {
                 command_id: command(4)?,
                 session_id: uuid(6),
                 expected_active_turn_id: uuid(7),
-                content: InputContent::new(String::from("continue after the stop")),
+                content: UserInputContent::text(String::from("continue after the stop")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: ModelSettingsOverlay::inherit_all(),
@@ -11979,7 +12318,7 @@ mod tests {
             command_id: command(4)?,
             session_id: uuid(6),
             expected_active_turn_id: uuid(7),
-            content: InputContent::new(String::from("continue after reconciliation")),
+            content: UserInputContent::text(String::from("continue after reconciliation")),
             expected_defaults_version: CanonicalU64::new(1),
             model_settings: ModelSettingsOverlay::inherit_all(),
         };
@@ -11993,7 +12332,7 @@ mod tests {
              \"command_id\":\"00000000-0000-0000-0000-000000000004\",\
              \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
              \"expected_active_turn_id\":\"00000000-0000-0000-0000-000000000007\",\
-             \"content\":\"continue after reconciliation\",\
+             \"content\":[{\"type\":\"text\",\"text\":\"continue after reconciliation\"}],\
              \"expected_defaults_version\":\"1\",\
              \"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\
              \"fast_mode\":{\"kind\":\"inherit\"},\
@@ -12069,7 +12408,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(2)?,
                 session_id: uuid(3),
-                content: InputContent::new(String::from("content")),
+                content: UserInputContent::text(String::from("content")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -13403,7 +13742,7 @@ mod tests {
             command_id: command(4)?,
             session_id: uuid(6),
             expected_active_turn_id: uuid(7),
-            content: InputContent::new(String::from("continue after the stop")),
+            content: UserInputContent::text(String::from("continue after the stop")),
             expected_defaults_version: CanonicalU64::new(1),
             descendant_scope: DescendantTerminationScope::ParentAndDescendants,
             model_settings: ModelSettingsOverlay::inherit_all(),
@@ -13418,7 +13757,7 @@ mod tests {
              \"command_id\":\"00000000-0000-0000-0000-000000000004\",\
              \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
              \"expected_active_turn_id\":\"00000000-0000-0000-0000-000000000007\",\
-             \"content\":\"continue after the stop\",\
+             \"content\":[{\"type\":\"text\",\"text\":\"continue after the stop\"}],\
              \"expected_defaults_version\":\"1\",\
              \"descendant_scope\":\"parent_and_descendants\",\
              \"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\
@@ -15086,7 +15425,7 @@ mod tests {
         let steering_request = ClientRequest::SubmitInput {
             command_id: command(1)?,
             session_id: uuid(2),
-            content: InputContent::new(String::from("steering")),
+            content: UserInputContent::text(String::from("steering")),
             expected_defaults_version: None,
             model_settings: ModelSettingsOverlay::inherit_all(),
             delivery: Some(InputDelivery::Steer {
@@ -15103,7 +15442,8 @@ mod tests {
                 "\"type\":\"submit_input\",",
                 "\"command_id\":\"00000000-0000-0000-0000-000000000001\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
-                "\"content\":\"steering\",\"expected_defaults_version\":null,",
+                "\"content\":[{\"type\":\"text\",\"text\":\"steering\"}],",
+                "\"expected_defaults_version\":null,",
                 "\"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
                 "\"fast_mode\":{\"kind\":\"inherit\"},",
                 "\"service_tier\":{\"kind\":\"inherit\"}},",
@@ -15125,7 +15465,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(4)?,
                 session_id: uuid(2),
-                content: InputContent::new(String::from("queued")),
+                content: UserInputContent::text(String::from("queued")),
                 expected_defaults_version: Some(CanonicalU64::new(7)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Queue {
@@ -15141,7 +15481,8 @@ mod tests {
                 "\"type\":\"submit_input\",",
                 "\"command_id\":\"00000000-0000-0000-0000-000000000004\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
-                "\"content\":\"queued\",\"expected_defaults_version\":\"7\",",
+                "\"content\":[{\"type\":\"text\",\"text\":\"queued\"}],",
+                "\"expected_defaults_version\":\"7\",",
                 "\"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
                 "\"fast_mode\":{\"kind\":\"inherit\"},",
                 "\"service_tier\":{\"kind\":\"inherit\"}},",
@@ -15164,7 +15505,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(5)?,
                 session_id: uuid(2),
-                content: InputContent::new(String::from("start")),
+                content: UserInputContent::text(String::from("start")),
                 expected_defaults_version: Some(CanonicalU64::new(7)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::StartWhenIdle {}),
@@ -15178,7 +15519,8 @@ mod tests {
                 "\"type\":\"submit_input\",",
                 "\"command_id\":\"00000000-0000-0000-0000-000000000005\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
-                "\"content\":\"start\",\"expected_defaults_version\":\"7\",",
+                "\"content\":[{\"type\":\"text\",\"text\":\"start\"}],",
+                "\"expected_defaults_version\":\"7\",",
                 "\"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
                 "\"fast_mode\":{\"kind\":\"inherit\"},",
                 "\"service_tier\":{\"kind\":\"inherit\"}},",
@@ -15200,7 +15542,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(6)?,
                 session_id: uuid(2),
-                content: InputContent::new(String::from("start without defaults")),
+                content: UserInputContent::text(String::from("start without defaults")),
                 expected_defaults_version: None,
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::StartWhenIdle {}),
@@ -15214,7 +15556,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(7)?,
                 session_id: uuid(2),
-                content: InputContent::new(String::from("queue without defaults")),
+                content: UserInputContent::text(String::from("queue without defaults")),
                 expected_defaults_version: None,
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Queue {
@@ -15237,7 +15579,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(5)?,
                 session_id: uuid(2),
-                content: InputContent::new(String::from("misconfigured steering")),
+                content: UserInputContent::text(String::from("misconfigured steering")),
                 expected_defaults_version: Some(CanonicalU64::new(7)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Steer {
@@ -15253,7 +15595,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(6)?,
                 session_id: uuid(2),
-                content: InputContent::new(String::from("zero-version steering")),
+                content: UserInputContent::text(String::from("zero-version steering")),
                 expected_defaults_version: Some(CanonicalU64::new(0)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Steer {
@@ -15314,23 +15656,21 @@ mod tests {
     }
 
     #[test]
-    fn submit_content_is_admitted_by_the_application_not_wire_decoding()
+    fn submit_content_bound_is_enforced_before_wire_encoding()
     -> Result<(), Box<dyn std::error::Error>> {
         let content = "x".repeat(MAX_CONTENT_FRAGMENT_BYTES + 1);
-        let frame = ClientFrame::try_new(
+        let result = ClientFrame::try_new(
             request(1)?,
             ClientRequest::SubmitInput {
                 command_id: command(5)?,
                 session_id: uuid(6),
-                content: InputContent::new(content),
+                content: UserInputContent::text(content),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
-        )?;
-        let encoded = encode_client_line(&frame)?;
-        assert!(encoded.len() < super::MAX_FRAME_BYTES);
-        assert_eq!(decode_client_line(&encoded)?, frame);
+        );
+        assert_eq!(result, Err(FrameValidationError::UserContentShape));
         Ok(())
     }
 
@@ -15463,10 +15803,10 @@ mod tests {
                 model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id: uuid(2),
-                    content: InputContent::new("queued request".to_owned()),
+                    content: UserInputContent::text("queued request".to_owned()),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued request"}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"text","text":"queued request"}]}}"#,
         )?;
         assert_server_message_round_trip(
             request(15)?,
@@ -15749,10 +16089,10 @@ mod tests {
                     accepted_input_id: uuid(2),
                     turn_id: uuid(3),
                     acceptance_position: CanonicalU64::new(1),
-                    content: InputContent::new("accepted request".to_owned()),
+                    content: UserInputContent::text("accepted request".to_owned()),
                 },
             },
-            r#"{"type":"session_event","cursor":"2","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"input_accepted","accepted_input_id":"00000000-0000-0000-0000-000000000002","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","content":"accepted request"}}"#,
+            r#"{"type":"session_event","cursor":"2","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"input_accepted","accepted_input_id":"00000000-0000-0000-0000-000000000002","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","content":[{"type":"text","text":"accepted request"}]}}"#,
         )?;
         assert_server_message_round_trip(
             request(19)?,
@@ -16004,7 +16344,7 @@ mod tests {
             }),
             state: TurnState::Queued {
                 accepted_input_id: uuid(2),
-                content: InputContent::new("settings-aware turn".to_owned()),
+                content: UserInputContent::text("settings-aware turn".to_owned()),
             },
         };
         let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request(43)?, message)?;
@@ -16012,6 +16352,26 @@ mod tests {
 
         assert_eq!(decode_server_line(&encoded)?, frame);
         Ok(())
+    }
+
+    /// INV-012: queued user content is validated before a server frame can be
+    /// encoded, including when no model-settings snapshot is present.
+    #[test]
+    fn inv012_transcript_turn_rejects_invalid_queued_content_before_encoding() {
+        let result = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state: TurnState::Queued {
+                    accepted_input_id: uuid(2),
+                    content: UserInputContent::from_parts(Vec::new()),
+                },
+            },
+        );
+
+        assert_eq!(result, Err(FrameValidationError::UserContentShape));
     }
 
     /// INV-033: queued turn settings evidence belongs to the accepted input
@@ -16039,7 +16399,7 @@ mod tests {
                 }),
                 state: TurnState::Queued {
                     accepted_input_id: uuid(2),
-                    content: InputContent::new("settings-aware turn".to_owned()),
+                    content: UserInputContent::text("settings-aware turn".to_owned()),
                 },
             },
         )
@@ -16087,7 +16447,7 @@ mod tests {
     #[test]
     fn inv033_transcript_turn_requires_model_settings_member() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued request"}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"text","text":"queued request"}]}}}"#,
         );
     }
 
@@ -16380,7 +16740,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(1).expect("fixture command identity is admitted"),
                 session_id: uuid(2),
-                content: InputContent::new(String::from("steer")),
+                content: UserInputContent::text(String::from("steer")),
                 expected_defaults_version: None,
                 model_settings,
                 delivery: Some(InputDelivery::Steer {

@@ -939,8 +939,8 @@ INV-007, INV-036).
 
 ### Bounds
 
-The multipart value and application admission apply the exact structural,
-text-byte, and attachment-metadata bounds owned by
+The multipart value applies the exact structural, text-byte, and
+attachment-metadata bounds owned by
 [blob storage](blob-storage.md#multipart-user-content) before typed command
 construction, so no command identifier is claimed for a structurally invalid
 value. Typed construction and the registry claim precede the current-state

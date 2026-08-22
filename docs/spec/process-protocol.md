@@ -1,5 +1,8 @@
 # Process protocol
 
+The ordered user-content part-array vocabulary is verified against this PR
+(`agent/blob-storage-multipart-algebra`).
+
 The typed runner-state session event, daemon outbox projection, authoritative
 session-summary and transcript-snapshot runner projections, and the runner
 request/projection implementation boundary were verified against this PR
@@ -390,7 +393,7 @@ where `D` is a canonical blob digest, `K` is `image`, `document`, or `file`, and
 text bytes and attachment member bounds are owned by
 [blob storage](blob-storage.md#multipart-user-content); the wire applies them
 before application construction. A one-part text array is the sole spelling of
-legacy text content.
+text-only content.
 
 The `content` member on transcript `queued` states and `input_accepted` session
 events is that same closed ordered parts array. Together with

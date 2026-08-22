@@ -200,7 +200,7 @@ use signalbox_process_protocol::{
     ToolApprovalEventDecision as WireToolApprovalEventDecision, ToolBatchState, ToolDecision,
     TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
     TurnModelSettingsSnapshot as WireTurnModelSettingsSnapshot, TurnState, UsageProvenance,
-    content_fragments, decode_client_line, encode_server_line,
+    UserInputContent, content_fragments, decode_client_line, encode_server_line,
     recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
 use signalbox_tools_sessions::{AwaitSessionPortOutcome, DeliveredChildResult};
@@ -10607,7 +10607,7 @@ async fn handle_submit_input<Writer>(
     request_id: RequestId,
     command_id: uuid::Uuid,
     session_id: CanonicalUuid,
-    content: InputContent,
+    content: UserInputContent,
     expected_defaults_version: Option<CanonicalU64>,
     model_settings: WireModelSettingsOverlay,
     delivery: Option<InputDelivery>,
@@ -10718,7 +10718,7 @@ async fn handle_reconcile_turn<Writer>(
     command_id: uuid::Uuid,
     session_id: CanonicalUuid,
     expected_active_turn_id: CanonicalUuid,
-    content: InputContent,
+    content: UserInputContent,
     expected_defaults_version: CanonicalU64,
     model_settings: WireModelSettingsOverlay,
     pool: &PgPool,
@@ -10895,7 +10895,7 @@ async fn handle_stop_turn<Writer>(
     command_id: uuid::Uuid,
     session_id: CanonicalUuid,
     expected_active_turn_id: CanonicalUuid,
-    content: InputContent,
+    content: UserInputContent,
     expected_defaults_version: CanonicalU64,
     descendant_scope: DescendantTerminationScope,
     model_settings: WireModelSettingsOverlay,
@@ -11467,12 +11467,12 @@ where
     write_error(writer, version, request_id, protocol_error).await
 }
 
-fn admitted_user_content(content: InputContent) -> Result<UserContent, ()> {
-    let content = content.into_string();
-    if content.len() > MAX_SUBMITTED_INPUT_BYTES {
+fn admitted_user_content(content: UserInputContent) -> Result<UserContent, ()> {
+    let text = content.single_text().ok_or(())?;
+    if text.len() > MAX_SUBMITTED_INPUT_BYTES {
         return Err(());
     }
-    UserContent::try_text(content).map_err(|_| ())
+    UserContent::try_text(text.to_owned()).map_err(|_| ())
 }
 
 async fn handle_read_transcript<Writer>(
@@ -13170,7 +13170,7 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             content,
         } => TurnState::Queued {
             accepted_input_id: wire_uuid(accepted_input.into_uuid()),
-            content: InputContent::new(content.clone()),
+            content: UserInputContent::text(content.clone()),
         },
         ProcessTurnState::QueuedDelegated {
             spawning_request,
@@ -14636,7 +14636,7 @@ impl ProcessUpdateEvent {
                 accepted_input_id: wire_uuid(accepted_input.into_uuid()),
                 turn_id: wire_uuid(turn.into_uuid()),
                 acceptance_position: CanonicalU64::new(*acceptance_position),
-                content: InputContent::new(content.clone()),
+                content: UserInputContent::text(content.clone()),
             },
             Self::GoalTurnRetired { turn } => SessionEvent::GoalTurnRetired {
                 turn_id: wire_uuid(turn.into_uuid()),
@@ -15186,14 +15186,14 @@ mod tests {
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ConversationImportRejectionClass,
         DelegationToolRequestState as WireDelegationToolRequestState, ErrorCode, ErrorDetail,
         FrameEncodeError, GoalLifecycleState, ImportedContentKind, ImportedSourceSpeaker,
-        ImportedSpeaker, InputContent, MAX_CONTENT_FRAGMENT_BYTES, MetadataActor, ProtocolVersion,
+        ImportedSpeaker, MAX_CONTENT_FRAGMENT_BYTES, MetadataActor, ProtocolVersion,
         RejectionDetail, ReviewFindingInput, ReviewSeverity,
         RunnerPlacementRevision as WireRunnerPlacementRevision,
         RunnerSandboxProfile as WireRunnerSandboxProfile,
         RunnerStateTransitionState as WireRunnerStateTransitionState,
         RunnerWorkingDirectory as WireRunnerWorkingDirectory, ServerFrame, ServerMessage,
         SessionEvent, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
-        TurnState, decode_server_line, encode_server_line,
+        TurnState, UserInputContent, decode_server_line, encode_server_line,
     };
     use sqlx::postgres::PgPoolOptions;
     use tokio::{
@@ -17589,15 +17589,17 @@ mod tests {
 
     #[test]
     fn process_submission_admits_the_exact_content_bound() {
-        let exact = InputContent::new("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES));
+        let exact = UserInputContent::text("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES));
         assert!(admitted_user_content(exact).is_ok());
     }
 
     #[test]
     fn process_submission_rejects_content_over_the_bound() {
         assert!(
-            admitted_user_content(InputContent::new("x".repeat(MAX_SUBMITTED_INPUT_BYTES + 1)))
-                .is_err()
+            admitted_user_content(UserInputContent::text(
+                "x".repeat(MAX_SUBMITTED_INPUT_BYTES + 1),
+            ))
+            .is_err()
         );
     }
 
@@ -17612,7 +17614,7 @@ mod tests {
                 model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 1)),
-                    content: InputContent::new("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES)),
+                    content: UserInputContent::text("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES)),
                 },
             },
         )?;
@@ -17632,7 +17634,7 @@ mod tests {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 1)),
                     turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 2)),
                     acceptance_position: CanonicalU64::new(u64::MAX),
-                    content: InputContent::new("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES)),
+                    content: UserInputContent::text("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES)),
                 },
             },
         )?;
