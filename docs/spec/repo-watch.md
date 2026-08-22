@@ -1392,8 +1392,8 @@ synonym for provider mergeability or checks: a current-head seal requires the
 latest dispatch to have been released, the goal generation bound to every
 dispatched action turn to have a terminal achieved event, and the dispatch's
 delivered-state event head to equal the current normalized head. An achieved
-release against an older delivered head is reported as a stale seal;
-held, queued, non-converged, and unattempted states remain distinct.
+release against an older delivered head is reported as a stale seal; held,
+queued, non-converged, and unattempted states remain distinct.
 
 ## Open edges
 
