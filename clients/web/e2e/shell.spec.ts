@@ -477,6 +477,7 @@ test('Mod+K opens the registered command palette', async ({ page }) => {
   await page.goto('/scenario/streaming')
   await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
 
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
@@ -498,6 +499,7 @@ test('the command palette opens keyboard help without closing it', async ({ page
   await page.goto('/scenario/streaming')
   await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
 
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   await page.getByRole('button', { name: /Open keyboard help/ }).click()

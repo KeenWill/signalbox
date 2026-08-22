@@ -38,7 +38,7 @@ describe('browser preferences', () => {
     const lastLogicalPositions = Object.fromEntries(
       Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS + 3 }, (_, index) => [
         `session-${index}`,
-        `cursor-${index}`,
+        String(index + 1),
       ]),
     )
     const keyOverrides = Object.fromEntries(
@@ -107,7 +107,6 @@ describe('browser preferences', () => {
     expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
     expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
   })
-
   it('guards access to a throwing browser storage getter', () => {
     const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
     Object.defineProperty(globalThis, 'localStorage', {

@@ -2,6 +2,7 @@ import { configureStore, createSlice, type Middleware } from '@reduxjs/toolkit'
 import { useDispatch, useSelector } from 'react-redux'
 import {
   type BrowserPreferences,
+  createDefaultBrowserPreferences,
   isBoundedLogicalPosition,
   loadBrowserPreferences,
   MAX_SAVED_LOGICAL_POSITIONS,
@@ -75,6 +76,10 @@ const appSlice = createSlice({
       state.remoteMedia = action.payload
       state.activitySequence += 1
     },
+    preferencesReset(state) {
+      Object.assign(state, createDefaultBrowserPreferences())
+      state.activitySequence += 1
+    },
     logicalPositionRecorded(state, action: { payload: { sessionId: string; position: string } }) {
       if (!isBoundedLogicalPosition(action.payload.sessionId, action.payload.position)) return
       const nextPositions = { ...state.lastLogicalPositions }
@@ -138,6 +143,7 @@ const preferenceActionTypes = new Set<string>([
   appSlice.actions.themeSet.type,
   appSlice.actions.paneSizesSet.type,
   appSlice.actions.remoteMediaSet.type,
+  appSlice.actions.preferencesReset.type,
   appSlice.actions.logicalPositionRecorded.type,
 ])
 const preferenceMiddleware: Middleware = (api) => (next) => (action) => {

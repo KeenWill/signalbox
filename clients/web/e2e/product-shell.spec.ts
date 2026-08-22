@@ -1,8 +1,71 @@
 import { expect, type Page, test } from '@playwright/test'
 import { webContractBootstrapFixture } from '../src/product.fixture'
 
+const sessionWorkspaceFixture = {
+  id: '00000000-0000-0000-0000-000000000991',
+  firstAddress: '41',
+  latestAddress: '43',
+  itemCount: '1000000',
+  projectedBytes: 234,
+} as const
+
+const settingsPreferenceFixture = {
+  path: '/settings',
+  changedTheme: 'Light',
+  defaultTheme: 'Dark',
+  restoreAction: 'Restore defaults',
+} as const
+
 const useDeterministicBootstrap = (page: Page) =>
   page.route('**/api/bootstrap', (route) => route.fulfill({ json: webContractBootstrapFixture }))
+
+const useDeterministicSession = async (page: Page) => {
+  await page.route('**/api/sessions/**', (route) => {
+    if (new URL(route.request().url()).pathname.endsWith('/timeline')) {
+      return route.fulfill({
+        json: {
+          session_id: sessionWorkspaceFixture.id,
+          items: [
+            {
+              address: { event_sequence: '41' },
+              kind: 'input_accepted',
+              projected_structured_bytes: 78,
+            },
+            {
+              address: { event_sequence: '42' },
+              kind: 'turn_activated',
+              projected_structured_bytes: 78,
+            },
+            {
+              address: { event_sequence: '43' },
+              kind: 'turn_completed',
+              projected_structured_bytes: 78,
+            },
+          ],
+          projected_structured_bytes: sessionWorkspaceFixture.projectedBytes,
+          continuation_before: { event_sequence: sessionWorkspaceFixture.firstAddress },
+          continuation_after: null,
+        },
+      })
+    }
+    return route.fulfill({
+      json: {
+        session_id: sessionWorkspaceFixture.id,
+        sizes: {
+          item_count: sessionWorkspaceFixture.itemCount,
+          projected_text_bytes: '0',
+          projected_structured_bytes: '96000000',
+          referenced_blob_count: '0',
+          referenced_blob_bytes: '0',
+        },
+        first_address: { event_sequence: sessionWorkspaceFixture.firstAddress },
+        latest_address: { event_sequence: sessionWorkspaceFixture.latestAddress },
+        work: { active_turn_count: '1', queued_turn_count: '2' },
+        observed_through: sessionWorkspaceFixture.latestAddress,
+      },
+    })
+  })
+}
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
@@ -24,6 +87,7 @@ test('opens the product at Attention with generated-contract transport status', 
   await page.goto('/')
 
   await expect(page).toHaveURL(/\/attention$/)
+  await expect(page).toHaveTitle('Attention · Signalbox')
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
   await expect(
     page.getByText(
@@ -45,34 +109,8 @@ test('navigates from Attention to Sessions with the shared semantic link', async
 
   await page.getByRole('link', { name: /Sessions/ }).click()
   await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page).toHaveTitle('Sessions · Signalbox')
   await expect(page.getByRole('heading', { name: 'Sessions', level: 1 })).toBeVisible()
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
-test('describes Settings as browser-local rather than daemon-backed', async ({ page }) => {
-  const problems = watchBrowser(page)
-  await useDeterministicBootstrap(page)
-  await page.goto('/settings')
-
-  await expect(
-    page.getByRole('heading', { name: 'Local settings are not exposed in this slice' }),
-  ).toBeVisible()
-  await expect(page.getByText(/do not depend on a daemon read contract/)).toBeVisible()
-  await expect(
-    page.getByText('Operational data is not exposed by this daemon contract'),
-  ).toHaveCount(0)
-  const inspector = page.getByRole('complementary', { name: 'Inspector' })
-  await expect(inspector.getByText('Browser', { exact: true })).toBeVisible()
-  await expect(inspector.getByText('Local preferences', { exact: true })).toBeVisible()
-  await expect(inspector.getByText('Daemon', { exact: true })).toHaveCount(0)
-  await expect(
-    inspector.getByText('Presentation preferences are stored locally in this browser.'),
-  ).toBeVisible()
-  await expect(inspector.getByText(/server-provided evidence/)).toHaveCount(0)
-  const settingsCopy = page.getByRole('heading', {
-    name: 'Local settings are not exposed in this slice',
-  })
-  expect((await settingsCopy.boundingBox())?.width).toBeGreaterThan(200)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -90,6 +128,55 @@ test('preserves a scenario-specific title after leaving the product shell', asyn
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('gates Sessions on the validated bootstrap capability', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...webContractBootstrapFixture,
+        capabilities: {
+          ...webContractBootstrapFixture.capabilities,
+          bounded_session_timeline: false,
+        },
+      },
+    }),
+  )
+  await page.goto('/sessions')
+
+  await expect(page.getByText('Timeline reads unavailable')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Open workspace' })).toBeDisabled()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('retries a failed product bootstrap after the daemon recovers', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let attempts = 0
+  await page.route('**/api/bootstrap', (route) => {
+    attempts += 1
+    if (attempts === 1) {
+      return route.fulfill({ status: 503, body: 'temporarily unavailable' })
+    }
+    return route.fulfill({ json: webContractBootstrapFixture })
+  })
+  await page.goto('/sessions')
+
+  await expect(page.getByText('Transport unavailable')).toBeVisible()
+  await page.getByRole('button', { name: 'Retry contract' }).click()
+
+  await expect(page.getByText('Timeline reads available')).toBeVisible()
+  await expect(
+    page.getByText(
+      `${webContractBootstrapFixture.contract.name} · ${webContractBootstrapFixture.contract.version}`,
+    ),
+  ).toBeVisible()
+  expect(attempts).toBe(2)
+  expect(problems.pageErrors).toEqual([])
+  expect(
+    problems.consoleErrors.every((message) =>
+      message.includes('Failed to load resource: the server responded with a status of 503'),
+    ),
+  ).toBe(true)
+})
 test('completes route switching from the command palette without a mouse', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -174,5 +261,82 @@ test('closes phone navigation after selecting a route', async ({ page }) => {
   await navigation.getByRole('link', { name: /Sessions/ }).click()
   await expect(page).toHaveURL(/\/sessions$/)
   await expect(navigation).toBeHidden()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('changes and restores a Settings preference without a mouse', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto(settingsPreferenceFixture.path)
+
+  const lightTheme = page.getByRole('radio', { name: settingsPreferenceFixture.changedTheme })
+  await lightTheme.focus()
+  await page.keyboard.press('Space')
+  await expect(lightTheme).toBeChecked()
+  await page.reload()
+  await expect(
+    page.getByRole('radio', { name: settingsPreferenceFixture.changedTheme }),
+  ).toBeChecked()
+  await page.getByRole('button', { name: settingsPreferenceFixture.restoreAction }).focus()
+  await page.keyboard.press('Enter')
+  await expect(
+    page.getByRole('radio', { name: settingsPreferenceFixture.defaultTheme }),
+  ).toBeChecked()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('opens and inspects a bounded production session without a mouse', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto('/sessions')
+
+  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  await sessionId.fill(sessionWorkspaceFixture.id)
+  await sessionId.press('Enter')
+  await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
+  await expect(page.getByText('Active · opened near latest')).toBeVisible()
+  await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
+  const completed = page.getByRole('option', { name: /43 turn completed/ })
+  await completed.click()
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeFocused()
+  await expect(page.getByText('Header only; rich event detail is not exposed')).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('gives Full and Condensed distinct Session presentations', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto('/sessions')
+
+  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  await sessionId.fill(sessionWorkspaceFixture.id)
+  await sessionId.press('Enter')
+  await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
+  await expect(page.locator('.session-item-summary small').first()).toBeHidden()
+
+  await page.getByRole('link', { name: /Settings/ }).click()
+  await page.getByRole('radio', { name: 'Full' }).check()
+  await page.getByRole('link', { name: /Sessions/ }).click()
+  const reopenedSessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  await reopenedSessionId.fill(sessionWorkspaceFixture.id)
+  await reopenedSessionId.press('Enter')
+
+  await expect(page.locator('.session-item-summary small').first()).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('honors the saved navigation width below 1080px', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 900, height: 800 })
+  await page.goto('/settings')
+
+  const navigationWidth = page.locator('.pane-preferences input[type="range"]').first()
+  await navigationWidth.fill('320')
+
+  await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '320px')
+  await expect(page.getByText('320px', { exact: true })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

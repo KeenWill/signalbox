@@ -24,6 +24,13 @@ export const defaultBrowserPreferences: BrowserPreferences = {
   keyOverrides: {},
 }
 
+export const createDefaultBrowserPreferences = (): BrowserPreferences => ({
+  ...defaultBrowserPreferences,
+  paneSizes: { ...defaultBrowserPreferences.paneSizes },
+  lastLogicalPositions: {},
+  keyOverrides: {},
+})
+
 export const BROWSER_PREFERENCES_KEY = 'signalbox.web.preferences.v1'
 export const MAX_SAVED_LOGICAL_POSITIONS = 128
 export const MAX_KEY_OVERRIDES = 64
@@ -146,15 +153,15 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
 export const loadBrowserPreferences = (): BrowserPreferences => {
   try {
     const storage = globalThis.localStorage
-    if (storage === undefined) return defaultBrowserPreferences
+    if (storage === undefined) return createDefaultBrowserPreferences()
     const stored = storage.getItem(BROWSER_PREFERENCES_KEY)
-    if (stored === null) return defaultBrowserPreferences
+    if (stored === null) return createDefaultBrowserPreferences()
     if (!isWithinUtf8ByteLimit(stored, MAX_BROWSER_PREFERENCES_BYTES)) {
-      return defaultBrowserPreferences
+      return createDefaultBrowserPreferences()
     }
     return decodeBrowserPreferences(JSON.parse(stored))
   } catch {
-    return defaultBrowserPreferences
+    return createDefaultBrowserPreferences()
   }
 }
 
