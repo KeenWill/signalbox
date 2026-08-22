@@ -181,5 +181,7 @@ judge-specific recording surface in a way that outlives it.
 
 ## Open edges
 
+- Graded approval-judge corpus governance and promotion evaluation:
+  [open-questions](../open-questions.md#graded-approval-judging).
 - Evaluation exporters toward external trackers:
   [open-questions](../open-questions.md#program-substrate-and-evaluations).
