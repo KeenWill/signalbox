@@ -29,10 +29,17 @@ use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
     SessionTimelineDescriptor, SessionTimelineDetailBody, SessionTimelineDetailPage,
-    SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress, TimelineBodyContinuation,
-    TimelineBodyField, TimelineContinuation, TimelineDetailContinuation, TimelineDetailCursor,
-    TimelineDetailLimits, TimelineModelCallDisposition, TimelineModelCallState,
-    TimelineTextExcerpt, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
+    SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress, TimelineApprovalDecider,
+    TimelineApprovalDecision, TimelineApprovalSource, TimelineBodyContinuation, TimelineBodyField,
+    TimelineBoundChildAction, TimelineContinuation, TimelineDelegationDetail,
+    TimelineDelegationOutcome, TimelineDelegationPolicy, TimelineDelegationProvenance,
+    TimelineDelegationReason, TimelineDelegationWaitMode, TimelineDetailContinuation,
+    TimelineDetailCursor, TimelineDetailLimits, TimelineGoalBlockedReason, TimelineGoalEvent,
+    TimelineGoalEventKind, TimelineModelCallDisposition, TimelineModelCallState,
+    TimelineReconciliationOperation, TimelineRunnerSandboxPosture, TimelineRunnerState,
+    TimelineTextExcerpt, TimelineToolApprovalPosture, TimelineToolAttempt, TimelineToolBatchState,
+    TimelineToolEffectPosture, TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor,
+    TimelineWindowLimits,
 };
 use signalbox_domain::{SessionId, TurnId};
 use signalbox_persistence::outbox::OutboxDispatchError;
@@ -44,10 +51,17 @@ use signalbox_web_contract::{
     WebContractBootstrap, WebContractExample, WebSessionId, WebSessionTimelineDescriptor,
     WebSessionTimelineDetail, WebSessionTimelineDetailBody, WebSessionTimelineDetailPage,
     WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
-    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineBlobReference,
-    WebTimelineBodyContinuation, WebTimelineBodyField, WebTimelineDetailContinuation,
-    WebTimelineEventSequence, WebTimelineModelCallDisposition, WebTimelineModelCallState,
-    WebTimelineModelUsage, WebTimelineTextExcerpt, WebTimelineTurnLifecycleKind, WebU64,
+    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineApprovalDecider,
+    WebTimelineApprovalDecision, WebTimelineApprovalSource, WebTimelineBlobReference,
+    WebTimelineBodyContinuation, WebTimelineBodyField, WebTimelineBoundChildAction,
+    WebTimelineDelegationDetail, WebTimelineDelegationOutcome, WebTimelineDelegationPolicy,
+    WebTimelineDelegationProvenance, WebTimelineDelegationReason, WebTimelineDelegationWaitMode,
+    WebTimelineDetailContinuation, WebTimelineEventSequence, WebTimelineGoalBlockedReason,
+    WebTimelineGoalEvent, WebTimelineGoalEventKind, WebTimelineImportedEvidence,
+    WebTimelineModelCallDisposition, WebTimelineModelCallState, WebTimelineModelUsage,
+    WebTimelineRunnerSandboxPosture, WebTimelineRunnerState, WebTimelineTextExcerpt,
+    WebTimelineToolApprovalPosture, WebTimelineToolAttempt, WebTimelineToolBatchState,
+    WebTimelineToolEffectPosture, WebTimelineToolState, WebTimelineTurnLifecycleKind, WebU64,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -644,6 +658,13 @@ fn parse_body_field(value: &str) -> Result<TimelineBodyField, ()> {
     match value {
         "input_text" => Ok(TimelineBodyField::InputText),
         "model_response" => Ok(TimelineBodyField::ModelResponse),
+        "tool_arguments" => Ok(TimelineBodyField::ToolArguments),
+        "tool_result" => Ok(TimelineBodyField::ToolResult),
+        "tool_failure" => Ok(TimelineBodyField::ToolFailure),
+        "approval_rationale" => Ok(TimelineBodyField::ApprovalRationale),
+        "goal_text" => Ok(TimelineBodyField::GoalText),
+        "compaction_summary" => Ok(TimelineBodyField::CompactionSummary),
+        "delegation_content" => Ok(TimelineBodyField::DelegationContent),
         _ => Err(()),
     }
 }
@@ -839,6 +860,21 @@ fn detail_page_dto(page: SessionTimelineDetailPage) -> WebSessionTimelineDetailP
 
 fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailBody {
     match body {
+        SessionTimelineDetailBody::SessionCreated { imported_evidence } => {
+            WebSessionTimelineDetailBody::SessionCreated {
+                imported_evidence: imported_evidence.map(|evidence| WebTimelineImportedEvidence {
+                    imported_entry_id: evidence.imported_entry_id.into_uuid().to_string(),
+                    imported_position: WebU64::from_u64(evidence.imported_position),
+                }),
+            }
+        }
+        SessionTimelineDetailBody::ModelSettings {
+            turn_id,
+            cause_code,
+        } => WebSessionTimelineDetailBody::ModelSettings {
+            turn_id: turn_id.map(|turn| turn.into_uuid().to_string()),
+            cause_code,
+        },
         SessionTimelineDetailBody::UserInput {
             turn_id,
             text,
@@ -881,6 +917,85 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             },
             cause_code,
         },
+        SessionTimelineDetailBody::ToolBatch {
+            turn_id,
+            producing_model_call_id,
+            state,
+            tools,
+            goal_events,
+        } => WebSessionTimelineDetailBody::ToolBatch {
+            turn_id: turn_id.into_uuid().to_string(),
+            producing_model_call_id: producing_model_call_id.into_uuid().to_string(),
+            state: match state {
+                TimelineToolBatchState::Proposed => WebTimelineToolBatchState::Proposed,
+                TimelineToolBatchState::ResultsProjected => {
+                    WebTimelineToolBatchState::ResultsProjected
+                }
+                TimelineToolBatchState::RecoveryRequired => {
+                    WebTimelineToolBatchState::RecoveryRequired
+                }
+            },
+            tools: tools.into_iter().map(tool_attempt_dto).collect(),
+            goal_events: goal_events.into_iter().map(goal_event_dto).collect(),
+        },
+        SessionTimelineDetailBody::ToolApprovalDecision {
+            turn_id,
+            request_id,
+            tool_name,
+            decision,
+            source,
+            decider,
+            rationale,
+            approval_judge_escalated,
+        } => WebSessionTimelineDetailBody::ToolApprovalDecision {
+            turn_id: turn_id.into_uuid().to_string(),
+            request_id: request_id.into_uuid().to_string(),
+            tool_name,
+            decision: match decision {
+                TimelineApprovalDecision::Approve => WebTimelineApprovalDecision::Approve,
+                TimelineApprovalDecision::Deny => WebTimelineApprovalDecision::Deny,
+            },
+            source: match source {
+                TimelineApprovalSource::Policy => WebTimelineApprovalSource::Policy,
+                TimelineApprovalSource::Delegate => WebTimelineApprovalSource::Delegate,
+                TimelineApprovalSource::User => WebTimelineApprovalSource::User,
+            },
+            decider: match decider {
+                TimelineApprovalDecider::User { command_id } => WebTimelineApprovalDecider::User {
+                    command_id: command_id.into_uuid().to_string(),
+                },
+                TimelineApprovalDecider::Delegate {
+                    model_selection_id,
+                    model_call_id,
+                } => WebTimelineApprovalDecider::Delegate {
+                    model_selection_id: model_selection_id.into_uuid().to_string(),
+                    model_call_id: model_call_id.into_uuid().to_string(),
+                },
+            },
+            rationale: rationale.map(text_excerpt_dto),
+            approval_judge_escalated,
+        },
+        SessionTimelineDetailBody::GoalEvent { turn_id, event } => {
+            WebSessionTimelineDetailBody::GoalEvent {
+                turn_id: turn_id.into_uuid().to_string(),
+                event: goal_event_dto(event),
+            }
+        }
+        SessionTimelineDetailBody::ContextCompaction {
+            compaction_id,
+            model_call_id,
+            through_position,
+            summary_entry_id,
+            result_frontier_id,
+            summary,
+        } => WebSessionTimelineDetailBody::ContextCompaction {
+            compaction_id: compaction_id.into_uuid().to_string(),
+            model_call_id: model_call_id.into_uuid().to_string(),
+            through_position: WebU64::from_u64(through_position),
+            summary_entry_id: summary_entry_id.into_uuid().to_string(),
+            result_frontier_id: result_frontier_id.into_uuid().to_string(),
+            summary: text_excerpt_dto(summary),
+        },
         SessionTimelineDetailBody::TurnLifecycle {
             turn_id,
             lifecycle,
@@ -895,9 +1010,305 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             },
             cause_code,
         },
-        SessionTimelineDetailBody::EventFact { kind } => WebSessionTimelineDetailBody::EventFact {
-            kind: event_kind_dto(kind),
+        SessionTimelineDetailBody::Reconciliation {
+            turn_id,
+            operation,
+            attempt_count,
+            exhausted,
+            operator_required,
+            cause_code,
+        } => {
+            let (operation_kind, operation_id) = match operation {
+                TimelineReconciliationOperation::ModelCall(call) => {
+                    (String::from("model_call"), call.into_uuid().to_string())
+                }
+                TimelineReconciliationOperation::ToolAttempt(attempt) => (
+                    String::from("tool_attempt"),
+                    attempt.into_uuid().to_string(),
+                ),
+            };
+            WebSessionTimelineDetailBody::Reconciliation {
+                turn_id: turn_id.into_uuid().to_string(),
+                operation_kind,
+                operation_id,
+                attempt_count: WebU64::from_u64(attempt_count),
+                exhausted,
+                operator_required,
+                cause_code,
+            }
+        }
+        SessionTimelineDetailBody::Runner {
+            runner_id,
+            placement_revision,
+            sandbox_posture,
+            working_directory,
+            state,
+        } => WebSessionTimelineDetailBody::Runner {
+            runner_id: runner_id.into_uuid().to_string(),
+            placement_revision: WebU64::from_u64(placement_revision),
+            sandbox_posture: match sandbox_posture {
+                TimelineRunnerSandboxPosture::Unsandboxed => {
+                    WebTimelineRunnerSandboxPosture::Unsandboxed
+                }
+                TimelineRunnerSandboxPosture::Sandboxed => {
+                    WebTimelineRunnerSandboxPosture::Sandboxed
+                }
+            },
+            working_directory,
+            state: match state {
+                TimelineRunnerState::Pinned => WebTimelineRunnerState::Pinned,
+                TimelineRunnerState::Suspect => WebTimelineRunnerState::Suspect,
+                TimelineRunnerState::Connected => WebTimelineRunnerState::Connected,
+                TimelineRunnerState::RunnerLostBeforePin => {
+                    WebTimelineRunnerState::RunnerLostBeforePin
+                }
+                TimelineRunnerState::RunnerLost => WebTimelineRunnerState::RunnerLost,
+                TimelineRunnerState::Replaced => WebTimelineRunnerState::Replaced,
+                TimelineRunnerState::WorkingDirectoryChanged => {
+                    WebTimelineRunnerState::WorkingDirectoryChanged
+                }
+                TimelineRunnerState::Abandoned => WebTimelineRunnerState::Abandoned,
+            },
         },
+        SessionTimelineDetailBody::Delegation(detail) => WebSessionTimelineDetailBody::Delegation {
+            detail: delegation_detail_dto(detail),
+        },
+    }
+}
+
+fn goal_event_dto(event: TimelineGoalEvent) -> WebTimelineGoalEvent {
+    WebTimelineGoalEvent {
+        generation: WebU64::from_u64(event.generation),
+        event_kind: match event.event_kind {
+            TimelineGoalEventKind::Commissioned => WebTimelineGoalEventKind::Commissioned,
+            TimelineGoalEventKind::Blocked => WebTimelineGoalEventKind::Blocked,
+            TimelineGoalEventKind::Resumed => WebTimelineGoalEventKind::Resumed,
+            TimelineGoalEventKind::Achieved => WebTimelineGoalEventKind::Achieved,
+            TimelineGoalEventKind::UserStopped => WebTimelineGoalEventKind::UserStopped,
+            TimelineGoalEventKind::Superseded => WebTimelineGoalEventKind::Superseded,
+        },
+        reason: event.reason.map(|reason| match reason {
+            TimelineGoalBlockedReason::UserInputRequired => {
+                WebTimelineGoalBlockedReason::UserInputRequired
+            }
+            TimelineGoalBlockedReason::ExternalChangeRequired => {
+                WebTimelineGoalBlockedReason::ExternalChangeRequired
+            }
+            TimelineGoalBlockedReason::AuthorizationRequired => {
+                WebTimelineGoalBlockedReason::AuthorizationRequired
+            }
+            TimelineGoalBlockedReason::ExecutionFailure => {
+                WebTimelineGoalBlockedReason::ExecutionFailure
+            }
+        }),
+        text: event.text.map(text_excerpt_dto),
+    }
+}
+
+fn delegation_policy_dto(policy: TimelineDelegationPolicy) -> WebTimelineDelegationPolicy {
+    match policy {
+        TimelineDelegationPolicy::Background => WebTimelineDelegationPolicy::Background,
+        TimelineDelegationPolicy::Bound {
+            on_parent_stopped,
+            on_parent_cancelled,
+        } => WebTimelineDelegationPolicy::Bound {
+            on_parent_stopped: bound_child_action_dto(on_parent_stopped),
+            on_parent_cancelled: bound_child_action_dto(on_parent_cancelled),
+        },
+    }
+}
+
+fn delegation_detail_dto(detail: TimelineDelegationDetail) -> WebTimelineDelegationDetail {
+    match detail {
+        TimelineDelegationDetail::ChildSpawned {
+            relationship_id,
+            child,
+            policy,
+        } => WebTimelineDelegationDetail::ChildSpawned {
+            relationship_id: relationship_id.into_uuid().to_string(),
+            child_session_id: child.into_uuid().to_string(),
+            policy: delegation_policy_dto(policy),
+        },
+        TimelineDelegationDetail::ChildWaiting {
+            relationship_id,
+            child,
+            awaiting_request,
+            mode,
+        } => WebTimelineDelegationDetail::ChildWaiting {
+            relationship_id: relationship_id.into_uuid().to_string(),
+            child_session_id: child.into_uuid().to_string(),
+            awaiting_request_id: awaiting_request.into_uuid().to_string(),
+            mode: match mode {
+                TimelineDelegationWaitMode::Foreground => WebTimelineDelegationWaitMode::Foreground,
+                TimelineDelegationWaitMode::Background => WebTimelineDelegationWaitMode::Background,
+            },
+        },
+        TimelineDelegationDetail::ChildLifecycleDisposition {
+            relationship_id,
+            child,
+            event_ordinal,
+            outcome,
+            reason,
+            provenance,
+        } => WebTimelineDelegationDetail::ChildLifecycleDisposition {
+            relationship_id: relationship_id.into_uuid().to_string(),
+            child_session_id: child.into_uuid().to_string(),
+            event_ordinal: WebU64::from_u64(event_ordinal),
+            outcome: delegation_outcome_dto(outcome),
+            reason: delegation_reason_dto(reason),
+            provenance: delegation_provenance_dto(provenance),
+        },
+        TimelineDelegationDetail::ChildResult {
+            relationship_id,
+            child,
+            outcome,
+            reason,
+            provenance,
+            content,
+        } => WebTimelineDelegationDetail::ChildResult {
+            relationship_id: relationship_id.into_uuid().to_string(),
+            child_session_id: child.into_uuid().to_string(),
+            outcome: delegation_outcome_dto(outcome),
+            reason: delegation_reason_dto(reason),
+            provenance: delegation_provenance_dto(provenance),
+            content: content.map(text_excerpt_dto),
+        },
+        TimelineDelegationDetail::SessionMessage {
+            relationship_id,
+            message,
+            sender,
+            recipient,
+            message_ordinal,
+            delivery_sequence,
+            content,
+        } => WebTimelineDelegationDetail::SessionMessage {
+            relationship_id: relationship_id.into_uuid().to_string(),
+            message_id: message.into_uuid().to_string(),
+            sender_session_id: sender.into_uuid().to_string(),
+            recipient_session_id: recipient.into_uuid().to_string(),
+            message_ordinal: WebU64::from_u64(message_ordinal),
+            delivery_sequence: WebU64::from_u64(delivery_sequence),
+            content: text_excerpt_dto(content),
+        },
+        TimelineDelegationDetail::ResultWake {
+            relationship_id,
+            awaiting_request,
+        } => WebTimelineDelegationDetail::ResultWake {
+            relationship_id: relationship_id.into_uuid().to_string(),
+            awaiting_request_id: awaiting_request.map(|request| request.into_uuid().to_string()),
+        },
+        TimelineDelegationDetail::MessageWake {
+            relationship_id,
+            message,
+        } => WebTimelineDelegationDetail::MessageWake {
+            relationship_id: relationship_id.into_uuid().to_string(),
+            message_id: message.into_uuid().to_string(),
+        },
+    }
+}
+
+const fn delegation_outcome_dto(
+    outcome: TimelineDelegationOutcome,
+) -> WebTimelineDelegationOutcome {
+    match outcome {
+        TimelineDelegationOutcome::ResultReturned => WebTimelineDelegationOutcome::ResultReturned,
+        TimelineDelegationOutcome::ChildFailed => WebTimelineDelegationOutcome::ChildFailed,
+        TimelineDelegationOutcome::ChildStopped => WebTimelineDelegationOutcome::ChildStopped,
+        TimelineDelegationOutcome::ChildCancelled => WebTimelineDelegationOutcome::ChildCancelled,
+        TimelineDelegationOutcome::ContinueRunning => WebTimelineDelegationOutcome::ContinueRunning,
+        TimelineDelegationOutcome::AlreadyTerminal => WebTimelineDelegationOutcome::AlreadyTerminal,
+    }
+}
+
+const fn delegation_reason_dto(reason: TimelineDelegationReason) -> WebTimelineDelegationReason {
+    match reason {
+        TimelineDelegationReason::ChildCompleted => WebTimelineDelegationReason::ChildCompleted,
+        TimelineDelegationReason::ChildExecutionFailed => {
+            WebTimelineDelegationReason::ChildExecutionFailed
+        }
+        TimelineDelegationReason::ChildResultUnavailable => {
+            WebTimelineDelegationReason::ChildResultUnavailable
+        }
+        TimelineDelegationReason::ChildCancelled => WebTimelineDelegationReason::ChildCancelled,
+        TimelineDelegationReason::ParentStoppedWithDescendants => {
+            WebTimelineDelegationReason::ParentStoppedWithDescendants
+        }
+        TimelineDelegationReason::ParentCancelledWithDescendants => {
+            WebTimelineDelegationReason::ParentCancelledWithDescendants
+        }
+    }
+}
+
+fn delegation_provenance_dto(
+    provenance: TimelineDelegationProvenance,
+) -> WebTimelineDelegationProvenance {
+    match provenance {
+        TimelineDelegationProvenance::ChildTurn { session, turn } => {
+            WebTimelineDelegationProvenance::ChildTurn {
+                session_id: session.into_uuid().to_string(),
+                turn_id: turn.into_uuid().to_string(),
+            }
+        }
+        TimelineDelegationProvenance::ParentTurnCommand {
+            session,
+            turn,
+            command,
+        } => WebTimelineDelegationProvenance::ParentTurnCommand {
+            session_id: session.into_uuid().to_string(),
+            turn_id: turn.into_uuid().to_string(),
+            command_id: command.into_uuid().to_string(),
+        },
+        TimelineDelegationProvenance::ParentGoalCommand {
+            session,
+            goal_generation,
+            command,
+        } => WebTimelineDelegationProvenance::ParentGoalCommand {
+            session_id: session.into_uuid().to_string(),
+            goal_generation: WebU64::from_u64(goal_generation),
+            command_id: command.into_uuid().to_string(),
+        },
+    }
+}
+
+const fn bound_child_action_dto(action: TimelineBoundChildAction) -> WebTimelineBoundChildAction {
+    match action {
+        TimelineBoundChildAction::KeepRunning => WebTimelineBoundChildAction::KeepRunning,
+        TimelineBoundChildAction::Stop => WebTimelineBoundChildAction::Stop,
+        TimelineBoundChildAction::Cancel => WebTimelineBoundChildAction::Cancel,
+    }
+}
+
+fn tool_attempt_dto(attempt: TimelineToolAttempt) -> WebTimelineToolAttempt {
+    WebTimelineToolAttempt {
+        request_id: attempt.request_id.into_uuid().to_string(),
+        attempt_id: attempt.attempt_id.map(|id| id.into_uuid().to_string()),
+        tool_name: attempt.tool_name,
+        arguments: attempt.arguments.map(text_excerpt_dto),
+        result: attempt.result.map(text_excerpt_dto),
+        failure: attempt.failure.map(text_excerpt_dto),
+        approval_posture: match attempt.approval_posture {
+            TimelineToolApprovalPosture::Auto => WebTimelineToolApprovalPosture::Auto,
+            TimelineToolApprovalPosture::Delegated => WebTimelineToolApprovalPosture::Delegated,
+            TimelineToolApprovalPosture::Human => WebTimelineToolApprovalPosture::Human,
+        },
+        approval_judge_escalated: attempt.approval_judge_escalated,
+        operator_required: attempt.operator_required,
+        effect_posture: attempt.effect_posture.map(|posture| match posture {
+            TimelineToolEffectPosture::EffectFree => WebTimelineToolEffectPosture::EffectFree,
+            TimelineToolEffectPosture::ExternalEffect => {
+                WebTimelineToolEffectPosture::ExternalEffect
+            }
+        }),
+        sandbox_posture: attempt.sandbox_posture,
+        state: attempt.state.map(|state| match state {
+            TimelineToolState::Prepared => WebTimelineToolState::Prepared,
+            TimelineToolState::InFlight => WebTimelineToolState::InFlight,
+            TimelineToolState::AwaitingChild => WebTimelineToolState::AwaitingChild,
+            TimelineToolState::Completed => WebTimelineToolState::Completed,
+            TimelineToolState::KnownFailed => WebTimelineToolState::KnownFailed,
+            TimelineToolState::Ambiguous => WebTimelineToolState::Ambiguous,
+        }),
+        cause_code: attempt.cause_code,
     }
 }
 
@@ -943,6 +1354,13 @@ fn body_continuation_dto(continuation: TimelineBodyContinuation) -> WebTimelineB
         field: match continuation.field {
             TimelineBodyField::InputText => WebTimelineBodyField::InputText,
             TimelineBodyField::ModelResponse => WebTimelineBodyField::ModelResponse,
+            TimelineBodyField::ToolArguments => WebTimelineBodyField::ToolArguments,
+            TimelineBodyField::ToolResult => WebTimelineBodyField::ToolResult,
+            TimelineBodyField::ToolFailure => WebTimelineBodyField::ToolFailure,
+            TimelineBodyField::ApprovalRationale => WebTimelineBodyField::ApprovalRationale,
+            TimelineBodyField::GoalText => WebTimelineBodyField::GoalText,
+            TimelineBodyField::CompactionSummary => WebTimelineBodyField::CompactionSummary,
+            TimelineBodyField::DelegationContent => WebTimelineBodyField::DelegationContent,
         },
         member_index: continuation.member_index,
         offset_bytes: WebU64::from_u64(continuation.offset_bytes),

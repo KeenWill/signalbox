@@ -8,26 +8,28 @@
 use std::{error::Error, num::NonZeroU64};
 
 use signalbox_application::{
-    SessionTimelineDetailBody, SessionTimelineEventKind, TimelineAddress, TimelineContinuation,
+    SessionTimelineDetailBody, TimelineAddress, TimelineContinuation, TimelineDelegationDetail,
     TimelineDetailLimits, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::{
     CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    TranscriptAncestry,
+    ToolApprovalDecision, ToolAttemptId, ToolEffectClass, TranscriptAncestry, TurnAttemptId,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
     session_timeline::{
         SessionTimelineCorruption, SessionTimelineRepository, SessionTimelineRepositoryError,
     },
+    tool_loop::PostgresToolLoopRepository,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{
-    commission_fixture_session_goal, migrated_postgres, prepared_complete_delegation_outbox,
-    stop_fixture_session_goal, test_session_credential_pin,
+    checkpoint_confirmed_tool_round, commission_fixture_session_goal, decide_tool_request,
+    migrated_postgres, prepared_complete_delegation_outbox, stop_fixture_session_goal,
+    test_session_credential_pin,
 };
 
 fn credential_pin() -> signalbox_persistence::SessionCredentialPin {
@@ -156,12 +158,139 @@ async fn item_and_region_details_share_the_stable_creation_address() -> Result<(
     assert_eq!(item.items[0].address, address);
     assert!(matches!(
         item.items[0].body,
-        SessionTimelineDetailBody::EventFact { .. }
+        SessionTimelineDetailBody::SessionCreated {
+            imported_evidence: None
+        }
     ));
     assert!(item.projected_body_bytes > 0);
     assert!(item.projected_body_bytes <= limits.max_projected_bytes());
     assert_eq!(item.continuation, None);
     assert_eq!(region, item);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn tool_detail_selects_one_lease_generation_for_sandbox_posture() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x99a0;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+    let tool_loop = PostgresToolLoopRepository::new(pool.clone());
+    tool_loop
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe0)),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1));
+    tool_loop
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?
+        .expect("the approved request prepares its physical attempt");
+    tool_loop
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+
+    let lease = Uuid::from_u128(seed + 0xe2);
+    let runner = Uuid::from_u128(seed + 0xe3);
+    sqlx::query("ALTER TABLE runner_session_placement_record DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id, directory_selection_kind,
+             workspace_requirement_kind, requested_sandbox_profile,
+             permission_override_count, state_kind, pinned_tool_count)
+         VALUES ($1, 1, 1, 'created', 'identity', $2, 'runner_default',
+                 'none', 'workspace_restricted', 0, 'unpinned', 0)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(runner)
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_session_placement_record ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE runner_lease_generation DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_generation
+            (lease_id, generation, attempt_id, session_id, runner_id,
+             tool_name, effect_class, placement_event_ordinal,
+             registration_enrollment_id, registration_revision,
+             predecessor_generation)
+         VALUES
+            ($1, 1, $2, $3, $4, 'current_time', 'pure', 1, $5, 1, NULL),
+            ($1, 2, $2, $3, $4, 'current_time', 'pure', 1, $5, 1, 1)",
+    )
+    .bind(lease)
+    .bind(attempt.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(runner)
+    .bind(Uuid::from_u128(seed + 0xe4))
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_lease_generation ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE runner_physical_attempt_lease_binding DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_physical_attempt_lease_binding (attempt_id, lease_id)
+         VALUES ($1, $2)",
+    )
+    .bind(attempt.into_uuid())
+    .bind(lease)
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_physical_attempt_lease_binding ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let sequence: i64 = sqlx::query_scalar(
+        "SELECT event_sequence::bigint
+           FROM tool_batch_transition_outbox_event
+          WHERE producing_model_call_id = $1
+            AND transition_kind = 'proposed'",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let address = TimelineAddress::new(
+        NonZeroU64::new(u64::try_from(sequence)?).expect("the durable event sequence is positive"),
+    );
+    let page = SessionTimelineRepository::new(pool.clone())
+        .read_item_details(
+            fixture.session,
+            address,
+            None,
+            TimelineDetailLimits::new(1, 512).expect("fixture limits are bounded"),
+        )
+        .await?
+        .expect("the tool-batch detail exists");
+    let SessionTimelineDetailBody::ToolBatch { tools, .. } = &page.items[0].body else {
+        panic!("the selected event projects a tool-batch body");
+    };
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].attempt_id, Some(attempt));
+    assert!(tools[0].sandbox_posture.is_some());
 
     pool.close().await;
     drop(container);
@@ -265,11 +394,12 @@ async fn delegation_detail_validates_body_shape_without_projecting_body_text()
         .read_item_details(fixture.child, address, None, limits)
         .await?
         .expect("the delegation detail exists");
+    let SessionTimelineDetailBody::Delegation(delegation) = &detail.items[0].body else {
+        panic!("expected delegation detail");
+    };
     assert!(matches!(
-        detail.items[0].body,
-        SessionTimelineDetailBody::EventFact {
-            kind: SessionTimelineEventKind::DelegationUpdate
-        }
+        delegation,
+        TimelineDelegationDetail::SessionMessage { .. }
     ));
 
     sqlx::query(
@@ -332,37 +462,31 @@ async fn rejected_response_text_position_constraint(
         .commit()
         .await
         .expect_err("non-contiguous response text positions must not commit");
-    let constraint = error
+    let database_error = error
         .as_database_error()
-        .and_then(sqlx::error::DatabaseError::constraint)
-        .map(str::to_owned);
+        .expect("the deferred trigger reports a database error");
+    let code = database_error.code().map(|code| code.into_owned());
 
     pool.close().await;
     drop(container);
-    Ok(constraint)
+    Ok(code)
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn assistant_response_text_positions_reject_gaps() -> Result<(), Box<dyn Error>> {
-    let constraint = rejected_response_text_position_constraint(0x9980, 0x9981, 4).await?;
+    let code = rejected_response_text_position_constraint(0x9980, 0x9981, 4).await?;
 
-    assert_eq!(
-        constraint.as_deref(),
-        Some("semantic_transcript_response_text_positions_contiguous")
-    );
+    assert_eq!(code.as_deref(), Some("23514"));
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn assistant_response_text_positions_reject_overlaps() -> Result<(), Box<dyn Error>> {
-    let constraint = rejected_response_text_position_constraint(0x9990, 0x9991, 2).await?;
+    let code = rejected_response_text_position_constraint(0x9990, 0x9991, 2).await?;
 
-    assert_eq!(
-        constraint.as_deref(),
-        Some("semantic_transcript_response_text_positions_contiguous")
-    );
+    assert_eq!(code.as_deref(), Some("23514"));
     Ok(())
 }
 

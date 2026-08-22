@@ -359,6 +359,52 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
+              "imported_evidence": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineImportedEvidence"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "const": "session_created",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cause_code": {
+                "type": "string"
+              },
+              "turn_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "model_settings",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "cause_code"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
               "attachments": {
                 "items": {
                   "$ref": "#/$defs/WebTimelineBlobReference"
@@ -440,6 +486,156 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
+              "goal_events": {
+                "items": {
+                  "$ref": "#/$defs/WebTimelineGoalEvent"
+                },
+                "maxItems": 1,
+                "type": "array"
+              },
+              "producing_model_call_id": {
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/WebTimelineToolBatchState"
+              },
+              "tools": {
+                "items": {
+                  "$ref": "#/$defs/WebTimelineToolAttempt"
+                },
+                "maxItems": 1,
+                "type": "array"
+              },
+              "turn_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "tool_batch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "turn_id",
+              "producing_model_call_id",
+              "state",
+              "tools",
+              "goal_events"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "approval_judge_escalated": {
+                "type": "boolean"
+              },
+              "decider": {
+                "$ref": "#/$defs/WebTimelineApprovalDecider"
+              },
+              "decision": {
+                "$ref": "#/$defs/WebTimelineApprovalDecision"
+              },
+              "rationale": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineTextExcerpt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "request_id": {
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/$defs/WebTimelineApprovalSource"
+              },
+              "tool_name": {
+                "type": "string"
+              },
+              "turn_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "tool_approval_decision",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "turn_id",
+              "request_id",
+              "tool_name",
+              "decision",
+              "source",
+              "decider",
+              "approval_judge_escalated"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "event": {
+                "$ref": "#/$defs/WebTimelineGoalEvent"
+              },
+              "turn_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "goal_event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "turn_id",
+              "event"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "compaction_id": {
+                "type": "string"
+              },
+              "model_call_id": {
+                "type": "string"
+              },
+              "result_frontier_id": {
+                "type": "string"
+              },
+              "summary": {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              "summary_entry_id": {
+                "type": "string"
+              },
+              "through_position": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "type": {
+                "const": "context_compaction",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "compaction_id",
+              "model_call_id",
+              "through_position",
+              "summary_entry_id",
+              "result_frontier_id",
+              "summary"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
               "cause_code": {
                 "type": "string"
               },
@@ -465,17 +661,93 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
-              "kind": {
-                "$ref": "#/$defs/WebSessionTimelineEventKind"
+              "attempt_count": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "cause_code": {
+                "type": "string"
+              },
+              "exhausted": {
+                "type": "boolean"
+              },
+              "operation_id": {
+                "type": "string"
+              },
+              "operation_kind": {
+                "type": "string"
+              },
+              "operator_required": {
+                "type": "boolean"
+              },
+              "turn_id": {
+                "type": "string"
               },
               "type": {
-                "const": "event_fact",
+                "const": "reconciliation",
                 "type": "string"
               }
             },
             "required": [
               "type",
-              "kind"
+              "turn_id",
+              "operation_kind",
+              "operation_id",
+              "attempt_count",
+              "exhausted",
+              "operator_required",
+              "cause_code"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "placement_revision": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "runner_id": {
+                "type": "string"
+              },
+              "sandbox_posture": {
+                "$ref": "#/$defs/WebTimelineRunnerSandboxPosture"
+              },
+              "state": {
+                "$ref": "#/$defs/WebTimelineRunnerState"
+              },
+              "type": {
+                "const": "runner",
+                "type": "string"
+              },
+              "working_directory": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "type",
+              "runner_id",
+              "placement_revision",
+              "sandbox_posture",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "detail": {
+                "$ref": "#/$defs/WebTimelineDelegationDetail"
+              },
+              "type": {
+                "const": "delegation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "detail"
             ],
             "type": "object"
           }
@@ -518,6 +790,63 @@ const schemas = {
           "event_sequence"
         ],
         "type": "object"
+      },
+      "WebTimelineApprovalDecider": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "command_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "user",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "command_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "model_call_id": {
+                "type": "string"
+              },
+              "model_selection_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "delegate",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "model_selection_id",
+              "model_call_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineApprovalDecision": {
+        "enum": [
+          "approve",
+          "deny"
+        ],
+        "type": "string"
+      },
+      "WebTimelineApprovalSource": {
+        "enum": [
+          "policy",
+          "delegate",
+          "user"
+        ],
+        "type": "string"
       },
       "WebTimelineBlobReference": {
         "additionalProperties": false,
@@ -573,7 +902,387 @@ const schemas = {
         "description": "Text-bearing field within one typed timeline body.",
         "enum": [
           "input_text",
-          "model_response"
+          "model_response",
+          "tool_arguments",
+          "tool_result",
+          "tool_failure",
+          "approval_rationale",
+          "goal_text",
+          "compaction_summary",
+          "delegation_content"
+        ],
+        "type": "string"
+      },
+      "WebTimelineBoundChildAction": {
+        "enum": [
+          "keep_running",
+          "stop",
+          "cancel"
+        ],
+        "type": "string"
+      },
+      "WebTimelineDelegationDetail": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "child_session_id": {
+                "type": "string"
+              },
+              "policy": {
+                "$ref": "#/$defs/WebTimelineDelegationPolicy"
+              },
+              "relationship_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "child_spawned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "relationship_id",
+              "child_session_id",
+              "policy"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "awaiting_request_id": {
+                "type": "string"
+              },
+              "child_session_id": {
+                "type": "string"
+              },
+              "mode": {
+                "$ref": "#/$defs/WebTimelineDelegationWaitMode"
+              },
+              "relationship_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "child_waiting",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "relationship_id",
+              "child_session_id",
+              "awaiting_request_id",
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "child_session_id": {
+                "type": "string"
+              },
+              "event_ordinal": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "outcome": {
+                "$ref": "#/$defs/WebTimelineDelegationOutcome"
+              },
+              "provenance": {
+                "$ref": "#/$defs/WebTimelineDelegationProvenance"
+              },
+              "reason": {
+                "$ref": "#/$defs/WebTimelineDelegationReason"
+              },
+              "relationship_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "child_lifecycle_disposition",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "relationship_id",
+              "child_session_id",
+              "event_ordinal",
+              "outcome",
+              "reason",
+              "provenance"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "child_session_id": {
+                "type": "string"
+              },
+              "content": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineTextExcerpt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "outcome": {
+                "$ref": "#/$defs/WebTimelineDelegationOutcome"
+              },
+              "provenance": {
+                "$ref": "#/$defs/WebTimelineDelegationProvenance"
+              },
+              "reason": {
+                "$ref": "#/$defs/WebTimelineDelegationReason"
+              },
+              "relationship_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "child_result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "relationship_id",
+              "child_session_id",
+              "outcome",
+              "reason",
+              "provenance"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "content": {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              "delivery_sequence": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "message_id": {
+                "type": "string"
+              },
+              "message_ordinal": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "recipient_session_id": {
+                "type": "string"
+              },
+              "relationship_id": {
+                "type": "string"
+              },
+              "sender_session_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "session_message",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "relationship_id",
+              "message_id",
+              "sender_session_id",
+              "recipient_session_id",
+              "message_ordinal",
+              "delivery_sequence",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "awaiting_request_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "relationship_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "result_wake",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "relationship_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "message_id": {
+                "type": "string"
+              },
+              "relationship_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "message_wake",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "relationship_id",
+              "message_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineDelegationOutcome": {
+        "enum": [
+          "result_returned",
+          "child_failed",
+          "child_stopped",
+          "child_cancelled",
+          "continue_running",
+          "already_terminal"
+        ],
+        "type": "string"
+      },
+      "WebTimelineDelegationPolicy": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "background",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "on_parent_cancelled": {
+                "$ref": "#/$defs/WebTimelineBoundChildAction"
+              },
+              "on_parent_stopped": {
+                "$ref": "#/$defs/WebTimelineBoundChildAction"
+              },
+              "type": {
+                "const": "bound",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "on_parent_stopped",
+              "on_parent_cancelled"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineDelegationProvenance": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "session_id": {
+                "type": "string"
+              },
+              "turn_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "child_turn",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "command_id": {
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              },
+              "turn_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "parent_turn_command",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "turn_id",
+              "command_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "command_id": {
+                "type": "string"
+              },
+              "goal_generation": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "session_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "parent_goal_command",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "goal_generation",
+              "command_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineDelegationReason": {
+        "enum": [
+          "child_completed",
+          "child_execution_failed",
+          "child_result_unavailable",
+          "child_cancelled",
+          "parent_stopped_with_descendants",
+          "parent_cancelled_with_descendants"
+        ],
+        "type": "string"
+      },
+      "WebTimelineDelegationWaitMode": {
+        "enum": [
+          "foreground",
+          "background"
         ],
         "type": "string"
       },
@@ -620,6 +1329,78 @@ const schemas = {
         "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
         "pattern": "^[1-9][0-9]*$",
         "type": "string"
+      },
+      "WebTimelineGoalBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure"
+        ],
+        "type": "string"
+      },
+      "WebTimelineGoalEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "event_kind": {
+            "$ref": "#/$defs/WebTimelineGoalEventKind"
+          },
+          "generation": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineGoalBlockedReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "text": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "generation",
+          "event_kind"
+        ],
+        "type": "object"
+      },
+      "WebTimelineGoalEventKind": {
+        "enum": [
+          "commissioned",
+          "blocked",
+          "resumed",
+          "achieved",
+          "user_stopped",
+          "superseded"
+        ],
+        "type": "string"
+      },
+      "WebTimelineImportedEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "imported_entry_id": {
+            "type": "string"
+          },
+          "imported_position": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "imported_entry_id",
+          "imported_position"
+        ],
+        "type": "object"
       },
       "WebTimelineModelCallDisposition": {
         "description": "Closed terminal model-call disposition.",
@@ -740,6 +1521,26 @@ const schemas = {
         },
         "type": "object"
       },
+      "WebTimelineRunnerSandboxPosture": {
+        "enum": [
+          "unsandboxed",
+          "sandboxed"
+        ],
+        "type": "string"
+      },
+      "WebTimelineRunnerState": {
+        "enum": [
+          "pinned",
+          "suspect",
+          "connected",
+          "runner_lost_before_pin",
+          "runner_lost",
+          "replaced",
+          "working_directory_changed",
+          "abandoned"
+        ],
+        "type": "string"
+      },
       "WebTimelineTextExcerpt": {
         "additionalProperties": false,
         "description": "Bounded UTF-8 excerpt with explicit completeness evidence.",
@@ -770,6 +1571,136 @@ const schemas = {
           "total_bytes"
         ],
         "type": "object"
+      },
+      "WebTimelineToolApprovalPosture": {
+        "enum": [
+          "auto",
+          "delegated",
+          "human"
+        ],
+        "type": "string"
+      },
+      "WebTimelineToolAttempt": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_judge_escalated": {
+            "type": "boolean"
+          },
+          "approval_posture": {
+            "$ref": "#/$defs/WebTimelineToolApprovalPosture"
+          },
+          "arguments": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attempt_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cause_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effect_posture": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineToolEffectPosture"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "operator_required": {
+            "type": "boolean"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sandbox_posture": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineToolState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tool_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "tool_name",
+          "approval_posture",
+          "approval_judge_escalated",
+          "operator_required"
+        ],
+        "type": "object"
+      },
+      "WebTimelineToolBatchState": {
+        "enum": [
+          "proposed",
+          "results_projected",
+          "recovery_required"
+        ],
+        "type": "string"
+      },
+      "WebTimelineToolEffectPosture": {
+        "enum": [
+          "effect_free",
+          "external_effect"
+        ],
+        "type": "string"
+      },
+      "WebTimelineToolState": {
+        "enum": [
+          "prepared",
+          "in_flight",
+          "awaiting_child",
+          "completed",
+          "known_failed",
+          "ambiguous"
+        ],
+        "type": "string"
       },
       "WebTimelineTurnLifecycleKind": {
         "description": "Closed turn lifecycle boundary.",

@@ -326,6 +326,13 @@ pub struct WebSessionTimelineWindow {
 pub enum WebTimelineBodyField {
     InputText,
     ModelResponse,
+    ToolArguments,
+    ToolResult,
+    ToolFailure,
+    ApprovalRationale,
+    GoalText,
+    CompactionSummary,
+    DelegationContent,
 }
 
 /// Exact continuation within an oversized typed body.
@@ -398,10 +405,267 @@ pub enum WebTimelineTurnLifecycleKind {
     Terminalized,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineToolState {
+    Prepared,
+    InFlight,
+    AwaitingChild,
+    Completed,
+    KnownFailed,
+    Ambiguous,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineToolBatchState {
+    Proposed,
+    ResultsProjected,
+    RecoveryRequired,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineToolApprovalPosture {
+    Auto,
+    Delegated,
+    Human,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineToolEffectPosture {
+    EffectFree,
+    ExternalEffect,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineToolAttempt {
+    pub request_id: String,
+    pub attempt_id: Option<String>,
+    pub tool_name: String,
+    pub arguments: Option<WebTimelineTextExcerpt>,
+    pub result: Option<WebTimelineTextExcerpt>,
+    pub failure: Option<WebTimelineTextExcerpt>,
+    pub approval_posture: WebTimelineToolApprovalPosture,
+    pub approval_judge_escalated: bool,
+    pub operator_required: bool,
+    pub effect_posture: Option<WebTimelineToolEffectPosture>,
+    pub sandbox_posture: Option<String>,
+    pub state: Option<WebTimelineToolState>,
+    pub cause_code: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineApprovalSource {
+    Policy,
+    Delegate,
+    User,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineApprovalDecision {
+    Approve,
+    Deny,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineApprovalDecider {
+    User {
+        command_id: String,
+    },
+    Delegate {
+        model_selection_id: String,
+        model_call_id: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineRunnerSandboxPosture {
+    Unsandboxed,
+    Sandboxed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineRunnerState {
+    Pinned,
+    Suspect,
+    Connected,
+    RunnerLostBeforePin,
+    RunnerLost,
+    Replaced,
+    WorkingDirectoryChanged,
+    Abandoned,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineGoalEventKind {
+    Commissioned,
+    Blocked,
+    Resumed,
+    Achieved,
+    UserStopped,
+    Superseded,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineGoalBlockedReason {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+    ExecutionFailure,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineGoalEvent {
+    pub generation: WebU64,
+    pub event_kind: WebTimelineGoalEventKind,
+    pub reason: Option<WebTimelineGoalBlockedReason>,
+    pub text: Option<WebTimelineTextExcerpt>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineBoundChildAction {
+    KeepRunning,
+    Stop,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineDelegationPolicy {
+    Background,
+    Bound {
+        on_parent_stopped: WebTimelineBoundChildAction,
+        on_parent_cancelled: WebTimelineBoundChildAction,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineDelegationWaitMode {
+    Foreground,
+    Background,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineDelegationOutcome {
+    ResultReturned,
+    ChildFailed,
+    ChildStopped,
+    ChildCancelled,
+    ContinueRunning,
+    AlreadyTerminal,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineDelegationReason {
+    ChildCompleted,
+    ChildExecutionFailed,
+    ChildResultUnavailable,
+    ChildCancelled,
+    ParentStoppedWithDescendants,
+    ParentCancelledWithDescendants,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineDelegationProvenance {
+    ChildTurn {
+        session_id: String,
+        turn_id: String,
+    },
+    ParentTurnCommand {
+        session_id: String,
+        turn_id: String,
+        command_id: String,
+    },
+    ParentGoalCommand {
+        session_id: String,
+        goal_generation: WebU64,
+        command_id: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineDelegationDetail {
+    ChildSpawned {
+        relationship_id: String,
+        child_session_id: String,
+        policy: WebTimelineDelegationPolicy,
+    },
+    ChildWaiting {
+        relationship_id: String,
+        child_session_id: String,
+        awaiting_request_id: String,
+        mode: WebTimelineDelegationWaitMode,
+    },
+    ChildLifecycleDisposition {
+        relationship_id: String,
+        child_session_id: String,
+        event_ordinal: WebU64,
+        outcome: WebTimelineDelegationOutcome,
+        reason: WebTimelineDelegationReason,
+        provenance: WebTimelineDelegationProvenance,
+    },
+    ChildResult {
+        relationship_id: String,
+        child_session_id: String,
+        outcome: WebTimelineDelegationOutcome,
+        reason: WebTimelineDelegationReason,
+        provenance: WebTimelineDelegationProvenance,
+        content: Option<WebTimelineTextExcerpt>,
+    },
+    SessionMessage {
+        relationship_id: String,
+        message_id: String,
+        sender_session_id: String,
+        recipient_session_id: String,
+        message_ordinal: WebU64,
+        delivery_sequence: WebU64,
+        content: WebTimelineTextExcerpt,
+    },
+    ResultWake {
+        relationship_id: String,
+        awaiting_request_id: Option<String>,
+    },
+    MessageWake {
+        relationship_id: String,
+        message_id: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineImportedEvidence {
+    pub imported_entry_id: String,
+    pub imported_position: WebU64,
+}
+
 /// Typed browser body, distinct from application and persistence projections.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 pub enum WebSessionTimelineDetailBody {
+    SessionCreated {
+        imported_evidence: Option<WebTimelineImportedEvidence>,
+    },
+    ModelSettings {
+        turn_id: Option<String>,
+        cause_code: String,
+    },
     UserInput {
         turn_id: String,
         text: WebTimelineTextExcerpt,
@@ -417,13 +681,60 @@ pub enum WebSessionTimelineDetailBody {
         usage: WebTimelineModelUsage,
         cause_code: Option<String>,
     },
+    ToolBatch {
+        turn_id: String,
+        producing_model_call_id: String,
+        state: WebTimelineToolBatchState,
+        #[schemars(length(max = 1))]
+        tools: Vec<WebTimelineToolAttempt>,
+        #[schemars(length(max = 1))]
+        goal_events: Vec<WebTimelineGoalEvent>,
+    },
+    ToolApprovalDecision {
+        turn_id: String,
+        request_id: String,
+        tool_name: String,
+        decision: WebTimelineApprovalDecision,
+        source: WebTimelineApprovalSource,
+        decider: WebTimelineApprovalDecider,
+        rationale: Option<WebTimelineTextExcerpt>,
+        approval_judge_escalated: bool,
+    },
+    GoalEvent {
+        turn_id: String,
+        event: WebTimelineGoalEvent,
+    },
+    ContextCompaction {
+        compaction_id: String,
+        model_call_id: String,
+        through_position: WebU64,
+        summary_entry_id: String,
+        result_frontier_id: String,
+        summary: WebTimelineTextExcerpt,
+    },
     TurnLifecycle {
         turn_id: String,
         lifecycle: WebTimelineTurnLifecycleKind,
         cause_code: String,
     },
-    EventFact {
-        kind: WebSessionTimelineEventKind,
+    Reconciliation {
+        turn_id: String,
+        operation_kind: String,
+        operation_id: String,
+        attempt_count: WebU64,
+        exhausted: bool,
+        operator_required: bool,
+        cause_code: String,
+    },
+    Runner {
+        runner_id: String,
+        placement_revision: WebU64,
+        sandbox_posture: WebTimelineRunnerSandboxPosture,
+        working_directory: Option<String>,
+        state: WebTimelineRunnerState,
+    },
+    Delegation {
+        detail: WebTimelineDelegationDetail,
     },
 }
 
