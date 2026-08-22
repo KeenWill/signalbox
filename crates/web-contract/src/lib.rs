@@ -637,6 +637,17 @@ impl fmt::Display for GenerateWebContractError {
 
 impl Error for GenerateWebContractError {}
 
+struct GeneratedSchemas {
+    bootstrap: Value,
+    example: Value,
+    error: Value,
+    descriptor: Value,
+    window: Value,
+    search_page: Value,
+    usage_summary: Value,
+    usage_call_page: Value,
+}
+
 /// Produces all checked-in browser contract artifacts.
 ///
 /// # Errors
@@ -644,17 +655,18 @@ impl Error for GenerateWebContractError {}
 /// Returns a closed build-time error when serde cannot encode a generated value
 /// or a DTO schema grows beyond the generator's focused supported shapes.
 pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContractError> {
-    let bootstrap_schema = canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value());
-    let example_schema = canonical_schema(schemars::schema_for!(WebContractExample).to_value());
-    let error_schema = canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value());
-    let descriptor_schema =
-        canonical_schema(schemars::schema_for!(WebSessionTimelineDescriptor).to_value());
-    let window_schema =
-        canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
-    let search_page_schema = canonical_schema(schemars::schema_for!(WebSearchPage).to_value());
-    let usage_summary_schema = canonical_schema(schemars::schema_for!(WebUsageSummary).to_value());
-    let usage_call_page_schema =
-        canonical_schema(schemars::schema_for!(WebUsageCallPage).to_value());
+    let schemas = GeneratedSchemas {
+        bootstrap: canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value()),
+        example: canonical_schema(schemars::schema_for!(WebContractExample).to_value()),
+        error: canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value()),
+        descriptor: canonical_schema(
+            schemars::schema_for!(WebSessionTimelineDescriptor).to_value(),
+        ),
+        window: canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value()),
+        search_page: canonical_schema(schemars::schema_for!(WebSearchPage).to_value()),
+        usage_summary: canonical_schema(schemars::schema_for!(WebUsageSummary).to_value()),
+        usage_call_page: canonical_schema(schemars::schema_for!(WebUsageCallPage).to_value()),
+    };
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -666,29 +678,11 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     Ok(vec![
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.mjs",
-            contents: runtime_module(
-                &bootstrap_schema,
-                &example_schema,
-                &error_schema,
-                &descriptor_schema,
-                &window_schema,
-                &search_page_schema,
-                &usage_summary_schema,
-                &usage_call_page_schema,
-            )?,
+            contents: runtime_module(&schemas)?,
         },
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.d.mts",
-            contents: declaration_module(
-                &bootstrap_schema,
-                &example_schema,
-                &error_schema,
-                &descriptor_schema,
-                &window_schema,
-                &search_page_schema,
-                &usage_summary_schema,
-                &usage_call_page_schema,
-            )?,
+            contents: declaration_module(&schemas)?,
         },
         GeneratedArtifact {
             path: "crates/web-contract/tests/fixtures/example.json",
@@ -705,25 +699,16 @@ fn canonical_schema(mut schema: Value) -> Value {
     schema
 }
 
-fn runtime_module(
-    bootstrap_schema: &Value,
-    example_schema: &Value,
-    error_schema: &Value,
-    descriptor_schema: &Value,
-    window_schema: &Value,
-    search_page_schema: &Value,
-    usage_summary_schema: &Value,
-    usage_call_page_schema: &Value,
-) -> Result<String, GenerateWebContractError> {
+fn runtime_module(schemas: &GeneratedSchemas) -> Result<String, GenerateWebContractError> {
     let mut schemas = json!({
-        "WebContractBootstrap": bootstrap_schema,
-        "WebContractExample": example_schema,
-        "WebApiErrorResponse": error_schema,
-        "WebSessionTimelineDescriptor": descriptor_schema,
-        "WebSessionTimelineWindow": window_schema,
-        "WebSearchPage": search_page_schema,
-        "WebUsageSummary": usage_summary_schema,
-        "WebUsageCallPage": usage_call_page_schema,
+        "WebContractBootstrap": schemas.bootstrap,
+        "WebContractExample": schemas.example,
+        "WebApiErrorResponse": schemas.error,
+        "WebSessionTimelineDescriptor": schemas.descriptor,
+        "WebSessionTimelineWindow": schemas.window,
+        "WebSearchPage": schemas.search_page,
+        "WebUsageSummary": schemas.usage_summary,
+        "WebUsageCallPage": schemas.usage_call_page,
     });
     schemas.sort_all_objects();
     let schemas = serde_json::to_string_pretty(&schemas)
@@ -928,28 +913,23 @@ export function decodeWebUsageCallPage(value) {{
     ))
 }
 
-fn declaration_module(
-    bootstrap_schema: &Value,
-    example_schema: &Value,
-    error_schema: &Value,
-    descriptor_schema: &Value,
-    window_schema: &Value,
-    search_page_schema: &Value,
-    usage_summary_schema: &Value,
-    usage_call_page_schema: &Value,
-) -> Result<String, GenerateWebContractError> {
+fn declaration_module(schemas: &GeneratedSchemas) -> Result<String, GenerateWebContractError> {
     let mut definitions = BTreeMap::new();
-    let bootstrap = typescript_type(bootstrap_schema, bootstrap_schema, &mut definitions)?;
-    let example = typescript_type(example_schema, example_schema, &mut definitions)?;
-    let error = typescript_type(error_schema, error_schema, &mut definitions)?;
-    let descriptor = typescript_type(descriptor_schema, descriptor_schema, &mut definitions)?;
-    let window = typescript_type(window_schema, window_schema, &mut definitions)?;
-    let search_page = typescript_type(search_page_schema, search_page_schema, &mut definitions)?;
-    let usage_summary =
-        typescript_type(usage_summary_schema, usage_summary_schema, &mut definitions)?;
+    let bootstrap = typescript_type(&schemas.bootstrap, &schemas.bootstrap, &mut definitions)?;
+    let example = typescript_type(&schemas.example, &schemas.example, &mut definitions)?;
+    let error = typescript_type(&schemas.error, &schemas.error, &mut definitions)?;
+    let descriptor = typescript_type(&schemas.descriptor, &schemas.descriptor, &mut definitions)?;
+    let window = typescript_type(&schemas.window, &schemas.window, &mut definitions)?;
+    let search_page =
+        typescript_type(&schemas.search_page, &schemas.search_page, &mut definitions)?;
+    let usage_summary = typescript_type(
+        &schemas.usage_summary,
+        &schemas.usage_summary,
+        &mut definitions,
+    )?;
     let usage_call_page = typescript_type(
-        usage_call_page_schema,
-        usage_call_page_schema,
+        &schemas.usage_call_page,
+        &schemas.usage_call_page,
         &mut definitions,
     )?;
     let mut output = String::from(
