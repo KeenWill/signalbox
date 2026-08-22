@@ -74,6 +74,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   const [pendingCommand, setPendingCommand] = useState<WebImportContinuationRequest | null>(() =>
     loadRetainedCommand(queryScope),
   )
+  const [retainedStorageFailed, setRetainedStorageFailed] = useState(false)
   const hasRetainedCommand = pendingCommand !== null
 
   const listRequest = useMemo(
@@ -155,6 +156,35 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     },
     [entryWindow?.items, hasRetainedCommand, resetContinuation],
   )
+  const modelSelectionMissing = modelSelectionId.trim().length === 0
+  const canContinueImport =
+    selectedFrontier !== null &&
+    !modelSelectionMissing &&
+    !descriptorQuery.isError &&
+    !continuation.isPending &&
+    !hasRetainedCommand
+  const continueAt = useCallback(
+    (relationship: WebImportedSessionRelationship) => {
+      if (!canContinueImport || !selectedFrontier) return
+      const request: WebImportContinuationRequest = {
+        command_id: crypto.randomUUID(),
+        frontier: selectedFrontier,
+        relationship,
+        initial_model_selection:
+          modelKind === 'direct'
+            ? { kind: 'direct', selection_id: modelSelectionId.trim() }
+            : { kind: 'alias', alias_id: modelSelectionId.trim() },
+      }
+      if (!storeRetainedCommand(queryScope, request)) {
+        setRetainedStorageFailed(true)
+        return
+      }
+      setRetainedStorageFailed(false)
+      setPendingCommand(request)
+      continuation.mutate(request)
+    },
+    [canContinueImport, continuation, modelKind, modelSelectionId, queryScope, selectedFrontier],
+  )
   const commandContext = useMemo<CommandContext>(
     () => ({
       dispatch: store.dispatch,
@@ -165,8 +195,16 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       importEntryIds,
       selectedImportEntry: selectedFrontier?.imported_entry_id ?? null,
       selectImportEntry,
+      canContinueImport,
+      continueImport: continueAt,
     }),
-    [importEntryIds, selectImportEntry, selectedFrontier?.imported_entry_id],
+    [
+      canContinueImport,
+      continueAt,
+      importEntryIds,
+      selectImportEntry,
+      selectedFrontier?.imported_entry_id,
+    ],
   )
   useHotkeys(
     [...surfaceHotkeyBindings, ...importHotkeyBindings].map((binding) => ({
@@ -275,23 +313,6 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   const retryableContinuationFailure =
     continuation.isError && isRetryableContinuationError(continuation.error)
   const retainedCommandNeedsAction = pendingCommand !== null && !continuation.isPending
-  const modelSelectionMissing = modelSelectionId.trim().length === 0
-
-  const continueAt = (relationship: WebImportedSessionRelationship) => {
-    if (hasRetainedCommand || !selectedFrontier || modelSelectionId.trim().length === 0) return
-    const request: WebImportContinuationRequest = {
-      command_id: crypto.randomUUID(),
-      frontier: selectedFrontier,
-      relationship,
-      initial_model_selection:
-        modelKind === 'direct'
-          ? { kind: 'direct', selection_id: modelSelectionId.trim() }
-          : { kind: 'alias', alias_id: modelSelectionId.trim() },
-    }
-    storeRetainedCommand(queryScope, request)
-    setPendingCommand(request)
-    continuation.mutate(request)
-  }
 
   return (
     <>
@@ -534,7 +555,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                   <div className="continuation-actions">
                     <button
                       type="button"
-                      onClick={() => continueAt('resume')}
+                      onClick={() => invokeCommand('imports.continue.resume', commandContext)}
                       disabled={
                         !selectedFrontier ||
                         modelSelectionMissing ||
@@ -547,7 +568,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                     </button>
                     <button
                       type="button"
-                      onClick={() => continueAt('fork')}
+                      onClick={() => invokeCommand('imports.continue.fork', commandContext)}
                       disabled={
                         !selectedFrontier ||
                         modelSelectionMissing ||
@@ -576,6 +597,12 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                       </>
                     )}
                   </div>
+                  {retainedStorageFailed && (
+                    <p role="alert">
+                      The exact continuation command could not be retained in session storage. No
+                      request was sent.
+                    </p>
+                  )}
                   {retainedCommandNeedsAction && pendingCommand && (
                     <p role="alert">
                       The exact command for import{' '}

@@ -58,6 +58,7 @@ export type WebImportSummary = {
   readonly format: WebImportFormat;
   readonly imported_conversation_id: string;
   readonly source_session_id?: WebImportSourceSessionEvidence | null;
+  readonly source_session_id_sha256?: string | null;
 };
 
 export type WebImportTextCompleteness = "complete" | "truncated";
@@ -121,12 +122,15 @@ export type WebImportListRequest = {
   readonly after?: string | null;
   readonly format?: WebImportFormat | null;
   readonly limit?: number | null;
+  readonly search_correlation?: string | null;
   readonly source_session_id?: string | null;
 };
 
 export type WebImportListPage = {
+  readonly exact_source_session_id_sha256?: string | null;
   readonly items: ReadonlyArray<WebImportSummary>;
   readonly next_cursor?: string | null;
+  readonly search_correlation?: string | null;
 };
 
 export type WebImportDescriptor = {

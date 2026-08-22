@@ -35,4 +35,36 @@ describe('command registry', () => {
 
     expect(selectedImportEntry).toBe(importEntryIds[1])
   })
+
+  it('runs available continuation actions through stable command identities', () => {
+    const relationships: Array<'resume' | 'fork'> = []
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      canContinueImport: true,
+      continueImport: (relationship: 'resume' | 'fork') => relationships.push(relationship),
+    }
+
+    invokeCommand('imports.continue.resume', context)
+    invokeCommand('imports.continue.fork', context)
+
+    expect(relationships).toEqual(['resume', 'fork'])
+  })
+
+  it('does not run an unavailable continuation command', () => {
+    const relationships: Array<'resume' | 'fork'> = []
+
+    invokeCommand('imports.continue.resume', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      canContinueImport: false,
+      continueImport: (relationship) => relationships.push(relationship),
+    })
+
+    expect(relationships).toEqual([])
+  })
 })

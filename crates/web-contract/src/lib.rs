@@ -123,8 +123,9 @@ pub enum WebImportFormat {
     CodexRolloutJsonlV1,
 }
 
-/// Bounded imports catalog request carried as query parameters, or as a bounded
-/// JSON search body when an exact source-session filter is present.
+/// Bounded imports catalog request carried as query parameters. An exact
+/// source-session filter is carried separately as the bounded raw UTF-8 body of
+/// `POST /api/imports/searches`; empty text and edge whitespace are preserved.
 #[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebImportListRequest {
@@ -136,6 +137,8 @@ pub struct WebImportListRequest {
     pub format: Option<WebImportFormat>,
     /// Optional exact converter-attested source-session identifier.
     pub source_session_id: Option<String>,
+    /// Client-selected UUID echoed by an exact-search response.
+    pub search_correlation: Option<String>,
 }
 
 /// One bounded imports catalog row.
@@ -150,6 +153,8 @@ pub struct WebImportSummary {
     pub format: WebImportFormat,
     /// Bounded converter-attested source-session evidence, when consistent.
     pub source_session_id: Option<WebImportSourceSessionEvidence>,
+    /// SHA-256 of the complete source-session identifier, when present.
+    pub source_session_id_sha256: Option<String>,
     /// Number of normalized imported entries.
     pub entry_count: u64,
 }
@@ -172,6 +177,10 @@ pub struct WebImportListPage {
     pub items: Vec<WebImportSummary>,
     /// Exclusive cursor for the next page, absent at the end.
     pub next_cursor: Option<String>,
+    /// Client-selected exact-search correlation UUID, absent for ordinary catalog reads.
+    pub search_correlation: Option<String>,
+    /// SHA-256 of the complete exact-search value, absent for ordinary catalog reads.
+    pub exact_source_session_id_sha256: Option<String>,
 }
 
 /// Source and converter evidence retained by one immutable import.

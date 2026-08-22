@@ -51,10 +51,32 @@ describe('retained import continuation commands', () => {
     expect(window.sessionStorage.getItem('signalbox.import-continuation.production')).toBeNull()
   })
 
-  it('evicts stored commands beyond the encoded byte ceiling', () => {
-    window.sessionStorage.setItem('signalbox.import-continuation.production', 'x'.repeat(4097))
+  it('evicts valid stored JSON beyond the encoded byte ceiling', () => {
+    const oversized = JSON.stringify({ ...command(), padding: 'x'.repeat(4097) })
+    window.sessionStorage.setItem('signalbox.import-continuation.production', oversized)
 
     expect(loadRetainedCommand('production')).toBeNull()
     expect(window.sessionStorage.getItem('signalbox.import-continuation.production')).toBeNull()
+  })
+
+  it('fails closed when storing a command beyond the encoded byte ceiling', () => {
+    const oversized = {
+      ...command(),
+      initial_model_selection: {
+        kind: 'direct' as const,
+        selection_id: 'x'.repeat(4097),
+      },
+    }
+
+    expect(storeRetainedCommand('production', oversized)).toBe(false)
+    expect(window.sessionStorage.getItem('signalbox.import-continuation.production')).toBeNull()
+  })
+
+  it('fails closed when session storage rejects a command', () => {
+    vi.spyOn(window.sessionStorage, 'setItem').mockImplementation(() => {
+      throw new Error('storage unavailable')
+    })
+
+    expect(storeRetainedCommand('production', command())).toBe(false)
   })
 })

@@ -69,7 +69,14 @@ export class ImportListCorrelationError extends Error {
 const correlateListPage = (
   request: WebImportListRequest,
   page: WebImportListPage,
+  searchCorrelation?: string,
 ): WebImportListPage => {
+  if ((page.search_correlation ?? undefined) !== searchCorrelation) {
+    throw new ImportListCorrelationError()
+  }
+  if (searchCorrelation !== undefined && !page.exact_source_session_id_sha256) {
+    throw new ImportListCorrelationError()
+  }
   let previous = request.after ?? undefined
   for (const item of page.items) {
     if (
@@ -87,6 +94,9 @@ const correlateListPage = (
           ? evidence.leading_text !== request.source_session_id
           : !request.source_session_id.startsWith(evidence.leading_text))
       ) {
+        throw new ImportListCorrelationError()
+      }
+      if (item.source_session_id_sha256 !== page.exact_source_session_id_sha256) {
         throw new ImportListCorrelationError()
       }
     }
@@ -158,13 +168,24 @@ export class HttpImportApi implements ImportApi {
   async list(request: WebImportListRequest, signal?: AbortSignal): Promise<WebImportListPage> {
     if (request.source_session_id !== undefined && request.source_session_id !== null) {
       const { source_session_id: sourceSessionId, ...catalogRequest } = request
-      const response = await fetch(`/api/imports/searches${queryString(catalogRequest)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-        body: sourceSessionId,
-        signal,
-      })
-      return correlateListPage(request, await decodeResponse(response, decodeWebImportListPage))
+      const searchCorrelation = crypto.randomUUID()
+      const response = await fetch(
+        `/api/imports/searches${queryString({
+          ...catalogRequest,
+          search_correlation: searchCorrelation,
+        })}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+          body: sourceSessionId,
+          signal,
+        },
+      )
+      return correlateListPage(
+        request,
+        await decodeResponse(response, decodeWebImportListPage),
+        searchCorrelation,
+      )
     }
     const response = await fetch(`/api/imports/${queryString(request)}`, { signal })
     return correlateListPage(request, await decodeResponse(response, decodeWebImportListPage))

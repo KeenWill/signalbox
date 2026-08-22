@@ -1012,6 +1012,13 @@ const schemas = {
               }
             ],
             "description": "Bounded converter-attested source-session evidence, when consistent."
+          },
+          "source_session_id_sha256": {
+            "description": "SHA-256 of the complete source-session identifier, when present.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -1041,6 +1048,13 @@ const schemas = {
     "additionalProperties": false,
     "description": "One keyset page of imports.",
     "properties": {
+      "exact_source_session_id_sha256": {
+        "description": "SHA-256 of the complete exact-search value, absent for ordinary catalog reads.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "items": {
         "description": "Rows in stable UUID order.",
         "items": {
@@ -1050,6 +1064,13 @@ const schemas = {
       },
       "next_cursor": {
         "description": "Exclusive cursor for the next page, absent at the end.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "search_correlation": {
+        "description": "Client-selected exact-search correlation UUID, absent for ordinary catalog reads.",
         "type": [
           "string",
           "null"
@@ -1087,7 +1108,7 @@ const schemas = {
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "Bounded imports catalog request carried as query parameters, or as a bounded\nJSON search body when an exact source-session filter is present.",
+    "description": "Bounded imports catalog request carried as query parameters. An exact\nsource-session filter is carried separately as the bounded raw UTF-8 body of\n`POST /api/imports/searches`; empty text and edge whitespace are preserved.",
     "properties": {
       "after": {
         "description": "Exclusive imported-conversation UUID cursor.",
@@ -1113,6 +1134,13 @@ const schemas = {
         "minimum": 0,
         "type": [
           "integer",
+          "null"
+        ]
+      },
+      "search_correlation": {
+        "description": "Client-selected UUID echoed by an exact-search response.",
+        "type": [
+          "string",
           "null"
         ]
       },
