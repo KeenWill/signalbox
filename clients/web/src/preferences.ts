@@ -44,6 +44,8 @@ const isWithinUtf8ByteLimit = (value: string, limit: number): boolean => {
 }
 
 export const isBoundedLogicalPosition = (sessionId: string, position: string): boolean =>
+  sessionId !== '__proto__' &&
+  !/^(?:0|[1-9]\d*)$/.test(sessionId) &&
   isWithinUtf8ByteLimit(sessionId, MAX_LOGICAL_POSITION_KEY_BYTES) &&
   isWithinUtf8ByteLimit(position, MAX_LOGICAL_POSITION_VALUE_BYTES)
 
