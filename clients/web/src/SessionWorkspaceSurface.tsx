@@ -77,6 +77,13 @@ export function SessionWorkspaceSurface({
   const timelineIds = useMemo(() => items.map((item) => item.address.event_sequence), [items])
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
+  useEffect(() => {
+    const visible = new Set(timelineIds)
+    setExpanded((current) => {
+      const retained = new Set([...current].filter((id) => visible.has(id)))
+      return retained.size === current.size ? current : retained
+    })
+  }, [timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   useEffect(() => onSessionId(sessionId), [onSessionId, sessionId])
   useEffect(() => () => onSessionId(null), [onSessionId])

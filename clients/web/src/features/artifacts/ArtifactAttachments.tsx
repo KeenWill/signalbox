@@ -15,7 +15,7 @@ export const boundAttachments = (
 })
 
 const attachmentKind = (artifact: ArtifactItem): string => {
-  if (artifact.kind === 'committed_unimplemented' || artifact.kind === 'blocked') {
+  if (artifact.kind === 'blocked') {
     return artifact.attemptedKind
   }
   if (artifact.kind === 'media_placeholder') return `${artifact.mediaKind} placeholder`

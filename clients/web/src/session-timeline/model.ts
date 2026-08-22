@@ -91,6 +91,9 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     const response = await request('/api/bootstrap')
     if (!response.ok) return throwApiError(response)
     const bootstrap = decodeWebContractBootstrap(await response.json())
+    if (!bootstrap.capabilities.bounded_session_timeline) {
+      throw new TypeError('bounded session timeline capability is unavailable')
+    }
     return new HttpSessionTimelineSource(bootstrap.limits, request)
   }
 
@@ -152,9 +155,12 @@ export class BoundedSessionHistory {
     if (canonicalSessionId(descriptor.session_id) !== this.sessionId) {
       throw new TypeError('descriptor session mismatch')
     }
-    decimalAddress(descriptor.first_address.event_sequence)
-    decimalAddress(descriptor.latest_address.event_sequence)
-    decimalU64(descriptor.observed_through)
+    const firstAddress = decimalAddress(descriptor.first_address.event_sequence)
+    const latestAddress = decimalAddress(descriptor.latest_address.event_sequence)
+    const observedThrough = decimalU64(descriptor.observed_through)
+    if (firstAddress > latestAddress || latestAddress > observedThrough) {
+      throw new TypeError('timeline descriptor carries contradictory bounds')
+    }
     decimalU64(descriptor.sizes.item_count)
     decimalU64(descriptor.sizes.projected_text_bytes)
     decimalU64(descriptor.sizes.projected_structured_bytes)
@@ -179,14 +185,29 @@ export class BoundedSessionHistory {
     if (window.items.length > bounded.maxItems) {
       throw new TypeError('timeline window exceeds the requested item ceiling')
     }
-    if (window.projected_structured_bytes > bounded.maxBytes) {
+    let verifiedStructuredBytes = 0
+    for (const item of window.items) {
+      verifiedStructuredBytes += item.projected_structured_bytes
+      if (!Number.isSafeInteger(verifiedStructuredBytes)) {
+        throw new TypeError('timeline window byte total overflows a safe integer')
+      }
+    }
+    if (verifiedStructuredBytes !== window.projected_structured_bytes) {
+      throw new TypeError('timeline window byte total does not match its items')
+    }
+    if (verifiedStructuredBytes > bounded.maxBytes) {
       throw new TypeError('timeline window exceeds the requested byte ceiling')
     }
     const incoming = new Map<string, (typeof window.items)[number]>()
     const requestedAddress = 'eventSequence' in anchor ? decimalAddress(anchor.eventSequence) : null
+    let previousAddress: bigint | undefined
     for (const item of window.items) {
       const address = item.address.event_sequence
       const parsedAddress = decimalAddress(address)
+      if (previousAddress !== undefined && parsedAddress <= previousAddress) {
+        throw new TypeError('timeline window items are not strictly ordered')
+      }
+      previousAddress = parsedAddress
       if (
         anchor.kind === 'before' &&
         requestedAddress !== null &&

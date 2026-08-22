@@ -70,6 +70,24 @@ describe('BoundedSessionHistory', () => {
     await expect(history.describe()).rejects.toThrow('exceeds 64 bits')
   })
 
+  it('rejects contradictory descriptor bounds and cursors', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        first_address: { event_sequence: '10' },
+        latest_address: { event_sequence: '9' },
+      }),
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+
+    await expect(new BoundedSessionHistory(sessionId, source).describe()).rejects.toThrow(
+      'contradictory bounds',
+    )
+  })
+
   it('compares canonical UUID identities', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const descriptor = await scenario.readDescriptor(sessionId)
@@ -151,6 +169,73 @@ describe('BoundedSessionHistory', () => {
         { maxItems: 4, maxBytes: 1024 },
       ),
     ).rejects.toThrow('at or before its anchor')
+  })
+
+  it('rejects a window whose byte total understates its items', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async (requestedSessionId, anchor, limits) => {
+        const window = await scenario.readWindow(requestedSessionId, anchor, limits)
+        return { ...window, projected_structured_bytes: 0 }
+      },
+    }
+
+    await expect(
+      new BoundedSessionHistory(sessionId, source).load(
+        { kind: 'first' },
+        { maxItems: 4, maxBytes: 1024 },
+      ),
+    ).rejects.toThrow('byte total does not match')
+  })
+
+  it('rejects timeline items that are not strictly ordered', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async (requestedSessionId, anchor, limits) => {
+        const window = await scenario.readWindow(requestedSessionId, anchor, limits)
+        return { ...window, items: [...window.items].reverse() }
+      },
+    }
+
+    await expect(
+      new BoundedSessionHistory(sessionId, source).load(
+        { kind: 'first' },
+        { maxItems: 4, maxBytes: 1024 },
+      ),
+    ).rejects.toThrow('not strictly ordered')
+  })
+
+  it('rejects bootstrap connections without timeline capability', async () => {
+    const request = async () =>
+      new Response(
+        JSON.stringify({
+          contract: { name: 'signalbox.web-http', version: '2' },
+          capabilities: {
+            bounded_json: true,
+            same_origin_json_mutations: true,
+            ndjson_streaming: true,
+            immutable_blob_content: false,
+            blob_derivations: false,
+            image_derivatives: false,
+            bounded_session_timeline: false,
+          },
+          limits: {
+            max_json_body_bytes: 1024,
+            max_ndjson_item_bytes: 1024,
+            max_timeline_window_items: 80,
+            max_timeline_window_bytes: 65536,
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+
+    await expect(HttpSessionTimelineSource.connect(request)).rejects.toThrow(
+      'timeline capability is unavailable',
+    )
   })
 
   it('decodes structured API errors before throwing', async () => {

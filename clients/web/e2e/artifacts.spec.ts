@@ -139,6 +139,19 @@ test('keyboard-scrolls overflowing artifact content', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('returns Escape focus to the selected artifact heading', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/blobs')
+
+  const heading = page.getByRole('button', { name: /renderer\.ts/ })
+  await heading.click()
+  const preview = page.getByRole('textbox', { name: 'Bounded preview of renderer.ts' })
+  await preview.focus()
+  await page.keyboard.press('Escape')
+  await expect(heading).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('keeps remote media unavailable without a bounded owning service', async ({ page }) => {
   const problems = watchBrowser(page)
   let requests = 0
@@ -165,6 +178,7 @@ test('keeps a generic descriptor available as metadata and download', async ({ p
   await expect(artifact.getByLabel('No compatible inline renderer')).toBeVisible()
   await expect(artifact.getByText('metadata fallback')).toBeVisible()
   await expect(artifact.getByText('application/octet-stream')).toBeVisible()
+  await expect(artifact.getByText('4,096 bytes')).toBeVisible()
   await expect(artifact.getByRole('link', { name: 'Download' })).toHaveAttribute(
     'href',
     /display_filename=trace\.bin/,
@@ -172,13 +186,10 @@ test('keeps a generic descriptor available as metadata and download', async ({ p
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('renders unsupported and unauthorized kinds as typed safe states', async ({ page }) => {
+test('renders unauthorized kinds as typed safe states', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/blobs')
 
-  const document = page.getByRole('article', { name: 'Artifact architecture.pdf' })
-  await expect(document.getByText('Typed renderer not implemented')).toBeVisible()
-  await expect(document.getByText('No bytes were read.')).toBeVisible()
   const blocked = page.getByRole('article', { name: 'Artifact restricted.capture' })
   await expect(blocked.getByText('Artifact blocked')).toBeVisible()
   await expect(blocked.getByRole('link')).toHaveCount(0)
@@ -223,15 +234,6 @@ test('captures the remote-unavailable renderer state', async ({ page }, testInfo
     testInfo,
     'Artifact remote-status-diagram.png',
     'artifact-remote-unavailable-state.png',
-  )
-})
-
-test('captures the unimplemented renderer state', async ({ page }, testInfo) => {
-  await captureArtifactState(
-    page,
-    testInfo,
-    'Artifact architecture.pdf',
-    'artifact-unimplemented-state.png',
   )
 })
 

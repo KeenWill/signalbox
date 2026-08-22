@@ -1,9 +1,10 @@
 import { decodeWebBlobDescriptor, type WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import type {
-  ArtifactItem,
-  DerivativeArtifact,
-  DocumentArtifact,
-  MediaPlaceholderArtifact,
+import {
+  type ArtifactItem,
+  boundArtifactText,
+  type DerivativeArtifact,
+  type DocumentArtifact,
+  type MediaPlaceholderArtifact,
 } from './artifactTypes'
 
 const sourceDigest = 'sha256:3729b2319da081a0710ba27da7af330c1236325cf8ed0a619cf132375bb0fc1e'
@@ -172,12 +173,6 @@ export const artifactScenario: ReadonlyArray<ArtifactItem> = [
     },
   },
   {
-    id: 'future-pdf',
-    kind: 'committed_unimplemented',
-    displayName: 'architecture.pdf',
-    attemptedKind: 'document',
-  },
-  {
     id: 'restricted-capture',
     kind: 'blocked',
     displayName: 'restricted.capture',
@@ -228,6 +223,16 @@ export const attachmentScenario: ReadonlyArray<ArtifactItem> = [
 
 export const imageArtifact = imageDescriptor
 export const artifactPreviewIds = artifactScenario
-  .filter((artifact) => artifact.kind === 'text' || artifact.kind === 'code')
+  .filter(
+    (artifact) =>
+      (artifact.kind === 'text' || artifact.kind === 'code') &&
+      boundArtifactText(artifact.content, artifact.characterCount, 'preview').omittedCharacters > 0,
+  )
   .map((artifact) => artifact.id)
-export const artifactOriginalIds = ['orbital-map'] as const
+export const artifactOriginalIds = artifactScenario.flatMap((artifact) =>
+  artifact.kind === 'image' &&
+  artifact.source.kind === 'signalbox_blob' &&
+  artifact.source.descriptor.available_views.some((view) => view.kind === 'browser_native')
+    ? [artifact.id]
+    : [],
+)
