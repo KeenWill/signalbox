@@ -197,16 +197,18 @@ function KeyboardHelp({ context }: { context: ProductCommandContext }) {
             {productCommandRegistry
               .filter(
                 (command) =>
-                  command.bindings.length > 0 &&
+                  command.bindings.some((binding) => 'registration' in binding) &&
                   (!('available' in command) || command.available(context)),
               )
               .map((command) => (
                 <div key={command.id}>
                   <dt>{command.title}</dt>
                   <dd>
-                    {command.bindings.map((binding) => (
-                      <kbd key={binding.label}>{binding.label}</kbd>
-                    ))}
+                    {command.bindings
+                      .filter((binding) => 'registration' in binding)
+                      .map((binding) => (
+                        <kbd key={binding.label}>{binding.label}</kbd>
+                      ))}
                   </dd>
                 </div>
               ))}
@@ -353,13 +355,21 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
-      callback: () => invokeProductCommand(binding.commandId, context),
+      callback: () => {
+        if (binding.commandId === 'surface.escape' || store.getState().app.overlay === null) {
+          invokeProductCommand(binding.commandId, context)
+        }
+      },
     })),
   )
   useHotkeySequences(
     [...globalHotkeySequenceBindings, ...productHotkeySequenceBindings].map((binding) => ({
       sequence: [...binding.sequence],
-      callback: () => invokeProductCommand(binding.commandId, context),
+      callback: () => {
+        if (store.getState().app.overlay === null) {
+          invokeProductCommand(binding.commandId, context)
+        }
+      },
     })),
   )
 

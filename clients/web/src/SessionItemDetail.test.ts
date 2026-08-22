@@ -23,7 +23,34 @@ describe('timeline detail body correlation', () => {
 
     expect(detailBodyMatchesKind(detail('session_created', eventFact))).toBe(true)
     expect(detailBodyMatchesKind(detail('input_accepted', eventFact))).toBe(false)
+    expect(
+      detailBodyMatchesKind(
+        detail('input_accepted', { type: 'event_fact', kind: 'input_accepted' }),
+      ),
+    ).toBe(false)
+    expect(
+      detailBodyMatchesKind(
+        detail('model_call_transition', {
+          type: 'event_fact',
+          kind: 'model_call_transition',
+        }),
+      ),
+    ).toBe(false)
+    expect(
+      detailBodyMatchesKind(
+        detail('turn_completed', { type: 'event_fact', kind: 'turn_completed' }),
+      ),
+    ).toBe(false)
     expect(detailBodyMatchesKind(detail('turn_activated', lifecycle))).toBe(true)
     expect(detailBodyMatchesKind(detail('turn_completed', lifecycle))).toBe(false)
+    expect(
+      detailBodyMatchesKind(
+        detail('turn_reconciliation_required', {
+          ...lifecycle,
+          lifecycle: 'terminalized',
+          cause_code: 'reconciliation_required',
+        }),
+      ),
+    ).toBe(true)
   })
 })

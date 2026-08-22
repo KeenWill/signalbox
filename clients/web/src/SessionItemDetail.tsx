@@ -19,9 +19,29 @@ export const detailBodyMatchesKind = (detail: DetailItem): boolean => {
   const body = detail.body
   if (body.type === 'user_input') return detail.kind === 'input_accepted'
   if (body.type === 'model_call') return detail.kind === 'model_call_transition'
-  if (body.type === 'event_fact') return body.kind === detail.kind
+  if (body.type === 'event_fact') {
+    return (
+      body.kind === detail.kind &&
+      ![
+        'input_accepted',
+        'model_call_transition',
+        'turn_activated',
+        'turn_completed',
+        'turn_failed',
+        'turn_refused',
+        'turn_cancelled',
+        'turn_reconciliation_required',
+      ].includes(detail.kind)
+    )
+  }
   if (body.lifecycle === 'activated') return detail.kind === 'turn_activated'
-  return ['turn_completed', 'turn_failed', 'turn_refused', 'turn_cancelled'].includes(detail.kind)
+  return [
+    'turn_completed',
+    'turn_failed',
+    'turn_refused',
+    'turn_cancelled',
+    'turn_reconciliation_required',
+  ].includes(detail.kind)
 }
 
 const modelCallState = (state: ModelCallBody['state']): string =>

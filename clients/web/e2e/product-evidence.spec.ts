@@ -27,7 +27,8 @@ const bootstrapFixture = {
 
 const sessionDetailText =
   'Inspect the current bounded timeline region and preserve stable navigation.'
-const sessionDetailBytes = new TextEncoder().encode(sessionDetailText).byteLength
+const sessionDetailTextBytes = new TextEncoder().encode(sessionDetailText).byteLength
+const sessionDetailBytes = 128 + sessionDetailTextBytes
 
 const sessionEvidenceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
@@ -45,7 +46,7 @@ const sessionEvidenceFixture = {
           text: {
             text: sessionDetailText,
             offset_bytes: '0',
-            total_bytes: String(sessionDetailBytes),
+            total_bytes: String(sessionDetailTextBytes),
             continuation: null,
           },
           attachments: [],
@@ -101,20 +102,20 @@ const useDeterministicSession = (page: Page) =>
             {
               address: { event_sequence: '999998' },
               kind: 'input_accepted',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: 78,
             },
             {
               address: { event_sequence: '999999' },
               kind: 'turn_activated',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: 78,
             },
             {
               address: { event_sequence: '1000000' },
               kind: 'turn_completed',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: 78,
             },
           ],
-          projected_structured_bytes: 288,
+          projected_structured_bytes: 234,
           continuation_before: { event_sequence: '999998' },
           continuation_after: null,
         },

@@ -637,10 +637,10 @@ describe('BoundedSessionHistory', () => {
             },
             attachments: [],
           },
-          projected_body_bytes: 5,
+          projected_body_bytes: 133,
         },
       ],
-      projected_body_bytes: 5,
+      projected_body_bytes: 133,
       continuation: bodyContinuation,
     } as const
     const secondPageFixture = {
@@ -660,10 +660,10 @@ describe('BoundedSessionHistory', () => {
             },
             attachments: [],
           },
-          projected_body_bytes: 6,
+          projected_body_bytes: 134,
         },
       ],
-      projected_body_bytes: 6,
+      projected_body_bytes: 134,
       continuation: null,
     } as const
     const request = vi
@@ -769,10 +769,10 @@ describe('BoundedSessionHistory', () => {
                   },
                   attachments: [],
                 },
-                projected_body_bytes: 5,
+                projected_body_bytes: 133,
               },
             ],
-            projected_body_bytes: 5,
+            projected_body_bytes: 133,
             continuation: null,
           }),
         ),

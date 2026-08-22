@@ -17,6 +17,7 @@ export const MAX_RETAINED_SESSION_ITEMS = 768
 const MAX_CONTRACT_TIMELINE_WINDOW_ITEMS = 256
 const MAX_CONTRACT_TIMELINE_WINDOW_BYTES = 64 * 1024
 const PROJECTED_ITEM_ENVELOPE_BYTES = 64
+const PROJECTED_DETAIL_ENVELOPE_BYTES = 128
 // Hard safety ceiling preventing a regressed endpoint from materializing an
 // unbounded JSON response before the generated decoder can reject its shape.
 export const MAX_TIMELINE_HTTP_RESPONSE_BYTES = 256 * 1024
@@ -30,6 +31,8 @@ type TimelineContractLimits = Pick<
 >
 
 type TimelineDetailCursor = NonNullable<WebSessionTimelineDetailPage['continuation']>
+type TimelineDetailItem = WebSessionTimelineDetailPage['items'][number]
+type TimelineTextExcerpt = Extract<TimelineDetailItem['body'], { type: 'user_input' }>['text']
 
 export type SessionWindowAnchor =
   | { kind: 'first' | 'latest' }
@@ -73,6 +76,45 @@ const decimalAddress = (value: string): bigint => {
 
 const projectedItemBytes = (kind: string): number =>
   PROJECTED_ITEM_ENVELOPE_BYTES + new TextEncoder().encode(kind).byteLength
+
+const validateTextExcerpt = (
+  item: TimelineDetailItem,
+  excerpt: TimelineTextExcerpt,
+  field: 'input_text' | 'model_response',
+): number => {
+  const offset = decimalU64(excerpt.offset_bytes)
+  const total = decimalU64(excerpt.total_bytes)
+  const excerptBytes = new TextEncoder().encode(excerpt.text).byteLength
+  const nextOffset = offset + BigInt(excerptBytes)
+  if (nextOffset > total) {
+    throw new TypeError('timeline detail text excerpt exceeds its declared total')
+  }
+  const continuation = excerpt.continuation
+  if (continuation) {
+    if (
+      continuation.address.event_sequence !== item.address.event_sequence ||
+      continuation.field !== field ||
+      continuation.member_index !== 0 ||
+      decimalU64(continuation.offset_bytes) !== nextOffset
+    ) {
+      throw new TypeError('timeline detail text continuation does not make exact UTF-8 progress')
+    }
+  } else if (nextOffset !== total) {
+    throw new TypeError('timeline detail terminal excerpt does not reach its declared total')
+  }
+  return excerptBytes
+}
+
+const projectedDetailBodyBytes = (item: TimelineDetailItem): number => {
+  const body = item.body
+  const excerptBytes =
+    body.type === 'user_input'
+      ? validateTextExcerpt(item, body.text, 'input_text')
+      : body.type === 'model_call' && body.response
+        ? validateTextExcerpt(item, body.response, 'model_response')
+        : 0
+  return PROJECTED_DETAIL_ENVELOPE_BYTES + excerptBytes
+}
 
 const boundedLimit = (value: number, minimum: number, maximum: number): number =>
   Number.isFinite(value) ? Math.min(Math.max(Math.trunc(value), minimum), maximum) : minimum
@@ -263,12 +305,19 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     if (page.items.length > bounded.maxItems) {
       throw new TypeError('timeline detail exceeds the requested item ceiling')
     }
+    if (page.items.length === 0) {
+      throw new TypeError('timeline item detail requires a nonempty page')
+    }
     let projectedBodyBytes = 0
     for (const item of page.items) {
       if (item.address.event_sequence !== address) {
         throw new TypeError('item detail returned a different timeline address')
       }
-      projectedBodyBytes += item.projected_body_bytes
+      const authoritativeBodyBytes = projectedDetailBodyBytes(item)
+      if (item.projected_body_bytes !== authoritativeBodyBytes) {
+        throw new TypeError('timeline detail item byte charge does not match its body')
+      }
+      projectedBodyBytes += authoritativeBodyBytes
       if (!Number.isSafeInteger(projectedBodyBytes)) {
         throw new TypeError('timeline detail byte total is not a safe integer')
       }

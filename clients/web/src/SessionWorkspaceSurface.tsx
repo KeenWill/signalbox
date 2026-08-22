@@ -64,7 +64,7 @@ export function SessionWorkspaceSurface({
         { maxItems: SESSION_WINDOW_ITEMS, maxBytes: SESSION_WINDOW_BYTES },
         signal,
       )
-      return { active, descriptor, source, window: timelineWindow }
+      return { active, anchor, descriptor, source, window: timelineWindow }
     },
     enabled: sessionId !== null && bootstrap?.capabilities.bounded_session_timeline === true,
   })
@@ -166,9 +166,14 @@ export function SessionWorkspaceSurface({
               <span className="eyebrow">Stable timeline identity</span>
               <h2 id="session-workspace-heading">{sessionId}</h2>
               <p>
-                {session.data.active
-                  ? 'Active · opened near latest'
-                  : 'Inactive · restored logical position'}
+                {session.data.active ? 'Active' : 'Inactive'} ·{' '}
+                {session.data.anchor.kind === 'first'
+                  ? 'opened at first'
+                  : session.data.anchor.kind === 'latest'
+                    ? 'opened near latest'
+                    : session.data.anchor.kind === 'around'
+                      ? 'restored logical position'
+                      : `opened ${session.data.anchor.kind} selected position`}
               </p>
             </div>
             <dl className="session-telemetry">
