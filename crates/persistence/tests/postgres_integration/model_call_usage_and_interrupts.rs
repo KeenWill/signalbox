@@ -1592,10 +1592,26 @@ async fn stop_request_schema_keeps_delivery_and_failure_shapes_closed() -> Resul
          (delivery_kind = 'interrupt'::text))"
     ));
 
-    let failed_assertion: String = sqlx::query_scalar(
+    let context_headroom_assertion: String = sqlx::query_scalar(
         "SELECT pg_get_functiondef(oid)
            FROM pg_proc
           WHERE proname = 'assert_failed_terminal_execution_final_state'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        context_headroom_assertion.contains("FROM tool_continuation_context_headroom AS headroom")
+    );
+    assert!(
+        context_headroom_assertion
+            .contains("PERFORM assert_failed_terminal_execution_before_context_headroom(")
+    );
+    assert!(context_headroom_assertion.contains("checked_turn_id"));
+
+    let failed_assertion: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(oid)
+           FROM pg_proc
+          WHERE proname = 'assert_failed_terminal_execution_before_context_headroom'",
     )
     .fetch_one(&pool)
     .await?;
