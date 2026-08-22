@@ -7,6 +7,7 @@ use super::{insert_outbox_session_fixture, migrated_postgres};
 
 const DEEP_MEMBER_COUNT: i32 = 1_200;
 const PREFIX_MEMBER_COUNT: i32 = 900;
+const OBSOLETE_COMPACTION_COUNT: i32 = 256;
 
 async fn insert_deep_frontier_fixture(
     pool: &PgPool,
@@ -177,7 +178,7 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
         .execute(&pool)
         .await?;
     let mut connection = pool.acquire().await?;
-    let validator_shape: (bool, bool, bool, bool, bool) = sqlx::query_as(
+    let validator_shape: (bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         "SELECT
             position(
                 'context_frontier_preserves_prefix'
@@ -199,6 +200,18 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
             ) > 0,
             position(
                 'context_frontier_preserves_prefix'
+                IN pg_get_functiondef(
+                    'turn_start_effective_predecessor_frontier(uuid,uuid)'::regprocedure
+                )
+            ) > 0,
+            position(
+                'leaf AS MATERIALIZED'
+                IN pg_get_functiondef(
+                    'turn_start_effective_predecessor_frontier(uuid,uuid)'::regprocedure
+                )
+            ) > 0,
+            position(
+                'candidate.member_count < predecessor.member_count'
                 IN pg_get_functiondef(
                     'turn_start_effective_predecessor_frontier(uuid,uuid)'::regprocedure
                 )
@@ -262,10 +275,65 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
     .fetch_one(&mut *connection)
     .await?;
 
-    assert_eq!(validator_shape, (true, true, true, true, true));
+    sqlx::query("SET statement_timeout = '0'")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::raw_sql("ALTER TABLE context_compaction DISABLE TRIGGER ALL;")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "INSERT INTO context_compaction
+            (context_compaction_id, session_id, predecessor_compaction_id,
+             source_frontier_id, result_frontier_id, producing_call_id,
+             first_source_session_id, first_entry_id,
+             through_source_session_id, through_entry_id, summary_entry_id)
+         SELECT md5('obsolete-compaction-' || ordinal)::uuid,
+                $1,
+                CASE
+                    WHEN ordinal = 1 THEN $2
+                    ELSE md5('obsolete-compaction-' || (ordinal - 1))::uuid
+                END,
+                CASE
+                    WHEN ordinal = 1 THEN $3
+                    ELSE md5('frontier-' || ($4 + ordinal - 1))::uuid
+                END,
+                md5('frontier-' || ($4 + ordinal))::uuid,
+                md5('obsolete-producing-call-' || ordinal)::uuid,
+                $1,
+                md5('entry-1')::uuid,
+                $1,
+                md5('entry-' || $5)::uuid,
+                md5('entry-' || ($4 + ordinal))::uuid
+           FROM generate_series(1, $6) AS history(ordinal)",
+    )
+    .bind(session)
+    .bind(compaction)
+    .bind(divergent)
+    .bind(DEEP_MEMBER_COUNT - OBSOLETE_COMPACTION_COUNT - 1)
+    .bind(PREFIX_MEMBER_COUNT)
+    .bind(OBSOLETE_COMPACTION_COUNT)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::raw_sql("ALTER TABLE context_compaction ENABLE TRIGGER ALL;")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("SET statement_timeout = '1s'")
+        .execute(&mut *connection)
+        .await?;
+    let effective_after_obsolete_chain: Uuid = sqlx::query_scalar(
+        "SELECT context_frontier_id
+           FROM turn_start_effective_predecessor_frontier($1, $2)",
+    )
+    .bind(session)
+    .bind(checked)
+    .fetch_one(&mut *connection)
+    .await?;
+
+    assert_eq!(validator_shape, (true, true, true, true, true, true, true));
     assert_eq!((preserved, rejected), (true, false));
     assert_eq!(effective_preserved, checked);
     assert_eq!(effective_rejected, prefix);
+    assert_eq!(effective_after_obsolete_chain, checked);
 
     drop(connection);
     pool.close().await;
