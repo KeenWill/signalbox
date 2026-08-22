@@ -1435,7 +1435,9 @@ const fn judge_failure_disposition(
     }
 }
 
-const fn provider_reported_usage(usage: TokenUsage) -> ProviderReportedTokenUsage {
+/// Carries a runtime usage report into the domain representation unchanged,
+/// field for field; absent fields stay absent.
+pub const fn provider_reported_usage(usage: TokenUsage) -> ProviderReportedTokenUsage {
     ProviderReportedTokenUsage::unreported()
         .with_input_tokens(usage.input_tokens)
         .with_output_tokens(usage.output_tokens)
