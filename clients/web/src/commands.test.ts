@@ -55,4 +55,31 @@ describe('command registry', () => {
 
     expect(loaded).toEqual(['first', 'latest'])
   })
+
+  it('routes catalog actions and rapid switching through registered commands', () => {
+    const calls: string[] = []
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      sessionCatalogAvailable: true,
+      sessionWorkspaceAvailable: true,
+      applySessionSearch: () => calls.push('search'),
+      loadMoreSessions: () => calls.push('more'),
+      toggleSessionSort: () => calls.push('sort'),
+      selectSession: (offset: -1 | 1) => calls.push(`select:${offset}`),
+      switchSession: (offset: -1 | 1) => calls.push(`switch:${offset}`),
+      openSelectedSession: () => calls.push('open'),
+    }
+
+    invokeCommand('session.catalog.apply-search', context)
+    invokeCommand('session.catalog.sort', context)
+    invokeCommand('session.catalog.more', context)
+    invokeCommand('session.catalog.next', context)
+    invokeCommand('session.catalog.open', context)
+    invokeCommand('session.switch.previous', context)
+
+    expect(calls).toEqual(['search', 'sort', 'more', 'select:1', 'open', 'switch:-1'])
+  })
 })

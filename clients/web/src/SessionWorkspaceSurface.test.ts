@@ -1,10 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { decodeWebSessionTimelineWindow } from './generated/web-contract.mjs'
-import {
-  isCanonicalSessionId,
-  sessionWorkspaceQueryKey,
-  visibleSessionItems,
-} from './SessionWorkspaceSurface'
+import { sessionWorkspaceQueryKey, visibleSessionItems } from './SessionWorkspaceSurface'
 
 const fixture = decodeWebSessionTimelineWindow({
   session_id: '00000000-0000-0000-0000-000000000991',
@@ -36,12 +32,6 @@ const fixture = decodeWebSessionTimelineWindow({
 })
 
 describe('Session Workspace projection', () => {
-  it('accepts only canonical session identities', () => {
-    expect(isCanonicalSessionId(fixture.session_id)).toBe(true)
-    expect(isCanonicalSessionId(fixture.session_id.replaceAll('-', ''))).toBe(false)
-    expect(isCanonicalSessionId('not-a-session')).toBe(false)
-  })
-
   it('keeps full and condensed modes over the same bounded window', () => {
     expect(visibleSessionItems(fixture.items, 'full')).toBe(fixture.items)
     expect(visibleSessionItems(fixture.items, 'condensed')).toBe(fixture.items)

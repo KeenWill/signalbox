@@ -11,6 +11,15 @@ export interface CommandContext {
   loadTimelineWindow?: (anchor: 'first' | 'latest') => void
   navigate?: (path: string) => void
   navigateScenario?: () => void
+  sessionCatalogAvailable?: boolean
+  sessionWorkspaceAvailable?: boolean
+  focusSessionSearch?: () => void
+  applySessionSearch?: () => void
+  loadMoreSessions?: () => void
+  toggleSessionSort?: () => void
+  selectSession?: (offset: -1 | 1) => void
+  switchSession?: (offset: -1 | 1) => void
+  openSelectedSession?: () => void
 }
 
 export interface CommandBinding {
@@ -227,6 +236,87 @@ export const commandRegistry = [
       if (context.loadTimelineWindow) context.loadTimelineWindow('latest')
       else context.dispatch(actions.timelineSelected(context.timelineIds.at(-1) ?? null))
     },
+  },
+  {
+    id: 'session.catalog.search',
+    title: 'Search sessions',
+    description: 'Focus the bounded server-backed session search.',
+    category: 'Surface',
+    bindings: [{ label: '/', registration: { kind: 'hotkey', hotkey: '/' } }],
+    available: (context) => context.focusSessionSearch !== undefined,
+    run: (context) => context.focusSessionSearch?.(),
+  },
+  {
+    id: 'session.catalog.apply-search',
+    title: 'Apply session search',
+    description: 'Apply the current browser-local search text to the bounded catalog.',
+    category: 'Surface',
+    bindings: [],
+    available: (context) => context.applySessionSearch !== undefined,
+    run: (context) => context.applySessionSearch?.(),
+  },
+  {
+    id: 'session.catalog.sort',
+    title: 'Toggle session sort',
+    description: 'Toggle authoritative activity order and stable session identity order.',
+    category: 'View',
+    bindings: [],
+    available: (context) => context.toggleSessionSort !== undefined,
+    run: (context) => context.toggleSessionSort?.(),
+  },
+  {
+    id: 'session.catalog.more',
+    title: 'Load more sessions',
+    description: 'Read the next keyset page without scanning transcripts.',
+    category: 'Surface',
+    bindings: [],
+    available: (context) => context.loadMoreSessions !== undefined,
+    run: (context) => context.loadMoreSessions?.(),
+  },
+  {
+    id: 'session.catalog.previous',
+    title: 'Select previous session',
+    description: 'Move catalog selection toward the first loaded session.',
+    category: 'Navigate',
+    bindings: [{ label: 'Alt+K', registration: { kind: 'hotkey', hotkey: 'Alt+K' } }],
+    available: (context) => context.sessionCatalogAvailable === true,
+    run: (context) => context.selectSession?.(-1),
+  },
+  {
+    id: 'session.catalog.next',
+    title: 'Select next session',
+    description: 'Move catalog selection toward the last loaded session.',
+    category: 'Navigate',
+    bindings: [{ label: 'Alt+J', registration: { kind: 'hotkey', hotkey: 'Alt+J' } }],
+    available: (context) => context.sessionCatalogAvailable === true,
+    run: (context) => context.selectSession?.(1),
+  },
+  {
+    id: 'session.catalog.open',
+    title: 'Open selected session',
+    description: 'Open the selected catalog row in the bounded workspace.',
+    category: 'Navigate',
+    bindings: [],
+    available: (context) => context.sessionCatalogAvailable === true,
+    run: (context) => context.openSelectedSession?.(),
+  },
+  {
+    id: 'session.switch.previous',
+    title: 'Switch to previous session',
+    description: 'Open the previous loaded catalog session without returning to the table.',
+    category: 'Navigate',
+    bindings: [{ label: '[', registration: { kind: 'hotkey', hotkey: '[' } }],
+    available: (context) => context.sessionWorkspaceAvailable === true,
+    run: (context) => context.switchSession?.(-1),
+  },
+  {
+    id: 'session.switch.next',
+    title: 'Switch to next session',
+    description: 'Open the next loaded catalog session without returning to the table.',
+    category: 'Navigate',
+    bindings: [{ label: ']', registration: { kind: 'hotkey', hotkey: ']' } }],
+    available: (context) => context.sessionWorkspaceAvailable === true,
+    run: (context) => context.switchSession?.(1),
   },
   {
     id: 'layout.toggle',

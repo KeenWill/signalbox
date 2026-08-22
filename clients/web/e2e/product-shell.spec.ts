@@ -9,6 +9,37 @@ const sessionWorkspaceFixture = {
   projectedBytes: 234,
 } as const
 
+const sessionCatalogSummary = {
+  active_turn_count: '1',
+  archived: false,
+  current_turn_id: '00000000-0000-0000-0000-000000000041',
+  judge: { actionable: '0', completed: '0', escalated: '0', failed: '0' },
+  last_activity: { kind: 'turn', unix_milliseconds: '1787400000000' },
+  queued_turn_count: '2',
+  session_id: sessionWorkspaceFixture.id,
+  state: 'active',
+  title_summary: 'Release train session',
+  title_truncated: false,
+} as const
+
+const sessionLiveSnapshot = {
+  active: {
+    state: { kind: 'running', model_call_id: '00000000-0000-0000-0000-000000000042' },
+    turn_id: '00000000-0000-0000-0000-000000000041',
+  },
+  observed_through: sessionWorkspaceFixture.latestAddress,
+  queued_turn_count: '2',
+  queued_turn_ids: ['00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000052'],
+  reconciliation: null,
+  runner: {
+    connection_health: 'connected',
+    placement_revision: '7',
+    runner_id: '00000000-0000-0000-0000-000000000061',
+    state: 'pinned',
+  },
+  session_id: sessionWorkspaceFixture.id,
+} as const
+
 const settingsPreferenceFixture = {
   path: '/settings',
   changedTheme: 'Light',
@@ -16,12 +47,77 @@ const settingsPreferenceFixture = {
   restoreAction: 'Restore defaults',
 } as const
 
-const useDeterministicBootstrap = (page: Page) =>
-  page.route('**/api/bootstrap', (route) => route.fulfill({ json: webContractBootstrapFixture }))
+const useDeterministicBootstrap = async (page: Page) => {
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
+  await page.route('**/api/sessions**', (route) =>
+    new URL(route.request().url()).pathname === '/api/sessions'
+      ? route.fulfill({
+          json: {
+            continuation: null,
+            cursor: '0',
+            sort: 'last_activity_descending',
+            summaries: [],
+            total: '0',
+          },
+        })
+      : route.fallback(),
+  )
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      contentType: 'application/x-ndjson',
+      body: `${JSON.stringify({
+        kind: 'snapshot',
+        snapshot: {
+          continuation: null,
+          cursor: '0',
+          sort: 'last_activity_descending',
+          summaries: [],
+          total: '0',
+        },
+      })}\n`,
+    }),
+  )
+}
 
 const useDeterministicSession = async (page: Page) => {
-  await page.route('**/api/sessions/**', (route) => {
-    if (new URL(route.request().url()).pathname.endsWith('/timeline')) {
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      contentType: 'application/x-ndjson',
+      body: `${JSON.stringify({
+        kind: 'snapshot',
+        snapshot: {
+          continuation: null,
+          cursor: sessionWorkspaceFixture.latestAddress,
+          sort: 'last_activity_descending',
+          summaries: [sessionCatalogSummary],
+          total: '1000',
+        },
+      })}\n`,
+    }),
+  )
+  await page.route('**/api/sessions**', (route) => {
+    const pathname = new URL(route.request().url()).pathname
+    if (pathname === '/api/sessions') {
+      return route.fulfill({
+        json: {
+          continuation: null,
+          cursor: sessionWorkspaceFixture.latestAddress,
+          sort: 'last_activity_descending',
+          summaries: [sessionCatalogSummary],
+          total: '1000',
+        },
+      })
+    }
+    if (pathname.endsWith('/follow')) {
+      return route.fulfill({
+        contentType: 'application/x-ndjson',
+        body: `${JSON.stringify({ kind: 'snapshot', snapshot: sessionLiveSnapshot })}\n`,
+      })
+    }
+    if (pathname.endsWith('/live')) return route.fulfill({ json: sessionLiveSnapshot })
+    if (pathname.endsWith('/timeline')) {
       return route.fulfill({
         json: {
           session_id: sessionWorkspaceFixture.id,
@@ -143,27 +239,54 @@ test('gates Sessions on the validated bootstrap capability', async ({ page }) =>
   )
   await page.goto('/sessions')
 
-  await expect(page.getByText('Timeline reads unavailable')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Open workspace' })).toBeDisabled()
+  await expect(page.getByText('Session reads unavailable')).toBeVisible()
+  await expect(page.getByRole('listbox', { name: 'Sessions' })).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
 test('retries a failed product bootstrap after the daemon recovers', async ({ page }) => {
   const problems = watchBrowser(page)
   let attempts = 0
+  await page.route('**/api/sessions**', (route) =>
+    new URL(route.request().url()).pathname === '/api/sessions'
+      ? route.fulfill({
+          json: {
+            continuation: null,
+            cursor: '0',
+            sort: 'last_activity_descending',
+            summaries: [],
+            total: '0',
+          },
+        })
+      : route.fallback(),
+  )
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      contentType: 'application/x-ndjson',
+      body: `${JSON.stringify({
+        kind: 'snapshot',
+        snapshot: {
+          continuation: null,
+          cursor: '0',
+          sort: 'last_activity_descending',
+          summaries: [],
+          total: '0',
+        },
+      })}\n`,
+    }),
+  )
   await page.route('**/api/bootstrap', (route) => {
     attempts += 1
-    if (attempts === 1) {
-      return route.fulfill({ status: 503, body: 'temporarily unavailable' })
-    }
-    return route.fulfill({ json: webContractBootstrapFixture })
+    return attempts === 1
+      ? route.fulfill({ status: 503, body: 'temporarily unavailable' })
+      : route.fulfill({ json: webContractBootstrapFixture })
   })
   await page.goto('/sessions')
 
   await expect(page.getByText('Transport unavailable')).toBeVisible()
   await page.getByRole('button', { name: 'Retry contract' }).click()
 
-  await expect(page.getByText('Timeline reads available')).toBeVisible()
+  await expect(page.getByText('Session reads available')).toBeVisible()
   await expect(
     page.getByText(
       `${webContractBootstrapFixture.contract.name} · ${webContractBootstrapFixture.contract.version}`,
@@ -291,10 +414,10 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await useDeterministicSession(page)
   await page.goto('/sessions')
 
-  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
-  await sessionId.fill(sessionWorkspaceFixture.id)
-  await sessionId.press('Enter')
-  await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
+  const sessions = page.getByRole('listbox', { name: 'Sessions' })
+  await sessions.focus()
+  await sessions.press('Enter')
+  await expect(page.getByRole('heading', { name: 'Release train session' })).toBeVisible()
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
   const completed = page.getByRole('option', { name: /43 turn completed/ })
@@ -310,18 +433,14 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   await useDeterministicSession(page)
   await page.goto('/sessions')
 
-  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
-  await sessionId.fill(sessionWorkspaceFixture.id)
-  await sessionId.press('Enter')
-  await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
+  await page.getByRole('option', { name: /Release train session/ }).click()
+  await expect(page.getByRole('heading', { name: 'Release train session' })).toBeVisible()
   await expect(page.locator('.session-item-summary small').first()).toBeHidden()
 
   await page.getByRole('link', { name: /Settings/ }).click()
   await page.getByRole('radio', { name: 'Full' }).check()
   await page.getByRole('link', { name: /Sessions/ }).click()
-  const reopenedSessionId = page.getByRole('textbox', { name: 'Exact session ID' })
-  await reopenedSessionId.fill(sessionWorkspaceFixture.id)
-  await reopenedSessionId.press('Enter')
+  await page.getByRole('option', { name: /Release train session/ }).click()
 
   await expect(page.locator('.session-item-summary small').first()).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })

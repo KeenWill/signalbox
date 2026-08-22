@@ -1,0 +1,343 @@
+import {
+  decodeWebAttentionSnapshot,
+  decodeWebAttentionStreamEvent,
+  decodeWebSessionLiveSnapshot,
+  decodeWebSessionLiveStreamEvent,
+  type WebAttentionSnapshot,
+  type WebAttentionStreamEvent,
+  type WebSessionLiveSnapshot,
+  type WebSessionLiveStreamEvent,
+} from '../generated/web-contract.mjs'
+
+export const MAX_CATALOG_ROWS = 512
+export const MAX_NDJSON_RECORD_BYTES = 65_536
+export const MAX_PROVIDER_DRAFT_BYTES = 65_536
+export const MAX_PROVIDER_DRAFT_PARTS = 32
+export const MAX_LIVE_DURABLE_ITEMS = 128
+
+export type CatalogSort = 'last_activity_desc' | 'session_id_asc'
+
+export interface CatalogQuery {
+  search: string
+  sort: CatalogSort
+}
+
+export interface CatalogPresentation {
+  snapshot: WebAttentionSnapshot | null
+  summaries: WebAttentionSnapshot['summaries']
+}
+
+export interface ProviderDraft {
+  key: string
+  turnId: string
+  modelCallId: string
+  partIndex: number
+  content: string
+}
+
+export interface LivePresentation {
+  snapshot: WebSessionLiveSnapshot | null
+  durable: ReadonlyArray<Extract<WebSessionLiveStreamEvent, { kind: 'durable' }>>
+  drafts: ReadonlyArray<ProviderDraft>
+  resyncing: boolean
+}
+
+export type FollowConnectionState = 'connecting' | 'live' | 'retrying'
+
+export const EMPTY_CATALOG_PRESENTATION: CatalogPresentation = {
+  snapshot: null,
+  summaries: [],
+}
+
+export const EMPTY_LIVE_PRESENTATION: LivePresentation = {
+  snapshot: null,
+  durable: [],
+  drafts: [],
+  resyncing: false,
+}
+
+const continuationParams = (continuation: NonNullable<WebAttentionSnapshot['continuation']>) => {
+  const params = new URLSearchParams({ after_session_id: continuation.session_id })
+  if (continuation.kind === 'last_activity') {
+    params.set('after_activity_unix_microseconds', continuation.unix_microseconds)
+  }
+  return params
+}
+
+export const catalogUrl = (
+  query: CatalogQuery,
+  continuation?: WebAttentionSnapshot['continuation'],
+): string => {
+  const params = continuation ? continuationParams(continuation) : new URLSearchParams()
+  const search = query.search.trim()
+  if (search) params.set('search', search)
+  params.set('sort', query.sort)
+  return `/api/sessions?${params.toString()}`
+}
+
+const responseJson = async (response: Response): Promise<unknown> => {
+  if (!response.ok) throw new Error(`session read failed with status ${response.status}`)
+  return response.json()
+}
+
+export class HttpSessionProjectionSource {
+  constructor(
+    private readonly fetcher: typeof fetch = window.fetch.bind(window),
+    private readonly maxNdjsonRecordBytes = MAX_NDJSON_RECORD_BYTES,
+  ) {}
+
+  async catalogPage(
+    query: CatalogQuery,
+    continuation?: WebAttentionSnapshot['continuation'],
+    signal?: AbortSignal,
+  ): Promise<WebAttentionSnapshot> {
+    const response = await this.fetcher(catalogUrl(query, continuation), {
+      credentials: 'same-origin',
+      headers: { accept: 'application/json' },
+      signal,
+    })
+    return decodeWebAttentionSnapshot(await responseJson(response))
+  }
+
+  async liveSnapshot(sessionId: string, signal?: AbortSignal): Promise<WebSessionLiveSnapshot> {
+    const response = await this.fetcher(`/api/sessions/${encodeURIComponent(sessionId)}/live`, {
+      credentials: 'same-origin',
+      headers: { accept: 'application/json' },
+      signal,
+    })
+    return decodeWebSessionLiveSnapshot(await responseJson(response))
+  }
+
+  async *attentionFollow(signal?: AbortSignal): AsyncGenerator<WebAttentionStreamEvent> {
+    const response = await this.fetcher('/api/attention/follow', {
+      credentials: 'same-origin',
+      headers: { accept: 'application/x-ndjson' },
+      signal,
+    })
+    yield* readBoundedNdjson(response, decodeWebAttentionStreamEvent, this.maxNdjsonRecordBytes)
+  }
+
+  async *sessionFollow(
+    sessionId: string,
+    signal?: AbortSignal,
+  ): AsyncGenerator<WebSessionLiveStreamEvent> {
+    const response = await this.fetcher(`/api/sessions/${encodeURIComponent(sessionId)}/follow`, {
+      credentials: 'same-origin',
+      headers: { accept: 'application/x-ndjson' },
+      signal,
+    })
+    yield* readBoundedNdjson(response, decodeWebSessionLiveStreamEvent, this.maxNdjsonRecordBytes)
+  }
+}
+
+const retryDelay = (signal: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    const timer = window.setTimeout(resolve, 250)
+    signal.addEventListener(
+      'abort',
+      () => {
+        window.clearTimeout(timer)
+        resolve()
+      },
+      { once: true },
+    )
+  })
+
+export class SessionProjectionSynchronizer {
+  constructor(private readonly source: HttpSessionProjectionSource) {}
+
+  followAttention(
+    onEvent: (event: WebAttentionStreamEvent) => void,
+    onConnection: (state: FollowConnectionState) => void,
+  ): () => void {
+    return this.follow((signal) => this.source.attentionFollow(signal), onEvent, onConnection)
+  }
+
+  followSession(
+    sessionId: string,
+    onEvent: (event: WebSessionLiveStreamEvent) => void,
+    onConnection: (state: FollowConnectionState) => void,
+  ): () => void {
+    return this.follow(
+      (signal) => this.source.sessionFollow(sessionId, signal),
+      onEvent,
+      onConnection,
+    )
+  }
+
+  private follow<T extends { kind: string }>(
+    open: (signal: AbortSignal) => AsyncGenerator<T>,
+    onEvent: (event: T) => void,
+    onConnection: (state: FollowConnectionState) => void,
+  ): () => void {
+    const controller = new AbortController()
+    const run = async () => {
+      let reachedLive = false
+      while (!controller.signal.aborted) {
+        if (!reachedLive) onConnection('connecting')
+        let failed = false
+        try {
+          for await (const event of open(controller.signal)) {
+            reachedLive = true
+            onConnection('live')
+            onEvent(event)
+            if (event.kind === 'resync_required') break
+          }
+        } catch {
+          if (controller.signal.aborted) return
+          failed = true
+        }
+        if (controller.signal.aborted) return
+        if (failed) {
+          reachedLive = false
+          onConnection('retrying')
+        }
+        await retryDelay(controller.signal)
+      }
+    }
+    void run()
+    return () => controller.abort()
+  }
+}
+
+const appendBytes = (
+  left: Uint8Array<ArrayBufferLike>,
+  right: Uint8Array<ArrayBufferLike>,
+): Uint8Array<ArrayBufferLike> => {
+  const joined = new Uint8Array(left.byteLength + right.byteLength)
+  joined.set(left)
+  joined.set(right, left.byteLength)
+  return joined
+}
+
+const decodeLine = <T>(line: Uint8Array, decode: (value: unknown) => T): T => {
+  if (line.byteLength === 0) throw new Error('NDJSON stream contains an empty record')
+  return decode(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(line)))
+}
+
+export async function* readBoundedNdjson<T>(
+  response: Response,
+  decode: (value: unknown) => T,
+  maxRecordBytes = MAX_NDJSON_RECORD_BYTES,
+): AsyncGenerator<T> {
+  if (!response.ok) throw new Error(`session follow failed with status ${response.status}`)
+  if (!response.body) throw new Error('session follow response has no body')
+  const reader = response.body.getReader()
+  let pending: Uint8Array<ArrayBufferLike> = new Uint8Array()
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    let lineStart = 0
+    for (let index = 0; index < value.byteLength; index += 1) {
+      if (value[index] !== 10) continue
+      const segment = value.subarray(lineStart, index)
+      if (pending.byteLength + segment.byteLength > maxRecordBytes) {
+        throw new Error('NDJSON record exceeds the byte limit')
+      }
+      const line = pending.byteLength === 0 ? segment : appendBytes(pending, segment)
+      yield decodeLine(line, decode)
+      pending = new Uint8Array()
+      lineStart = index + 1
+    }
+    const trailing = value.subarray(lineStart)
+    if (pending.byteLength + trailing.byteLength > maxRecordBytes) {
+      throw new Error('NDJSON record exceeds the byte limit')
+    }
+    if (trailing.byteLength > 0) pending = appendBytes(pending, trailing)
+  }
+  if (pending.byteLength > 0) yield decodeLine(pending, decode)
+}
+
+const uniqueSummaries = (
+  summaries: WebAttentionSnapshot['summaries'],
+): WebAttentionSnapshot['summaries'] => {
+  const bySession = new Map(summaries.map((summary) => [summary.session_id, summary]))
+  return [...bySession.values()].slice(0, MAX_CATALOG_ROWS)
+}
+
+export const replaceCatalog = (snapshot: WebAttentionSnapshot): CatalogPresentation => ({
+  snapshot,
+  summaries: uniqueSummaries(snapshot.summaries),
+})
+
+export const appendCatalog = (
+  current: CatalogPresentation,
+  page: WebAttentionSnapshot,
+): CatalogPresentation => ({
+  snapshot: page,
+  summaries: uniqueSummaries([...current.summaries, ...page.summaries]),
+})
+
+export const applyAttentionEvent = (
+  current: CatalogPresentation,
+  event: WebAttentionStreamEvent,
+): CatalogPresentation => {
+  if (event.kind === 'resync_required') return current
+  const updates = event.kind === 'snapshot' ? event.snapshot.summaries : event.summaries
+  const bySession = new Map(updates.map((summary) => [summary.session_id, summary]))
+  return {
+    ...current,
+    summaries: current.summaries.map((summary) => bySession.get(summary.session_id) ?? summary),
+  }
+}
+
+const draftKey = (event: Extract<WebSessionLiveStreamEvent, { kind: 'provider_text_delta' }>) =>
+  `${event.turn_id}:${event.model_call_id}:${event.part_index}`
+
+const draftBytes = (drafts: ReadonlyArray<ProviderDraft>) =>
+  drafts.reduce((total, draft) => total + new TextEncoder().encode(draft.content).byteLength, 0)
+
+const boundedDrafts = (drafts: ReadonlyArray<ProviderDraft>): ReadonlyArray<ProviderDraft> => {
+  const retained = drafts.slice(-MAX_PROVIDER_DRAFT_PARTS)
+  while (retained.length > 0 && draftBytes(retained) > MAX_PROVIDER_DRAFT_BYTES) retained.shift()
+  return retained
+}
+
+export const beginLiveResync = (current: LivePresentation): LivePresentation => ({
+  ...current,
+  durable: [],
+  drafts: [],
+  resyncing: true,
+})
+
+export const applyLiveEvent = (
+  current: LivePresentation,
+  event: WebSessionLiveStreamEvent,
+): LivePresentation => {
+  if (event.kind === 'snapshot') {
+    const observedThrough = BigInt(event.snapshot.observed_through)
+    return {
+      snapshot: event.snapshot,
+      durable: current.durable.filter(
+        (item) => BigInt(item.address.event_sequence) > observedThrough,
+      ),
+      drafts: [],
+      resyncing: false,
+    }
+  }
+  if (event.kind === 'resync_required') {
+    return beginLiveResync(current)
+  }
+  if (event.kind === 'durable') {
+    const withoutDuplicate = current.durable.filter(
+      (item) => item.address.event_sequence !== event.address.event_sequence,
+    )
+    return {
+      ...current,
+      durable: [...withoutDuplicate, event].slice(-MAX_LIVE_DURABLE_ITEMS),
+    }
+  }
+  const key = draftKey(event)
+  const existing = current.drafts.find((draft) => draft.key === key)
+  const next: ProviderDraft = {
+    key,
+    turnId: event.turn_id,
+    modelCallId: event.model_call_id,
+    partIndex: event.part_index,
+    content: `${existing?.content ?? ''}${event.content}`,
+  }
+  return {
+    ...current,
+    drafts: boundedDrafts([...current.drafts.filter((draft) => draft.key !== key), next]),
+  }
+}

@@ -90,7 +90,12 @@ describe('product surface availability', () => {
     expect(productSurfaceStates.sessions).toEqual({
       kind: 'server-backed',
       owningTrack: '#991 session projections',
-      facts: ['bounded session descriptors', 'stable-address timeline windows'],
+      facts: [
+        'bounded session catalog',
+        'bounded session descriptors',
+        'stable-address timeline windows',
+        'snapshot-first live follow',
+      ],
     })
   })
 

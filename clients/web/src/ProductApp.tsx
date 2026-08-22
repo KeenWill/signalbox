@@ -28,7 +28,7 @@ import {
   productSurfaceStates,
   productTransport,
 } from './product'
-import { SessionWorkspaceSurface } from './SessionWorkspaceSurface'
+import { type SessionCommandControls, SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
 import { selectApp, store, useAppDispatch, useAppSelector } from './state'
 
@@ -394,6 +394,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const navigationReturnFocusRef = useRef<HTMLButtonElement | null>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
+  const [sessionControls, setSessionControls] = useState<SessionCommandControls | null>(null)
   const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
   const [windowRequest, setWindowRequest] = useState<{
     anchor: 'first' | 'latest'
@@ -418,8 +419,18 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
       navigateScenario: () =>
         void navigate({ to: '/scenario/$scenarioId', params: { scenarioId: 'streaming' } }),
+      sessionCatalogAvailable: surface === 'sessions' && sessionControls?.catalogAvailable === true,
+      sessionWorkspaceAvailable:
+        surface === 'sessions' && sessionControls?.workspaceAvailable === true,
+      focusSessionSearch: surface === 'sessions' ? sessionControls?.focusSearch : undefined,
+      applySessionSearch: surface === 'sessions' ? sessionControls?.applySearch : undefined,
+      loadMoreSessions: surface === 'sessions' ? sessionControls?.loadMore : undefined,
+      toggleSessionSort: surface === 'sessions' ? sessionControls?.toggleSort : undefined,
+      selectSession: surface === 'sessions' ? sessionControls?.select : undefined,
+      switchSession: surface === 'sessions' ? sessionControls?.switchSession : undefined,
+      openSelectedSession: surface === 'sessions' ? sessionControls?.openSelected : undefined,
     }),
-    [dispatch, navigate, surface, timelineIds, timelineWindowAvailable],
+    [dispatch, navigate, sessionControls, surface, timelineIds, timelineWindowAvailable],
   )
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
@@ -458,7 +469,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const cacheLabel = productSurfaceCacheLabel(surface)
   const timelineCapability = bootstrap.isPending
     ? 'checking'
-    : bootstrap.isSuccess && bootstrap.data.capabilities.bounded_session_timeline
+    : bootstrap.isSuccess &&
+        bootstrap.data.capabilities.bounded_session_timeline &&
+        bootstrap.data.capabilities.bounded_session_live
       ? 'available'
       : 'unavailable'
 
@@ -467,6 +480,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <AttentionSurface />
     ) : surface === 'sessions' ? (
       <SessionWorkspaceSurface
+        maxNdjsonRecordBytes={bootstrap.data?.limits.max_ndjson_item_bytes ?? 65_536}
+        onCommandControls={setSessionControls}
         onTimelineIds={updateTimelineIds}
         onTimelineWindowAvailable={setTimelineWindowAvailable}
         onWindowRequestConsumed={consumeWindowRequest}

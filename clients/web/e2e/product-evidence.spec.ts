@@ -17,7 +17,7 @@ const bootstrapFixture = {
   },
   limits: {
     max_json_body_bytes: 65_536,
-    max_ndjson_item_bytes: 262_144,
+    max_ndjson_item_bytes: 65_536,
     max_session_live_queued_turns: 32,
     max_timeline_window_items: 256,
     max_timeline_window_bytes: 65_536,
@@ -27,6 +27,45 @@ const bootstrapFixture = {
 const sessionEvidenceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
   itemCount: '1000000',
+} as const
+
+const sessionEvidenceSummary = {
+  active_turn_count: '1',
+  archived: false,
+  current_turn_id: '00000000-0000-0000-0000-000000000041',
+  judge: { actionable: '0', completed: '0', escalated: '0', failed: '0' },
+  last_activity: { kind: 'turn', unix_milliseconds: '1787400000000' },
+  queued_turn_count: '4',
+  session_id: sessionEvidenceFixture.id,
+  state: 'awaiting_approval',
+  title_summary: 'Release train approval',
+  title_truncated: false,
+} as const
+
+const sessionEvidenceLive = {
+  active: {
+    state: {
+      kind: 'awaiting_tool_approval',
+      tool_request_id: '00000000-0000-0000-0000-000000000071',
+    },
+    turn_id: '00000000-0000-0000-0000-000000000041',
+  },
+  observed_through: '1000037',
+  queued_turn_count: '4',
+  queued_turn_ids: [
+    '00000000-0000-0000-0000-000000000051',
+    '00000000-0000-0000-0000-000000000052',
+    '00000000-0000-0000-0000-000000000053',
+    '00000000-0000-0000-0000-000000000054',
+  ],
+  reconciliation: null,
+  runner: {
+    connection_health: 'connected',
+    placement_revision: '7',
+    runner_id: '00000000-0000-0000-0000-000000000061',
+    state: 'pinned',
+  },
+  session_id: sessionEvidenceFixture.id,
 } as const
 
 const attentionEvidence = { path: '/attention', title: 'Attention', snapshot: 'attention' } as const
@@ -46,8 +85,37 @@ const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
   )
 }
 
-const useDeterministicBootstrap = (page: Page) =>
-  page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+const useDeterministicBootstrap = async (page: Page) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/sessions**', (route) =>
+    new URL(route.request().url()).pathname === '/api/sessions'
+      ? route.fulfill({
+          json: {
+            continuation: null,
+            cursor: '0',
+            sort: 'last_activity_descending',
+            summaries: [],
+            total: '0',
+          },
+        })
+      : route.fallback(),
+  )
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      contentType: 'application/x-ndjson',
+      body: `${JSON.stringify({
+        kind: 'snapshot',
+        snapshot: {
+          continuation: null,
+          cursor: '0',
+          sort: 'last_activity_descending',
+          summaries: [],
+          total: '0',
+        },
+      })}\n`,
+    }),
+  )
+}
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
@@ -58,9 +126,43 @@ const watchBrowser = (page: Page) => {
   return problems
 }
 
-const useDeterministicSession = (page: Page) =>
-  page.route('**/api/sessions/**', (route) => {
-    if (new URL(route.request().url()).pathname.endsWith('/timeline')) {
+const useDeterministicSession = async (page: Page) => {
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      contentType: 'application/x-ndjson',
+      body: `${JSON.stringify({
+        kind: 'snapshot',
+        snapshot: {
+          continuation: null,
+          cursor: '1000037',
+          sort: 'last_activity_descending',
+          summaries: [sessionEvidenceSummary],
+          total: '1000',
+        },
+      })}\n`,
+    }),
+  )
+  await page.route('**/api/sessions**', (route) => {
+    const pathname = new URL(route.request().url()).pathname
+    if (pathname === '/api/sessions') {
+      return route.fulfill({
+        json: {
+          continuation: null,
+          cursor: '1000037',
+          sort: 'last_activity_descending',
+          summaries: [sessionEvidenceSummary],
+          total: '1000',
+        },
+      })
+    }
+    if (pathname.endsWith('/follow')) {
+      return route.fulfill({
+        contentType: 'application/x-ndjson',
+        body: `${JSON.stringify({ kind: 'snapshot', snapshot: sessionEvidenceLive })}\n`,
+      })
+    }
+    if (pathname.endsWith('/live')) return route.fulfill({ json: sessionEvidenceLive })
+    if (pathname.endsWith('/timeline')) {
       return route.fulfill({
         json: {
           session_id: sessionEvidenceFixture.id,
@@ -104,6 +206,7 @@ const useDeterministicSession = (page: Page) =>
       },
     })
   })
+}
 
 const captureRouteEvidence = async (page: Page, evidence: RouteEvidence) => {
   const problems = watchBrowser(page)
@@ -134,9 +237,8 @@ const captureSessionEvidence = async (page: Page) => {
   await useDeterministicSession(page)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(sessionsEvidence.path)
-  await page.getByRole('textbox', { name: 'Exact session ID' }).fill(sessionEvidenceFixture.id)
-  await page.getByRole('button', { name: 'Open workspace' }).click()
-  await expect(page.getByRole('heading', { name: sessionEvidenceFixture.id })).toBeVisible()
+  await page.getByRole('option', { name: /Release train approval/ }).click()
+  await expect(page.getByRole('heading', { name: 'Release train approval' })).toBeVisible()
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
   await expect(page).toHaveScreenshot('sessions-desktop-dark.png', { animations: 'disabled' })
   await page.getByRole('button', { name: 'Use light theme' }).click()
