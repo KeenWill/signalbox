@@ -895,6 +895,9 @@ kbd {
     width: 100%;
     min-width: 0;
   }
+  .product-main-imports .surface-question p {
+    width: min(320px, 100%);
+  }
   .import-inspector-body {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(180px, auto) minmax(260px, 1fr);
