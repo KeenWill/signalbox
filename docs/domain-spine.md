@@ -6006,7 +6006,7 @@ pub enum RepoWatchHeldSlotBlocker {
 }
 pub struct RepoWatchHeldSlot {
     pub dispatch: RepoWatchDispatchId,
-    pub pull_request: Option<PullRequestNumber>,
+    pub singleton: RepoWatchSingletonKey,
     pub rule: RepoWatchRuleId,
     pub held_since: SystemTime,
     pub sessions: Vec<SessionId>,
@@ -6018,7 +6018,7 @@ pub enum RepoWatchObligationReadiness {
         dispatch: RepoWatchDispatchId,
         sessions: Vec<SessionId>,
     },
-    Cooldown { eligible_at: SystemTime },
+    Cooldown { eligible_at: Option<SystemTime> },
     Parked { parked_at: SystemTime },
 }
 pub struct RepoWatchObligationId(/* private uuid::Uuid */);
@@ -6028,7 +6028,7 @@ impl RepoWatchObligationId {
 }
 pub struct RepoWatchQueuedObligation {
     pub id: RepoWatchObligationId,
-    pub pull_request: Option<PullRequestNumber>,
+    pub singleton: RepoWatchSingletonKey,
     pub rule: RepoWatchRuleId,
     pub first_event: RepoWatchEventId,
     pub latest_event: RepoWatchEventId,

@@ -12,9 +12,9 @@ use signalbox_application::{
     RepoWatchPullRequestOperations, RepoWatchPullRequestOperationsFacts, RepoWatchPullRequestPage,
     RepoWatchPullRequestSession, RepoWatchPullRequestSessionPage, RepoWatchQueuedObligation,
     RepoWatchRepositoryStatus, RepoWatchRepositoryStatusPage, RepoWatchSessionCursor,
-    RepoWatchSessionPurpose, RepoWatchWebhookActivity, RepoWatchWebhookDisposition,
-    RepoWatchWebhookWindow, RepoWatchWorkPage, max_repo_watch_activity_page_items,
-    max_repo_watch_operations_page_items,
+    RepoWatchSessionPurpose, RepoWatchSingletonKey, RepoWatchWebhookActivity,
+    RepoWatchWebhookDisposition, RepoWatchWebhookWindow, RepoWatchWorkPage,
+    max_repo_watch_activity_page_items, max_repo_watch_operations_page_items,
 };
 use signalbox_domain::{
     PullRequestNumber, RepoWatchDispatchId, RepoWatchEventId, RepoWatchEventKindNameV1,
@@ -28,8 +28,12 @@ use sqlx::{
 
 use crate::{
     attention::{AttentionRepositoryError, load_summaries},
-    mapping::{positive_u64_from_numeric, repo_watch_event_kind_from_str},
+    mapping::{
+        positive_u64_from_numeric, repo_watch_event_kind_from_str,
+        repo_watch_webhook_disposition_from_str,
+    },
     repo_watch::{RepoWatchStoreError, load_cursor_in_transaction},
+    repo_watch_webhook::RepoWatchWebhookDisposition as StoredWebhookDisposition,
 };
 
 const FIVE_MINUTES_SECONDS: u32 = 5 * 60;
@@ -463,7 +467,9 @@ impl RepoWatchOperationsReader for PostgresRepoWatchOperations {
 }
 
 const HELD_SLOTS_SQL: &str = r#"
-SELECT dispatch_id, pull_request_number, rule_id, held_since, session_ids, blockers
+SELECT dispatch_id, singleton_scope, singleton_repository,
+       singleton_pull_request_number, singleton_stack_root_pull_request_number,
+       rule_id, held_since, session_ids, blockers
   FROM repo_watch_held_dispatch_slot
  WHERE repository = $1
    AND ($2::timestamptz IS NULL OR (held_since, dispatch_id) > ($2, $3))
@@ -472,10 +478,16 @@ SELECT dispatch_id, pull_request_number, rule_id, held_since, session_ids, block
 "#;
 
 const OBLIGATIONS_SQL: &str = r#"
-SELECT obligation_id, singleton_pull_request_number, rule_id, first_event_id,
+SELECT obligation_id, singleton_scope, singleton_repository,
+       singleton_pull_request_number, singleton_stack_root_pull_request_number,
+       rule_id, first_event_id,
        latest_event_id, matched_event_count, owed_since, latest_match_at,
        failed_attempts, occupying_dispatch_id, occupying_session_ids,
-       eligible_at, ready, parked_at
+       CASE WHEN eligible_at = 'infinity'::timestamptz THEN NULL ELSE eligible_at END
+           AS eligible_at,
+       COALESCE(eligible_at = 'infinity'::timestamptz, false)
+           AS eligibility_is_infinite,
+       ready, parked_at
   FROM repo_watch_outstanding_dispatch_obligation
  WHERE repository = $1
    AND ($2::timestamptz IS NULL OR (owed_since, obligation_id) > ($2, $3))
@@ -555,7 +567,7 @@ SELECT selected.repository, selected.generation, selected.recorded_at,
        COALESCE(webhook_window.projected_1h, 0) AS projected_1h,
        COALESCE(webhook_window.terminal_1h, 0) AS terminal_1h,
        COALESCE(webhook_window.quarantined_1h, 0) AS quarantined_1h,
-       latency.latest_latency_ms, latency.maximum_latency_ms_1h,
+       latest_latency.latest_latency_ms, latency_window.maximum_latency_ms_1h,
        observed.event_id AS observed_event_id,
        observed.cursor_generation AS observed_generation,
        observed.event_ordinal AS observed_ordinal,
@@ -609,17 +621,27 @@ SELECT selected.repository, selected.generation, selected.recorded_at,
            AND delivery.received_at >= transaction_timestamp() - interval '1 hour'
   ) AS webhook_window ON true
   LEFT JOIN LATERAL (
-        SELECT (array_agg(floor(extract(epoch FROM (projection.projected_at - delivery.received_at)) * 1000)::bigint
-                          ORDER BY projection.projected_at DESC))[1] AS latest_latency_ms,
-               max(floor(extract(epoch FROM (projection.projected_at - delivery.received_at)) * 1000)::bigint)
-                   FILTER (WHERE projection.projected_at >= transaction_timestamp() - interval '1 hour')
+        SELECT floor(extract(epoch FROM (projection.projected_at - delivery.received_at)) * 1000)::bigint
+                   AS latest_latency_ms
+          FROM repo_watch_webhook_delivery AS delivery
+          JOIN repo_watch_webhook_projection AS projection
+            ON projection.hook_id = delivery.hook_id
+           AND projection.delivery_id = delivery.delivery_id
+         WHERE delivery.repository = selected.repository
+         ORDER BY projection.projected_at DESC, delivery.receipt_sequence DESC,
+                  projection.projection_ordinal DESC
+         LIMIT 1
+  ) AS latest_latency ON true
+  LEFT JOIN LATERAL (
+        SELECT max(floor(extract(epoch FROM (projection.projected_at - delivery.received_at)) * 1000)::bigint)
                    AS maximum_latency_ms_1h
           FROM repo_watch_webhook_delivery AS delivery
           JOIN repo_watch_webhook_projection AS projection
             ON projection.hook_id = delivery.hook_id
            AND projection.delivery_id = delivery.delivery_id
          WHERE delivery.repository = selected.repository
-  ) AS latency ON true
+           AND projection.projected_at >= transaction_timestamp() - interval '1 hour'
+  ) AS latency_window ON true
   LEFT JOIN LATERAL (
         SELECT * FROM repo_watch_event
          WHERE repository = selected.repository
@@ -653,13 +675,23 @@ SELECT selected.repository, selected.generation, selected.recorded_at,
                 SELECT 1 FROM repo_watch_dispatch_action AS action
                  WHERE action.dispatch_id = batch.dispatch_id
                    AND NOT EXISTS (
-                        SELECT 1 FROM goal_event AS goal
-                         WHERE goal.session_id = action.session_id
+                        SELECT 1
+                          FROM repo_watch_dispatch_delivery AS delivery
+                          JOIN goal_turn AS dispatched_turn
+                            ON dispatched_turn.session_id = action.session_id
+                           AND dispatched_turn.turn_id = delivery.turn_id
+                          JOIN goal_event AS goal
+                            ON goal.session_id = dispatched_turn.session_id
+                           AND goal.generation = dispatched_turn.goal_generation
                            AND goal.event_ordinal = (
-                                SELECT max(candidate.event_ordinal) FROM goal_event AS candidate
-                                 WHERE candidate.session_id = action.session_id
+                                SELECT max(candidate.event_ordinal)
+                                  FROM goal_event AS candidate
+                                 WHERE candidate.session_id = dispatched_turn.session_id
+                                   AND candidate.generation = dispatched_turn.goal_generation
                            )
                            AND goal.event_kind = 'achieved'
+                         WHERE delivery.dispatch_id = action.dispatch_id
+                           AND delivery.action_ordinal = action.action_ordinal
                    )
            )
          ORDER BY release.released_at DESC, batch.dispatch_id DESC LIMIT 1
@@ -975,7 +1007,7 @@ fn decode_held_slot(row: &PgRow) -> Result<RepoWatchHeldSlot, RepoWatchOperation
         .collect::<Result<Vec<_>, RepoWatchOperationsError>>()?;
     Ok(RepoWatchHeldSlot {
         dispatch: RepoWatchDispatchId::from_uuid(row.try_get("dispatch_id")?),
-        pull_request: optional_pull_request(row.try_get("pull_request_number")?)?,
+        singleton: decode_singleton(row)?,
         rule: decode_rule(row.try_get("rule_id")?)?,
         held_since: decode_time(row.try_get("held_since")?),
         sessions: row
@@ -991,12 +1023,19 @@ fn decode_obligation(row: &PgRow) -> Result<RepoWatchQueuedObligation, RepoWatch
     let occupying = row.try_get::<Option<Uuid>, _>("occupying_dispatch_id")?;
     let parked_at = row.try_get::<Option<OffsetDateTime>, _>("parked_at")?;
     let eligible_at = row.try_get::<Option<OffsetDateTime>, _>("eligible_at")?;
+    let eligibility_is_infinite = row.try_get::<bool, _>("eligibility_is_infinite")?;
     let ready = row.try_get::<bool, _>("ready")?;
-    let readiness = match (parked_at, occupying, eligible_at, ready) {
-        (Some(parked_at), _, _, _) => RepoWatchObligationReadiness::Parked {
+    let readiness = match (
+        parked_at,
+        occupying,
+        eligible_at,
+        eligibility_is_infinite,
+        ready,
+    ) {
+        (Some(parked_at), _, _, _, _) => RepoWatchObligationReadiness::Parked {
             parked_at: decode_time(parked_at),
         },
-        (None, Some(dispatch), _, _) => RepoWatchObligationReadiness::Occupied {
+        (None, Some(dispatch), _, _, _) => RepoWatchObligationReadiness::Occupied {
             dispatch: RepoWatchDispatchId::from_uuid(dispatch),
             sessions: row
                 .try_get::<Option<Vec<Uuid>>, _>("occupying_session_ids")?
@@ -1005,17 +1044,21 @@ fn decode_obligation(row: &PgRow) -> Result<RepoWatchQueuedObligation, RepoWatch
                 .map(SessionId::from_uuid)
                 .collect(),
         },
-        (None, None, Some(eligible_at), false) => RepoWatchObligationReadiness::Cooldown {
-            eligible_at: decode_time(eligible_at),
-        },
-        (None, None, _, true) => RepoWatchObligationReadiness::Ready,
-        (None, None, _, false) => {
+        (None, None, eligible_at, eligibility_is_infinite, false)
+            if eligible_at.is_some() || eligibility_is_infinite =>
+        {
+            RepoWatchObligationReadiness::Cooldown {
+                eligible_at: eligible_at.map(decode_time),
+            }
+        }
+        (None, None, _, _, true) => RepoWatchObligationReadiness::Ready,
+        (None, None, _, _, false) => {
             return Err(RepoWatchOperationsCorruption::Invalid("obligation readiness").into());
         }
     };
     Ok(RepoWatchQueuedObligation {
         id: RepoWatchObligationId::from_uuid(row.try_get("obligation_id")?),
-        pull_request: optional_pull_request(row.try_get("singleton_pull_request_number")?)?,
+        singleton: decode_singleton(row)?,
         rule: decode_rule(row.try_get("rule_id")?)?,
         first_event: RepoWatchEventId::from_uuid(row.try_get("first_event_id")?),
         latest_event: RepoWatchEventId::from_uuid(row.try_get("latest_event_id")?),
@@ -1095,17 +1138,48 @@ fn decode_webhook_activity(
 fn decode_webhook_disposition(
     value: &str,
 ) -> Result<RepoWatchWebhookDisposition, RepoWatchOperationsError> {
-    match value {
-        "projected" => Ok(RepoWatchWebhookDisposition::Projected),
-        "duplicate_state" => Ok(RepoWatchWebhookDisposition::DuplicateState),
-        "superseded" => Ok(RepoWatchWebhookDisposition::Superseded),
-        "ignored" => Ok(RepoWatchWebhookDisposition::Ignored),
-        "quarantined" => Ok(RepoWatchWebhookDisposition::Quarantined),
-        value => Err(RepoWatchOperationsCorruption::Unsupported {
+    let disposition = repo_watch_webhook_disposition_from_str(value).ok_or_else(|| {
+        RepoWatchOperationsCorruption::Unsupported {
             field: "webhook disposition",
             value: value.to_owned(),
         }
-        .into()),
+    })?;
+    Ok(match disposition {
+        StoredWebhookDisposition::Projected => RepoWatchWebhookDisposition::Projected,
+        StoredWebhookDisposition::DuplicateState => RepoWatchWebhookDisposition::DuplicateState,
+        StoredWebhookDisposition::Superseded => RepoWatchWebhookDisposition::Superseded,
+        StoredWebhookDisposition::Ignored => RepoWatchWebhookDisposition::Ignored,
+        StoredWebhookDisposition::Quarantined => RepoWatchWebhookDisposition::Quarantined,
+    })
+}
+
+fn decode_singleton(row: &PgRow) -> Result<RepoWatchSingletonKey, RepoWatchOperationsError> {
+    let scope = row.try_get::<String, _>("singleton_scope")?;
+    let repository = row.try_get::<Option<String>, _>("singleton_repository")?;
+    let pull_request = optional_pull_request(row.try_get("singleton_pull_request_number")?)?;
+    let stack_root =
+        optional_pull_request(row.try_get("singleton_stack_root_pull_request_number")?)?;
+    match (scope.as_str(), repository, pull_request, stack_root) {
+        ("pull_request", Some(repository), Some(number), None) => {
+            Ok(RepoWatchSingletonKey::PullRequest {
+                repository: RepositorySlug::try_new(repository)
+                    .map_err(|_| RepoWatchOperationsCorruption::Invalid("singleton repository"))?,
+                number,
+            })
+        }
+        ("stack", Some(repository), None, Some(root_pull_request)) => {
+            Ok(RepoWatchSingletonKey::Stack {
+                repository: RepositorySlug::try_new(repository)
+                    .map_err(|_| RepoWatchOperationsCorruption::Invalid("singleton repository"))?,
+                root_pull_request,
+            })
+        }
+        ("rule", None, None, None) => Ok(RepoWatchSingletonKey::Rule),
+        ("repo", Some(repository), None, None) => Ok(RepoWatchSingletonKey::Repository {
+            repository: RepositorySlug::try_new(repository)
+                .map_err(|_| RepoWatchOperationsCorruption::Invalid("singleton repository"))?,
+        }),
+        _ => Err(RepoWatchOperationsCorruption::Invalid("singleton identity").into()),
     }
 }
 
@@ -1190,14 +1264,23 @@ SELECT selected.pull_request_number,
                 SELECT 1 FROM repo_watch_dispatch_action AS action
                  WHERE action.dispatch_id = batch.dispatch_id
                    AND NOT EXISTS (
-                        SELECT 1 FROM goal_event AS goal
-                         WHERE goal.session_id = action.session_id
+                        SELECT 1
+                          FROM repo_watch_dispatch_delivery AS delivery
+                          JOIN goal_turn AS dispatched_turn
+                            ON dispatched_turn.session_id = action.session_id
+                           AND dispatched_turn.turn_id = delivery.turn_id
+                          JOIN goal_event AS goal
+                            ON goal.session_id = dispatched_turn.session_id
+                           AND goal.generation = dispatched_turn.goal_generation
                            AND goal.event_ordinal = (
                                 SELECT max(candidate.event_ordinal)
                                   FROM goal_event AS candidate
-                                 WHERE candidate.session_id = action.session_id
+                                 WHERE candidate.session_id = dispatched_turn.session_id
+                                   AND candidate.generation = dispatched_turn.goal_generation
                            )
                            AND goal.event_kind = 'achieved'
+                         WHERE delivery.dispatch_id = action.dispatch_id
+                           AND delivery.action_ordinal = action.action_ordinal
                    )
            )
          ORDER BY release.released_at DESC, batch.dispatch_id DESC LIMIT 1
@@ -1215,23 +1298,37 @@ SELECT selected.pull_request_number,
          ORDER BY latest_match_at DESC, obligation_id DESC LIMIT 1
   ) AS queued ON true
   LEFT JOIN LATERAL (
-        SELECT batch.dispatch_id, batch.event_id, event.head_sha, release.released_at,
-               release.dispatch_id IS NOT NULL AND NOT EXISTS (
+        SELECT batch.dispatch_id, batch.delivered_state_event_id AS event_id,
+               delivered.head_sha, release.released_at,
+               release.dispatch_id IS NOT NULL
+               AND batch.delivered_state_event_id IS NOT NULL
+               AND NOT EXISTS (
                     SELECT 1 FROM repo_watch_dispatch_action AS action
                      WHERE action.dispatch_id = batch.dispatch_id
                        AND NOT EXISTS (
-                            SELECT 1 FROM goal_event AS goal
-                             WHERE goal.session_id = action.session_id
+                            SELECT 1
+                              FROM repo_watch_dispatch_delivery AS delivery
+                              JOIN goal_turn AS dispatched_turn
+                                ON dispatched_turn.session_id = action.session_id
+                               AND dispatched_turn.turn_id = delivery.turn_id
+                              JOIN goal_event AS goal
+                                ON goal.session_id = dispatched_turn.session_id
+                               AND goal.generation = dispatched_turn.goal_generation
                                AND goal.event_ordinal = (
                                     SELECT max(candidate.event_ordinal)
                                       FROM goal_event AS candidate
-                                     WHERE candidate.session_id = action.session_id
+                                     WHERE candidate.session_id = dispatched_turn.session_id
+                                       AND candidate.generation = dispatched_turn.goal_generation
                                )
                                AND goal.event_kind = 'achieved'
+                             WHERE delivery.dispatch_id = action.dispatch_id
+                               AND delivery.action_ordinal = action.action_ordinal
                        )
                ) AS achieved
           FROM repo_watch_dispatch_batch AS batch
           JOIN repo_watch_event AS event ON event.event_id = batch.event_id
+          LEFT JOIN repo_watch_event AS delivered
+            ON delivered.event_id = batch.delivered_state_event_id
           LEFT JOIN repo_watch_dispatch_release AS release ON release.dispatch_id = batch.dispatch_id
          WHERE event.repository = $1 AND event.pull_request_number = selected.pull_request_number
          ORDER BY batch.admitted_at DESC, batch.dispatch_id DESC LIMIT 1
@@ -1410,17 +1507,19 @@ fn stack_relationship(
                 && candidate.context().head_branch() == subject.context().base_branch()
         })
         .map(|candidate| candidate.context().number());
-    let open_child_count = all
-        .iter()
-        .filter(|candidate| {
-            candidate.lifecycle() == RepoWatchPullRequestLifecycle::Open
-                && candidate.context().number() != subject.context().number()
-                && candidate.context().head_repository() == repository
-                && candidate.context().base_branch() == subject.context().head_branch()
-        })
-        .count()
-        .try_into()
-        .unwrap_or(u64::MAX);
+    let open_child_count = if subject.context().head_repository() == repository {
+        all.iter()
+            .filter(|candidate| {
+                candidate.lifecycle() == RepoWatchPullRequestLifecycle::Open
+                    && candidate.context().number() != subject.context().number()
+                    && candidate.context().base_branch() == subject.context().head_branch()
+            })
+            .count()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    } else {
+        0
+    };
     (open_parent, open_child_count)
 }
 
