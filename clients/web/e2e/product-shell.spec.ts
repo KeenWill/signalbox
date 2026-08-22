@@ -1,20 +1,5 @@
 import { expect, type Page, test } from '@playwright/test'
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
-  capabilities: {
-    bounded_json: true,
-    bounded_session_timeline: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: {
-    max_json_body_bytes: 65_536,
-    max_ndjson_item_bytes: 262_144,
-    max_timeline_window_bytes: 524_288,
-    max_timeline_window_items: 256,
-  },
-} as const
+import bootstrapFixture from '../src/generated/web-contract-bootstrap.json' with { type: 'json' }
 
 const emptySessionPage = {
   continuation: null,

@@ -1130,6 +1130,19 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.catalog-title-truncated {
+  display: inline-flex;
+  margin-left: 0.4rem;
+  padding: 0.1rem 0.3rem;
+  border: 1px solid var(--warning);
+  border-radius: 999px;
+  color: var(--warning);
+  font-size: 0.52rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
 .catalog-session-copy code,
 .catalog-list time,
 .catalog-list li > button > span {

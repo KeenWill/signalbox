@@ -1,22 +1,8 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import bootstrapFixture from '../src/generated/web-contract-bootstrap.json' with { type: 'json' }
 
 const firstSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
 const secondSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e'
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
-  capabilities: {
-    bounded_json: true,
-    bounded_session_timeline: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: {
-    max_json_body_bytes: 65_536,
-    max_ndjson_item_bytes: 262_144,
-    max_timeline_window_bytes: 524_288,
-    max_timeline_window_items: 256,
-  },
-} as const
 const firstPage = {
   continuation: {
     kind: 'last_activity',
@@ -78,7 +64,7 @@ const secondPage = {
       session_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c8f',
       state: 'idle',
       title_summary: 'Archived investigation',
-      title_truncated: false,
+      title_truncated: true,
     },
   ],
   total: '48',
@@ -147,6 +133,8 @@ test('replaces the bounded catalog page through its typed continuation', async (
   ).toBeVisible()
   await expect(page).toHaveURL(/afterSession/)
   await expect(page.getByRole('button', { name: 'Next page' })).toBeHidden()
+  await expect(page.getByRole('heading', { name: `${secondPage.total} sessions` })).toBeFocused()
+  await expect(page.getByText('Truncated', { exact: true })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -204,6 +192,11 @@ test('captures desktop dark, desktop light, and responsive catalog evidence', as
   await expect(page).toHaveScreenshot('catalog-desktop-light.png', { animations: 'disabled' })
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
+  await expect(
+    page.getByRole('dialog', { name: firstPage.summaries[0].title_summary }),
+  ).toBeVisible()
+  await page.keyboard.press('Tab')
+  await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeFocused()
   await expect(page).toHaveScreenshot('catalog-mobile-light.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

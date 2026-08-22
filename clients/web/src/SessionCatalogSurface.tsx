@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { ArrowRight, Search, X } from 'lucide-react'
-import { type FormEvent, useEffect, useRef } from 'react'
+import { type FormEvent, useEffect, useRef, useState } from 'react'
 import type { WebAttentionSnapshot } from './generated/web-contract.mjs'
 import { ProductRequestError, type ProductSessionState, productTransport } from './product'
 
@@ -18,6 +18,13 @@ const activityTime = (unixMilliseconds: string) => {
   }).format(new Date(value))
 }
 
+const SessionTitle = ({ summary }: { summary: SessionSummary }) => (
+  <>
+    {summary.title_summary ?? 'Untitled session'}
+    {summary.title_truncated && <span className="catalog-title-truncated">Truncated</span>}
+  </>
+)
+
 export function SessionCatalogSurface({
   state,
   onStateChange,
@@ -27,6 +34,9 @@ export function SessionCatalogSurface({
 }) {
   const returnFocus = useRef<HTMLButtonElement>(null)
   const closeFocus = useRef<HTMLButtonElement>(null)
+  const pageHeading = useRef<HTMLHeadingElement>(null)
+  const restorePageFocus = useRef(false)
+  const [narrowInspector, setNarrowInspector] = useState(false)
   const sessions = useQuery({
     queryKey: [
       'production',
@@ -53,10 +63,25 @@ export function SessionCatalogSurface({
   const selected = sessions.data?.summaries.find((summary) => summary.session_id === state.session)
 
   useEffect(() => {
+    const query = window.matchMedia('(max-width: 760px)')
+    const update = () => setNarrowInspector(query.matches)
+    update()
+    query.addEventListener('change', update)
+    return () => query.removeEventListener('change', update)
+  }, [])
+
+  useEffect(() => {
     const focusTarget = state.session ? closeFocus : returnFocus
     const frame = requestAnimationFrame(() => focusTarget.current?.focus())
     return () => cancelAnimationFrame(frame)
   }, [state.session])
+
+  useEffect(() => {
+    if (!sessions.data || !restorePageFocus.current) return
+    restorePageFocus.current = false
+    const frame = requestAnimationFrame(() => pageHeading.current?.focus())
+    return () => cancelAnimationFrame(frame)
+  }, [sessions.data])
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -74,6 +99,7 @@ export function SessionCatalogSurface({
   const nextPage = () => {
     const continuation = sessions.data?.continuation
     if (!continuation) return
+    restorePageFocus.current = true
     onStateChange({
       q: state.q,
       sort: state.sort,
@@ -135,7 +161,9 @@ export function SessionCatalogSurface({
             <header>
               <div>
                 <span className="eyebrow">Bounded session catalog</span>
-                <h2 id="catalog-heading">{sessions.data.total} sessions</h2>
+                <h2 ref={pageHeading} id="catalog-heading" tabIndex={-1}>
+                  {sessions.data.total} sessions
+                </h2>
               </div>
               <span>{sessions.data.summaries.length} on this page</span>
             </header>
@@ -151,7 +179,9 @@ export function SessionCatalogSurface({
                       onClick={(event) => openSession(summary, event.currentTarget)}
                     >
                       <span className="catalog-session-copy">
-                        <strong>{summary.title_summary ?? 'Untitled session'}</strong>
+                        <strong>
+                          <SessionTitle summary={summary} />
+                        </strong>
                         <code>{summary.session_id}</code>
                       </span>
                       <span className={`state-chip state-${summary.state}`}>
@@ -177,16 +207,22 @@ export function SessionCatalogSurface({
           {selected && (
             <aside
               className="catalog-inspector"
+              role="dialog"
+              aria-modal={narrowInspector || undefined}
               aria-labelledby="catalog-inspector-heading"
               onKeyDown={(event) => {
                 if (event.key === 'Escape') closeSession()
+                if (event.key === 'Tab' && narrowInspector) {
+                  event.preventDefault()
+                  closeFocus.current?.focus()
+                }
               }}
             >
               <header>
                 <div>
                   <span className="eyebrow">Selected session</span>
                   <h2 id="catalog-inspector-heading">
-                    {selected.title_summary ?? 'Untitled session'}
+                    <SessionTitle summary={selected} />
                   </h2>
                 </div>
                 <button

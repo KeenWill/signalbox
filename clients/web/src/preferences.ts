@@ -107,5 +107,9 @@ export const loadBrowserPreferences = (): BrowserPreferences => {
 
 export const saveBrowserPreferences = (preferences: BrowserPreferences): void => {
   if (typeof localStorage === 'undefined') return
-  localStorage.setItem(BROWSER_PREFERENCES_KEY, JSON.stringify(preferences))
+  try {
+    localStorage.setItem(BROWSER_PREFERENCES_KEY, JSON.stringify(preferences))
+  } catch {
+    // Persistence is best-effort when access is denied or quota is exhausted.
+  }
 }

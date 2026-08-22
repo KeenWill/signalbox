@@ -56,6 +56,31 @@ export interface ProductTransport {
 }
 
 export const MAX_SESSION_PAGE_ITEMS = 32
+export const MAX_PRODUCT_HTTP_RESPONSE_BYTES = 64 * 1024
+
+const readBoundedJson = async (response: Response): Promise<unknown> => {
+  const reader = response.body?.getReader()
+  if (!reader) throw new TypeError('product HTTP response has no body')
+  const chunks: Uint8Array[] = []
+  let byteCount = 0
+  while (true) {
+    const next = await reader.read()
+    if (next.done) break
+    byteCount += next.value.byteLength
+    if (byteCount > MAX_PRODUCT_HTTP_RESPONSE_BYTES) {
+      await reader.cancel()
+      throw new TypeError('product HTTP response exceeds its encoded byte ceiling')
+    }
+    chunks.push(next.value)
+  }
+  const encoded = new Uint8Array(byteCount)
+  let offset = 0
+  for (const chunk of chunks) {
+    encoded.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(encoded)) as unknown
+}
 
 const validateSessionPage = (
   page: WebAttentionSnapshot,
@@ -74,6 +99,22 @@ const validateSessionPage = (
   }
   if (page.summaries.length > MAX_SESSION_PAGE_ITEMS) {
     throw new Error(`session catalog response exceeds ${MAX_SESSION_PAGE_ITEMS} summaries`)
+  }
+  if (page.continuation) {
+    const boundary = page.summaries.at(-1)
+    if (!boundary || page.continuation.session_id !== boundary.session_id) {
+      throw new Error('session catalog continuation does not match its returned boundary')
+    }
+    if (page.continuation.kind === 'last_activity') {
+      const milliseconds = boundary.last_activity.unix_milliseconds
+      if (!/^(0|[1-9]\d*)$/.test(milliseconds)) {
+        throw new Error('session catalog boundary activity is not canonical')
+      }
+      const expectedMicroseconds = (BigInt(milliseconds) * 1000n).toString()
+      if (page.continuation.unix_microseconds !== expectedMicroseconds) {
+        throw new Error('session catalog continuation does not match its returned boundary')
+      }
+    }
   }
   return page
 }
@@ -96,7 +137,7 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    return decodeWebContractBootstrap(await response.json())
+    return decodeWebContractBootstrap(await readBoundedJson(response))
   }
 
   async readSessions(
@@ -118,10 +159,10 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) {
-      const failure = decodeWebApiErrorResponse(await response.json())
+      const failure = decodeWebApiErrorResponse(await readBoundedJson(response))
       throw new ProductRequestError(failure.error.code, failure.error.kind, failure.error.message)
     }
-    return validateSessionPage(decodeWebAttentionSnapshot(await response.json()), request)
+    return validateSessionPage(decodeWebAttentionSnapshot(await readBoundedJson(response)), request)
   }
 }
 

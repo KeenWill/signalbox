@@ -1,26 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import bootstrapFixture from './generated/web-contract-bootstrap.json' with { type: 'json' }
 import {
+  MAX_PRODUCT_HTTP_RESPONSE_BYTES,
   MAX_SESSION_PAGE_ITEMS,
   ProductRequestError,
   readProductSessionState,
   SameOriginProductTransport,
 } from './product'
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
-  capabilities: {
-    bounded_json: true,
-    bounded_session_timeline: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: {
-    max_json_body_bytes: 65_536,
-    max_ndjson_item_bytes: 262_144,
-    max_timeline_window_bytes: 524_288,
-    max_timeline_window_items: 256,
-  },
-} as const
 
 const sessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
 const sessionPageFixture = {
@@ -195,6 +181,45 @@ describe('SameOriginProductTransport', () => {
         includeArchived: false,
       }),
     ).rejects.toThrow(`exceeds ${MAX_SESSION_PAGE_ITEMS} summaries`)
+  })
+
+  it('rejects a continuation that does not match the returned page boundary', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: {
+                ...sessionPageFixture.continuation,
+                session_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e',
+              },
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('does not match its returned boundary')
+  })
+
+  it('rejects a catalog response beyond its encoded byte ceiling before decoding', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(' '.repeat(MAX_PRODUCT_HTTP_RESPONSE_BYTES + 1))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('exceeds its encoded byte ceiling')
   })
 })
 
