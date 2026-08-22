@@ -67,6 +67,7 @@ use signalbox_persistence::{
     repo_watch_dispatch_obligation::{
         RepoWatchDispatchObligation, RepoWatchDispatchRetryPolicy, RepoWatchObligationParkRelease,
     },
+    repo_watch_operations::PostgresRepoWatchOperations,
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
 };
@@ -4736,6 +4737,52 @@ async fn dispatch_batch_creates_every_session_and_audit_row_atomically()
 
     assert_eq!(fixture.sessions.len(), expected_action_count);
     assert_eq!(usize::try_from(action_count)?, expected_action_count);
+    Ok(())
+}
+
+/// The operator read joins durable event, action, work, and session facts while
+/// retaining their separate identities and bounded page shapes.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repo_watch_operations_project_held_queued_and_correlated_sessions()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let occupied = evaluate_second_conflict(&fixture).await?;
+    let reader = PostgresRepoWatchOperations::new(fixture.pool.clone());
+    let statuses = reader.repository_statuses(None).await?;
+    let pull_requests = reader
+        .pull_requests(fixture.repository.clone(), None)
+        .await?;
+    let work = reader.work(fixture.repository.clone(), None, None).await?;
+    let sessions = reader
+        .pull_request_sessions(
+            fixture.repository.clone(),
+            pull_request_number(&fixture.event),
+            None,
+        )
+        .await?;
+    let activity = reader
+        .activity(fixture.repository.clone(), None, None)
+        .await?;
+
+    assert_eq!(occupied, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(statuses.repositories.len(), 1);
+    assert_eq!(statuses.repositories[0].held_slot_count, 1);
+    assert_eq!(statuses.repositories[0].queued_obligation_count, 1);
+    assert_eq!(pull_requests.pull_requests.len(), 1);
+    assert_eq!(pull_requests.pull_requests[0].held_slot_count, 1);
+    assert_eq!(pull_requests.pull_requests[0].queued_obligation_count, 1);
+    assert_eq!(work.held_slots.len(), 1);
+    assert_eq!(work.queued_obligations.len(), 1);
+    assert_eq!(sessions.sessions.len(), fixture.sessions.len());
+    assert_eq!(sessions.sessions[0].attention.session, fixture.sessions[1]);
+    assert_eq!(sessions.sessions[1].attention.session, fixture.sessions[0]);
+    assert_eq!(activity.events.len(), 3);
+    assert_eq!(
+        activity.events[0].id,
+        work.queued_obligations[0].latest_event
+    );
+    assert_eq!(activity.events[1].id, fixture.event.id());
     Ok(())
 }
 

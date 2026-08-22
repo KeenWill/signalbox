@@ -49,7 +49,8 @@ of slow complete reconciliation is verified against this PR
 fence and unattended escalation release described below are verified against
 this PR (`agent/headless-approval-escalation`). The operator-commissioned
 dispatch fence and its unattended-escalation coverage are verified against this
-PR (`agent/commissioned-dispatch-fence`).
+PR (`agent/commissioned-dispatch-fence`). The bounded repository-watch operator
+projections are verified against this PR (`agent/web-repo-watch-projection`).
 
 ## Configuration and credential boundary
 
@@ -1359,6 +1360,39 @@ hold the gate. Reaching zero uncaused rows is the remaining rollout work, since
 the runtime today records `cross_drain_shadow_gap` and derives
 `poll_only_family`, while `compressed_transition` and `context_drift` are
 available to record and not yet emitted.
+
+## Operator read projection
+
+**Implemented behavior.** Repository-watch operations are available through a
+typed, read-only application port backed by the existing durable cursor, event,
+evaluation, dispatch, release, obligation, held-slot, webhook, and commissioned
+dispatch records. Each call uses one repeatable-read, read-only transaction.
+Current repository, pull-request, held-work, queued-work, and correlated-session
+pages return at most 64 rows per collection. Event and webhook history return at
+most 100 rows per collection and continue with durable keyset positions rather
+than an offset or fixed terminal limit. A pull request's correlated session
+summaries are loaded as one bounded set in that transaction; constructing the
+page never follows each session separately.
+
+**Implemented behavior.** The projection retains separate typed facts for the
+last observed event, last event that matched an actionable rule, last dispatch
+attempt, and last achieved-and-released automation settlement. It reports held
+slots and outstanding obligations separately, including the held release
+blockers and whether an obligation is ready, occupied, cooling down, or parked.
+Repository health includes explicit five-minute and one-hour webhook windows,
+latest and one-hour maximum projection latency, and event-kind counts. Activity
+times come from durable record timestamps; neither session age nor activity time
+is inferred from a UUID.
+
+**Implemented behavior.** Pull-request provider state comes from the normalized
+durable cursor and reports lifecycle, draft state, mergeability, completed-check
+status, current-head review decision, stale-review count, unresolved-thread
+count, and current open-stack relationships. Automation convergence is not a
+synonym for provider mergeability or checks: a current-head seal requires the
+latest dispatch to have been released, every action session's latest goal to be
+achieved, and the dispatch event's durable head to equal the current normalized
+head. An achieved release against an older head is reported as a stale seal;
+held, queued, non-converged, and unattempted states remain distinct.
 
 ## Open edges
 

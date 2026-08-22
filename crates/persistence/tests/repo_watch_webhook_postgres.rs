@@ -14,6 +14,7 @@ use rust_decimal::Decimal;
 use signalbox_application::RepoWatchEventContentIdentityV1;
 use signalbox_application::{
     RepoWatchObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
+    max_repo_watch_activity_page_items,
 };
 use signalbox_domain::{CommitSha, PullRequestNumber, RepoWatchEventKindNameV1, RepositorySlug};
 use signalbox_persistence::{
@@ -23,6 +24,7 @@ use signalbox_persistence::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
         RepoWatchCursorCandidate, RepoWatchCursorGeneration,
     },
+    repo_watch_operations::PostgresRepoWatchOperations,
     repo_watch_webhook::{
         MAX_PENDING_PAGE_BYTES, PostgresRepoWatchWebhookStore, RepoWatchWebhookAdmission,
         RepoWatchWebhookAdmissionOutcome, RepoWatchWebhookDeliveryKey, RepoWatchWebhookDisposition,
@@ -62,6 +64,8 @@ const MATCHED_IDENTITY: [u8; 32] = [0x31; 32];
 const WEBHOOK_ONLY_IDENTITY: [u8; 32] = [0x32; 32];
 const POLL_ONLY_IDENTITY: [u8; 32] = [0x33; 32];
 const HISTORICAL_IDENTITY: [u8; 32] = [0x35; 32];
+const OPERATIONS_BURST_BASE: u128 = 0xa00;
+const OPERATIONS_BURST_COUNT: usize = 101;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -184,6 +188,22 @@ async fn admit_fixture(
             BODY,
         )?)
         .await?)
+}
+
+async fn seed_operations_webhook_burst(
+    store: &PostgresRepoWatchWebhookStore,
+) -> Result<(), Box<dyn Error>> {
+    for offset in 0..OPERATIONS_BURST_COUNT {
+        let key = delivery_key(OPERATIONS_BURST_BASE + offset as u128);
+        admit_fixture(store, key).await?;
+        store
+            .record_terminal(
+                key,
+                &projected_request(vec![event_projection(MATCHED_IDENTITY)?])?,
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 fn admitted_receipt(
@@ -651,6 +671,63 @@ async fn terminal_disposition_drains_pending_delivery() -> Result<(), Box<dyn Er
             .await?;
     assert_eq!(projection_count, 1);
     assert_eq!(disposition_count, 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operations_webhook_window_and_activity_are_bounded_and_keyset_paged()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                None,
+                RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+                    Vec::new(),
+                    RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())?,
+                )),
+                Vec::new(),
+            ),
+        )
+        .await?;
+    let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    seed_operations_webhook_burst(&webhook_store).await?;
+    let reader = PostgresRepoWatchOperations::new(pool);
+    let statuses = reader.repository_statuses(None).await?;
+    let first = reader.activity(repository.clone(), None, None).await?;
+    let second = reader
+        .activity(repository, None, first.webhook_continuation_before)
+        .await?;
+
+    assert_eq!(statuses.repositories.len(), 1);
+    assert_eq!(
+        statuses.repositories[0].previous_five_minutes.received,
+        u64::try_from(OPERATIONS_BURST_COUNT)?
+    );
+    assert_eq!(
+        statuses.repositories[0].previous_five_minutes.projected,
+        u64::try_from(OPERATIONS_BURST_COUNT)?
+    );
+    assert_eq!(
+        first.webhooks.len(),
+        usize::from(max_repo_watch_activity_page_items())
+    );
+    assert_eq!(
+        second.webhooks.len(),
+        OPERATIONS_BURST_COUNT - usize::from(max_repo_watch_activity_page_items())
+    );
+    assert_eq!(
+        first.webhooks[0].receipt_sequence,
+        u64::try_from(OPERATIONS_BURST_COUNT)?
+    );
+    assert_eq!(
+        second.webhooks[0].receipt_sequence,
+        first.webhooks[first.webhooks.len() - 1].receipt_sequence - 1
+    );
     Ok(())
 }
 

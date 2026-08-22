@@ -574,7 +574,7 @@ struct CursorRow {
     cursor_payload: Json<Value>,
 }
 
-async fn load_cursor_in_transaction(
+pub(crate) async fn load_cursor_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &RepositorySlug,
 ) -> Result<Option<RepoWatchCursor>, RepoWatchStoreError> {

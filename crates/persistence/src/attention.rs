@@ -248,7 +248,7 @@ SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
  ORDER BY selected.session_id
 "#;
 
-async fn load_summaries(
+pub(crate) async fn load_summaries(
     transaction: &mut Transaction<'_, Postgres>,
     identities: Option<&[Uuid]>,
     after: Option<SessionId>,
