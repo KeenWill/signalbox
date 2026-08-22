@@ -69,7 +69,8 @@ const MAX_TOTAL_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_WORKING_DIRECTORY_CHARACTERS: usize = 4096;
 const MAX_WORKING_DIRECTORY_BYTES: usize = MAX_WORKING_DIRECTORY_CHARACTERS * 4;
 const MAX_SANDBOX_ENVIRONMENT_NAME_BYTES: usize = 4096;
-const MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES: usize = 64 * 1024;
+const MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES: usize =
+    crate::limits::MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES;
 #[cfg(target_os = "linux")]
 const MIN_LINUX_ARG_MAX_BYTES: usize = 128 * 1024;
 #[cfg(target_os = "linux")]
@@ -767,6 +768,8 @@ pub enum BwrapAvailability {
     Unusable,
     /// The exact profile probe exhausted the request deadline.
     TimedOut,
+    /// The private restricted-environment descriptor could not be prepared.
+    EnvironmentDelivery,
 }
 
 /// Injectable one-shot process spawning and bubblewrap probing.
@@ -1055,6 +1058,9 @@ fn classify_bwrap_availability(result: &ProcessRunResult) -> BwrapAvailability {
             BwrapAvailability::Missing
         }
         ProcessOutcome::TimedOut => BwrapAvailability::TimedOut,
+        ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::EnvironmentDelivery,
+        } => BwrapAvailability::EnvironmentDelivery,
         ProcessOutcome::Exited { .. }
         | ProcessOutcome::SpawnFailed { .. }
         | ProcessOutcome::SupervisionFailed { .. } => BwrapAvailability::Unusable,
@@ -1303,7 +1309,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 return Err(SandboxEnvironmentRunError::Arguments);
             }
         }
-        Ok(self
+        let result = self
             .run_with_capture_environment(
                 arguments,
                 EXEC_CAPTURE_BYTES,
@@ -1313,7 +1319,15 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 #[cfg(not(target_os = "linux"))]
                 None,
             )
-            .await)
+            .await;
+        if result.outcome
+            == (ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::EnvironmentDelivery,
+            })
+        {
+            return Err(SandboxEnvironmentRunError::Delivery);
+        }
+        Ok(result)
     }
 
     pub(crate) fn pinned_workspace_root(&self) -> &Path {
@@ -1452,6 +1466,14 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         );
         let availability = self.runner.bwrap_availability(probe).await;
         match availability {
+            BwrapAvailability::EnvironmentDelivery if environment.is_some() => ExecResult {
+                confinement: ExecutionConfinement::SandboxSetupFailed,
+                outcome: ProcessOutcome::SpawnFailed {
+                    reason: ProcessSpawnFailure::EnvironmentDelivery,
+                },
+                stdout: OutputCapture::empty(),
+                stderr: OutputCapture::empty(),
+            },
             BwrapAvailability::Available => {
                 if !self.mount_profile.identities_are_current() {
                     return ExecResult {
@@ -1540,7 +1562,9 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 );
                 sandbox_process_result(self.runner.run(request).await, capture_bytes)
             }
-            BwrapAvailability::Missing | BwrapAvailability::Unusable => ExecResult {
+            BwrapAvailability::Missing
+            | BwrapAvailability::Unusable
+            | BwrapAvailability::EnvironmentDelivery => ExecResult {
                 confinement: ExecutionConfinement::SandboxRefused { availability },
                 outcome: ProcessOutcome::SpawnFailed {
                     reason: ProcessSpawnFailure::SandboxUnavailable,
@@ -2644,6 +2668,8 @@ pub enum ProcessSpawnFailure {
     SandboxUnavailable,
     /// Bubblewrap did not confirm that it dispatched the requested target.
     SandboxSetup,
+    /// The private restricted-environment descriptor could not be prepared.
+    EnvironmentDelivery,
     /// Another sanitized spawn failure occurred.
     Other,
 }
@@ -2741,6 +2767,13 @@ fn sandbox_process_result(mut result: ProcessRunResult, capture_bytes: usize) ->
     truncate_process_output(&mut result.stderr, capture_bytes);
     if dispatched {
         return process_result(ExecutionConfinement::FilesystemConfined, result);
+    }
+    if result.outcome
+        == (ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::EnvironmentDelivery,
+        })
+    {
+        return process_result(ExecutionConfinement::SandboxSetupFailed, result);
     }
     let outcome = match result.outcome {
         ProcessOutcome::TimedOut => ProcessOutcome::TimedOut,
@@ -2847,7 +2880,10 @@ async fn read_supervised_stdout(
     let status = serde_json::from_slice(encoded)
         .map_err(|_| std::io::Error::other("supervisor status trailer is malformed"))?;
     let launcher_trailer = match (status_protocol, status) {
-        (ProcessStatusProtocol::SandboxDispatch, SupervisorStatus::SpawnFailed { .. }) => None,
+        (
+            ProcessStatusProtocol::SandboxDispatch,
+            SupervisorStatus::SpawnFailed { .. } | SupervisorStatus::DeliveryFailed,
+        ) => None,
         (ProcessStatusProtocol::SandboxDispatch, _) => {
             let (launcher_marker, launcher_status) = parse_launcher_status(&tail[..marker])
                 .ok_or_else(|| {
@@ -2881,6 +2917,7 @@ async fn read_supervised_stdout(
             | SupervisorStatus::TimedOut
             | SupervisorStatus::Cancelled
             | SupervisorStatus::SpawnFailed { .. }
+            | SupervisorStatus::DeliveryFailed
             | SupervisorStatus::SupervisionFailed { .. } => None,
         },
     ))
@@ -3720,6 +3757,9 @@ fn supervisor_outcome(
             .unwrap_or(ProcessOutcome::Exited { code }),
         SupervisorStatus::TimedOut => ProcessOutcome::TimedOut,
         SupervisorStatus::SpawnFailed { reason } => process_spawn_failure(reason),
+        SupervisorStatus::DeliveryFailed => ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::EnvironmentDelivery,
+        },
         SupervisorStatus::Cancelled => ProcessOutcome::SupervisionFailed {
             reason: ProcessSupervisionFailure::Wait,
         },
@@ -3737,6 +3777,9 @@ fn launcher_outcome(status: LauncherStatus) -> ProcessOutcome {
     match status {
         LauncherStatus::Exited { code, .. } => ProcessOutcome::Exited { code },
         LauncherStatus::SpawnFailed { reason } => process_spawn_failure(reason),
+        LauncherStatus::DeliveryFailed => ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::EnvironmentDelivery,
+        },
         LauncherStatus::SupervisionFailed => ProcessOutcome::SupervisionFailed {
             reason: ProcessSupervisionFailure::Wait,
         },
@@ -3766,6 +3809,7 @@ fn supervisor_capture_completeness(
         SupervisorStatus::Exited { stdout, stderr, .. } => (stdout, stderr),
         SupervisorStatus::TimedOut
         | SupervisorStatus::Cancelled
+        | SupervisorStatus::DeliveryFailed
         | SupervisorStatus::SupervisionFailed { .. } => (
             SupervisorCaptureCompleteness::Incomplete,
             SupervisorCaptureCompleteness::Incomplete,
@@ -3781,7 +3825,7 @@ fn supervisor_capture_completeness(
             SupervisorCaptureCompleteness::Incomplete,
             SupervisorCaptureCompleteness::Incomplete,
         ),
-        Some(LauncherStatus::SpawnFailed { .. }) | None => (
+        Some(LauncherStatus::SpawnFailed { .. }) | Some(LauncherStatus::DeliveryFailed) | None => (
             SupervisorCaptureCompleteness::Complete,
             SupervisorCaptureCompleteness::Complete,
         ),
@@ -4811,6 +4855,19 @@ mod tests {
     }
 
     #[test]
+    fn production_probe_classifies_environment_delivery_failure() {
+        let mut delivery_failure = successful_process(b"");
+        delivery_failure.outcome = ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::EnvironmentDelivery,
+        };
+
+        assert_eq!(
+            classify_bwrap_availability(&delivery_failure),
+            BwrapAvailability::EnvironmentDelivery
+        );
+    }
+
+    #[test]
     fn production_probe_classifies_timeout_and_nonzero_exit_as_unusable() {
         let mut timed_out = successful_process(b"");
         timed_out.outcome = ProcessOutcome::TimedOut;
@@ -5264,6 +5321,41 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    async fn runner_environment_reports_probe_descriptor_failure_as_delivery()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let read_only = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::EnvironmentDelivery,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let mut command_runner = SandboxedCommandRunner::try_new_runner_restricted(
+            runner,
+            workspace.path(),
+            &[read_only.path().to_owned()],
+        )?;
+        let arguments = ExecArguments {
+            program: String::from("fixture-program"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+        let environment = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        )?;
+
+        let error = command_runner
+            .try_run_with_environment(arguments, environment)
+            .await
+            .expect_err("descriptor preparation failure must remain typed");
+
+        assert_eq!(error, SandboxEnvironmentRunError::Delivery);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
     async fn runner_restricted_environment_uses_a_private_namespace_file()
     -> Result<(), Box<dyn Error>> {
         let workspace = ReplacementWorkspace::new()?;
@@ -5604,6 +5696,7 @@ mod tests {
     fn runner_restricted_profile_rejects_a_read_only_delivery_ancestor()
     -> Result<(), Box<dyn Error>> {
         let workspace = ReplacementWorkspace::new()?;
+        let ancestor = PathBuf::from("/");
         let runner = FakeRunner::returning(
             BwrapAvailability::Available,
             successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
@@ -5612,15 +5705,15 @@ mod tests {
         let error = SandboxedCommandRunner::try_new_runner_restricted(
             runner,
             workspace.path(),
-            &[PathBuf::from("/")],
+            std::slice::from_ref(&ancestor),
         )
         .expect_err("a read-only delivery ancestor must be rejected at construction");
+        let ExecToolConstructionError::ReadOnlyPath { path, source } = error else {
+            panic!("expected a read-only path construction failure");
+        };
 
-        assert!(matches!(
-            error,
-            ExecToolConstructionError::ReadOnlyPath { path, source: None }
-                if path == Path::new("/")
-        ));
+        assert_eq!(path, ancestor);
+        assert!(source.is_none());
         Ok(())
     }
 

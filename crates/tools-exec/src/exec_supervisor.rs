@@ -58,7 +58,8 @@ mod linux {
     const RESTRICTED_ENVIRONMENT_FILE: &str = "/run/signalbox/restricted-environment";
     const RESTRICTED_ENVIRONMENT_DESCRIPTOR_PLACEHOLDER: &str =
         "signalbox-private-environment-descriptor";
-    const MAX_RESTRICTED_ENVIRONMENT_BYTES: usize = 64 * 1024;
+    const MAX_RESTRICTED_ENVIRONMENT_BYTES: usize =
+        crate::limits::MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES;
     const HTTPS_PROXY_PORT: u16 = 18_080;
     const HTTPS_BROKER_SOCKET: &str = "/run/signalbox/https-broker.sock";
     const MAX_HTTPS_PROXY_TUNNELS: usize = 8;
@@ -791,7 +792,7 @@ mod linux {
         } else {
             match restricted_environment_descriptor(&delivery_payload) {
                 Ok(descriptor) => Some(descriptor),
-                Err(()) => return ExitCode::FAILURE,
+                Err(()) => return emit_launcher_status(LauncherStatus::DeliveryFailed),
             }
         };
         if let Some(descriptor) = descriptor.as_ref() {
@@ -835,6 +836,10 @@ mod linux {
             },
             Err(TargetFailure::Supervision) => LauncherStatus::SupervisionFailed,
         };
+        emit_launcher_status(status)
+    }
+
+    fn emit_launcher_status(status: LauncherStatus) -> ExitCode {
         let mut stdout = std::io::stdout().lock();
         let written = stdout
             .write_all(LAUNCH_STATUS_TRAILER)
@@ -1305,6 +1310,7 @@ mod linux {
                 stderr,
             },
             LauncherStatus::SpawnFailed { reason } => SupervisorStatus::SpawnFailed { reason },
+            LauncherStatus::DeliveryFailed => SupervisorStatus::DeliveryFailed,
             LauncherStatus::SupervisionFailed => SupervisorStatus::SupervisionFailed {
                 stage: SupervisorFailureStage::Wait,
             },

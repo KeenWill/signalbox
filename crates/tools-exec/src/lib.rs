@@ -51,6 +51,7 @@
 
 mod diagnostics;
 mod exec_supervisor;
+mod limits;
 mod process;
 #[cfg(target_os = "linux")]
 mod supervisor_protocol;
