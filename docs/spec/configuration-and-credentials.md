@@ -2,7 +2,9 @@
 
 The browser HTTP listener and same-origin static assets are verified against
 this PR (`agent/web-http-transport`); contract version two and its blob routes
-are verified against this PR (`agent/web-blob-delivery`).
+are verified against this PR (`agent/web-blob-delivery`). The composed bounded
+session descriptor and historical-window routes are verified against this PR
+(`agent/web-session-timeline`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -154,9 +156,10 @@ stated where each is owned.
   configuration failure. Otherwise the runner socket uses the same private-node
   discipline but has an independent lock, identity, vocabulary, and listener.
 - `SIGNALBOX_WEB_BIND` — optional browser HTTP socket address. Absence binds
-  `127.0.0.1:37231`, keeping the listener on loopback; an explicit valid socket
-  address is the deployment's opt-in override. An invalid or non-Unicode value
-  fails the `Configuration` phase without logging the value.
+  `127.0.0.1:37231`, keeping the listener on loopback. Explicit addresses must
+  also be loopback because these routes have no application authentication; an
+  invalid, non-Unicode, or non-loopback value fails the `Configuration` phase
+  without logging the value.
 - `SIGNALBOX_WEB_ASSET_ROOT` — optional path to a static production web build.
   An explicitly empty path fails the `Configuration` phase. When absent, non-API
   paths return `404 Not Found`; when present, the daemon serves files from that
@@ -168,19 +171,23 @@ The browser application and `/api/**` share the configured listener and origin.
 API routing takes precedence over static files: an unknown `/api/**` path
 returns a structured API `404` and never the web application's `index.html`. The
 daemon does not emit permissive CORS headers and adds no account, login,
-bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. Those
-deployment boundaries remain outside Signalbox.
+bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. The
+listener therefore rejects non-loopback binds; any future remote deployment
+requires an explicit authentication and transport-security design first.
 
 `GET /api/bootstrap` returns the exact contract family `signalbox.web-http`,
 version `2`, the `bounded_json`, `same_origin_json_mutations`,
 `ndjson_streaming`, `immutable_blob_content`, `blob_derivations`, and
-`image_derivatives` capabilities, and the effective 65,536-byte JSON-body and
-NDJSON-item hard ceilings. The generated browser decoder rejects an unknown
-field, wrong shape, different family, or different version rather than
-interpreting it as the local process protocol. No process-protocol frame is a
-browser DTO. The descriptor, content, and download routes beneath
-`/api/blobs/{digest}` are the same-origin surface owned by
-[blob storage](blob-storage.md#browser-delivery-views-and-derivations).
+`image_derivatives` capabilities, the `bounded_session_timeline` capability, the
+effective 65,536-byte JSON-body and NDJSON-item hard ceilings, and the 256-item
+and 65,536-projected-byte timeline ceilings. The generated browser decoder
+rejects an unknown field, wrong shape, different family, or different version
+rather than interpreting it as the local process protocol. No process-protocol
+frame is a browser DTO. The blob descriptor, content, and download routes
+beneath `/api/blobs/{digest}` are the same-origin surface owned by
+[blob storage](blob-storage.md#browser-delivery-views-and-derivations). The
+session descriptor and historical-window route shapes and semantics are owned by
+[Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline).
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
 authority. The checked-in `web-contract.mjs` runtime decoders and

@@ -24,6 +24,71 @@ use signalbox_domain::{
     TurnId, UpdateSessionPlacementRejectionKind, ValidatedModelSettings, WorkspaceOrigin,
 };
 
+pub(crate) const SESSION_CREATED: &str = "session_created";
+pub(crate) const SESSION_MODEL_SETTINGS_CHANGED: &str = "session_model_settings_changed";
+pub(crate) const TURN_MODEL_SETTINGS_RESOLVED: &str = "turn_model_settings_resolved";
+pub(crate) const INPUT_ACCEPTED: &str = "input_accepted";
+pub(crate) const GOAL_TURN_RETIRED: &str = "goal_turn_retired";
+pub(crate) const TURN_ACTIVATED: &str = "turn_activated";
+pub(crate) const TURN_FAILED: &str = "turn_failed";
+pub(crate) const MODEL_CALL_TRANSITION: &str = "model_call_transition";
+pub(crate) const TOOL_BATCH_TRANSITION: &str = "tool_batch_transition";
+pub(crate) const TOOL_APPROVAL_DECIDED: &str = "tool_approval_decided";
+pub(crate) const CONTEXT_COMPACTED: &str = "context_compacted";
+pub(crate) const TURN_COMPLETED: &str = "turn_completed";
+pub(crate) const TURN_REFUSED: &str = "turn_refused";
+pub(crate) const TURN_CANCELLED: &str = "turn_cancelled";
+pub(crate) const TURN_RECONCILIATION_REQUIRED: &str = "turn_reconciliation_required";
+pub(crate) const RUNNER_STATE_TRANSITION: &str = "runner_state_transition";
+pub(crate) const DELEGATION_UPDATE: &str = "delegation_update";
+pub(crate) const DELEGATION_WAKE: &str = "delegation_wake";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutboxEventDiscriminator {
+    SessionCreated,
+    SessionModelSettingsChanged,
+    TurnModelSettingsResolved,
+    InputAccepted,
+    GoalTurnRetired,
+    TurnActivated,
+    TurnFailed,
+    ModelCallTransition,
+    ToolBatchTransition,
+    ToolApprovalDecided,
+    ContextCompacted,
+    TurnCompleted,
+    TurnRefused,
+    TurnCancelled,
+    TurnReconciliationRequired,
+    RunnerStateTransition,
+    DelegationUpdate,
+    DelegationWake,
+}
+
+pub(crate) fn outbox_event_discriminator_from_str(value: &str) -> Option<OutboxEventDiscriminator> {
+    Some(match value {
+        SESSION_CREATED => OutboxEventDiscriminator::SessionCreated,
+        SESSION_MODEL_SETTINGS_CHANGED => OutboxEventDiscriminator::SessionModelSettingsChanged,
+        TURN_MODEL_SETTINGS_RESOLVED => OutboxEventDiscriminator::TurnModelSettingsResolved,
+        INPUT_ACCEPTED => OutboxEventDiscriminator::InputAccepted,
+        GOAL_TURN_RETIRED => OutboxEventDiscriminator::GoalTurnRetired,
+        TURN_ACTIVATED => OutboxEventDiscriminator::TurnActivated,
+        TURN_FAILED => OutboxEventDiscriminator::TurnFailed,
+        MODEL_CALL_TRANSITION => OutboxEventDiscriminator::ModelCallTransition,
+        TOOL_BATCH_TRANSITION => OutboxEventDiscriminator::ToolBatchTransition,
+        TOOL_APPROVAL_DECIDED => OutboxEventDiscriminator::ToolApprovalDecided,
+        CONTEXT_COMPACTED => OutboxEventDiscriminator::ContextCompacted,
+        TURN_COMPLETED => OutboxEventDiscriminator::TurnCompleted,
+        TURN_REFUSED => OutboxEventDiscriminator::TurnRefused,
+        TURN_CANCELLED => OutboxEventDiscriminator::TurnCancelled,
+        TURN_RECONCILIATION_REQUIRED => OutboxEventDiscriminator::TurnReconciliationRequired,
+        RUNNER_STATE_TRANSITION => OutboxEventDiscriminator::RunnerStateTransition,
+        DELEGATION_UPDATE => OutboxEventDiscriminator::DelegationUpdate,
+        DELEGATION_WAKE => OutboxEventDiscriminator::DelegationWake,
+        _ => return None,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProgramRequestStorageKind {
     Now,
