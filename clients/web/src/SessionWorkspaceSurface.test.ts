@@ -56,6 +56,7 @@ describe('Session Workspace projection', () => {
       fixture.items[1],
       fixture.items[2],
       fixture.items[3],
+      fixture.items[4],
     ])
   })
 })

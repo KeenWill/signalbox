@@ -172,6 +172,14 @@ const captureSessionEvidence = async (page: Page) => {
   await page.getByRole('button', { name: 'Open workspace' }).click()
   await expect(page.getByRole('heading', { name: sessionEvidenceFixture.id })).toBeVisible()
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
+  await expect(page).toHaveScreenshot('sessions-desktop-dark.png', {
+    animations: 'disabled',
+  })
+  await page.getByRole('button', { name: 'Use light theme' }).click()
+  await expect(page).toHaveScreenshot('sessions-desktop-light.png', {
+    animations: 'disabled',
+  })
+  await page.getByRole('button', { name: 'Use dark theme' }).click()
   const detail = page.getByRole('button', {
     name: new RegExp(`${sessionEvidenceFixture.detailAddress} input accepted`),
   })

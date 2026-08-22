@@ -1356,6 +1356,9 @@ kbd {
   background: transparent;
   text-align: left;
 }
+.session-item-summary.no-detail {
+  grid-template-columns: 20ch minmax(160px, 1fr) auto;
+}
 .session-item-summary svg {
   width: 14px;
   color: var(--text-muted);
@@ -1469,6 +1472,9 @@ kbd {
   }
   .session-item-summary {
     grid-template-columns: 16px 20ch minmax(100px, 1fr);
+  }
+  .session-item-summary.no-detail {
+    grid-template-columns: 20ch minmax(100px, 1fr);
   }
   .session-item-summary small {
     display: none;

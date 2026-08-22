@@ -41,17 +41,69 @@ describe('BoundedSessionHistory', () => {
       item as unknown as Parameters<typeof timelineDetailIdentity>[0],
     )
 
-    for (const bodyChange of [
-      { state: 'known_failed' },
-      { request_context_items: '4' },
-      { usage: { ...body.usage, output_tokens: '21' } },
-      { cause_code: 'failed' },
-    ]) {
-      const changed = { ...item, body: { ...body, ...bodyChange } }
-      expect(
-        timelineDetailIdentity(changed as unknown as Parameters<typeof timelineDetailIdentity>[0]),
-      ).not.toEqual(identity)
+    const changedState = { ...item, body: { ...body, state: 'known_failed' } }
+    const changedContext = { ...item, body: { ...body, request_context_items: '4' } }
+    const changedUsage = {
+      ...item,
+      body: { ...body, usage: { ...body.usage, output_tokens: '21' } },
     }
+    const changedCause = { ...item, body: { ...body, cause_code: 'failed' } }
+
+    expect(
+      timelineDetailIdentity(
+        changedState as unknown as Parameters<typeof timelineDetailIdentity>[0],
+      ),
+    ).not.toEqual(identity)
+    expect(
+      timelineDetailIdentity(
+        changedContext as unknown as Parameters<typeof timelineDetailIdentity>[0],
+      ),
+    ).not.toEqual(identity)
+    expect(
+      timelineDetailIdentity(
+        changedUsage as unknown as Parameters<typeof timelineDetailIdentity>[0],
+      ),
+    ).not.toEqual(identity)
+    expect(
+      timelineDetailIdentity(
+        changedCause as unknown as Parameters<typeof timelineDetailIdentity>[0],
+      ),
+    ).not.toEqual(identity)
+  })
+
+  it('changes user-input continuation identity when attachment facts drift', () => {
+    const body = {
+      type: 'user_input',
+      turn_id: '00000000-0000-0000-0000-000000000041',
+      text: { text: 'hello', offset_bytes: '0', total_bytes: '5', continuation: null },
+      attachments: [
+        {
+          blob_id: '00000000-0000-0000-0000-000000000042',
+          length_bytes: '5',
+          media_type: 'text/plain',
+        },
+      ],
+    } as const
+    const item = {
+      address: { event_sequence: '41' },
+      kind: 'input_accepted',
+      body,
+      projected_body_bytes: 133,
+    }
+    const identity = timelineDetailIdentity(
+      item as unknown as Parameters<typeof timelineDetailIdentity>[0],
+    )
+    const changed = {
+      ...item,
+      body: {
+        ...body,
+        attachments: [{ ...body.attachments[0], length_bytes: '6' }],
+      },
+    }
+
+    expect(
+      timelineDetailIdentity(changed as unknown as Parameters<typeof timelineDetailIdentity>[0]),
+    ).not.toEqual(identity)
   })
 
   it('navigates an enormous session without retaining lifetime history', async () => {
@@ -202,7 +254,7 @@ describe('BoundedSessionHistory', () => {
     }
 
     await expect(new BoundedSessionHistory(sessionId, source).describe()).rejects.toThrow(
-      'boundaries are contradictory',
+      'item count contradicts its address span',
     )
   })
 

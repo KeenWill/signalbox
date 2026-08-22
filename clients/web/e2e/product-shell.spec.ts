@@ -278,7 +278,11 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await sessionId.press('Enter')
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
-  await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
+  await expect(
+    page
+      .getByLabel('Session telemetry')
+      .getByText(sessionWorkspaceFixture.itemCount, { exact: true }),
+  ).toBeVisible()
   const completed = page.getByRole('button', {
     name: new RegExp(`${sessionWorkspaceFixture.latestAddress} turn completed`),
   })

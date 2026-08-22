@@ -142,7 +142,19 @@ const projectedDetailBodyBytes = (item: TimelineDetailItem): number => {
 
 export const timelineDetailIdentity = (item: TimelineDetailItem): TimelineDetailIdentity => {
   const body = item.body
-  if (body.type === 'user_input') return [body.type, body.turn_id]
+  if (body.type === 'user_input') {
+    return [
+      body.type,
+      JSON.stringify({
+        turn_id: body.turn_id,
+        attachments: body.attachments.map((attachment) => ({
+          blob_id: attachment.blob_id,
+          length_bytes: attachment.length_bytes,
+          media_type: attachment.media_type,
+        })),
+      }),
+    ]
+  }
   if (body.type === 'model_call') {
     return [
       body.type,
@@ -501,12 +513,11 @@ export class BoundedSessionHistory {
     if (
       itemCount === 0n ||
       firstAddress > latestAddress ||
-      latestAddress > observedThrough ||
-      itemCount > addressSpan
+      latestAddress > observedThrough
     ) {
       throw new TypeError('descriptor timeline boundaries are contradictory')
     }
-    if ((itemCount === 1n) !== (firstAddress === latestAddress)) {
+    if ((itemCount === 1n) !== (firstAddress === latestAddress) || itemCount > addressSpan) {
       throw new TypeError('descriptor item count contradicts its address span')
     }
     decimalU64(descriptor.sizes.projected_text_bytes)

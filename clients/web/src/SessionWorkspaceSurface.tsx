@@ -31,6 +31,7 @@ export const visibleSessionItems = (
           'turn_refused',
           'turn_cancelled',
           'turn_reconciliation_required',
+          'model_call_transition',
         ].includes(item.kind),
       )
     : detail === 'condensed'
@@ -225,7 +226,7 @@ export function SessionWorkspaceSurface({
                       : `opened ${session.data.anchor.kind} selected position`}
               </p>
             </div>
-            <dl className="session-telemetry">
+            <dl className="session-telemetry" aria-label="Session telemetry">
               <div>
                 <dt>Items</dt>
                 <dd>{session.data.descriptor.sizes.item_count}</dd>
@@ -264,7 +265,7 @@ export function SessionWorkspaceSurface({
                 <li key={id} className={selected === id ? 'selected' : undefined}>
                   <button
                     type="button"
-                    className="session-item-summary"
+                    className={`session-item-summary${detailAvailable ? '' : ' no-detail'}`}
                     data-timeline-id={id}
                     aria-expanded={detailAvailable ? isExpanded : undefined}
                     onClick={() => {
