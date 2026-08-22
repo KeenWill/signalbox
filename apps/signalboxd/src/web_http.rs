@@ -437,8 +437,7 @@ fn search_page_dto(page: signalbox_application::SearchPage) -> WebSearchPage {
 
 fn search_result_dto(result: signalbox_application::SearchResult) -> WebSearchResult {
     WebSearchResult {
-        session_id: WebSessionId::from_canonical(result.session.into_uuid().to_string())
-            .expect("domain session UUID formats canonically"),
+        session_id: WebSessionId::from_uuid(result.session.into_uuid()),
         address: address_dto(result.address),
         source: search_source_dto(result.source),
         content_class: search_content_class_dto(result.content_class),
@@ -457,8 +456,7 @@ fn search_result_dto(result: signalbox_application::SearchResult) -> WebSearchRe
 fn search_source_dto(source: SearchResultSource) -> WebSearchResultSource {
     match source {
         SearchResultSource::Session(session) => WebSearchResultSource::Session {
-            session_id: WebSessionId::from_canonical(session.into_uuid().to_string())
-                .expect("domain session UUID formats canonically"),
+            session_id: WebSessionId::from_uuid(session.into_uuid()),
         },
         SearchResultSource::AcceptedInput { input, turn } => WebSearchResultSource::AcceptedInput {
             accepted_input_id: web_uuid(input.into_uuid()),
@@ -501,7 +499,7 @@ fn search_source_dto(source: SearchResultSource) -> WebSearchResultSource {
 }
 
 fn web_uuid(value: uuid::Uuid) -> WebUuid {
-    WebUuid::from_canonical(value.to_string()).expect("domain UUID formats canonically")
+    WebUuid::from_uuid(value)
 }
 
 fn search_content_class_dto(content: SearchContentClass) -> WebSearchContentClass {
@@ -711,8 +709,7 @@ fn descriptor_dto(
         return Err(SessionTimelineRequestError::MissingBounds);
     };
     Ok(WebSessionTimelineDescriptor {
-        session_id: WebSessionId::from_canonical(descriptor.session.into_uuid().to_string())
-            .expect("domain session UUID formats canonically"),
+        session_id: WebSessionId::from_uuid(descriptor.session.into_uuid()),
         sizes: WebSessionTimelineSizeFacts {
             item_count: WebU64::from_u64(descriptor.sizes.item_count),
             projected_text_bytes: WebU64::from_u64(descriptor.sizes.projected_text_bytes),
@@ -742,8 +739,7 @@ fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
         TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
     };
     WebSessionTimelineWindow {
-        session_id: WebSessionId::from_canonical(window.session.into_uuid().to_string())
-            .expect("domain session UUID formats canonically"),
+        session_id: WebSessionId::from_uuid(window.session.into_uuid()),
         items: window
             .items
             .into_iter()

@@ -152,6 +152,12 @@ pub struct WebSessionId(
 );
 
 impl WebSessionId {
+    /// Encodes an already-validated UUID in canonical lowercase form.
+    #[must_use]
+    pub fn from_uuid(value: uuid::Uuid) -> Self {
+        Self(value.to_string())
+    }
+
     /// Constructs a session identity from its canonical lowercase UUID spelling.
     #[must_use]
     pub fn from_canonical(value: String) -> Option<Self> {
@@ -187,6 +193,12 @@ pub struct WebUuid(
 );
 
 impl WebUuid {
+    /// Encodes an already-validated UUID in canonical lowercase form.
+    #[must_use]
+    pub fn from_uuid(value: uuid::Uuid) -> Self {
+        Self(value.to_string())
+    }
+
     /// Constructs an identity from its canonical lowercase UUID spelling.
     #[must_use]
     pub fn from_canonical(value: String) -> Option<Self> {
