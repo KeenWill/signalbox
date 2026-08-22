@@ -183,6 +183,43 @@ use sqlx::types::Uuid;
 
 use crate::{approval_judge::FailedApprovalJudgeDisposition, outbox::DispatchedRunnerState};
 
+/// Closed active-turn phase discriminators stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ActiveTurnPhaseStorageKind {
+    Running,
+    AwaitingToolApproval,
+    AwaitingChild,
+    AwaitingModelCallRecovery,
+    AwaitingToolRecovery,
+    AwaitingRunnerRecovery,
+}
+
+#[cfg(test)]
+pub(crate) const fn active_turn_phase_to_str(value: ActiveTurnPhaseStorageKind) -> &'static str {
+    match value {
+        ActiveTurnPhaseStorageKind::Running => "running",
+        ActiveTurnPhaseStorageKind::AwaitingToolApproval => "awaiting_tool_approval",
+        ActiveTurnPhaseStorageKind::AwaitingChild => "awaiting_child",
+        ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery => "awaiting_model_call_recovery",
+        ActiveTurnPhaseStorageKind::AwaitingToolRecovery => "awaiting_tool_recovery",
+        ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery => "awaiting_runner_recovery",
+    }
+}
+
+pub(crate) fn active_turn_phase_from_str(value: &str) -> Option<ActiveTurnPhaseStorageKind> {
+    match value {
+        "running" => Some(ActiveTurnPhaseStorageKind::Running),
+        "awaiting_tool_approval" => Some(ActiveTurnPhaseStorageKind::AwaitingToolApproval),
+        "awaiting_child" => Some(ActiveTurnPhaseStorageKind::AwaitingChild),
+        "awaiting_model_call_recovery" => {
+            Some(ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery)
+        }
+        "awaiting_tool_recovery" => Some(ActiveTurnPhaseStorageKind::AwaitingToolRecovery),
+        "awaiting_runner_recovery" => Some(ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery),
+        _ => None,
+    }
+}
+
 /// Closed stored states for one durable runner-loss propagation cursor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RunnerLossPropagationStateStorageKind {
@@ -2260,15 +2297,17 @@ mod tests {
     use crate::outbox::DispatchedRunnerState;
 
     use super::{
-        ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
-        DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
-        DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
-        PlanEventStorageKind, PositiveOrdinalMappingError, RepoWatchEvaluationOutcomeStorageKind,
+        ActiveTurnPhaseStorageKind, ApprovalJudgeStateStorageKind,
+        ApprovalJudgeTerminalDispositionStorageKind, DelegationPolicyStorageKind,
+        DelegationRejectionStorageKind, DelegationUpdateStorageKind, DelegationWakeStorageKind,
+        DurableCommandIdMappingError, DurableCommandKind, PlanEventStorageKind,
+        PositiveOrdinalMappingError, RepoWatchEvaluationOutcomeStorageKind,
         RepoWatchLifecycleCutoffDispositionStorageKind, RepoWatchObligationSettlementStorageKind,
         RunnerLossPropagationStateStorageKind, SessionCreationCauseStorageKind,
         SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
         StoredModelSettingsError, ToolApprovalDecisionSourceStorageKind,
         ToolAttemptDispositionStorageKind, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        active_turn_phase_from_str, active_turn_phase_to_str,
         approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
         approval_judge_state_from_str, approval_judge_state_to_str,
         approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
@@ -2311,6 +2350,24 @@ mod tests {
         tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
         turn_id_to_uuid,
     };
+
+    #[test]
+    fn active_turn_phase_mapping_is_closed() {
+        for phase in [
+            ActiveTurnPhaseStorageKind::Running,
+            ActiveTurnPhaseStorageKind::AwaitingToolApproval,
+            ActiveTurnPhaseStorageKind::AwaitingChild,
+            ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery,
+            ActiveTurnPhaseStorageKind::AwaitingToolRecovery,
+            ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery,
+        ] {
+            assert_eq!(
+                active_turn_phase_from_str(active_turn_phase_to_str(phase)),
+                Some(phase)
+            );
+        }
+        assert_eq!(active_turn_phase_from_str("unknown"), None);
+    }
 
     #[test]
     fn runner_loss_propagation_state_mapping_is_closed() {

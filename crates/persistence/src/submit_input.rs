@@ -70,7 +70,8 @@ use crate::{
         self, CommandKind, RegistryCorruption, RegistryInspectionError, SUBMIT_INPUT_KIND,
     },
     mapping::{
-        PositiveOrdinalMappingError, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        ActiveTurnPhaseStorageKind, PositiveOrdinalMappingError, accepted_input_id_from_uuid,
+        accepted_input_id_to_uuid, active_turn_phase_from_str,
         dangerous_tool_auto_approval_from_str, dangerous_tool_auto_approval_to_str,
         defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
         durable_command_id_to_uuid, input_position_from_numeric, input_position_to_numeric,
@@ -2081,9 +2082,17 @@ async fn load_delegated_parked_attachment_frontier(
         return Ok(None);
     };
     let turn = turn_id_from_uuid(required(&row, "turn_id")?);
-    let phase: String = required(&row, "active_phase_kind")?;
-    let snapshot = match phase.as_str() {
-        "awaiting_tool_approval" | "awaiting_child" | "awaiting_tool_recovery" => {
+    let phase_spelling: String = required(&row, "active_phase_kind")?;
+    let phase = active_turn_phase_from_str(&phase_spelling).ok_or({
+        SubmitInputCorruption::Unsupported {
+            field: "delegated parked active phase",
+            value: phase_spelling,
+        }
+    })?;
+    let snapshot = match phase {
+        ActiveTurnPhaseStorageKind::AwaitingToolApproval
+        | ActiveTurnPhaseStorageKind::AwaitingChild
+        | ActiveTurnPhaseStorageKind::AwaitingToolRecovery => {
             load_active_batch_from_connection(connection, session, turn)
                 .await
                 .map_err(map_tool_loop_error)?
@@ -2092,7 +2101,7 @@ async fn load_delegated_parked_attachment_frontier(
                     "delegated parked tool frontier missing",
                 ))?
         }
-        "awaiting_model_call_recovery" => {
+        ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery => {
             let recovery_call: Uuid = required(&row, "recovery_model_call_id")?;
             let frontier = sqlx::query_scalar::<_, Uuid>(
                 "SELECT context_frontier_id
@@ -2117,7 +2126,7 @@ async fn load_delegated_parked_attachment_frontier(
                     "delegated model recovery snapshot invalid",
                 ))?
         }
-        "awaiting_runner_recovery" => {
+        ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery => {
             load_runner_recovery_source_snapshot(connection, session, turn)
                 .await
                 .map_err(map_tool_loop_error)?
@@ -2125,7 +2134,7 @@ async fn load_delegated_parked_attachment_frontier(
                     "delegated runner recovery prospective attachment frontier missing",
                 ))?
         }
-        "running" => {
+        ActiveTurnPhaseStorageKind::Running => {
             let stop_requested_call: Option<Uuid> = row.try_get("stop_requested_model_call_id")?;
             let Some(stop_requested_call) = stop_requested_call else {
                 return Ok(None);
@@ -2153,13 +2162,6 @@ async fn load_delegated_parked_attachment_frontier(
                 .ok_or(SubmitInputCorruption::Inconsistent(
                     "delegated stop-requested snapshot invalid",
                 ))?
-        }
-        value => {
-            return Err(SubmitInputCorruption::Unsupported {
-                field: "delegated parked active phase",
-                value: value.to_owned(),
-            }
-            .into());
         }
     };
     Ok(Some(DelegatedParkedAttachmentFrontier { turn, snapshot }))
