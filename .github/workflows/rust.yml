@@ -30,14 +30,21 @@ env:
 
 jobs:
   # Keep the required `validate` and `postgres-integration` checks present on
-  # every pull-request head. Their aggregate jobs below accept skipped heavy
-  # work only when this job proves every changed path is Markdown or under
-  # `docs/`; pushes to main always run the complete workflow.
+  # every pull-request head. Their aggregate jobs below accept skipped Rust
+  # work only when this job proves no changed path can reach the Rust build:
+  # every path is either non-binding Markdown/`docs/` prose or browser-client
+  # source under `clients/web/` (the generated contract under
+  # `clients/web/src/generated/` is Rust output and keeps the full bar, as
+  # does `clients/web`'s own workflow file). Pushes to main always run the
+  # complete workflow. `clients/web/**` changes are gated by `web.yml`, which
+  # triggers on exactly that path set.
   rust-change-scope:
     name: Rust change scope
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.paths.outputs.docs_only }}
+      web_only: ${{ steps.paths.outputs.web_only }}
+      skip_rust: ${{ steps.paths.outputs.skip_rust }}
     steps:
       - name: Check out repository history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -52,8 +59,12 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           docs_only=false
+          web_only=false
+          skip_rust=false
           if [ "$EVENT_NAME" = pull_request ]; then
-            docs_only=true
+            docs=0
+            web=0
+            rust=0
             changed_paths="$RUNNER_TEMP/rust-changed-files"
             git diff --no-renames --name-only -z \
               "$BASE_SHA...$HEAD_SHA" > "$changed_paths"
@@ -64,19 +75,35 @@ jobs:
                 AGENTS.md | */AGENTS.md | docs/agents/* | docs/spec/* \
                   | docs/domain-spine.md | docs/invariants.md \
                   | docs/scenarios.md | docs/style.md)
-                  docs_only=false
-                  break
+                  rust=$((rust + 1))
                   ;;
                 docs/* | *.md)
+                  docs=$((docs + 1))
+                  ;;
+                # Generated browser-contract output is produced from Rust and
+                # checked against it by the workspace tests.
+                clients/web/src/generated/*)
+                  rust=$((rust + 1))
+                  ;;
+                clients/web/*)
+                  web=$((web + 1))
                   ;;
                 *)
-                  docs_only=false
-                  break
+                  rust=$((rust + 1))
                   ;;
               esac
             done < "$changed_paths"
+            if [ "$rust" -eq 0 ]; then
+              skip_rust=true
+              [ "$web" -eq 0 ] && docs_only=true
+              [ "$docs" -eq 0 ] && web_only=true
+            fi
+            echo "changed paths: docs=$docs web=$web rust-reaching=$rust" \
+              "-> skip_rust=$skip_rust"
           fi
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "web_only=$web_only" >> "$GITHUB_OUTPUT"
+          echo "skip_rust=$skip_rust" >> "$GITHUB_OUTPUT"
 
   contract-checks:
     runs-on: ubuntu-latest
@@ -217,7 +244,7 @@ jobs:
           }
   rust-checks:
     needs: rust-change-scope
-    if: needs.rust-change-scope.outputs.docs_only != 'true'
+    if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: signalbox
     # The self-hosted pool starts with cold caches; give the workspace check
     # headroom until they warm.
@@ -316,11 +343,11 @@ jobs:
           CONTRACT_RESULT: ${{ needs.contract-checks.result }}
           CHECKER_RESULT: ${{ needs.checker-and-format-tests.result }}
           RUST_RESULT: ${{ needs.rust-checks.result }}
-          DOCS_ONLY: ${{ needs.rust-change-scope.outputs.docs_only }}
+          SKIP_RUST: ${{ needs.rust-change-scope.outputs.skip_rust }}
         run: |
           test "$CONTRACT_RESULT" = success
           test "$CHECKER_RESULT" = success
-          if [ "$DOCS_ONLY" = true ]; then
+          if [ "$SKIP_RUST" = true ]; then
             test "$RUST_RESULT" = skipped
           else
             test "$RUST_RESULT" = success
@@ -332,7 +359,7 @@ jobs:
   # share a target directory, so this job carries its own rust-cache entry.
   workspace-tests:
     needs: rust-change-scope
-    if: needs.rust-change-scope.outputs.docs_only != 'true'
+    if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -376,10 +403,10 @@ jobs:
         env:
           CHECKS_RESULT: ${{ needs.validate-checks.result }}
           TESTS_RESULT: ${{ needs.workspace-tests.result }}
-          DOCS_ONLY: ${{ needs.rust-change-scope.outputs.docs_only }}
+          SKIP_RUST: ${{ needs.rust-change-scope.outputs.skip_rust }}
         run: |
           test "$CHECKS_RESULT" = success
-          if [ "$DOCS_ONLY" = true ]; then
+          if [ "$SKIP_RUST" = true ]; then
             test "$TESTS_RESULT" = skipped
           else
             test "$TESTS_RESULT" = success
@@ -391,7 +418,7 @@ jobs:
     name: Domain instruction counts (report only)
     continue-on-error: true
     needs: rust-change-scope
-    if: needs.rust-change-scope.outputs.docs_only != 'true'
+    if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: signalbox
     timeout-minutes: 20
     steps:
@@ -494,7 +521,7 @@ jobs:
   postgres-integration-build:
     name: postgres-integration (build)
     needs: rust-change-scope
-    if: needs.rust-change-scope.outputs.docs_only != 'true'
+    if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: signalbox-docker
     # Generous by design: this job now absorbs all six suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
@@ -747,9 +774,9 @@ jobs:
         env:
           BUILD_RESULT: ${{ needs.postgres-integration-build.result }}
           RUN_RESULT: ${{ needs.postgres-integration-run.result }}
-          DOCS_ONLY: ${{ needs.rust-change-scope.outputs.docs_only }}
+          SKIP_RUST: ${{ needs.rust-change-scope.outputs.skip_rust }}
         run: |
-          if [ "$DOCS_ONLY" = true ]; then
+          if [ "$SKIP_RUST" = true ]; then
             test "$BUILD_RESULT" = skipped
             test "$RUN_RESULT" = skipped
           else
