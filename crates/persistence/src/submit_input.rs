@@ -668,7 +668,7 @@ impl SubmitInputRepository {
             ) + Send,
     {
         let mut transaction = self.pool.begin().await?;
-        let decision = handle_in_transaction(
+        let decision = Box::pin(handle_in_transaction(
             &mut transaction,
             command,
             accepted_input,
@@ -679,7 +679,7 @@ impl SubmitInputRepository {
             select_definition,
             self.model_capabilities.as_ref(),
             self.maximum_attachment_bytes,
-        )
+        ))
         .await;
 
         match decision {
