@@ -1,5 +1,9 @@
 # Turn lifecycle and scheduling
 
+The scheduler occupancy ceiling and metrics, daemon-owned ambiguous-call
+reconciliation, and outer slot-held watchdog coverage were verified against this
+PR (`agent/turn-lifecycle-hardening`).
+
 The runner-recovery active-phase algebra, checked persistence reconstitution,
 and preserved interrupt/stop authority were verified against this PR
 (`agent/runner-awaiting-recovery-persistence`). The atomic persistence
@@ -51,18 +55,18 @@ path and descendant-cascade ordering were verified through this PR
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
-`crates/persistence/src/{start_eligible_turn,startup,scheduler,`
-`lock_inventory}.rs` and its migrations, and
-`apps/signalboxd/src/{main,process_runtime}.rs`. The `signalboxd`
-composition-root name and that `apps/signalboxd` code home were verified through
-PR #258 (`agent/signalboxd-rename`); the additional daemon-held code-host
-credential path is verified through PR #270 (`agent/tool-batch-tier1`), and the
-Brave Search credential path is verified through PR #433
-(`agent/web-search-wiring`); the user reconciliation decision that releases an
-ambiguity wait, together with the startup scan's separate report of sessions
-holding their slot for that decision, were verified through PR #281
-(`agent/turn-reconciliation-recovery`). The finite startup scan and removal of
-the superseded steering blocker were verified through PR #291
+`crates/persistence/src/{start_eligible_turn,startup,scheduler,turn_liveness,`
+`model_call_reconciliation,lock_inventory}.rs` and its migrations, and
+`apps/signalboxd/src/{main,process_runtime,turn_liveness_runtime,telemetry}.rs`.
+The `signalboxd` composition-root name and that `apps/signalboxd` code home were
+verified through PR #258 (`agent/signalboxd-rename`); the additional daemon-held
+code-host credential path is verified through PR #270
+(`agent/tool-batch-tier1`), and the Brave Search credential path is verified
+through PR #433 (`agent/web-search-wiring`); the user reconciliation decision
+that releases an ambiguity wait, together with the startup scan's separate
+report of sessions holding their slot for that decision, were verified through
+PR #281 (`agent/turn-reconciliation-recovery`). The finite startup scan and
+removal of the superseded steering blocker were verified through PR #291
 (`agent/turn-control-verbs`). INV-tagged tests are the enforcement of record;
 tags below resolve through the generated
 [invariant test index](../invariants.md). Designed lifecycle behavior that has
@@ -403,6 +407,7 @@ the sweep (INV-007).
   new), `SubmitInputService` hands the session to the in-process nudge port. The
   buffer is bounded (1024); a full buffer or closed source drops only the hint,
   visibly, and never changes the command result.
+
 - **Sweep (backstop).** `PostgresEligibilitySweep` finds four durable shapes: a
   queued turn with no active turn (the activation precondition), an active turn
   whose current model call remains `Prepared`, an active tool round in the
@@ -416,6 +421,7 @@ the sweep (INV-007).
   run immediately. The baseline interval is one second; missed ticks are
   delayed, not burst. A failed sweep is logged with its operator classification
   and retried at the next interval.
+
 - **Loop.** `SchedulerLoop::run_until` spawns at most 16 concurrent per-session
   passes. Every explicit nonzero application bound, including the deployment's
   configured bound, is capped at that shared admission cap. The loop
@@ -436,6 +442,23 @@ the sweep (INV-007).
   correlated result evidence or crash-loss classification. The independent
   direct-read admission budget remains fixed, so at most 16 direct reads can
   wait at that reacquisition point regardless of the scheduler-pass override.
+  One admitted authoritative pass may occupy its slot for at most fifteen
+  minutes. A checked application bound may lower that compiled ceiling but
+  cannot raise it or admit zero or subsecond values. Expiry invokes a detached
+  daemon recovery handoff before dropping the pass future, then immediately
+  releases the admission slot. The handoff marks the correlated cancellation so
+  fatal supervision does not mistake the scheduler's bounded drop for an
+  unrelated failure, and invokes the existing startup-recovery transaction
+  immediately plus three retries at two-minute intervals. The outer watchdog
+  below remains responsible if those attempts all fail. Stateful pass data,
+  including identity generators, is never cloned per admitted pass; only the
+  detached expiry handler is cloned.
+
+  With Prometheus export enabled, the loop publishes scheduler occupancy and
+  oldest-pass telemetry through the registry owned by
+  [configuration and credentials](configuration-and-credentials.md). Age is
+  calculated at scrape time, so it advances while a pass is stalled even when
+  the scheduler emits no event.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
 scheduler after startup recovery. This recovers a goal disposition when the
@@ -499,6 +522,29 @@ keeps its steering out of reach through the phase filter, not through this one.
 Every conjunct is an absence the candidate query proves for itself, so a shape
 it cannot consult is a shape it does not clear — absent evidence skips the turn
 rather than condemning it.
+
+**The outer slot-held shape.** A second inventory covers an active `running`
+turn whose current attempt is `prepared`, `running`, or `stop_requested` and
+whose durable rows still show a live model call, dedicated compaction call, or
+tool attempt (or the stop request itself). This deliberately complements the
+quiescent operation-absence predicate. It excludes every durable parked phase,
+including `awaiting_tool_approval`: approval remains the judge's surface and
+this watchdog never decides it. The inventory uses the same complete,
+session-keyed paging, progress evidence, repeated-observation ledger, and
+sixty-four-turn fair window as the quiescent inventory, but keeps an independent
+ledger and lap.
+
+A slot-held turn whose evidence remains unchanged for thirty minutes is handed
+to the existing startup-recovery transaction under the session scheduler lock.
+Each detached database attempt has a one-second wall-clock bound, so the
+sixty-four-turn fair window also bounds how long a fully stalled database can
+delay the next watchdog wake. A timeout is commit-ambiguous and leaves the
+unchanged durable evidence due for a later observation. That transaction
+reconstitutes and classifies the exact current durable shape; the watchdog
+invents no parallel terminal transition. This is the outer backstop for
+pass-expiry recovery whose bounded database attempts all failed and for a
+prior-process running turn that survives startup classification. The
+fifteen-minute scheduler-pass ceiling remains the tighter same-process bound.
 
 **Staleness.** No lifecycle table stores an activity timestamp, and this page
 introduces none: a stored clock would be one more thing to keep true. Staleness
@@ -699,6 +745,37 @@ at the moment its outcome became unknown. The durable record is the ordinary
 `TurnFailed` shape, which has no cause column, so a watchdog-ended turn is not
 durably distinguishable from a restart-recovered one.
 
+**Ambiguous model-call reconciliation.** Every watchdog wake also discovers
+active `awaiting_model_call_recovery` turns and durably claims at most 64 due
+attempts. The recovery row binds the exact session, turn, and ambiguous call;
+each claim inserts a one-based attempt row. Failed attempts end with the typed
+outcome `infrastructure_failure` or `integrity_failure`, and recovery becomes
+due after 120, 240, 480, 960, then 1,800 seconds. If a daemon disappears while
+an attempt is `attempting`, its recorded deadline lets the next daemon classify
+it as an infrastructure failure before continuing. Every inventory or
+application transaction has the same one-second wall-clock bound; a timed-out
+claimed attempt remains durably `attempting` until that deadline makes it
+classifiable. An explicitly recorded fifth failure becomes exhausted on the next
+watchdog scan without waiting out that final ambiguity deadline; the deadline
+remains necessary when the daemon cannot tell whether the fifth attempt
+committed.
+
+The automatic budget is five attempts. Each attempt locks the same session
+scheduler row as the operator path, reconstitutes the complete scheduling
+projection, and applies the existing reconciliation-required transition to the
+exact ambiguous call and ended attempt. It neither claims what the provider did
+nor rewrites the ambiguous call, and it reclassifies pending steering through
+the same terminal boundary. A concurrent operator decision or other
+authoritative transition wins by ordinary row locking and records the automatic
+attempt as `superseded`. After five failures, the recovery row becomes
+`exhausted`, the active wait remains unchanged, and the process transcript sets
+`operator_action_required`; only then is the wait an operator park.
+
+Quiescent turns, slot-held turns, and ambiguous-call attempts run on independent
+watchdog loops with the same cadence. A stalled inventory or database operation
+on one surface therefore cannot prevent either of the other two from reaching
+its next bounded attempt.
+
 ## Startup scan and recovery
 
 After configuration and database connection, signalboxd acquires the dedicated
@@ -763,13 +840,14 @@ end (INV-034):
   awaiting a recovery decision. The scan does not count it as recovered and does
   not block startup on it;
   `StartupScanOutcome::awaiting_recovery_decision_sessions` carries those
-  sessions so the completed-phase log names each one instead of leaving the wait
-  indistinguishable from a healed session. The scan that parks a turn itself —
-  the in-flight branch below — reports its session the same way, so the wait is
-  named on the restart that creates it and not only on a later one. The report
-  is scoped to the model-call wait: `AwaitingRecoveryDecision` also carries a
-  tool-attempt ambiguity set, which has no operator surface and stays classified
-  as before, so a reported session always names a decision an operator can make;
+  sessions so the completed-phase log names each one before bounded runtime
+  reconciliation starts instead of leaving the wait indistinguishable from a
+  healed session. The scan that parks a turn itself — the in-flight branch below
+  — reports its session the same way, so the wait is named on the restart that
+  creates it and not only on a later one. The report is scoped to the model-call
+  wait: `AwaitingRecoveryDecision` also carries a tool-attempt ambiguity set,
+  which has no operator surface and stays classified as before, so a reported
+  session always names a decision an operator can make;
 - an approval wait remains parked unchanged, with no fabricated decision or live
   attempt; and
 - a running tool attempt follows its stored effect class: prepared or
@@ -1328,10 +1406,11 @@ from child transcript state nor depend on process-local wake memory.
 - Startup recovery now classifies model-call evidence (a `Prepared` call closes
   as a known failure; an unstopped in-flight call parks the turn as ambiguous in
   `awaiting_model_call_recovery`), tool-loop evidence, and delegated-result
-  waits. A user reconciliation decision is the only implemented resolution for
-  that park: no automatic resolution exists, because the terminal disposition it
-  produces is proof-bearing and the durable evidence supplies no authority to
-  construct. Resolving the ambiguity itself from provider evidence remains an
+  waits. The model-call park is resolved automatically through the bounded
+  durable attempt protocol above, or by the existing user reconciliation command
+  if it wins the race; the process surface asks for operator action only after
+  the automatic budget is exhausted. Neither path resolves what the provider
+  actually did. Provider-evidence resolution remains an
   [open question](../open-questions.md#turn-lifecycle); the tool-attempt
   ambiguity wait keeps its own operator surface deferred with that question.
 - A turn holding pending steering cannot be ended by the liveness watchdog,

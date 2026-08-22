@@ -2811,6 +2811,7 @@ pub enum ReconciliationReason {
     UserChoseReconciliation { decision: AppliedStopForReconciliationProof },
     InterruptRequiresReconciliation { interrupt: AppliedInterruptProof },
     FatalMismatchRequiresReconciliation { causes: FatalMismatchStopCauses },
+    AutomaticModelCallRecovery { attempt: NonZeroU32 },
 }
 
 pub struct ReconciliationMarker { /* private */ }
@@ -2891,7 +2892,7 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         reconciling_attempt: TurnAttemptId,
         reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
         ambiguous_call: ModelCallId,
-        interrupt: AppliedInterruptCommandResult,
+        interrupt: Option<AppliedInterruptCommandResult>,
         terminal_frontier: ContextFrontierId,
     },
     TerminalToolReconciliationRequired {
@@ -3401,6 +3402,11 @@ impl AcceptedInputSchedulingProjection {
     pub fn apply_interrupt_to_model_call_recovery(
         self,
         interrupt: AppliedInterruptCommandResult,
+        identities: AmbiguousModelCallTurnIdentities,
+    ) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError>;
+    pub fn apply_automatic_model_call_reconciliation(
+        self,
+        attempt: NonZeroU32,
         identities: AmbiguousModelCallTurnIdentities,
     ) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError>;
     pub fn apply_interrupt_to_runner_recovery(
@@ -8429,6 +8435,7 @@ pub trait EligibilityPass {
 
     fn failure_stage(_error: &Self::Error) -> &'static str;
     fn failure_turn(_error: &Self::Error) -> Option<TurnId>;
+    fn occupancy_expiry_handler(&self) -> Option<Arc<dyn SchedulerPassExpiryHandler>>;
     fn run(
         &mut self,
         session: SessionId,
@@ -8489,6 +8496,28 @@ pub enum SchedulerLoopExit {
     Shutdown,
 }
 
+pub struct SchedulerPassOccupancyBound(/* private */);
+impl SchedulerPassOccupancyBound {
+    pub const fn hard_ceiling() -> Self;
+    pub fn try_lowered(bound: Duration) -> Result<Self, InvalidSchedulerPassOccupancyBound>;
+    pub const fn get(self) -> Duration;
+}
+pub struct InvalidSchedulerPassOccupancyBound;
+// impl Display + std::error::Error
+
+pub struct SchedulerOldestInFlightPass { /* private */ }
+impl SchedulerOldestInFlightPass {
+    pub const fn new(session: SessionId, started_at: Instant) -> Self;
+    pub const fn session(self) -> SessionId;
+    pub fn age(self) -> Duration;
+}
+pub trait SchedulerOccupancyObserver: Send + Sync + 'static {
+    fn observe(&self, occupancy: usize, oldest: Option<SchedulerOldestInFlightPass>);
+}
+pub trait SchedulerPassExpiryHandler: Debug + Send + Sync + 'static {
+    fn occupancy_expired(&self, session: SessionId);
+}
+
 pub struct SchedulerLoop<WorkSource, Pass> { /* private */ }
 impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
     pub const fn new(work_source: WorkSource, pass: Pass) -> Self;
@@ -8498,6 +8527,11 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
         max_in_flight_passes: NonZeroUsize,
     ) -> Self;
     pub const fn paused(work_source: WorkSource, pass: Pass) -> Self;
+    pub fn with_occupancy_bound(self, bound: SchedulerPassOccupancyBound) -> Self;
+    pub fn with_occupancy_observer(
+        self,
+        observer: Arc<dyn SchedulerOccupancyObserver>,
+    ) -> Self;
     pub fn into_parts(self) -> (WorkSource, Pass);
 }
 impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass>
@@ -8903,6 +8937,56 @@ pub trait ToolExecutionTransaction {
 ## application: turn_liveness
 
 ```rust
+pub struct ModelCallReconciliationAttempt(/* private */);
+impl ModelCallReconciliationAttempt {
+    pub const fn first() -> Self;
+    pub const fn try_from_u32(value: u32) -> Option<Self>;
+    pub const fn get(self) -> u32;
+    pub fn retry_backoff(self) -> Duration;
+    pub const fn next(self) -> Option<Self>;
+    pub const fn budget() -> u32;
+}
+
+pub struct ClaimedModelCallReconciliation { /* private */ }
+impl ClaimedModelCallReconciliation {
+    pub const fn new(
+        session: SessionId,
+        turn: TurnId,
+        call: ModelCallId,
+        attempt: ModelCallReconciliationAttempt,
+    ) -> Self;
+    // accessors: session(), turn(), call(), attempt()
+}
+
+pub struct ExhaustedModelCallReconciliation { /* private */ }
+impl ExhaustedModelCallReconciliation {
+    pub const fn new(session: SessionId, turn: TurnId, call: ModelCallId) -> Self;
+    // accessors: session(), turn(), call()
+}
+
+pub struct ModelCallReconciliationBatch { /* private */ }
+impl ModelCallReconciliationBatch {
+    pub fn new(
+        claimed: Box<[ClaimedModelCallReconciliation]>,
+        exhausted: Box<[ExhaustedModelCallReconciliation]>,
+    ) -> Self;
+    pub fn claimed(&self) -> &[ClaimedModelCallReconciliation];
+    pub fn exhausted(&self) -> &[ExhaustedModelCallReconciliation];
+}
+
+pub enum ModelCallReconciliationFailureKind {
+    Infrastructure,
+    Integrity,
+}
+impl ModelCallReconciliationFailureKind {
+    pub const fn as_str(self) -> &'static str;
+}
+
+pub enum ModelCallReconciliationOutcome {
+    Reconciled,
+    Superseded,
+}
+
 pub struct StaleActiveTurnBound(/* private */);
 impl StaleActiveTurnBound {
     pub const fn hard_ceiling() -> Self;
@@ -11081,12 +11165,12 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
 | application: session_metadata                      | 12 (incl. 4 traits)              |
-| application: scheduler                             | 15 (+1 free fn) (incl. 5 traits) |
+| application: scheduler                             | 20 (+1 free fn) (incl. 7 traits) |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)               |
 | application: startup_scan                          | 7 (incl. 2 traits)               |
 | application: submit_input                          | 7 (incl. 2 traits)               |
 | application: tool_dispatch_gate                    | 2                                |
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
-| application: turn_liveness                         | 7                                |
-| **signalbox-application total**                    | **295 (+6 free fn)**             |
+| application: turn_liveness                         | 13                               |
+| **signalbox-application total**                    | **306 (+6 free fn)**             |

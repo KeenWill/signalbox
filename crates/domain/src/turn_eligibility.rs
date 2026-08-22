@@ -121,8 +121,8 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
         /// The exact ambiguous physical call.
         ambiguous_call: crate::ModelCallId,
-        /// The later or already-applied interrupt that requires reconciliation.
-        interrupt: AppliedInterruptCommandResult,
+        /// The applied interrupt, absent for daemon-owned automatic recovery.
+        interrupt: Option<AppliedInterruptCommandResult>,
         /// The equal-content terminal frontier identifying the turn boundary.
         terminal_frontier: ContextFrontierId,
     },
@@ -2417,6 +2417,29 @@ impl AcceptedInputSchedulingProjection {
             recovery.attempt,
             recovery.source_snapshot,
             interrupt,
+            identities,
+        )
+    }
+
+    /// Closes the active model-call recovery wait under a daemon-owned durable
+    /// attempt while preserving its exact ambiguity set.
+    pub fn apply_automatic_model_call_reconciliation(
+        self,
+        attempt: std::num::NonZeroU32,
+        identities: crate::AmbiguousModelCallTurnIdentities,
+    ) -> Result<crate::ReconciliationRequiredModelCallTurn, crate::ModelCallClosureError> {
+        let active_turn = self
+            .active_turn_execution()
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        let recovery = self
+            .active_model_call_recovery
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        crate::model_execution::apply_automatic_model_call_reconciliation(
+            active_turn.into(),
+            recovery.call,
+            recovery.attempt,
+            recovery.source_snapshot,
+            attempt,
             identities,
         )
     }
@@ -6481,21 +6504,24 @@ fn reconstitute_inner(
                         cause,
                         disposition:
                             CancellationStopDisposition::Ambiguous | CancellationStopDisposition::Lost,
-                    } => {
+                    } => interrupt.is_some_and(|interrupt| {
                         *cause == interrupt.proof()
-                            && reconciling_attempt_end.interrupt() == Some(*interrupt)
-                    }
+                            && reconciling_attempt_end.interrupt() == Some(interrupt)
+                    }),
                     _ => false,
                 };
-                let successor = records_by_turn.get(&interrupt.successor());
-                if interrupt.session() != session
-                    || interrupt.proof().predecessor() != turn
-                    || !attempt_end_matches
-                    || successor.is_none_or(|successor| {
-                        successor.stored_session != session
-                            || successor.accepted_input.id() != interrupt.accepted_input()
-                            || successor.order != interrupt.successor_order()
-                    })
+                let interrupt_matches = interrupt.is_none_or(|interrupt| {
+                    let successor = records_by_turn.get(&interrupt.successor());
+                    interrupt.session() == session
+                        && interrupt.proof().predecessor() == turn
+                        && successor.is_some_and(|successor| {
+                            successor.stored_session == session
+                                && successor.accepted_input.id() == interrupt.accepted_input()
+                                && successor.order == interrupt.successor_order()
+                        })
+                });
+                if !attempt_end_matches
+                    || !interrupt_matches
                     || attempt_owners.insert(*reconciling_attempt, turn).is_some()
                 {
                     return Err(
@@ -7225,8 +7251,8 @@ fn terminal_record_interrupt(
         AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
             interrupt,
             ..
-        }
-        | AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired {
+        } => *interrupt,
+        AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired {
             interrupt,
             ..
         } => Some(*interrupt),
@@ -12309,7 +12335,7 @@ mod tests {
                     interrupt,
                 ),
                 ambiguous_call: continuation_call,
-                interrupt,
+                interrupt: Some(interrupt),
                 terminal_frontier: terminal_frontier.id(),
             },
         );

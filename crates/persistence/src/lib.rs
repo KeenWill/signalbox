@@ -20,6 +20,7 @@ pub mod goal;
 pub mod goal_turn;
 pub mod hub_fence;
 pub mod mapping;
+pub mod model_call_reconciliation;
 pub mod model_execution;
 pub mod outbox;
 pub mod plan;

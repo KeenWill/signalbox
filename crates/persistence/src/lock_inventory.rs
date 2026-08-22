@@ -111,6 +111,120 @@ pub(crate) const STARTUP_RECOVERY: &str = "SELECT
                    AND NOT delegation_runtime_terminal
             )";
 
+pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY: &str = "WITH discovery AS (
+            SELECT after_turn_id
+              FROM automatic_model_call_reconciliation_discovery_state
+             WHERE singleton
+             FOR UPDATE
+         ), page AS (
+            SELECT turn_id, session_id, recovery_model_call_id
+              FROM turn_lifecycle, discovery
+             WHERE state_kind = 'active'
+               AND origin_kind = 'accepted_input'
+               AND active_phase_kind = 'awaiting_model_call_recovery'
+               AND recovery_model_call_id IS NOT NULL
+               AND (after_turn_id IS NULL OR turn_id > after_turn_id)
+             ORDER BY turn_id
+             LIMIT $1
+         ), inserted AS (
+            INSERT INTO automatic_model_call_reconciliation
+                (turn_id, session_id, model_call_id)
+            SELECT turn_id, session_id, recovery_model_call_id FROM page
+            ON CONFLICT (turn_id) DO NOTHING
+            RETURNING turn_id
+         )
+         UPDATE automatic_model_call_reconciliation_discovery_state
+            SET after_turn_id = (
+                SELECT turn_id
+                  FROM page
+                 ORDER BY turn_id DESC
+                 LIMIT 1
+            )
+          WHERE singleton";
+
+pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION: &str = "WITH cursor AS (
+            SELECT after_turn_id
+              FROM automatic_model_call_reconciliation_supersession_state
+             WHERE singleton
+             FOR UPDATE
+         ), page AS (
+            SELECT recovery.turn_id, recovery.session_id, recovery.model_call_id,
+                   recovery.state_kind, recovery.attempt_count
+              FROM automatic_model_call_reconciliation AS recovery, cursor
+             WHERE recovery.state_kind IN ('scheduled', 'attempting', 'exhausted')
+               AND (cursor.after_turn_id IS NULL OR recovery.turn_id > cursor.after_turn_id)
+             ORDER BY recovery.turn_id
+             LIMIT $1
+         ), superseded AS (
+            SELECT page.*
+              FROM page
+             WHERE NOT EXISTS (
+                SELECT 1 FROM turn_lifecycle AS lifecycle
+                 WHERE lifecycle.turn_id = page.turn_id
+                   AND lifecycle.session_id = page.session_id
+                   AND lifecycle.state_kind = 'active'
+                   AND lifecycle.origin_kind = 'accepted_input'
+                   AND lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
+                   AND lifecycle.recovery_model_call_id = page.model_call_id
+            )
+         ), attempts AS (
+            UPDATE automatic_model_call_reconciliation_attempt AS attempt
+               SET outcome_kind = 'superseded',
+                   finished_at = statement_timestamp()
+              FROM superseded
+             WHERE superseded.state_kind = 'attempting'
+               AND attempt.turn_id = superseded.turn_id
+               AND attempt.attempt_ordinal = superseded.attempt_count
+               AND attempt.outcome_kind = 'attempting'
+         ), recoveries AS (
+            UPDATE automatic_model_call_reconciliation AS recovery
+               SET state_kind = 'superseded', exhausted_at = NULL
+              FROM superseded
+             WHERE recovery.turn_id = superseded.turn_id
+         )
+         UPDATE automatic_model_call_reconciliation_supersession_state
+            SET after_turn_id = (
+                SELECT turn_id FROM page ORDER BY turn_id DESC LIMIT 1
+            )
+          WHERE singleton";
+
+pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_CLAIM: &str = "WITH due AS (
+                SELECT turn_id
+                  FROM automatic_model_call_reconciliation
+                 WHERE state_kind = 'scheduled'
+                   AND attempt_count < 5
+                   AND next_attempt_at <= statement_timestamp()
+                 ORDER BY next_attempt_at, turn_id
+                 LIMIT $1
+                 FOR UPDATE SKIP LOCKED
+             ), claimed AS (
+                UPDATE automatic_model_call_reconciliation AS recovery
+                   SET attempt_count = recovery.attempt_count + 1,
+                       state_kind = 'attempting',
+                       next_attempt_at = statement_timestamp()
+                           + (CASE recovery.attempt_count + 1
+                                WHEN 1 THEN 120
+                                WHEN 2 THEN 240
+                                WHEN 3 THEN 480
+                                WHEN 4 THEN 960
+                                ELSE 1800
+                              END * interval '1 second')
+                  FROM due
+                 WHERE recovery.turn_id = due.turn_id
+             RETURNING recovery.session_id, recovery.turn_id,
+                       recovery.model_call_id, recovery.attempt_count
+             ), recorded AS (
+                INSERT INTO automatic_model_call_reconciliation_attempt
+                    (turn_id, attempt_ordinal)
+                SELECT turn_id, attempt_count FROM claimed
+                RETURNING turn_id
+             )
+             SELECT claimed.session_id, claimed.turn_id,
+                    claimed.model_call_id, claimed.attempt_count
+               FROM claimed
+               JOIN recorded USING (turn_id)
+              ORDER BY claimed.turn_id";
+
 pub(crate) const CONTEXT_COMPACTION_SCHEDULER: &str = "SELECT
             EXISTS (
                 SELECT 1

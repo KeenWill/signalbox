@@ -6508,7 +6508,7 @@ async fn persist_delegated_child_result(
     Ok(())
 }
 
-async fn persist_reconciliation_required(
+pub(crate) async fn persist_reconciliation_required(
     connection: &mut PgConnection,
     reconciliation: &ReconciliationRequiredModelCallTurn,
     usage: ProviderReportedTokenUsage,

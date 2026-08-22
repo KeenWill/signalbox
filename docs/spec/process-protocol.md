@@ -1,5 +1,8 @@
 # Process protocol
 
+The bounded automatic model-call recovery status projected on active turns is
+verified against this PR (`agent/turn-lifecycle-hardening`).
+
 The typed runner-state session event, daemon outbox projection, authoritative
 session-summary and transcript-snapshot runner projections, and the runner
 request/projection implementation boundary were verified against this PR
@@ -1792,7 +1795,11 @@ Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
 - `active_running { current_attempt_id, current_model_call }`, where
   `current_model_call` is null before preparation or `{ model_call_id, state }`
   with state exactly `prepared`, `in_flight`, or `cancellation_requested`;
-- `active_awaiting_model_call_recovery { ended_attempt_id, recovery_model_call_id }`;
+- `active_awaiting_model_call_recovery { ended_attempt_id, recovery_model_call_id, automatic_reconciliation_attempts, operator_action_required }`,
+  where the canonical nonnegative attempt count is the durable number already
+  claimed and `operator_action_required` is false while automatic work is
+  scheduled or attempting and true only after its five-attempt budget is
+  exhausted;
 - `active_awaiting_child { await_request_id, spawning_request_id, child_session_id }`,
   which names the exact foreground wait and delegated relationship retaining the
   parent turn's progressing slot;
@@ -2322,9 +2329,11 @@ The client applies the same behavior to `active_awaiting_tool_recovery` and to
 `tool_batch_transition { recovery_required }` followed by that state. An
 `active_awaiting_runner_recovery` turn likewise ends the follow with its typed
 lost-runner diagnostic naming replacement or `stop_turn` before abandonment. A
-model-call recovery wait has one process-protocol writer that completes it —
-`reconcile_turn`, which the diagnostic's operator runs next. A runner recovery
-wait has `stop_turn`, which terminalizes the parked turn as cancelled or
+model-call recovery wait is completed by bounded daemon reconciliation using the
+same terminal transition as `reconcile_turn`; the operator verb remains
+available to win that race and becomes required only when the projected
+`operator_action_required` field is true. A runner recovery wait has
+`stop_turn`, which terminalizes the parked turn as cancelled or
 reconciliation-required while preserving any tool ambiguity; the tool recovery
 wait still has no writer. An `active_awaiting_tool_approval` turn remains an
 ordinary nonterminal wait that `send` keeps waiting through;

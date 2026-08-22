@@ -45,7 +45,8 @@ use signalbox_application::{
     EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
     ModelCallAuthorizationReread, ModelCallCredentialReference, ModelCallExecutionError,
     ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelCallObservationCommitOutcome, ModelConversationMessage, OperatorFailureClass,
+    ModelCallObservationCommitOutcome, ModelCallReconciliationFailureKind,
+    ModelCallReconciliationOutcome, ModelConversationMessage, OperatorFailureClass,
     PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
     ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
     RetainedModelCallObservationStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
@@ -110,6 +111,7 @@ use signalbox_persistence::{
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
+    model_call_reconciliation::PostgresModelCallReconciliationRepository,
     model_execution::{
         CredentialPoolRuntimeAction, CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy,
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
