@@ -103,7 +103,7 @@ query PullRequestConvergenceThreads(
 
 const CHECKS_QUERY: &str = r#"
 query PullRequestConvergenceChecks(
-  $namespace: String!, $name: String!, $number: Int!, $after: String!
+  $namespace: String!, $name: String!, $number: Int!, $after: String
 ) {
   repository(owner: $namespace, name: $name) {
     pullRequest(number: $number) {
@@ -725,6 +725,38 @@ impl ConvergenceSweepRuntime {
             )?);
             check_page = page_info(connection.get("pageInfo"))?;
         }
+        if check_pages > 1 {
+            let mut next = variables.clone();
+            next["after"] = Value::Null;
+            let page = self.graphql(CHECKS_QUERY, next, &authorization).await?;
+            let connection = checks_page(&page, &head_sha, &base_branch, &base_sha)?;
+            let mut revalidated = decode_checks(
+                connection
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .ok_or(CensusError::Shape)?,
+            )?;
+            let mut revalidation_page = page_info(connection.get("pageInfo"))?;
+            let mut revalidation_pages = 1usize;
+            while revalidation_page.has_next {
+                revalidation_pages += 1;
+                if revalidation_pages > MAX_CONNECTION_PAGES {
+                    return Err(CensusError::Pagination);
+                }
+                let mut next = variables.clone();
+                next["after"] = Value::String(revalidation_page.cursor.ok_or(CensusError::Shape)?);
+                let page = self.graphql(CHECKS_QUERY, next, &authorization).await?;
+                let connection = checks_page(&page, &head_sha, &base_branch, &base_sha)?;
+                revalidated.extend(decode_checks(
+                    connection
+                        .get("nodes")
+                        .and_then(Value::as_array)
+                        .ok_or(CensusError::Shape)?,
+                )?);
+                revalidation_page = page_info(connection.get("pageInfo"))?;
+            }
+            ensure_checks_stable(&checks, &revalidated)?;
+        }
         let mergeable_state = match pull.get("mergeable").and_then(Value::as_str) {
             Some("MERGEABLE") => MergeableState::Mergeable,
             Some("CONFLICTING") => MergeableState::Conflicting,
@@ -965,6 +997,17 @@ fn decode_checks(values: &[Value]) -> Result<Vec<PullRequestCheck>, CensusError>
             },
         )
         .collect()
+}
+
+fn ensure_checks_stable(
+    observed: &[PullRequestCheck],
+    revalidated: &[PullRequestCheck],
+) -> Result<(), CensusError> {
+    if observed == revalidated {
+        Ok(())
+    } else {
+        Err(CensusError::State)
+    }
 }
 
 fn checked_head_at(pull: &Value) -> Result<Option<CommitSha>, CensusError> {
@@ -1279,6 +1322,34 @@ mod tests {
         assert_eq!(
             checks_page(&page, &sha('a'), &expected_base, &expected_base_sha),
             Err(CensusError::Shape)
+        );
+    }
+
+    #[test]
+    fn mutable_paginated_check_states_are_rejected() {
+        let successful = PullRequestCheck::new(
+            String::from("test"),
+            PullRequestCheckState::CheckRunCompleted {
+                conclusion: Some(String::from("SUCCESS")),
+            },
+        );
+        let failed = PullRequestCheck::new(
+            String::from("test"),
+            PullRequestCheckState::CheckRunCompleted {
+                conclusion: Some(String::from("FAILURE")),
+            },
+        );
+
+        assert_eq!(
+            ensure_checks_stable(std::slice::from_ref(&successful), &[failed]),
+            Err(CensusError::State)
+        );
+        assert_eq!(
+            ensure_checks_stable(
+                std::slice::from_ref(&successful),
+                std::slice::from_ref(&successful),
+            ),
+            Ok(())
         );
     }
 

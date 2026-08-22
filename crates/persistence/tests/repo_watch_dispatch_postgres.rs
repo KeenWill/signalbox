@@ -6193,6 +6193,18 @@ async fn repository_watch_observes_operator_commission_target_ownership()
     assert_eq!(obligation.0, fixture.session.into_uuid());
     assert_eq!(obligation.1, vec![fixture.session.into_uuid()]);
     assert!(!obligation.2);
+    assert!(
+        dispatch_store
+            .load_next_dispatch_obligation(
+                &repository,
+                rule.id(),
+                rule.version(),
+                immediate_retry_policy(),
+            )
+            .await?
+            .is_none(),
+        "a live external blocker keeps the obligation out of the dispatch loader"
+    );
 
     let stopped = GoalRepository::new(fixture.pool.clone())
         .handle_user_command(
@@ -6258,6 +6270,32 @@ async fn repository_watch_observes_operator_commission_target_ownership()
     assert_applied_goal_command(stopped);
     assert_eq!(redispatch, RepoWatchRuleEvaluationOutcome::Occupied);
     assert_eq!(refreshed_blocker, replacement_session.into_uuid());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_watch_siblings_do_not_block_each_others_pursuit_commands()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let outcome = GoalRepository::new(fixture.pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x60_130)),
+                fixture.session(0),
+                GoalUserAction::Supersede(GoalStatement::try_new(String::from(
+                    "continue the first action while its sibling remains live",
+                ))?),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x60_131)),
+                TurnId::from_uuid(Uuid::from_u128(0x60_132)),
+            )),
+            |_| None,
+        )
+        .await?;
+
+    assert_applied_goal_command(outcome);
     Ok(())
 }
 

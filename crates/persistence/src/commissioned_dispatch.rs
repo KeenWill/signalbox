@@ -414,7 +414,7 @@ async fn lock_live_pull_request_target(
     };
     let pull_request = Decimal::from(pull_request.get());
     lock_pull_request_target(transaction, repository.as_str(), &pull_request).await?;
-    live_pull_request_session(transaction, repository.as_str(), &pull_request, None)
+    live_pull_request_session(transaction, repository.as_str(), &pull_request, None, None)
         .await
         .map_err(Into::into)
 }
@@ -423,6 +423,7 @@ async fn lock_live_pull_request_target(
 struct PullRequestTargetRow {
     repository: String,
     pull_request_number: Decimal,
+    repo_watch_dispatch_id: Option<uuid::Uuid>,
 }
 
 pub(crate) async fn lock_competing_pull_request_session(
@@ -431,13 +432,16 @@ pub(crate) async fn lock_competing_pull_request_session(
 ) -> Result<Option<SessionId>, sqlx::Error> {
     let target: Option<PullRequestTargetRow> = sqlx::query_as(
         "SELECT repository AS repository,
-                pull_request_number AS pull_request_number
+                pull_request_number AS pull_request_number,
+                repo_watch_dispatch_id AS repo_watch_dispatch_id
            FROM (
-                SELECT repository, pull_request_number, recorded_at
+                SELECT repository, pull_request_number, recorded_at,
+                       NULL::uuid AS repo_watch_dispatch_id
                   FROM commissioned_dispatch
                  WHERE session_id = $1 AND target_kind = 'pull_request'
                 UNION ALL
-                SELECT event.repository, event.pull_request_number, action.recorded_at
+                SELECT event.repository, event.pull_request_number, action.recorded_at,
+                       action.dispatch_id AS repo_watch_dispatch_id
                   FROM repo_watch_dispatch_action AS action
                   JOIN repo_watch_event AS event ON event.event_id = action.event_id
                  WHERE action.session_id = $1
@@ -452,6 +456,7 @@ pub(crate) async fn lock_competing_pull_request_session(
     let Some(PullRequestTargetRow {
         repository,
         pull_request_number,
+        repo_watch_dispatch_id,
     }) = target
     else {
         return Ok(None);
@@ -462,6 +467,7 @@ pub(crate) async fn lock_competing_pull_request_session(
         &repository,
         &pull_request_number,
         Some(session),
+        repo_watch_dispatch_id,
     )
     .await
 }
@@ -484,17 +490,20 @@ async fn live_pull_request_session(
     repository: &str,
     pull_request: &Decimal,
     excluded_session: Option<SessionId>,
+    excluded_repo_watch_dispatch: Option<uuid::Uuid>,
 ) -> Result<Option<SessionId>, sqlx::Error> {
     let session: Option<uuid::Uuid> = sqlx::query_scalar(
         "SELECT target.session_id
            FROM (
-                SELECT dispatch.session_id, dispatch.recorded_at
+                SELECT dispatch.session_id, dispatch.recorded_at,
+                       NULL::uuid AS repo_watch_dispatch_id
                   FROM commissioned_dispatch AS dispatch
                  WHERE dispatch.target_kind = 'pull_request'
                    AND dispatch.repository = $1
                    AND dispatch.pull_request_number = $2
                 UNION ALL
-                SELECT action.session_id, action.recorded_at
+                SELECT action.session_id, action.recorded_at,
+                       action.dispatch_id AS repo_watch_dispatch_id
                   FROM repo_watch_dispatch_action AS action
                   JOIN repo_watch_event AS event ON event.event_id = action.event_id
                  WHERE event.target_kind = 'pull_request'
@@ -502,6 +511,8 @@ async fn live_pull_request_session(
                    AND event.pull_request_number = $2
            ) AS target
           WHERE ($3::uuid IS NULL OR target.session_id <> $3)
+            AND ($4::uuid IS NULL
+                 OR target.repo_watch_dispatch_id IS DISTINCT FROM $4)
             AND coalesce((
                 SELECT event.event_kind IN ('commissioned', 'resumed', 'superseded')
                   FROM goal_event AS event
@@ -514,6 +525,7 @@ async fn live_pull_request_session(
     .bind(repository)
     .bind(pull_request)
     .bind(excluded_session.map(session_id_to_uuid))
+    .bind(excluded_repo_watch_dispatch)
     .fetch_optional(&mut **transaction)
     .await?;
     Ok(session.map(session_id_from_uuid))
@@ -526,7 +538,7 @@ pub(crate) async fn lock_live_pull_request_target_identity(
 ) -> Result<Option<SessionId>, sqlx::Error> {
     let pull_request = Decimal::from(pull_request.get());
     lock_pull_request_target(transaction, repository.as_str(), &pull_request).await?;
-    live_pull_request_session(transaction, repository.as_str(), &pull_request, None).await
+    live_pull_request_session(transaction, repository.as_str(), &pull_request, None, None).await
 }
 
 /// Borrows the statement the prepared commission attaches.

@@ -222,6 +222,13 @@ impl PostgresRepoWatchDispatchStore {
                 AND obligation.parked_at IS NULL
                 AND obligation.failed_attempts
                      < repo_watch_dispatch_attempt_budget()
+                AND NOT coalesce((
+                    SELECT event.event_kind IN ('commissioned', 'resumed', 'superseded')
+                      FROM goal_event AS event
+                     WHERE event.session_id = obligation.external_blocking_session_id
+                     ORDER BY event.event_ordinal DESC
+                     LIMIT 1
+                ), false)
                 AND (
                     obligation.last_failed_attempt_at IS NULL
                     OR extract(epoch FROM (
