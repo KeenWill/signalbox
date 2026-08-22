@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ProductRequestError, readProductSessionState, SameOriginProductTransport } from './product'
+import {
+  MAX_SESSION_PAGE_ITEMS,
+  ProductRequestError,
+  readProductSessionState,
+  SameOriginProductTransport,
+} from './product'
 
 const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '1' },
@@ -124,6 +129,72 @@ describe('SameOriginProductTransport', () => {
         errorFixture.error.message,
       ),
     )
+  })
+
+  it('rejects a response whose sort contradicts the request', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              sort: 'session_identity_ascending',
+              continuation: { kind: 'session_identity', session_id: sessionId },
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('contradicts last_activity_descending')
+  })
+
+  it('rejects a response whose continuation contradicts the request', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: { kind: 'session_identity', session_id: sessionId },
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('continuation session_identity contradicts last_activity')
+  })
+
+  it('rejects a response beyond the catalog page ceiling', async () => {
+    const oversizedSummaries = Array.from(
+      { length: MAX_SESSION_PAGE_ITEMS + 1 },
+      () => sessionPageFixture.summaries[0],
+    )
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ ...sessionPageFixture, summaries: oversizedSummaries })),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow(`exceeds ${MAX_SESSION_PAGE_ITEMS} summaries`)
   })
 })
 

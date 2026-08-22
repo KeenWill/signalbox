@@ -55,6 +55,29 @@ export interface ProductTransport {
   readSessions(request: ProductSessionRequest, signal?: AbortSignal): Promise<WebAttentionSnapshot>
 }
 
+export const MAX_SESSION_PAGE_ITEMS = 32
+
+const validateSessionPage = (
+  page: WebAttentionSnapshot,
+  request: ProductSessionRequest,
+): WebAttentionSnapshot => {
+  const expectedSort =
+    request.sort === 'identity' ? 'session_identity_ascending' : 'last_activity_descending'
+  const expectedContinuation = request.sort === 'identity' ? 'session_identity' : 'last_activity'
+  if (page.sort !== expectedSort) {
+    throw new Error(`session catalog response sort ${page.sort} contradicts ${expectedSort}`)
+  }
+  if (page.continuation && page.continuation.kind !== expectedContinuation) {
+    throw new Error(
+      `session catalog continuation ${page.continuation.kind} contradicts ${expectedContinuation}`,
+    )
+  }
+  if (page.summaries.length > MAX_SESSION_PAGE_ITEMS) {
+    throw new Error(`session catalog response exceeds ${MAX_SESSION_PAGE_ITEMS} summaries`)
+  }
+  return page
+}
+
 export class ProductRequestError extends Error {
   constructor(
     readonly code: string,
@@ -98,7 +121,7 @@ export class SameOriginProductTransport implements ProductTransport {
       const failure = decodeWebApiErrorResponse(await response.json())
       throw new ProductRequestError(failure.error.code, failure.error.kind, failure.error.message)
     }
-    return decodeWebAttentionSnapshot(await response.json())
+    return validateSessionPage(decodeWebAttentionSnapshot(await response.json()), request)
   }
 }
 

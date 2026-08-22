@@ -1,14 +1,27 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   decodeBrowserPreferences,
   defaultBrowserPreferences,
+  loadBrowserPreferences,
   MAX_KEY_OVERRIDES,
   MAX_SAVED_LOGICAL_POSITIONS,
 } from './preferences'
 
+afterEach(() => vi.unstubAllGlobals())
+
 describe('browser preferences', () => {
   it('fails closed to defaults for an unrelated stored value', () => {
     expect(decodeBrowserPreferences('not-an-object')).toEqual(defaultBrowserPreferences)
+  })
+
+  it('falls back to defaults when browser storage is unavailable', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => {
+        throw new DOMException('Storage denied', 'SecurityError')
+      },
+    })
+
+    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
   })
 
   it('clamps pane sizes and rejects unknown closed variants', () => {

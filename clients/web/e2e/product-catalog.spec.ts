@@ -150,6 +150,44 @@ test('replaces the bounded catalog page through its typed continuation', async (
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('gates catalog reads on a successful bootstrap', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let sessionReads = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+  await page.route('**/api/sessions?**', (route) => {
+    sessionReads += 1
+    return route.fulfill({ json: firstPage })
+  })
+
+  await page.goto('/sessions')
+  await expect(page.getByText('Transport unavailable')).toBeVisible()
+  await expect(
+    page.getByText('Sessions are unavailable until the browser contract handshake succeeds.'),
+  ).toBeVisible()
+  expect(sessionReads).toBe(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('uses product navigation sequences and closes mobile navigation after activation', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+
+  await page.keyboard.press('g')
+  await page.keyboard.press('a')
+  await expect(page).toHaveURL(/attention/)
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.getByRole('button', { name: 'Open navigation' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('link', { name: 'Sessions' }).click()
+  await expect(page).toHaveURL(/sessions/)
+  await expect(dialog).toBeHidden()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('captures desktop dark, desktop light, and responsive catalog evidence', async ({
   page,
 }, testInfo) => {

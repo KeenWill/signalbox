@@ -1299,8 +1299,12 @@ kbd {
     display: none;
   }
   .catalog-inspector {
-    border-top: 1px solid var(--border);
+    position: fixed;
+    z-index: 45;
+    inset: 0;
+    border-top: 0;
     border-left: 0;
+    background: var(--surface-2);
   }
 }
 
