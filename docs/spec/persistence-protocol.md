@@ -16,7 +16,9 @@ before recursive turn-start validation is verified against this PR
 tool-round validation scope is verified against this PR
 (`agent/daemon-live-deferred-round-validation-scope`). Immutable frontier-header
 ancestry before exact prefix-member fallback is verified against this PR
-(`agent/daemon-live-frontier-ancestry-fast-path`).
+(`agent/daemon-live-frontier-ancestry-fast-path`). Successor compaction
+validation from its immutable predecessor and bounded current suffix is verified
+against this PR (`agent/daemon-live-current-compaction-validation-scope`).
 
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
@@ -1527,14 +1529,15 @@ unchanged proposal-order and single-result checks admit it as the
 Tool-batch outbox decoding and context-compaction evidence count that foreground
 correlation as one tool result; a background result has no tool-result
 correlation and counts as neither one. Each immutable compaction validates its
-summary's tool balance exactly when it commits. A successor replays prior
-summary structure to derive model-visible order without rescanning those already
-validated balances. A later turn first isolates the one immutable compaction
-leaf, rejects it from frontier header counts when it is shorter than the turn's
-terminal predecessor, and performs recursive prefix validation only for that one
-remaining candidate; historical compaction results are never expanded by a
-turn-start commit. The successor then resolves the current boundary's entries
-through their typed source-session and entry key.
+summary's tool balance exactly when it commits. A root compaction replays
+summary structure so imported and independently rooted frontiers retain their
+exact model-visible order. A successor trusts its immutable predecessor's
+validated boundary, excludes the consumed local summary chain, and validates
+only the retained/current suffix through typed source-session and entry keys. A
+later turn first isolates the one immutable compaction leaf, rejects it from
+frontier header counts when it is shorter than the turn's terminal predecessor,
+and performs recursive prefix validation only for that one remaining candidate;
+historical compaction results are never expanded by a turn-start commit.
 
 An accepted background wait reserves one future recipient delivery position
 until its child result exists. Message and later-wait admission under the same
