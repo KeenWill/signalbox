@@ -7,6 +7,8 @@ export interface CommandContext {
   getState: () => RootState
   timelineIds: readonly string[]
   focusTimeline: () => void
+  searchAvailable: boolean
+  focusSearch: () => void
 }
 
 export interface CommandBinding {
@@ -54,6 +56,15 @@ export const commandRegistry = [
     bindings: [],
     available: always,
     run: (context) => context.dispatch(actions.overlaySet('navigation')),
+  },
+  {
+    id: 'search.focus',
+    title: 'Focus lexical search',
+    description: 'Move directly to the bounded canonical-evidence search field.',
+    category: 'Navigate',
+    bindings: [{ label: 'Mod+Shift+F', registration: { kind: 'hotkey', hotkey: 'Mod+Shift+F' } }],
+    available: (context) => context.searchAvailable,
+    run: (context) => context.focusSearch(),
   },
   {
     id: 'surface.escape',

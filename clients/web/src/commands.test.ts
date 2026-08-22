@@ -12,6 +12,8 @@ describe('command registry', () => {
       getState: store.getState,
       timelineIds,
       focusTimeline: () => undefined,
+      searchAvailable: false,
+      focusSearch: () => undefined,
     })
 
     expect(selectApp(store.getState()).selectedTimeline).toBe(timelineIds[0])
