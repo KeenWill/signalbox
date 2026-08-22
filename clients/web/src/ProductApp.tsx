@@ -293,7 +293,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       dispatch,
       getState: store.getState,
       timelineIds,
-      focusTimeline: () => primaryRef.current?.focus(),
+      focusTimeline: () => {
+        const selected = document.querySelector<HTMLElement>(
+          '.session-item-summary[aria-current="true"]',
+        )
+        const first = document.querySelector<HTMLElement>('.session-item-summary')
+        ;(selected ?? first ?? primaryRef.current)?.focus()
+      },
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
       selectTimeline: timelineActions?.selectTimeline,
       openTimelineWindow: timelineActions?.openTimelineWindow,

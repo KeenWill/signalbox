@@ -241,6 +241,29 @@ const bodyContinuations = (value: unknown): TimelineBodyCursor[] => {
   return 'address' in candidate && 'field' in candidate ? [candidate, ...nested] : nested
 }
 
+const excerptStartsAtCursor = (
+  value: unknown,
+  cursor: TimelineBodyCursor,
+  continuation: TimelineBodyCursor,
+): boolean => {
+  if (value === null || typeof value !== 'object') return false
+  if (Array.isArray(value)) {
+    return value.some((entry) => excerptStartsAtCursor(entry, cursor, continuation))
+  }
+  const record = value as Record<string, unknown>
+  if (
+    typeof record.offset_bytes === 'string' &&
+    record.offset_bytes === cursor.offset_bytes &&
+    record.continuation !== null &&
+    typeof record.continuation === 'object' &&
+    !Array.isArray(record.continuation) &&
+    sameBodyContinuation(record.continuation as TimelineBodyCursor, continuation)
+  ) {
+    return true
+  }
+  return Object.values(record).some((entry) => excerptStartsAtCursor(entry, cursor, continuation))
+}
+
 const isCanonicalCrossFieldContinuation = (
   body: WebSessionTimelineDetailPage['items'][number]['body'],
   continuation: TimelineBodyCursor,
@@ -250,6 +273,15 @@ const isCanonicalCrossFieldContinuation = (
   const current = cursor?.type === 'more_body' ? cursor.body : undefined
   const currentField = current?.field ?? 'tool_arguments'
   const currentMember = current?.member_index ?? 0
+  if (currentField === 'goal_text') {
+    const goal = body.goal_events.length === 1 ? body.goal_events[0] : undefined
+    return (
+      body.tools.length === 0 &&
+      goal?.text != null &&
+      continuation.field === 'goal_text' &&
+      continuation.member_index === currentMember + 1
+    )
+  }
   const tool = body.tools.length === 1 ? body.tools[0] : undefined
   if (!tool || body.goal_events.length !== 0) return false
   const currentExcerpt =
@@ -426,6 +458,15 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       }
       if (page.continuation.type === 'more_body') {
         const continuation = page.continuation.body
+        if (
+          cursor?.type === 'more_body' &&
+          continuation.field === cursor.body.field &&
+          continuation.member_index === cursor.body.member_index &&
+          (decimalU64(continuation.offset_bytes) <= decimalU64(cursor.body.offset_bytes) ||
+            !page.items.some((item) => excerptStartsAtCursor(item.body, cursor.body, continuation)))
+        ) {
+          throw new TypeError('timeline detail continuation regressed from its request cursor')
+        }
         const excerpts = page.items.flatMap((item) => bodyContinuations(item.body))
         const continuesExcerpt = excerpts.some((entry) => sameBodyContinuation(entry, continuation))
         const continuesCanonicalBodyField = page.items.some((item) =>

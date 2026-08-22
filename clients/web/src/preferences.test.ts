@@ -53,6 +53,19 @@ describe('browser preferences', () => {
     expect(decoded.lastLogicalPositions).toEqual({ [validSession]: '42' })
   })
 
+  it('falls back when accessing browser storage itself is unavailable', () => {
+    vi.stubGlobal('localStorage', undefined)
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get: () => {
+        throw new DOMException('denied', 'SecurityError')
+      },
+    })
+
+    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+    expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
+  })
+
   it('falls back when browser storage reads are unavailable', () => {
     vi.stubGlobal('localStorage', {
       getItem: vi.fn(() => {

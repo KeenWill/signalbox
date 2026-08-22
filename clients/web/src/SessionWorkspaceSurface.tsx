@@ -62,6 +62,13 @@ export const visibleSessionItems = (
   return items
 }
 
+export const restoredTimelineSelection = (
+  restorePosition: string | undefined,
+  restored: boolean,
+  ids: readonly string[],
+): string | undefined =>
+  restored && restorePosition && ids.includes(restorePosition) ? restorePosition : undefined
+
 export const timelineArrowTarget = (
   ids: readonly string[],
   selected: string | null,
@@ -140,14 +147,18 @@ export function SessionWorkspaceSurface({
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
-  const openTimelineWindow = useCallback(
-    (anchor: 'first' | 'latest') => {
-      setManualAnchor({ kind: anchor })
+  const openTimelineAnchor = useCallback(
+    (anchor: SessionWindowAnchor) => {
+      setManualAnchor(anchor)
       setOpenAttempt((attempt) => attempt + 1)
       setExpanded(new Set())
       dispatch(actions.timelineSelected(null))
     },
     [dispatch],
+  )
+  const openTimelineWindow = useCallback(
+    (anchor: 'first' | 'latest') => openTimelineAnchor({ kind: anchor }),
+    [openTimelineAnchor],
   )
   useEffect(() => {
     onTimelineActions({
@@ -171,6 +182,15 @@ export function SessionWorkspaceSurface({
       dispatch(actions.logicalPositionRecorded({ sessionId, position: boundary }))
     }
   }, [dispatch, manualAnchor, session.data?.anchor.kind, sessionId, timelineIds])
+
+  useEffect(() => {
+    const restored = restoredTimelineSelection(
+      restorePosition,
+      session.data?.restored ?? false,
+      timelineIds,
+    )
+    if (restored) dispatch(actions.timelineSelected(restored))
+  }, [dispatch, restorePosition, session.data?.restored, timelineIds])
 
   const openSession = (event: FormEvent) => {
     event.preventDefault()
@@ -305,6 +325,30 @@ export function SessionWorkspaceSurface({
             </button>
             <button type="button" onClick={() => openTimelineWindow('latest')}>
               <SkipForward aria-hidden="true" /> Latest <kbd>G</kbd>
+            </button>
+            <button
+              type="button"
+              disabled={!session.data.window.continuation_before}
+              onClick={() => {
+                const boundary = session.data.window.continuation_before
+                if (boundary) {
+                  openTimelineAnchor({ kind: 'before', eventSequence: boundary.event_sequence })
+                }
+              }}
+            >
+              Previous window
+            </button>
+            <button
+              type="button"
+              disabled={!session.data.window.continuation_after}
+              onClick={() => {
+                const boundary = session.data.window.continuation_after
+                if (boundary) {
+                  openTimelineAnchor({ kind: 'after', eventSequence: boundary.event_sequence })
+                }
+              }}
+            >
+              Next window
             </button>
             <span>
               {session.data.window.items.length} bounded items ·{' '}

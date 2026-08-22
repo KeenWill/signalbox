@@ -3,6 +3,7 @@ import { decodeWebSessionTimelineWindow } from './generated/web-contract.mjs'
 import { isCompatibleDetailBody } from './SessionItemDetail'
 import {
   isCanonicalSessionId,
+  restoredTimelineSelection,
   timelineArrowTarget,
   visibleSessionItems,
 } from './SessionWorkspaceSurface'
@@ -67,6 +68,12 @@ describe('Session Workspace projection', () => {
       fixture.items[2],
       fixture.items[4],
     ])
+  })
+
+  it('restores a saved selection only when its projected row is visible', () => {
+    expect(restoredTimelineSelection('42', true, ['41', '42'])).toBe('42')
+    expect(restoredTimelineSelection('42', true, ['41'])).toBeUndefined()
+    expect(restoredTimelineSelection('42', false, ['42'])).toBeUndefined()
   })
 
   it('moves focused timeline selection with arrow keys', () => {

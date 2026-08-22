@@ -164,6 +164,7 @@ const detailContent = (body: DetailBody): ReactNode => {
       const visibleAttachments = body.attachments.slice(0, MAX_RENDERED_ATTACHMENTS)
       return (
         <>
+          <Facts facts={[['Turn', body.turn_id]]} />
           <TextDetail label="User input" excerpt={body.text} />
           {visibleAttachments.length > 0 && (
             <ul className="session-detail-attachments" aria-label="Attachment references">
@@ -334,7 +335,17 @@ const detailContent = (body: DetailBody): ReactNode => {
           ]}
         />
       )
-    case 'delegation':
+    case 'delegation': {
+      const policyFacts: ReadonlyArray<readonly [string, ReactNode]> =
+        body.policy?.type === 'bound'
+          ? [
+              ['Policy', 'bound'],
+              ['On parent stopped', body.policy.on_parent_stopped.replaceAll('_', ' ')],
+              ['On parent cancelled', body.policy.on_parent_cancelled.replaceAll('_', ' ')],
+            ]
+          : body.policy?.type === 'background'
+            ? [['Policy', 'background']]
+            : [['Policy', 'not recorded']]
       return (
         <>
           <Facts
@@ -344,11 +355,13 @@ const detailContent = (body: DetailBody): ReactNode => {
               ['Subject', body.subject_id ?? 'not recorded'],
               ['Outcome', body.outcome?.replaceAll('_', ' ') ?? 'not recorded'],
               ['Reason', body.reason ?? 'not recorded'],
+              ...policyFacts,
             ]}
           />
           {body.content && <TextDetail label="Delegation content" excerpt={body.content} />}
         </>
       )
+    }
     default:
       return unreachableBody(body)
   }

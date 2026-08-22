@@ -1021,6 +1021,94 @@ describe('BoundedSessionHistory', () => {
     ).resolves.toMatchObject({ continuation: { type: 'more_body', body: continuation } })
   })
 
+  it('accepts a canonical continuation to the next goal member', async () => {
+    const cursor = {
+      type: 'more_body',
+      body: {
+        address: { event_sequence: '41' },
+        field: 'goal_text',
+        member_index: 0,
+        offset_bytes: '0',
+      },
+    } as const
+    const continuation = {
+      address: { event_sequence: '41' },
+      field: 'goal_text',
+      member_index: 1,
+      offset_bytes: '0',
+    } as const
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000141',
+            state: 'results_projected',
+            tools: [],
+            goal_events: [
+              {
+                generation: '1',
+                event_kind: 'achieved',
+                text: {
+                  text: 'done',
+                  offset_bytes: '0',
+                  total_bytes: '4',
+                  continuation: null,
+                },
+              },
+            ],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 4,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 4,
+      continuation: { type: 'more_body', body: continuation },
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }, cursor),
+    ).resolves.toMatchObject({ continuation: { type: 'more_body', body: continuation } })
+  })
+
+  it('rejects a same-field continuation whose excerpt restarts before the request cursor', async () => {
+    const cursor = {
+      type: 'more_body',
+      body: {
+        address: { event_sequence: '41' },
+        field: 'input_text',
+        member_index: 0,
+        offset_bytes: '10',
+      },
+    } as const
+    const continuation = { ...cursor.body, offset_bytes: '5' }
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: { text: 'hello', offset_bytes: '0', total_bytes: '11', continuation },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+      continuation: { type: 'more_body', body: continuation },
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }, cursor),
+    ).rejects.toThrow('regressed from its request cursor')
+  })
+
   it('rejects an incomplete excerpt without a matching page continuation', async () => {
     const continuation = {
       address: { event_sequence: '41' },
