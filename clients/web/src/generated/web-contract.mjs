@@ -751,6 +751,7 @@ function assertSameOriginBlobUrl(value, path) {
   if (route === null) {
     fail(path, "a canonical blob API route");
   }
+  let mediaType;
   if (route[2] === "download") {
     const mediaTypes = parsed.searchParams.getAll("media_type");
     const filenames = parsed.searchParams.getAll("display_filename");
@@ -759,13 +760,21 @@ function assertSameOriginBlobUrl(value, path) {
       fail(path, "a download route with required media type metadata");
     }
     assertMediaType(mediaTypes[0], `${path} media_type`);
+    mediaType = mediaTypes[0];
     if (filenames.length === 1) {
       assertDisplayFilename(filenames[0], `${path} display_filename`);
     }
   } else if (parsed.search !== "") {
     fail(path, "a content route without query metadata");
+  } else {
+    mediaType = {
+      "content/image-png": "image/png",
+      "content/image-jpeg": "image/jpeg",
+      "content/image-gif": "image/gif",
+      "content/image-webp": "image/webp",
+    }[route[2]];
   }
-  return { digest: route[1], kind: route[2] };
+  return { digest: route[1], kind: route[2], mediaType };
 }
 
 function u64Bytes(value) {
@@ -822,6 +831,9 @@ export function decodeWebBlobDescriptor(value) {
     const contentPath = `blob_descriptor.available_views[${index}].content_url`;
     const contentRoute = assertSameOriginBlobUrl(view.content_url, contentPath);
     const contentDigest = contentRoute.digest;
+    if (view.media_type !== contentRoute.mediaType) {
+      fail(`blob_descriptor.available_views[${index}].media_type`, "the content route media type");
+    }
     if (view.kind === "download" || view.kind === "browser_native") {
       if (view.derivations.length !== 0) {
         fail(`blob_descriptor.available_views[${index}].derivations`, "empty for an original representation");

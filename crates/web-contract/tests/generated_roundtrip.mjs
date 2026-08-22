@@ -903,6 +903,29 @@ test("generated blob decoder rejects unsupported routes and incomplete download 
   );
 });
 
+test("generated blob decoder cross-checks view and route media types", () => {
+  const routeDigest = `sha256:${"a1".repeat(32)}`;
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        digest: routeDigest,
+        byte_length: "1",
+        declared_media_type: "image/png",
+        display_filename: [],
+        available_views: [
+          {
+            kind: "download",
+            content_url: `/api/blobs/${routeDigest}/download?media_type=image%2Fpng`,
+            media_type: "text/plain",
+            byte_length: "1",
+            derivations: [],
+          },
+        ],
+      }),
+    /media_type must be the content route media type/,
+  );
+});
+
 test("generated blob decoder rejects a contradictory deterministic cache key", () => {
   const digest = `sha256:${"a1".repeat(32)}`;
   const outputDigest = `sha256:${"b2".repeat(32)}`;

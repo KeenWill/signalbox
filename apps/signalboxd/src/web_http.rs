@@ -794,16 +794,77 @@ fn single_range_header(headers: &HeaderMap) -> Result<Option<&HeaderValue>, ()> 
 }
 
 fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
-    headers
-        .get_all(IF_NONE_MATCH)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .any(|value| {
-            value.split(',').any(|candidate| {
-                let candidate = candidate.trim();
-                candidate == "*" || candidate == etag || candidate.strip_prefix("W/") == Some(etag)
-            })
-        })
+    let mut member_count = 0;
+    let mut matched = false;
+    let mut wildcard = false;
+    for value in headers.get_all(IF_NONE_MATCH) {
+        let Some((field_count, field_matched, field_wildcard)) =
+            parse_if_none_match_field(value.as_bytes(), etag.as_bytes())
+        else {
+            return false;
+        };
+        member_count += field_count;
+        matched |= field_matched;
+        wildcard |= field_wildcard;
+    }
+    member_count > 0 && ((wildcard && member_count == 1) || (!wildcard && matched))
+}
+
+fn parse_if_none_match_field(value: &[u8], etag: &[u8]) -> Option<(usize, bool, bool)> {
+    let mut cursor = 0;
+    let mut member_count = 0;
+    let mut matched = false;
+    let mut wildcard = false;
+    loop {
+        while matches!(value.get(cursor), Some(b' ' | b'\t')) {
+            cursor += 1;
+        }
+        if cursor == value.len() {
+            return (member_count > 0).then_some((member_count, matched, wildcard));
+        }
+        let start = cursor;
+        if value[cursor] == b'*' {
+            wildcard = true;
+            cursor += 1;
+        } else {
+            if value.get(cursor..cursor + 2) == Some(b"W/") {
+                cursor += 2;
+            }
+            if value.get(cursor) != Some(&b'\"') {
+                return None;
+            }
+            cursor += 1;
+            while let Some(byte) = value.get(cursor).copied() {
+                if byte == b'\"' {
+                    break;
+                }
+                if byte != 0x21 && !(0x23..=0x7e).contains(&byte) && byte < 0x80 {
+                    return None;
+                }
+                cursor += 1;
+            }
+            if value.get(cursor) != Some(&b'\"') {
+                return None;
+            }
+            cursor += 1;
+            matched |= &value[start..cursor] == etag
+                || value.get(start..start + 2) == Some(b"W/") && &value[start + 2..cursor] == etag;
+        }
+        member_count += 1;
+        while matches!(value.get(cursor), Some(b' ' | b'\t')) {
+            cursor += 1;
+        }
+        if cursor == value.len() {
+            return Some((member_count, matched, wildcard));
+        }
+        if value[cursor] != b',' {
+            return None;
+        }
+        cursor += 1;
+        if wildcard {
+            return None;
+        }
+    }
 }
 
 fn if_range_matches(headers: &HeaderMap, etag: &str) -> bool {
@@ -1255,6 +1316,28 @@ mod tests {
         );
 
         assert!(if_none_match(&headers, "\"matching\""));
+    }
+
+    #[test]
+    fn malformed_if_none_match_list_is_ignored() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::IF_NONE_MATCH,
+            header::HeaderValue::from_static("garbage, \"matching\""),
+        );
+
+        assert!(!if_none_match(&headers, "\"matching\""));
+    }
+
+    #[test]
+    fn wildcard_if_none_match_cannot_be_combined_with_members() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::IF_NONE_MATCH,
+            header::HeaderValue::from_static("*, \"matching\""),
+        );
+
+        assert!(!if_none_match(&headers, "\"matching\""));
     }
 
     #[test]
