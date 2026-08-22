@@ -116,6 +116,7 @@ pub type ToolContinuationUsageLimitCatalog =
 /// Exact prospective first-call material derived from one activation preview.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProspectiveModelCall {
+    prepared: signalbox_domain::PreparedInitialModelCall,
     request: PreparedModelCallRequest,
     credential_reference: ModelCallCredentialReference,
     system_prompt: Option<signalbox_domain::SessionSystemPrompt>,
@@ -157,19 +158,23 @@ impl ReportedModelCallUsage {
 impl ProspectiveModelCall {
     /// Applies the canonical application frontier renderer with the supplied tool catalog.
     pub fn render(
-        self,
+        &self,
         tools: Box<[signalbox_application::ToolDefinition]>,
     ) -> Result<
         signalbox_application::PreparedModelOperation,
         signalbox_application::ModelFrontierRenderingError,
     > {
         signalbox_application::PreparedModelOperation::render(
-            self.request,
-            self.credential_reference,
-            self.system_prompt,
+            self.request.clone(),
+            self.credential_reference.clone(),
+            self.system_prompt.clone(),
             tools,
             &self.tool_entries,
         )
+    }
+
+    const fn prepared(&self) -> &signalbox_domain::PreparedInitialModelCall {
+        &self.prepared
     }
 }
 
@@ -953,6 +958,10 @@ impl PostgresModelCallRepository {
             let (_, failure) = error.into_parts();
             ModelCallCorruption::Execution(failure)
         })?;
+        let prepared = execution
+            .clone()
+            .prepare_initial_call(call)
+            .map_err(|_| ModelCallRepositoryError::InvalidTransition("preview initial call"))?;
         let request = execution
             .preview_initial_call(call)
             .map_err(|_| ModelCallRepositoryError::InvalidTransition("preview initial call"))?;
@@ -1008,6 +1017,7 @@ impl PostgresModelCallRepository {
         };
         transaction.rollback().await?;
         Ok(Some(ProspectiveModelCall {
+            prepared,
             request,
             credential_reference,
             system_prompt,
@@ -1020,41 +1030,37 @@ impl PostgresModelCallRepository {
     pub(crate) async fn checkpoint_counted_activation_in_transaction(
         &self,
         connection: &mut PgConnection,
-        session: SessionId,
-        call: ModelCallId,
+        activated: &signalbox_domain::ActivatedTurn,
+        prospective: &ProspectiveModelCall,
         _outbox_order_guard: ModelCallOutboxOrderGuard,
     ) -> Result<(), ModelCallRepositoryError> {
-        let execution = require_live_execution_with_targets(
-            connection,
-            session,
-            Some(&self.targets),
-            None,
-            None,
-        )
-        .await?;
-        if execution.current_call().is_some()
-            || !execution.active_turn().pending_steering().is_empty()
+        let prepared = prospective.prepared();
+        let signalbox_domain::ActiveTurnPhase::Running { current_attempt } = activated.phase()
+        else {
+            return Err(ModelCallRepositoryError::InvalidTransition(
+                "counted activation is not running",
+            ));
+        };
+        if prepared.session() != activated.session()
+            || prepared.turn() != activated.turn()
+            || prepared.attempt() != current_attempt.id()
+            || current_attempt.state() != &signalbox_domain::CurrentTurnAttemptState::Prepared
+            || !prepared.consumed_steering().is_empty()
+            || prepared.steering_snapshot().is_some()
         {
             return Err(ModelCallRepositoryError::InvalidTransition(
-                "counted activation gained uncounted call input",
+                "counted preparation does not match activated turn",
             ));
         }
-        let fast_mode = execution
+        let fast_mode = activated
             .configuration()
             .effective()
             .model_settings()
             .effective()
             .fast_mode();
-        let prepared = execution
-            .prepare_initial_call_consuming_steering(call, Vec::new(), None)
-            .map_err(|_| {
-                ModelCallRepositoryError::InvalidTransition(
-                    "counted activation initial call cannot be prepared",
-                )
-            })?;
         let credential_reference = resolve_session_credential(
             connection,
-            session,
+            activated.session(),
             prepared.call().target(),
             fast_mode,
             &self.credential_reference,
