@@ -9,7 +9,7 @@
 
 #[cfg(target_os = "linux")]
 use std::os::{
-    fd::{AsFd, AsRawFd, OwnedFd},
+    fd::AsFd,
     unix::{ffi::OsStrExt, fs::MetadataExt},
 };
 use std::{
@@ -85,6 +85,8 @@ const SANDBOX_DISPATCH_PROGRAM: &str = "/signalbox-exec-dispatch";
 const SANDBOX_HTTPS_BROKER_DIRECTORY: &str = "/run/signalbox";
 const SANDBOX_HTTPS_BROKER_SOCKET: &str = "/run/signalbox/https-broker.sock";
 const SANDBOX_ENVIRONMENT_FILE: &str = "/run/signalbox/restricted-environment";
+#[cfg(target_os = "linux")]
+const SANDBOX_ENVIRONMENT_DESCRIPTOR_PLACEHOLDER: &str = "signalbox-private-environment-descriptor";
 const SANDBOX_HTTPS_PROXY: &str = "http://127.0.0.1:18080";
 const SANDBOX_FALLBACK_PATH: &str = "/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 pub(crate) const SANDBOX_DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
@@ -669,30 +671,24 @@ pub struct ProcessRequest {
     pub environment_inheritance: ProcessEnvironment,
     /// Trusted status protocol expected from the supervised target.
     pub status_protocol: ProcessStatusProtocol,
+    /// Private bytes delivered through this request's exact supervisor pipe.
+    #[cfg(target_os = "linux")]
+    #[doc(hidden)]
+    pub delivery_payload: Option<Vec<u8>>,
 }
 
 struct SandboxEnvironmentDelivery {
     name: SandboxEnvironmentName,
     #[cfg(target_os = "linux")]
-    descriptor: OwnedFd,
+    value: OsString,
 }
 
 impl SandboxEnvironmentDelivery {
     #[cfg(target_os = "linux")]
     fn try_new(environment: SandboxEnvironmentVariable) -> Result<Self, ()> {
-        let descriptor = rustix::fs::memfd_create(
-            c"signalbox-restricted-environment",
-            rustix::fs::MemfdFlags::CLOEXEC,
-        )
-        .map_err(|_| ())?;
-        let mut file = std::fs::File::from(descriptor);
-        std::io::Write::write_all(&mut file, environment.value.as_bytes()).map_err(|_| ())?;
-        std::io::Seek::rewind(&mut file).map_err(|_| ())?;
-        let descriptor =
-            inherited_descriptor_above_standard_streams(OwnedFd::from(file)).map_err(|_| ())?;
         Ok(Self {
             name: environment.name,
-            descriptor,
+            value: environment.value,
         })
     }
 
@@ -2128,6 +2124,8 @@ fn direct_request(
         environment: BTreeMap::new(),
         environment_inheritance: ProcessEnvironment::Inherit,
         status_protocol: ProcessStatusProtocol::Direct,
+        #[cfg(target_os = "linux")]
+        delivery_payload: None,
     }
 }
 
@@ -2265,14 +2263,14 @@ fn bwrap_request(
             // Apply private environment delivery after every configured mount
             // so a read-only `/run` ancestor cannot hide the delivery file.
             #[cfg(target_os = "linux")]
-            if let Some(environment) = invocation.environment {
+            if invocation.environment.is_some() {
                 bwrap_arguments.extend([
                     OsString::from("--dir"),
                     OsString::from(SANDBOX_HTTPS_BROKER_DIRECTORY),
                     OsString::from("--perms"),
                     OsString::from("0600"),
                     OsString::from("--file"),
-                    OsString::from(environment.descriptor.as_raw_fd().to_string()),
+                    OsString::from(SANDBOX_ENVIRONMENT_DESCRIPTOR_PLACEHOLDER),
                     OsString::from(SANDBOX_ENVIRONMENT_FILE),
                 ]);
             }
@@ -2376,6 +2374,10 @@ fn bwrap_request(
         environment,
         environment_inheritance: ProcessEnvironment::Clear,
         status_protocol: ProcessStatusProtocol::SandboxDispatch,
+        #[cfg(target_os = "linux")]
+        delivery_payload: invocation
+            .environment
+            .map(|environment| environment.value.as_bytes().to_vec()),
     }
 }
 
@@ -3382,6 +3384,21 @@ async fn run_process(supervisor_program: &Path, request: ProcessRequest) -> Proc
 }
 
 #[cfg(target_os = "linux")]
+async fn write_control_payload(
+    control: &mut tokio::process::ChildStdin,
+    payload: Option<&[u8]>,
+) -> Result<(), ()> {
+    let payload = payload.unwrap_or_default();
+    let length = u32::try_from(payload.len()).map_err(|_| ())?;
+    control.write_all(&[1]).await.map_err(|_| ())?;
+    control
+        .write_all(&length.to_be_bytes())
+        .await
+        .map_err(|_| ())?;
+    control.write_all(payload).await.map_err(|_| ())
+}
+
+#[cfg(target_os = "linux")]
 async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -> ProcessRunResult {
     if request.capture_bytes > PROCESS_CAPTURE_BYTES_LIMIT {
         return empty_process_result(ProcessOutcome::SpawnFailed {
@@ -3494,7 +3511,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
     let mut stderr_task = tokio::spawn(read_bounded(stderr, request.capture_bytes));
     let startup = tokio::time::timeout_at(asynchronous_request_deadline, async {
         let control = control.as_mut().ok_or(())?;
-        control.write_all(&[1]).await.map_err(|_| ())
+        write_control_payload(control, request.delivery_payload.as_deref()).await
     })
     .await;
     if !matches!(startup, Ok(Ok(()))) {
@@ -3992,6 +4009,7 @@ mod tests {
                 environment: BTreeMap::new(),
                 environment_inheritance: ProcessEnvironment::Clear,
                 status_protocol: ProcessStatusProtocol::Direct,
+                delivery_payload: None,
             },
         )
         .await;
@@ -4018,6 +4036,7 @@ mod tests {
                 environment: BTreeMap::new(),
                 environment_inheritance: ProcessEnvironment::Clear,
                 status_protocol: ProcessStatusProtocol::Direct,
+                delivery_payload: None,
             },
         )
         .await;
@@ -5280,11 +5299,17 @@ mod tests {
             .iter()
             .position(|argument| argument == SANDBOX_ENVIRONMENT_FILE)
             .ok_or_else(|| std::io::Error::other("private environment file position"))?;
-        assert!(
-            private_file_arguments[3]
-                .to_string_lossy()
-                .parse::<i32>()
-                .is_ok()
+        assert_eq!(
+            private_file_arguments[3],
+            SANDBOX_ENVIRONMENT_DESCRIPTOR_PLACEHOLDER
+        );
+        assert_eq!(
+            request.delivery_payload.as_deref(),
+            Some(SYNTHETIC_ENVIRONMENT_VALUE.as_bytes())
+        );
+        assert_eq!(
+            probe.delivery_payload.as_deref(),
+            Some(SANDBOX_ENVIRONMENT_PROBE_VALUE.as_bytes())
         );
         assert!(private_file_position > read_only_mount_position);
         assert!(request.arguments.ends_with(&dispatch_arguments));
@@ -5351,11 +5376,17 @@ mod tests {
             })
             .ok_or_else(|| std::io::Error::other("one probe environment file"))?;
 
-        assert!(
-            private_file_arguments[3]
-                .to_string_lossy()
-                .parse::<i32>()
-                .is_ok()
+        assert_eq!(
+            private_file_arguments[3],
+            SANDBOX_ENVIRONMENT_DESCRIPTOR_PLACEHOLDER
+        );
+        assert_eq!(
+            probe.delivery_payload.as_deref(),
+            Some(SANDBOX_ENVIRONMENT_PROBE_VALUE.as_bytes())
+        );
+        assert_ne!(
+            probe.delivery_payload.as_deref(),
+            Some(SYNTHETIC_ENVIRONMENT_VALUE.as_bytes())
         );
         assert!(
             probe
@@ -5535,6 +5566,7 @@ mod tests {
             environment: BTreeMap::new(),
             environment_inheritance: ProcessEnvironment::Clear,
             status_protocol: ProcessStatusProtocol::SandboxDispatch,
+            delivery_payload: None,
         };
         let long_supervisor = PathBuf::from("s".repeat(64));
 
@@ -5576,6 +5608,8 @@ mod tests {
             )]),
             environment_inheritance: ProcessEnvironment::Clear,
             status_protocol: ProcessStatusProtocol::Direct,
+            #[cfg(target_os = "linux")]
+            delivery_payload: None,
         };
 
         let rendered = format!("{request:?}");
@@ -5731,12 +5765,8 @@ mod tests {
 
         let delivery = SandboxEnvironmentDelivery::try_new(environment)
             .map_err(|()| std::io::Error::other("create sandbox environment delivery"))?;
-        let mut file =
-            std::fs::File::open(format!("/proc/self/fd/{}", delivery.descriptor.as_raw_fd()))?;
-        let mut delivered = String::new();
-        std::io::Read::read_to_string(&mut file, &mut delivered)?;
 
-        assert_eq!(delivered, expected);
+        assert_eq!(delivery.value.as_bytes(), expected.as_bytes());
         Ok(())
     }
 

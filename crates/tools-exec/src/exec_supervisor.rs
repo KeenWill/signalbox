@@ -23,7 +23,10 @@ mod linux {
         io::{Read, Write},
         net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
         os::unix::net::UnixStream,
-        os::unix::{ffi::OsStringExt, process::CommandExt},
+        os::{
+            fd::AsRawFd,
+            unix::{ffi::OsStringExt, process::CommandExt},
+        },
         path::{Path, PathBuf},
         process::{Command, ExitCode, ExitStatus, Stdio},
         sync::{
@@ -53,6 +56,9 @@ mod linux {
     const DISPATCH_HTTPS_PROXY_ENVIRONMENT_MODE: &str =
         "--dispatch-with-https-proxy-and-environment";
     const RESTRICTED_ENVIRONMENT_FILE: &str = "/run/signalbox/restricted-environment";
+    const RESTRICTED_ENVIRONMENT_DESCRIPTOR_PLACEHOLDER: &str =
+        "signalbox-private-environment-descriptor";
+    const MAX_RESTRICTED_ENVIRONMENT_BYTES: usize = 64 * 1024;
     const HTTPS_PROXY_PORT: u16 = 18_080;
     const HTTPS_BROKER_SOCKET: &str = "/run/signalbox/https-broker.sock";
     const MAX_HTTPS_PROXY_TUNNELS: usize = 8;
@@ -166,7 +172,8 @@ mod linux {
 
     fn run_outer_supervisor(timeout: OsString, mut arguments: Vec<OsString>) -> Result<(), ()> {
         let timeout_milliseconds = parse_u64(timeout.clone())?;
-        if arguments.is_empty() || read_control_byte().is_err() {
+        let delivery_payload = read_control_payload()?;
+        if arguments.is_empty() {
             return Err(());
         }
         let started = Instant::now();
@@ -196,7 +203,7 @@ mod linux {
                 return Err(());
             }
         };
-        control.write_all(&[1]).map_err(|_| ())?;
+        write_control_payload(&mut control, &delivery_payload)?;
         let cancelled = match cancellation_signal() {
             Ok(cancelled) => cancelled,
             Err(()) => {
@@ -775,10 +782,42 @@ mod linux {
     }
 
     fn launch(arguments: Vec<OsString>) -> ExitCode {
-        if read_control_byte().is_err() {
+        let Ok(delivery_payload) = read_control_payload() else {
             return ExitCode::FAILURE;
+        };
+        let mut arguments = arguments;
+        let descriptor = if delivery_payload.is_empty() {
+            None
+        } else {
+            match restricted_environment_descriptor(&delivery_payload) {
+                Ok(descriptor) => Some(descriptor),
+                Err(()) => return ExitCode::FAILURE,
+            }
+        };
+        if let Some(descriptor) = descriptor.as_ref() {
+            let Some(argument) = arguments
+                .iter_mut()
+                .find(|argument| **argument == RESTRICTED_ENVIRONMENT_DESCRIPTOR_PLACEHOLDER)
+            else {
+                return ExitCode::FAILURE;
+            };
+            *argument = OsString::from(descriptor.as_raw_fd().to_string());
         }
-        emit_target_status(arguments, None)
+        let result = emit_target_status(arguments, None);
+        drop(descriptor);
+        result
+    }
+
+    fn restricted_environment_descriptor(payload: &[u8]) -> Result<std::fs::File, ()> {
+        let descriptor = rustix::fs::memfd_create(
+            c"signalbox-restricted-environment",
+            rustix::fs::MemfdFlags::empty(),
+        )
+        .map_err(|_| ())?;
+        let mut file = std::fs::File::from(descriptor);
+        file.write_all(payload).map_err(|_| ())?;
+        std::io::Seek::rewind(&mut file).map_err(|_| ())?;
+        Ok(file)
     }
 
     fn emit_target_status(
@@ -960,11 +999,14 @@ mod linux {
         arguments: Vec<OsString>,
         timeout: Duration,
     ) -> SupervisorStatus {
-        if read_control_byte().is_err() {
-            return SupervisorStatus::SupervisionFailed {
-                stage: SupervisorFailureStage::Cleanup,
-            };
-        }
+        let delivery_payload = match read_control_payload() {
+            Ok(payload) => payload,
+            Err(()) => {
+                return SupervisorStatus::SupervisionFailed {
+                    stage: SupervisorFailureStage::Cleanup,
+                };
+            }
+        };
         let pidfd_reservation = match preflight_process_tree() {
             Ok(reservation) => reservation,
             Err(()) => {
@@ -1037,7 +1079,9 @@ mod linux {
                 };
             }
         };
-        if read_control_byte().is_err() || launcher_control.write_all(&[1]).is_err() {
+        if read_control_byte().is_err()
+            || write_control_payload(&mut launcher_control, &delivery_payload).is_err()
+        {
             let cleanup = tree.finish(&mut child);
             let reader_disposition = match cleanup {
                 CleanupStatus::Complete { .. } => LauncherReaderDisposition::DrainToEof,
@@ -1344,6 +1388,28 @@ mod linux {
     fn read_control_byte() -> Result<(), ()> {
         let mut byte = [0_u8; 1];
         std::io::stdin().read_exact(&mut byte).map_err(|_| ())
+    }
+
+    fn read_control_payload() -> Result<Vec<u8>, ()> {
+        read_control_byte()?;
+        let mut encoded_length = [0_u8; 4];
+        std::io::stdin()
+            .read_exact(&mut encoded_length)
+            .map_err(|_| ())?;
+        let length = usize::try_from(u32::from_be_bytes(encoded_length)).map_err(|_| ())?;
+        if length > MAX_RESTRICTED_ENVIRONMENT_BYTES {
+            return Err(());
+        }
+        let mut payload = vec![0_u8; length];
+        std::io::stdin().read_exact(&mut payload).map_err(|_| ())?;
+        Ok(payload)
+    }
+
+    fn write_control_payload(target: &mut impl Write, payload: &[u8]) -> Result<(), ()> {
+        let length = u32::try_from(payload.len()).map_err(|_| ())?;
+        target.write_all(&[1]).map_err(|_| ())?;
+        target.write_all(&length.to_be_bytes()).map_err(|_| ())?;
+        target.write_all(payload).map_err(|_| ())
     }
 
     struct ProcessTreeGuard {
