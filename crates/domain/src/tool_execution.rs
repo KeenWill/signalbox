@@ -1747,7 +1747,7 @@ impl PreparedToolResultProjection {
 
     /// Borrows the checked placement-aware boundary immediately preceding
     /// the projected result entries.
-    pub(crate) const fn projection_base_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
+    pub const fn projection_base_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
         &self.projection_base_snapshot
     }
 

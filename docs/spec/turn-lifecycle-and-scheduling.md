@@ -670,15 +670,14 @@ registration cursor before marking prior-process connections lost; the durable
 registration source therefore remains the cause of any resulting
 `AwaitingRunnerRecovery` wait.
 
-**Committed unimplemented functionality — loss replacement.** No present
-surface provides `ReplaceLostRunner`, installs its successor placement, emits
+**Committed unimplemented functionality — loss replacement.** No present surface
+provides `ReplaceLostRunner`, installs its successor placement, emits
 `RunnerPlacementChanged`, or installs `session_runner_placement_frontier`. The
 following paragraphs define the checked transaction that a future producer must
-implement. `ReplaceLostRunner` requires the
-expected current placement revision and either a different live exact runner,
-the one pending replacement enrollment it atomically activates, or — for a
-registration-triggered loss alone — a checked re-enrollment of the same runner
-against its current connection
+implement. `ReplaceLostRunner` requires the expected current placement revision
+and either a different live exact runner, the one pending replacement enrollment
+it atomically activates, or — for a registration-triggered loss alone — a
+checked re-enrollment of the same runner against its current connection
 ([runner protocol and placement](runner-protocol.md#identity-enrollment-and-registration)).
 For a pinned loss, its transaction installs the checked successor placement and
 grant lineage, provisions a new revisioned workspace when the successor request
@@ -1072,9 +1071,9 @@ from child transcript state nor depend on process-local wake memory.
 - Loss replacement is the intended version-one producer of a placement change,
   but remains committed unimplemented functionality with no present command.
   User-directed relocation of a healthy session, and a working-directory move on
-  the same runner, likewise have no command here yet; the
-  placement-revision, transcript-boundary, and runner-event mechanisms this page
-  drives must stay compatible with a relocation that no loss caused
+  the same runner, likewise have no command here yet; the placement-revision,
+  transcript-boundary, and runner-event mechanisms this page drives must stay
+  compatible with a relocation that no loss caused
   ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one)).
 - The eligible terminal-failure path (queued turn fixes its start and fails
   without an attempt for a structurally unexecutable configuration) is

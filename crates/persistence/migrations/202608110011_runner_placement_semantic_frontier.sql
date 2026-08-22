@@ -187,7 +187,7 @@ FOR EACH STATEMENT EXECUTE FUNCTION reject_immutable_record_change();
 -- Placement boundaries are out-of-band while a yielded tool round is being
 -- completed. Match the first proposal-count non-placement entries after the
 -- predecessor boundary as ordered results, allowing placement entries before
--- or between them while still rejecting every other interruption.
+-- or between them and authenticated steering only after every result.
 CREATE OR REPLACE FUNCTION continuation_frontier_closes_predecessor_tool_round(
     checked_attempt_id uuid,
     checked_turn_id uuid,
@@ -292,22 +292,31 @@ AS $$
                             IS DISTINCT FROM request.request_id
                     )
            )
-           AND (
-                SELECT count(*)
-                  FROM context_frontier_member AS suffix_member
-                  JOIN semantic_transcript_entry AS suffix_entry
-                    ON suffix_entry.source_session_id =
-                       suffix_member.source_session_id
-                   AND suffix_entry.semantic_entry_id =
-                       suffix_member.semantic_entry_id
-                 WHERE suffix_member.owning_session_id =
-                       predecessor_round.session_id
-                   AND suffix_member.context_frontier_id =
-                       checked_frontier_id
-                   AND suffix_member.member_position > boundary.member_count
-                   AND suffix_entry.payload_kind <>
-                       'runner_placement_changed'
-           ) = predecessor_round.request_count
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM (
+                        SELECT suffix_entry.payload_kind,
+                               row_number() OVER (
+                                   ORDER BY suffix_member.member_position
+                               ) AS suffix_ordinal
+                          FROM context_frontier_member AS suffix_member
+                          JOIN semantic_transcript_entry AS suffix_entry
+                            ON suffix_entry.source_session_id =
+                               suffix_member.source_session_id
+                           AND suffix_entry.semantic_entry_id =
+                               suffix_member.semantic_entry_id
+                         WHERE suffix_member.owning_session_id =
+                               predecessor_round.session_id
+                           AND suffix_member.context_frontier_id =
+                               checked_frontier_id
+                           AND suffix_member.member_position >
+                               boundary.member_count
+                           AND suffix_entry.payload_kind <>
+                               'runner_placement_changed'
+                  ) AS suffix
+                 WHERE suffix.suffix_ordinal > predecessor_round.request_count
+                   AND suffix.payload_kind <> 'steering_accepted_input'
+           )
     );
 $$;
 

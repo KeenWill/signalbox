@@ -29,8 +29,7 @@ selection were verified through PR #314 (`agent/context-compaction-protocol`).
 The runner placement-entry payload and checked relational readback were verified
 against this PR (`agent/runner-placement-semantic-persistence`); the transaction
 that produces and installs that boundary remains committed unimplemented
-functionality. The
-imported-conversation record and converter are owned by
+functionality. The imported-conversation record and converter are owned by
 [conversation-import](conversation-import.md). Where a law is cited as
 `INV-NNN`, the generated [invariant test index](../invariants.md) resolves it;
 where mechanics owned by another contract are summarized, the owning sibling

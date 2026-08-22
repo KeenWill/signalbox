@@ -5314,8 +5314,8 @@ pub enum ToolBatchExecutionFailure {
 pub struct ToolBatchExecutionError { /* private */ }
 // accessor: failure()
 pub struct PreparedToolResultProjection { /* private */ }
-// accessors: entries(), snapshot(), into_parts(); crate-internal correlation
-// accessors retain the yielded source and checked projection-base snapshot
+// accessors: projection_base_snapshot(), entries(), snapshot(), into_parts();
+// crate-internal correlation accessors retain the yielded source
 pub enum ToolResultProjectionFailure {
     BatchNotResolved,
     TurnLevelFailure,

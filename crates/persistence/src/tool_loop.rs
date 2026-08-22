@@ -956,6 +956,7 @@ impl PostgresToolLoopRepository {
                 .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
             if batch.producing_call() != producing_call
                 || batch.yielded_snapshot().frontier().owning_session() != session
+                || projection.projection_base_snapshot() != batch.projection_base_snapshot()
                 || !matches!(
                     batch.phase(),
                     signalbox_domain::ToolBatchPhase::Executing { turn_attempt }
