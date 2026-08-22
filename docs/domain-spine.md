@@ -2511,6 +2511,7 @@ pub enum SubmitInputRejectedResult {
     AttachmentBytesTooLarge {
         session: SessionId,
         maximum_bytes: NonZeroU64,
+        observed_bytes: NonZeroU64,
     },
     SessionNotFound {
         session: SessionId,
@@ -2648,7 +2649,7 @@ pub struct SubmitInputRejectedBlobNotFoundReconstitutionInput {
     /* public named command, actor, session, and absent-digest facts */
 }
 pub struct SubmitInputRejectedAttachmentBytesTooLargeReconstitutionInput {
-    /* public named command, actor, session, and deployment-maximum facts */
+    /* public named command, actor, session, deployment-maximum, and observed-aggregate facts */
 }
 pub struct SubmitInputRejectedNoActiveTurnReconstitutionInput {
     /* public named command, actor, session, and expected-turn facts */
@@ -2732,7 +2733,7 @@ pub enum SubmitInputReconstitutionFailure {
     AppliedDeliveryIsNotNextSafePoint,
     ResultSessionMismatch,
     RejectedBlobDigestNotReferenced,
-    RejectedAttachmentBoundWithoutAttachment,
+    RejectedAttachmentAggregateWithinBound,
     AcceptedCommandMismatch,
     AcceptedInputMismatch,
     AcceptedSessionMismatch,

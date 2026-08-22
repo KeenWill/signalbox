@@ -12614,6 +12614,7 @@ fn map_rejection(
         SubmitInputRejectedResult::AttachmentBytesTooLarge {
             session: _,
             maximum_bytes,
+            observed_bytes: _,
         } => RejectionDetail::AttachmentByteBudgetExceeded {
             maximum_bytes: CanonicalU64::new(maximum_bytes.get()),
         },

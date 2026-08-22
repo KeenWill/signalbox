@@ -2,7 +2,8 @@
 
 ALTER TABLE submit_input_command
     ADD COLUMN result_blob_digest bytea,
-    ADD COLUMN result_maximum_attachment_bytes numeric(20, 0);
+    ADD COLUMN result_maximum_attachment_bytes numeric(20, 0),
+    ADD COLUMN result_observed_attachment_bytes numeric(20, 0);
 
 -- Rejected commands must retain an unknown caller-supplied digest for exact
 -- replay comparison. Accepted-input parts keep their blob foreign key, while
@@ -59,6 +60,7 @@ BEGIN
                 (%s)
                 AND result_blob_digest IS NULL
                 AND result_maximum_attachment_bytes IS NULL
+                AND result_observed_attachment_bytes IS NULL
             )
             OR (
                 result_kind = 'rejected'
@@ -76,6 +78,7 @@ BEGIN
                 AND result_blob_digest IS NOT NULL
                 AND octet_length(result_blob_digest) = 32
                 AND result_maximum_attachment_bytes IS NULL
+                AND result_observed_attachment_bytes IS NULL
             )
             OR (
                 result_kind = 'rejected'
@@ -93,6 +96,9 @@ BEGIN
                 AND result_blob_digest IS NULL
                 AND result_maximum_attachment_bytes IS NOT NULL
                 AND result_maximum_attachment_bytes BETWEEN 1 AND 18446744073709551615
+                AND result_observed_attachment_bytes IS NOT NULL
+                AND result_observed_attachment_bytes BETWEEN 1 AND 18446744073709551615
+                AND result_observed_attachment_bytes > result_maximum_attachment_bytes
             )
         )
         $shape$,

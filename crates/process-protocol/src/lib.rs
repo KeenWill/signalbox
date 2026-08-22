@@ -10537,10 +10537,10 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033 / INV-061: attachment admission failures carry their exact
+    /// INV-033 / INV-071: attachment admission failures carry their exact
     /// content-silent durable rejection shapes.
     #[test]
-    fn inv033_inv061_attachment_rejections_have_exact_closed_shapes()
+    fn inv033_inv071_attachment_rejections_have_exact_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
         assert_server_message_round_trip(
