@@ -4,7 +4,8 @@ use crate::{
     BoundedMetadata, CanonicalMediaType, FileInspection, FileMediaCeilings, FileMediaFailure,
     FileMediaProcessor, FileMediaProviderDeclaration, FileMediaProviderReadRequest,
     FileMediaProviderValidationRequest, FileReadRequest, FileReadResult, InspectionRequest,
-    MAX_READ_OPTIONS_BYTES, ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput,
+    MAX_READ_OPTIONS_BYTES, MAX_WORKER_WALL_SECONDS, ProbeStrength, ProcessorProbeOutput,
+    ProcessorReadOutput,
     ProcessorValidationOutput, ReadAccessPattern, ReadContinuation, ReadContinuationCursor,
     ReadViewBounds, ReaderDeclaration, ReaderIdentity, ReasonCode, StreamingTextFallback,
     ValidatedFile, ValidationEvidence, VerifiedBlobSource,
@@ -173,23 +174,32 @@ impl FileMediaRegistry {
             });
         }
 
-        let mut candidates = Vec::new();
-        let mut malformed = Vec::new();
-        for reader in self.readers.values() {
-            let raw = processor
-                .probe(reader.identity(), source, cancellation)
-                .await?;
-            match sanitize_probe(reader, raw)? {
-                SanitizedProbe::NoMatch => {}
-                SanitizedProbe::Candidate(candidate) => candidates.push(candidate),
-                SanitizedProbe::Malformed {
-                    media_type,
-                    reason_code,
-                } => {
-                    malformed.push((media_type, reason_code));
+        let probes = async {
+            let mut candidates = Vec::new();
+            let mut malformed = Vec::new();
+            for reader in self.readers.values() {
+                let raw = processor
+                    .probe(reader.identity(), source, cancellation)
+                    .await?;
+                match sanitize_probe(reader, raw)? {
+                    SanitizedProbe::NoMatch => {}
+                    SanitizedProbe::Candidate(candidate) => candidates.push(candidate),
+                    SanitizedProbe::Malformed {
+                        media_type,
+                        reason_code,
+                    } => {
+                        malformed.push((media_type, reason_code));
+                    }
                 }
             }
-        }
+            Ok::<_, FileMediaFailure>((candidates, malformed))
+        };
+        let (candidates, mut malformed) = tokio::time::timeout(
+            std::time::Duration::from_secs(MAX_WORKER_WALL_SECONDS),
+            probes,
+        )
+        .await
+        .map_err(|_| FileMediaFailure::ProcessorTimedOut)??;
         if !malformed.is_empty() {
             malformed.sort();
             malformed.dedup();

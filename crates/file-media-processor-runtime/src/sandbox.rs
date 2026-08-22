@@ -17,7 +17,8 @@ use rustix::process::{Resource, Rlimit, geteuid, getuid};
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProcessCeilings, FileMediaProcessor, FileMediaProcessorFuture,
     FileMediaProviderDeclaration, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    MAX_WORKER_TASKS, ProcessorBoundaryFailure, ProcessorFailure, ProcessorIsolation,
+    MAX_VALIDATION_RANGES, MAX_VALIDATION_SOURCE_BYTES, MAX_WORKER_TASKS,
+    ProcessorBoundaryFailure, ProcessorFailure, ProcessorIsolation,
     ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReaderDeclaration,
     ReaderIdentity, VerifiedBlobSource,
 };
@@ -170,12 +171,21 @@ impl SandboxedFileMediaProcessor {
 
     /// Proves that the exact configured profile can start every registered worker.
     pub async fn verify_isolation(&self) -> ProcessorIsolation {
-        for (worker, declarations) in self.worker_declarations.iter() {
-            if self.run_probe(worker, declarations).await.is_err() {
-                return ProcessorIsolation::Unavailable;
+        let verification = async {
+            for (worker, declarations) in self.worker_declarations.iter() {
+                self.run_probe(worker, declarations).await?;
             }
+            Ok::<(), ProcessorFailure>(())
+        };
+        match tokio::time::timeout(
+            Duration::from_secs(self.ceilings.wall_seconds()),
+            verification,
+        )
+        .await
+        {
+            Ok(Ok(())) => ProcessorIsolation::Available,
+            Ok(Err(_)) | Err(_) => ProcessorIsolation::Unavailable,
         }
-        ProcessorIsolation::Available
     }
 
     /// Returns the effective lowerable-only process ceilings.
@@ -435,6 +445,13 @@ impl FileMediaProcessor for SandboxedFileMediaProcessor {
         Box::pin(async move {
             self.reader(reader)?;
             require_file_use_source(&request.source, source)?;
+            if request.maximum_source_bytes == 0
+                || request.maximum_source_bytes > MAX_VALIDATION_SOURCE_BYTES
+                || request.maximum_ranges == 0
+                || request.maximum_ranges > MAX_VALIDATION_RANGES
+            {
+                return Err(ProcessorFailure::Protocol.into());
+            }
             let envelope = WireReadEnvelope::RandomAccess {
                 ranges: request.maximum_ranges,
                 cumulative_bytes: request.maximum_source_bytes,
@@ -990,6 +1007,10 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         std::io::ErrorKind::Unsupported,
         "unsupported seccomp architecture",
     ));
+    #[cfg(target_arch = "x86_64")]
+    let (inotify_init1, inotify_add_watch) = (294_u32, 254_u32);
+    #[cfg(target_arch = "aarch64")]
+    let (inotify_init1, inotify_add_watch) = (26_u32, 27_u32);
     let mut syscall_denials = vec![
         memfd_create,
         shmget,
@@ -997,6 +1018,8 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         mq_open,
         semget,
         io_setup,
+        inotify_init1,
+        inotify_add_watch,
         add_key,
         request_key,
         keyctl,
@@ -1542,6 +1565,17 @@ mod tests {
         #[cfg(target_arch = "aarch64")]
         let io_setup = 0_u32;
         assert_syscall_denied(&program, io_setup, "io_setup");
+    }
+
+    #[test]
+    fn descendant_filter_denies_unbudgeted_inotify_allocation() {
+        let program = seccomp_instructions().expect("the test architecture is supported");
+        #[cfg(target_arch = "x86_64")]
+        let (inotify_init1, inotify_add_watch) = (294_u32, 254_u32);
+        #[cfg(target_arch = "aarch64")]
+        let (inotify_init1, inotify_add_watch) = (26_u32, 27_u32);
+        assert_syscall_denied(&program, inotify_init1, "inotify_init1");
+        assert_syscall_denied(&program, inotify_add_watch, "inotify_add_watch");
     }
 
     #[test]

@@ -62,6 +62,8 @@ pub const MAX_WORKER_DESCENDANTS: u32 = 0;
 pub const MAX_WORKER_TASKS: u64 = 64;
 /// Maximum file descriptors available to an isolated worker.
 pub const MAX_WORKER_FILE_DESCRIPTORS: u64 = 32;
+/// Minimum descriptor ceiling that can launch bubblewrap and the dynamic worker.
+pub const MIN_WORKER_FILE_DESCRIPTORS: u64 = 16;
 /// Maximum retained diagnostic bytes from an isolated worker.
 pub const MAX_WORKER_STDERR_BYTES: usize = 16_384;
 
@@ -258,7 +260,7 @@ impl FileMediaProcessCeilings {
             && candidate.cpu_seconds <= self.cpu_seconds
             && candidate.wall_seconds > 0
             && candidate.wall_seconds <= self.wall_seconds
-            && candidate.file_descriptors >= 3
+            && candidate.file_descriptors >= MIN_WORKER_FILE_DESCRIPTORS
             && candidate.file_descriptors <= self.file_descriptors
             && candidate.stderr_bytes > 0
             && candidate.stderr_bytes <= self.stderr_bytes
@@ -314,6 +316,7 @@ mod tests {
         MAX_AGGREGATE_MEDIA_BYTES_PER_CALL, MAX_MEDIA_REFERENCES_PER_CALL,
         MAX_PROCESSOR_FRAME_BYTES, MAX_WORKER_CPU_SECONDS, MAX_WORKER_FILE_DESCRIPTORS,
         MAX_WORKER_MEMORY_BYTES, MAX_WORKER_STDERR_BYTES, MAX_WORKER_WALL_SECONDS,
+        MIN_WORKER_FILE_DESCRIPTORS,
     };
 
     /// INV-072: deployment configuration can lower but never raise a compiled ceiling.
@@ -396,6 +399,20 @@ mod tests {
             })
             .map(FileMediaProcessCeilings::frame_bytes),
             Some(MAX_PROCESSOR_FRAME_BYTES)
+        );
+    }
+
+    #[test]
+    fn process_ceiling_rejects_an_unlaunchable_descriptor_limit() {
+        assert_eq!(
+            FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
+                memory_bytes: MAX_WORKER_MEMORY_BYTES,
+                cpu_seconds: MAX_WORKER_CPU_SECONDS,
+                wall_seconds: MAX_WORKER_WALL_SECONDS,
+                file_descriptors: MIN_WORKER_FILE_DESCRIPTORS - 1,
+                stderr_bytes: MAX_WORKER_STDERR_BYTES,
+            }),
+            None
         );
     }
 }

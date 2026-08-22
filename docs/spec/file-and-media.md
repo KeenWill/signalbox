@@ -156,8 +156,9 @@ tmpfs mount, and mounts only the exact worker plus the host's dynamic-runtime
 library trees read-only. It exposes no source path,
 catalog, database, daemon socket, configuration, credential, home directory, or
 network namespace. An architecture-checked seccomp filter returns `ENOSYS` for
-`clone3`, permits fallback `clone` only with `CLONE_THREAD`, and denies process
-creation. Decoder threads remain available while worker descendants stay zero.
+`clone3`, permits fallback `clone` only with `CLONE_THREAD`, denies process
+creation, and denies unbudgeted inotify instance and watch allocation. Decoder
+threads remain available while worker descendants stay zero.
 
 Before releasing a dedicated startup gate, the daemon applies hard
 address-space, CPU, task, core-dump, and descriptor limits to the sandbox
@@ -166,10 +167,12 @@ combined budget: half is reserved for address space and half is split between
 the three writable tmpfs mounts, so their maxima cannot add to more than the
 configured value. Construction fails when either the real or effective UID is 0
 because Linux exempts those identities from `RLIMIT_NPROC`, making the task
-ceiling unenforceable. The daemon independently owns the wall deadline and kills
-the isolated process group on timeout or authoritative cancellation. Bounded
-stderr is drained and discarded; it is never parser evidence, telemetry content,
-or model-visible output.
+ceiling unenforceable. The daemon independently owns one wall deadline per
+invocation, one inspection-wide deadline across all serial reader probes, and
+one verification-wide deadline across all configured worker probes. It kills the
+isolated process group on timeout or authoritative cancellation. Bounded stderr
+is drained and discarded; it is never parser evidence, telemetry content, or
+model-visible output.
 
 The worker receives one digest and positive length, then requests exact byte
 ranges over length-delimited standard I/O. The daemon checks every request for
@@ -210,7 +213,9 @@ The version-one compiled ceilings are:
 | References / aggregate media per call | 16 / 33,554,432 bytes   |
 | Worker memory budget / CPU / wall     | 512 MiB / 60 s / 120 s  |
 | Worker descriptors / retained stderr  | 32 / 16,384 bytes       |
+| Minimum worker descriptor override    | 16 descriptors          |
 | One / aggregate executable snapshots  | 64 MiB / 64 MiB         |
+| Worker bindings per processor         | 256                     |
 | Worker descendants                    | 0                       |
 
 `FileMediaCeilings` admits only positive effective values at or below its

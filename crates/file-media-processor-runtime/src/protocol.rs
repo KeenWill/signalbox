@@ -33,8 +33,10 @@ where
     for declaration in declarations {
         let declaration = declaration.borrow();
         fingerprint_field(&mut fingerprint, declaration.provider().as_str().as_bytes());
-        fingerprint_len(&mut fingerprint, declaration.readers().len());
-        for reader in declaration.readers() {
+        let mut readers = declaration.readers().iter().collect::<Vec<_>>();
+        readers.sort_by(|left, right| left.identity().cmp(right.identity()));
+        fingerprint_len(&mut fingerprint, readers.len());
+        for reader in readers {
             fingerprint_field(
                 &mut fingerprint,
                 reader.identity().provider().as_str().as_bytes(),
