@@ -4,6 +4,7 @@ import { isCompatibleDetailBody } from './SessionItemDetail'
 import {
   isCanonicalSessionId,
   restoredTimelineSelection,
+  sameSessionWindowAnchor,
   timelineArrowTarget,
   visibleSessionItems,
 } from './SessionWorkspaceSurface'
@@ -74,6 +75,23 @@ describe('Session Workspace projection', () => {
     expect(restoredTimelineSelection('42', true, ['41', '42'])).toBe('42')
     expect(restoredTimelineSelection('42', true, ['41'])).toBeUndefined()
     expect(restoredTimelineSelection('42', false, ['42'])).toBeUndefined()
+  })
+
+  it('identifies repeated window anchors without allocating query attempts', () => {
+    expect(sameSessionWindowAnchor({ kind: 'latest' }, { kind: 'latest' })).toBe(true)
+    expect(sameSessionWindowAnchor({ kind: 'first' }, { kind: 'latest' })).toBe(false)
+    expect(
+      sameSessionWindowAnchor(
+        { kind: 'after', eventSequence: '42' },
+        { kind: 'after', eventSequence: '42' },
+      ),
+    ).toBe(true)
+    expect(
+      sameSessionWindowAnchor(
+        { kind: 'after', eventSequence: '42' },
+        { kind: 'after', eventSequence: '43' },
+      ),
+    ).toBe(false)
   })
 
   it('moves focused timeline selection with arrow keys', () => {

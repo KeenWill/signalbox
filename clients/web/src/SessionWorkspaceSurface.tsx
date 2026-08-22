@@ -69,6 +69,18 @@ export const restoredTimelineSelection = (
 ): string | undefined =>
   restored && restorePosition && ids.includes(restorePosition) ? restorePosition : undefined
 
+export const sameSessionWindowAnchor = (
+  left: SessionWindowAnchor | null,
+  right: SessionWindowAnchor | null,
+): boolean => {
+  if (left === null || right === null) return left === right
+  if (left.kind !== right.kind) return false
+  return (
+    !('eventSequence' in left) ||
+    ('eventSequence' in right && left.eventSequence === right.eventSequence)
+  )
+}
+
 export const timelineArrowTarget = (
   ids: readonly string[],
   selected: string | null,
@@ -101,18 +113,10 @@ export function SessionWorkspaceSurface({
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [restorePosition, setRestorePosition] = useState<string | undefined>()
   const [manualAnchor, setManualAnchor] = useState<SessionWindowAnchor | null>(null)
-  const [openAttempt, setOpenAttempt] = useState(0)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const sessionCapabilitiesAvailable = hasUsableSessionTimeline(bootstrap)
   const session = useQuery({
-    queryKey: [
-      'production',
-      'session-workspace',
-      sessionId,
-      manualAnchor,
-      restorePosition,
-      openAttempt,
-    ],
+    queryKey: ['production', 'session-workspace', sessionId, manualAnchor, restorePosition],
     queryFn: async ({ signal }) => {
       const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window), signal)
       const history = new BoundedSessionHistory(sessionId ?? '', source)
@@ -138,6 +142,8 @@ export function SessionWorkspaceSurface({
       }
     },
     enabled: sessionId !== null && sessionCapabilitiesAvailable,
+    placeholderData: (previous) =>
+      previous?.descriptor.session_id === sessionId ? previous : undefined,
   })
   const items = useMemo(
     () => visibleSessionItems(session.data?.window.items ?? [], app.detail),
@@ -149,12 +155,13 @@ export function SessionWorkspaceSurface({
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   const openTimelineAnchor = useCallback(
     (anchor: SessionWindowAnchor) => {
+      const refetchCurrentAnchor = sameSessionWindowAnchor(manualAnchor, anchor)
       setManualAnchor(anchor)
-      setOpenAttempt((attempt) => attempt + 1)
       setExpanded(new Set())
       dispatch(actions.timelineSelected(null))
+      if (refetchCurrentAnchor) void session.refetch()
     },
-    [dispatch],
+    [dispatch, manualAnchor, session],
   )
   const openTimelineWindow = useCallback(
     (anchor: 'first' | 'latest') => openTimelineAnchor({ kind: anchor }),
@@ -196,12 +203,15 @@ export function SessionWorkspaceSurface({
     event.preventDefault()
     const candidate = draftId.trim().toLowerCase()
     if (!isCanonicalSessionId(candidate)) return
+    const nextRestorePosition = app.lastLogicalPositions[candidate]
+    const refetchCurrentSession =
+      candidate === sessionId && manualAnchor === null && restorePosition === nextRestorePosition
     setManualAnchor(null)
     setExpanded(new Set())
     dispatch(actions.timelineSelected(null))
-    setRestorePosition(app.lastLogicalPositions[candidate])
+    setRestorePosition(nextRestorePosition)
     setSessionId(candidate)
-    setOpenAttempt((attempt) => attempt + 1)
+    if (refetchCurrentSession) void session.refetch()
   }
   const selected = app.selectedTimeline
   const select = (eventSequence: string) => {
@@ -319,7 +329,12 @@ export function SessionWorkspaceSurface({
               </div>
             </dl>
           </header>
-          <div className="session-window-controls" role="toolbar" aria-label="Timeline window">
+          <div
+            className="session-window-controls"
+            role="toolbar"
+            aria-label="Timeline window"
+            aria-busy={session.isFetching}
+          >
             <button type="button" onClick={() => openTimelineWindow('first')}>
               <SkipBack aria-hidden="true" /> First <kbd>gg</kbd>
             </button>
