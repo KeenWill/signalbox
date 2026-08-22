@@ -798,6 +798,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebSessionTimelineDetail"
         },
+        "maxItems": 128,
         "type": "array"
       },
       "projected_body_bytes": {
@@ -1042,6 +1043,9 @@ function assertSchema(root, schema, value, path) {
     if (!Array.isArray(value)) {
       fail(path, "an array");
     }
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+      fail(path, `at most ${schema.maxItems} items`);
+    }
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${path}[${index}]`));
     return;
   }
@@ -1081,6 +1085,128 @@ function assertSchema(root, schema, value, path) {
   }
 }
 
+function sameTimelineAddress(left, right) {
+  return left.event_sequence === right.event_sequence;
+}
+
+function sameBodyContinuation(left, right) {
+  return (
+    sameTimelineAddress(left.address, right.address) &&
+    left.field === right.field &&
+    left.member_index === right.member_index &&
+    left.offset_bytes === right.offset_bytes
+  );
+}
+
+function assertTimelineExcerpt(excerpt, address, field, path) {
+  const offset = BigInt(excerpt.offset_bytes);
+  const total = BigInt(excerpt.total_bytes);
+  const end = offset + BigInt(new TextEncoder().encode(excerpt.text).byteLength);
+  if (offset > total || end > total) {
+    fail(path, "an excerpt within its declared byte range");
+  }
+  if (excerpt.continuation === undefined || excerpt.continuation === null) {
+    if (end !== total) {
+      fail(path, "complete when no continuation is present");
+    }
+    return null;
+  }
+  const continuation = excerpt.continuation;
+  if (end >= total) {
+    fail(`${path}.continuation`, "present only before the declared body end");
+  }
+  if (!sameTimelineAddress(continuation.address, address) || continuation.field !== field) {
+    fail(`${path}.continuation`, "the same body field at the same address");
+  }
+  if (BigInt(continuation.offset_bytes) !== end) {
+    fail(`${path}.continuation.offset_bytes`, "the byte immediately after the excerpt");
+  }
+  return continuation;
+}
+
+function assertTimelineDetailPage(value) {
+  const terminalKinds = new Set([
+    "turn_failed",
+    "turn_completed",
+    "turn_refused",
+    "turn_cancelled",
+    "turn_reconciliation_required",
+  ]);
+  const bodyOwnedKinds = new Set([
+    "input_accepted",
+    "model_call_transition",
+    "turn_activated",
+    ...terminalKinds,
+  ]);
+  let expectedBodyContinuation = null;
+  value.items.forEach((item, index) => {
+    const path = `timeline_detail_page.items[${index}]`;
+    let continuation = null;
+    switch (item.body.type) {
+      case "user_input":
+        if (item.kind !== "input_accepted") {
+          fail(`${path}.kind`, "input_accepted for a user_input body");
+        }
+        continuation = assertTimelineExcerpt(
+          item.body.text,
+          item.address,
+          "input_text",
+          `${path}.body.text`,
+        );
+        break;
+      case "model_call":
+        if (item.kind !== "model_call_transition") {
+          fail(`${path}.kind`, "model_call_transition for a model_call body");
+        }
+        if (item.body.response !== undefined && item.body.response !== null) {
+          continuation = assertTimelineExcerpt(
+            item.body.response,
+            item.address,
+            "model_response",
+            `${path}.body.response`,
+          );
+        }
+        break;
+      case "turn_lifecycle":
+        if (item.body.lifecycle === "activated" && item.kind !== "turn_activated") {
+          fail(`${path}.kind`, "turn_activated for an activated lifecycle");
+        }
+        if (item.body.lifecycle === "terminalized" && !terminalKinds.has(item.kind)) {
+          fail(`${path}.kind`, "a terminal turn event for a terminalized lifecycle");
+        }
+        break;
+      case "event_fact":
+        if (item.body.kind !== item.kind || bodyOwnedKinds.has(item.kind)) {
+          fail(`${path}.body.kind`, "the matching header-only event kind");
+        }
+        break;
+    }
+    if (continuation !== null) {
+      if (expectedBodyContinuation !== null) {
+        fail(path, "at most one continued body per page");
+      }
+      expectedBodyContinuation = continuation;
+    }
+  });
+
+  if (value.continuation === undefined || value.continuation === null) {
+    if (expectedBodyContinuation !== null) {
+      fail("timeline_detail_page.continuation", "the excerpt body continuation");
+    }
+    return;
+  }
+  if (value.continuation.type === "more_body") {
+    if (
+      expectedBodyContinuation === null ||
+      !sameBodyContinuation(value.continuation.body, expectedBodyContinuation)
+    ) {
+      fail("timeline_detail_page.continuation.body", "the excerpt body continuation");
+    }
+  } else if (expectedBodyContinuation !== null) {
+    fail("timeline_detail_page.continuation", "more_body for a continued excerpt");
+  }
+}
+
 export function decodeWebContractBootstrap(value) {
   assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "bootstrap");
   if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "1") {
@@ -1111,5 +1237,6 @@ export function decodeWebSessionTimelineWindow(value) {
 
 export function decodeWebSessionTimelineDetailPage(value) {
   assertSchema(schemas.WebSessionTimelineDetailPage, schemas.WebSessionTimelineDetailPage, value, "timeline_detail_page");
+  assertTimelineDetailPage(value);
   return value;
 }

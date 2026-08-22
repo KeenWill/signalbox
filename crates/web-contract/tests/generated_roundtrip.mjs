@@ -7,10 +7,37 @@ import {
   decodeWebContractBootstrap,
   decodeWebContractExample,
   decodeWebSessionTimelineDescriptor,
+  decodeWebSessionTimelineDetailPage,
   decodeWebSessionTimelineWindow,
 } from "../../../clients/web/src/generated/web-contract.mjs";
 
 const fixtureUrl = new URL("./fixtures/example.json", import.meta.url);
+
+function userInputDetailPage() {
+  return {
+    session_id: "00000000-0000-0000-0000-000000000991",
+    items: [
+      {
+        address: { event_sequence: "7" },
+        kind: "input_accepted",
+        body: {
+          type: "user_input",
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          text: {
+            text: "abc",
+            offset_bytes: "0",
+            total_bytes: "3",
+            continuation: null,
+          },
+          attachments: [],
+        },
+        projected_body_bytes: 3,
+      },
+    ],
+    projected_body_bytes: 3,
+    continuation: null,
+  };
+}
 
 test("generated example decoder round trips the Rust fixture", async () => {
   const source = JSON.parse(await readFile(fixtureUrl, "utf8"));
@@ -97,6 +124,54 @@ test("generated timeline decoder rejects an address beyond u64", () => {
         continuation_after: null,
       }),
     /unsigned 64-bit integer/,
+  );
+});
+
+test("generated detail decoder rejects contradictory event semantics", () => {
+  const page = userInputDetailPage();
+  page.items[0].kind = "turn_failed";
+
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /input_accepted/);
+});
+
+test("generated detail decoder rejects invalid excerpt arithmetic", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.text.offset_bytes = "10";
+  page.items[0].body.text.total_bytes = "5";
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /declared byte range/,
+  );
+});
+
+test("generated detail decoder requires the exact excerpt continuation", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.text.total_bytes = "6";
+  page.items[0].body.text.continuation = {
+    address: { event_sequence: "7" },
+    field: "input_text",
+    member_index: 0,
+    offset_bytes: "4",
+  };
+  page.continuation = {
+    type: "more_body",
+    body: page.items[0].body.text.continuation,
+  };
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /immediately after the excerpt/,
+  );
+});
+
+test("generated detail decoder rejects oversized arrays before their members", () => {
+  const page = userInputDetailPage();
+  page.items = Array.from({ length: 129 }, () => null);
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /at most 128 items/,
   );
 });
 

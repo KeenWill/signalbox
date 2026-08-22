@@ -643,8 +643,11 @@ async fn load_detail_event(
     let sequence = address.sequence().get();
     let (allocated, event_beyond_allocated, header) =
         crate::outbox::load_event_header(transaction, sequence).await?;
-    if event_beyond_allocated || sequence > allocated {
+    if event_beyond_allocated {
         return Err(SessionTimelineCorruption::MissingDetailRecord.into());
+    }
+    if sequence > allocated {
+        return Ok(None);
     }
     let Some(header) = header else {
         return Err(SessionTimelineCorruption::MissingDetailRecord.into());
