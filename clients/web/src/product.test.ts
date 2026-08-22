@@ -418,7 +418,7 @@ describe('SameOriginProductTransport', () => {
         maxItems: 1,
         maxSnippetBytes: 512,
       }),
-    ).rejects.toThrow('invalid highlight range')
+    ).rejects.toThrow('UTF-8 boundaries')
   })
 
   it('rejects search pages that are not ordered newest first', async () => {
@@ -447,10 +447,13 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('not ordered newest first')
   })
 
-  const rejectContinuation = async (continuation: {
-    address: { event_sequence: string }
-    projection_id: string
-  }) => {
+  const rejectContinuation = async (
+    continuation: {
+      address: { event_sequence: string }
+      projection_id: string
+    },
+    expectedError = 'invalid continuation',
+  ) => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response(JSON.stringify({ ...searchPageFixture, continuation }))),
@@ -461,35 +464,35 @@ describe('SameOriginProductTransport', () => {
         maxItems: 1,
         maxSnippetBytes: 512,
       }),
-    ).rejects.toThrow('invalid continuation')
+    ).rejects.toThrow(expectedError)
   }
 
   it('rejects a continuation address detached from the returned page', () =>
     rejectContinuation({ address: { event_sequence: '900' }, projection_id: '42' }))
 
   it('rejects a nondecimal continuation projection ID', () =>
-    rejectContinuation({
-      address: { event_sequence: '901' },
-      projection_id: 'not-decimal',
-    }))
+    rejectContinuation(
+      { address: { event_sequence: '901' }, projection_id: 'not-decimal' },
+      'recognized variant',
+    ))
 
   it('rejects a zero continuation projection ID', () =>
-    rejectContinuation({
-      address: { event_sequence: '901' },
-      projection_id: '0',
-    }))
+    rejectContinuation(
+      { address: { event_sequence: '901' }, projection_id: '0' },
+      'recognized variant',
+    ))
 
   it('rejects a continuation projection ID above positive i64', () =>
-    rejectContinuation({
-      address: { event_sequence: '901' },
-      projection_id: '9223372036854775808',
-    }))
+    rejectContinuation(
+      { address: { event_sequence: '901' }, projection_id: '9223372036854775808' },
+      'recognized variant',
+    ))
 
   it('rejects a continuation projection ID above u64', () =>
-    rejectContinuation({
-      address: { event_sequence: '901' },
-      projection_id: '18446744073709551616',
-    }))
+    rejectContinuation(
+      { address: { event_sequence: '901' }, projection_id: '18446744073709551616' },
+      'recognized variant',
+    ))
 
   it('rejects a continuation on an empty page', async () => {
     vi.stubGlobal(
