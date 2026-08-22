@@ -9,7 +9,9 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Value, json};
-use signalbox_application::{max_timeline_window_bytes, max_timeline_window_items};
+use signalbox_application::{
+    max_session_live_queued_turns, max_timeline_window_bytes, max_timeline_window_items,
+};
 
 /// Exact browser HTTP contract version served by this daemon build.
 pub const WEB_CONTRACT_VERSION: &str = "1";
@@ -43,6 +45,8 @@ pub struct WebContractCapabilities {
     pub ndjson_streaming: bool,
     /// Stable bounded session descriptors and historical windows are available.
     pub bounded_session_timeline: bool,
+    /// Bounded current snapshots and snapshot-first live follow are available.
+    pub bounded_session_live: bool,
 }
 
 /// Effective hard limits clients must honor for this contract version.
@@ -57,6 +61,8 @@ pub struct WebContractLimits {
     pub max_timeline_window_items: u32,
     /// Maximum projected structured item bytes in one timeline window.
     pub max_timeline_window_bytes: u32,
+    /// Maximum queued turn identities retained in one live snapshot.
+    pub max_session_live_queued_turns: u32,
 }
 
 /// Response from the contract bootstrap endpoint.
@@ -85,12 +91,14 @@ impl WebContractBootstrap {
                 same_origin_json_mutations: true,
                 ndjson_streaming: true,
                 bounded_session_timeline: true,
+                bounded_session_live: true,
             },
             limits: WebContractLimits {
                 max_json_body_bytes: MAX_JSON_BODY_BYTES as u32,
                 max_ndjson_item_bytes: MAX_NDJSON_ITEM_BYTES as u32,
                 max_timeline_window_items: u32::from(max_timeline_window_items()),
                 max_timeline_window_bytes: max_timeline_window_bytes(),
+                max_session_live_queued_turns: u32::from(max_session_live_queued_turns()),
             },
         }
     }
@@ -347,6 +355,7 @@ pub struct WebSessionLiveSnapshot {
     pub observed_through: WebU64,
     pub active: Option<WebSessionLiveActiveTurn>,
     pub queued_turn_count: WebU64,
+    #[schemars(length(max = 32))]
     pub queued_turn_ids: Vec<String>,
     pub reconciliation: Option<WebSessionLiveReconciliation>,
     pub runner: Option<WebSessionLiveRunner>,
@@ -589,8 +598,6 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
         canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value());
     let attention_event_schema =
         canonical_schema(schemars::schema_for!(WebAttentionStreamEvent).to_value());
-    let live_snapshot_schema =
-        canonical_schema(schemars::schema_for!(WebSessionLiveSnapshot).to_value());
     let live_event_schema =
         canonical_schema(schemars::schema_for!(WebSessionLiveStreamEvent).to_value());
     let example = WebContractExample {
@@ -612,7 +619,6 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
                 &window_schema,
                 &attention_snapshot_schema,
                 &attention_event_schema,
-                &live_snapshot_schema,
                 &live_event_schema,
             )?,
         },
@@ -626,7 +632,6 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
                 &window_schema,
                 &attention_snapshot_schema,
                 &attention_event_schema,
-                &live_snapshot_schema,
                 &live_event_schema,
             )?,
         },
@@ -653,7 +658,6 @@ fn runtime_module(
     window_schema: &Value,
     attention_snapshot_schema: &Value,
     attention_event_schema: &Value,
-    live_snapshot_schema: &Value,
     live_event_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut schemas = json!({
@@ -664,7 +668,6 @@ fn runtime_module(
         "WebSessionTimelineWindow": window_schema,
         "WebAttentionSnapshot": attention_snapshot_schema,
         "WebAttentionStreamEvent": attention_event_schema,
-        "WebSessionLiveSnapshot": live_snapshot_schema,
         "WebSessionLiveStreamEvent": live_event_schema,
     });
     schemas.sort_all_objects();
@@ -783,6 +786,9 @@ function assertSchema(root, schema, value, path) {{
     if (!Array.isArray(value)) {{
       fail(path, "an array");
     }}
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {{
+      fail(path, `at most ${{schema.maxItems}} items`);
+    }}
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${{path}}[${{index}}]`));
     return;
   }}
@@ -861,7 +867,8 @@ export function decodeWebAttentionStreamEvent(value) {{
 }}
 
 export function decodeWebSessionLiveSnapshot(value) {{
-  assertSchema(schemas.WebSessionLiveSnapshot, schemas.WebSessionLiveSnapshot, value, "session_live_snapshot");
+  const root = schemas.WebSessionLiveStreamEvent;
+  assertSchema(root, root.$defs.WebSessionLiveSnapshot, value, "session_live_snapshot");
   return value;
 }}
 
@@ -883,7 +890,6 @@ fn declaration_module(
     window_schema: &Value,
     attention_snapshot_schema: &Value,
     attention_event_schema: &Value,
-    live_snapshot_schema: &Value,
     live_event_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut definitions = BTreeMap::new();
@@ -902,8 +908,14 @@ fn declaration_module(
         attention_event_schema,
         &mut definitions,
     )?;
-    let live_snapshot =
-        typescript_type(live_snapshot_schema, live_snapshot_schema, &mut definitions)?;
+    let live_snapshot_definition = live_event_schema
+        .pointer("/$defs/WebSessionLiveSnapshot")
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    let live_snapshot = typescript_type(
+        live_event_schema,
+        live_snapshot_definition,
+        &mut definitions,
+    )?;
     let live_event = typescript_type(live_event_schema, live_event_schema, &mut definitions)?;
     let mut output = String::from(
         "// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.\n// Do not edit by hand.\n\n",

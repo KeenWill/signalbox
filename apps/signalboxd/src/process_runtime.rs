@@ -561,6 +561,24 @@ impl ProcessMonitor {
             receiver: self.updates.subscribe(),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> Self {
+        let (updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
+        Self { updates }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_for_test(&self, update: ProcessMonitorUpdate) {
+        let _ = self.updates.send(update);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fill_for_test(&self, update: ProcessMonitorUpdate) {
+        for _ in 0..=PROCESS_UPDATE_CAPACITY {
+            let _ = self.updates.send(update.clone());
+        }
+    }
 }
 
 /// One monitor subscriber; lag is explicit and requires resynchronization.
@@ -583,7 +601,7 @@ impl ProcessMonitorSubscription {
 }
 
 /// Current-runtime update exposed to browser HTTP without process frames.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessMonitorUpdate {
     Durable {
         cursor: u64,

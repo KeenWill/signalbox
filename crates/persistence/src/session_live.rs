@@ -82,8 +82,8 @@ impl SessionLiveRepository {
         let base = sqlx::query(
             "SELECT state.last_sequence, facts.queued_turn_count
                FROM session
-               JOIN session_timeline_fact AS facts USING (session_id)
-               JOIN outbox_sequence_state AS state ON state.singleton
+               LEFT JOIN session_timeline_fact AS facts USING (session_id)
+               LEFT JOIN outbox_sequence_state AS state ON state.singleton
               WHERE session.session_id = $1",
         )
         .bind(session.into_uuid())
@@ -93,9 +93,10 @@ impl SessionLiveRepository {
             transaction.commit().await?;
             return Ok(None);
         };
-        let observed_through = decimal_u64(base.try_get("last_sequence")?, "outbox cursor")?;
-        let queued_turn_count =
-            decimal_u64(base.try_get("queued_turn_count")?, "queued turn count")?;
+        let observed_through = required_decimal(&base, "last_sequence")
+            .and_then(|value| decimal_u64(value, "outbox cursor"))?;
+        let queued_turn_count = required_decimal(&base, "queued_turn_count")
+            .and_then(|value| decimal_u64(value, "queued turn count"))?;
         let active_rows = sqlx::query(ACTIVE_TURN_SQL)
             .bind(session.into_uuid())
             .fetch_all(&mut *transaction)
@@ -123,7 +124,10 @@ impl SessionLiveRepository {
             .iter()
             .map(|row| row.try_get::<Uuid, _>("turn_id").map(TurnId::from_uuid))
             .collect::<Result<Vec<_>, _>>()?;
-        if u64::try_from(queued_turns.len()).unwrap_or(u64::MAX) > queued_turn_count {
+        let expected_queued_turns =
+            usize::try_from(queued_turn_count.min(u64::from(max_session_live_queued_turns())))
+                .map_err(|_| SessionLiveRepositoryError::Corruption("queued turn count"))?;
+        if queued_turns.len() != expected_queued_turns {
             return Err(SessionLiveRepositoryError::Corruption("queued turn count"));
         }
         let reconciliation = if active.is_none() {
@@ -132,8 +136,9 @@ impl SessionLiveRepository {
                 .fetch_optional(&mut *transaction)
                 .await?
                 .as_ref()
-                .map(decode_reconciliation)
+                .map(decode_latest_reconciliation)
                 .transpose()?
+                .flatten()
         } else {
             None
         };
@@ -191,11 +196,10 @@ SELECT lifecycle.turn_id, lifecycle.active_phase_kind,
 "#;
 
 const RECONCILIATION_SQL: &str = r#"
-SELECT turn_id, terminal_model_call_id, terminal_tool_attempt_id
+SELECT turn_id, state_kind, terminal_disposition_kind,
+       terminal_model_call_id, terminal_tool_attempt_id
   FROM turn_lifecycle
  WHERE session_id = $1
-   AND state_kind = 'terminal'
-   AND terminal_disposition_kind = 'reconciliation_required'
    AND goal_turn_is_runtime_relevant(session_id, turn_id)
  ORDER BY acceptance_position DESC
  LIMIT 1
@@ -204,59 +208,97 @@ SELECT turn_id, terminal_model_call_id, terminal_tool_attempt_id
 fn decode_active(row: &PgRow) -> Result<SessionLiveActiveTurn, SessionLiveRepositoryError> {
     let turn = TurnId::from_uuid(row.try_get("turn_id")?);
     let phase: String = row.try_get("active_phase_kind")?;
-    let state = match phase.as_str() {
-        "running" => SessionLiveActiveState::Running {
-            model_call: row
-                .try_get::<Option<Uuid>, _>("model_call_id")?
-                .map(ModelCallId::from_uuid),
+    let shape = (
+        phase.as_str(),
+        row.try_get::<Option<Uuid>, _>("model_call_id")?,
+        row.try_get::<Option<Uuid>, _>("recovery_model_call_id")?,
+        row.try_get::<Option<Uuid>, _>("approval_tool_request_id")?,
+        row.try_get::<Option<Uuid>, _>("child_wait_request_id")?,
+        row.try_get::<Option<Uuid>, _>("child_session_id")?,
+        row.try_get::<Option<Uuid>, _>("recovery_tool_attempt_id")?,
+        row.try_get::<Option<Uuid>, _>("runner_recovery_runner_id")?,
+        row.try_get::<Option<Decimal>, _>("runner_recovery_placement_revision")?,
+    );
+    let state = match shape {
+        ("running", model_call, None, None, None, None, None, None, None) => {
+            SessionLiveActiveState::Running {
+                model_call: model_call.map(ModelCallId::from_uuid),
+            }
+        }
+        ("awaiting_model_call_recovery", None, Some(call), None, None, None, None, None, None) => {
+            SessionLiveActiveState::AwaitingModelCallRecovery {
+                call: ModelCallId::from_uuid(call),
+            }
+        }
+        ("awaiting_tool_approval", None, None, Some(request), None, None, None, None, None) => {
+            SessionLiveActiveState::AwaitingToolApproval {
+                request: ToolRequestId::from_uuid(request),
+            }
+        }
+        ("awaiting_child", None, None, None, Some(request), Some(child), None, None, None) => {
+            SessionLiveActiveState::AwaitingChild {
+                request: ToolRequestId::from_uuid(request),
+                child: SessionId::from_uuid(child),
+            }
+        }
+        ("awaiting_tool_recovery", None, None, None, None, None, Some(attempt), None, None) => {
+            SessionLiveActiveState::AwaitingToolRecovery {
+                attempt: ToolAttemptId::from_uuid(attempt),
+            }
+        }
+        (
+            "awaiting_runner_recovery",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(runner),
+            Some(revision),
+        ) => SessionLiveActiveState::AwaitingRunnerRecovery {
+            runner: RunnerId::from_uuid(runner),
+            placement_revision: decimal_u64(revision, "runner recovery placement revision")?,
         },
-        "awaiting_model_call_recovery" => SessionLiveActiveState::AwaitingModelCallRecovery {
-            call: required_uuid(row, "recovery_model_call_id").map(ModelCallId::from_uuid)?,
-        },
-        "awaiting_tool_approval" => SessionLiveActiveState::AwaitingToolApproval {
-            request: required_uuid(row, "approval_tool_request_id")
-                .map(ToolRequestId::from_uuid)?,
-        },
-        "awaiting_child" => SessionLiveActiveState::AwaitingChild {
-            request: required_uuid(row, "child_wait_request_id").map(ToolRequestId::from_uuid)?,
-            child: required_uuid(row, "child_session_id").map(SessionId::from_uuid)?,
-        },
-        "awaiting_tool_recovery" => SessionLiveActiveState::AwaitingToolRecovery {
-            attempt: required_uuid(row, "recovery_tool_attempt_id")
-                .map(ToolAttemptId::from_uuid)?,
-        },
-        "awaiting_runner_recovery" => SessionLiveActiveState::AwaitingRunnerRecovery {
-            runner: required_uuid(row, "runner_recovery_runner_id").map(RunnerId::from_uuid)?,
-            placement_revision: decimal_u64(
-                row.try_get("runner_recovery_placement_revision")?,
-                "runner recovery placement revision",
-            )?,
-        },
+        (
+            "running"
+            | "awaiting_model_call_recovery"
+            | "awaiting_tool_approval"
+            | "awaiting_child"
+            | "awaiting_tool_recovery"
+            | "awaiting_runner_recovery",
+            ..,
+        ) => return Err(SessionLiveRepositoryError::Corruption("active state shape")),
         value => {
             return Err(SessionLiveRepositoryError::Unsupported {
                 field: "active phase",
-                value: value.to_owned(),
+                value: value.0.to_owned(),
             });
         }
     };
     Ok(SessionLiveActiveTurn { turn, state })
 }
 
-fn decode_reconciliation(
+fn decode_latest_reconciliation(
     row: &PgRow,
-) -> Result<SessionLiveReconciliation, SessionLiveRepositoryError> {
+) -> Result<Option<SessionLiveReconciliation>, SessionLiveRepositoryError> {
+    let state: String = row.try_get("state_kind")?;
+    let disposition = row.try_get::<Option<String>, _>("terminal_disposition_kind")?;
+    if state != "terminal" || disposition.as_deref() != Some("reconciliation_required") {
+        return Ok(None);
+    }
     let turn = TurnId::from_uuid(row.try_get("turn_id")?);
     let call = row.try_get::<Option<Uuid>, _>("terminal_model_call_id")?;
     let attempt = row.try_get::<Option<Uuid>, _>("terminal_tool_attempt_id")?;
     match (call, attempt) {
-        (Some(call), None) => Ok(SessionLiveReconciliation::ModelCall {
+        (Some(call), None) => Ok(Some(SessionLiveReconciliation::ModelCall {
             turn,
             call: ModelCallId::from_uuid(call),
-        }),
-        (None, Some(attempt)) => Ok(SessionLiveReconciliation::ToolAttempt {
+        })),
+        (None, Some(attempt)) => Ok(Some(SessionLiveReconciliation::ToolAttempt {
             turn,
             attempt: ToolAttemptId::from_uuid(attempt),
-        }),
+        })),
         _ => Err(SessionLiveRepositoryError::Corruption(
             "reconciliation operation",
         )),
@@ -289,8 +331,11 @@ fn map_runner(
     })
 }
 
-fn required_uuid(row: &PgRow, field: &'static str) -> Result<Uuid, SessionLiveRepositoryError> {
-    row.try_get::<Option<Uuid>, _>(field)?
+fn required_decimal(
+    row: &PgRow,
+    field: &'static str,
+) -> Result<Decimal, SessionLiveRepositoryError> {
+    row.try_get::<Option<Decimal>, _>(field)?
         .ok_or(SessionLiveRepositoryError::Corruption(field))
 }
 

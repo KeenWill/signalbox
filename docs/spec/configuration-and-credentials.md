@@ -5,6 +5,8 @@ bootstrap are verified against this PR (`agent/web-http-transport`). The
 composed bounded session descriptor and historical-window routes are verified
 against this PR (`agent/web-session-timeline`). The fleet-attention snapshot and
 monitor stream are verified against this PR (`agent/web-attention-projections`).
+The bounded live-session snapshot and monitor-backed follow routes are verified
+against this PR (`agent/web-session-catalog-follow-live`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -180,10 +182,11 @@ exact contract family `signalbox.web-http`, version `1`, the `bounded_json`,
 `same_origin_json_mutations`, and `ndjson_streaming` capabilities, the
 `bounded_session_timeline` capability, the effective 65,536-byte JSON-body and
 NDJSON-item hard ceilings, and the 256-item and 65,536-projected-byte timeline
-ceilings. The generated browser decoder rejects an unknown field, wrong shape,
-different family, or different version rather than interpreting it as the local
-process protocol. No process-protocol frame is a browser DTO. The descriptor and
-historical-window route shapes and semantics are owned by
+ceilings. It also reports the `bounded_session_live` capability and 32-turn live
+queue-preview ceiling. The generated browser decoder rejects an unknown field,
+wrong shape, different family, or different version rather than interpreting it
+as the local process protocol. No process-protocol frame is a browser DTO. The
+descriptor and historical-window route shapes and semantics are owned by
 [Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline).
 
 The bounded session catalog route and row semantics are owned by
@@ -201,6 +204,14 @@ empty polls. An initial projection failure returns a typed HTTP error before
 streaming begins. The append-only change journal timestamps commits explicitly;
 historical creation is seeded only from the durable command claim time and never
 inferred from UUID bits.
+
+The open-workspace `GET /api/sessions/{session_id}/live` and
+`GET /api/sessions/{session_id}/follow` route shapes and resynchronization
+semantics are owned by
+[Sessions and the transcript](sessions-and-transcript.md#bounded-browser-live-session-projection).
+They consume one runtime-owned bounded monitor fanout shared by all browser
+followers; the monitor handle is composed into the browser router and is not a
+process-protocol frame or persistence type.
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
 authority. The checked-in `web-contract.mjs` runtime decoders and

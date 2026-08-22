@@ -74,6 +74,8 @@ pub const DEFAULT_WEB_BIND_ADDRESS: SocketAddr =
 const JSON_CONTENT_TYPE: &str = "application/json";
 const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
 const HTTP_DEFAULT_PORT: u16 = 80;
+// numeric-bound: hard safety - leaves room for worst-case JSON escaping and the event envelope
+const MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES: usize = 8_192;
 
 /// Deployment-owned browser listener and production assets configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -794,13 +796,17 @@ async fn live_follow_next(
 }
 
 fn web_text_fragments(value: &str) -> impl Iterator<Item = String> + '_ {
-    const MAX_TEXT_BYTES: usize = 60 * 1024;
     let mut remaining = value;
+    let mut emitted_empty = !value.is_empty();
     std::iter::from_fn(move || {
         if remaining.is_empty() {
-            return None;
+            if emitted_empty {
+                return None;
+            }
+            emitted_empty = true;
+            return Some(String::new());
         }
-        let mut end = remaining.len().min(MAX_TEXT_BYTES);
+        let mut end = remaining.len().min(MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES);
         while !remaining.is_char_boundary(end) {
             end -= 1;
         }
@@ -1585,10 +1591,11 @@ mod tests {
         max_attention_goal_summary_characters, max_attention_snapshot_items,
         max_attention_title_characters,
     };
-    use signalbox_domain::{SessionId, TurnId};
+    use signalbox_domain::{ModelCallId, SessionId, TurnId};
     use signalbox_web_contract::{
         MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebAttentionStreamEvent, WebContractBootstrap,
-        WebContractExample,
+        WebContractExample, WebSessionLiveStreamEvent, WebSessionTimelineEventKind,
+        WebTimelineAddress, WebTimelineEventSequence, WebU64,
     };
     use sqlx::types::Uuid;
     use tokio::sync::{mpsc, watch};
@@ -1596,9 +1603,11 @@ mod tests {
     use url::Url;
 
     use super::{
-        DEFAULT_WEB_BIND_ADDRESS, WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime,
-        attention_snapshot_dto, deterministic_test_router, ndjson_response, production_router,
+        DEFAULT_WEB_BIND_ADDRESS, LiveFollowState, WebHttpConfiguration, WebHttpConfigurationError,
+        WebHttpRuntime, attention_snapshot_dto, deterministic_test_router, live_follow_next,
+        ndjson_response, production_router, web_text_fragments,
     };
+    use crate::{ProcessMonitor, ProcessMonitorUpdate};
 
     fn loopback_ephemeral() -> SocketAddr {
         "127.0.0.1:0"
@@ -1611,6 +1620,152 @@ mod tests {
             request_id: "transport-test".to_owned(),
             message: "bounded payload".to_owned(),
         }
+    }
+
+    fn live_session() -> SessionId {
+        SessionId::from_uuid(Uuid::from_u128(0x991))
+    }
+
+    fn live_turn() -> TurnId {
+        TurnId::from_uuid(Uuid::from_u128(0x992))
+    }
+
+    fn live_call() -> ModelCallId {
+        ModelCallId::from_uuid(Uuid::from_u128(0x993))
+    }
+
+    fn live_follow_state(
+        monitor: &ProcessMonitor,
+        observed_through: u64,
+        queued_at_snapshot: usize,
+    ) -> LiveFollowState {
+        LiveFollowState {
+            subscription: monitor.subscribe(),
+            session: live_session(),
+            observed_through,
+            queued_at_snapshot,
+            pending: std::collections::VecDeque::new(),
+            ended: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn live_follow_orders_provider_draft_before_later_durable_header() {
+        let monitor = ProcessMonitor::test_channel();
+        let state = live_follow_state(&monitor, 7, 0);
+        monitor.publish_for_test(ProcessMonitorUpdate::ProviderTextDelta {
+            session: live_session(),
+            turn: live_turn(),
+            call: live_call(),
+            part_index: 2,
+            text: "draft".to_owned(),
+        });
+        let (draft, state) = live_follow_next(state)
+            .await
+            .expect("the provider draft is delivered");
+        monitor.publish_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::ModelCallTransition,
+        });
+        let (durable, _) = live_follow_next(state)
+            .await
+            .expect("the durable header follows the draft");
+
+        assert_eq!(
+            draft,
+            WebSessionLiveStreamEvent::ProviderTextDelta {
+                turn_id: live_turn().into_uuid().to_string(),
+                model_call_id: live_call().into_uuid().to_string(),
+                part_index: 2,
+                content: "draft".to_owned(),
+            }
+        );
+        assert_eq!(
+            durable,
+            WebSessionLiveStreamEvent::Durable {
+                cursor: WebU64::from_u64(8),
+                address: WebTimelineAddress {
+                    event_sequence: WebTimelineEventSequence::from_nonzero(
+                        std::num::NonZeroU64::new(8).expect("the fixture cursor is positive"),
+                    ),
+                },
+                event_kind: WebSessionTimelineEventKind::ModelCallTransition,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn live_follow_discards_provider_draft_queued_before_snapshot() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        monitor.publish_for_test(ProcessMonitorUpdate::ProviderTextDelta {
+            session: live_session(),
+            turn: live_turn(),
+            call: live_call(),
+            part_index: 0,
+            text: "stale draft".to_owned(),
+        });
+        state.queued_at_snapshot = state.subscription.queued_len();
+        monitor.publish_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::TurnCompleted,
+        });
+        let (event, _) = live_follow_next(state)
+            .await
+            .expect("the post-snapshot durable event is delivered");
+
+        assert_eq!(
+            event,
+            WebSessionLiveStreamEvent::Durable {
+                cursor: WebU64::from_u64(8),
+                address: WebTimelineAddress {
+                    event_sequence: WebTimelineEventSequence::from_nonzero(
+                        std::num::NonZeroU64::new(8).expect("the fixture cursor is positive"),
+                    ),
+                },
+                event_kind: WebSessionTimelineEventKind::TurnCompleted,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn live_follow_lag_requires_transient_presentation_resync() {
+        let monitor = ProcessMonitor::test_channel();
+        let state = live_follow_state(&monitor, 7, 0);
+        monitor.fill_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::TurnActivated,
+        });
+        let (event, _) = live_follow_next(state)
+            .await
+            .expect("lag produces one explicit terminal event");
+
+        assert_eq!(
+            event,
+            WebSessionLiveStreamEvent::ResyncRequired {
+                cursor: WebU64::from_u64(7),
+            }
+        );
+    }
+
+    #[test]
+    fn provider_text_fragment_fits_after_worst_case_json_escaping() {
+        let source = "\u{0001}".repeat(super::MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES);
+        let content = web_text_fragments(&source)
+            .next()
+            .expect("nonempty provider text has a first fragment");
+        let encoded = super::encode_ndjson_item(WebSessionLiveStreamEvent::ProviderTextDelta {
+            turn_id: live_turn().into_uuid().to_string(),
+            model_call_id: live_call().into_uuid().to_string(),
+            part_index: u32::MAX,
+            content,
+        })
+        .expect("the worst-case escaped fragment remains below the NDJSON ceiling");
+
+        assert!(encoded.len() <= MAX_NDJSON_ITEM_BYTES + 1);
     }
 
     const STATIC_INDEX: &str = "signalbox-static-build";
