@@ -8,9 +8,22 @@ export const DEFAULT_REMOTE_MEDIA_POLICY: RemoteMediaPolicy = 'ask'
 export const decodeRemoteMediaPolicy = (value: unknown): RemoteMediaPolicy =>
   value === 'block' || value === 'allow' || value === 'ask' ? value : DEFAULT_REMOTE_MEDIA_POLICY
 
+export const admitRemoteMediaUrl = (value: string): string | null => {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && url.username === '' && url.password === '' ? url.href : null
+  } catch {
+    return null
+  }
+}
+
 const loadRemoteMediaPolicy = (): RemoteMediaPolicy => {
   if (typeof localStorage === 'undefined') return DEFAULT_REMOTE_MEDIA_POLICY
-  return decodeRemoteMediaPolicy(localStorage.getItem(REMOTE_MEDIA_PREFERENCE_KEY))
+  try {
+    return decodeRemoteMediaPolicy(localStorage.getItem(REMOTE_MEDIA_PREFERENCE_KEY))
+  } catch {
+    return DEFAULT_REMOTE_MEDIA_POLICY
+  }
 }
 
 export const useRemoteMediaPreference = (): readonly [
@@ -20,7 +33,11 @@ export const useRemoteMediaPreference = (): readonly [
   const [policy, setPolicy] = useState(loadRemoteMediaPolicy)
   const persistPolicy = useCallback((next: RemoteMediaPolicy) => {
     setPolicy(next)
-    localStorage.setItem(REMOTE_MEDIA_PREFERENCE_KEY, next)
+    try {
+      localStorage.setItem(REMOTE_MEDIA_PREFERENCE_KEY, next)
+    } catch {
+      // The in-memory policy still applies when browser storage is unavailable.
+    }
   }, [])
   return [policy, persistPolicy] as const
 }

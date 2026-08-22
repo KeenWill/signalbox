@@ -12,7 +12,7 @@ import {
   ARTIFACT_PREVIEW_CHARACTERS,
   boundArtifactText,
 } from './artifactTypes'
-import { decodeRemoteMediaPolicy } from './remoteMediaPreference'
+import { admitRemoteMediaUrl, decodeRemoteMediaPolicy } from './remoteMediaPreference'
 
 describe('artifact renderer compatibility', () => {
   it('registers the closed text, code, and image renderer set', () => {
@@ -77,5 +77,13 @@ describe('artifact renderer compatibility', () => {
 
   it('fails an unknown remote-media preference closed to ask', () => {
     expect(decodeRemoteMediaPolicy('invented')).toBe('ask')
+  })
+
+  it('admits only credential-free HTTPS remote media', () => {
+    expect(admitRemoteMediaUrl('https://media.example.test/status.png')).toBe(
+      'https://media.example.test/status.png',
+    )
+    expect(admitRemoteMediaUrl('http://media.example.test/status.png')).toBeNull()
+    expect(admitRemoteMediaUrl('https://token@media.example.test/status.png')).toBeNull()
   })
 })

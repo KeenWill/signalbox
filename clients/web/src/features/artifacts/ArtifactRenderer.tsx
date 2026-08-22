@@ -22,7 +22,11 @@ import {
   type SignalboxImageArtifact,
   type TextArtifact,
 } from './artifactTypes'
-import { type RemoteMediaPolicy, useRemoteMediaPreference } from './remoteMediaPreference'
+import {
+  admitRemoteMediaUrl,
+  type RemoteMediaPolicy,
+  useRemoteMediaPreference,
+} from './remoteMediaPreference'
 import './artifacts.css'
 
 type WebBlobAvailableView = WebBlobDescriptor['available_views'][number]
@@ -163,23 +167,30 @@ function RemoteImageBody({
   remoteMediaPolicy: policy,
 }: RendererProps<RemoteImageArtifact>) {
   const [approved, setApproved] = useState(false)
-  const visible = policy === 'allow' || (policy === 'ask' && approved)
+  const admittedUrl = admitRemoteMediaUrl(artifact.source.url)
+  const visible = admittedUrl !== null && (policy === 'allow' || (policy === 'ask' && approved))
 
   return (
     <div className="artifact-image-layout">
       <div className="artifact-visual remote-media">
         {visible ? (
-          <img src={artifact.source.url} alt={artifact.source.alt} loading="lazy" />
+          <img src={admittedUrl} alt={artifact.source.alt} loading="lazy" />
         ) : (
           <Ban aria-label="Remote media not loaded" />
         )}
       </div>
       <ArtifactMetadata
-        renderer={visible ? 'remote image' : `remote media ${policy}`}
+        renderer={
+          admittedUrl === null
+            ? 'remote media blocked'
+            : visible
+              ? 'remote image'
+              : `remote media ${policy}`
+        }
         mediaType="Not inspected"
         provenance="External URL"
       >
-        {policy === 'ask' && !approved && (
+        {admittedUrl !== null && policy === 'ask' && !approved && (
           <button type="button" onClick={() => setApproved(true)}>
             <ImageIcon aria-hidden="true" /> Load this remote image
           </button>
