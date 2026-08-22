@@ -5977,6 +5977,9 @@ where
             })
         }
         BlobUploadError::Unavailable => ProtocolError::without_detail(ErrorCode::Unavailable),
+        BlobUploadError::PublicationAmbiguous => {
+            ProtocolError::without_detail(ErrorCode::PublicationAmbiguous)
+        }
         BlobUploadError::CommitAmbiguous => {
             ProtocolError::without_detail(ErrorCode::CommitAmbiguous)
         }
