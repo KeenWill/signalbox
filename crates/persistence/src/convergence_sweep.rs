@@ -9,7 +9,11 @@ use sqlx::{
     types::{Uuid, time::OffsetDateTime},
 };
 
-use crate::mapping::session_id_from_uuid;
+use crate::mapping::{
+    convergence_sweep_decision_to_str, convergence_sweep_failure_from_str,
+    convergence_sweep_failure_outcome_to_str, convergence_sweep_failure_to_str,
+    convergence_sweep_operator_need_to_str, session_id_from_uuid,
+};
 
 /// The exact pull-request observation used for movement and dispatch-effect checks.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,65 +49,12 @@ pub enum ConvergenceSweepFailureKind {
     StateAccess,
 }
 
-impl ConvergenceSweepFailureKind {
-    const fn storage(self) -> &'static str {
-        match self {
-            Self::FactsFetch => "facts_fetch",
-            Self::CommissionRefused => "commission_refused",
-            Self::TemplateDrift => "template_drift",
-            Self::NoModelActivity => "no_model_activity",
-            Self::StateAccess => "state_access",
-        }
-    }
-
-    const fn outcome(self) -> &'static str {
-        match self {
-            Self::FactsFetch => "facts_fetch_failed",
-            Self::CommissionRefused => "commission_refused",
-            Self::TemplateDrift => "template_drift",
-            Self::NoModelActivity => "no_model_activity",
-            Self::StateAccess => "state_access_failed",
-        }
-    }
-
-    const fn need(self) -> &'static str {
-        match self {
-            Self::FactsFetch => "repair_facts_fetch",
-            Self::CommissionRefused => "repair_commission",
-            Self::TemplateDrift => "repair_template",
-            Self::NoModelActivity => "inspect_inactive_session",
-            Self::StateAccess => "repair_sweep_state",
-        }
-    }
-
-    fn from_storage(value: &str) -> Option<Self> {
-        match value {
-            "facts_fetch" => Some(Self::FactsFetch),
-            "commission_refused" => Some(Self::CommissionRefused),
-            "template_drift" => Some(Self::TemplateDrift),
-            "no_model_activity" => Some(Self::NoModelActivity),
-            "state_access" => Some(Self::StateAccess),
-            _ => None,
-        }
-    }
-}
-
 /// Non-failure decisions retained in the append-only audit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConvergenceSweepDecision {
     Converged,
     CoolingOff,
     LiveSession,
-}
-
-impl ConvergenceSweepDecision {
-    const fn storage(self) -> &'static str {
-        match self {
-            Self::Converged => "converged",
-            Self::CoolingOff => "cooling_off",
-            Self::LiveSession => "live_session",
-        }
-    }
 }
 
 /// Latest commissioned session for this pull request.
@@ -435,7 +386,7 @@ impl PostgresConvergenceSweepStore {
     ) -> Result<(), ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
         ensure_target(&mut transaction, repository, pull_request).await?;
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE convergence_sweep_target
                 SET state_kind = 'observed', failure_kind = NULL,
                     consecutive_failures = 0, retry_not_before = NULL,
@@ -445,11 +396,20 @@ impl PostgresConvergenceSweepStore {
                     pending_command_id = NULL, pending_head_sha = NULL,
                     pending_unresolved_threads = NULL, pending_content_digest = NULL,
                     pending_started_at = NULL,
-                    last_dispatch_id = $5, last_session_id = $6,
-                    last_dispatched_at = clock_timestamp(),
+                    last_dispatch_id = dispatch.dispatch_id,
+                    last_session_id = dispatch.session_id,
+                    last_dispatched_at = dispatch.recorded_at,
                     last_dispatch_head_sha = $3,
                     last_dispatch_unresolved_threads = $4
-              WHERE repository = $1 AND pull_request_number = $2",
+               FROM commissioned_dispatch AS dispatch
+              WHERE convergence_sweep_target.repository = $1
+                AND convergence_sweep_target.pull_request_number = $2
+                AND dispatch.dispatch_id = $5
+                AND dispatch.session_id = $6
+                AND dispatch.target_kind = 'pull_request'
+                AND dispatch.repository = convergence_sweep_target.repository
+                AND dispatch.pull_request_number =
+                    convergence_sweep_target.pull_request_number",
         )
         .bind(repository.as_str())
         .bind(Decimal::from(pull_request.get()))
@@ -459,6 +419,12 @@ impl PostgresConvergenceSweepStore {
         .bind(session_id.into_uuid())
         .execute(&mut *transaction)
         .await?;
+        if updated.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Err(ConvergenceSweepStoreError::Corruption(
+                "dispatch does not belong to the convergence target",
+            ));
+        }
         insert_event(
             &mut transaction,
             event_id,
@@ -507,7 +473,7 @@ impl PostgresConvergenceSweepStore {
             event_id,
             repository,
             pull_request,
-            decision.storage(),
+            convergence_sweep_decision_to_str(decision),
             None,
             Some(observation),
             None,
@@ -520,6 +486,10 @@ impl PostgresConvergenceSweepStore {
     }
 
     /// Advances one typed failure lineage, scheduling retry or parking atomically.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the durable failure transition receives each persisted fact explicitly"
+    )]
     pub async fn record_failure(
         &self,
         event_id: Uuid,
@@ -669,12 +639,12 @@ impl PostgresConvergenceSweepStore {
         )
         .bind(repository.as_str())
         .bind(Decimal::from(pull_request.get()))
-        .bind(failure.storage())
+        .bind(convergence_sweep_failure_to_str(failure))
         .bind(failure == ConvergenceSweepFailureKind::NoModelActivity)
         .bind(budget)
         .bind(i64::try_from(retry_backoff_base_seconds).unwrap_or(i64::MAX))
         .bind(i64::try_from(retry_backoff_cap_seconds).unwrap_or(i64::MAX))
-        .bind(failure.need())
+        .bind(convergence_sweep_operator_need_to_str(failure))
         .bind(head)
         .bind(threads)
         .bind(expected_inactive_session.map(SessionId::into_uuid))
@@ -695,12 +665,12 @@ impl PostgresConvergenceSweepStore {
             event_id,
             repository,
             pull_request,
-            failure.outcome(),
+            convergence_sweep_failure_outcome_to_str(failure),
             Some(failure),
             observation,
             None,
             failures,
-            parked.then_some(failure.need()),
+            parked.then_some(convergence_sweep_operator_need_to_str(failure)),
         )
         .await?;
         transaction.commit().await?;
@@ -787,7 +757,7 @@ async fn insert_event(
     .bind(repository.as_str())
     .bind(Decimal::from(pull_request.get()))
     .bind(outcome)
-    .bind(failure.map(ConvergenceSweepFailureKind::storage))
+    .bind(failure.map(convergence_sweep_failure_to_str))
     .bind(head)
     .bind(threads)
     .bind(dispatch_id)
@@ -806,7 +776,7 @@ fn decode_target_state(
     let failure_kind = row
         .try_get::<Option<String>, _>("failure_kind")?
         .map(|value| {
-            ConvergenceSweepFailureKind::from_storage(&value).ok_or(
+            convergence_sweep_failure_from_str(&value).ok_or(
                 ConvergenceSweepStoreError::Corruption("invalid failure kind"),
             )
         })

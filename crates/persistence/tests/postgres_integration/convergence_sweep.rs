@@ -510,7 +510,7 @@ async fn a_committed_pending_dispatch_is_available_for_projection_repair()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
     let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
-    let sweep = PostgresConvergenceSweepStore::new(pool);
+    let sweep = PostgresConvergenceSweepStore::new(pool.clone());
     let repository = repository()?;
     let observation = observation()?;
     let command = 0x89_204;
@@ -527,6 +527,11 @@ async fn a_committed_pending_dispatch_is_available_for_projection_repair()
         .commission(prepared_commission(command)?, |_| None)
         .await?;
     let (dispatch, session) = dispatched(outcome);
+    let commissioned_at: sqlx::types::time::OffsetDateTime =
+        sqlx::query_scalar("SELECT recorded_at FROM commissioned_dispatch WHERE dispatch_id = $1")
+            .bind(dispatch)
+            .fetch_one(&pool)
+            .await?;
 
     let state = sweep
         .load_target(&repository, pull_request())
@@ -539,6 +544,29 @@ async fn a_committed_pending_dispatch_is_available_for_projection_repair()
     assert_eq!(pending.dispatch_id(), dispatch);
     assert_eq!(pending.session_id(), session);
     assert_eq!(state.pending_observation(), Some(&observation));
+
+    sqlx::query("SELECT pg_sleep(0.01)").execute(&pool).await?;
+    sweep
+        .record_dispatch(
+            Uuid::from_u128(0x89_214),
+            &repository,
+            pull_request(),
+            &observation,
+            dispatch,
+            session,
+        )
+        .await?;
+    let projected_at: sqlx::types::time::OffsetDateTime = sqlx::query_scalar(
+        "SELECT last_dispatched_at
+           FROM convergence_sweep_target
+          WHERE repository = $1 AND pull_request_number = $2",
+    )
+    .bind(repository.as_str())
+    .bind(rust_decimal::Decimal::from(pull_request().get()))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(projected_at, commissioned_at);
     Ok(())
 }
 

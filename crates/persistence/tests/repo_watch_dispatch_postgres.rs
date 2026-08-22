@@ -5950,6 +5950,85 @@ async fn commissioned_fixture() -> Result<CommissionedFixture, Box<dyn Error>> {
     })
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_commission_observes_repository_watch_target_ownership()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let store = PostgresCommissionedDispatchStore::new(fixture.pool.clone(), credential_pin());
+    let (provenance, defaults) = commissioned_template();
+    let prepared = commission_request_with_fence(COMMISSION_COMMAND_ID, commissioned_fence()?)?
+        .prepare(
+            &mut UuidV7CommissionedDispatchIdGenerator,
+            provenance,
+            defaults,
+        )?;
+
+    assert_eq!(
+        store.commission(prepared, |_| None).await?,
+        CommissionDispatchOutcome::TargetBusy {
+            session: fixture.session(0),
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_watch_observes_operator_commission_target_ownership()
+-> Result<(), Box<dyn Error>> {
+    let fixture = commissioned_fixture().await?;
+    let repository = repository()?;
+    let rule = one_action_rule(Duration::ZERO)?;
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let dispatch_store =
+        PostgresRepoWatchDispatchStore::new(fixture.pool.clone(), credential_pin());
+    let initial_observation = observation(context(INITIAL_HEAD)?)?;
+    let first_generation = generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(initial_observation),
+                    vec![identified_event(opened_event(100, INITIAL_HEAD)?)],
+                ),
+            )
+            .await?,
+    );
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let event = conflict_event(101, FIRST_HEAD)?;
+    let observed = observation(context(FIRST_HEAD)?)?;
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                RepoWatchCursorCandidate::new(observed.clone()),
+                vec![identified_event(event)],
+            ),
+        )
+        .await?;
+    let loaded = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the activated rule sees the conflict event");
+    let outcome = RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store)
+        .evaluate(
+            loaded,
+            &rule,
+            &observed,
+            &TemplateResolver,
+            dispatch_context(),
+        )
+        .await?;
+
+    assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::Occupied);
+    Ok(())
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct CommissionedEscalationVisibility {
     lifecycle_state: String,

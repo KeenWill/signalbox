@@ -415,9 +415,18 @@ pub(crate) async fn lock_competing_pull_request_session(
 ) -> Result<Option<SessionId>, sqlx::Error> {
     let target: Option<(String, Decimal)> = sqlx::query_as(
         "SELECT repository, pull_request_number
-           FROM commissioned_dispatch
-          WHERE session_id = $1 AND target_kind = 'pull_request'
-          ORDER BY recorded_at DESC, dispatch_id DESC
+           FROM (
+                SELECT repository, pull_request_number, recorded_at
+                  FROM commissioned_dispatch
+                 WHERE session_id = $1 AND target_kind = 'pull_request'
+                UNION ALL
+                SELECT event.repository, event.pull_request_number, action.recorded_at
+                  FROM repo_watch_dispatch_action AS action
+                  JOIN repo_watch_event AS event ON event.event_id = action.event_id
+                 WHERE action.session_id = $1
+                   AND event.target_kind = 'pull_request'
+           ) AS target
+          ORDER BY recorded_at DESC
           LIMIT 1",
     )
     .bind(session_id_to_uuid(session))
@@ -430,7 +439,7 @@ pub(crate) async fn lock_competing_pull_request_session(
     live_pull_request_session(transaction, &repository, &pull_request, Some(session)).await
 }
 
-async fn lock_pull_request_target(
+pub(crate) async fn lock_pull_request_target(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     repository: &str,
     pull_request: &Decimal,
@@ -450,19 +459,29 @@ async fn live_pull_request_session(
     excluded_session: Option<SessionId>,
 ) -> Result<Option<SessionId>, sqlx::Error> {
     let session: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT dispatch.session_id
-           FROM commissioned_dispatch AS dispatch
-          WHERE dispatch.target_kind = 'pull_request'
-            AND dispatch.repository = $1
-            AND dispatch.pull_request_number = $2
-            AND ($3::uuid IS NULL OR dispatch.session_id <> $3)
+        "SELECT target.session_id
+           FROM (
+                SELECT dispatch.session_id, dispatch.recorded_at
+                  FROM commissioned_dispatch AS dispatch
+                 WHERE dispatch.target_kind = 'pull_request'
+                   AND dispatch.repository = $1
+                   AND dispatch.pull_request_number = $2
+                UNION ALL
+                SELECT action.session_id, action.recorded_at
+                  FROM repo_watch_dispatch_action AS action
+                  JOIN repo_watch_event AS event ON event.event_id = action.event_id
+                 WHERE event.target_kind = 'pull_request'
+                   AND event.repository = $1
+                   AND event.pull_request_number = $2
+           ) AS target
+          WHERE ($3::uuid IS NULL OR target.session_id <> $3)
             AND coalesce((
                 SELECT event.event_kind IN ('commissioned', 'resumed', 'superseded')
                   FROM goal_event AS event
-                 WHERE event.session_id = dispatch.session_id
+                 WHERE event.session_id = target.session_id
                  ORDER BY event.event_ordinal DESC LIMIT 1
             ), false)
-          ORDER BY dispatch.recorded_at DESC, dispatch.dispatch_id DESC
+          ORDER BY target.recorded_at DESC, target.session_id DESC
           LIMIT 1",
     )
     .bind(repository)
@@ -471,6 +490,16 @@ async fn live_pull_request_session(
     .fetch_optional(&mut **transaction)
     .await?;
     Ok(session.map(session_id_from_uuid))
+}
+
+pub(crate) async fn lock_live_pull_request_target_identity(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    repository: &signalbox_domain::RepositorySlug,
+    pull_request: signalbox_domain::PullRequestNumber,
+) -> Result<Option<SessionId>, sqlx::Error> {
+    let pull_request = Decimal::from(pull_request.get());
+    lock_pull_request_target(transaction, repository.as_str(), &pull_request).await?;
+    live_pull_request_session(transaction, repository.as_str(), &pull_request, None).await
 }
 
 /// Borrows the statement the prepared commission attaches.
