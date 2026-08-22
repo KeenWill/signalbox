@@ -98,6 +98,22 @@ test('uses a navigation sheet on a phone viewport and unwinds it with Escape', a
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('restores desktop navigation-dialog focus to the visible product main', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await palette.getByRole('button', { name: /Open navigation/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeHidden()
+  await expect(page.locator('.product-main')).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('closes the navigation sheet after selecting a phone route', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)

@@ -471,9 +471,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             className="mobile-navigation"
             aria-describedby="mobile-navigation-description"
             onCloseAutoFocus={(event) => {
-              const returnTarget = document.querySelector<HTMLElement>(
+              const navigationButton = document.querySelector<HTMLElement>(
                 '[aria-label="Open navigation"]',
               )
+              const returnTarget =
+                navigationButton && navigationButton.getClientRects().length > 0
+                  ? navigationButton
+                  : primaryRef.current
               if (restoreNavigationFocusRef.current && returnTarget) {
                 event.preventDefault()
                 returnTarget.focus()

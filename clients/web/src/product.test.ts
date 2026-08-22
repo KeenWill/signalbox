@@ -76,6 +76,25 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('fails closed when the daemon advertises incompatible hard limits', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...bootstrapFixture,
+              limits: { ...bootstrapFixture.limits, max_json_body_bytes: 1 },
+            }),
+          ),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'incompatible web contract limits',
+    )
+  })
+
   it('reports an unsuccessful HTTP response without decoding its body', async () => {
     vi.stubGlobal(
       'fetch',
