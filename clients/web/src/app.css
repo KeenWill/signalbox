@@ -870,7 +870,7 @@ kbd {
 .import-window {
   display: grid;
   min-height: 0;
-  grid-template-rows: 30px minmax(0, 1fr);
+  grid-template-rows: 30px minmax(132px, 1fr) minmax(154px, auto);
 }
 .import-window-summary {
   display: flex;
@@ -931,6 +931,72 @@ kbd {
   font-size: 0.54rem;
   font-weight: 700;
   text-transform: uppercase;
+}
+.import-artifact-view {
+  min-width: 0;
+  overflow: auto;
+  border-top: 1px solid var(--border-strong);
+  background: var(--surface-2);
+}
+.import-artifact-view > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+}
+.import-artifact-view > header div {
+  display: grid;
+  gap: 0.12rem;
+}
+.import-artifact-view h3 {
+  font-size: 0.68rem;
+}
+.import-artifact-view > header small {
+  color: var(--text-muted);
+  font:
+    0.57rem ui-monospace,
+    monospace;
+}
+.import-artifact-view .artifact-row {
+  grid-template-columns: 132px minmax(0, 1fr);
+}
+.import-artifact-view .artifact-heading {
+  padding: 0.62rem;
+}
+.import-artifact-view .artifact-rendered pre {
+  max-height: 120px;
+  padding: 0.62rem;
+}
+.import-artifact-view .artifact-state {
+  min-height: 92px;
+}
+.reviews-artifact-surface {
+  display: grid;
+  align-content: start;
+  gap: 0.8rem;
+}
+.reviews-artifact-surface > section {
+  max-width: 880px;
+  border: 1px solid var(--border);
+}
+.reviews-artifact-surface > section > header {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.8rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+}
+.reviews-artifact-surface > section > header h2 {
+  font-size: 0.78rem;
+}
+.reviews-artifact-surface > section > header p {
+  max-width: 72ch;
+  color: var(--text-muted);
+  font-size: 0.64rem;
+  line-height: 1.5;
 }
 
 @media (max-width: 900px) {
@@ -996,6 +1062,9 @@ kbd {
     max-height: 42dvh;
     border-right: 0;
     border-bottom: 1px solid var(--border);
+  }
+  .import-window {
+    grid-template-rows: 30px minmax(260px, 1fr) minmax(180px, auto);
   }
   .imports-table-header,
   .imports-table-row {

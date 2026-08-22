@@ -24,6 +24,8 @@ import {
 } from 'react'
 import { ArtifactInspector } from './ArtifactInspector'
 import { type CommandContext, globalHotkeyBindings } from './commands'
+import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
+import type { ArtifactItem } from './features/artifacts/artifactTypes'
 import { HttpImportApi } from './imports/api'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import {
@@ -231,6 +233,32 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   )
 }
 
+const reviewEvidenceUnavailable: ArtifactItem = {
+  id: 'review-evidence-unavailable',
+  displayName: 'Review evidence',
+  kind: 'committed_unimplemented',
+  attemptedKind: 'review evidence artifact',
+}
+
+function ReviewsArtifactSurface() {
+  return (
+    <div className="surface-body reviews-artifact-surface">
+      <SurfaceUnavailable surface="reviews" />
+      <section aria-labelledby="review-artifact-heading">
+        <header>
+          <span className="eyebrow">Typed artifact view</span>
+          <h2 id="review-artifact-heading">Review evidence</h2>
+          <p>
+            Review facts and their artifact identities are not exposed by this daemon contract. The
+            client preserves that missing typed boundary instead of fabricating a preview.
+          </p>
+        </header>
+        <ArtifactRenderer artifact={reviewEvidenceUnavailable} />
+      </section>
+    </div>
+  )
+}
+
 function ProductToolbar({
   artifactAvailable,
   artifactButtonRef,
@@ -408,6 +436,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         presentation="product"
         onCommandContext={updateImportsCommandContext}
       />
+    ) : surface === 'reviews' ? (
+      <ReviewsArtifactSurface />
     ) : (
       <DeferredSurface surface={surface} />
     )

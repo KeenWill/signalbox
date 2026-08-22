@@ -21,6 +21,7 @@ import { ScenarioNavigation } from '../ScenarioNavigation'
 import { type DiagnosticSnapshot, IconCommand, OverlaySurfaces } from '../Surfaces'
 import { store } from '../state'
 import { type ImportApi, ImportApiError, ImportReceiptCorrelationError } from './api'
+import { ImportedArtifactView } from './ImportedArtifactView'
 import { ImportedEntries } from './ImportedEntries'
 import { ImportsTable } from './ImportsTable'
 import { SCENARIO_IMPORT_TOTAL } from './scenario'
@@ -123,6 +124,10 @@ export function ImportsWorkspace({
     enabled: selectedImport !== null,
   })
   const entryWindow = windowQuery.data
+  const selectedEntry =
+    entryWindow?.items.find(
+      (entry) => entry.frontier.imported_entry_id === selectedFrontier?.imported_entry_id,
+    ) ?? null
   const anchorFrontier =
     entryWindow?.items.find((entry) => entry.frontier.position === entryWindow.anchor_position)
       ?.frontier ?? null
@@ -599,6 +604,7 @@ export function ImportsWorkspace({
                     commandContext={commandContext}
                   />
                 )}
+                <ImportedArtifactView entry={selectedEntry} />
               </div>
             </div>
           </section>
