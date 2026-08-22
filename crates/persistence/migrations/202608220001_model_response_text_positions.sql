@@ -87,25 +87,46 @@ CREATE FUNCTION require_contiguous_assistant_response_text_positions()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    previous_end numeric;
+    next_start numeric;
 BEGIN
-    IF EXISTS (
-        SELECT 1
-          FROM (
-              SELECT entry.assistant_response_text_start_bytes AS actual_start,
-                     coalesce(
-                         sum(octet_length(entry.assistant_text_value)) OVER (
-                             ORDER BY entry.assistant_response_part_ordinal
-                             ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-                         ),
-                         0
-                     )::numeric AS expected_start
-                FROM semantic_transcript_entry AS entry
-               WHERE entry.producing_model_call_id =
-                     NEW.producing_model_call_id
-                 AND entry.payload_kind = 'assistant_text'
-          ) AS positioned
-         WHERE positioned.actual_start <> positioned.expected_start
-    ) THEN
+    SELECT entry.assistant_response_text_start_bytes
+               + octet_length(entry.assistant_text_value)::numeric
+      INTO previous_end
+      FROM semantic_transcript_entry AS entry
+     WHERE entry.producing_model_call_id = NEW.producing_model_call_id
+       AND entry.payload_kind = 'assistant_text'
+       AND entry.assistant_response_part_ordinal
+           < NEW.assistant_response_part_ordinal
+     ORDER BY entry.assistant_response_part_ordinal DESC
+     LIMIT 1;
+
+    IF coalesce(previous_end, 0)
+        <> NEW.assistant_response_text_start_bytes THEN
+        RAISE EXCEPTION
+            'assistant response text positions are not contiguous for model call %',
+            NEW.producing_model_call_id
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT =
+                    'semantic_transcript_response_text_positions_contiguous';
+    END IF;
+
+    SELECT entry.assistant_response_text_start_bytes
+      INTO next_start
+      FROM semantic_transcript_entry AS entry
+     WHERE entry.producing_model_call_id = NEW.producing_model_call_id
+       AND entry.payload_kind = 'assistant_text'
+       AND entry.assistant_response_part_ordinal
+           > NEW.assistant_response_part_ordinal
+     ORDER BY entry.assistant_response_part_ordinal ASC
+     LIMIT 1;
+
+    IF next_start IS NOT NULL
+       AND NEW.assistant_response_text_start_bytes
+               + octet_length(NEW.assistant_text_value)::numeric
+           <> next_start THEN
         RAISE EXCEPTION
             'assistant response text positions are not contiguous for model call %',
             NEW.producing_model_call_id
