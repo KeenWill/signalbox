@@ -119,6 +119,19 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('rejects a typed error before buffering beyond the JSON byte ceiling', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () => new Response(' '.repeat(MAX_ATTENTION_SNAPSHOT_BYTES + 1), { status: 503 }),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
+      'error response exceeds the contract byte ceiling',
+    )
+  })
+
   it('decodes complete NDJSON attention events without buffering stream history', async () => {
     const body = `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n${JSON.stringify(attentionUpdateFixture)}\n`
     vi.stubGlobal(

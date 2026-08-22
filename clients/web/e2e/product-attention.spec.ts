@@ -86,6 +86,17 @@ const installAttentionScenario = async (page: Page) => {
   })
 }
 
+const installAttentionReplacementScenario = async (page: Page) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      body: `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n`,
+      contentType: 'application/x-ndjson',
+    }),
+  )
+  await page.route('**/api/attention', (route) => route.fulfill({ json: nextAttentionFixture }))
+}
+
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
   page.on('console', (message) => {
@@ -130,13 +141,18 @@ test('replaces the current bounded page instead of accumulating attention histor
   await installAttentionScenario(page)
   await page.goto('/attention')
 
-  await expect(page.getByRole('listitem')).toHaveCount(3)
+  await expect(page.getByRole('listitem')).toHaveCount(attentionFixture.summaries.length)
   await page.getByRole('button', { name: /Next page/ }).click()
-  await expect(page.getByRole('listitem')).toHaveCount(1)
+  await expect(page.getByRole('listitem')).toHaveCount(nextAttentionFixture.summaries.length)
   await expect(page.getByText(idleSessionId)).toBeVisible()
   await expect(page.getByText(approvalSessionId)).toBeHidden()
   await expect(page.getByRole('button', { name: 'Return to live page' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: '1 sessions', level: 2 })).toBeFocused()
+  await expect(
+    page.getByRole('heading', {
+      name: `${nextAttentionFixture.summaries.length} sessions`,
+      level: 2,
+    }),
+  ).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -158,14 +174,7 @@ test('closes the inspector with global Escape after focus leaves it', async ({ p
 test('moves focus to the page heading when refreshed data removes the selection', async ({
   page,
 }) => {
-  let snapshotReads = 0
-  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
-  await page.route('**/api/attention**', (route) => {
-    const requestUrl = new URL(route.request().url())
-    if (requestUrl.pathname.endsWith('/follow')) return route.abort()
-    snapshotReads += 1
-    return route.fulfill({ json: snapshotReads === 1 ? attentionFixture : nextAttentionFixture })
-  })
+  await installAttentionReplacementScenario(page)
   await page.goto('/attention')
 
   await page
@@ -174,7 +183,12 @@ test('moves focus to the page heading when refreshed data removes the selection'
   await page.getByRole('button', { name: 'Refresh snapshot' }).click()
 
   await expect(page.getByRole('button', { name: 'Close attention inspector' })).toBeHidden()
-  await expect(page.getByRole('heading', { name: '1 sessions', level: 2 })).toBeFocused()
+  await expect(
+    page.getByRole('heading', {
+      name: `${nextAttentionFixture.summaries.length} sessions`,
+      level: 2,
+    }),
+  ).toBeFocused()
 })
 
 test('captures the dark attention fleet', async ({ page }, testInfo) => {

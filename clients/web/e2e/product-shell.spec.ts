@@ -81,6 +81,22 @@ test('completes route switching from the command palette without a mouse', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('suspends product navigation sequences while the palette owns input', async ({ page }) => {
+  await useDeterministicProductTransport(page)
+  await page.goto('/attention')
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(palette).toBeVisible()
+  await palette.getByRole('button', { name: /Go to Sessions/ }).focus()
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(palette).toBeVisible()
+})
+
 test('uses a navigation sheet on a phone viewport and unwinds it with Escape', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicProductTransport(page)

@@ -49,8 +49,10 @@ export function AttentionSurface({
   const attention = useQuery({
     queryKey: queryKey(after),
     queryFn: async ({ signal }) => {
+      const projectionAtStart = liveProjection.current
       const snapshot = await productTransport.readAttention(after ?? undefined, signal)
-      return after === null ? (liveProjection.current ?? snapshot) : snapshot
+      const latestProjection = liveProjection.current
+      return after === null && latestProjection !== projectionAtStart ? latestProjection : snapshot
     },
     gcTime: 0,
   })

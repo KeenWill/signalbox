@@ -170,7 +170,9 @@ export class SameOriginProductTransport implements ProductTransport {
   }
 
   private async requestError(response: Response): Promise<ProductRequestError> {
-    const failure = decodeWebApiErrorResponse(await response.json())
+    const failure = decodeWebApiErrorResponse(
+      await readBoundedJson(response, MAX_ATTENTION_SNAPSHOT_BYTES, 'error response'),
+    )
     return new ProductRequestError(failure.error.code, failure.error.kind, failure.error.message)
   }
 }
