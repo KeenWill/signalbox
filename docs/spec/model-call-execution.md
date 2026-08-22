@@ -12,7 +12,9 @@ against this PR (`agent/daemon-live-ambiguous-usage-compaction`).
 Same-turn tool-continuation headroom closure is verified against this PR
 (`agent/daemon-live-tool-result-headroom`). Queued-turn post-usage transcript
 headroom is verified against this PR
-(`agent/daemon-live-post-usage-transcript-headroom`).
+(`agent/daemon-live-post-usage-transcript-headroom`). Dedicated-compaction usage
+as the next queued-turn baseline is verified against this PR
+(`agent/daemon-live-compaction-source-headroom`).
 
 Non-ambiguous execution-failure containment is verified against this PR
 (`agent/daemon-live-nonambiguous-execution-containment`).
@@ -424,20 +426,24 @@ inferred from provider or model names. Adapters with a provider setting surface,
 including Anthropic, send the configured output ceiling in the provider request.
 Codex CLI instead renders the ceiling as model-visible advisory context because
 the CLI exposes no provider-side control. Before activating a queued turn, the
-daemon reads the newest terminal call with provider-reported input for the same
-resolved target since the latest compaction. The terminal disposition does not
-erase usage from a provider round that may have been accepted: ambiguous and
-failed calls therefore protect a resumed session from re-sending a request whose
-reported size already exhausted headroom. If the reported input, interpreted
-with the stored cache-inclusion semantics, plus output only when completion
-retained it as assistant transcript, a conservative UTF-8 byte allowance for
-model-visible entries appended after that input, and the next configured output
-reservation exceeds the context window, the daemon performs one bounded
-automatic compaction before activation. The allowance counts durable content and
-excludes assistant content from the reporting call when reported output already
-accounts for it. A queued turn spends at most one automatic attempt; if durable
-evidence says that attempt was already spent, the scheduler reports exhaustion
-and permits activation rather than wedging the queue on a compaction it may not
+daemon reads the newest provider-reported input for the same resolved target
+from either a terminal ordinary call since the latest compaction or the latest
+completed dedicated compaction call itself. The terminal disposition does not
+erase usage from an ordinary provider round that may have been accepted:
+ambiguous and failed calls therefore protect a resumed session from re-sending a
+request whose reported size already exhausted headroom. If the reported input,
+interpreted with the stored cache-inclusion semantics, plus output only when
+completion retained it in the model-visible transcript, a conservative UTF-8
+byte allowance for model-visible entries appended after that input, and the next
+configured output reservation exceeds the context window, the daemon performs
+one bounded automatic compaction before activation. The allowance counts durable
+content and excludes ordinary assistant content or the dedicated summary when
+reported output already accounts for it. Historical dedicated calls prepared
+before that semantics became durable retain an unknown value; the guard treats
+unknown as cache-exclusive so it may overcount but cannot omit reported cache
+axes. A queued turn spends at most one automatic attempt; if durable evidence
+says that attempt was already spent, the scheduler reports exhaustion and
+permits activation rather than wedging the queue on a compaction it may not
 repeat. After a nominal completion, the daemon retains adapter-reported usage
 and the completed observation even when reported output exceeds
 `max_output_tokens` or the reported input-plus-output lower bound exceeds

@@ -217,6 +217,150 @@ async fn ambiguous_model_call_usage_is_available_to_pre_activation_compaction()
     Ok(())
 }
 
+/// A successful dedicated compaction call becomes the provider-confirmed
+/// baseline until a later ordinary call reports usage. Its retained summary is
+/// already represented by reported output tokens and is not counted twice.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn context_compaction_usage_is_available_to_pre_activation_compaction()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (is_nullable, column_default): (String, Option<String>) = sqlx::query_as(
+        "SELECT is_nullable, column_default
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'context_compaction_model_call'
+            AND column_name = 'usage_input_includes_cache_tokens'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(is_nullable, "YES");
+    assert_eq!(column_default.as_deref(), Some("false"));
+
+    let seed = 0x6d78;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let assistant = AssistantText::try_new(String::from("context before compaction"))
+        .expect("fixture assistant text is admitted");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+            assistant_text: vec![assistant],
+        });
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x20,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x22)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let compaction_repository = ContextCompactionRepository::new(pool.clone());
+    let prepared = compaction_repository
+        .prepare(PrepareContextCompactionRequest {
+            command: DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x30)),
+            session: fixture.session,
+            requested_through_position: None,
+            automatic_for_turn: None,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+            selection: DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+            target,
+            input_includes_cache_tokens: true,
+            credential_reference: String::from("compaction usage fixture credential"),
+            call: ModelCallId::from_uuid(Uuid::from_u128(seed + 0x31)),
+            compaction: ContextCompactionId::from_uuid(Uuid::from_u128(seed + 0x32)),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x33)),
+            result_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x34)),
+        })
+        .await?;
+    let PrepareContextCompactionOutcome::Prepared(prepared) = prepared else {
+        panic!("the completed turn has a compactable frontier")
+    };
+    compaction_repository.authorize(&prepared).await?;
+    let compaction_usage = ContextCompactionTokenUsage::unreported()
+        .with_input_tokens(Some(91))
+        .with_output_tokens(Some(13))
+        .with_cache_creation_input_tokens(Some(17))
+        .with_cache_read_input_tokens(Some(19));
+    compaction_repository
+        .complete(&prepared, "retained context summary", compaction_usage)
+        .await?;
+
+    let suffix = "content appended after compaction";
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x40,
+                seed + 1,
+                suffix,
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x41)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 0x42))),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: fixture.session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 0x43),
+            starting_frontier: Uuid::from_u128(seed + 0x44),
+            initial_attempt: Uuid::from_u128(seed + 0x45),
+        },
+    )
+    .await?;
+
+    let retained = repository
+        .latest_reported_usage(
+            fixture.session,
+            target,
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x44)),
+        )
+        .await?
+        .expect("the dedicated compaction usage becomes the current baseline");
+    let expected_usage = ProviderReportedTokenUsage::unreported()
+        .with_input_tokens(Some(91))
+        .with_output_tokens(Some(13))
+        .with_cache_creation_input_tokens(Some(17))
+        .with_cache_read_input_tokens(Some(19));
+    assert_eq!(retained.usage(), expected_usage);
+    assert!(retained.input_includes_cache_tokens());
+    assert!(retained.output_is_retained());
+    assert_eq!(
+        retained.projected_unreported_content_bytes(),
+        u64::try_from(suffix.len())?
+    );
+
+    let mutation_error = sqlx::query(
+        "UPDATE context_compaction_model_call
+            SET usage_input_includes_cache_tokens = false
+          WHERE model_call_id = $1",
+    )
+    .bind(prepared.call().into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a prepared compaction call's input semantics are immutable");
+    assert_eq!(
+        mutation_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("context_compaction_input_semantics_immutable")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-006: cancellation evidence cannot carry provider usage because neither
 /// cancellation-confirmed nor pre-send cancellation reports token evidence.
 #[tokio::test(flavor = "multi_thread")]

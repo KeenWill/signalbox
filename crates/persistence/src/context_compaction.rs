@@ -40,6 +40,8 @@ pub struct PrepareContextCompactionRequest {
     pub selection: DirectModelSelection,
     /// Exact resolved provider target.
     pub target: ResolvedProviderTarget,
+    /// Whether this call's provider input total includes both cache axes.
+    pub input_includes_cache_tokens: bool,
     /// Non-secret credential reference pinned for the call.
     pub credential_reference: String,
     /// Fresh physical call candidate.
@@ -1050,8 +1052,8 @@ async fn prepare_in_transaction(
         "INSERT INTO context_compaction_model_call
             (model_call_id, session_id, direct_model_selection_id,
              resolved_provider_model_identity_id, source_frontier_id,
-             credential_reference, state_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, 'prepared')",
+             credential_reference, usage_input_includes_cache_tokens, state_kind)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'prepared')",
     )
     .bind(request.call.into_uuid())
     .bind(session_id_to_uuid(request.session))
@@ -1059,6 +1061,7 @@ async fn prepare_in_transaction(
     .bind(request.target.identity().into_uuid())
     .bind(source_frontier.into_uuid())
     .bind(&request.credential_reference)
+    .bind(request.input_includes_cache_tokens)
     .execute(&mut **transaction)
     .await;
     if let Err(error) = insert_call {
