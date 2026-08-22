@@ -47,4 +47,24 @@ describe('command registry', () => {
 
     expect(selectApp(store.getState()).detail).toBe('results')
   })
+
+  it('sets exact presentation preferences through registered commands', () => {
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      presentationPreferences: true,
+    }
+
+    invokeCommand('layout.focus', context)
+    invokeCommand('density.comfortable', context)
+    invokeCommand('theme.light', context)
+
+    expect(selectApp(store.getState())).toMatchObject({
+      layout: 'focus',
+      density: 'comfortable',
+      theme: 'light',
+    })
+  })
 })

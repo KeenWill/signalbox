@@ -33,7 +33,7 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
               type="radio"
               name="layout"
               checked={app.layout === 'workbench'}
-              onChange={() => dispatch(actions.layoutSet('workbench'))}
+              onChange={() => invokeCommand('layout.workbench', context)}
             />
             <span>Workbench</span>
             <small>Navigation, primary surface, and contextual inspector.</small>
@@ -43,7 +43,7 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
               type="radio"
               name="layout"
               checked={app.layout === 'focus'}
-              onChange={() => dispatch(actions.layoutSet('focus'))}
+              onChange={() => invokeCommand('layout.focus', context)}
             />
             <span>Focus</span>
             <small>A quiet primary surface with secondary panes removed.</small>
@@ -56,7 +56,7 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
               type="radio"
               name="density"
               checked={app.density === 'compact'}
-              onChange={() => dispatch(actions.densitySet('compact'))}
+              onChange={() => invokeCommand('density.compact', context)}
             />
             <span>Compact</span>
             <small>Dense rows for high-volume operator work.</small>
@@ -66,7 +66,7 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
               type="radio"
               name="density"
               checked={app.density === 'comfortable'}
-              onChange={() => dispatch(actions.densitySet('comfortable'))}
+              onChange={() => invokeCommand('density.comfortable', context)}
             />
             <span>Comfortable</span>
             <small>More separation without changing information detail.</small>
@@ -109,7 +109,7 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
               type="radio"
               name="theme"
               checked={app.theme === 'dark'}
-              onChange={() => dispatch(actions.themeSet('dark'))}
+              onChange={() => invokeCommand('theme.dark', context)}
             />
             <span>Dark</span>
           </label>
@@ -118,7 +118,7 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
               type="radio"
               name="theme"
               checked={app.theme === 'light'}
-              onChange={() => dispatch(actions.themeSet('light'))}
+              onChange={() => invokeCommand('theme.light', context)}
             />
             <span>Light</span>
           </label>

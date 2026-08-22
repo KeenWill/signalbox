@@ -9,7 +9,7 @@ import {
   Outlet,
   RouterProvider,
 } from '@tanstack/react-router'
-import { lazy, StrictMode, Suspense, useEffect } from 'react'
+import { lazy, StrictMode, Suspense, useLayoutEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
@@ -21,7 +21,7 @@ import './app.css'
 
 function ApplicationRoot() {
   const { density, theme } = useAppSelector(selectApp)
-  useEffect(() => {
+  useLayoutEffect(() => {
     document.documentElement.dataset.theme = theme
     document.documentElement.dataset.density = density
   }, [density, theme])
@@ -85,6 +85,9 @@ declare module '@tanstack/react-router' {
 
 const root = document.getElementById('root')
 if (!root) throw new Error('Missing web application root')
+const initialPresentation = selectApp(store.getState())
+document.documentElement.dataset.theme = initialPresentation.theme
+document.documentElement.dataset.density = initialPresentation.density
 
 createRoot(root).render(
   <StrictMode>

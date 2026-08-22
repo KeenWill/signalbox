@@ -346,6 +346,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       timelineIds: surfaceContext?.timelineIds ?? [],
       focusTimeline: surfaceContext?.focusTimeline ?? (() => primaryRef.current?.focus()),
       transcriptPreferences: surface === 'settings',
+      presentationPreferences: surface === 'settings',
       navigate: navigationDisabled
         ? undefined
         : (path) => {
@@ -371,6 +372,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   )
 
   const copy = surfaceCopy[surface]
+  useEffect(() => {
+    document.title = `${copy.title} · Signalbox`
+    return () => {
+      document.title = 'Signalbox scenarios'
+    }
+  }, [copy.title])
   const content =
     surface === 'attention' ? (
       <AttentionSurface />

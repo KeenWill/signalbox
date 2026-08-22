@@ -13,6 +13,7 @@ export interface CommandContext {
   selectImportEntry?: (id: string) => void
   navigate?: (path: string) => void
   transcriptPreferences?: boolean
+  presentationPreferences?: boolean
 }
 
 export interface CommandBinding {
@@ -38,6 +39,8 @@ const productNavigation = (context: CommandContext) => context.navigate !== unde
 const scenarioTimeline = (context: CommandContext) => context.timelineIds.length > 0
 const transcriptDetail = (context: CommandContext) =>
   scenarioTimeline(context) || context.transcriptPreferences === true
+const presentationPreferences = (context: CommandContext) =>
+  context.presentationPreferences === true
 export const commandRegistry = [
   {
     id: 'navigate.attention',
@@ -308,6 +311,24 @@ export const commandRegistry = [
     },
   },
   {
+    id: 'layout.workbench',
+    title: 'Use workbench layout',
+    description: 'Show navigation, the primary surface, and the contextual inspector.',
+    category: 'View',
+    bindings: [],
+    available: presentationPreferences,
+    run: (context) => context.dispatch(actions.layoutSet('workbench')),
+  },
+  {
+    id: 'layout.focus',
+    title: 'Use focus layout',
+    description: 'Show a quiet primary surface without secondary panes.',
+    category: 'View',
+    bindings: [],
+    available: presentationPreferences,
+    run: (context) => context.dispatch(actions.layoutSet('focus')),
+  },
+  {
     id: 'density.toggle',
     title: 'Toggle visual density',
     description: 'Switch compact and comfortable spacing independently of detail.',
@@ -320,6 +341,24 @@ export const commandRegistry = [
     },
   },
   {
+    id: 'density.compact',
+    title: 'Use compact density',
+    description: 'Use dense spacing for high-volume operator work.',
+    category: 'View',
+    bindings: [],
+    available: presentationPreferences,
+    run: (context) => context.dispatch(actions.densitySet('compact')),
+  },
+  {
+    id: 'density.comfortable',
+    title: 'Use comfortable density',
+    description: 'Use more separation without changing information detail.',
+    category: 'View',
+    bindings: [],
+    available: presentationPreferences,
+    run: (context) => context.dispatch(actions.densitySet('comfortable')),
+  },
+  {
     id: 'theme.toggle',
     title: 'Toggle light/dark theme',
     description: 'Switch the CSS-variable theme.',
@@ -330,6 +369,24 @@ export const commandRegistry = [
       const current = context.getState().app.theme
       context.dispatch(actions.themeSet(current === 'dark' ? 'light' : 'dark'))
     },
+  },
+  {
+    id: 'theme.dark',
+    title: 'Use dark theme',
+    description: 'Use the dark workstation color theme.',
+    category: 'View',
+    bindings: [],
+    available: presentationPreferences,
+    run: (context) => context.dispatch(actions.themeSet('dark')),
+  },
+  {
+    id: 'theme.light',
+    title: 'Use light theme',
+    description: 'Use the light workstation color theme.',
+    category: 'View',
+    bindings: [],
+    available: presentationPreferences,
+    run: (context) => context.dispatch(actions.themeSet('light')),
   },
   {
     id: 'detail.full',
