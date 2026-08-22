@@ -163,6 +163,32 @@ describe('BoundedSessionHistory', () => {
     expect(window.items).toHaveLength(256)
   })
 
+  it('sanitizes non-finite source ceilings to the protocol maxima', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    let receivedMaxItems = 0
+    let receivedMaxBytes = 0
+    const source: SessionTimelineSource = {
+      limits: {
+        max_timeline_window_items: Number.NaN,
+        max_timeline_window_bytes: Number.POSITIVE_INFINITY,
+      },
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async (requestedSessionId, anchor, limits) => {
+        receivedMaxItems = limits.maxItems
+        receivedMaxBytes = limits.maxBytes
+        return scenario.readWindow(requestedSessionId, anchor, limits)
+      },
+    }
+
+    await new BoundedSessionHistory(sessionId, source).load(
+      { kind: 'first' },
+      { maxItems: 1_000_000, maxBytes: 1_000_000_000 },
+    )
+
+    expect(receivedMaxItems).toBe(256)
+    expect(receivedMaxBytes).toBe(64 * 1024)
+  })
+
   it('budgets scenario windows and descriptors from exact event-kind charges', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const descriptor = await scenario.readDescriptor(sessionId)
@@ -218,6 +244,18 @@ describe('BoundedSessionHistory', () => {
     const window = await scenario.readWindow(
       sessionId,
       { kind: 'around', eventSequence: String(SESSION_FOUNDATION_TOTAL) },
+      { maxItems: scenario.limits.max_timeline_window_items, maxBytes: 64 * 1024 },
+    )
+
+    expect(window.items).toHaveLength(scenario.limits.max_timeline_window_items)
+    expect(window.items.at(-1)?.address.event_sequence).toBe(String(SESSION_FOUNDATION_TOTAL))
+  })
+
+  it('clamps a scenario around anchor beyond the latest address', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const window = await scenario.readWindow(
+      sessionId,
+      { kind: 'around', eventSequence: String(SESSION_FOUNDATION_TOTAL + 1_000) },
       { maxItems: scenario.limits.max_timeline_window_items, maxBytes: 64 * 1024 },
     )
 
