@@ -501,12 +501,19 @@ impl InputContent {
     }
 }
 
+/// Maximum number of ordered parts in one process-protocol user input.
 // numeric-bound: ceiling - bounds retained parts in one user input
-const MAX_USER_INPUT_PARTS: usize = 256;
+pub const MAX_USER_INPUT_PARTS: usize = signalbox_domain::UserContent::MAX_PARTS;
+/// Maximum aggregate UTF-8 bytes across process-protocol text parts.
 // numeric-bound: ceiling - bounds aggregate retained user text
-const MAX_USER_INPUT_TEXT_BYTES: usize = 1_048_576;
-// numeric-bound: ceiling - bounds retained attachment metadata fields
-const MAX_USER_ATTACHMENT_METADATA_BYTES: usize = 255;
+pub const MAX_USER_INPUT_TEXT_BYTES: usize = signalbox_domain::UserContent::MAX_TEXT_BYTES;
+/// Maximum encoded bytes in one process-protocol attachment media type.
+// numeric-bound: ceiling - bounds retained attachment media types
+pub const MAX_USER_INPUT_MEDIA_TYPE_BYTES: usize = signalbox_domain::DeclaredMediaType::MAX_BYTES;
+/// Maximum encoded bytes in one process-protocol attachment display filename.
+// numeric-bound: ceiling - bounds retained attachment display filenames
+pub const MAX_USER_INPUT_DISPLAY_FILENAME_BYTES: usize =
+    signalbox_domain::AttachmentDisplayFilename::MAX_BYTES;
 
 /// Closed semantic kind declared for one user attachment on the wire.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -521,7 +528,7 @@ pub enum UserAttachmentKind {
 }
 
 /// One exact part in canonical ordered user input.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UserInputPart {
     /// Exact decoded text.
@@ -541,6 +548,32 @@ pub enum UserInputPart {
         #[serde(deserialize_with = "deserialize_required_nullable")]
         display_filename: Option<String>,
     },
+}
+
+impl fmt::Debug for UserInputPart {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text { .. } => formatter
+                .debug_struct("Text")
+                .field("text", &"<redacted>")
+                .finish(),
+            Self::Attachment {
+                digest,
+                kind,
+                media_type,
+                display_filename,
+            } => formatter
+                .debug_struct("Attachment")
+                .field("digest", digest)
+                .field("kind", kind)
+                .field("media_type", media_type)
+                .field(
+                    "display_filename",
+                    &display_filename.as_ref().map(|_| "<redacted>"),
+                )
+                .finish(),
+        }
+    }
 }
 
 /// Canonical nonempty ordered user-input parts array.
@@ -604,14 +637,14 @@ impl UserInputContent {
                     ..
                 } => {
                     if media_type.is_empty()
-                        || media_type.len() > MAX_USER_ATTACHMENT_METADATA_BYTES
+                        || media_type.len() > MAX_USER_INPUT_MEDIA_TYPE_BYTES
                         || !media_type.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
                     {
                         return Err(FrameValidationError::UserContentShape);
                     }
                     if display_filename.as_ref().is_some_and(|filename| {
                         filename.is_empty()
-                            || filename.len() > MAX_USER_ATTACHMENT_METADATA_BYTES
+                            || filename.len() > MAX_USER_INPUT_DISPLAY_FILENAME_BYTES
                             || filename == "."
                             || filename == ".."
                             || filename.contains('/')
@@ -3230,6 +3263,40 @@ pub enum DescendantTerminationScope {
     ParentAndDescendants,
 }
 
+/// Immutable authority fence a commissioned-session request records.
+///
+/// The shapes mirror the repository-watch dispatch fence: a pull-request fence
+/// names the pull request, its exact head commit, the repository and branch
+/// holding that head, and the base branch; a branch fence names the repository
+/// and branch alone. Field admission (slug, commit, and branch grammar) is the
+/// daemon's, at command construction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "target", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CommissionedSessionFence {
+    /// Exact pull-request authority for the commissioned session.
+    PullRequest {
+        /// Repository whose pull request the session is commissioned against.
+        repository: String,
+        /// Positive pull-request number within the repository.
+        pull_request: CanonicalU64,
+        /// Exact head commit authorized at commissioning time.
+        head_sha: String,
+        /// Repository containing the authorized head branch.
+        head_repository: String,
+        /// Authorized head branch.
+        head_branch: String,
+        /// Authorized base branch.
+        base_branch: String,
+    },
+    /// Exact branch authority for the commissioned session.
+    Branch {
+        /// Repository whose branch the session is commissioned against.
+        repository: String,
+        /// Authorized branch.
+        branch: String,
+    },
+}
+
 /// Closed versioned request family.
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -3259,6 +3326,21 @@ pub enum ClientRequest {
         /// Explicit opt-in placement, defaulting to legacy pathless behavior.
         #[serde(default, skip_serializing_if = "SessionPlacement::is_pathless")]
         placement: SessionPlacement,
+    },
+    /// Atomically commission one session from a daemon-held template: create
+    /// it under a recorded immutable authority fence, attach its goal, and
+    /// submit its first input through the start-when-idle path.
+    CommissionSession {
+        /// Durable mutation identity for the whole composite.
+        command_id: CommandId,
+        /// Validated static template name.
+        template_name: String,
+        /// Immutable authority fence recorded for the created session.
+        fence: CommissionedSessionFence,
+        /// Exact immutable goal statement.
+        statement: String,
+        /// Exact first-input text carried to the created session.
+        content: InputContent,
     },
     /// List available static templates by name and version.
     ListTemplates {},
@@ -3771,7 +3853,9 @@ pub enum ToolDecision {
 impl ClientRequest {
     fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
-            Self::AttachGoal { statement, .. } | Self::SupersedeGoal { statement, .. } => {
+            Self::AttachGoal { statement, .. }
+            | Self::SupersedeGoal { statement, .. }
+            | Self::CommissionSession { statement, .. } => {
                 validate_goal_text(statement)?;
             }
             Self::ResumeGoal {
@@ -3854,6 +3938,18 @@ impl ClientRequest {
             && expected_placement_version.value() == 0
         {
             return Err(FrameValidationError::PlacementShape);
+        }
+        if let Self::CommissionSession {
+            fence:
+                CommissionedSessionFence::PullRequest {
+                    pull_request: number,
+                    ..
+                },
+            ..
+        } = self
+            && number.value() == 0
+        {
+            return Err(FrameValidationError::DispatchFenceShape);
         }
         if let Self::SubmitInput {
             expected_defaults_version,
@@ -3951,6 +4047,9 @@ impl ClientRequest {
             }
         }
         if let Self::CreateSessionFromTemplate { template_name, .. } = self {
+            validate_session_template_name(template_name)?;
+        }
+        if let Self::CommissionSession { template_name, .. } = self {
             validate_session_template_name(template_name)?;
         }
         if let Self::CompleteReviewPass {
@@ -7027,6 +7126,13 @@ pub enum ServerMessage {
         /// Complete settings snapshot installed as defaults version one.
         model_settings: ModelSettingsSnapshot,
     },
+    /// Commissioned-session receipt: the composite committed or replayed.
+    SessionCommissioned {
+        /// Created session.
+        session_id: CanonicalUuid,
+        /// Append-only commissioned-dispatch record carrying the fence.
+        dispatch_id: CanonicalUuid,
+    },
     /// One delegated child spawn was recorded or equally replayed.
     SessionSpawned {
         /// Exact logical spawn tool request.
@@ -8409,6 +8515,8 @@ pub enum FrameValidationError {
     ModelSettingsShape,
     /// A dotted placement or its root-global-read acknowledgement is invalid.
     PlacementShape,
+    /// A commissioned-session authority fence carried an invalid shape.
+    DispatchFenceShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -8445,6 +8553,7 @@ impl fmt::Display for FrameValidationError {
             Self::DelegationShape => "session-delegation frame shape is inconsistent",
             Self::ModelSettingsShape => "model-settings frame shape is inconsistent",
             Self::PlacementShape => "session-placement frame shape is inconsistent",
+            Self::DispatchFenceShape => "commissioned-session fence shape is inconsistent",
         })
     }
 }
@@ -8852,11 +8961,11 @@ mod tests {
     use super::{
         BillingRateVersion, BlobChunk, BulkIngestKind, CanonicalBlobDigest, CanonicalDigest,
         CanonicalDollarAmount, CanonicalU64, CanonicalUuid, CanonicalValueError, ClientFrame,
-        ClientRequest, CommandId, ContentFragment, ConversationCursor, ConversationImportFormat,
-        ConversationImportRejectionClass, ConversationImportSource, ConversationOrigin,
-        ConversationOriginFilter, ConversationSummary, CurrentModelCall, CurrentModelCallState,
-        DelegationMessageDirection, DelegationOutcome, DelegationPolicy, DelegationProvenance,
-        DelegationReason, DelegationToolRequestState, DelegationWaitMode,
+        ClientRequest, CommandId, CommissionedSessionFence, ContentFragment, ConversationCursor,
+        ConversationImportFormat, ConversationImportRejectionClass, ConversationImportSource,
+        ConversationOrigin, ConversationOriginFilter, ConversationSummary, CurrentModelCall,
+        CurrentModelCallState, DelegationMessageDirection, DelegationOutcome, DelegationPolicy,
+        DelegationProvenance, DelegationReason, DelegationToolRequestState, DelegationWaitMode,
         DescendantTerminationScope, EffectiveModelSettings, ErrorCode, ErrorDetail,
         FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall, FastMode,
         FastModeOverlay, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
@@ -9491,6 +9600,31 @@ mod tests {
                 "\"service_tier\":{\"kind\":\"inherit\"}}}}\n"
             )
         );
+        Ok(())
+    }
+
+    #[test]
+    fn user_input_debug_redacts_content_bearing_values() -> Result<(), Box<dyn std::error::Error>> {
+        let private_text = "private user text";
+        let private_filename = "private-filename.txt";
+        let digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            .parse::<CanonicalBlobDigest>()?;
+        let content = UserInputContent::from_parts(vec![
+            UserInputPart::Text {
+                text: String::from(private_text),
+            },
+            UserInputPart::Attachment {
+                digest,
+                kind: UserAttachmentKind::File,
+                media_type: String::from("text/plain"),
+                display_filename: Some(String::from(private_filename)),
+            },
+        ]);
+
+        let debug = format!("{content:?}");
+        assert!(!debug.contains(private_text));
+        assert!(!debug.contains(private_filename));
+        assert!(debug.contains("<redacted>"));
         Ok(())
     }
 
@@ -13406,6 +13540,134 @@ mod tests {
             },
             r#"{"type":"model_aliases_end","alias_count":"1"}"#,
         )?;
+        Ok(())
+    }
+
+    /// One commissioned-session request carries its complete composite —
+    /// fence, statement, and first input — in one closed shape, and its
+    /// receipt names the created session and the fence record.
+    #[test]
+    fn inv033_commission_session_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_client_request_round_trip(
+            request(1)?,
+            ClientRequest::CommissionSession {
+                command_id: command(2)?,
+                template_name: String::from("review-response"),
+                fence: CommissionedSessionFence::PullRequest {
+                    repository: String::from("sample-user/sample-repository"),
+                    pull_request: CanonicalU64::new(12),
+                    head_sha: String::from("1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"),
+                    head_repository: String::from("sample-user/sample-repository"),
+                    head_branch: String::from("agent/sample-feature"),
+                    base_branch: String::from("main"),
+                },
+                statement: String::from("Address the findings on pull request 12."),
+                content: InputContent::new(String::from("Respond to the review threads.")),
+            },
+            concat!(
+                "{\"type\":\"commission_session\",",
+                "\"command_id\":\"00000000-0000-0000-0000-000000000002\",",
+                "\"template_name\":\"review-response\",",
+                "\"fence\":{\"target\":\"pull_request\",",
+                "\"repository\":\"sample-user/sample-repository\",",
+                "\"pull_request\":\"12\",",
+                "\"head_sha\":\"1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d\",",
+                "\"head_repository\":\"sample-user/sample-repository\",",
+                "\"head_branch\":\"agent/sample-feature\",",
+                "\"base_branch\":\"main\"},",
+                "\"statement\":\"Address the findings on pull request 12.\",",
+                "\"content\":\"Respond to the review threads.\"}"
+            ),
+        )?;
+        assert_client_request_round_trip(
+            request(3)?,
+            ClientRequest::CommissionSession {
+                command_id: command(4)?,
+                template_name: String::from("branch-watch"),
+                fence: CommissionedSessionFence::Branch {
+                    repository: String::from("sample-user/sample-repository"),
+                    branch: String::from("main"),
+                },
+                statement: String::from("Investigate the failing workflow on main."),
+                content: InputContent::new(String::from("The nightly workflow failed.")),
+            },
+            concat!(
+                "{\"type\":\"commission_session\",",
+                "\"command_id\":\"00000000-0000-0000-0000-000000000004\",",
+                "\"template_name\":\"branch-watch\",",
+                "\"fence\":{\"target\":\"branch\",",
+                "\"repository\":\"sample-user/sample-repository\",",
+                "\"branch\":\"main\"},",
+                "\"statement\":\"Investigate the failing workflow on main.\",",
+                "\"content\":\"The nightly workflow failed.\"}"
+            ),
+        )?;
+        assert_server_message_round_trip(
+            request(5)?,
+            ServerMessage::SessionCommissioned {
+                session_id: uuid(6),
+                dispatch_id: uuid(7),
+            },
+            concat!(
+                "{\"type\":\"session_commissioned\",",
+                "\"session_id\":\"00000000-0000-0000-0000-000000000006\",",
+                "\"dispatch_id\":\"00000000-0000-0000-0000-000000000007\"}"
+            ),
+        )?;
+
+        let zero_pull_request = ClientRequest::CommissionSession {
+            command_id: command(8)?,
+            template_name: String::from("review-response"),
+            fence: CommissionedSessionFence::PullRequest {
+                repository: String::from("sample-user/sample-repository"),
+                pull_request: CanonicalU64::new(0),
+                head_sha: String::from("1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"),
+                head_repository: String::from("sample-user/sample-repository"),
+                head_branch: String::from("agent/sample-feature"),
+                base_branch: String::from("main"),
+            },
+            statement: String::from("Address the findings."),
+            content: InputContent::new(String::from("Respond.")),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(9)?, zero_pull_request),
+            Err(FrameValidationError::DispatchFenceShape)
+        );
+
+        let empty_statement = ClientRequest::CommissionSession {
+            command_id: command(10)?,
+            template_name: String::from("review-response"),
+            fence: CommissionedSessionFence::Branch {
+                repository: String::from("sample-user/sample-repository"),
+                branch: String::from("main"),
+            },
+            statement: String::new(),
+            content: InputContent::new(String::from("Respond.")),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(11)?, empty_statement),
+            Err(FrameValidationError::GoalShape)
+        );
+
+        let uppercase_template = ClientRequest::CommissionSession {
+            command_id: command(12)?,
+            template_name: String::from("Review-Response"),
+            fence: CommissionedSessionFence::Branch {
+                repository: String::from("sample-user/sample-repository"),
+                branch: String::from("main"),
+            },
+            statement: String::from("Address the findings."),
+            content: InputContent::new(String::from("Respond.")),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::One,
+                request(13)?,
+                uppercase_template
+            ),
+            Err(FrameValidationError::TemplateShape)
+        );
         Ok(())
     }
 

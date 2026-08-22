@@ -4340,9 +4340,7 @@ mod tests {
                     content: UserContent {
                         parts: [
                             Text {
-                                value: NonEmptyUnicodeText(
-                                    "inherited user request",
-                                ),
+                                value: NonEmptyUnicodeText(<redacted>),
                             },
                         ],
                     },
@@ -4360,9 +4358,7 @@ mod tests {
                         00000000-0000-0000-0000-00000000005d,
                     ),
                     content: AssistantText(
-                        NonEmptyUnicodeText(
-                            "inherited assistant reply",
-                        ),
+                        NonEmptyUnicodeText(<redacted>),
                     ),
                 },
                 User {
@@ -4380,9 +4376,7 @@ mod tests {
                     content: UserContent {
                         parts: [
                             Text {
-                                value: NonEmptyUnicodeText(
-                                    "failed user request",
-                                ),
+                                value: NonEmptyUnicodeText(<redacted>),
                             },
                         ],
                     },
@@ -4402,9 +4396,7 @@ mod tests {
                     content: UserContent {
                         parts: [
                             Text {
-                                value: NonEmptyUnicodeText(
-                                    "current user request",
-                                ),
+                                value: NonEmptyUnicodeText(<redacted>),
                             },
                         ],
                     },

@@ -2055,8 +2055,24 @@ impl<'a> Output<'a> {
         match content.parts() {
             [UserInputPart::Text { text }] => self.text(text),
             parts => {
-                serde_json::to_writer(&mut self.stdout, parts)?;
-                writeln!(self.stdout)
+                let serialized = serde_json::to_string(parts)?;
+                if self.raw {
+                    self.stdout.write_all(serialized.as_bytes())?;
+                } else {
+                    for character in serialized.chars() {
+                        let code = character as u32;
+                        if (0x7f..=0x9f).contains(&code) {
+                            write!(self.stdout, "\\u{code:04x}")?;
+                        } else {
+                            write!(self.stdout, "{character}")?;
+                        }
+                    }
+                }
+                writeln!(self.stdout)?;
+                if self.raw {
+                    self.stdout.flush()?;
+                }
+                Ok(())
             }
         }
     }

@@ -289,8 +289,11 @@ per-session dispatch gate remain in flight. It reacquires scheduler capacity
 before committing either the correlated result evidence or a crash-loss
 classification. A request that cannot acquire a direct-read permit returns the
 ordinary unavailable result without relinquishing its pass. At most 16 such
-tasks can wait to reacquire scheduler capacity, so slow reads cannot occupy all
-16 scheduler-pass slots and the handoff creates no unbounded waiter inventory.
+tasks can wait to reacquire scheduler capacity, independent of the configured
+scheduler-pass capacity. Because each task relinquishes its scheduler slot
+during store traversal, slow reads cannot occupy every configured scheduler-pass
+slot, and the fixed direct-read bound keeps the handoff's waiter inventory
+bounded.
 
 Attachment-preparation store traversal is bounded independently from scheduler
 passes: at most eight such traversals are active process-wide. A model-call pass

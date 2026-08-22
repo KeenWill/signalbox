@@ -80,6 +80,13 @@ struct ToolApprovalDecidedRow {
     request_id: Uuid,
 }
 
+#[derive(sqlx::FromRow)]
+struct TurnCancelledOutboxRow {
+    turn_id: Uuid,
+    cancellation_entry_id: Uuid,
+    terminal_frontier_id: Uuid,
+}
+
 /// One committed outbox event offered to the hub's single dispatcher consumer.
 ///
 /// This is a persistence projection, not a domain event or process-protocol
@@ -1751,9 +1758,10 @@ async fn load_event(
             }
         }
         TURN_CANCELLED => {
-            let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
-                "SELECT event.turn_id, event.cancellation_entry_id,
-                        event.terminal_frontier_id
+            let row: Option<TurnCancelledOutboxRow> = sqlx::query_as(
+                "SELECT event.turn_id AS turn_id,
+                        event.cancellation_entry_id AS cancellation_entry_id,
+                        event.terminal_frontier_id AS terminal_frontier_id
                    FROM turn_cancelled_outbox_event AS event
                    JOIN turn_lifecycle AS turn
                      ON turn.turn_id = event.turn_id
@@ -1798,7 +1806,16 @@ async fn load_event(
                     AND terminal_call.turn_id = event.turn_id
                     AND terminal_call.session_id = event.session_id
                     AND terminal_call.state_kind = 'terminal'
-                    AND terminal_call.terminal_disposition_kind = 'cancelled'
+                    AND terminal_call.terminal_disposition_kind
+                        IN ('cancelled', 'completed')
+                   LEFT JOIN tool_round AS terminal_round
+                     ON terminal_round.producing_model_call_id =
+                        terminal_call.model_call_id
+                    AND terminal_round.turn_id = event.turn_id
+                    AND terminal_round.session_id = event.session_id
+                    AND terminal_round.boundary_kind = 'closed_by_turn_end'
+                    AND terminal_round.boundary_frontier_id =
+                        event.terminal_frontier_id
                   WHERE event.event_sequence = $1
                     AND event.session_id = $2
                     AND (
@@ -1810,6 +1827,12 @@ async fn load_event(
                             turn.terminal_model_call_id IS NOT NULL
                             AND terminal_call.model_call_id =
                                 turn.terminal_model_call_id
+                            AND (
+                                terminal_call.terminal_disposition_kind =
+                                    'cancelled'
+                                OR terminal_round.producing_model_call_id =
+                                    terminal_call.model_call_id
+                            )
                         )
                     )",
             )
@@ -1817,12 +1840,11 @@ async fn load_event(
             .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?;
-            let (turn, cancellation_entry, terminal_frontier) =
-                row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+            let row = row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
             DispatchedOutboxEventKind::TurnCancelled {
-                turn: TurnId::from_uuid(turn),
-                cancellation_entry: SemanticTranscriptEntryId::from_uuid(cancellation_entry),
-                terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
+                turn: TurnId::from_uuid(row.turn_id),
+                cancellation_entry: SemanticTranscriptEntryId::from_uuid(row.cancellation_entry_id),
+                terminal_frontier: ContextFrontierId::from_uuid(row.terminal_frontier_id),
             }
         }
         TURN_RECONCILIATION_REQUIRED => {
