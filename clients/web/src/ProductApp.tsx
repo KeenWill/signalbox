@@ -13,7 +13,7 @@ import {
   Sun,
   X,
 } from 'lucide-react'
-import { type RefObject, useEffect, useMemo, useRef } from 'react'
+import { type CSSProperties, type RefObject, useEffect, useMemo, useRef } from 'react'
 import {
   type CommandContext,
   type CommandId,
@@ -26,67 +26,57 @@ import {
   BootstrapContractError,
   type ProductRouteId,
   productRoutes,
+  productSurfaceStates,
   productTransport,
 } from './product'
+import { SettingsSurface } from './SettingsSurface'
 import { selectApp, store, useAppDispatch, useAppSelector } from './state'
 
-const surfaceCopy: Record<
-  ProductRouteId,
-  { eyebrow: string; title: string; question: string; track: string }
-> = {
+const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; question: string }> = {
   attention: {
     eyebrow: 'Operator overview',
     title: 'Attention',
     question: 'What needs intervention now?',
-    track: '#992 attention projections',
   },
   sessions: {
     eyebrow: 'Conversation index',
     title: 'Sessions',
     question: 'Where is work active, blocked, or recently settled?',
-    track: '#991 session projections',
   },
   search: {
     eyebrow: 'Corpus navigation',
     title: 'Search',
     question: 'Where does this fact occur?',
-    track: '#994 search reads',
   },
   activity: {
     eyebrow: 'Repository operations',
     title: 'Activity',
     question: 'What entered the system and how was it handled?',
-    track: '#995 discovery reads',
   },
   runners: {
     eyebrow: 'Execution fleet',
     title: 'Runners',
     question: 'Which runners are available, occupied, or lost?',
-    track: '#995 runner discovery',
   },
   reviews: {
     eyebrow: 'Convergence',
     title: 'Reviews',
     question: 'Which pull requests still need work?',
-    track: '#995 review discovery',
   },
   imports: {
     eyebrow: 'Conversation intake',
     title: 'Imports',
     question: 'Which imports completed, failed, or need inspection?',
-    track: '#995 import discovery',
   },
   usage: {
     eyebrow: 'Accounting',
     title: 'Usage',
     question: 'Where are tokens and cost accumulating?',
-    track: '#994 usage reads',
   },
   settings: {
     eyebrow: 'Local preferences',
     title: 'Settings',
     question: 'How should this workstation present information?',
-    track: 'Web track H slice 2',
   },
 }
 
@@ -231,18 +221,25 @@ function CommandPalette({
 }
 
 function SurfaceUnavailable({ surface }: { surface: ProductRouteId }) {
-  const copy = surfaceCopy[surface]
+  const state = productSurfaceStates[surface]
+  if (state.kind !== 'committed-unimplemented') return null
   return (
-    <section className="surface-empty" aria-labelledby="surface-unavailable-heading">
+    <section className="surface-empty" aria-labelledby={`${surface}-unavailable-heading`}>
       <AlertTriangle aria-hidden="true" />
       <div>
-        <h2 id="surface-unavailable-heading">
+        <span className="availability-tag">Committed · unavailable</span>
+        <h2 id={`${surface}-unavailable-heading`}>
           Operational data is not exposed by this daemon contract
         </h2>
         <p>
-          The product route is ready, but {copy.track} has not supplied a production read on this
-          branch. Signalbox will not infer or fabricate these facts.
+          {state.owningTrack} is committed, but no present production surface provides the required
+          facts on this branch. Signalbox will not infer or fabricate them.
         </p>
+        <ul>
+          {state.facts.map((fact) => (
+            <li key={fact}>{fact}</li>
+          ))}
+        </ul>
       </div>
     </section>
   )
@@ -276,9 +273,6 @@ function SessionsSurface() {
             disabled
           />
         </label>
-        <button type="button" disabled>
-          New session
-        </button>
       </div>
       <div className="session-columns" aria-hidden="true">
         <span>Session</span>
@@ -295,25 +289,6 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   return (
     <div className="surface-body">
       <SurfaceUnavailable surface={surface} />
-    </div>
-  )
-}
-
-function SettingsSurface() {
-  return (
-    <div className="surface-body">
-      <section
-        className="surface-empty surface-empty-no-icon"
-        aria-labelledby="settings-local-heading"
-      >
-        <div>
-          <h2 id="settings-local-heading">Local settings are not exposed in this slice</h2>
-          <p>
-            Presentation preferences remain browser-local. Their dedicated controls arrive in Web
-            track H slice 2 and do not depend on a daemon read contract.
-          </p>
-        </div>
-      </section>
     </div>
   )
 }
@@ -393,18 +368,20 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
     staleTime: Number.POSITIVE_INFINITY,
+    enabled: surface !== 'settings',
   })
   const context = useMemo<CommandContext>(
     () => ({
       dispatch,
       getState: store.getState,
       timelineIds: [],
+      configuresTranscriptDetail: surface === 'settings',
       focusTimeline: () => primaryRef.current?.focus(),
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
       navigateScenario: () =>
         void navigate({ to: '/scenario/$scenarioId', params: { scenarioId: 'streaming' } }),
     }),
-    [dispatch, navigate],
+    [dispatch, navigate, surface],
   )
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
@@ -442,13 +419,18 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     ) : surface === 'sessions' ? (
       <SessionsSurface />
     ) : surface === 'settings' ? (
-      <SettingsSurface />
+      <SettingsSurface context={context} />
     ) : (
       <DeferredSurface surface={surface} />
     )
 
+  const shellStyle = {
+    '--product-navigation-width': `${app.paneSizes.navigation}px`,
+    '--product-inspector-width': `${app.paneSizes.inspector}px`,
+  } as CSSProperties
+
   return (
-    <div className={`product-shell layout-${app.layout}`}>
+    <div className={`product-shell layout-${app.layout}`} style={shellStyle}>
       <aside className="product-navigation-pane">
         <ProductNavigation active={surface} context={context} />
       </aside>
@@ -469,19 +451,25 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         </header>
         <div className="surface-question">
           <p>{copy.question}</p>
-          <span
-            className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
-            role="status"
-            aria-live="polite"
-          >
-            {bootstrap.isSuccess
-              ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
-              : bootstrap.isError
-                ? bootstrap.error instanceof BootstrapContractError
-                  ? 'Incompatible daemon contract'
-                  : 'Transport unavailable'
-                : 'Checking contract…'}
-          </span>
+          {surface === 'settings' ? (
+            <span className="contract-state ready" role="status">
+              Browser-local preferences
+            </span>
+          ) : (
+            <span
+              className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
+              role="status"
+              aria-live="polite"
+            >
+              {bootstrap.isSuccess
+                ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
+                : bootstrap.isError
+                  ? bootstrap.error instanceof BootstrapContractError
+                    ? 'Incompatible daemon contract'
+                    : 'Transport unavailable'
+                  : 'Checking contract…'}
+            </span>
+          )}
         </div>
         {content}
       </main>
@@ -491,7 +479,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           <h2>Selection details</h2>
           <p>
             {surface === 'settings'
-              ? 'Presentation preferences are stored locally in this browser.'
+              ? 'Presentation preferences are stored locally in this browser and do not represent server evidence.'
               : 'Select an available operational record to inspect its server-provided evidence.'}
           </p>
           <dl>
@@ -531,7 +519,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               const trigger = navigationReturnFocusRef.current
               if (trigger?.getClientRects().length) {
                 event.preventDefault()
-                trigger.focus()
+                requestAnimationFrame(() => trigger.focus())
               }
             }}
           >

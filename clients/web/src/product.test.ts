@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   BootstrapContractError,
   MAX_BOOTSTRAP_RESPONSE_BYTES,
+  productRoutes,
+  productSurfaceStates,
   SameOriginProductTransport,
 } from './product'
 import { webContractBootstrapFixture } from './product.fixture'
@@ -60,5 +62,26 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow('status 503')
+  })
+})
+
+describe('product surface availability', () => {
+  it('defines one typed authority state for every product route', () => {
+    expect(productSurfaceStates).toHaveProperty(productRoutes[0].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[1].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[2].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[3].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[4].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[5].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[6].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[7].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[8].id)
+  })
+
+  it('keeps Settings browser-local instead of implying daemon authority', () => {
+    expect(productSurfaceStates.settings).toEqual({
+      kind: 'browser-local',
+      authority: 'browser preferences',
+    })
   })
 })
