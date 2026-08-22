@@ -313,33 +313,9 @@ impl UserContent {
 
     /// Checks one complete ordered parts sequence.
     pub fn try_parts(parts: Vec<UserContentPart>) -> Result<Self, UserContentError> {
-        if parts.is_empty() {
-            return Err(UserContentError::Empty);
+        if let Some(failure) = user_content_failure(&parts) {
+            return Err(UserContentError { parts, failure });
         }
-        if parts.len() > MAX_USER_CONTENT_PARTS {
-            return Err(UserContentError::TooManyParts);
-        }
-
-        let mut aggregate_text_bytes = 0_usize;
-        let mut previous_was_text = false;
-        for part in &parts {
-            match part {
-                UserContentPart::Text { value } => {
-                    if previous_was_text {
-                        return Err(UserContentError::AdjacentTextParts);
-                    }
-                    aggregate_text_bytes = aggregate_text_bytes
-                        .checked_add(value.as_str().len())
-                        .ok_or(UserContentError::TextTooLarge)?;
-                    if aggregate_text_bytes > Self::MAX_TEXT_BYTES {
-                        return Err(UserContentError::TextTooLarge);
-                    }
-                    previous_was_text = true;
-                }
-                UserContentPart::Attachment { .. } => previous_was_text = false,
-            }
-        }
-
         Ok(Self { parts })
     }
 
@@ -362,9 +338,65 @@ impl UserContent {
     }
 }
 
+fn user_content_failure(parts: &[UserContentPart]) -> Option<UserContentFailure> {
+    if parts.is_empty() {
+        return Some(UserContentFailure::Empty);
+    }
+    if parts.len() > MAX_USER_CONTENT_PARTS {
+        return Some(UserContentFailure::TooManyParts);
+    }
+
+    let mut aggregate_text_bytes = 0_usize;
+    let mut previous_was_text = false;
+    for part in parts {
+        match part {
+            UserContentPart::Text { value } => {
+                if previous_was_text {
+                    return Some(UserContentFailure::AdjacentTextParts);
+                }
+                let Some(next_text_bytes) = aggregate_text_bytes.checked_add(value.as_str().len())
+                else {
+                    return Some(UserContentFailure::TextTooLarge);
+                };
+                aggregate_text_bytes = next_text_bytes;
+                if aggregate_text_bytes > UserContent::MAX_TEXT_BYTES {
+                    return Some(UserContentFailure::TextTooLarge);
+                }
+                previous_was_text = true;
+            }
+            UserContentPart::Attachment { .. } => previous_was_text = false,
+        }
+    }
+    None
+}
+
+/// Failed content construction retaining the rejected parts unchanged.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UserContentError {
+    parts: Vec<UserContentPart>,
+    failure: UserContentFailure,
+}
+
+impl UserContentError {
+    /// Returns the closed structural rejection reason.
+    pub const fn failure(&self) -> UserContentFailure {
+        self.failure
+    }
+
+    /// Borrows the rejected ordered parts unchanged.
+    pub fn parts(&self) -> &[UserContentPart] {
+        &self.parts
+    }
+
+    /// Returns the rejected parts and failure.
+    pub fn into_parts(self) -> (Vec<UserContentPart>, UserContentFailure) {
+        (self.parts, self.failure)
+    }
+}
+
 /// Closed structural rejection for one complete content sequence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UserContentError {
+pub enum UserContentFailure {
     /// No parts were supplied.
     Empty,
     /// The part-count bound was exceeded.
@@ -380,7 +412,7 @@ mod tests {
     use super::{
         AttachmentDisplayFilename, AttachmentDisplayFilenameFailure, AttachmentKind,
         DeclaredMediaType, DeclaredMediaTypeFailure, MAX_USER_CONTENT_TEXT_BYTES,
-        NonEmptyUnicodeText, NonEmptyUnicodeTextFailure, UserContent, UserContentError,
+        NonEmptyUnicodeText, NonEmptyUnicodeTextFailure, UserContent, UserContentFailure,
         UserContentPart,
     };
     use crate::BlobDigest;
@@ -486,20 +518,28 @@ mod tests {
     }
 
     #[test]
-    fn empty_part_sequence_is_rejected() {
-        assert_eq!(
-            UserContent::try_parts(Vec::new()),
-            Err(UserContentError::Empty)
-        );
+    fn empty_part_sequence_is_rejected_without_losing_the_parts() {
+        let error =
+            UserContent::try_parts(Vec::new()).expect_err("an empty part sequence is rejected");
+
+        assert_eq!(error.failure(), UserContentFailure::Empty);
+        assert_eq!(error.into_parts(), (Vec::new(), UserContentFailure::Empty));
     }
 
     #[test]
-    fn adjacent_text_parts_are_rejected() {
-        let adjacent = UserContent::try_parts(vec![
+    fn adjacent_text_parts_are_rejected_without_losing_the_parts() {
+        let parts = vec![
             UserContentPart::try_text(String::from("first")).expect("text is valid"),
             UserContentPart::try_text(String::from("second")).expect("text is valid"),
-        ]);
-        assert_eq!(adjacent, Err(UserContentError::AdjacentTextParts));
+        ];
+        let error =
+            UserContent::try_parts(parts.clone()).expect_err("adjacent text parts are rejected");
+
+        assert_eq!(error.failure(), UserContentFailure::AdjacentTextParts);
+        assert_eq!(
+            error.into_parts(),
+            (parts, UserContentFailure::AdjacentTextParts)
+        );
     }
 
     #[test]

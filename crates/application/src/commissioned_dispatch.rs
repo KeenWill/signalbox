@@ -257,7 +257,7 @@ fn initial_content_digest(content: &UserContent) -> [u8; 32] {
             } => {
                 digest.update([1]);
                 digest.update(blob_digest.as_bytes());
-                digest.update([*kind as u8]);
+                digest.update([attachment_kind_digest_tag(*kind)]);
                 update_digest_bytes(&mut digest, media_type.as_str().as_bytes());
                 match display_filename {
                     Some(filename) => {
@@ -276,6 +276,18 @@ fn update_digest_bytes(digest: &mut sha2::Sha256, bytes: &[u8]) {
     use sha2::Digest as _;
     digest.update((bytes.len() as u64).to_be_bytes());
     digest.update(bytes);
+}
+
+const ATTACHMENT_KIND_IMAGE_DIGEST_TAG: u8 = 0;
+const ATTACHMENT_KIND_DOCUMENT_DIGEST_TAG: u8 = 1;
+const ATTACHMENT_KIND_FILE_DIGEST_TAG: u8 = 2;
+
+const fn attachment_kind_digest_tag(kind: signalbox_domain::AttachmentKind) -> u8 {
+    match kind {
+        signalbox_domain::AttachmentKind::Image => ATTACHMENT_KIND_IMAGE_DIGEST_TAG,
+        signalbox_domain::AttachmentKind::Document => ATTACHMENT_KIND_DOCUMENT_DIGEST_TAG,
+        signalbox_domain::AttachmentKind::File => ATTACHMENT_KIND_FILE_DIGEST_TAG,
+    }
 }
 
 /// One commissioned dispatch whose session creation has been domain-prepared.
@@ -468,6 +480,22 @@ mod tests {
         assert_eq!(
             refused_sentinel(uuid::Uuid::max()),
             InvalidDurableCommandId::Max
+        );
+    }
+
+    #[test]
+    fn attachment_kind_digest_tags_are_explicit_and_stable() {
+        assert_eq!(
+            attachment_kind_digest_tag(signalbox_domain::AttachmentKind::Image),
+            ATTACHMENT_KIND_IMAGE_DIGEST_TAG
+        );
+        assert_eq!(
+            attachment_kind_digest_tag(signalbox_domain::AttachmentKind::Document),
+            ATTACHMENT_KIND_DOCUMENT_DIGEST_TAG
+        );
+        assert_eq!(
+            attachment_kind_digest_tag(signalbox_domain::AttachmentKind::File),
+            ATTACHMENT_KIND_FILE_DIGEST_TAG
         );
     }
 

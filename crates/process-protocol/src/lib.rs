@@ -577,9 +577,53 @@ impl fmt::Debug for UserInputPart {
 }
 
 /// Canonical nonempty ordered user-input parts array.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct UserInputContent(Vec<UserInputPart>);
+
+struct UserInputContentVisitor;
+
+impl<'de> Visitor<'de> for UserInputContentVisitor {
+    type Value = UserInputContent;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "at most {MAX_USER_INPUT_PARTS} ordered user-input parts"
+        )
+    }
+
+    fn visit_seq<AccessT>(self, mut sequence: AccessT) -> Result<Self::Value, AccessT::Error>
+    where
+        AccessT: SeqAccess<'de>,
+    {
+        let mut parts = Vec::with_capacity(
+            sequence
+                .size_hint()
+                .unwrap_or_default()
+                .min(MAX_USER_INPUT_PARTS),
+        );
+        while parts.len() < MAX_USER_INPUT_PARTS {
+            match sequence.next_element::<UserInputPart>()? {
+                Some(part) => parts.push(part),
+                None => return Ok(UserInputContent(parts)),
+            }
+        }
+        if sequence.next_element::<IgnoredAny>()?.is_some() {
+            return Err(serde::de::Error::custom("too many user-input parts"));
+        }
+        Ok(UserInputContent(parts))
+    }
+}
+
+impl<'de> Deserialize<'de> for UserInputContent {
+    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
+    where
+        DeserializerT: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(UserInputContentVisitor)
+    }
+}
 
 impl UserInputContent {
     /// Wraps one text part for text-only clients.
@@ -9591,6 +9635,24 @@ mod tests {
         Ok(())
     }
 
+    /// INV-012: multipart decoding stops at the public retained-parts bound.
+    #[test]
+    fn inv012_multipart_deserialization_stops_after_the_parts_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let oversized = vec![
+            UserInputPart::Text {
+                text: String::from("x"),
+            };
+            super::MAX_USER_INPUT_PARTS + 1
+        ];
+        let encoded = serde_json::to_vec(&oversized)?;
+        let error = serde_json::from_slice::<UserInputContent>(&encoded)
+            .expect_err("one part beyond the retained bound is rejected during decoding");
+
+        assert!(error.to_string().contains("too many user-input parts"));
+        Ok(())
+    }
+
     #[test]
     fn user_input_debug_redacts_content_bearing_values() -> Result<(), Box<dyn std::error::Error>> {
         let private_text = "private user text";
@@ -10227,7 +10289,7 @@ mod tests {
             r#"{"version":1,"request_id":"1","message":{"type":"sessions_start","extra":true}}"#,
         );
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued","extra":true}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"text","text":"queued"}],"extra":true}}}"#,
         );
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"session_created","extra":true}}}"#,
