@@ -35,7 +35,7 @@ export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> =
     facts: [
       'bounded session descriptors',
       'stable-address timeline windows',
-      'typed item detail pages',
+      'closed typed item detail bodies',
     ],
   },
   search: {

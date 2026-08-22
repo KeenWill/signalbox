@@ -25,9 +25,8 @@ const bootstrapFixture = {
   },
 } as const
 
-const sessionDetailText =
-  'Inspect the current bounded timeline region and preserve stable navigation.'
-const sessionDetailBytes = new TextEncoder().encode(sessionDetailText).byteLength
+const toolEvidenceArguments = '{"path":"docs/spec/sessions-and-transcript.md"}'
+const toolEvidenceResult = 'Read 64 bounded lines from the owning contract.'
 
 const sessionEvidenceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
@@ -38,22 +37,52 @@ const sessionEvidenceFixture = {
     items: [
       {
         address: { event_sequence: '999998' },
-        kind: 'input_accepted',
+        kind: 'tool_batch_transition',
         body: {
-          type: 'user_input',
+          type: 'tool_batch',
           turn_id: '00000000-0000-0000-0000-000000999998',
-          text: {
-            text: sessionDetailText,
-            offset_bytes: '0',
-            total_bytes: String(sessionDetailBytes),
-            continuation: null,
-          },
-          attachments: [],
+          producing_model_call_id: '00000000-0000-0000-0000-000000999898',
+          state: 'completed',
+          tools: [
+            {
+              request_id: '00000000-0000-0000-0000-000000999798',
+              tool_name: 'workspace_read',
+              approval_posture: 'auto',
+              approval_judge_escalated: false,
+              operator_required: false,
+              arguments: {
+                text: toolEvidenceArguments,
+                offset_bytes: '0',
+                total_bytes: String(new TextEncoder().encode(toolEvidenceArguments).byteLength),
+                continuation: null,
+              },
+              attempt_id: '00000000-0000-0000-0000-000000999698',
+              state: 'completed',
+              effect_posture: 'read_only',
+              sandbox_posture: 'workspace_read',
+              result: {
+                text: toolEvidenceResult,
+                offset_bytes: '0',
+                total_bytes: String(new TextEncoder().encode(toolEvidenceResult).byteLength),
+                continuation: null,
+              },
+              failure: null,
+              cause_code: null,
+            },
+          ],
+          goal_events: [
+            {
+              event_kind: 'advanced',
+              generation: '19',
+              reason: 'evidence inspected',
+              text: null,
+            },
+          ],
         },
-        projected_body_bytes: sessionDetailBytes,
+        projected_body_bytes: 384,
       },
     ],
-    projected_body_bytes: sessionDetailBytes,
+    projected_body_bytes: 384,
     continuation: null,
   },
 } as const
@@ -100,7 +129,7 @@ const useDeterministicSession = (page: Page) =>
           items: [
             {
               address: { event_sequence: '999998' },
-              kind: 'input_accepted',
+              kind: sessionEvidenceFixture.detail.items[0].kind,
               projected_structured_bytes: 96,
             },
             {
@@ -172,11 +201,17 @@ const captureSessionEvidence = async (page: Page) => {
   await expect(page.getByRole('heading', { name: sessionEvidenceFixture.id })).toBeVisible()
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
   const detail = page.getByRole('button', {
-    name: new RegExp(`${sessionEvidenceFixture.detailAddress} input accepted`),
+    name: new RegExp(
+      `${sessionEvidenceFixture.detailAddress} ${sessionEvidenceFixture.detail.items[0].kind.replaceAll('_', ' ')}`,
+    ),
   })
   await detail.focus()
   await page.keyboard.press('Enter')
-  await expect(page.getByText(sessionEvidenceFixture.detail.items[0].body.text.text)).toBeVisible()
+  await expect(
+    page.getByRole('heading', {
+      name: sessionEvidenceFixture.detail.items[0].body.tools[0].tool_name,
+    }),
+  ).toBeVisible()
   await expect(page).toHaveScreenshot('sessions-detail-desktop-dark.png', {
     animations: 'disabled',
   })

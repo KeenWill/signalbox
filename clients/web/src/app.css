@@ -1416,6 +1416,27 @@ kbd {
 .session-detail-facts dd {
   overflow-wrap: anywhere;
 }
+.session-detail-members {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+}
+.session-detail-member {
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.session-detail-member h4 {
+  margin: 0;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.68rem;
+}
+.session-detail-member .session-detail-facts div {
+  background: var(--surface-1);
+}
 .session-detail-text pre {
   max-height: 240px;
   margin: 0;
