@@ -18,7 +18,7 @@ import {
   productHotkeyBindings,
   productHotkeySequenceBindings,
 } from './productCommands'
-import { SessionWorkspaceSurface } from './SessionWorkspaceSurface'
+import { type SessionSelectionEvidence, SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
@@ -326,11 +326,16 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const timelineRef = useRef<HTMLDivElement>(null)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
+  const [selectionEvidence, setSelectionEvidence] = useState<SessionSelectionEvidence | null>(null)
   const [windowRequest, setWindowRequest] = useState<{
     anchor: 'first' | 'latest'
     attempt: number
   } | null>(null)
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
+  const updateSelectionEvidence = useCallback(
+    (evidence: SessionSelectionEvidence | null) => setSelectionEvidence(evidence),
+    [],
+  )
   const consumeWindowRequest = useCallback(() => setWindowRequest(null), [])
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
@@ -355,6 +360,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       hotkey: binding.hotkey,
       callback: () => {
         if (store.getState().app.overlay === null || binding.commandId === 'surface.escape') {
+          if (binding.commandId.startsWith('selection.')) context.focusTimeline()
           invokeProductCommand(binding.commandId, context)
         }
       },
@@ -365,6 +371,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       sequence: binding.sequence,
       callback: () => {
         if (store.getState().app.overlay === null) {
+          if (binding.commandId.startsWith('selection.')) context.focusTimeline()
           invokeProductCommand(binding.commandId, context)
         }
       },
@@ -397,6 +404,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <AttentionSurface />
     ) : surface === 'sessions' ? (
       <SessionWorkspaceSurface
+        onSelectionEvidence={updateSelectionEvidence}
         onTimelineIds={updateTimelineIds}
         onTimelineWindowAvailable={setTimelineWindowAvailable}
         onWindowRequestConsumed={consumeWindowRequest}
@@ -455,7 +463,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         <aside className="product-inspector" aria-label="Inspector">
           <span className="eyebrow">Inspector</span>
           <h2>Selection details</h2>
-          <p>Select an available operational record to inspect its server-provided evidence.</p>
+          <p>
+            {selectionEvidence === null
+              ? 'Select an available operational record to inspect its server-provided evidence.'
+              : 'Bounded server-provided timeline projection for the selected record.'}
+          </p>
           <dl>
             <div>
               <dt>Surface</dt>
@@ -470,6 +482,26 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
                 <dt>Cache</dt>
                 <dd>{cacheLabel}</dd>
               </div>
+            )}
+            {surface === 'sessions' && selectionEvidence !== null && (
+              <>
+                <div>
+                  <dt>Session</dt>
+                  <dd>{selectionEvidence.sessionId}</dd>
+                </div>
+                <div>
+                  <dt>Event</dt>
+                  <dd>{selectionEvidence.eventSequence}</dd>
+                </div>
+                <div>
+                  <dt>Kind</dt>
+                  <dd>{selectionEvidence.kind.replaceAll('_', ' ')}</dd>
+                </div>
+                <div>
+                  <dt>Projected bytes</dt>
+                  <dd>{selectionEvidence.projectedStructuredBytes}</dd>
+                </div>
+              </>
             )}
           </dl>
         </aside>

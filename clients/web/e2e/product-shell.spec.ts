@@ -227,6 +227,7 @@ test('changes and restores a Settings preference without a mouse', async ({ page
   await expect(
     page.getByRole('radio', { name: settingsPreferenceFixture.defaultTheme }),
   ).toBeChecked()
+  await expect(page.getByRole('group', { name: 'Remote media' })).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -247,6 +248,13 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await latest.focus()
   await page.keyboard.press('Tab')
   await expect(timeline).toBeFocused()
+  await latest.focus()
+  await page.keyboard.press('j')
+  await expect(timeline).toBeFocused()
+  await expect(page.getByRole('option', { name: /41 input accepted/ })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  )
 
   const completed = page.getByRole('option', { name: /43 turn completed/ })
   await completed.click()
@@ -256,6 +264,11 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(page.locator('#session-timeline-disclosure-43')).toHaveText('Expanded')
   await expect(page.locator('#session-timeline-detail-43')).toBeVisible()
   await expect(page.getByText('Header only; rich event detail is not exposed')).toBeVisible()
+  const inspector = page.getByLabel('Inspector')
+  await expect(inspector.getByText(sessionWorkspaceFixture.id, { exact: true })).toBeVisible()
+  await expect(inspector.getByText('43', { exact: true })).toBeVisible()
+  await expect(inspector.getByText('turn completed', { exact: true })).toBeVisible()
+  await expect(inspector.getByText('78', { exact: true })).toBeVisible()
 
   await page.getByRole('button', { name: /First/ }).click()
   await expect(page.getByRole('option', { name: /41 input accepted/ })).toHaveAttribute(

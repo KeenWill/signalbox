@@ -24,6 +24,12 @@ const NATIVE_SESSION_ID_PATTERN = String.raw`\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0
 const SESSION_WINDOW_ITEMS = 80
 const SESSION_WINDOW_BYTES = 64 * 1024
 type TimelineCapability = 'checking' | 'available' | 'unavailable'
+export interface SessionSelectionEvidence {
+  sessionId: string
+  eventSequence: string
+  kind: string
+  projectedStructuredBytes: number
+}
 
 export const isCanonicalSessionId = (value: string): boolean => SESSION_ID_PATTERN.test(value)
 export const sessionWorkspaceQueryKey = (sessionId: string | null) =>
@@ -66,6 +72,7 @@ export const pruneExpandedSessionItems = (
 }
 
 export function SessionWorkspaceSurface({
+  onSelectionEvidence,
   onTimelineIds,
   onTimelineWindowAvailable,
   onWindowRequestConsumed,
@@ -73,6 +80,7 @@ export function SessionWorkspaceSurface({
   timelineRef,
   windowRequest,
 }: {
+  onSelectionEvidence: (evidence: SessionSelectionEvidence | null) => void
   onTimelineIds: (ids: readonly string[]) => void
   onTimelineWindowAvailable: (available: boolean) => void
   onWindowRequestConsumed: () => void
@@ -137,6 +145,22 @@ export function SessionWorkspaceSurface({
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
+  useEffect(() => {
+    const selectedItem = session.data?.window.items.find(
+      (item) => item.address.event_sequence === app.selectedTimeline,
+    )
+    onSelectionEvidence(
+      sessionId !== null && selectedItem !== undefined
+        ? {
+            sessionId,
+            eventSequence: selectedItem.address.event_sequence,
+            kind: selectedItem.kind,
+            projectedStructuredBytes: selectedItem.projected_structured_bytes,
+          }
+        : null,
+    )
+  }, [app.selectedTimeline, onSelectionEvidence, session.data?.window.items, sessionId])
+  useEffect(() => () => onSelectionEvidence(null), [onSelectionEvidence])
   useEffect(() => {
     setExpanded((current) => pruneExpandedSessionItems(current, session.data?.window.items ?? []))
   }, [session.data?.window.items])
