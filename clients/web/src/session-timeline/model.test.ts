@@ -1,10 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
+import { decodeWebSessionTimelineDetailPage } from '../generated/web-contract.mjs'
 import {
+  assertBoundedDetailPage,
   BoundedSessionHistory,
   EnormousSessionScenarioSource,
   HttpSessionTimelineSource,
+  MAX_RETAINED_SESSION_DETAIL_ITEMS,
   MAX_RETAINED_SESSION_ITEMS,
   MAX_TIMELINE_HTTP_RESPONSE_BYTES,
+  retainBoundedDetailPages,
   SESSION_FOUNDATION_TOTAL,
   type SessionTimelineSource,
 } from './model'
@@ -499,5 +503,49 @@ describe('BoundedSessionHistory', () => {
         error: { kind: 'application', code: 'projection_failed', message: 'projection failed' },
       },
     })
+  })
+
+  it('accepts an exact bounded typed detail page', () => {
+    const page = decodeWebSessionTimelineDetailPage({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '17' },
+          kind: 'session_created',
+          projected_body_bytes: 200,
+          body: { type: 'session_created', imported_evidence: null },
+        },
+      ],
+      projected_body_bytes: 200,
+      continuation: null,
+    })
+
+    expect(assertBoundedDetailPage(sessionId, page, { maxItems: 1, maxBytes: 256 })).toBe(page)
+  })
+
+  it('evicts older detail pages at the retained-record ceiling', () => {
+    const detail = {
+      address: { event_sequence: '17' },
+      kind: 'session_created' as const,
+      projected_body_bytes: 200,
+      body: { type: 'session_created' as const, imported_evidence: null },
+    }
+    const full = decodeWebSessionTimelineDetailPage({
+      session_id: sessionId,
+      items: new Array(MAX_RETAINED_SESSION_DETAIL_ITEMS).fill(detail),
+      projected_body_bytes: MAX_RETAINED_SESSION_DETAIL_ITEMS * detail.projected_body_bytes,
+      continuation: null,
+    })
+    const next = decodeWebSessionTimelineDetailPage({
+      session_id: sessionId,
+      items: [{ ...detail, address: { event_sequence: '18' } }],
+      projected_body_bytes: detail.projected_body_bytes,
+      continuation: null,
+    })
+
+    const retained = retainBoundedDetailPages(new Map([['old', full]]), 'new', next)
+
+    expect(retained.has('old')).toBe(false)
+    expect(retained.get('new')).toBe(next)
   })
 })

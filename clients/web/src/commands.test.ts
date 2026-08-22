@@ -16,4 +16,22 @@ describe('command registry', () => {
 
     expect(selectApp(store.getState()).selectedTimeline).toBe(timelineIds[0])
   })
+
+  it('routes the expansion command through the registered timeline control', () => {
+    const timelineIds = ['event-0'] as const
+    let toggled = false
+    store.dispatch(actions.timelineSelected(timelineIds[0]))
+
+    invokeCommand('selection.toggleExpansion', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds,
+      focusTimeline: () => undefined,
+      toggleTimelineExpansion: () => {
+        toggled = true
+      },
+    })
+
+    expect(toggled).toBe(true)
+  })
 })

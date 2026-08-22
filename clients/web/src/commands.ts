@@ -7,6 +7,7 @@ export interface CommandContext {
   getState: () => RootState
   timelineIds: readonly string[]
   focusTimeline: () => void
+  toggleTimelineExpansion?: () => void
 }
 
 export interface CommandBinding {
@@ -84,6 +85,17 @@ export const commandRegistry = [
         currentIndex < 0 ? 0 : Math.min(currentIndex + 1, context.timelineIds.length - 1)
       context.dispatch(actions.timelineSelected(context.timelineIds[nextIndex] ?? null))
     },
+  },
+  {
+    id: 'selection.toggleExpansion',
+    title: 'Expand or collapse selected item',
+    description: 'Read one bounded typed body or collapse the selected timeline item.',
+    category: 'Navigate',
+    bindings: [{ label: 'l', registration: { kind: 'hotkey', hotkey: 'L' } }],
+    available: (context) =>
+      context.timelineIds.includes(context.getState().app.selectedTimeline ?? '') &&
+      context.toggleTimelineExpansion !== undefined,
+    run: (context) => context.toggleTimelineExpansion?.(),
   },
   {
     id: 'selection.previous',
