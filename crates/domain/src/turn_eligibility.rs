@@ -7782,9 +7782,20 @@ fn tool_round_producing_call_in_window(
                     _ => return false,
                 }
             }
+            let mut result_entries = Vec::new();
+            for entry in terminal.ordered_entries_range(assistant_end, before_marker_end) {
+                match semantic_entries
+                    .get(&entry)
+                    .map(SemanticTranscriptEntry::payload)
+                {
+                    Some(SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }) => {}
+                    Some(_) => result_entries.push(entry),
+                    None => return false,
+                }
+            }
             if requests.is_empty()
                 || requests.iter().copied().collect::<BTreeSet<_>>().len() != requests.len()
-                || before_marker_end - assistant_end != requests.len()
+                || result_entries.len() != requests.len()
             {
                 return false;
             }
@@ -7800,8 +7811,8 @@ fn tool_round_producing_call_in_window(
             }
             let mut observed_attempts = BTreeSet::new();
             let mut observed_denials = BTreeSet::new();
-            let results_match = terminal
-                .ordered_entries_range(assistant_end, before_marker_end)
+            let results_match = result_entries
+                .into_iter()
                 .zip(requests)
                 .all(|(entry, request)| {
                     match semantic_entries
@@ -7927,7 +7938,21 @@ fn prepare_active_turn_lost_failure(
             AcceptedInputTurnFailureFailure::StartingSnapshotMissing,
         ));
     };
-    let Ok(terminal_snapshot) = starting_snapshot.derive_appending_candidate(
+    let terminal_base = match projection
+        .runner_placement_frontier
+        .and_then(|frontier| projection.snapshots.get(&frontier))
+    {
+        Some(placement) if starting_snapshot.is_semantic_prefix_of(placement) => placement,
+        Some(placement) if placement.is_semantic_prefix_of(starting_snapshot) => starting_snapshot,
+        Some(_) => {
+            return Err(fail(
+                projection,
+                AcceptedInputTurnFailureFailure::TerminalFrontierCannotAppend,
+            ));
+        }
+        None => starting_snapshot,
+    };
+    let Ok(terminal_snapshot) = terminal_base.derive_appending_candidate(
         identities.terminal_frontier,
         vec![failure_entry.reference()],
     ) else {
@@ -10189,6 +10214,58 @@ mod tests {
         );
     }
 
+    /// S03 / S32 / INV-015 / INV-034 / INV-044: startup recovery preserves a
+    /// runner-placement boundary committed after the active turn started.
+    #[test]
+    fn s03_s32_inv015_inv034_inv044_lost_failure_extends_runner_placement_boundary() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let placement_entry = semantic_entry(501);
+        let placement_frontier = frontier(502);
+        let failure_entry = semantic_entry(503);
+        let terminal_frontier = frontier(504);
+        let revision =
+            RunnerGeneration::try_from_u64(2).expect("the fixture placement revision is positive");
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        facts
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                placement_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: revision,
+                },
+            ));
+        let placement_snapshot = facts.snapshots[0].derive_appending(
+            placement_frontier.id(),
+            vec![placement_entry.reference(&session)],
+        );
+        facts.snapshots.push(placement_snapshot);
+
+        let candidate = facts
+            .input()
+            .with_runner_placement_frontier(placement_frontier.id())
+            .reconstitute()
+            .expect("the placement-aware active projection is valid")
+            .prepare_active_turn_lost_failure(AcceptedInputTurnFailureIdentities::new(
+                failure_entry.id(),
+                terminal_frontier.id(),
+            ))
+            .expect("startup failure extends the placement boundary");
+
+        assert_eq!(
+            candidate
+                .terminal_snapshot()
+                .ordered_entries()
+                .collect::<Vec<_>>(),
+            vec![
+                ActiveReconstitutionFacts::matching_origin_entry().reference(&session),
+                placement_entry.reference(&session),
+                failure_entry.reference(&session),
+            ]
+        );
+    }
+
     /// INV-034: the same Lost failure transition is valid for a stored
     /// Running attempt, without inventing a stop cause.
     #[test]
@@ -12330,6 +12407,50 @@ mod tests {
         refused_continuation_call_input(&session, refused)
             .reconstitute()
             .expect("the refused continuation-call terminal shape reconstructs");
+    }
+
+    /// S02 / S10 / S32 / INV-006 / INV-015 / INV-044: placement boundaries
+    /// are out-of-band while completed tool results are matched in request
+    /// order.
+    #[test]
+    fn s02_s10_s32_inv006_inv015_inv044_continuation_skips_runner_placement() {
+        let session = current_session();
+        let refused = accepted_origin(1);
+        let placement_entry = semantic_entry(33);
+        let placement_frontier = frontier(43);
+        let revision =
+            RunnerGeneration::try_from_u64(2).expect("the fixture placement revision is positive");
+        let mut input = refused_continuation_call_input(&session, refused);
+        input
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                placement_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: revision,
+                },
+            ));
+        let placement_base = input.snapshots[0].derive_appending(
+            frontier(44).id(),
+            vec![semantic_entry(31).reference(&session)],
+        );
+        let placement_snapshot = placement_base.derive_appending(
+            placement_frontier.id(),
+            vec![placement_entry.reference(&session)],
+        );
+        let call_snapshot = placement_snapshot.derive_appending(
+            frontier(41).id(),
+            vec![semantic_entry(32).reference(&session)],
+        );
+        let terminal_snapshot = call_snapshot.derive_appending(frontier(42).id(), Vec::new());
+        input.snapshots[1] = call_snapshot;
+        input.snapshots[2] = terminal_snapshot;
+        input.snapshots.push(placement_snapshot);
+
+        input
+            .with_runner_placement_frontier(placement_frontier.id())
+            .reconstitute()
+            .expect("the placement-interleaved continuation round reconstructs");
     }
 
     /// S02 / S10 / INV-006: a refused terminal turn naming a continuation
