@@ -143,7 +143,7 @@ fn synthetic_declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error
         ReadViewName::try_new("text")?,
         String::from("Reads synthetic text."),
         CanonicalJsonObjectSchema::try_new(r#"{"type":"object"}"#)?,
-        ReadAccessPattern::Streaming,
+        ReadAccessPattern::Streaming { maximum_ranges: 1 },
         ReadViewBounds::Text {
             source_bytes: 64,
             output_bytes: 64,

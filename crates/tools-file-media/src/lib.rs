@@ -17,7 +17,7 @@ use signalbox_domain::{
     ToolResultText,
 };
 use signalbox_file_media_runtime::{
-    AttachmentKind, FileDigest, FileInspection, FileMediaFailure, FileReadResult,
+    AttachmentKind, FileDigest, FileInspection, FileMediaFailure, FileReadInput, FileReadResult,
     ReadContinuationCursor, ReadOutputKind, ReadViewName, VisiblePartSelector,
 };
 use signalbox_tool_contract::{
@@ -63,8 +63,22 @@ impl FileInspectServiceRequest {
 pub struct FileReadServiceRequest {
     target: FileInspectServiceRequest,
     view: ReadViewName,
-    options: Option<BTreeMap<String, Value>>,
-    continuation: Option<ReadContinuationCursor>,
+    input: FileReadServiceInput,
+}
+
+/// Closed checked input mode for the `file_read` service.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FileReadServiceInput {
+    /// Initial request carrying object options.
+    Initial {
+        /// Provider-owned view options.
+        options: BTreeMap<String, Value>,
+    },
+    /// Continuation request carrying a prior-page cursor.
+    Continuation {
+        /// Checked opaque cursor.
+        cursor: ReadContinuationCursor,
+    },
 }
 
 impl FileReadServiceRequest {
@@ -80,12 +94,28 @@ impl FileReadServiceRequest {
 
     /// Borrows structured model-supplied options on an initial request.
     pub const fn options(&self) -> Option<&BTreeMap<String, Value>> {
-        self.options.as_ref()
+        match &self.input {
+            FileReadServiceInput::Initial { options } => Some(options),
+            FileReadServiceInput::Continuation { .. } => None,
+        }
     }
 
     /// Borrows the checked prior-page cursor on a continuation request.
     pub const fn continuation(&self) -> Option<&ReadContinuationCursor> {
-        self.continuation.as_ref()
+        match &self.input {
+            FileReadServiceInput::Initial { .. } => None,
+            FileReadServiceInput::Continuation { cursor } => Some(cursor),
+        }
+    }
+
+    /// Converts the checked service input into the neutral runtime input.
+    pub fn into_runtime_input(self) -> FileReadInput {
+        match self.input {
+            FileReadServiceInput::Initial { options } => FileReadInput::Initial {
+                options: Value::Object(options.into_iter().collect()),
+            },
+            FileReadServiceInput::Continuation { cursor } => FileReadInput::Continuation { cursor },
+        }
     }
 }
 
@@ -293,12 +323,11 @@ fn decode_read(
         .map(ReadContinuationCursor::try_new)
         .transpose()
         .map_err(|_| InvalidFileMediaArguments)?;
-    if !matches!(
-        (&decoded.options, &continuation),
-        (Some(_), None) | (None, Some(_))
-    ) {
-        return Err(InvalidFileMediaArguments);
-    }
+    let input = match (decoded.options, continuation) {
+        (Some(options), None) => FileReadServiceInput::Initial { options },
+        (None, Some(cursor)) => FileReadServiceInput::Continuation { cursor },
+        (Some(_), Some(_)) | (None, None) => return Err(InvalidFileMediaArguments),
+    };
     Ok(FileReadServiceRequest {
         target: FileInspectServiceRequest {
             digest: FileDigest::from_str(&decoded.digest).map_err(|_| InvalidFileMediaArguments)?,
@@ -309,8 +338,7 @@ fn decode_read(
                 .map_err(|_| InvalidFileMediaArguments)?,
         },
         view: ReadViewName::try_new(decoded.view).map_err(|_| InvalidFileMediaArguments)?,
-        options: decoded.options,
-        continuation,
+        input,
     })
 }
 
@@ -654,21 +682,18 @@ mod tests {
     }
 
     #[test]
-    fn encoded_read_result_cannot_exceed_tool_result_text_bound() {
+    fn maximum_admitted_text_result_fits_tool_result_text_bound() {
         let result = FileReadResult::Text {
-            body: "\"".repeat(786_432),
+            body: "\u{1f}".repeat(signalbox_file_media_runtime::MAX_TEXT_BODY_BYTES),
             continuation: signalbox_file_media_runtime::ReadContinuation::Complete,
         };
 
         let evidence = read_evidence(result);
 
-        let ToolExecutorEvidence::KnownFailed {
-            detail: Some(detail),
-        } = evidence
-        else {
-            panic!("an oversized encoded result must retain fallback detail");
+        let ToolExecutorEvidence::CompletedText(text) = evidence else {
+            panic!("the maximum admitted worst-case text must fit the tool result");
         };
-        assert_eq!(detail.as_str(), RESULT_TOO_LARGE_DETAIL);
+        assert!(ToolResultText::try_new(text).is_ok());
     }
 
     #[test]

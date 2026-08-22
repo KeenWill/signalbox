@@ -20,8 +20,10 @@ pub const MAX_READ_RANGES: u32 = 4_096;
 pub const MAX_PROCESSOR_FRAME_BYTES: usize = 1_048_576;
 /// Hard safety ceiling; bounds serialized read options before processor framing.
 pub const MAX_READ_OPTIONS_BYTES: usize = 65_536;
-/// Hard safety ceiling; reserves worst-case JSON escaping space in one processor frame.
-pub const MAX_TEXT_OR_JSON_BYTES: usize = 170_000;
+/// Hard safety ceiling; bounds admitted text and JSON allocation before projection.
+pub const MAX_TEXT_OR_JSON_BYTES: usize = 786_432;
+/// Hard safety ceiling; bounds text so worst-case JSON escaping fits one tool result.
+pub const MAX_TEXT_BODY_BYTES: usize = 174_000;
 /// Hard safety ceiling; bounds JSON nesting to protect recursive traversal.
 pub const MAX_STRUCTURED_DEPTH: u32 = 64;
 /// Hard safety ceiling; bounds JSON nodes to protect traversal work and memory.

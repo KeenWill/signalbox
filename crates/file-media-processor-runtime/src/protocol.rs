@@ -65,8 +65,9 @@ where
                     view.arguments_schema().as_str().as_bytes(),
                 );
                 match view.access() {
-                    ReadAccessPattern::Streaming => {
+                    ReadAccessPattern::Streaming { maximum_ranges } => {
                         fingerprint_field(&mut fingerprint, b"streaming");
+                        fingerprint_u64(&mut fingerprint, u64::from(maximum_ranges));
                     }
                     ReadAccessPattern::RandomAccess { maximum_ranges } => {
                         fingerprint_field(&mut fingerprint, b"random_access");
@@ -279,7 +280,7 @@ impl WireReadEnvelope {
 
     pub(crate) const fn for_view(view: &ReadViewDeclaration) -> Self {
         match view.access() {
-            ReadAccessPattern::Streaming => Self::Streaming {
+            ReadAccessPattern::Streaming { .. } => Self::Streaming {
                 cumulative_bytes: view.bounds().source_bytes(),
             },
             ReadAccessPattern::RandomAccess { maximum_ranges } => Self::RandomAccess {
@@ -441,17 +442,22 @@ pub(crate) struct WireReadRequest {
 
 impl From<&FileMediaProviderReadRequest> for WireReadRequest {
     fn from(request: &FileMediaProviderReadRequest) -> Self {
+        let (options, continuation) = match &request.input {
+            signalbox_file_media_runtime::FileReadInput::Initial { options } => {
+                (Some(options.clone()), None)
+            }
+            signalbox_file_media_runtime::FileReadInput::Continuation { cursor } => {
+                (None, Some(cursor.as_str().to_owned()))
+            }
+        };
         Self {
             source: (&request.source).into(),
             detected_media_type: request.detected_media_type.as_str().to_owned(),
             validation: request.validation,
             metadata_json: request.metadata.as_str().to_owned(),
             view: request.view.as_str().to_owned(),
-            options: request.options.clone(),
-            continuation: request
-                .continuation
-                .as_ref()
-                .map(|cursor| cursor.as_str().to_owned()),
+            options,
+            continuation,
         }
     }
 }
@@ -460,6 +466,15 @@ impl TryFrom<WireReadRequest> for FileMediaProviderReadRequest {
     type Error = ProtocolValueError;
 
     fn try_from(value: WireReadRequest) -> Result<Self, Self::Error> {
+        let input = match (value.options, value.continuation) {
+            (Some(options), None) => {
+                signalbox_file_media_runtime::FileReadInput::Initial { options }
+            }
+            (None, Some(cursor)) => signalbox_file_media_runtime::FileReadInput::Continuation {
+                cursor: ReadContinuationCursor::try_new(cursor).map_err(map_value_error)?,
+            },
+            (Some(_), Some(_)) | (None, None) => return Err(ProtocolValueError),
+        };
         Ok(Self {
             source: value.source.try_into()?,
             detected_media_type: CanonicalMediaType::from_str(&value.detected_media_type)
@@ -467,12 +482,7 @@ impl TryFrom<WireReadRequest> for FileMediaProviderReadRequest {
             validation: value.validation,
             metadata: BoundedMetadata::try_new(&value.metadata_json).map_err(map_value_error)?,
             view: ReadViewName::try_new(value.view).map_err(map_value_error)?,
-            options: value.options,
-            continuation: value
-                .continuation
-                .map(ReadContinuationCursor::try_new)
-                .transpose()
-                .map_err(map_value_error)?,
+            input,
         })
     }
 }

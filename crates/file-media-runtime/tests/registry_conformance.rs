@@ -11,8 +11,8 @@ use signalbox_file_media_runtime::{
     DeclaredMediaType, FileDigest, FileInspection, FileMediaCeilings, FileMediaFailure,
     FileMediaProcessor, FileMediaProcessorFuture, FileMediaProviderDeclaration,
     FileMediaProviderReadRequest, FileMediaProviderValidationRequest, FileMediaRegistry,
-    FileReadRequest, FileReaderName, FileReaderProviderName, FileReaderRevision, FileUse,
-    InspectionRequest, MAX_VALIDATION_RANGES, MAX_VALIDATION_SOURCE_BYTES, NeverCancelled,
+    FileReadInput, FileReadRequest, FileReaderName, FileReaderProviderName, FileReaderRevision,
+    FileUse, InspectionRequest, MAX_VALIDATION_RANGES, MAX_VALIDATION_SOURCE_BYTES, NeverCancelled,
     ProbeDeclaration, ProbeStrength, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
     ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds,
     ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity,
@@ -219,7 +219,7 @@ fn text_view() -> ReadViewDeclaration {
         String::from("Reads the bounded synthetic body."),
         CanonicalJsonObjectSchema::try_new(EMPTY_OPTIONS_SCHEMA)
             .expect("fixture schema is object-rooted"),
-        ReadAccessPattern::Streaming,
+        ReadAccessPattern::Streaming { maximum_ranges: 16 },
         ReadViewBounds::Text {
             source_bytes: 1_024,
             output_bytes: 64,
@@ -238,7 +238,7 @@ fn structured_view_with_output_bytes(output_bytes: usize) -> ReadViewDeclaration
         String::from("Reads bounded synthetic structure."),
         CanonicalJsonObjectSchema::try_new(EMPTY_OPTIONS_SCHEMA)
             .expect("fixture schema is object-rooted"),
-        ReadAccessPattern::Streaming,
+        ReadAccessPattern::Streaming { maximum_ranges: 16 },
         ReadViewBounds::Structured {
             source_bytes: 1_024,
             output_bytes,
@@ -392,8 +392,9 @@ fn inv076_oversized_processor_text_is_sanitized_to_failure() {
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
-        options: Some(serde_json::json!({})),
-        continuation: None,
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
+        },
     };
 
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
@@ -413,8 +414,9 @@ fn inv076_malformed_injection_shaped_structure_is_sanitized_to_failure() {
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         view: ReadViewName::try_new(STRUCTURED_VIEW_NAME).expect("fixture view name is valid"),
-        options: Some(serde_json::json!({})),
-        continuation: None,
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
+        },
     };
 
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
@@ -434,8 +436,9 @@ fn inv076_duplicate_structured_member_is_sanitized_to_failure() {
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         view: ReadViewName::try_new(STRUCTURED_VIEW_NAME).expect("fixture view name is valid"),
-        options: Some(serde_json::json!({})),
-        continuation: None,
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
+        },
     };
 
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
@@ -455,8 +458,9 @@ fn inv076_canonicalized_structured_bytes_are_rechecked() {
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         view: ReadViewName::try_new(STRUCTURED_VIEW_NAME).expect("fixture view name is valid"),
-        options: Some(serde_json::json!({})),
-        continuation: None,
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
+        },
     };
 
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
@@ -477,8 +481,9 @@ fn inv076_contradictory_processor_continuation_is_sanitized_to_failure() {
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
-        options: Some(serde_json::json!({})),
-        continuation: None,
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
+        },
     };
 
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
@@ -499,11 +504,10 @@ fn inv076_continuation_invalid_arguments_is_sanitized_to_failure() {
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
-        options: None,
-        continuation: Some(
-            signalbox_file_media_runtime::ReadContinuationCursor::try_new("next-page")
+        input: FileReadInput::Continuation {
+            cursor: signalbox_file_media_runtime::ReadContinuationCursor::try_new("next-page")
                 .expect("fixture continuation cursor is valid"),
-        ),
+        },
     };
 
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
@@ -663,7 +667,7 @@ fn oversized_inspection_view_inventory() -> Vec<ReadViewDeclaration> {
                 String::from("Reads one bounded synthetic projection."),
                 CanonicalJsonObjectSchema::try_new(&schema)
                     .expect("fixture schema is object-rooted and individually bounded"),
-                ReadAccessPattern::Streaming,
+                ReadAccessPattern::Streaming { maximum_ranges: 16 },
                 ReadViewBounds::Text {
                     source_bytes: 1_024,
                     output_bytes: 64,
@@ -732,7 +736,10 @@ fn read_view_source_work_above_the_compiled_ceiling_is_rejected() {
         .read_source_bytes
         .checked_add(1)
         .expect("the fixture ceiling leaves room for one excessive byte");
-    let view = bounded_text_view(ReadAccessPattern::Streaming, source_bytes);
+    let view = bounded_text_view(
+        ReadAccessPattern::Streaming { maximum_ranges: 16 },
+        source_bytes,
+    );
 
     let outcome = registry_outcome_with_view(view, ceilings);
 
@@ -750,6 +757,23 @@ fn random_access_range_fanout_above_the_compiled_ceiling_is_rejected() {
         .checked_add(1)
         .expect("the fixture ceiling leaves room for one excessive range");
     let view = bounded_text_view(ReadAccessPattern::RandomAccess { maximum_ranges }, 1_024);
+
+    let outcome = registry_outcome_with_view(view, ceilings);
+
+    assert!(matches!(
+        outcome,
+        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::ViewBounds)
+    ));
+}
+
+#[test]
+fn streaming_range_fanout_above_the_compiled_ceiling_is_rejected() {
+    let ceilings = FileMediaCeilings::version_one();
+    let maximum_ranges = ceilings
+        .read_ranges
+        .checked_add(1)
+        .expect("the fixture ceiling leaves room for one excessive range");
+    let view = bounded_text_view(ReadAccessPattern::Streaming { maximum_ranges }, 1_024);
 
     let outcome = registry_outcome_with_view(view, ceilings);
 

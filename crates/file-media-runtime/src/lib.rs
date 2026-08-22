@@ -18,10 +18,10 @@ pub use declaration::{
 };
 pub use detection::{
     CancellationSignal, FileInspection, FileInspectionStatus, FileMediaFailure, FileMediaProcessor,
-    FileMediaProcessorFuture, FileReadRequest, FileReadResult, InspectionRequest, NeverCancelled,
-    ProcessorBoundaryFailure, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, ReadContinuation, SourceReadError, SourceReadFuture, ValidatedFile,
-    ValidationEvidence, VerifiedBlobSource,
+    FileMediaProcessorFuture, FileReadInput, FileReadRequest, FileReadResult, InspectionRequest,
+    NeverCancelled, ProcessorBoundaryFailure, ProcessorFailure, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation, SourceReadError,
+    SourceReadFuture, ValidatedFile, ValidationEvidence, VerifiedBlobSource,
 };
 pub use limits::{
     FileMediaCeilings, FileMediaProcessCeilings, FileMediaProcessLimitOverrides,
@@ -31,7 +31,7 @@ pub use limits::{
     MAX_PRESENTED_FILE_BYTES, MAX_PRESENTED_IMAGE_BYTES, MAX_PROBE_CUMULATIVE_BYTES,
     MAX_PROBE_PREFIX_BYTES, MAX_PROBE_RANGES, MAX_PROBE_SUFFIX_BYTES, MAX_PROCESSOR_FRAME_BYTES,
     MAX_READ_OPTIONS_BYTES, MAX_READ_RANGES, MAX_READ_SOURCE_BYTES, MAX_STRUCTURED_DEPTH,
-    MAX_STRUCTURED_NODES, MAX_TEXT_OR_JSON_BYTES, MAX_VALIDATION_RANGES,
+    MAX_STRUCTURED_NODES, MAX_TEXT_BODY_BYTES, MAX_TEXT_OR_JSON_BYTES, MAX_VALIDATION_RANGES,
     MAX_VALIDATION_SOURCE_BYTES, MAX_WORKER_CPU_SECONDS, MAX_WORKER_DESCENDANTS,
     MAX_WORKER_FILE_DESCRIPTORS, MAX_WORKER_MEMORY_BYTES, MAX_WORKER_STDERR_BYTES,
     MAX_WORKER_TASKS, MAX_WORKER_WALL_SECONDS,
