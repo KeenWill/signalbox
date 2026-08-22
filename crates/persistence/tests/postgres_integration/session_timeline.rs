@@ -270,49 +270,69 @@ async fn delegation_detail_validates_body_shape_without_projecting_body_text()
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn assistant_response_text_positions_reject_gaps_and_overlaps() -> Result<(), Box<dyn Error>>
-{
-    let (container, pool, fixture) = prepared_complete_delegation_outbox(0x9980).await?;
+async fn rejected_response_text_position_constraint(
+    fixture_seed: u128,
+    entry_seed: u128,
+    second_start: i64,
+) -> Result<Option<String>, Box<dyn Error>> {
+    let (container, pool, fixture) = prepared_complete_delegation_outbox(fixture_seed).await?;
     let call: Uuid =
         sqlx::query_scalar("SELECT model_call_id FROM model_call WHERE session_id = $1 LIMIT 1")
             .bind(fixture.parent.into_uuid())
             .fetch_one(&pool)
             .await?;
-
-    for (seed, second_start) in [(0x9981_u128, 4_i64), (0x9983_u128, 2_i64)] {
-        let mut transaction = pool.begin().await?;
-        sqlx::query(
-            "INSERT INTO semantic_transcript_entry
-                (source_session_id, semantic_entry_id, payload_kind,
-                 assistant_text_value, producing_model_call_id,
-                 assistant_response_part_ordinal,
-                 assistant_response_text_start_bytes)
-             VALUES ($1, $2, 'assistant_text', 'abc', $4, 100, 0),
-                    ($1, $3, 'assistant_text', 'def', $4, 101, $5)",
-        )
-        .bind(fixture.parent.into_uuid())
-        .bind(Uuid::from_u128(seed))
-        .bind(Uuid::from_u128(seed + 1))
-        .bind(call)
-        .bind(second_start)
-        .execute(&mut *transaction)
-        .await?;
-        let error = transaction
-            .commit()
-            .await
-            .expect_err("non-contiguous response text positions must not commit");
-        assert_eq!(
-            error
-                .as_database_error()
-                .and_then(sqlx::error::DatabaseError::constraint),
-            Some("semantic_transcript_response_text_positions_contiguous")
-        );
-    }
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             assistant_text_value, producing_model_call_id,
+             assistant_response_part_ordinal,
+             assistant_response_text_start_bytes)
+         VALUES ($1, $2, 'assistant_text', 'abc', $4, 100, 0),
+                ($1, $3, 'assistant_text', 'def', $4, 101, $5)",
+    )
+    .bind(fixture.parent.into_uuid())
+    .bind(Uuid::from_u128(entry_seed))
+    .bind(Uuid::from_u128(entry_seed + 1))
+    .bind(call)
+    .bind(second_start)
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("non-contiguous response text positions must not commit");
+    let constraint = error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::constraint)
+        .map(str::to_owned);
 
     pool.close().await;
     drop(container);
+    Ok(constraint)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn assistant_response_text_positions_reject_gaps() -> Result<(), Box<dyn Error>> {
+    let constraint = rejected_response_text_position_constraint(0x9980, 0x9981, 4).await?;
+
+    assert_eq!(
+        constraint.as_deref(),
+        Some("semantic_transcript_response_text_positions_contiguous")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn assistant_response_text_positions_reject_overlaps() -> Result<(), Box<dyn Error>> {
+    let constraint = rejected_response_text_position_constraint(0x9990, 0x9991, 2).await?;
+
+    assert_eq!(
+        constraint.as_deref(),
+        Some("semantic_transcript_response_text_positions_contiguous")
+    );
     Ok(())
 }
 
