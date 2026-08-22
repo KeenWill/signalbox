@@ -308,11 +308,29 @@ fn finish_digest(hasher: Sha256) -> Sha256Digest {
 }
 
 fn canonical_case_json(case: &ApprovalJudgeCase) -> Result<Vec<u8>, ManifestError> {
-    // This schema contains strings, nulls, and objects only. serde_json's map
-    // representation is bytewise-key-ordered without `preserve_order`, so its
-    // compact serialization is the RFC 8785 form for every admitted value.
-    let value = serde_json::to_value(case).map_err(ManifestError::Json)?;
+    // Sort explicitly so canonicalization is unchanged when another workspace
+    // crate enables serde_json's insertion-order `preserve_order` feature.
+    let value = canonical_json_value(serde_json::to_value(case).map_err(ManifestError::Json)?);
     serde_json::to_vec(&value).map_err(ManifestError::Json)
+}
+
+fn canonical_json_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(canonical_json_value).collect())
+        }
+        serde_json::Value::Object(values) => {
+            let mut entries: Vec<_> = values.into_iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
+            serde_json::Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical_json_value(value)))
+                    .collect(),
+            )
+        }
+        scalar => scalar,
+    }
 }
 
 fn validate_manifest_header(manifest: &CorpusManifest) -> Result<(), ManifestError> {

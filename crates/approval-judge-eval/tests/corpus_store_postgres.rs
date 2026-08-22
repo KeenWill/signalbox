@@ -316,10 +316,10 @@ async fn corpus_registration_rejects_unicode_whitespace_name() -> Result<(), Box
     let replay_digest = [0_u8; 32];
 
     sqlx::query(
-        "INSERT INTO evaluation_corpus (
+        r#"INSERT INTO evaluation_corpus (
             corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
             source_kind
-         ) VALUES (U&'\00A0', 'v1', 1, $1, $2, 1, 'database_native')",
+         ) VALUES (U&'\00A0', 'v1', 1, $1, $2, 1, 'database_native')"#,
     )
     .bind(corpus_digest.as_slice())
     .bind(replay_digest.as_slice())
@@ -340,10 +340,10 @@ async fn corpus_registration_rejects_unicode_control_version() -> Result<(), Box
     let replay_digest = [0_u8; 32];
 
     sqlx::query(
-        "INSERT INTO evaluation_corpus (
+        r#"INSERT INTO evaluation_corpus (
             corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
             source_kind
-         ) VALUES ('valid-name', U&'v1\0085', 1, $1, $2, 1, 'database_native')",
+         ) VALUES ('valid-name', U&'v1\0085', 1, $1, $2, 1, 'database_native')"#,
     )
     .bind(corpus_digest.as_slice())
     .bind(replay_digest.as_slice())
@@ -393,11 +393,11 @@ async fn repository_registration_rejects_unicode_whitespace_repository()
     let source_digest = [0_u8; 32];
 
     sqlx::query(
-        "INSERT INTO evaluation_corpus (
+        r#"INSERT INTO evaluation_corpus (
             corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
             source_kind, source_repository, source_path, source_sha256
          ) VALUES ('invalid-unicode-repository', 'v1', 1, $1, $2, 1,
-                   'repository', U&'\00A0', 'cases.json', $3)",
+                   'repository', U&'\00A0', 'cases.json', $3)"#,
     )
     .bind(corpus_digest.as_slice())
     .bind(replay_digest.as_slice())
@@ -550,9 +550,9 @@ async fn stored_case_identity_rejects_unicode_control_character() -> Result<(), 
     let imported = database.import_manifest(seed_manifest_path()).await?;
 
     sqlx::query(
-        "UPDATE evaluation_corpus_case
+        r#"UPDATE evaluation_corpus_case
             SET case_id = U&'control\0085identity'
-          WHERE corpus_name = $1 AND corpus_version = $2 AND replay_position = 0",
+          WHERE corpus_name = $1 AND corpus_version = $2 AND replay_position = 0"#,
     )
     .bind(&imported.key().name)
     .bind(&imported.key().version)
