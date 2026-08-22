@@ -20,7 +20,7 @@ const sessionWorkspaceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
   firstAddress: '41',
   latestAddress: '43',
-  itemCount: '1000000',
+  itemCount: '3',
   projectedBytes: 234,
 } as const
 
