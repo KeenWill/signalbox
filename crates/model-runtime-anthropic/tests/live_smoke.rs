@@ -79,7 +79,7 @@ const PROMPT: &str = "Reply with the single word: ready";
 const MAX_OUTPUT_TOKENS: u32 = 64;
 
 /// Bounds the one exchange well inside the workflow job's 10-minute budget.
-/// `AnthropicConfig::new()`'s own default (10 minutes) leaves no headroom for
+/// `AnthropicConfig::new(None)`'s own default (10 minutes) leaves no headroom for
 /// dependency setup and compilation ahead of it in that same job: if the
 /// provider ever stalls near the adapter's default, GitHub's job timeout
 /// fires first and kills the job before the adapter's own typed timeout
@@ -91,7 +91,7 @@ const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 /// Applies this smoke's timeout policy on top of the adapter's documented
 /// defaults.
 fn anthropic_config() -> AnthropicConfig {
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.exchange_timeout = EXCHANGE_TIMEOUT;
     config
 }

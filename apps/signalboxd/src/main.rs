@@ -1315,6 +1315,8 @@ async fn run_hub(
         configured_duration("automatic_resume_startup_retry_delay"),
     );
     let diagnostic_model_identity_limit = configured_usize("diagnostic_model_identity_limit")?;
+    let post_kill_reap_bound = configured_duration("post_kill_reap_bound");
+    let native_message_limit = configured_usize("max_native_message_bytes")?;
     if configuration.repository_watch_credential_conflicts(&model_configuration) {
         let error = HubConfigurationError::new(
             GITHUB_TOKEN_FILE_ENVIRONMENT,
@@ -1402,7 +1404,12 @@ async fn run_hub(
     );
     let compaction_anthropic = anthropic_credential_access
         .clone()
-        .map(|credential_access| AnthropicRuntime::new(AnthropicConfig::new(), credential_access))
+        .map(|credential_access| {
+            AnthropicRuntime::new(
+                AnthropicConfig::new(native_message_limit),
+                credential_access,
+            )
+        })
         .transpose()
         .map_err(|error| {
             erase_startup_cause(
@@ -1412,7 +1419,9 @@ async fn run_hub(
         })?;
     let compaction_openai = openai_credential_access
         .clone()
-        .map(|credential_access| OpenAiRuntime::new(OpenAiConfig::new(), credential_access))
+        .map(|credential_access| {
+            OpenAiRuntime::new(OpenAiConfig::new(native_message_limit), credential_access)
+        })
         .transpose()
         .map_err(|error| {
             erase_startup_cause(
@@ -1426,7 +1435,7 @@ async fn run_hub(
         .uses_anthropic_adapter()
         .then(|| anthropic_model_credentials.clone())
         .map(|credential_access| {
-            let mut adapter_configuration = AnthropicConfig::new();
+            let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
             adapter_configuration.model_capabilities = anthropic_model_capabilities;
             AnthropicRuntime::new(adapter_configuration, credential_access)
         })
@@ -1439,7 +1448,7 @@ async fn run_hub(
         })?;
     let openai = openai_credential_access
         .map(|credential_access| {
-            let mut adapter_configuration = OpenAiConfig::new();
+            let mut adapter_configuration = OpenAiConfig::new(native_message_limit);
             adapter_configuration.model_capabilities = openai_model_capabilities;
             OpenAiRuntime::new(adapter_configuration, credential_access)
         })
@@ -1461,6 +1470,8 @@ async fn run_hub(
         compaction_anthropic,
         compaction_openai,
         &model_configuration,
+        post_kill_reap_bound,
+        native_message_limit,
     )
     .map_err(|error| {
         erase_startup_cause(
@@ -1468,13 +1479,19 @@ async fn run_hub(
             SanitizedStartupCause::Static(error.cause_code()),
         )
     })?;
-    let runtime =
-        ConfiguredModelRuntime::new(anthropic, openai, &model_configuration).map_err(|error| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static(error.cause_code()),
-            )
-        })?;
+    let runtime = ConfiguredModelRuntime::new(
+        anthropic,
+        openai,
+        &model_configuration,
+        post_kill_reap_bound,
+        native_message_limit,
+    )
+    .map_err(|error| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static(error.cause_code()),
+        )
+    })?;
     let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
         RuntimeContextCompactionModel::new(compaction_runtime, runtime_models.clone()),
     );

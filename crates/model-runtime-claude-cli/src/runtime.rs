@@ -146,8 +146,10 @@ pub struct ClaudeCliRuntime {
     credential_delivery: ClaudeCredentialDelivery,
     exchange_timeout: Duration,
     interrupt_grace: Duration,
+    post_kill_reap_bound: Option<Duration>,
     event_limit: usize,
     stderr_limit: usize,
+    native_message_limit: Option<usize>,
     model_capabilities: ModelCapabilityCatalog,
 }
 
@@ -166,8 +168,10 @@ pub struct ClaudeCliPreparedRequest<C> {
     translated: crate::translate::TranslatedOperation,
     exchange_timeout: Duration,
     interrupt_grace: Duration,
+    post_kill_reap_bound: Option<Duration>,
     event_limit: usize,
     stderr_limit: usize,
+    native_message_limit: Option<usize>,
     reasoning_effort: Option<&'static str>,
     max_output_tokens: u32,
     credential: Option<CredentialValue>,
@@ -344,8 +348,10 @@ impl ClaudeCliRuntime {
             credential_delivery,
             exchange_timeout: config.exchange_timeout,
             interrupt_grace: config.interrupt_grace,
+            post_kill_reap_bound: config.post_kill_reap_bound,
             event_limit: config.event_limit,
             stderr_limit: config.stderr_limit,
+            native_message_limit: config.native_message_limit,
             model_capabilities: config.model_capabilities,
         })
     }
@@ -513,8 +519,10 @@ impl ClaudeCliRuntime {
             translated,
             exchange_timeout: self.exchange_timeout,
             interrupt_grace: self.interrupt_grace,
+            post_kill_reap_bound: self.post_kill_reap_bound,
             event_limit: self.event_limit,
             stderr_limit: self.stderr_limit,
+            native_message_limit: self.native_message_limit,
             reasoning_effort,
             max_output_tokens: operation.settings.max_output_tokens,
             credential,
@@ -798,6 +806,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         decoder,
         exchange_timeout: prepared.exchange_timeout,
         interrupt_grace: prepared.interrupt_grace,
+        post_kill_reap_bound: prepared.post_kill_reap_bound,
         event_limit: prepared.event_limit,
         stderr_limit: prepared.stderr_limit,
         environment: CLAUDE_ENVIRONMENT,
@@ -810,7 +819,7 @@ async fn execute_process<C: Clone + Send + Sync>(
             let mut redacting_sink = CredentialRedactingSink::new(sink, credential);
             let evidence = execute_cli_process(request, &mut redacting_sink, cancellation).await;
             redacting_sink.flush();
-            redact_evidence(evidence, credential)
+            redact_evidence(evidence, credential, prepared.native_message_limit)
         }
     }
 }

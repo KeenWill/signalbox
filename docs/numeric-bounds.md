@@ -96,7 +96,7 @@ maintained with the implementation slices that move or delete declarations.
 | `config/signalboxd.example.toml:79`                            | `AUTOMATIC_RESUME_BACKOFF_CAP`                    | config | `numeric_bounds.automatic_resume_backoff_cap`                                    |
 | `config/signalboxd.example.toml:81`                            | `AUTOMATIC_RESUME_ATTEMPT_BUDGET`                 | config | `numeric_bounds.automatic_resume_attempt_budget`                                 |
 | `config/signalboxd.example.toml:83`                            | `AUTOMATIC_RESUME_STARTUP_RETRY_DELAY`            | config | `numeric_bounds.automatic_resume_startup_retry_delay`                            |
-| `crates/model-runtime/src/cli_process.rs:1565`                 | `POST_KILL_REAP_BOUND`                            | config | `numeric_bounds.post_kill_reap_bound`                                            |
+| `config/signalboxd.example.toml:85`                            | `POST_KILL_REAP_BOUND`                            | config | `numeric_bounds.post_kill_reap_bound`                                            |
 | `config/signalboxd.example.toml:87`                            | `STALE_ACTIVE_TURN_BOUND`                         | config | `numeric_bounds.stale_active_turn_bound`                                         |
 | `config/signalboxd.example.toml:89`                            | `BASELINE_TURN_LIVENESS_SCAN_INTERVAL`            | config | `numeric_bounds.turn_liveness_scan_interval`                                     |
 | `config/signalboxd.example.toml:91`                            | `AUTOMATIC_RECONCILIATION_BASE_BACKOFF`           | config | `numeric_bounds.automatic_reconciliation_base_backoff`                           |
@@ -114,7 +114,7 @@ maintained with the implementation slices that move or delete declarations.
 | `config/signalboxd.example.toml:113`                           | `BASELINE_NUDGE_BUFFER_CAPACITY`                  | config | `numeric_bounds.nudge_buffer_capacity`                                           |
 | `config/signalboxd.example.toml:115`                           | `SCHEDULER_PASS_ADMISSION_CAP`                    | config | `numeric_bounds.scheduler_pass_admission_cap`                                    |
 | `config/signalboxd.example.toml:117`                           | `SCHEDULER_PASS_OCCUPANCY_BOUND`                  | config | `numeric_bounds.scheduler_pass_occupancy_bound`                                  |
-| `crates/model-runtime/src/redaction.rs:15`                     | `MAX_NATIVE_MESSAGE_BYTES`                        | config | `numeric_bounds.max_native_message_bytes`                                        |
+| `config/signalboxd.example.toml:119`                           | `MAX_NATIVE_MESSAGE_BYTES`                        | config | `numeric_bounds.max_native_message_bytes`                                        |
 | `config/signalboxd.example.toml:121`                           | `TERMINALIZATION_LOCK_WAIT`                       | config | `numeric_bounds.terminalization_lock_wait`                                       |
 | `config/signalboxd.example.toml:123`                           | `TERMINALIZATION_ACQUIRE_WAIT`                    | config | `numeric_bounds.terminalization_acquire_wait`                                    |
 | `config/signalboxd.example.toml:125`                           | `TERMINALIZATION_WRITE_LOCK_WAIT`                 | config | `numeric_bounds.terminalization_write_lock_wait`                                 |
