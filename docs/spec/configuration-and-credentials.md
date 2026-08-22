@@ -190,14 +190,16 @@ last transaction-timestamped durable activity fact. Exact blocked-goal need text
 remains available from the session detail read rather than entering the hot
 fleet page.
 
-Runner loss, recovery ambiguity, reconciliation, approval wait, blocked goal,
-active, queued, and idle remain distinct states. The projection uses one set
+Runner loss, model-call recovery ambiguity, tool recovery, reconciliation,
+approval wait, blocked goal, active, queued, and idle remain distinct states.
+Tool recovery carries no reconciliation action because no current command writes
+that wait. The projection uses one set
 query over the selected identities and never constructs the fleet by following
 individual sessions.
 
 `GET /api/attention/follow` begins with the first coherent attention page and
 its durable change-journal cursor, then emits summary replacements only for
-changed session identities. One incremental read examines at most 128 journal
+changed session identities. One incremental read examines at most 64 journal
 records. A larger cursor gap emits `resync_required` with the current cursor and
 ends that stream; it never skips records or continues from a partial gap. The
 HTTP producer retains only the item currently being encoded and waits between
