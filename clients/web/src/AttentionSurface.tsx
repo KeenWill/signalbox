@@ -120,6 +120,14 @@ export function AttentionSurface() {
         </section>
       )}
 
+      {after && (
+        <div className="attention-page-controls">
+          <button type="button" onClick={() => setAfter(null)}>
+            Return to live page
+          </button>
+        </div>
+      )}
+
       {attention.data && (
         <div className={workbenchClass}>
           <section className="attention-list" aria-labelledby="attention-heading">
@@ -158,11 +166,6 @@ export function AttentionSurface() {
               </ol>
             )}
             <div className="attention-page-controls">
-              {after && (
-                <button type="button" onClick={() => setAfter(null)}>
-                  Return to live page
-                </button>
-              )}
               {attention.data.continuation_after_session_id && (
                 <button type="button" onClick={nextPage}>
                   Next page <ArrowRight aria-hidden="true" />

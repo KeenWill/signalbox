@@ -287,8 +287,8 @@ function PullRequestTable({
                   </a>
                 </td>
                 <td>
-                  <code>{pullRequest.head.slice(0, 8)}</code> {pullRequest.head_branch} →{' '}
-                  {pullRequest.base_branch}
+                  <code>{pullRequest.head.slice(0, 8)}</code> {pullRequest.head_repository}:
+                  {pullRequest.head_branch} → {pullRequest.base_branch}
                 </td>
                 <td>
                   {words(pullRequest.lifecycle)} · {words(pullRequest.mergeable)} ·{' '}
@@ -602,6 +602,11 @@ export function ActivitySurface() {
     setActivityPaging(false)
     setActivityPages([])
   }
+  const changePullRequestPage = (after: string | null) => {
+    setSelectedPullRequest(null)
+    setSessionBefore(undefined)
+    setPullRequestAfter(after)
+  }
   const nextActivityPage = () => {
     const page = activity.data
     if (!page) return
@@ -670,7 +675,7 @@ export function ActivitySurface() {
           />
           <div className="activity-page-controls">
             {pullRequestAfter && (
-              <button type="button" onClick={() => setPullRequestAfter(null)}>
+              <button type="button" onClick={() => changePullRequestPage(null)}>
                 First PR page
               </button>
             )}
@@ -678,7 +683,7 @@ export function ActivitySurface() {
               <button
                 type="button"
                 onClick={() =>
-                  setPullRequestAfter(pullRequests.data.continuation_after_pull_request ?? null)
+                  changePullRequestPage(pullRequests.data.continuation_after_pull_request ?? null)
                 }
               >
                 Next PR page <ArrowRight aria-hidden="true" />

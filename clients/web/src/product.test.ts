@@ -176,6 +176,17 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('activity_page')
   })
 
+  it('rejects an oversized JSON response before parsing it', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(' '.repeat(bootstrapFixture.limits.max_json_body_bytes + 1))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readRepoWatchActivity('example/repository'),
+    ).rejects.toThrow('JSON response exceeds the contract ceiling')
+  })
+
   it('rejects a pull-request page for a different repository', async () => {
     vi.stubGlobal(
       'fetch',
@@ -241,6 +252,33 @@ describe('SameOriginProductTransport', () => {
     })
     await expect(events.next()).resolves.toEqual({ done: false, value: attentionUpdateFixture })
     await expect(events.next()).resolves.toEqual({ done: true, value: undefined })
+  })
+
+  it('cancels an abandoned attention response before reconnecting', async () => {
+    const cancel = vi.fn()
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(
+            `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n`,
+          ),
+        )
+      },
+      cancel,
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body)),
+    )
+    const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
+
+    await expect(events.next()).resolves.toEqual({
+      done: false,
+      value: { kind: 'snapshot', snapshot: attentionFixture },
+    })
+    await events.return?.(undefined)
+
+    expect(cancel).toHaveBeenCalledOnce()
   })
 
   it('rejects an attention event beyond the advertised NDJSON item ceiling', async () => {

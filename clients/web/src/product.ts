@@ -35,16 +35,52 @@ const requireCompatibleBootstrap = (bootstrap: WebContractBootstrap): WebContrac
   return bootstrap
 }
 
+const readBoundedJson = async (response: Response): Promise<unknown> => {
+  if (!response.body) throw new TypeError('JSON response has no body')
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let length = 0
+  let complete = false
+  try {
+    while (true) {
+      const chunk = await reader.read()
+      if (chunk.done) {
+        complete = true
+        break
+      }
+      if (length + chunk.value.byteLength > MAX_JSON_BODY_BYTES) {
+        throw new TypeError('JSON response exceeds the contract ceiling')
+      }
+      chunks.push(chunk.value)
+      length += chunk.value.byteLength
+    }
+    const encoded = new Uint8Array(length)
+    let offset = 0
+    for (const chunk of chunks) {
+      encoded.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(encoded))
+  } finally {
+    if (!complete) await reader.cancel().catch(() => undefined)
+    reader.releaseLock()
+  }
+}
+
 const decodeAttentionLines = async function* (
   body: ReadableStream<Uint8Array>,
 ): AsyncGenerator<WebAttentionStreamEvent> {
   const reader = body.getReader()
   const decoder = new TextDecoder('utf-8', { fatal: true })
   let line: number[] = []
+  let complete = false
   try {
     while (true) {
       const chunk = await reader.read()
-      if (chunk.done) break
+      if (chunk.done) {
+        complete = true
+        break
+      }
       for (const byte of chunk.value) {
         if (byte === 10) {
           if (line.length === 0) throw new TypeError('attention stream contains an empty item')
@@ -60,10 +96,8 @@ const decodeAttentionLines = async function* (
       }
     }
     if (line.length !== 0) throw new TypeError('attention stream ended with an incomplete item')
-  } catch (error) {
-    await reader.cancel().catch(() => undefined)
-    throw error
   } finally {
+    if (!complete) await reader.cancel().catch(() => undefined)
     reader.releaseLock()
   }
 }
@@ -163,7 +197,7 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    return requireCompatibleBootstrap(decodeWebContractBootstrap(await response.json()))
+    return requireCompatibleBootstrap(decodeWebContractBootstrap(await readBoundedJson(response)))
   }
 
   async readAttention(
@@ -179,7 +213,7 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
       signal,
     })
     if (!response.ok) throw await this.requestError(response)
-    return decodeWebAttentionSnapshot(await response.json())
+    return decodeWebAttentionSnapshot(await readBoundedJson(response))
   }
 
   async *followAttention(signal?: AbortSignal): AsyncGenerator<WebAttentionStreamEvent> {
@@ -303,7 +337,7 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
       signal,
     })
     if (!response.ok) throw await this.requestError(response)
-    return decode(await response.json())
+    return decode(await readBoundedJson(response))
   }
 
   private async fetchResponse(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
@@ -320,7 +354,7 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
   }
 
   private async requestError(response: Response): Promise<ProductRequestError> {
-    const failure = decodeWebApiErrorResponse(await response.json())
+    const failure = decodeWebApiErrorResponse(await readBoundedJson(response))
     return new ProductRequestError(failure.error.code, failure.error.kind, failure.error.message)
   }
 }

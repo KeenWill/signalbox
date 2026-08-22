@@ -19,7 +19,15 @@ export const reduceAttentionEvent = (
   current: WebAttentionSnapshot | undefined,
   event: WebAttentionStreamEvent,
 ): AttentionReduction => {
-  if (event.kind === 'snapshot') return { kind: 'projection', snapshot: event.snapshot }
+  if (event.kind === 'snapshot') {
+    const snapshotCursor = cursorValue(event.snapshot.cursor)
+    if (snapshotCursor === null) return { kind: 'resync' }
+    if (current) {
+      const currentCursor = cursorValue(current.cursor)
+      if (currentCursor === null || snapshotCursor < currentCursor) return { kind: 'resync' }
+    }
+    return { kind: 'projection', snapshot: event.snapshot }
+  }
   if (event.kind === 'resync_required' || !current) return { kind: 'resync' }
   const currentCursor = cursorValue(current.cursor)
   const eventCursor = cursorValue(event.cursor)

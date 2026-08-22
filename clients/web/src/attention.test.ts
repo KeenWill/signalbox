@@ -78,6 +78,15 @@ describe('attention projection recovery', () => {
     expect(reduction).toEqual({ kind: 'resync' })
   })
 
+  it('rejects a replacement snapshot that moves the durable cursor backward', () => {
+    const reduction = reduceAttentionEvent(snapshot, {
+      kind: 'snapshot',
+      snapshot: { ...snapshot, cursor: '16' },
+    })
+
+    expect(reduction).toEqual({ kind: 'resync' })
+  })
+
   it('restarts after an explicit resync and marks a cleanly ended monitor stale', async () => {
     const phases: string[] = []
     const projections: WebAttentionSnapshot[] = []
