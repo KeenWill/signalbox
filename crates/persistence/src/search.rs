@@ -300,16 +300,35 @@ impl SearchRepository {
         sqlx::query(
             "SELECT pg_advisory_xact_lock(
                  hashtextextended(
-                     concat_ws(chr(31), $1::text, $2::text, $3::text),
+                     concat_ws(chr(31), $1::text, $2::text),
                      0
                  )
              )",
         )
         .bind(source_kind)
         .bind(projection.artifact.into_uuid())
-        .bind(content_class)
         .execute(&mut *transaction)
         .await?;
+        let identity_compatible = sqlx::query_scalar::<_, bool>(
+            "SELECT NOT EXISTS (
+                 SELECT 1
+                   FROM web_search_projection
+                  WHERE source_kind = $1
+                    AND source_id = $2
+                    AND session_id <> $3
+             )",
+        )
+        .bind(source_kind)
+        .bind(projection.artifact.into_uuid())
+        .bind(projection.session.into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !identity_compatible {
+            transaction.rollback().await?;
+            return Err(
+                SearchProjectionCorruption::Invalid("conflicting artifact identity").into(),
+            );
+        }
         let compatible = sqlx::query_scalar::<_, bool>(PUBLISH_ARTIFACT_SQL)
             .bind(source_kind)
             .bind(projection.artifact.into_uuid())

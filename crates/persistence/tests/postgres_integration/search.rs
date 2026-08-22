@@ -257,6 +257,39 @@ async fn derived_text_is_searchable_only_after_its_durable_publisher_runs()
     .await?;
     assert_eq!(stored_chunks, 1);
 
+    let other_session = create_search_session(&pool, 0x220).await?;
+    let attachment = SearchArtifactId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x221));
+    repository
+        .publish(SearchArtifactProjection {
+            session,
+            address,
+            artifact: attachment,
+            class: SearchArtifactProjectionClass::AttachmentFilename,
+            text: SearchProjectionText::try_new(String::from("fixture.txt"))
+                .expect("fixture filename is admitted"),
+        })
+        .await?;
+    let cross_class_conflict = repository
+        .publish(SearchArtifactProjection {
+            session: other_session,
+            address: session_created_address(&pool, other_session).await?,
+            artifact: attachment,
+            class: SearchArtifactProjectionClass::AttachmentMediaMetadata,
+            text: SearchProjectionText::try_new(String::from("text/plain"))
+                .expect("fixture media metadata is admitted"),
+        })
+        .await;
+    assert!(cross_class_conflict.is_err());
+    let attachment_sessions: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT session_id)
+           FROM web_search_projection
+          WHERE source_kind = 'attachment' AND source_id = $1",
+    )
+    .bind(attachment.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(attachment_sessions, 1);
+
     pool.close().await;
     drop(container);
     Ok(())

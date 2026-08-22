@@ -154,8 +154,9 @@ pub struct WebSessionId(
 impl WebSessionId {
     /// Encodes an already-validated UUID in canonical lowercase form.
     #[must_use]
-    pub fn from_uuid(value: uuid::Uuid) -> Self {
-        Self(value.to_string())
+    pub fn from_validated_uuid(value: String) -> Self {
+        debug_assert!(canonical_session_id(&value));
+        Self(value)
     }
 
     /// Constructs a session identity from its canonical lowercase UUID spelling.
@@ -195,8 +196,9 @@ pub struct WebUuid(
 impl WebUuid {
     /// Encodes an already-validated UUID in canonical lowercase form.
     #[must_use]
-    pub fn from_uuid(value: uuid::Uuid) -> Self {
-        Self(value.to_string())
+    pub fn from_validated_uuid(value: String) -> Self {
+        debug_assert!(canonical_session_id(&value));
+        Self(value)
     }
 
     /// Constructs an identity from its canonical lowercase UUID spelling.
@@ -853,6 +855,18 @@ function validSearchSourceCorrelation(result) {{
 
 export function decodeWebSearchPage(value) {{
   assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
+  if (value.continuation !== null) {{
+    const lastResult = value.results.at(-1);
+    if (
+      lastResult === undefined ||
+      value.continuation.address.event_sequence !== lastResult.address.event_sequence
+    ) {{
+      fail(
+        "search_page.continuation",
+        "a cursor anchored to the final search result",
+      );
+    }}
+  }}
   const encoder = new TextEncoder();
   value.results.forEach((result, resultIndex) => {{
     if (!validSearchSourceCorrelation(result)) {{

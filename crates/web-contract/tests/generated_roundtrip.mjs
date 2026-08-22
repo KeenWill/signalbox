@@ -213,6 +213,22 @@ test("generated search decoder rejects too many highlight ranges", () => {
   );
 });
 
+test("generated search decoder validates continuation against the final result", () => {
+  const empty = searchPage();
+  empty.results = [];
+  assert.throws(
+    () => decodeWebSearchPage(empty),
+    /cursor anchored to the final search result/,
+  );
+
+  const mismatched = searchPage();
+  mismatched.continuation.address.event_sequence = "2";
+  assert.throws(
+    () => decodeWebSearchPage(mismatched),
+    /cursor anchored to the final search result/,
+  );
+});
+
 test("generated search decoder rejects malformed result identities", () => {
   const page = searchPage();
   page.results[0].session_id = "not-a-uuid";
