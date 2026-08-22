@@ -1389,9 +1389,10 @@ durable cursor and reports lifecycle, draft state, mergeability, completed-check
 status, current-head review decision, stale-review count, unresolved-thread
 count, and current open-stack relationships. Automation convergence is not a
 synonym for provider mergeability or checks: a current-head seal requires the
-latest dispatch to have been released, every action session's latest goal to be
-achieved, and the dispatch event's durable head to equal the current normalized
-head. An achieved release against an older head is reported as a stale seal;
+latest dispatch to have been released, the goal generation bound to every
+dispatched action turn to have a terminal achieved event, and the dispatch's
+delivered-state event head to equal the current normalized head. An achieved
+release against an older delivered head is reported as a stale seal;
 held, queued, non-converged, and unattempted states remain distinct.
 
 ## Open edges

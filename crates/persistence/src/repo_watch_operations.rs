@@ -1313,11 +1313,13 @@ SELECT selected.pull_request_number,
          ORDER BY held_since DESC, dispatch_id DESC LIMIT 1
   ) AS held ON true
   LEFT JOIN LATERAL (
-        SELECT latest_event_id FROM repo_watch_outstanding_dispatch_obligation
-         WHERE repository = $1
-           AND singleton_scope = 'pull_request'
-           AND singleton_pull_request_number = selected.pull_request_number
-         ORDER BY latest_match_at DESC, obligation_id DESC LIMIT 1
+        SELECT obligation.latest_event_id
+          FROM repo_watch_outstanding_dispatch_obligation AS obligation
+          JOIN repo_watch_event AS latest_event
+            ON latest_event.event_id = obligation.latest_event_id
+         WHERE latest_event.repository = $1
+           AND latest_event.pull_request_number = selected.pull_request_number
+         ORDER BY obligation.latest_match_at DESC, obligation.obligation_id DESC LIMIT 1
   ) AS queued ON true
   LEFT JOIN LATERAL (
         SELECT batch.dispatch_id, batch.delivered_state_event_id AS event_id,
@@ -1358,9 +1360,12 @@ SELECT selected.pull_request_number,
   LEFT JOIN LATERAL (
         SELECT (SELECT count(*) FROM repo_watch_held_dispatch_slot
                  WHERE repository = $1 AND pull_request_number = selected.pull_request_number) AS held_count,
-               (SELECT count(*) FROM repo_watch_outstanding_dispatch_obligation
-                 WHERE repository = $1 AND singleton_scope = 'pull_request'
-                   AND singleton_pull_request_number = selected.pull_request_number) AS queued_count
+               (SELECT count(*)
+                  FROM repo_watch_outstanding_dispatch_obligation AS obligation
+                  JOIN repo_watch_event AS latest_event
+                    ON latest_event.event_id = obligation.latest_event_id
+                 WHERE latest_event.repository = $1
+                   AND latest_event.pull_request_number = selected.pull_request_number) AS queued_count
   ) AS counts ON true
   LEFT JOIN LATERAL (
         SELECT count(*) AS session_count FROM (
