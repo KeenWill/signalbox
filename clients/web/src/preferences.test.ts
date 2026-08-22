@@ -63,4 +63,25 @@ describe('browser preferences', () => {
     expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
     expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
   })
+
+  it('falls back when resolving the browser storage getter throws', () => {
+    const previousDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get: () => {
+        throw new DOMException('blocked', 'SecurityError')
+      },
+    })
+
+    try {
+      expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+      expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
+    } finally {
+      if (previousDescriptor === undefined) {
+        Reflect.deleteProperty(globalThis, 'localStorage')
+      } else {
+        Object.defineProperty(globalThis, 'localStorage', previousDescriptor)
+      }
+    }
+  })
 })

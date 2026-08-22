@@ -43,8 +43,40 @@ const MAX_SEARCH_QUERY_BYTES = 512
 const MAX_SEARCH_PAGE_ITEMS = 100
 const MAX_SEARCH_SNIPPET_BYTES = 512
 const ERROR_RESPONSE_BYTES = 16_384
+const MAX_U64 = 18_446_744_073_709_551_615n
 const isUtf8ContinuationByte = (byte: number | undefined) =>
   byte !== undefined && (byte & 0xc0) === 0x80
+
+const canonicalUuid = (value: string): string | undefined => {
+  const compact = value
+    .toLowerCase()
+    .replace(/^urn:uuid:/, '')
+    .replace(/^\{(.*)\}$/, '$1')
+    .replaceAll('-', '')
+  if (!/^[0-9a-f]{32}$/.test(compact)) return undefined
+  return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`
+}
+
+const sourceUuids = (source: WebSearchPage['results'][number]['source']): string[] => {
+  switch (source.kind) {
+    case 'session':
+      return [source.session_id]
+    case 'accepted_input':
+      return [source.accepted_input_id, source.turn_id]
+    case 'turn_transcript_entry':
+      return [source.semantic_entry_id, source.turn_id]
+    case 'session_transcript_entry':
+      return [source.semantic_entry_id]
+    case 'tool_request':
+      return [source.tool_request_id, source.turn_id]
+    case 'tool_attempt':
+      return [source.tool_attempt_id, source.turn_id]
+    case 'attachment':
+      return [source.attachment_id]
+    case 'derived_artifact':
+      return [source.artifact_id]
+  }
+}
 
 const readBoundedJson = async (response: Response, maximumBytes: number): Promise<unknown> => {
   const declaredLength = response.headers.get('content-length')
@@ -90,12 +122,27 @@ const validateSearchPageBounds = (
 ): WebSearchPage => {
   if (page.results.length > request.maxItems) throw new TypeError('search page exceeds item limit')
   const encoder = new TextEncoder()
+  const requestedSession =
+    request.sessionId === undefined ? undefined : canonicalUuid(request.sessionId)
   let previousAddress: bigint | undefined
   for (const result of page.results) {
-    if (request.sessionId !== undefined && result.session_id !== request.sessionId) {
+    const resultSession = canonicalUuid(result.session_id)
+    if (
+      resultSession === undefined ||
+      sourceUuids(result.source).some((identity) => canonicalUuid(identity) === undefined)
+    ) {
+      throw new TypeError('search result carries an invalid UUID identity')
+    }
+    if (
+      request.sessionId !== undefined &&
+      (requestedSession === undefined || resultSession !== requestedSession)
+    ) {
       throw new TypeError('search result falls outside the requested session')
     }
-    if (result.source.kind === 'session' && result.source.session_id !== result.session_id) {
+    if (
+      result.source.kind === 'session' &&
+      canonicalUuid(result.source.session_id) !== resultSession
+    ) {
       throw new TypeError('search result source contradicts its session')
     }
     const address = BigInt(result.address.event_sequence)
@@ -127,6 +174,19 @@ const validateSearchPageBounds = (
         throw new TypeError('search result carries an invalid highlight range')
       }
       previousEnd = highlight.end_byte
+    }
+  }
+  const continuation = page.continuation
+  if (continuation != null) {
+    const lastResult = page.results.at(-1)
+    const projectionId = continuation.projection_id
+    if (
+      lastResult === undefined ||
+      continuation.address.event_sequence !== lastResult.address.event_sequence ||
+      !/^(0|[1-9][0-9]*)$/.test(projectionId) ||
+      BigInt(projectionId) > MAX_U64
+    ) {
+      throw new TypeError('search page carries an invalid continuation')
     }
   }
   return page
@@ -192,12 +252,20 @@ export class ProductTransportError extends Error {
 
 export class SameOriginProductTransport implements ProductTransport {
   async readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap> {
-    const response = await fetch('/api/bootstrap', {
-      headers: { accept: 'application/json' },
-      credentials: 'same-origin',
-      signal,
-    })
-    if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
+    let response: Response
+    try {
+      response = await fetch('/api/bootstrap', {
+        headers: { accept: 'application/json' },
+        credentials: 'same-origin',
+        signal,
+      })
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') throw error
+      throw new ProductTransportError('The bootstrap request could not reach Signalbox.')
+    }
+    if (!response.ok) {
+      throw new ProductTransportError(`Bootstrap request failed with status ${response.status}.`)
+    }
     return validateBootstrapSearchLimits(
       decodeWebContractBootstrap(await readBoundedJson(response, MAX_BOOTSTRAP_RESPONSE_BYTES)),
     )

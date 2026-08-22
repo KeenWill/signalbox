@@ -11,7 +11,7 @@ import {
   RouterProvider,
   stringifySearchWith,
 } from '@tanstack/react-router'
-import { lazy, StrictMode, Suspense } from 'react'
+import { lazy, StrictMode, Suspense, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
 import { ProductApp } from './ProductApp'
@@ -23,6 +23,17 @@ const rootRoute = createRootRoute({ component: () => <Outlet /> })
 const ScenarioWorkspace = lazy(() =>
   import('./App').then((module) => ({ default: module.Workspace })),
 )
+const ScenarioRoute = () => {
+  const scenarioId = scenarioRoute.useParams().scenarioId
+  useEffect(() => {
+    document.title = 'Signalbox scenarios'
+  }, [])
+  return (
+    <Suspense fallback={<main className="loading">Loading scenario studio…</main>}>
+      <ScenarioWorkspace scenarioId={scenarioId} />
+    </Suspense>
+  )
+}
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
@@ -44,11 +55,7 @@ const productRoute = createRoute({
 const scenarioRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/scenario/$scenarioId',
-  component: () => (
-    <Suspense fallback={<main className="loading">Loading scenario studio…</main>}>
-      <ScenarioWorkspace scenarioId={scenarioRoute.useParams().scenarioId} />
-    </Suspense>
-  ),
+  component: ScenarioRoute,
 })
 const router = createRouter({
   routeTree: rootRoute.addChildren([indexRoute, productRoute, scenarioRoute]),

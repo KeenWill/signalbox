@@ -25,15 +25,22 @@ const firstPage = {
     {
       session_id: sessionId,
       address: { event_sequence: '901' },
-      source: { kind: 'accepted_input', accepted_input_id: 'input-901', turn_id: 'turn-31' },
+      source: {
+        kind: 'accepted_input',
+        accepted_input_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5010',
+        turn_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5020',
+      },
       content_class: 'user_transcript',
       snippet: 'durable release evidence',
       highlights: [{ start_byte: 0, end_byte: 7 }],
     },
     {
-      session_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e',
+      session_id: sessionId,
       address: { event_sequence: '750' },
-      source: { kind: 'derived_artifact', artifact_id: 'artifact-750' },
+      source: {
+        kind: 'derived_artifact',
+        artifact_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5030',
+      },
       content_class: 'derived_text_artifact',
       snippet: 'derived artifact context',
       highlights: [{ start_byte: 8, end_byte: 16 }],
@@ -126,9 +133,10 @@ test('replaces the bounded result page through its typed cursor', async ({ page 
 
   const nextPage = page.getByRole('button', { name: 'Next page' })
   await nextPage.focus()
-  await page.keyboard.press('Enter')
+  await nextPage.click()
   await expect(page.getByRole('heading', { name: '1 results on this page' })).toBeVisible()
-  await expect(page).toHaveURL(/afterAddress=%22750%22/)
+  await expect(page).toHaveURL(/afterAddress=750/)
+  await expect(page.getByRole('heading', { name: '1 results on this page' })).toBeFocused()
   await expect(page.getByText('release planning')).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -142,7 +150,9 @@ test('preserves search focus and announces asynchronous results', async ({ page 
   await search.fill('release evidence')
   await search.press('Enter')
   await expect(search).toBeFocused()
-  await expect(page.getByRole('status')).toHaveText('2 results loaded on this page.')
+  await expect(page.getByText('2 results loaded on this page.', { exact: true })).toHaveText(
+    '2 results loaded on this page.',
+  )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

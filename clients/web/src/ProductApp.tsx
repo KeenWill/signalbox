@@ -13,7 +13,7 @@ import {
   Sun,
   X,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef } from 'react'
+import { type RefObject, useEffect, useMemo, useRef } from 'react'
 import {
   type CommandContext,
   commandRegistry,
@@ -24,6 +24,7 @@ import {
 import {
   type ProductRouteId,
   type ProductSearchState,
+  ProductTransportError,
   productRoutes,
   productTransport,
 } from './product'
@@ -131,7 +132,13 @@ function ProductNavigation({
   )
 }
 
-function CommandPalette({ context }: { context: CommandContext }) {
+function CommandPalette({
+  context,
+  returnFocusRef,
+}: {
+  context: CommandContext
+  returnFocusRef: RefObject<HTMLElement | null>
+}) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
   return (
     <Dialog.Root
@@ -145,6 +152,10 @@ function CommandPalette({ context }: { context: CommandContext }) {
         <Dialog.Content
           className="dialog-content product-palette"
           aria-describedby="product-palette-description"
+          onCloseAutoFocus={(event) => {
+            event.preventDefault()
+            returnFocusRef.current?.focus()
+          }}
         >
           <div className="dialog-heading">
             <div>
@@ -254,7 +265,13 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   )
 }
 
-function ProductToolbar({ context }: { context: CommandContext }) {
+function ProductToolbar({
+  context,
+  paletteReturnFocusRef,
+}: {
+  context: CommandContext
+  paletteReturnFocusRef: RefObject<HTMLElement | null>
+}) {
   const app = useAppSelector(selectApp)
   return (
     <div className="toolbar" role="toolbar" aria-label="Application controls">
@@ -294,7 +311,10 @@ function ProductToolbar({ context }: { context: CommandContext }) {
         className="icon-button"
         type="button"
         aria-label="Open command palette"
-        onClick={() => invokeCommand('palette.open', context)}
+        onClick={(event) => {
+          paletteReturnFocusRef.current = event.currentTarget
+          invokeCommand('palette.open', context)
+        }}
       >
         <Command />
       </button>
@@ -313,6 +333,7 @@ export function ProductApp({
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
+  const paletteReturnFocusRef = useRef<HTMLElement | null>(null)
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -343,6 +364,9 @@ export function ProductApp({
       callback: (event) => {
         if (app.overlay !== null && binding.commandId !== 'surface.escape') return
         if (binding.commandId === 'palette.open' && isEditableTarget(event.target)) return
+        if (binding.commandId === 'palette.open') {
+          paletteReturnFocusRef.current = primaryRef.current
+        }
         invokeCommand(binding.commandId, context)
       },
     })),
@@ -361,6 +385,10 @@ export function ProductApp({
     document.documentElement.dataset.theme = app.theme
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
+
+  useEffect(() => {
+    document.title = `${surfaceCopy[surface].title} · Signalbox`
+  }, [surface])
 
   const copy = surfaceCopy[surface]
   const updateSearch = (next: ProductSearchState) =>
@@ -389,7 +417,7 @@ export function ProductApp({
             <span className="eyebrow">{copy.eyebrow}</span>
             <h1>{copy.title}</h1>
           </div>
-          <ProductToolbar context={context} />
+          <ProductToolbar context={context} paletteReturnFocusRef={paletteReturnFocusRef} />
         </header>
         <div className="surface-question">
           <p>{copy.question}</p>
@@ -402,7 +430,9 @@ export function ProductApp({
             {bootstrap.isSuccess
               ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
               : bootstrap.isError
-                ? 'Transport unavailable'
+                ? bootstrap.error instanceof ProductTransportError
+                  ? 'Transport unavailable'
+                  : 'Contract incompatible'
                 : 'Checking contract…'}
             {bootstrap.isError && (
               <button type="button" onClick={() => void bootstrap.refetch()}>
@@ -434,7 +464,7 @@ export function ProductApp({
           </dl>
         </aside>
       )}
-      <CommandPalette context={context} />
+      <CommandPalette context={context} returnFocusRef={paletteReturnFocusRef} />
       <Dialog.Root
         open={app.overlay === 'navigation'}
         onOpenChange={(open) => {

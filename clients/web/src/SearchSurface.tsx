@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRight, Search } from 'lucide-react'
-import { type FormEvent, type ReactNode, useEffect, useState } from 'react'
+import { AlertTriangle, ArrowRight, Search } from 'lucide-react'
+import { type FormEvent, type ReactNode, useEffect, useRef, useState } from 'react'
 import type { WebContractBootstrap, WebSearchPage } from './generated/web-contract.mjs'
 import {
   ProductRequestError,
@@ -68,18 +68,21 @@ export function SearchSurface({
 }) {
   const [draftQuery, setDraftQuery] = useState(state.q ?? '')
   const [draftSession, setDraftSession] = useState(state.session ?? '')
+  const resultsHeadingRef = useRef<HTMLHeadingElement>(null)
+  const restorePaginationFocusRef = useRef(false)
+  const [activeAfter, setActiveAfter] = useState(() =>
+    state.afterAddress && state.afterProjection
+      ? { address: state.afterAddress, projectionId: state.afterProjection }
+      : undefined,
+  )
   useEffect(() => setDraftQuery(state.q ?? ''), [state.q])
   useEffect(() => setDraftSession(state.session ?? ''), [state.session])
   const queryText = state.q?.trim() ?? ''
   const queryBytes = new TextEncoder().encode(queryText).length
   const queryLimit = bootstrap?.limits.max_search_query_bytes ?? 0
   const requestIsValid = queryBytes > 0 && queryBytes <= queryLimit
-  const after =
-    state.afterAddress && state.afterProjection
-      ? { address: state.afterAddress, projectionId: state.afterProjection }
-      : undefined
   const results = useQuery({
-    queryKey: ['production', 'search', queryText, state.session ?? null, after ?? null],
+    queryKey: ['production', 'search', queryText, state.session ?? null, activeAfter ?? null],
     queryFn: ({ signal }) =>
       productTransport.search(
         {
@@ -87,13 +90,19 @@ export function SearchSurface({
           sessionId: state.session,
           maxItems: Math.min(100, bootstrap?.limits.max_search_page_items ?? 1),
           maxSnippetBytes: bootstrap?.limits.max_search_snippet_bytes ?? 0,
-          after,
+          after: activeAfter,
         },
         signal,
       ),
     enabled: bootstrap?.capabilities.bounded_lexical_search === true && requestIsValid,
     gcTime: 0,
   })
+  useEffect(() => {
+    if (restorePaginationFocusRef.current && results.data !== undefined) {
+      restorePaginationFocusRef.current = false
+      resultsHeadingRef.current?.focus()
+    }
+  }, [results.data])
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -159,6 +168,7 @@ export function SearchSurface({
       {results.isLoading && <p className="search-notice">Searching the durable projection…</p>}
       {results.isError && (
         <section className="surface-empty" role="alert">
+          <AlertTriangle aria-hidden="true" />
           <div>
             <h2>Search could not be read</h2>
             <p>
@@ -179,21 +189,29 @@ export function SearchSurface({
           <header>
             <div>
               <span className="eyebrow">Newest logical address first</span>
-              <h2 id="search-results-heading">
+              <h2 id="search-results-heading" ref={resultsHeadingRef} tabIndex={-1}>
                 {results.data.results.length} results on this page
               </h2>
             </div>
             {results.data.continuation && (
               <button
                 type="button"
-                onClick={() =>
+                onClick={() => {
+                  const continuation = results.data.continuation
+                  if (continuation == null) return
+                  const nextAfter = {
+                    address: continuation.address.event_sequence,
+                    projectionId: continuation.projection_id,
+                  }
+                  restorePaginationFocusRef.current = true
+                  setActiveAfter(nextAfter)
                   onStateChange({
                     q: queryText,
                     session: state.session,
-                    afterAddress: results.data.continuation?.address.event_sequence,
-                    afterProjection: results.data.continuation?.projection_id,
+                    afterAddress: nextAfter.address,
+                    afterProjection: nextAfter.projectionId,
                   })
-                }
+                }}
               >
                 Next page <ArrowRight aria-hidden="true" />
               </button>

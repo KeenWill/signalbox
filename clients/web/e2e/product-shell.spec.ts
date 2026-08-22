@@ -77,6 +77,25 @@ test('completes route switching from the command palette without a mouse', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('restores focus after closing the command palette', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const trigger = page.getByRole('button', { name: 'Open command palette' })
+  await trigger.click()
+  await page.keyboard.press('Escape')
+  await expect(trigger).toBeFocused()
+})
+
+test('sets route-aware product document titles', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/search')
+  await expect(page).toHaveTitle('Search · Signalbox')
+
+  await page.getByRole('link', { name: /Attention/ }).click()
+  await expect(page).toHaveTitle('Attention · Signalbox')
+})
+
 test('uses a navigation sheet on a phone viewport and unwinds it with Escape', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -181,4 +200,11 @@ test('retries an initial bootstrap failure', async ({ page }) => {
   await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
   expect(problems.pageErrors).toEqual([])
   expect(problems.consoleErrors.filter((message) => message !== expectedFailureMessage)).toEqual([])
+})
+
+test('distinguishes an incompatible bootstrap contract from an outage', async ({ page }) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+  await page.goto('/attention')
+
+  await expect(page.getByRole('status')).toContainText('Contract incompatible')
 })

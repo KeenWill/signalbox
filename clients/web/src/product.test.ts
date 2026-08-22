@@ -98,32 +98,50 @@ describe('SameOriginProductTransport', () => {
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow('status 503')
   })
 
-  it('rejects impossible advertised search ceilings', async () => {
-    for (const limits of [
-      { max_search_query_bytes: 0 },
-      { max_search_query_bytes: 513 },
-      { max_search_page_items: 0 },
-      { max_search_page_items: 101 },
-      { max_search_snippet_bytes: 0 },
-      { max_search_snippet_bytes: 513 },
-    ]) {
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          async () =>
-            new Response(
-              JSON.stringify({
-                ...bootstrapFixture,
-                limits: { ...bootstrapFixture.limits, ...limits },
-              }),
-            ),
-        ),
-      )
-      await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-        'invalid search',
-      )
-    }
+  it('distinguishes an unreachable bootstrap transport from contract decoding failures', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Promise.reject(new TypeError('Failed to fetch'))),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toEqual(
+      new ProductTransportError('The bootstrap request could not reach Signalbox.'),
+    )
   })
+
+  const rejectBootstrapLimits = async (limits: Record<string, number>) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...bootstrapFixture,
+              limits: { ...bootstrapFixture.limits, ...limits },
+            }),
+          ),
+      ),
+    )
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow('invalid search')
+  }
+
+  it('rejects a zero search-query ceiling', () =>
+    rejectBootstrapLimits({ max_search_query_bytes: 0 }))
+
+  it('rejects an excessive search-query ceiling', () =>
+    rejectBootstrapLimits({ max_search_query_bytes: 513 }))
+
+  it('rejects a zero search-page ceiling', () =>
+    rejectBootstrapLimits({ max_search_page_items: 0 }))
+
+  it('rejects an excessive search-page ceiling', () =>
+    rejectBootstrapLimits({ max_search_page_items: 101 }))
+
+  it('rejects a zero search-snippet ceiling', () =>
+    rejectBootstrapLimits({ max_search_snippet_bytes: 0 }))
+
+  it('rejects an excessive search-snippet ceiling', () =>
+    rejectBootstrapLimits({ max_search_snippet_bytes: 513 }))
 
   it('decodes a bounded search page and sends product vocabulary', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(searchPageFixture)))
@@ -230,7 +248,12 @@ describe('SameOriginProductTransport', () => {
           new Response(
             JSON.stringify({
               ...searchPageFixture,
-              results: [{ ...searchPageFixture.results[0], session_id: 'wrong-session' }],
+              results: [
+                {
+                  ...searchPageFixture.results[0],
+                  session_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e',
+                },
+              ],
             }),
           ),
       ),
@@ -246,6 +269,22 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('outside the requested session')
   })
 
+  it('canonicalizes exact-session UUID spellings before comparing results', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(searchPageFixture))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        sessionId: `URN:UUID:{${searchPageFixture.results[0].session_id.toUpperCase()}}`,
+        maxItems: 1,
+        maxSnippetBytes: 512,
+      }),
+    ).resolves.toEqual(searchPageFixture)
+  })
+
   it('rejects session source identities that contradict the result session', async () => {
     vi.stubGlobal(
       'fetch',
@@ -257,7 +296,10 @@ describe('SameOriginProductTransport', () => {
               results: [
                 {
                   ...searchPageFixture.results[0],
-                  source: { kind: 'session', session_id: 'wrong-session' },
+                  source: {
+                    kind: 'session',
+                    session_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e',
+                  },
                 },
               ],
             }),
@@ -272,6 +314,57 @@ describe('SameOriginProductTransport', () => {
         maxSnippetBytes: 512,
       }),
     ).rejects.toThrow('source contradicts its session')
+  })
+
+  it('rejects a malformed result session UUID', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...searchPageFixture,
+              results: [{ ...searchPageFixture.results[0], session_id: 'not-a-uuid' }],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 1,
+        maxSnippetBytes: 512,
+      }),
+    ).rejects.toThrow('invalid UUID identity')
+  })
+
+  it('rejects a malformed typed source UUID', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...searchPageFixture,
+              results: [
+                {
+                  ...searchPageFixture.results[0],
+                  source: { kind: 'session', session_id: 'not-a-uuid' },
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 1,
+        maxSnippetBytes: 512,
+      }),
+    ).rejects.toThrow('invalid UUID identity')
   })
 
   it('rejects highlight offsets inside a UTF-8 character', async () => {
@@ -327,6 +420,61 @@ describe('SameOriginProductTransport', () => {
         maxSnippetBytes: 512,
       }),
     ).rejects.toThrow('not ordered newest first')
+  })
+
+  const rejectContinuation = async (continuation: {
+    address: { event_sequence: string }
+    projection_id: string
+  }) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ...searchPageFixture, continuation }))),
+    )
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 1,
+        maxSnippetBytes: 512,
+      }),
+    ).rejects.toThrow('invalid continuation')
+  }
+
+  it('rejects a continuation address detached from the returned page', () =>
+    rejectContinuation({ address: { event_sequence: '900' }, projection_id: '42' }))
+
+  it('rejects a nondecimal continuation projection ID', () =>
+    rejectContinuation({
+      address: { event_sequence: '901' },
+      projection_id: 'not-decimal',
+    }))
+
+  it('rejects an out-of-range continuation projection ID', () =>
+    rejectContinuation({
+      address: { event_sequence: '901' },
+      projection_id: '18446744073709551616',
+    }))
+
+  it('rejects a continuation on an empty page', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              results: [],
+              continuation: { address: { event_sequence: '901' }, projection_id: '42' },
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 1,
+        maxSnippetBytes: 512,
+      }),
+    ).rejects.toThrow('invalid continuation')
   })
 })
 
