@@ -3555,6 +3555,10 @@ impl AcceptedInputSchedulingProjection {
     pub fn earliest_queued_rendered_base_origins(
         &self,
     ) -> Option<Vec<AcceptedInputId>>;
+    pub fn external_predecessor_rendered_base_origins(
+        &self,
+        turn: TurnId,
+    ) -> Option<Vec<AcceptedInputId>>;
     pub fn resolved_snapshot(
         &self,
         snapshot: ContextFrontierId,
