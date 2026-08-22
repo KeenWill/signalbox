@@ -34,7 +34,7 @@ use signalbox_blob_store::{
 use signalbox_domain::BlobDigest;
 use tokio::{
     io::AsyncReadExt,
-    sync::{Mutex as AsyncMutex, mpsc},
+    sync::{Mutex as AsyncMutex, mpsc, watch},
     task::JoinHandle,
 };
 use tokio_util::io::StreamReader;
@@ -80,6 +80,11 @@ struct PutReconciliation {
 struct MultipartAbortGuard {
     client: Client,
     signed_abort: Option<Url>,
+}
+
+enum CompletionFailure {
+    Definite(BlobStoreError),
+    PossiblyAccepted,
 }
 
 impl MultipartAbortGuard {
@@ -431,27 +436,27 @@ impl S3BlobStore {
 
         while offset < expected.byte_length() {
             let length = part_bytes.min(expected.byte_length() - offset);
-            let body = ExactUploadBody::new(Arc::clone(&stream_state), length);
+            let (progress, observed_progress) = watch::channel(0_u64);
+            let body = ExactUploadBody::new(Arc::clone(&stream_state), length, progress);
             let action =
                 self.bucket
                     .upload_part(Some(credentials), key.as_str(), part_number, upload_id);
-            let response = match self
+            let request = self
                 .client
                 .put(action.sign(SIGNED_URL_LIFETIME))
                 .header(reqwest::header::CONTENT_LENGTH, length)
-                .body(reqwest::Body::wrap(body))
-                .send()
-                .await
-            {
-                Ok(response) => response,
-                Err(_) => {
-                    return source_or_transport_failure(
-                        producer.take(),
-                        "upload S3 multipart part",
-                    )
-                    .await;
-                }
-            };
+                .body(reqwest::Body::wrap(body));
+            let response =
+                match send_with_upload_idle_timeout(request, observed_progress, length).await {
+                    Ok(response) => response,
+                    Err(_) => {
+                        return source_or_transport_failure(
+                            producer.take(),
+                            "upload S3 multipart part",
+                        )
+                        .await;
+                    }
+                };
             let response = require_success(response, "upload S3 multipart part").await?;
             let etag = response
                 .headers()
@@ -498,25 +503,32 @@ impl S3BlobStore {
                 .body(body)
                 .send()
                 .await
-                .map_err(|_| {
-                    BlobStoreError::io("complete S3 multipart upload", SanitizedS3Failure)
-                })?;
-            let response = require_success(response, "complete S3 multipart upload").await?;
-            let _ = bounded_response(
+                .map_err(|_| CompletionFailure::PossiblyAccepted)?;
+            let response = require_success(response, "complete S3 multipart upload")
+                .await
+                .map_err(CompletionFailure::Definite)?;
+            let body = bounded_response(
                 response,
                 MAX_COMPLETE_RESPONSE_BYTES,
                 "read S3 completion response",
             )
-            .await?;
+            .await
+            .map_err(|_| CompletionFailure::PossiblyAccepted)?;
+            validate_completion_response(&body).map_err(|_| CompletionFailure::PossiblyAccepted)?;
             Ok(())
         }
         .await;
         match completion {
             Ok(()) => Ok(()),
-            Err(completion_error) => match self.verify_object(credentials, key, expected).await {
-                Ok(()) => Ok(()),
-                Err(_) => Err(completion_error),
-            },
+            Err(CompletionFailure::Definite(error)) => Err(error),
+            Err(CompletionFailure::PossiblyAccepted) => {
+                match self.verify_object(credentials, key, expected).await {
+                    Ok(()) => Ok(()),
+                    Err(_) => Err(BlobStoreError::publication_ambiguous(
+                        "reconcile S3 multipart completion",
+                    )),
+                }
+            }
         }
     }
 
@@ -768,11 +780,35 @@ async fn require_success(
 ) -> Result<Response, BlobStoreError> {
     if response.status().is_success() {
         Ok(response)
-    } else if response.status() == StatusCode::NOT_FOUND {
-        Err(BlobStoreError::not_found(operation))
     } else {
         Err(BlobStoreError::unavailable(operation))
     }
+}
+
+async fn send_with_upload_idle_timeout(
+    request: reqwest::RequestBuilder,
+    mut progress: watch::Receiver<u64>,
+    length: u64,
+) -> Result<Response, ()> {
+    let send = request.send();
+    tokio::pin!(send);
+    loop {
+        if *progress.borrow() >= length {
+            return send.await.map_err(|_| ());
+        }
+        tokio::select! {
+            response = &mut send => return response.map_err(|_| ()),
+            changed = tokio::time::timeout(IDLE_TIMEOUT, progress.changed()) =>
+                changed.map_err(|_| ())?.map_err(|_| ())?,
+        }
+    }
+}
+
+fn validate_completion_response(body: &[u8]) -> Result<(), ()> {
+    let body = std::str::from_utf8(body).map_err(|_| ())?;
+    instant_xml::from_str::<CompleteMultipartUploadResult>(body)
+        .map(|_| ())
+        .map_err(|_| ())
 }
 
 async fn bounded_response(
@@ -949,14 +985,38 @@ struct AbortIncompleteMultipartUpload {
     days: u16,
 }
 
+#[derive(Debug, FromXml)]
+#[xml(rename = "CompleteMultipartUploadResult", ns(S3_XML_NAMESPACE))]
+struct CompleteMultipartUploadResult {
+    #[xml(rename = "Location")]
+    _location: Option<String>,
+    #[xml(rename = "Bucket")]
+    _bucket: Option<String>,
+    #[xml(rename = "Key")]
+    _key: Option<String>,
+    #[xml(rename = "ETag")]
+    _etag: Option<String>,
+}
+
 struct ExactUploadBody {
     state: Arc<StdMutex<UploadStreamState>>,
     remaining: u64,
+    emitted: u64,
+    progress: watch::Sender<u64>,
 }
 
 impl ExactUploadBody {
-    fn new(state: Arc<StdMutex<UploadStreamState>>, remaining: u64) -> Self {
-        Self { state, remaining }
+    fn new(
+        state: Arc<StdMutex<UploadStreamState>>,
+        remaining: u64,
+        progress: watch::Sender<u64>,
+    ) -> Self {
+        Self {
+            state,
+            remaining,
+            emitted: 0,
+            progress,
+        }
     }
 }
 
@@ -997,6 +1057,8 @@ impl Body for ExactUploadBody {
         }
         drop(state);
         self.remaining -= take as u64;
+        self.emitted += take as u64;
+        self.progress.send_replace(self.emitted);
         Poll::Ready(Some(Ok(Frame::data(emitted))))
     }
 
@@ -1044,7 +1106,7 @@ fn read_credentials(path: &Path) -> Result<CredentialDocument, CredentialFileErr
     let descriptor = openat(
         rustix::fs::CWD,
         path,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(|_| CredentialFileError)?;
@@ -1142,7 +1204,7 @@ mod tests {
     use super::{
         CredentialFileError, LifecycleConfiguration, LifecycleRule, MAX_MULTIPART_PART_BYTES,
         MAX_MULTIPART_PARTS, MIN_MULTIPART_PART_BYTES, S3BlobStore, multipart_part_bytes,
-        read_credentials,
+        read_credentials, validate_completion_response,
     };
 
     const ACCESS_KEY: &str = "fixture-access-key";
@@ -1236,6 +1298,16 @@ mod tests {
         assert!(!LifecycleRule::covers_blobs(narrow_rule));
         assert!(!LifecycleRule::covers_blobs(tagged_rule));
         Ok(())
+    }
+
+    #[test]
+    fn completion_response_rejects_an_http_success_error_document() {
+        let success = br#"<CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Location>fixture</Location><Bucket>bucket</Bucket><Key>key</Key><ETag>etag</ETag></CompleteMultipartUploadResult>"#;
+        let embedded_error =
+            br#"<Error><Code>InternalError</Code><Message>retry</Message></Error>"#;
+
+        assert!(validate_completion_response(success).is_ok());
+        assert!(validate_completion_response(embedded_error).is_err());
     }
 
     #[test]
