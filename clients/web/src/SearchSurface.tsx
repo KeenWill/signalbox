@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { ArrowRight, Search } from 'lucide-react'
-import type { FormEvent, ReactNode } from 'react'
+import { type FormEvent, type ReactNode, useEffect, useState } from 'react'
 import type { WebContractBootstrap, WebSearchPage } from './generated/web-contract.mjs'
 import { ProductRequestError, type ProductSearchState, productTransport } from './product'
 
@@ -62,6 +62,10 @@ export function SearchSurface({
   state: ProductSearchState
   onStateChange: (state: ProductSearchState) => void
 }) {
+  const [draftQuery, setDraftQuery] = useState(state.q ?? '')
+  const [draftSession, setDraftSession] = useState(state.session ?? '')
+  useEffect(() => setDraftQuery(state.q ?? ''), [state.q])
+  useEffect(() => setDraftSession(state.session ?? ''), [state.session])
   const queryText = state.q?.trim() ?? ''
   const queryBytes = new TextEncoder().encode(queryText).length
   const queryLimit = bootstrap?.limits.max_search_query_bytes ?? 0
@@ -78,6 +82,7 @@ export function SearchSurface({
           query: queryText,
           sessionId: state.session,
           maxItems: Math.min(100, bootstrap?.limits.max_search_page_items ?? 1),
+          maxSnippetBytes: bootstrap?.limits.max_search_snippet_bytes ?? 0,
           after,
         },
         signal,
@@ -96,23 +101,30 @@ export function SearchSurface({
 
   return (
     <div className="surface-body search-surface">
-      <form
-        className="search-form"
-        onSubmit={submit}
-        key={`${state.q ?? ''}:${state.session ?? ''}`}
-      >
+      <form className="search-form" onSubmit={submit}>
         <label>
           <span>Search text</span>
           <span className="search-input">
             <Search aria-hidden="true" />
-            <input name="q" defaultValue={state.q} placeholder="Natural language terms" required />
+            <input
+              name="q"
+              value={draftQuery}
+              onChange={(event) => setDraftQuery(event.currentTarget.value)}
+              placeholder="Natural language terms"
+              required
+            />
           </span>
         </label>
         <label>
           <span>
             Exact session <small>optional</small>
           </span>
-          <input name="session" defaultValue={state.session} placeholder="Session UUID" />
+          <input
+            name="session"
+            value={draftSession}
+            onChange={(event) => setDraftSession(event.currentTarget.value)}
+            placeholder="Session UUID"
+          />
         </label>
         <button type="submit" disabled={bootstrap === undefined}>
           Search
@@ -133,6 +145,13 @@ export function SearchSurface({
           </p>
         </section>
       )}
+      <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {results.isLoading
+          ? 'Searching the durable projection.'
+          : results.data
+            ? `${results.data.results.length} results loaded on this page.`
+            : ''}
+      </p>
       {results.isLoading && <p className="search-notice">Searching the durable projection…</p>}
       {results.isError && (
         <section className="surface-empty" role="alert">
@@ -179,7 +198,9 @@ export function SearchSurface({
           ) : (
             <ol>
               {results.data.results.map((result) => (
-                <li key={`${result.address.event_sequence}:${sourceIdentity(result)}`}>
+                <li
+                  key={`${result.session_id}:${result.address.event_sequence}:${result.source.kind}:${result.content_class}:${sourceIdentity(result)}`}
+                >
                   <div className="search-result-meta">
                     <span>{displayClass(result.content_class)}</span>
                     <code>{result.address.event_sequence}</code>

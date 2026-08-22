@@ -91,3 +91,55 @@ test('uses a navigation sheet on a phone viewport and unwinds it with Escape', a
   await expect(openNavigation).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
+
+test('closes the phone navigation sheet after route selection', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open navigation' }).click()
+  const navigation = page.getByRole('dialog', { name: 'Product navigation' })
+  await navigation.getByRole('link', { name: /Sessions/ }).click()
+  await expect(navigation).toBeHidden()
+  await expect(page).toHaveURL(/\/sessions$/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('runs product navigation sequences but leaves Mod+K to an editing field', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/search')
+
+  const search = page.getByRole('textbox', { name: 'Search text' })
+  await search.focus()
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeHidden()
+  await search.press('Escape')
+  await page.keyboard.press('g')
+  await page.keyboard.press('a')
+  await expect(page).toHaveURL(/\/attention$/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('retries an initial bootstrap failure', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let attempts = 0
+  await page.route('**/api/bootstrap', (route) => {
+    attempts += 1
+    return attempts === 1
+      ? route.fulfill({ status: 503 })
+      : route.fulfill({ json: bootstrapFixture })
+  })
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Retry contract check' }).click()
+  await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
+  expect(problems).toEqual({
+    consoleErrors: [
+      'Failed to load resource: the server responded with a status of 503 (Service Unavailable)',
+    ],
+    pageErrors: [],
+  })
+})

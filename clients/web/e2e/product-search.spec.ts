@@ -118,6 +118,19 @@ test('replaces the bounded result page through its typed cursor', async ({ page 
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('preserves search focus and announces asynchronous results', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useSearchFixture(page)
+  await page.goto('/search')
+
+  const search = page.getByRole('textbox', { name: 'Search text' })
+  await search.fill('release evidence')
+  await search.press('Enter')
+  await expect(search).toBeFocused()
+  await expect(page.getByRole('status')).toHaveText('2 results loaded on this page.')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('captures desktop dark, desktop light, and responsive search evidence', async ({
   page,
 }, testInfo) => {

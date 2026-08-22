@@ -85,6 +85,7 @@ describe('SameOriginProductTransport', () => {
       query: 'natural terms',
       sessionId: searchPageFixture.results[0].session_id,
       maxItems: 100,
+      maxSnippetBytes: 512,
       after: { address: '500', projectionId: '42' },
     })
 
@@ -101,7 +102,11 @@ describe('SameOriginProductTransport', () => {
       vi.fn(async () => new Response(JSON.stringify(errorFixture), { status: 503 })),
     )
 
-    const request = new SameOriginProductTransport().search({ query: 'term', maxItems: 10 })
+    const request = new SameOriginProductTransport().search({
+      query: 'term',
+      maxItems: 10,
+      maxSnippetBytes: 512,
+    })
 
     await expect(request).rejects.toEqual(
       new ProductRequestError(
@@ -110,6 +115,49 @@ describe('SameOriginProductTransport', () => {
         errorFixture.error.message,
       ),
     )
+  })
+
+  it('rejects an encoded search response beyond its byte bound', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(searchPageFixture), {
+            headers: { 'content-length': '9999999' },
+          }),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 1,
+        maxSnippetBytes: 512,
+      }),
+    ).rejects.toThrow('response exceeds')
+  })
+
+  it('rejects decoded search fields beyond their rendering bounds', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...searchPageFixture,
+              results: [{ ...searchPageFixture.results[0], snippet: 'too long' }],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 1,
+        maxSnippetBytes: 3,
+      }),
+    ).rejects.toThrow('snippet limit')
   })
 })
 

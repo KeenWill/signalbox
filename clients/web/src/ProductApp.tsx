@@ -1,5 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog'
-import { useHotkeys } from '@tanstack/react-hotkeys'
+import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
 import {
@@ -18,6 +18,7 @@ import {
   type CommandContext,
   commandRegistry,
   globalHotkeyBindings,
+  globalHotkeySequenceBindings,
   invokeCommand,
 } from './commands'
 import {
@@ -89,7 +90,13 @@ const surfaceCopy: Record<
   },
 }
 
-function ProductNavigation({ active }: { active: ProductRouteId }) {
+function ProductNavigation({
+  active,
+  onNavigate,
+}: {
+  active: ProductRouteId
+  onNavigate?: () => void
+}) {
   return (
     <div className="product-navigation">
       <div className="brand">
@@ -105,6 +112,7 @@ function ProductNavigation({ active }: { active: ProductRouteId }) {
             params={{ surface: route.id }}
             className={active === route.id ? 'product-link active' : 'product-link'}
             aria-current={active === route.id ? 'page' : undefined}
+            onClick={onNavigate}
           >
             <span>{route.label}</span>
             <small>{route.description}</small>
@@ -115,6 +123,7 @@ function ProductNavigation({ active }: { active: ProductRouteId }) {
         className="scenario-entry"
         to="/scenario/$scenarioId"
         params={{ scenarioId: 'streaming' }}
+        onClick={onNavigate}
       >
         Scenario studio <span aria-hidden="true">↗</span>
       </Link>
@@ -253,7 +262,7 @@ function ProductToolbar({ context }: { context: CommandContext }) {
         className="icon-button mobile-only"
         type="button"
         aria-label="Open navigation"
-        onClick={() => context.dispatch(actions.overlaySet('navigation'))}
+        onClick={() => invokeCommand('navigation.open', context)}
       >
         <Menu />
       </button>
@@ -319,10 +328,31 @@ export function ProductApp({
     }),
     [dispatch, navigate],
   )
+  const isEditableTarget = (target: EventTarget | null) => {
+    if (!(target instanceof HTMLElement)) return false
+    return (
+      target.isContentEditable ||
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      target instanceof HTMLSelectElement
+    )
+  }
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
-      callback: () => invokeCommand(binding.commandId, context),
+      callback: (event) => {
+        if (binding.commandId === 'palette.open' && isEditableTarget(event.target)) return
+        invokeCommand(binding.commandId, context)
+      },
+    })),
+  )
+  useHotkeySequences(
+    globalHotkeySequenceBindings.map((binding) => ({
+      sequence: binding.sequence,
+      callback: (event) => {
+        if (isEditableTarget(event.target)) return
+        invokeCommand(binding.commandId, context)
+      },
     })),
   )
 
@@ -370,6 +400,11 @@ export function ProductApp({
               : bootstrap.isError
                 ? 'Transport unavailable'
                 : 'Checking contract…'}
+            {bootstrap.isError && (
+              <button type="button" onClick={() => void bootstrap.refetch()}>
+                Retry contract check
+              </button>
+            )}
           </span>
         </div>
         {content}
@@ -416,7 +451,10 @@ export function ProductApp({
             <Dialog.Description id="mobile-navigation-description" className="sr-only">
               Choose a Signalbox surface.
             </Dialog.Description>
-            <ProductNavigation active={surface} />
+            <ProductNavigation
+              active={surface}
+              onNavigate={() => dispatch(actions.overlaySet(null))}
+            />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>

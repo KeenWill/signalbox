@@ -32,7 +32,79 @@ export interface ProductSearchRequest {
   query: string
   sessionId?: string
   maxItems: number
+  maxSnippetBytes: number
   after?: { address: string; projectionId: string }
+}
+
+const MAX_SEARCH_RESPONSE_BYTES = 1_048_576
+const MAX_SEARCH_HIGHLIGHTS_PER_RESULT = 64
+const ERROR_RESPONSE_BYTES = 16_384
+
+const readBoundedJson = async (response: Response, maximumBytes: number): Promise<unknown> => {
+  const declaredLength = response.headers.get('content-length')
+  if (declaredLength !== null && Number(declaredLength) > maximumBytes) {
+    throw new TypeError(`response exceeds ${maximumBytes} bytes`)
+  }
+  const reader = response.body?.getReader()
+  if (reader === undefined) {
+    const text = await response.text()
+    if (new TextEncoder().encode(text).byteLength > maximumBytes) {
+      throw new TypeError(`response exceeds ${maximumBytes} bytes`)
+    }
+    return JSON.parse(text)
+  }
+  const chunks: Uint8Array[] = []
+  let length = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      length += value.byteLength
+      if (length > maximumBytes) {
+        await reader.cancel()
+        throw new TypeError(`response exceeds ${maximumBytes} bytes`)
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  const bytes = new Uint8Array(length)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+}
+
+const validateSearchPageBounds = (
+  page: WebSearchPage,
+  request: ProductSearchRequest,
+): WebSearchPage => {
+  if (page.results.length > request.maxItems) throw new TypeError('search page exceeds item limit')
+  const encoder = new TextEncoder()
+  for (const result of page.results) {
+    const snippetLength = encoder.encode(result.snippet).byteLength
+    if (snippetLength > request.maxSnippetBytes) {
+      throw new TypeError('search result exceeds snippet limit')
+    }
+    if (result.highlights.length > MAX_SEARCH_HIGHLIGHTS_PER_RESULT) {
+      throw new TypeError('search result exceeds highlight limit')
+    }
+    let previousEnd = 0
+    for (const highlight of result.highlights) {
+      if (
+        highlight.start_byte < previousEnd ||
+        highlight.end_byte < highlight.start_byte ||
+        highlight.end_byte > snippetLength
+      ) {
+        throw new TypeError('search result carries an invalid highlight range')
+      }
+      previousEnd = highlight.end_byte
+    }
+  }
+  return page
 }
 
 export const readProductSearchState = (value: Record<string, unknown>): ProductSearchState => {
@@ -90,10 +162,17 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) {
-      const failure = decodeWebApiErrorResponse(await response.json())
+      const failure = decodeWebApiErrorResponse(
+        await readBoundedJson(response, ERROR_RESPONSE_BYTES),
+      )
       throw new ProductRequestError(failure.error.code, failure.error.kind, failure.error.message)
     }
-    return decodeWebSearchPage(await response.json())
+    const responseLimit = Math.min(
+      MAX_SEARCH_RESPONSE_BYTES,
+      16_384 + request.maxItems * (request.maxSnippetBytes + 2_048),
+    )
+    const page = decodeWebSearchPage(await readBoundedJson(response, responseLimit))
+    return validateSearchPageBounds(page, request)
   }
 }
 

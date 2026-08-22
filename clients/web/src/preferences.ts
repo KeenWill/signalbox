@@ -96,9 +96,9 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
 
 export const loadBrowserPreferences = (): BrowserPreferences => {
   if (typeof localStorage === 'undefined') return defaultBrowserPreferences
-  const stored = localStorage.getItem(BROWSER_PREFERENCES_KEY)
-  if (stored === null) return defaultBrowserPreferences
   try {
+    const stored = localStorage.getItem(BROWSER_PREFERENCES_KEY)
+    if (stored === null) return defaultBrowserPreferences
     return decodeBrowserPreferences(JSON.parse(stored))
   } catch {
     return defaultBrowserPreferences
@@ -107,5 +107,9 @@ export const loadBrowserPreferences = (): BrowserPreferences => {
 
 export const saveBrowserPreferences = (preferences: BrowserPreferences): void => {
   if (typeof localStorage === 'undefined') return
-  localStorage.setItem(BROWSER_PREFERENCES_KEY, JSON.stringify(preferences))
+  try {
+    localStorage.setItem(BROWSER_PREFERENCES_KEY, JSON.stringify(preferences))
+  } catch {
+    // The in-memory store remains authoritative when persistence is unavailable.
+  }
 }
