@@ -27,6 +27,12 @@ const admittedOriginalArtifact = decodeWebBlobDescriptor({
     view.kind === 'browser_native' ? { ...view, byte_length: '1048576' } : view,
   ),
 })
+const oversizedOriginalArtifact = decodeWebBlobDescriptor({
+  ...imageArtifact,
+  available_views: imageArtifact.available_views.map((view) =>
+    view.kind === 'browser_native' ? { ...view, byte_length: '16777217' } : view,
+  ),
+})
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
@@ -159,7 +165,7 @@ test('preserves an active artifact when the inspector changes composition', asyn
 
 test('keeps an oversized browser-native original download-only', async ({ page }) => {
   const problems = watchBrowser(page)
-  await useArtifactScenario(page)
+  await useArtifactScenario(page, oversizedOriginalArtifact)
   await page.goto('/sessions')
 
   await resolveArtifactWithoutMouse(page)
