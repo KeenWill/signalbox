@@ -30,14 +30,75 @@ END; $$;
 
 CREATE FUNCTION imported_encoding_skip_text(encoded bytea, start_at integer)
 RETURNS integer LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
-DECLARE payload_bytes bigint; next_at bigint;
+DECLARE
+    payload_bytes bigint;
+    next_at bigint;
+    position integer;
+    first_byte integer;
+    second_byte integer;
 BEGIN
     payload_bytes := imported_encoding_length_at(encoded, start_at);
     next_at := start_at::bigint + 8 + payload_bytes;
     IF next_at > octet_length(encoded) THEN
         RAISE EXCEPTION 'truncated imported text encoding' USING ERRCODE = '23514';
     END IF;
+    position := start_at + 8;
+    WHILE position < next_at LOOP
+        first_byte := get_byte(encoded, position);
+        IF first_byte <= 127 THEN
+            position := position + 1;
+        ELSIF first_byte BETWEEN 194 AND 223 THEN
+            IF position + 1 >= next_at
+                OR get_byte(encoded, position + 1) NOT BETWEEN 128 AND 191 THEN
+                RAISE EXCEPTION 'invalid imported text UTF-8' USING ERRCODE = '23514';
+            END IF;
+            position := position + 2;
+        ELSIF first_byte BETWEEN 224 AND 239 THEN
+            IF position + 2 >= next_at THEN
+                RAISE EXCEPTION 'invalid imported text UTF-8' USING ERRCODE = '23514';
+            END IF;
+            second_byte := get_byte(encoded, position + 1);
+            IF (first_byte = 224 AND second_byte NOT BETWEEN 160 AND 191)
+                OR (first_byte = 237 AND second_byte NOT BETWEEN 128 AND 159)
+                OR (first_byte NOT IN (224, 237) AND second_byte NOT BETWEEN 128 AND 191)
+                OR get_byte(encoded, position + 2) NOT BETWEEN 128 AND 191 THEN
+                RAISE EXCEPTION 'invalid imported text UTF-8' USING ERRCODE = '23514';
+            END IF;
+            position := position + 3;
+        ELSIF first_byte BETWEEN 240 AND 244 THEN
+            IF position + 3 >= next_at THEN
+                RAISE EXCEPTION 'invalid imported text UTF-8' USING ERRCODE = '23514';
+            END IF;
+            second_byte := get_byte(encoded, position + 1);
+            IF (first_byte = 240 AND second_byte NOT BETWEEN 144 AND 191)
+                OR (first_byte = 244 AND second_byte NOT BETWEEN 128 AND 143)
+                OR (first_byte BETWEEN 241 AND 243 AND second_byte NOT BETWEEN 128 AND 191)
+                OR get_byte(encoded, position + 2) NOT BETWEEN 128 AND 191
+                OR get_byte(encoded, position + 3) NOT BETWEEN 128 AND 191 THEN
+                RAISE EXCEPTION 'invalid imported text UTF-8' USING ERRCODE = '23514';
+            END IF;
+            position := position + 4;
+        ELSE
+            RAISE EXCEPTION 'invalid imported text UTF-8' USING ERRCODE = '23514';
+        END IF;
+    END LOOP;
     RETURN next_at::integer;
+END; $$;
+
+CREATE FUNCTION imported_encoding_skip_number(encoded bytea, start_at integer)
+RETURNS integer LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
+DECLARE payload_bytes bigint; next_at integer; value text;
+BEGIN
+    payload_bytes := imported_encoding_length_at(encoded, start_at);
+    next_at := imported_encoding_skip_text(encoded, start_at);
+    value := convert_from(
+        substring(encoded FROM start_at + 9 FOR payload_bytes::integer),
+        'UTF8'
+    );
+    IF value !~ '^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN
+        RAISE EXCEPTION 'invalid imported JSON number' USING ERRCODE = '23514';
+    END IF;
+    RETURN next_at;
 END; $$;
 
 CREATE FUNCTION imported_encoding_skip_boolean(encoded bytea, start_at integer)
@@ -59,7 +120,8 @@ BEGIN
     tag := get_byte(encoded, start_at); next_at := start_at + 1;
     IF tag = 0 THEN RETURN next_at;
     ELSIF tag = 1 THEN RETURN imported_encoding_skip_boolean(encoded, next_at);
-    ELSIF tag IN (2, 3) THEN RETURN imported_encoding_skip_text(encoded, next_at);
+    ELSIF tag = 2 THEN RETURN imported_encoding_skip_number(encoded, next_at);
+    ELSIF tag = 3 THEN RETURN imported_encoding_skip_text(encoded, next_at);
     ELSIF tag IN (4, 5) THEN
         IF nesting_depth >= 128 THEN
             RAISE EXCEPTION 'imported structured container depth exceeded' USING ERRCODE = '23514';

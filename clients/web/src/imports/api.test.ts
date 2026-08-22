@@ -30,6 +30,33 @@ describe('HttpImportApi correlation', () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
+  it('revalidates the bootstrap after a transient validation failure', async () => {
+    const fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            items: [],
+            next_cursor: null,
+            search_correlation: null,
+            exact_source_session_id_sha256: null,
+          }),
+        ),
+    )
+    vi.stubGlobal('fetch', fetch)
+    const transientFailure = new TypeError('daemon is restarting')
+    const bootstrapValidation = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(transientFailure)
+      .mockResolvedValueOnce(undefined)
+    const api = new HttpImportApi(bootstrapValidation)
+
+    await expect(api.list({ limit: 1 })).rejects.toBe(transientFailure)
+    await expect(api.list({ limit: 1 })).resolves.toMatchObject({ items: [] })
+
+    expect(bootstrapValidation).toHaveBeenCalledTimes(2)
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
   it('accepts the documented omitted first-window anchor', async () => {
     vi.stubGlobal(
       'fetch',

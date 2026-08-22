@@ -176,7 +176,10 @@ export class HttpImportApi implements ImportApi {
   constructor(private readonly bootstrapValidation = validateWebContractBootstrap) {}
 
   private validateBootstrap(): Promise<void> {
-    this.bootstrapValidationPromise ??= this.bootstrapValidation()
+    this.bootstrapValidationPromise ??= this.bootstrapValidation().catch((error: unknown) => {
+      this.bootstrapValidationPromise = undefined
+      throw error
+    })
     return this.bootstrapValidationPromise
   }
 

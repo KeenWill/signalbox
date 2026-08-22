@@ -324,7 +324,8 @@ impl ImportedConversationDiscoveryRepository {
             "SELECT imported_conversation_id, source_format, converter_version,
                     substring(source_session_id FROM 1 FOR $6::integer) AS source_session_prefix,
                     octet_length(source_session_id)::bigint AS source_session_bytes,
-                    sha256(source_session_id) AS source_session_digest,
+                    CASE WHEN $4::bytea IS NOT NULL
+                         THEN sha256(source_session_id) END AS source_session_digest,
                     $6::bigint AS source_session_maximum_bytes,
                     declared_entry_count, display_title, display_title_state
                FROM imported_conversation
