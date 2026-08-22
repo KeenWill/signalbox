@@ -150,8 +150,9 @@ const captureSessionEvidence = async (page: Page) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
   await page
-    .getByText('Earlier investigation evidence compacted through transcript position 88.')
-    .scrollIntoViewIfNeeded()
+    .locator('.timeline-detail-card')
+    .filter({ hasText: 'context compacted' })
+    .evaluate((element) => element.scrollIntoView({ block: 'center' }))
   await expect(page).toHaveScreenshot('sessions-mobile-light.png', { animations: 'disabled' })
   await expect(
     page.locator('.timeline-detail-card').filter({ hasText: 'context compacted' }),
