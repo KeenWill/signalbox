@@ -139,7 +139,7 @@ test('makes the fleet scroll viewport keyboard reachable', async ({ page }) => {
   await rows.focus()
   await expect(rows).toBeFocused()
   await rows.press('End')
-  expect(await rows.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+  await expect.poll(() => rows.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -443,6 +443,7 @@ test('keeps the fleet surface reachable on a short wide viewport', async ({ page
 test('Mod+K opens the registered command palette', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
 
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
@@ -463,6 +464,7 @@ test('Escape closes the command palette', async ({ page }) => {
 test('the command palette opens keyboard help without closing it', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
 
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
