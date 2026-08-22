@@ -2,6 +2,8 @@
 
 mod configuration;
 mod dispatch_https;
+#[allow(unsafe_code)]
+mod fchmodat2;
 mod https_broker;
 mod protocol;
 mod state;

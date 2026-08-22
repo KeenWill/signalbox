@@ -7,6 +7,7 @@ use std::{
     fs::File,
     future::Future,
     io::{self, Read, Write},
+    os::fd::AsFd as _,
     os::unix::ffi::{OsStrExt as _, OsStringExt as _},
     os::unix::fs::{MetadataExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
@@ -26,6 +27,8 @@ use signalbox_runner_wire::{
     RepositoryKey, SandboxProfile, WorkingDirectory, WorkspaceManifest, workspace_manifest_digest,
 };
 use uuid::Uuid;
+
+use crate::fchmodat2::chmod_descriptor;
 
 const DIRECTORY_MODE: u32 = 0o700;
 const DOCUMENT_MODE: u32 = 0o600;
@@ -1079,20 +1082,36 @@ fn remove_directory_steps(
                 let status =
                     statat(parent.as_ref(), &name, AtFlags::SYMLINK_NOFOLLOW).map_err(rustix_io)?;
                 if FileType::from_raw_mode(status.st_mode) == FileType::Directory {
-                    let descriptor = openat(
+                    let opaque_descriptor = openat(
+                        parent.as_ref(),
+                        &name,
+                        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(rustix_io)?;
+                    let opaque = File::from(opaque_descriptor);
+                    let identity = DirectoryIdentity::from_file(&opaque)?;
+                    if !identity.names(parent.as_ref(), &name)? {
+                        return Err(RunnerWorkspaceError::ManifestConflict);
+                    }
+                    chmod_descriptor(
+                        opaque.as_fd(),
+                        (Mode::RUSR | Mode::WUSR | Mode::XUSR).bits(),
+                    )
+                    .map_err(RunnerWorkspaceError::Io)?;
+                    if DirectoryIdentity::from_file(&opaque)? != identity
+                        || !identity.names(parent.as_ref(), &name)?
+                    {
+                        return Err(RunnerWorkspaceError::ManifestConflict);
+                    }
+                    let readable_descriptor = openat(
                         parent.as_ref(),
                         &name,
                         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                         Mode::empty(),
                     )
                     .map_err(rustix_io)?;
-                    let child = Rc::new(File::from(descriptor));
-                    let identity = DirectoryIdentity::from_file(child.as_ref())?;
-                    if !identity.names(parent.as_ref(), &name)? {
-                        return Err(RunnerWorkspaceError::ManifestConflict);
-                    }
-                    fchmod(child.as_ref(), Mode::RUSR | Mode::WUSR | Mode::XUSR)
-                        .map_err(rustix_io)?;
+                    let child = Rc::new(File::from(readable_descriptor));
                     if DirectoryIdentity::from_file(child.as_ref())? != identity
                         || !identity.names(parent.as_ref(), &name)?
                     {
@@ -1281,6 +1300,8 @@ mod tests {
     const CLONE_URL: &str = "https://github.com/KeenWill/signalbox.git";
     const PREPARED_REPOSITORY_BYTES: &[u8] = b"repository\n";
     const LATE_REPOSITORY_WRITE_BYTES: &[u8] = b"late repository write\n";
+    const NESTED_REPOSITORY_DIRECTORY: &str = "nested";
+    const PARTIAL_REPOSITORY_BYTES: &[u8] = b"partial repository\n";
 
     fn fixture_root() -> (TempDir, RunnerStateRoot) {
         let parent = tempfile::tempdir().expect("the workspace fixture parent exists");
@@ -1526,8 +1547,10 @@ mod tests {
                 .workspace_store()
                 .expect("the locked root forms a workspace store")
                 .prepare_repository_workspace(&expected, |target| async move {
-                    fs::write(target.path().join("partial"), b"partial repository\n")?;
-                    fs::set_permissions(target.path(), fs::Permissions::from_mode(0o000))?;
+                    let nested = target.path().join(NESTED_REPOSITORY_DIRECTORY);
+                    fs::create_dir(&nested)?;
+                    fs::write(nested.join("partial"), PARTIAL_REPOSITORY_BYTES)?;
+                    fs::set_permissions(&nested, fs::Permissions::from_mode(0o000))?;
                     let _ = started.send(());
                     future::pending::<Result<Recovery, std::io::Error>>().await
                 })
