@@ -112,10 +112,11 @@ or open database transaction to a processor.
 Unknown inspection is successful and has no views. Malformed, ambiguous,
 declared-mismatch, and encrypted outcomes are known typed failures. Reads admit
 only a declared view; options remain structured data for adapter validation. A
-complete `file_read` argument document admits at most 256 total JSON object and
-array containers, including the outer argument and options objects. Text must be
-bounded valid UTF-8 without U+0000. Structured output must parse as bounded JSON
-within its declared depth, node, string, and byte limits. A cursor is absent on
+complete `file_read` argument document admits a maximum nesting depth of 256
+JSON object and array containers; the outer argument and options objects count
+toward that depth. Text must be bounded valid UTF-8 without U+0000. Structured
+output must parse as bounded JSON within its declared depth, node, string, and
+byte limits. A cursor is absent on
 complete output and is a bounded control-free opaque value on a truncated
 result. A continuation read sends that cursor instead of initial view options
 through the same checked service and processor request contracts.
