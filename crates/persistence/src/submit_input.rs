@@ -1966,9 +1966,12 @@ async fn prepare_attachment_admission(
         saturating_attachment_byte_sum(total, *length)
     });
     if aggregate > maximum_bytes.get() {
+        let observed_bytes = NonZeroU64::new(aggregate).ok_or(
+            SubmitInputCorruption::Inconsistent("attachment byte length sum"),
+        )?;
         return Ok(Some(command.prepare_attachment_bytes_too_large(
             maximum_bytes,
-            NonZeroU64::new(aggregate).expect("an exceeded aggregate is positive"),
+            observed_bytes,
         )));
     }
     Ok(None)
