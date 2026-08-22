@@ -2,6 +2,7 @@ import { type CommandContext, type CommandId, commandRegistry, invokeCommand } f
 
 export interface ProductCommandContext extends CommandContext {
   navigate: (path: string) => void
+  openArtifactInspector?: () => void
 }
 
 const productNavigationCommands = [
@@ -68,6 +69,15 @@ const productNavigationCommands = [
     category: 'Navigate',
     bindings: [],
     run: (context: ProductCommandContext) => context.navigate('/usage'),
+  },
+  {
+    id: 'artifact.open',
+    title: 'Open artifact inspector',
+    description: 'Resolve and inspect an immutable blob by its declared identity.',
+    category: 'Surface',
+    bindings: [],
+    available: (context: ProductCommandContext) => context.openArtifactInspector !== undefined,
+    run: (context: ProductCommandContext) => context.openArtifactInspector?.(),
   },
   {
     id: 'navigate.settings',
