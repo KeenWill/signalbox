@@ -343,6 +343,7 @@ describe('BoundedSessionHistory', () => {
           contract: { name: 'signalbox.web-http', version: '1' },
           capabilities: {
             bounded_json: true,
+            bounded_lexical_search: true,
             same_origin_json_mutations: true,
             ndjson_streaming: true,
             bounded_session_timeline: false,
@@ -350,6 +351,9 @@ describe('BoundedSessionHistory', () => {
           limits: {
             max_json_body_bytes: 1024,
             max_ndjson_item_bytes: 1024,
+            max_search_query_bytes: 1,
+            max_search_page_items: 1,
+            max_search_snippet_bytes: 1,
             max_timeline_window_items: 256,
             max_timeline_window_bytes: 64 * 1024,
           },
@@ -369,6 +373,7 @@ describe('BoundedSessionHistory', () => {
           contract: { name: 'signalbox.web-http', version: '1' },
           capabilities: {
             bounded_json: true,
+            bounded_lexical_search: true,
             same_origin_json_mutations: true,
             ndjson_streaming: true,
             bounded_session_timeline: true,
@@ -376,6 +381,9 @@ describe('BoundedSessionHistory', () => {
           limits: {
             max_json_body_bytes: 1024,
             max_ndjson_item_bytes: 1024,
+            max_search_query_bytes: 1,
+            max_search_page_items: 1,
+            max_search_snippet_bytes: 1,
             max_timeline_window_items: 0,
             max_timeline_window_bytes: 255,
           },
@@ -395,6 +403,7 @@ describe('BoundedSessionHistory', () => {
           contract: { name: 'signalbox.web-http', version: '1' },
           capabilities: {
             bounded_json: true,
+            bounded_lexical_search: true,
             same_origin_json_mutations: true,
             ndjson_streaming: true,
             bounded_session_timeline: true,
@@ -402,6 +411,9 @@ describe('BoundedSessionHistory', () => {
           limits: {
             max_json_body_bytes: 1024,
             max_ndjson_item_bytes: 1024,
+            max_search_query_bytes: 1,
+            max_search_page_items: 1,
+            max_search_snippet_bytes: 1,
             max_timeline_window_items: 257,
             max_timeline_window_bytes: 64 * 1024 + 1,
           },
@@ -692,6 +704,7 @@ describe('BoundedSessionHistory', () => {
             contract: { name: 'signalbox.web-http', version: '1' },
             capabilities: {
               bounded_json: true,
+              bounded_lexical_search: true,
               same_origin_json_mutations: true,
               ndjson_streaming: true,
               bounded_session_timeline: true,
@@ -699,6 +712,9 @@ describe('BoundedSessionHistory', () => {
             limits: {
               max_json_body_bytes: 1024,
               max_ndjson_item_bytes: 1024,
+              max_search_query_bytes: 1,
+              max_search_page_items: 1,
+              max_search_snippet_bytes: 1,
               max_timeline_window_items: 256,
               max_timeline_window_bytes: 64 * 1024,
             },

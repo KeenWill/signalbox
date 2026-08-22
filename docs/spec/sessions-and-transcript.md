@@ -1,7 +1,9 @@
 # Sessions and the transcript
 
 The bounded browser session descriptor and historical timeline foundation are
-verified against this PR (`agent/web-session-timeline`).
+verified against this PR (`agent/web-session-timeline`). The bounded
+lexical-search projection and query boundary are verified against this PR
+(`agent/web-search-usage`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -689,6 +691,42 @@ retained preferentially, so moving among the first, latest, and an arbitrary
 million-event address never makes lifetime history a client-memory precondition.
 Transcript `full`, `condensed`, and `results` remain local presentation choices
 and do not alter any server query.
+
+## Bounded browser lexical search
+
+Version-one browser search is lexical. `GET /api/search` accepts natural product
+text, an optional exact session, a page size, and an opaque continuation made
+from a stable timeline address plus projection identity. It accepts only the
+`lexical` strategy and passes text to PostgreSQL `plainto_tsquery`; PostgreSQL
+operators and query syntax are not product semantics. The application strategy
+boundary remains explicit so a future semantic or hybrid strategy does not
+change the lexical request into a database query language.
+
+The dedicated PostgreSQL full-text projection indexes canonical accepted user
+text, final assistant transcript text, model-visible tool arguments and results,
+current session title/tags/searchable attributes, explicitly published
+attachment filenames and media metadata, and durable derived text. Context
+summaries are the implemented transcript-owned derived-text producer. Attachment
+and other derivation producers publish only text their durable contract
+explicitly supplies, through the typed projection-writer port and after their
+own source exists. The projection performs no implicit attachment reading, OCR,
+text extraction, or model pass.
+
+Every result carries its session, stable timeline address, typed owning
+session/input/turn transcript entry/tool request/tool attempt/attachment/derived
+artifact identity, closed content class, and a plain-text snippet with UTF-8
+byte highlight ranges. The address is directly usable with the timeline `around`
+read even when the matching region is not loaded. An unknown stored source or
+content class, malformed identity, invalid address, or contradictory source
+shape fails closed.
+
+Requests accept 1 through 100 results and at most 512 UTF-8 query bytes. Each
+returned snippet is at most 512 UTF-8 bytes. Results have a stable strict
+newest-address-first keyset order by `(event_sequence, projection_id)`; the
+adapter fetches at most one item beyond the requested page to decide whether to
+return a continuation. The GIN full-text index finds matches, while separate
+global and session indexes support the bounded keyset traversal. Search never
+materializes or scans a session transcript in the browser.
 
 ## Semantic transcript entries
 

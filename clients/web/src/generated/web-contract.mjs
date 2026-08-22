@@ -69,6 +69,10 @@ const schemas = {
             "description": "Ordinary bounded JSON responses are available under `/api/`.",
             "type": "boolean"
           },
+          "bounded_lexical_search": {
+            "description": "Bounded lexical search with stable history reveal addresses is available.",
+            "type": "boolean"
+          },
           "bounded_session_timeline": {
             "description": "Stable bounded session descriptors and historical windows are available.",
             "type": "boolean"
@@ -86,7 +90,8 @@ const schemas = {
           "bounded_json",
           "same_origin_json_mutations",
           "ndjson_streaming",
-          "bounded_session_timeline"
+          "bounded_session_timeline",
+          "bounded_lexical_search"
         ],
         "type": "object"
       },
@@ -125,6 +130,24 @@ const schemas = {
             "minimum": 0,
             "type": "integer"
           },
+          "max_search_page_items": {
+            "description": "Maximum results in one search page.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_search_query_bytes": {
+            "description": "Maximum UTF-8 bytes in one product search expression.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_search_snippet_bytes": {
+            "description": "Maximum UTF-8 bytes in one search result snippet.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "max_timeline_window_bytes": {
             "description": "Maximum projected structured item bytes in one timeline window.",
             "format": "uint32",
@@ -142,7 +165,10 @@ const schemas = {
           "max_json_body_bytes",
           "max_ndjson_item_bytes",
           "max_timeline_window_items",
-          "max_timeline_window_bytes"
+          "max_timeline_window_bytes",
+          "max_search_query_bytes",
+          "max_search_page_items",
+          "max_search_snippet_bytes"
         ],
         "type": "object"
       }
@@ -191,6 +217,339 @@ const schemas = {
       "message"
     ],
     "title": "WebContractExample",
+    "type": "object"
+  },
+  "WebSearchPage": {
+    "$defs": {
+      "WebSearchContentClass": {
+        "description": "Closed browser-visible class of matched indexed content.",
+        "enum": [
+          "user_transcript",
+          "assistant_transcript",
+          "tool_arguments",
+          "tool_result",
+          "session_metadata",
+          "attachment_filename",
+          "attachment_media_metadata",
+          "derived_text_artifact"
+        ],
+        "type": "string"
+      },
+      "WebSearchCursor": {
+        "additionalProperties": false,
+        "description": "Stable opaque descending search keyset boundary.",
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/WebTimelineAddress"
+          },
+          "projection_id": {
+            "$ref": "#/$defs/WebSearchProjectionId"
+          }
+        },
+        "required": [
+          "address",
+          "projection_id"
+        ],
+        "type": "object"
+      },
+      "WebSearchHighlight": {
+        "additionalProperties": false,
+        "description": "One half-open UTF-8 byte range within a bounded snippet.",
+        "properties": {
+          "end_byte": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_byte": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start_byte",
+          "end_byte"
+        ],
+        "type": "object"
+      },
+      "WebSearchProjectionId": {
+        "description": "Checked positive PostgreSQL projection identity encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]{0,18}$",
+        "type": "string"
+      },
+      "WebSearchResult": {
+        "additionalProperties": false,
+        "description": "One bounded lexical match with enough identity to reveal unloaded history.",
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/WebTimelineAddress"
+          },
+          "content_class": {
+            "$ref": "#/$defs/WebSearchContentClass"
+          },
+          "highlights": {
+            "items": {
+              "$ref": "#/$defs/WebSearchHighlight"
+            },
+            "maxItems": 512,
+            "type": "array"
+          },
+          "session_id": {
+            "$ref": "#/$defs/WebSessionId"
+          },
+          "snippet": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/$defs/WebSearchResultSource"
+          }
+        },
+        "required": [
+          "session_id",
+          "address",
+          "source",
+          "content_class",
+          "snippet",
+          "highlights"
+        ],
+        "type": "object"
+      },
+      "WebSearchResultSource": {
+        "description": "Typed durable source of one browser search result.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/WebSessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "accepted_input_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "kind": {
+                "const": "accepted_input",
+                "type": "string"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "accepted_input_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "accepted_input_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "kind": {
+                "const": "steering_input",
+                "type": "string"
+              },
+              "source_turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "accepted_input_id",
+              "source_turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "turn_transcript_entry",
+                "type": "string"
+              },
+              "semantic_entry_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "semantic_entry_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "session_transcript_entry",
+                "type": "string"
+              },
+              "semantic_entry_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "semantic_entry_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "tool_request",
+                "type": "string"
+              },
+              "tool_request_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_request_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "tool_attempt",
+                "type": "string"
+              },
+              "tool_attempt_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_attempt_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "attachment_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "kind": {
+                "const": "attachment",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "attachment_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "artifact_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "kind": {
+                "const": "derived_artifact",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "artifact_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebTimelineAddress": {
+        "additionalProperties": false,
+        "description": "Stable browser-visible location of one durable session event.",
+        "properties": {
+          "event_sequence": {
+            "$ref": "#/$defs/WebTimelineEventSequence",
+            "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+          }
+        },
+        "required": [
+          "event_sequence"
+        ],
+        "type": "object"
+      },
+      "WebTimelineEventSequence": {
+        "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebUuid": {
+        "description": "Checked canonical UUID used for browser-visible non-session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One bounded, stable page of lexical matches.",
+    "properties": {
+      "continuation": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebSearchCursor"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "results": {
+        "items": {
+          "$ref": "#/$defs/WebSearchResult"
+        },
+        "maxItems": 100,
+        "type": "array"
+      }
+    },
+    "required": [
+      "results"
+    ],
+    "title": "WebSearchPage",
     "type": "object"
   },
   "WebSessionTimelineDescriptor": {
@@ -535,6 +894,9 @@ function assertSchema(root, schema, value, path) {
     if (!Array.isArray(value)) {
       fail(path, "an array");
     }
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+      fail(path, `at most ${schema.maxItems} items`);
+    }
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${path}[${index}]`));
     return;
   }
@@ -564,6 +926,13 @@ function assertSchema(root, schema, value, path) {
   }
   if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {
     fail(path, `a string matching ${schema.pattern}`);
+  }
+  if (
+    schema.type === "string" &&
+    schema.pattern === "^[1-9][0-9]{0,18}$" &&
+    BigInt(value) > 9223372036854775807n
+  ) {
+    fail(path, "a positive signed 64-bit integer");
   }
   if (
     schema.type === "string" &&
@@ -599,5 +968,81 @@ export function decodeWebSessionTimelineDescriptor(value) {
 
 export function decodeWebSessionTimelineWindow(value) {
   assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "timeline_window");
+  return value;
+}
+
+function validSearchSourceCorrelation(result) {
+  switch (result.source.kind) {
+    case "session":
+      return result.source.session_id === result.session_id && result.content_class === "session_metadata";
+    case "accepted_input":
+    case "steering_input":
+      return result.content_class === "user_transcript";
+    case "turn_transcript_entry":
+      return result.content_class === "assistant_transcript";
+    case "session_transcript_entry":
+      return result.content_class === "derived_text_artifact";
+    case "tool_request":
+      return result.content_class === "tool_arguments";
+    case "tool_attempt":
+      return result.content_class === "tool_result";
+    case "attachment":
+      return result.content_class === "attachment_filename" ||
+        result.content_class === "attachment_media_metadata";
+    case "derived_artifact":
+      return result.content_class === "derived_text_artifact";
+    default:
+      return false;
+  }
+}
+
+export function decodeWebSearchPage(value) {
+  assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
+  if (value.continuation !== null) {
+    const lastResult = value.results.at(-1);
+    if (
+      lastResult === undefined ||
+      value.continuation.address.event_sequence !== lastResult.address.event_sequence
+    ) {
+      fail(
+        "search_page.continuation",
+        "a cursor anchored to the final search result",
+      );
+    }
+  }
+  const encoder = new TextEncoder();
+  value.results.forEach((result, resultIndex) => {
+    if (!validSearchSourceCorrelation(result)) {
+      fail(
+        `search_page.results[${resultIndex}].source`,
+        "a source consistent with the result session and content class",
+      );
+    }
+    const bytes = encoder.encode(result.snippet);
+    if (bytes.length > 512) {
+      fail(
+        `search_page.results[${resultIndex}].snippet`,
+        `at most 512 UTF-8 bytes`,
+      );
+    }
+    let previousEnd = 0;
+    result.highlights.forEach((highlight, highlightIndex) => {
+      const rangePath = `search_page.results[${resultIndex}].highlights[${highlightIndex}]`;
+      if (
+        highlight.start_byte < previousEnd ||
+        highlight.start_byte >= highlight.end_byte ||
+        highlight.end_byte > bytes.length
+      ) {
+        fail(rangePath, "an ordered non-overlapping in-bounds UTF-8 byte range");
+      }
+      if (
+        (highlight.start_byte > 0 && (bytes[highlight.start_byte] & 0xc0) === 0x80) ||
+        (highlight.end_byte < bytes.length && (bytes[highlight.end_byte] & 0xc0) === 0x80)
+      ) {
+        fail(rangePath, "a range on UTF-8 boundaries");
+      }
+      previousEnd = highlight.end_byte;
+    });
+  });
   return value;
 }
