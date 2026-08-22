@@ -303,7 +303,7 @@ async fn verify_replica_candidates(
                 BlobStoreFailureKind::NotFound => saw_missing = true,
                 BlobStoreFailureKind::VerificationFailed => saw_corrupt = true,
                 BlobStoreFailureKind::PublicationAmbiguous | BlobStoreFailureKind::Unavailable => {
-                    saw_unavailable = true
+                    saw_unavailable = true;
                 }
             },
             Err(_) => saw_unavailable = true,

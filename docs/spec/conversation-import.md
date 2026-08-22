@@ -3,20 +3,19 @@
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
-The raw-source blob convergence below is the foundation proposal from PR #553
-(`agent/blob-storage-foundation`) and becomes verified with its implementing
-child stack.
+The raw-source blob convergence below is verified against this implementing
+change (`agent/blob-storage-import-convergence`), atop the foundation proposal
+from PR #553 (`agent/blob-storage-foundation`).
 
 This page specifies immutable imported conversation snapshots, raw source-record
 preservation, source-neutral normalization, addressable imported frontiers, the
 format-versioned converter seam, Claude Code session and Codex rollout JSONL
 converters, the append-only Postgres import store, evidence-derived display
-titles and their startup backfill, the user-operated one-file and directory-scan
-import surfaces, and the imported-conversation inspection read. The one-file
-surface was verified against the implementing stack through PR #252
-(`agent/import-surfaces`); the directory scan through PR #284
-(`agent/import-directory-scan`); the derived display title and its startup
-backfill through PR #304 (`agent/unified-conversation-listing`); and the
+titles, the user-operated one-file and directory-scan import surfaces, and the
+imported-conversation inspection read. The one-file surface was verified against
+the implementing stack through PR #252 (`agent/import-surfaces`); the directory
+scan through PR #284 (`agent/import-directory-scan`); the derived display title
+through PR #304 (`agent/unified-conversation-listing`); and the
 imported-conversation inspection read through PR #303
 (`agent/imported-conversation-inspection`); and the chunked transport, total
 bound, and typed rejection evidence against PR #401
@@ -381,8 +380,8 @@ closed class and ordinal inventory in the
 Errors and logs contain classes and ordinals only, never source content,
 source-derived identifiers, paths, or parser excerpts. Database failure remains
 conservatively `commit_ambiguous`, so the operator may retry the exact format
-and source bytes. Assembly allocation exhaustion is `unavailable`; integrity
-failure remains `internal`.
+and source bytes. Assembly allocation exhaustion or blob-store unavailability is
+`unavailable`; blob integrity failure remains `internal`.
 
 A new exact snapshot returns
 `conversation_import_inserted { imported_conversation_id }`; exact reingestion
@@ -410,11 +409,11 @@ complete message sequence and its bounds are owned by the
 The read exposes no imported content a transcript snapshot does not already
 carry: it bounds exactly the attested text that snapshot carries in full and
 adds nothing for source events, tools, results, thinking, media, absence detail,
-or raw records. The immutable aggregate remains the sole authority for complete
-normalized content and verbatim raw source. The read creates nothing, seeds no
-session, and performs no durable write; it loads the same completely checked
-aggregate the continuation command loads, so it inherits that path's integrity
-verification rather than reading members selectively.
+or raw records. It reads the normalized relational projection and never fetches
+verbatim raw-source blobs. The read creates nothing, seeds no session, and
+performs no durable write; stored entry positions, identities, typed content,
+speaker attestations, and source metadata are decoded fail-closed before
+presentation.
 
 `signalbox continue` consumes those positions. Its `--through-position` is
 required, and it accepts either a positive decimal or the exact sentinel
@@ -737,20 +736,12 @@ CHECK constraints seal the derived shape — nonempty single-line text of at mos
 256 scalars without edge ASCII whitespace, present exactly in the `derived`
 state.
 
-Insertion always resolves the title, so the transitional `pending` state names
-only rows inserted before the column existed. The daemon resolves every pending
-row once at startup — after migration, generic recovery, and blob namespace
-initialization, and before serving — by loading each complete aggregate through
-the checked reconstitution seam, re-deriving, and applying the one guarded
-update the header's append-only trigger admits: a `pending` row resolving to
-`derived` or `underivable` with every other column unchanged. The backfill is a
-pure derivation from durably stored raw bytes; it fails closed rather than
-guessing, and a serving unified-listing read that observes a pending row fails
-closed as corruption because startup owns that transition. Checked complete
-loads re-derive and reject a resolved title that disagrees with the records;
-exact reingestion continues to resolve through the digest and
-conversion-equivalence check unchanged, since the deterministic derivation adds
-no new degree of freedom.
+Insertion always resolves the title. The final schema's closed state
+discriminator admits only `derived` and `underivable`; runtime reads and writes
+only that shape. Checked complete loads re-derive and reject a resolved title
+that disagrees with the records; exact reingestion continues to resolve through
+the digest and conversion-equivalence check unchanged, since the deterministic
+derivation adds no new degree of freedom.
 
 ## Test data and local validation
 

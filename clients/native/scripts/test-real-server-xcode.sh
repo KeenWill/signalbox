@@ -225,7 +225,7 @@ EOF
 
 (
 	cd "$REPOSITORY_ROOT"
-	cargo build --locked -p signalboxd
+	cargo build --locked -p signalboxd --features test-support
 )
 
 SOCKET_PATH="$TEMPORARY_ROOT/signalboxd.sock"

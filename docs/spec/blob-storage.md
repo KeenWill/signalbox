@@ -62,6 +62,11 @@ The text-only blob-read family, frontier-derived digest authorization, and
 durable per-request and per-turn admission counters are verified against this
 implementing change (`agent/blob-storage-read-tools`).
 
+Imported raw-source publication, aggregate-owned catalog registration,
+blob-backed checked loads, normalized runtime projections, and the one-time
+final-schema migration are verified against this implementing change
+(`agent/blob-storage-import-convergence`).
+
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
 configuration and routing, the ingest and read lifecycle, the blob wire

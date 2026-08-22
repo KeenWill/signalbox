@@ -11,6 +11,7 @@ publish.workspace = true
 test-support = [
     "signalbox-blob-store-filesystem/test-support",
     "signalbox-blob-store-s3/test-support",
+    "signalbox-persistence/postgres-integration",
     "signalbox-persistence/test-support",
 ]
 
@@ -104,6 +105,9 @@ uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] 
 
 [dev-dependencies]
 signalbox-blob-store-filesystem = { path = "../../crates/blob-store-filesystem", features = ["test-support"] }
+signalbox-persistence = { path = "../../crates/persistence", features = [
+    "postgres-integration",
+] }
 expect-test = "1.5.1"
 git2 = { version = "0.21.0", default-features = false, features = ["unstable-sha256"] }
 # The shared executor-driving harness lives in the application crate so sibling

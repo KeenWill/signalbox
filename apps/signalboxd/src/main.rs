@@ -38,9 +38,7 @@ use signalbox_model_runtime_anthropic::{
 };
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, OpenAiRuntime};
 use signalbox_persistence::{
-    blob::BlobCatalogRepository,
-    conversation_import::backfill_imported_conversation_display_titles, migrate,
-    model_execution::PostgresModelCallRepository,
+    blob::BlobCatalogRepository, migrate, model_execution::PostgresModelCallRepository,
     repo_watch_dispatch::PostgresRepoWatchDispatchStore, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
 };
@@ -1281,18 +1279,8 @@ async fn run_hub(
                     SanitizedStartupCause::Static("database_migration_failed"),
                 )
             })?;
-            let resolved_display_titles =
-                backfill_imported_conversation_display_titles(&migration_pool)
-                    .await
-                    .map_err(|_| {
-                        erase_startup_cause(
-                            RuntimePhase::Migration,
-                            SanitizedStartupCause::Static("imported_title_backfill_failed"),
-                        )
-                    })?;
             tracing::info!(
                 phase = ?RuntimePhase::Migration,
-                resolved_display_titles,
                 "daemon startup phase completed"
             );
             Ok(())
