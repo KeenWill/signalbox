@@ -32,7 +32,7 @@ use signalbox_application::{
     AttentionAction, AttentionActivityKind, AttentionBlockedReason, AttentionChanges,
     AttentionContinuation, AttentionQuery, AttentionSnapshot, AttentionSort, AttentionState,
     AttentionSummary, SessionTimelineDescriptor, SessionTimelineEventKind, SessionTimelineWindow,
-    TimelineAddress, TimelineWindowAnchor, TimelineWindowLimits,
+    TimelineAddress, TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits,
     max_attention_goal_summary_characters, max_attention_title_characters,
 };
 use signalbox_domain::SessionId;
@@ -505,14 +505,14 @@ fn descriptor_dto(
 }
 
 fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
-    let continuation_before = window
-        .has_more_before
-        .then(|| window.items.first().map(|item| address_dto(item.address)))
-        .flatten();
-    let continuation_after = window
-        .has_more_after
-        .then(|| window.items.last().map(|item| address_dto(item.address)))
-        .flatten();
+    let continuation_before = match window.continuation_before {
+        TimelineContinuation::Exhausted => None,
+        TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
+    };
+    let continuation_after = match window.continuation_after {
+        TimelineContinuation::Exhausted => None,
+        TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
+    };
     WebSessionTimelineWindow {
         session_id: window.session.into_uuid().to_string(),
         items: window

@@ -7,7 +7,7 @@
 
 use std::error::Error;
 
-use signalbox_application::{TimelineWindowAnchor, TimelineWindowLimits};
+use signalbox_application::{TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits};
 use signalbox_domain::{
     CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
@@ -104,11 +104,17 @@ async fn descriptor_and_windows_share_one_stable_creation_address() -> Result<()
         descriptor.sizes.projected_structured_bytes,
         u64::from(first.items[0].projected_structured_bytes)
     );
-    assert!(!first.has_more_before);
-    assert!(!latest.has_more_after);
+    assert_eq!(first.continuation_before, TimelineContinuation::Exhausted);
+    assert_eq!(latest.continuation_after, TimelineContinuation::Exhausted);
     assert!(after_latest.items.is_empty());
-    assert!(!after_latest.has_more_before);
-    assert!(!after_latest.has_more_after);
+    assert_eq!(
+        after_latest.continuation_before,
+        TimelineContinuation::Exhausted
+    );
+    assert_eq!(
+        after_latest.continuation_after,
+        TimelineContinuation::Exhausted
+    );
 
     pool.close().await;
     drop(container);
@@ -121,6 +127,8 @@ async fn missing_allocator_is_observation_cursor_corruption() -> Result<(), Box<
     let (container, pool, _database_url) = migrated_postgres().await?;
     let identity = session(0x993);
     create_session(&pool, identity).await?;
+    // This disposable isolated container may bypass the deletion guard to simulate
+    // a missing allocator observation cursor without affecting another test.
     sqlx::query("DROP TRIGGER outbox_sequence_state_cannot_be_deleted ON outbox_sequence_state")
         .execute(&pool)
         .await?;

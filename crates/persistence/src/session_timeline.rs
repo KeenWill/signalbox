@@ -6,7 +6,8 @@ use rust_decimal::Decimal;
 use signalbox_application::{
     SessionTimelineBounds, SessionTimelineDescriptor, SessionTimelineEventKind,
     SessionTimelineItem, SessionTimelineReader, SessionTimelineSizeFacts, SessionTimelineWindow,
-    SessionWorkFacts, TimelineAddress, TimelineWindowAnchor, TimelineWindowLimits,
+    SessionWorkFacts, TimelineAddress, TimelineContinuation, TimelineWindowAnchor,
+    TimelineWindowLimits,
 };
 use signalbox_domain::SessionId;
 use sqlx::{PgConnection, PgPool, Row};
@@ -186,20 +187,22 @@ impl SessionTimelineRepository {
         items.sort_by_key(|item| item.address);
         let first = items.first().map(|item| item.address);
         let latest = items.last().map(|item| item.address);
-        let has_more_before = first
-            .zip(descriptor.bounds.first)
-            .is_some_and(|(loaded, bound)| loaded > bound);
-        let has_more_after = latest
-            .zip(descriptor.bounds.latest)
-            .is_some_and(|(loaded, bound)| loaded < bound);
+        let continuation_before = match first.zip(descriptor.bounds.first) {
+            Some((loaded, bound)) if loaded > bound => TimelineContinuation::MoreAt(loaded),
+            _ => TimelineContinuation::Exhausted,
+        };
+        let continuation_after = match latest.zip(descriptor.bounds.latest) {
+            Some((loaded, bound)) if loaded < bound => TimelineContinuation::MoreAt(loaded),
+            _ => TimelineContinuation::Exhausted,
+        };
         transaction.commit().await?;
 
         Ok(Some(SessionTimelineWindow {
             session,
             items,
             projected_structured_bytes: projected_bytes,
-            has_more_before,
-            has_more_after,
+            continuation_before,
+            continuation_after,
         }))
     }
 }

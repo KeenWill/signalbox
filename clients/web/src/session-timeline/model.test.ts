@@ -117,6 +117,88 @@ describe('BoundedSessionHistory', () => {
     expect(window.items.map((item) => item.address.event_sequence)).toEqual(['1', '2', '3', '4'])
   })
 
+  it('fills a clipped scenario around window at the latest address', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const window = await scenario.readWindow(
+      sessionId,
+      { kind: 'around', eventSequence: String(SESSION_FOUNDATION_TOTAL) },
+      { maxItems: scenario.limits.max_timeline_window_items, maxBytes: 64 * 1024 },
+    )
+
+    expect(window.items).toHaveLength(scenario.limits.max_timeline_window_items)
+    expect(window.items.at(-1)?.address.event_sequence).toBe(String(SESSION_FOUNDATION_TOTAL))
+  })
+
+  it('rejects a bootstrap without bounded timeline capability', async () => {
+    const request = async () =>
+      new Response(
+        JSON.stringify({
+          contract: { name: 'signalbox.web-http', version: '1' },
+          capabilities: {
+            bounded_json: true,
+            same_origin_json_mutations: true,
+            ndjson_streaming: true,
+            bounded_session_timeline: false,
+          },
+          limits: {
+            max_json_body_bytes: 1024,
+            max_ndjson_item_bytes: 1024,
+            max_timeline_window_items: 256,
+            max_timeline_window_bytes: 64 * 1024,
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+
+    await expect(HttpSessionTimelineSource.connect(request)).rejects.toThrow(
+      'timeline capability is unavailable',
+    )
+  })
+
+  it('does not expose mutable retained storage', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const history = new BoundedSessionHistory(sessionId, scenario)
+    await history.load({ kind: 'first' }, { maxItems: 1, maxBytes: 256 })
+    const retained = [...history.retained]
+
+    retained.splice(0)
+
+    expect(history.retained).toHaveLength(1)
+  })
+
+  it('rejects a timeline window whose addresses decrease', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '2' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 96,
+          },
+          {
+            address: { event_sequence: '1' },
+            kind: 'turn_activated',
+            projected_structured_bytes: 96,
+          },
+        ],
+        projected_structured_bytes: 192,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    }
+
+    await expect(
+      new BoundedSessionHistory(sessionId, source).load(
+        { kind: 'first' },
+        { maxItems: 2, maxBytes: 256 },
+      ),
+    ).rejects.toThrow('strictly increasing')
+  })
+
   it('decodes structured API errors before throwing', async () => {
     const request = async () =>
       new Response(
