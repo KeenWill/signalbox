@@ -668,11 +668,59 @@ function assertDisplayFilename(value, path) {
   }
 }
 
+function isMimeTokenCharacter(value) {
+  return /^[!#$%&'*+.^_`|~0-9A-Za-z-]$/u.test(value);
+}
+
+function consumeMimeToken(value, cursor) {
+  const start = cursor;
+  while (cursor < value.length && isMimeTokenCharacter(value[cursor])) cursor += 1;
+  return cursor === start ? -1 : cursor;
+}
+
+function isMimeValue(value) {
+  let cursor = 0;
+  cursor = consumeMimeToken(value, cursor);
+  if (cursor < 0 || value[cursor] !== "/") return false;
+  cursor += 1;
+  cursor = consumeMimeToken(value, cursor);
+  if (cursor < 0) return false;
+  if (cursor === value.length) return true;
+  if (value[cursor] !== ";") return false;
+  cursor += 1;
+  while (cursor < value.length) {
+    while (value[cursor] === " ") cursor += 1;
+    if (cursor === value.length) return true;
+    cursor = consumeMimeToken(value, cursor);
+    if (cursor < 0 || value[cursor] !== "=") return false;
+    cursor += 1;
+    if (value[cursor] === '"') {
+      cursor += 1;
+      const start = cursor;
+      while (cursor < value.length && value[cursor] !== '"') {
+        const unit = value.charCodeAt(cursor);
+        if (unit <= 31 || unit === 127) return false;
+        cursor += 1;
+      }
+      if (cursor === start || value[cursor] !== '"') return false;
+      cursor += 1;
+      while (value[cursor] === " ") cursor += 1;
+    } else {
+      cursor = consumeMimeToken(value, cursor);
+      if (cursor < 0) return false;
+    }
+    if (cursor === value.length) return true;
+    if (value[cursor] !== ";") return false;
+    cursor += 1;
+  }
+  return true;
+}
+
 function assertMediaType(value, path) {
   if (
     typeof value !== "string" ||
     utf8.encode(value).length > 255 ||
-    !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+\/[!#$%&'*+.^_`|~0-9A-Za-z-]+(?:[ \t]*;[ \t]*[!#$%&'*+.^_`|~0-9A-Za-z-]+=(?:[!#$%&'*+.^_`|~0-9A-Za-z-]+|"(?:[^"\\\r\n]|\\.)*"))*$/u.test(value)
+    !isMimeValue(value)
   ) {
     fail(path, "a MIME value of at most 255 UTF-8 bytes");
   }
@@ -784,10 +832,15 @@ export function decodeWebBlobDescriptor(value) {
       if ((view.kind === "download") !== (contentRoute.kind === "download")) {
         fail(contentPath, "a route matching the advertised view kind");
       }
-    } else if (!view.derivations.some((derivation) =>
-      derivation.input_digests.includes(value.digest) &&
-      derivation.output_digests.includes(contentDigest))) {
-      fail(contentPath, "a route for a derivation output bound to the descriptor input");
+    } else {
+      if (contentRoute.kind !== "content/image-png") {
+        fail(contentPath, "an image-content route for a derivative view");
+      }
+      if (!view.derivations.some((derivation) =>
+        derivation.input_digests.includes(value.digest) &&
+        derivation.output_digests.includes(contentDigest))) {
+        fail(contentPath, "a route for a derivation output bound to the descriptor input");
+      }
     }
     view.derivations.forEach((derivation, derivationIndex) => {
       const path = `blob_descriptor.available_views[${index}].derivations[${derivationIndex}]`;
