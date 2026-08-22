@@ -730,6 +730,20 @@ fn oversized_inspection_view_inventory_is_rejected() {
 }
 
 #[test]
+fn lowered_result_ceiling_applies_to_inspection_view_inventory() {
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.text_or_json_bytes = 64 * 1_024;
+    let view = text_view();
+
+    let outcome = registry_outcome_with_view(view, ceilings);
+
+    assert!(matches!(
+        outcome,
+        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::Inventory)
+    ));
+}
+
+#[test]
 fn read_view_source_work_above_the_compiled_ceiling_is_rejected() {
     let ceilings = FileMediaCeilings::version_one();
     let source_bytes = ceilings
