@@ -23,6 +23,8 @@ const PROJECTED_DETAIL_ENVELOPE_BYTES = 128
 // Hard safety ceiling preventing a regressed endpoint from materializing an
 // unbounded JSON response before the generated decoder can reject its shape.
 export const MAX_TIMELINE_HTTP_RESPONSE_BYTES = 256 * 1024
+export const MAX_TIMELINE_DETAIL_HTTP_RESPONSE_BYTES =
+  MAX_TIMELINE_HTTP_RESPONSE_BYTES + 5 * MAX_CONTRACT_TIMELINE_DETAIL_BYTES
 
 type TimelineContractLimits = Pick<
   WebContractBootstrap['limits'],
@@ -112,6 +114,19 @@ const validateTextExcerpt = (
 
 const projectedDetailBodyBytes = (item: TimelineDetailItem): number => {
   const body = item.body
+  if (body.type === 'user_input') {
+    for (const attachment of body.attachments) decimalU64(attachment.length_bytes)
+  } else if (body.type === 'model_call') {
+    decimalU64(body.request_context_items)
+    for (const value of [
+      body.usage.input_tokens,
+      body.usage.output_tokens,
+      body.usage.cache_creation_input_tokens,
+      body.usage.cache_read_input_tokens,
+    ]) {
+      if (value != null) decimalU64(value)
+    }
+  }
   const excerptBytes =
     body.type === 'user_input'
       ? validateTextExcerpt(item, body.text, 'input_text')
@@ -156,7 +171,10 @@ const canonicalSessionId = (value: string): string => {
   return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`
 }
 
-const readBoundedJson = async (response: Response): Promise<unknown> => {
+const readBoundedJson = async (
+  response: Response,
+  maxEncodedBytes = MAX_TIMELINE_HTTP_RESPONSE_BYTES,
+): Promise<unknown> => {
   const reader = response.body?.getReader()
   if (!reader) throw new TypeError('HTTP response has no body')
   const chunks: Uint8Array[] = []
@@ -165,7 +183,7 @@ const readBoundedJson = async (response: Response): Promise<unknown> => {
     const next = await reader.read()
     if (next.done) break
     byteCount += next.value.byteLength
-    if (byteCount > MAX_TIMELINE_HTTP_RESPONSE_BYTES) {
+    if (byteCount > maxEncodedBytes) {
       await reader.cancel()
       throw new TypeError('timeline HTTP response exceeds its encoded byte ceiling')
     }
@@ -281,6 +299,7 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     limits: SessionDetailLimits,
     cursor?: TimelineDetailCursor,
     signal?: AbortSignal,
+    expectedTotalBytes?: string,
   ): Promise<WebSessionTimelineDetailPage> {
     if (!this.detailAvailable) {
       throw new TypeError('bounded session timeline detail capability is unavailable')
@@ -305,7 +324,9 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       { signal },
     )
     if (!response.ok) return throwApiError(response)
-    const page = decodeWebSessionTimelineDetailPage(await readBoundedJson(response))
+    const page = decodeWebSessionTimelineDetailPage(
+      await readBoundedJson(response, MAX_TIMELINE_DETAIL_HTTP_RESPONSE_BYTES),
+    )
     if (page.continuation?.type === 'more_at') {
       throw new TypeError('exact item detail cannot return a more-at continuation')
     }
@@ -365,6 +386,12 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       if (!excerpt || excerpt.offset_bytes !== cursor.body.offset_bytes) {
         throw new TypeError('timeline detail body does not match its requested cursor field')
       }
+      if (
+        expectedTotalBytes === undefined ||
+        decimalU64(excerpt.total_bytes) !== decimalU64(expectedTotalBytes)
+      ) {
+        throw new TypeError('timeline detail body changed its declared text total')
+      }
     }
     const excerptContinuations = page.items.flatMap((item) => {
       const excerpt =
@@ -419,6 +446,10 @@ export class BoundedSessionHistory {
     const itemCount = decimalU64(descriptor.sizes.item_count)
     if (itemCount === 0n || firstAddress > latestAddress || latestAddress > observedThrough) {
       throw new TypeError('descriptor timeline boundaries are contradictory')
+    }
+    const addressSpan = latestAddress - firstAddress + 1n
+    if ((itemCount === 1n) !== (firstAddress === latestAddress) || itemCount > addressSpan) {
+      throw new TypeError('descriptor item count contradicts its address span')
     }
     decimalU64(descriptor.sizes.projected_text_bytes)
     decimalU64(descriptor.sizes.projected_structured_bytes)
@@ -502,12 +533,11 @@ export class BoundedSessionHistory {
     ) {
       throw new TypeError('first timeline window does not match the descriptor boundary')
     }
-    if (
-      anchor.kind === 'latest' &&
-      this.descriptorValue &&
-      lastItemAddress !== this.descriptorValue.latest_address.event_sequence
-    ) {
-      throw new TypeError('latest timeline window does not match the descriptor boundary')
+    if (anchor.kind === 'latest' && this.descriptorValue) {
+      const describedLatest = decimalAddress(this.descriptorValue.latest_address.event_sequence)
+      if (!lastItemAddress || decimalAddress(lastItemAddress) < describedLatest) {
+        throw new TypeError('latest timeline window does not reach the descriptor boundary')
+      }
     }
     if (anchor.kind === 'first' && this.descriptorValue && lastItemAddress) {
       const hasLaterItems =

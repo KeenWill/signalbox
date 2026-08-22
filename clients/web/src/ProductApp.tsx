@@ -3,7 +3,15 @@ import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { AlertTriangle, Command, Menu, Moon, PanelLeftClose, Rows3, Sun, X } from 'lucide-react'
-import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  type CSSProperties,
+  type MouseEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { globalHotkeyBindings, globalHotkeySequenceBindings } from './commands'
 import {
   type ProductRouteId,
@@ -14,6 +22,7 @@ import {
 import {
   invokeProductCommand,
   type ProductCommandContext,
+  type ProductCommandId,
   productCommandRegistry,
   productHotkeySequenceBindings,
 } from './productCommands'
@@ -71,11 +80,27 @@ const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; ques
 
 function ProductNavigation({
   active,
+  context,
   onNavigate,
 }: {
   active: ProductRouteId
+  context: ProductCommandContext
   onNavigate?: () => void
 }) {
+  const invokeNavigation = (event: MouseEvent<HTMLAnchorElement>, route: ProductRouteId) => {
+    if (
+      event.defaultPrevented ||
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    ) {
+      return
+    }
+    event.preventDefault()
+    invokeProductCommand(`navigate.${route}` as ProductCommandId, context)
+  }
   return (
     <div className="product-navigation">
       <div className="brand">
@@ -91,7 +116,7 @@ function ProductNavigation({
             params={{ surface: route.id }}
             className={active === route.id ? 'product-link active' : 'product-link'}
             aria-current={active === route.id ? 'page' : undefined}
-            onClick={onNavigate}
+            onClick={(event) => invokeNavigation(event, route.id)}
           >
             <span>{route.label}</span>
             <small>{route.description}</small>
@@ -321,8 +346,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
+  const navigationOpenerRef = useRef<HTMLElement | null>(null)
   const timelineWindowNavigationRef = useRef<(anchor: 'first' | 'latest') => void>(() => {})
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
+  const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
   const updateTimelineWindowNavigation = useCallback(
     (navigateTimelineWindow: (anchor: 'first' | 'latest') => void) => {
@@ -349,8 +376,15 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       },
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
       navigateTimelineWindow: (anchor) => timelineWindowNavigationRef.current(anchor),
+      openNavigation: () => {
+        const active = document.activeElement
+        navigationOpenerRef.current =
+          active instanceof HTMLElement && active !== document.body ? active : null
+        dispatch(actions.overlaySet('navigation'))
+      },
+      timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
     }),
-    [dispatch, navigate, timelineIds],
+    [dispatch, navigate, surface, timelineIds, timelineWindowAvailable],
   )
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
@@ -384,7 +418,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   }, [app.density, app.theme])
 
   const copy = surfaceCopy[surface]
-  const surfaceUnavailable = productSurfaceStates[surface].kind === 'committed-unimplemented'
+  const surfaceUnavailable =
+    productSurfaceStates[surface].kind === 'committed-unimplemented' ||
+    (surface === 'sessions' && bootstrap.data?.capabilities.bounded_session_timeline !== true)
   const content =
     surface === 'attention' ? (
       <AttentionSurface />
@@ -393,6 +429,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         bootstrap={bootstrap.data}
         onTimelineIds={updateTimelineIds}
         onTimelineWindowNavigation={updateTimelineWindowNavigation}
+        onTimelineWindowAvailability={setTimelineWindowAvailable}
       />
     ) : surface === 'settings' ? (
       <SettingsSurface />
@@ -408,7 +445,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   return (
     <div className={`product-shell layout-${app.layout}`} style={shellStyle}>
       <aside className="product-navigation-pane">
-        <ProductNavigation active={surface} />
+        <ProductNavigation active={surface} context={context} />
       </aside>
       <main className="product-main" tabIndex={-1} ref={primaryRef}>
         <header className="product-header">
@@ -481,7 +518,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             aria-describedby="mobile-navigation-description"
             onCloseAutoFocus={(event) => {
               event.preventDefault()
-              document.querySelector<HTMLElement>('[aria-label="Open navigation"]')?.focus()
+              const opener = navigationOpenerRef.current
+              if (opener?.isConnected && opener.getClientRects().length > 0) opener.focus()
+              else primaryRef.current?.focus()
+              navigationOpenerRef.current = null
             }}
           >
             <Dialog.Title className="sr-only">Product navigation</Dialog.Title>
@@ -490,6 +530,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             </Dialog.Description>
             <ProductNavigation
               active={surface}
+              context={context}
               onNavigate={() => dispatch(actions.overlaySet(null))}
             />
           </Dialog.Content>

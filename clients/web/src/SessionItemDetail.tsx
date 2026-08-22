@@ -187,10 +187,18 @@ export function SessionItemDetail({
   item: WebSessionTimelineWindow['items'][number]
 }) {
   const [cursor, setCursor] = useState<NonNullable<WebSessionTimelineDetailPage['continuation']>>()
+  const [expectedTotalBytes, setExpectedTotalBytes] = useState<string>()
   const retryRef = useRef<HTMLButtonElement>(null)
   const detailRef = useRef<HTMLElement>(null)
   const detail = useQuery({
-    queryKey: ['production', 'session-item-detail', sessionId, item.address.event_sequence, cursor],
+    queryKey: [
+      'production',
+      'session-item-detail',
+      sessionId,
+      item.address.event_sequence,
+      cursor,
+      expectedTotalBytes,
+    ],
     queryFn: ({ signal }) =>
       source.readItemDetail(
         sessionId,
@@ -198,6 +206,7 @@ export function SessionItemDetail({
         { maxItems: DETAIL_PAGE_ITEMS, maxBytes: DETAIL_PAGE_BYTES },
         cursor,
         signal,
+        expectedTotalBytes,
       ),
     gcTime: 0,
     placeholderData: (previousData) => previousData,
@@ -255,7 +264,24 @@ export function SessionItemDetail({
           type="button"
           className="session-detail-continue"
           disabled={detail.isFetching}
-          onClick={() => setCursor(detail.data.continuation ?? undefined)}
+          onClick={() => {
+            const continuation = detail.data.continuation
+            if (continuation?.type !== 'more_body') return
+            const detailItem = detail.data.items.find(
+              (candidate) =>
+                candidate.address.event_sequence === continuation.body.address.event_sequence,
+            )
+            const excerpt =
+              continuation.body.field === 'input_text' && detailItem?.body.type === 'user_input'
+                ? detailItem.body.text
+                : continuation.body.field === 'model_response' &&
+                    detailItem?.body.type === 'model_call'
+                  ? detailItem.body.response
+                  : undefined
+            if (!excerpt) return
+            setExpectedTotalBytes(excerpt.total_bytes)
+            setCursor(continuation)
+          }}
         >
           {detail.isFetching
             ? 'Loading next bounded detail chunk…'

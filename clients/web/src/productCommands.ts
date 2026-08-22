@@ -4,6 +4,8 @@ import { actions } from './state'
 export interface ProductCommandContext extends CommandContext {
   navigate: (path: string) => void
   navigateTimelineWindow: (anchor: 'first' | 'latest') => void
+  openNavigation: () => void
+  timelineWindowAvailable: boolean
 }
 
 const navigateProductSurface = (context: ProductCommandContext, path: string) => {
@@ -18,7 +20,7 @@ const productNavigationCommands = [
     description: 'Choose a Signalbox product surface.',
     category: 'Surface',
     bindings: [],
-    run: (context: ProductCommandContext) => context.dispatch(actions.overlaySet('navigation')),
+    run: (context: ProductCommandContext) => context.openNavigation(),
   },
   {
     id: 'navigate.attention',
@@ -101,7 +103,7 @@ const productTimelineCommands = [
     description: 'Load the server window containing the first session item.',
     category: 'Navigate',
     bindings: [{ label: 'g g', registration: { kind: 'sequence', sequence: ['G', 'G'] } }],
-    available: (context: ProductCommandContext) => context.timelineIds.length > 0,
+    available: (context: ProductCommandContext) => context.timelineWindowAvailable,
     run: (context: ProductCommandContext) => context.navigateTimelineWindow('first'),
   },
   {
@@ -110,7 +112,7 @@ const productTimelineCommands = [
     description: 'Load the server window containing the latest session item.',
     category: 'Navigate',
     bindings: [{ label: 'G', registration: { kind: 'hotkey', hotkey: 'Shift+G' } }],
-    available: (context: ProductCommandContext) => context.timelineIds.length > 0,
+    available: (context: ProductCommandContext) => context.timelineWindowAvailable,
     run: (context: ProductCommandContext) => context.navigateTimelineWindow('latest'),
   },
 ] as const

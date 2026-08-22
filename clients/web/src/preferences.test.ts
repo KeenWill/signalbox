@@ -3,7 +3,6 @@ import {
   decodeBrowserPreferences,
   defaultBrowserPreferences,
   loadBrowserPreferences,
-  MAX_KEY_OVERRIDES,
   MAX_SAVED_LOGICAL_POSITIONS,
   saveBrowserPreferences,
 } from './preferences'
@@ -28,24 +27,16 @@ describe('browser preferences', () => {
     expect(decoded.paneSizes).toEqual({ navigation: 160, inspector: 480 })
   })
 
-  it('bounds retained positions and future key overrides', () => {
+  it('bounds retained logical positions', () => {
     const lastLogicalPositions = Object.fromEntries(
       Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS + 3 }, (_, index) => [
         `00000000-0000-0000-0000-${index.toString(16).padStart(12, '0')}`,
         String(index + 1),
       ]),
     )
-    const keyOverrides = Object.fromEntries(
-      Array.from({ length: MAX_KEY_OVERRIDES + 2 }, (_, index) => [
-        `command-${index}`,
-        `key-${index}`,
-      ]),
-    )
-
-    const decoded = decodeBrowserPreferences({ lastLogicalPositions, keyOverrides })
+    const decoded = decodeBrowserPreferences({ lastLogicalPositions })
 
     expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
-    expect(Object.keys(decoded.keyOverrides)).toHaveLength(MAX_KEY_OVERRIDES)
   })
 
   it('discards malformed persisted session positions', () => {

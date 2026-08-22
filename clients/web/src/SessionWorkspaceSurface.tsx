@@ -40,10 +40,12 @@ export function SessionWorkspaceSurface({
   bootstrap,
   onTimelineIds,
   onTimelineWindowNavigation,
+  onTimelineWindowAvailability,
 }: {
   bootstrap: WebContractBootstrap | undefined
   onTimelineIds: (ids: readonly string[]) => void
   onTimelineWindowNavigation: (navigate: (anchor: 'first' | 'latest') => void) => void
+  onTimelineWindowAvailability: (available: boolean) => void
 }) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
@@ -70,6 +72,7 @@ export function SessionWorkspaceSurface({
       return { active, anchor, descriptor, source, window: timelineWindow }
     },
     enabled: sessionId !== null && bootstrap?.capabilities.bounded_session_timeline === true,
+    gcTime: 0,
   })
   const items = useMemo(
     () => visibleSessionItems(session.data?.window.items ?? [], app.detail),
@@ -79,6 +82,10 @@ export function SessionWorkspaceSurface({
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
+  useEffect(() => {
+    onTimelineWindowAvailability(session.data !== undefined)
+    return () => onTimelineWindowAvailability(false)
+  }, [onTimelineWindowAvailability, session.data])
   const activeAnchorKind = session.data?.anchor.kind
   const refetchSession = session.refetch
   const navigateTimelineWindow = useCallback(

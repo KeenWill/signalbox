@@ -7,7 +7,6 @@ export interface BrowserPreferences {
   theme: ThemeMode
   paneSizes: { navigation: number; inspector: number }
   lastLogicalPositions: Record<string, string>
-  keyOverrides: Record<string, string>
 }
 
 export const defaultBrowserPreferences: BrowserPreferences = {
@@ -17,19 +16,16 @@ export const defaultBrowserPreferences: BrowserPreferences = {
   theme: 'dark',
   paneSizes: { navigation: 218, inspector: 252 },
   lastLogicalPositions: {},
-  keyOverrides: {},
 }
 
 export const createDefaultBrowserPreferences = (): BrowserPreferences => ({
   ...defaultBrowserPreferences,
   paneSizes: { ...defaultBrowserPreferences.paneSizes },
   lastLogicalPositions: {},
-  keyOverrides: {},
 })
 
 export const BROWSER_PREFERENCES_KEY = 'signalbox.web.preferences.v1'
 export const MAX_SAVED_LOGICAL_POSITIONS = 128
-export const MAX_KEY_OVERRIDES = 64
 
 const oneOf = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T =>
   typeof value === 'string' && allowed.includes(value as T) ? (value as T) : fallback
@@ -38,15 +34,6 @@ const boundedNumber = (value: unknown, fallback: number, minimum: number, maximu
   typeof value === 'number' && Number.isFinite(value)
     ? Math.min(Math.max(Math.round(value), minimum), maximum)
     : fallback
-
-const boundedRecord = (value: unknown, maximum: number): Record<string, string> => {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {}
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
-      .slice(-maximum),
-  )
-}
 
 const CANONICAL_SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const POSITIVE_DECIMAL_U64 = /^[1-9]\d*$/
@@ -104,7 +91,6 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
       ),
     },
     lastLogicalPositions: boundedLogicalPositions(candidate.lastLogicalPositions),
-    keyOverrides: boundedRecord(candidate.keyOverrides, MAX_KEY_OVERRIDES),
   }
 }
 

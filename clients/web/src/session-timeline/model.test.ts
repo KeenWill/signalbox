@@ -72,6 +72,25 @@ describe('BoundedSessionHistory', () => {
     await expect(history.describe()).rejects.toThrow('exceeds 64 bits')
   })
 
+  it('rejects a descriptor count that contradicts its address span', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        first_address: { event_sequence: '10' },
+        latest_address: { event_sequence: '11' },
+        sizes: { ...descriptor.sizes, item_count: '3' },
+      }),
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+
+    await expect(new BoundedSessionHistory(sessionId, source).describe()).rejects.toThrow(
+      'item count contradicts its address span',
+    )
+  })
+
   it('compares canonical UUID identities', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const descriptor = await scenario.readDescriptor(sessionId)
@@ -584,6 +603,35 @@ describe('BoundedSessionHistory', () => {
     )
   })
 
+  it('accepts a latest window that advances beyond an earlier descriptor', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const appendedAddress = String(BigInt(descriptor.latest_address.event_sequence) + 1n)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => descriptor,
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: appendedAddress },
+            kind: 'turn_completed',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 78,
+        continuation_before: { event_sequence: appendedAddress },
+        continuation_after: null,
+      }),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(
+      history.load({ kind: 'latest' }, { maxItems: 1, maxBytes: 256 }),
+    ).resolves.toMatchObject({ items: [{ address: { event_sequence: appendedAddress } }] })
+  })
+
   it('rejects a window on the wrong side of a strict anchor', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const source: SessionTimelineSource = {
@@ -827,6 +875,8 @@ describe('BoundedSessionHistory', () => {
       detailAddress,
       detailLimits,
       first.continuation ?? undefined,
+      undefined,
+      firstPageFixture.items[0].body.text.total_bytes,
     )
     const firstUrl = new URL(String(request.mock.calls[1]?.[0]), 'http://signalbox.test')
     const secondUrl = new URL(String(request.mock.calls[2]?.[0]), 'http://signalbox.test')
