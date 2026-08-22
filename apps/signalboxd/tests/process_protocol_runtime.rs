@@ -8126,6 +8126,10 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
                 format!("Signalbox prior-conversation summary:\n{summary_text}"),
             ),
             (
+                signalbox_model_runtime::ConversationRole::Assistant,
+                first_assistant.clone(),
+            ),
+            (
                 signalbox_model_runtime::ConversationRole::User,
                 second_user.clone(),
             ),
