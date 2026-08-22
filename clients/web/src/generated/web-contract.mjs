@@ -157,6 +157,7 @@ const schemas = {
           "blocked",
           "awaiting_approval",
           "ambiguous",
+          "awaiting_tool_recovery",
           "awaiting_reconciliation",
           "runner_lost",
           "idle"
@@ -363,6 +364,7 @@ const schemas = {
           "blocked",
           "awaiting_approval",
           "ambiguous",
+          "awaiting_tool_recovery",
           "awaiting_reconciliation",
           "runner_lost",
           "idle"
@@ -423,6 +425,7 @@ const schemas = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "oneOf": [
       {
+        "additionalProperties": false,
         "properties": {
           "kind": {
             "const": "snapshot",
@@ -439,6 +442,7 @@ const schemas = {
         "type": "object"
       },
       {
+        "additionalProperties": false,
         "properties": {
           "cursor": {
             "type": "string"
@@ -462,6 +466,7 @@ const schemas = {
         "type": "object"
       },
       {
+        "additionalProperties": false,
         "properties": {
           "cursor": {
             "type": "string"

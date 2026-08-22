@@ -199,8 +199,15 @@ WITH selected AS (
 ), latest_turn AS (
     SELECT DISTINCT ON (lifecycle.session_id)
            lifecycle.session_id, lifecycle.turn_id, lifecycle.state_kind,
-           lifecycle.active_phase_kind, lifecycle.terminal_disposition_kind
+           lifecycle.active_phase_kind, lifecycle.terminal_disposition_kind,
+           lifecycle.approval_tool_request_id
       FROM turn_lifecycle AS lifecycle JOIN selected USING (session_id)
+     WHERE NOT EXISTS (
+               SELECT 1
+                 FROM goal_turn_retired_outbox_event AS retired
+                WHERE retired.session_id = lifecycle.session_id
+                  AND retired.turn_id = lifecycle.turn_id
+           )
      ORDER BY lifecycle.session_id, lifecycle.acceptance_position DESC
 ), latest_goal AS (
     SELECT DISTINCT ON (goal.session_id)
@@ -232,6 +239,19 @@ WITH selected AS (
 )
 SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
        turn.active_phase_kind, turn.terminal_disposition_kind,
+       CASE
+           WHEN request.approval_posture = 'human' THEN true
+           WHEN request.approval_posture = 'delegated' THEN
+               approval_call.state_kind = 'terminal'
+               AND (
+                   (approval_call.terminal_disposition_kind = 'completed'
+                    AND approval_call.recommendation_kind = 'escalate_to_human')
+                   OR approval_call.terminal_disposition_kind IN (
+                       'known_failed', 'refused', 'cancelled', 'ambiguous'
+                   )
+               )
+           ELSE false
+       END AS approval_human_authority,
        goal.generation, goal.event_kind AS goal_state, goal.blocked_reason, goal.need_summary,
        COALESCE(judge.actionable, 0) AS judge_actionable,
        COALESCE(judge.completed, 0) AS judge_completed,
@@ -241,6 +261,10 @@ SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
        activity.fact_kind, activity.recorded_at
   FROM selected
   LEFT JOIN latest_turn AS turn USING (session_id)
+  LEFT JOIN tool_request AS request
+    ON request.request_id = turn.approval_tool_request_id
+  LEFT JOIN tool_approval_judge_model_call AS approval_call
+    ON approval_call.request_id = request.request_id
   LEFT JOIN latest_goal AS goal USING (session_id)
   LEFT JOIN judge USING (session_id)
   LEFT JOIN latest_runner AS runner USING (session_id)
@@ -285,12 +309,18 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
         phase.as_deref(),
         terminal.as_deref(),
     )?;
+    let approval_human_authority = row
+        .try_get::<Option<bool>, _>("approval_human_authority")?
+        .unwrap_or(false);
     let action = match state {
         AttentionState::Blocked => Some(AttentionAction::ProvideGoalNeed),
-        AttentionState::AwaitingApproval => Some(AttentionAction::DecideApproval),
+        AttentionState::AwaitingApproval if approval_human_authority => {
+            Some(AttentionAction::DecideApproval)
+        }
         AttentionState::Ambiguous | AttentionState::AwaitingReconciliation => {
             Some(AttentionAction::ReconcileTurn)
         }
+        AttentionState::AwaitingApproval | AttentionState::AwaitingToolRecovery => None,
         AttentionState::RunnerLost => Some(AttentionAction::RestoreRunner),
         AttentionState::Active | AttentionState::Queued | AttentionState::Idle => None,
     };
@@ -334,8 +364,9 @@ fn classify_state(
     }
     match (turn, phase, terminal) {
         (Some("active"), Some("awaiting_tool_approval"), _) => Ok(AttentionState::AwaitingApproval),
-        (Some("active"), Some("awaiting_model_call_recovery" | "awaiting_tool_recovery"), _) => {
-            Ok(AttentionState::Ambiguous)
+        (Some("active"), Some("awaiting_model_call_recovery"), _) => Ok(AttentionState::Ambiguous),
+        (Some("active"), Some("awaiting_tool_recovery"), _) => {
+            Ok(AttentionState::AwaitingToolRecovery)
         }
         (Some("active"), Some("awaiting_runner_recovery"), _) => Ok(AttentionState::RunnerLost),
         (Some("active"), Some("running" | "awaiting_child"), _) => Ok(AttentionState::Active),
@@ -344,6 +375,9 @@ fn classify_state(
             Ok(AttentionState::AwaitingReconciliation)
         }
         (Some("terminal"), None, Some(_)) | (None, None, None) => Ok(AttentionState::Idle),
+        (Some("active" | "queued" | "terminal"), _, _) => {
+            Err(AttentionCorruption::Invalid("turn state shape").into())
+        }
         (Some(value), _, _) => Err(AttentionCorruption::Unsupported {
             field: "turn state",
             value: value.to_owned(),
@@ -438,5 +472,31 @@ mod tests {
             .unwrap(),
             AttentionState::AwaitingApproval
         );
+    }
+
+    #[test]
+    fn tool_recovery_is_distinct_from_model_recovery() {
+        assert_eq!(
+            classify_state(
+                None,
+                None,
+                Some("active"),
+                Some("awaiting_tool_recovery"),
+                None
+            )
+            .unwrap(),
+            AttentionState::AwaitingToolRecovery
+        );
+    }
+
+    #[test]
+    fn supported_turn_with_invalid_shape_reports_shape_corruption() {
+        let error = classify_state(None, None, Some("active"), None, None)
+            .expect_err("a supported state with a missing phase is corrupt");
+
+        assert!(matches!(
+            error,
+            AttentionRepositoryError::Corruption(AttentionCorruption::Invalid("turn state shape"))
+        ));
     }
 }
