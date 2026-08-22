@@ -44,7 +44,7 @@ use signalbox_web_contract::{
     WebSearchHighlight, WebSearchPage, WebSearchResult, WebSearchResultSource,
     WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
     WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
-    WebTimelineEventSequence,
+    WebTimelineEventSequence, WebU64,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -672,19 +672,21 @@ fn descriptor_dto(
     Ok(WebSessionTimelineDescriptor {
         session_id: descriptor.session.into_uuid().to_string(),
         sizes: WebSessionTimelineSizeFacts {
-            item_count: descriptor.sizes.item_count.to_string(),
-            projected_text_bytes: descriptor.sizes.projected_text_bytes.to_string(),
-            projected_structured_bytes: descriptor.sizes.projected_structured_bytes.to_string(),
-            referenced_blob_count: descriptor.sizes.referenced_blob_count.to_string(),
-            referenced_blob_bytes: descriptor.sizes.referenced_blob_bytes.to_string(),
+            item_count: WebU64::from_u64(descriptor.sizes.item_count),
+            projected_text_bytes: WebU64::from_u64(descriptor.sizes.projected_text_bytes),
+            projected_structured_bytes: WebU64::from_u64(
+                descriptor.sizes.projected_structured_bytes,
+            ),
+            referenced_blob_count: WebU64::from_u64(descriptor.sizes.referenced_blob_count),
+            referenced_blob_bytes: WebU64::from_u64(descriptor.sizes.referenced_blob_bytes),
         },
         first_address: address_dto(first_address),
         latest_address: address_dto(latest_address),
         work: WebSessionWorkFacts {
-            active_turn_count: descriptor.work.active_turn_count.to_string(),
-            queued_turn_count: descriptor.work.queued_turn_count.to_string(),
+            active_turn_count: WebU64::from_u64(descriptor.work.active_turn_count),
+            queued_turn_count: WebU64::from_u64(descriptor.work.queued_turn_count),
         },
-        observed_through: descriptor.observed_through.to_string(),
+        observed_through: WebU64::from_u64(descriptor.observed_through),
     })
 }
 
