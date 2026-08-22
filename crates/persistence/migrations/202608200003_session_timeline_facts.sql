@@ -102,6 +102,9 @@ CREATE FUNCTION append_session_timeline_input_bytes()
 RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$
 BEGIN
+    -- Submission later acquires the allocator through lifecycle/outbox work.
+    -- Preserve the global allocator-then-session-fact lock order here too.
+    PERFORM 1 FROM outbox_sequence_state WHERE singleton FOR UPDATE;
     UPDATE session_timeline_fact
        SET projected_text_bytes = projected_text_bytes
            + octet_length(convert_to(NEW.content_text, 'UTF8'))
@@ -118,6 +121,9 @@ CREATE FUNCTION append_session_timeline_transcript_bytes()
 RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$
 BEGIN
+    -- Transcript persistence can share a transaction with later outbox work.
+    -- Preserve the global allocator-then-session-fact lock order here too.
+    PERFORM 1 FROM outbox_sequence_state WHERE singleton FOR UPDATE;
     UPDATE session_timeline_fact
        SET projected_text_bytes = projected_text_bytes
            + coalesce(octet_length(convert_to(NEW.assistant_text_value, 'UTF8')), 0)

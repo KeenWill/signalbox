@@ -65,6 +65,9 @@ const projectedItemBytes = (kind: string): number =>
 const boundedLimit = (value: number, minimum: number, maximum: number): number =>
   Number.isFinite(value) ? Math.min(Math.max(Math.trunc(value), minimum), maximum) : minimum
 
+const boundedSourceLimit = (value: number, minimum: number, maximum: number): number =>
+  Number.isFinite(value) ? Math.min(Math.max(Math.trunc(value), minimum), maximum) : maximum
+
 const boundedLimits = (
   limits: SessionWindowLimits,
   contract: TimelineContractLimits,
@@ -72,12 +75,12 @@ const boundedLimits = (
   maxItems: boundedLimit(
     limits.maxItems,
     1,
-    Math.max(1, Math.min(contract.max_timeline_window_items, MAX_CONTRACT_TIMELINE_WINDOW_ITEMS)),
+    boundedSourceLimit(contract.max_timeline_window_items, 1, MAX_CONTRACT_TIMELINE_WINDOW_ITEMS),
   ),
   maxBytes: boundedLimit(
     limits.maxBytes,
     256,
-    Math.max(256, Math.min(contract.max_timeline_window_bytes, MAX_CONTRACT_TIMELINE_WINDOW_BYTES)),
+    boundedSourceLimit(contract.max_timeline_window_bytes, 256, MAX_CONTRACT_TIMELINE_WINDOW_BYTES),
   ),
 })
 
@@ -256,10 +259,17 @@ export class BoundedSessionHistory {
     const anchorAddress =
       'eventSequence' in anchor ? decimalAddress(anchor.eventSequence) : undefined
     const bounded = boundedLimits(limits, this.source.limits)
-    const window = await this.source.readWindow(this.sessionId, anchor, bounded, signal)
+    const maxItems = bounded.maxItems
+    const maxBytes = bounded.maxBytes
+    const window = await this.source.readWindow(
+      this.sessionId,
+      anchor,
+      { maxItems, maxBytes },
+      signal,
+    )
     if (canonicalSessionId(window.session_id) !== this.sessionId)
       throw new TypeError('timeline window session mismatch')
-    if (window.items.length > bounded.maxItems) {
+    if (window.items.length > maxItems) {
       throw new TypeError('timeline window exceeds the requested item ceiling')
     }
     if (
@@ -305,7 +315,7 @@ export class BoundedSessionHistory {
     if (projectedStructuredBytes !== window.projected_structured_bytes) {
       throw new TypeError('timeline window byte total does not match its items')
     }
-    if (projectedStructuredBytes > bounded.maxBytes) {
+    if (projectedStructuredBytes > maxBytes) {
       throw new TypeError('timeline window exceeds the requested byte ceiling')
     }
     const firstItemAddress = window.items[0]?.address.event_sequence
@@ -430,13 +440,14 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
             (_, offset) => Math.min(addressed, SESSION_FOUNDATION_TOTAL + 1) - offset - 1,
           )
         case 'around': {
+          const aroundAddress = Math.min(addressed, SESSION_FOUNDATION_TOTAL)
           const candidates = Array.from(
             { length: bounded.maxItems * 2 },
-            (_, offset) => Math.max(addressed - bounded.maxItems + 1, 1) + offset,
+            (_, offset) => Math.max(aroundAddress - bounded.maxItems + 1, 1) + offset,
           ).filter((sequence) => sequence <= SESSION_FOUNDATION_TOTAL)
           candidates.sort(
             (left, right) =>
-              Math.abs(left - addressed) - Math.abs(right - addressed) || left - right,
+              Math.abs(left - aroundAddress) - Math.abs(right - aroundAddress) || left - right,
           )
           return candidates.slice(0, bounded.maxItems)
         }
