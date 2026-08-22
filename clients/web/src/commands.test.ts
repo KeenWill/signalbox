@@ -67,4 +67,36 @@ describe('command registry', () => {
 
     expect(firstWindowRequests).toBe(1)
   })
+
+  it('routes the last-item hotkey to the owning latest-window action when available', () => {
+    let latestWindowRequests = 0
+
+    invokeCommand('selection.last', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: ['41', '42'],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      focusTimeline: () => undefined,
+      openLatestTimelineWindow: () => {
+        latestWindowRequests += 1
+      },
+    })
+
+    expect(latestWindowRequests).toBe(1)
+  })
+
+  it('lets the registered artifact command own selection state', () => {
+    invokeCommand('artifact.select', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      artifactSelectionTarget: 'artifact-2',
+      focusTimeline: () => undefined,
+    })
+
+    expect(selectApp(store.getState()).selectedArtifact).toBe('artifact-2')
+  })
 })

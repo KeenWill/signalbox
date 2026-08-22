@@ -136,6 +136,23 @@ describe('BoundedSessionHistory', () => {
     expect(window.items.map((item) => item.address.event_sequence)).toEqual(['1', '2', '3', '4'])
   })
 
+  it('rejects items on the wrong side of an addressed window anchor', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async (requestedSessionId, _anchor, limits) =>
+        scenario.readWindow(requestedSessionId, { kind: 'first' }, limits),
+    }
+
+    await expect(
+      new BoundedSessionHistory(sessionId, source).load(
+        { kind: 'after', eventSequence: '5' },
+        { maxItems: 4, maxBytes: 1024 },
+      ),
+    ).rejects.toThrow('at or before its anchor')
+  })
+
   it('decodes structured API errors before throwing', async () => {
     const request = async () =>
       new Response(

@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import { boundAttachments, MAX_VISIBLE_ATTACHMENTS } from './ArtifactAttachments'
-import { registeredArtifactKinds, selectBlobView, selectImageView } from './ArtifactRenderer'
+import {
+  registeredArtifactKinds,
+  selectBlobView,
+  selectImageView,
+  selectViewDerivation,
+} from './ArtifactRenderer'
 import {
   documentAttachment,
   imageArtifact,
@@ -38,6 +43,22 @@ describe('artifact renderer compatibility', () => {
     }
 
     expect(selectImageView(descriptor)?.kind).toBe('preview')
+  })
+
+  it('selects the derivation that binds the descriptor input to the rendered output', () => {
+    const authoritative = imagePreviewView.derivations[0]
+    if (authoritative === undefined) throw new Error('fixture derivation missing')
+    const unrelated = {
+      ...authoritative,
+      derivation_id: '0198f321-2300-7000-8000-000000000002',
+      input_digests: [`sha256:${'9a'.repeat(32)}`],
+      output_digests: [`sha256:${'9b'.repeat(32)}`],
+    }
+    const view = { ...imagePreviewView, derivations: [unrelated, authoritative] }
+
+    expect(selectViewDerivation(imageArtifact, view)?.derivation_id).toBe(
+      authoritative?.derivation_id,
+    )
   })
 
   it('does not create an inline renderer from an image-like MIME string', () => {
@@ -118,6 +139,19 @@ describe('artifact renderer compatibility', () => {
       { length: ARTIFACT_EXPANDED_LINES + 20 },
       (_, index) => `line ${index + 1}`,
     ).join('\n')
+
+    const bounded = boundArtifactText(content, Array.from(content).length, 'expanded')
+
+    expect(bounded.content.split('\n')).toHaveLength(ARTIFACT_EXPANDED_LINES)
+    expect(bounded.omittedLines).toBe(true)
+    expect(bounded.omittedCharacters).toBeGreaterThan(0)
+  })
+
+  it('counts bare carriage returns toward the expanded line ceiling', () => {
+    const content = Array.from(
+      { length: ARTIFACT_EXPANDED_LINES + 20 },
+      (_, index) => `line ${index + 1}`,
+    ).join('\r')
 
     const bounded = boundArtifactText(content, Array.from(content).length, 'expanded')
 

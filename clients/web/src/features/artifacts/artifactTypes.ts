@@ -110,12 +110,27 @@ export const boundArtifactText = (
     characterPrefix += character
     prefixCharacters += 1
   }
-  const lines = characterPrefix.split('\n', lineLimit + 1)
-  const omittedLines = lines.length > lineLimit
-  const boundedLines = omittedLines ? lines.slice(0, lineLimit) : lines
-  const bounded = boundedLines.join('\n')
+  let lineBreaks = 0
+  let sourceIndex = 0
+  let boundedSourceEnd = characterPrefix.length
+  while (sourceIndex < characterPrefix.length) {
+    const character = characterPrefix[sourceIndex]
+    if (character === '\r' || character === '\n') {
+      lineBreaks += 1
+      if (lineBreaks === lineLimit) {
+        boundedSourceEnd = sourceIndex
+        break
+      }
+      sourceIndex += character === '\r' && characterPrefix[sourceIndex + 1] === '\n' ? 2 : 1
+      continue
+    }
+    sourceIndex += 1
+  }
+  const omittedLines = boundedSourceEnd < characterPrefix.length
+  const boundedSource = characterPrefix.slice(0, boundedSourceEnd)
+  const bounded = boundedSource.replace(/\r\n?|\n/g, '\n')
   let boundedCharacterCount = 0
-  for (const _character of bounded) boundedCharacterCount += 1
+  for (const _character of boundedSource) boundedCharacterCount += 1
 
   return {
     content: bounded,

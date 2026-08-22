@@ -316,11 +316,15 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
   const firstTimelineWindowRef = useRef<(() => void) | null>(null)
+  const latestTimelineWindowRef = useRef<(() => void) | null>(null)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineSessionId, setTimelineSessionId] = useState<string | null>(null)
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
   const updateFirstTimelineWindow = useCallback((action: (() => void) | null) => {
     firstTimelineWindowRef.current = action
+  }, [])
+  const updateLatestTimelineWindow = useCallback((action: (() => void) | null) => {
+    latestTimelineWindowRef.current = action
   }, [])
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
@@ -336,6 +340,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       artifactOriginalIds: [],
       focusTimeline: () => primaryRef.current?.focus(),
       openFirstTimelineWindow: () => firstTimelineWindowRef.current?.(),
+      openLatestTimelineWindow: () => latestTimelineWindowRef.current?.(),
       onTimelineSelected: (eventSequence) => {
         if (timelineSessionId !== null) {
           dispatch(
@@ -353,13 +358,22 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
-      callback: () => invokeProductCommand(binding.commandId, context),
+      callback: () => {
+        const overlay = store.getState().app.overlay
+        if (overlay === null || binding.commandId === 'surface.escape') {
+          invokeProductCommand(binding.commandId, context)
+        }
+      },
     })),
   )
   useHotkeySequences(
     [...globalHotkeySequenceBindings, ...productHotkeySequenceBindings].map((binding) => ({
       sequence: binding.sequence,
-      callback: () => invokeProductCommand(binding.commandId, context),
+      callback: () => {
+        if (store.getState().app.overlay === null) {
+          invokeProductCommand(binding.commandId, context)
+        }
+      },
     })),
   )
 
@@ -375,6 +389,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     ) : surface === 'sessions' ? (
       <SessionWorkspaceSurface
         onFirstWindowAction={updateFirstTimelineWindow}
+        onLatestWindowAction={updateLatestTimelineWindow}
         onSessionId={setTimelineSessionId}
         onTimelineIds={updateTimelineIds}
       />

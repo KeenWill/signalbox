@@ -8,8 +8,10 @@ export interface CommandContext {
   timelineIds: readonly string[]
   artifactPreviewIds: readonly string[]
   artifactOriginalIds: readonly string[]
+  artifactSelectionTarget?: string
   focusTimeline: () => void
   openFirstTimelineWindow?: () => void
+  openLatestTimelineWindow?: () => void
   onTimelineSelected?: (eventSequence: string) => void
 }
 
@@ -42,6 +44,19 @@ const hasSelectedArtifactPreview = (context: CommandContext) => {
   return id !== null && context.artifactPreviewIds.includes(id)
 }
 export const commandRegistry = [
+  {
+    id: 'artifact.select',
+    title: 'Select artifact',
+    description: 'Select the artifact targeted by the invoking control.',
+    category: 'Artifact',
+    bindings: [],
+    available: (context) => context.artifactSelectionTarget !== undefined,
+    run: (context) => {
+      if (context.artifactSelectionTarget !== undefined) {
+        context.dispatch(actions.artifactSelected(context.artifactSelectionTarget))
+      }
+    },
+  },
   {
     id: 'artifact.preview.expand',
     title: 'Expand bounded artifact preview',
@@ -195,7 +210,10 @@ export const commandRegistry = [
       { label: 'End' },
     ],
     available: (context) => context.timelineIds.length > 0,
-    run: (context) => selectTimeline(context, context.timelineIds.at(-1)),
+    run: (context) => {
+      if (context.openLatestTimelineWindow) context.openLatestTimelineWindow()
+      else selectTimeline(context, context.timelineIds.at(-1))
+    },
   },
   {
     id: 'layout.toggle',

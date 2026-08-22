@@ -146,6 +146,9 @@ test('opens visible keyboard help and follows product navigation sequences', asy
 
   await page.keyboard.press('Shift+/')
   await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/attention$/)
   await page.keyboard.press('Escape')
   await page.keyboard.press('g')
   await page.keyboard.press('s')
@@ -241,5 +244,18 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await page.keyboard.press('g')
   await firstWindowRequest
   await expect(completedItem).toHaveClass(/selected/)
+
+  const latestWindowRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url())
+    return url.pathname.endsWith('/timeline') && url.searchParams.get('anchor') === 'latest'
+  })
+  await page.keyboard.press('Shift+G')
+  await latestWindowRequest
+
+  const reopenRequest = page.waitForRequest((request) =>
+    new URL(request.url()).pathname.endsWith(`/api/sessions/${sessionWorkspaceFixture.id}`),
+  )
+  await page.getByRole('button', { name: 'Open workspace' }).click()
+  await reopenRequest
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

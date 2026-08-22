@@ -183,9 +183,24 @@ export class BoundedSessionHistory {
       throw new TypeError('timeline window exceeds the requested byte ceiling')
     }
     const incoming = new Map<string, (typeof window.items)[number]>()
+    const requestedAddress = 'eventSequence' in anchor ? decimalAddress(anchor.eventSequence) : null
     for (const item of window.items) {
       const address = item.address.event_sequence
-      decimalAddress(address)
+      const parsedAddress = decimalAddress(address)
+      if (
+        anchor.kind === 'before' &&
+        requestedAddress !== null &&
+        parsedAddress >= requestedAddress
+      ) {
+        throw new TypeError('timeline before window contains an item at or after its anchor')
+      }
+      if (
+        anchor.kind === 'after' &&
+        requestedAddress !== null &&
+        parsedAddress <= requestedAddress
+      ) {
+        throw new TypeError('timeline after window contains an item at or before its anchor')
+      }
       if (incoming.has(address)) throw new TypeError('timeline window repeats an address')
       incoming.set(address, item)
     }

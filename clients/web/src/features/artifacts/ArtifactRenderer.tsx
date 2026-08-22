@@ -53,6 +53,19 @@ export const selectBlobView = (
   kind: WebBlobViewKind,
 ): WebBlobAvailableView | undefined => descriptor.available_views.find((view) => view.kind === kind)
 
+const digestFromContentUrl = (contentUrl: string): string | undefined =>
+  contentUrl.match(/\/api\/blobs\/(sha256:[0-9a-f]{64})\//)?.[1]
+
+export const selectViewDerivation = (descriptor: WebBlobDescriptor, view: WebBlobAvailableView) => {
+  const outputDigest = digestFromContentUrl(view.content_url)
+  if (outputDigest === undefined) return undefined
+  return view.derivations.find(
+    (derivation) =>
+      derivation.input_digests.includes(descriptor.digest) &&
+      derivation.output_digests.includes(outputDigest),
+  )
+}
+
 interface RendererProps<T extends RenderableArtifact> {
   artifact: T
   commandContext: CommandContext
@@ -63,12 +76,19 @@ type ArtifactCommandId =
   | 'artifact.preview.collapse'
   | 'artifact.original.load'
 
+const selectArtifact = (commandContext: CommandContext, artifactId: string) => {
+  invokeCommand('artifact.select', {
+    ...commandContext,
+    artifactSelectionTarget: artifactId,
+  })
+}
+
 const invokeArtifactAction = (
   commandContext: CommandContext,
   commandId: ArtifactCommandId,
   artifactId: string,
 ) => {
-  commandContext.dispatch(actions.artifactSelected(artifactId))
+  selectArtifact(commandContext, artifactId)
   invokeCommand(commandId, commandContext)
 }
 
@@ -178,8 +198,13 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
   const automatic = selectImageView(descriptor)
   const original = selectBlobView(descriptor, 'browser_native')
   const download = selectBlobView(descriptor, 'download')
-  const rendered = originalRequested && original ? original : automatic
-  const derivation = rendered?.derivations[0]
+  const candidate = originalRequested && original ? original : automatic
+  const derivation = candidate ? selectViewDerivation(descriptor, candidate) : undefined
+  const rendered =
+    candidate &&
+    ((candidate.kind !== 'preview' && candidate.kind !== 'thumbnail') || derivation !== undefined)
+      ? candidate
+      : undefined
 
   return (
     <div className="artifact-image-layout">
@@ -314,7 +339,9 @@ function DocumentBody({ artifact }: RendererProps<DocumentArtifact>) {
 
 function DerivativeBody({ artifact }: RendererProps<DerivativeArtifact>) {
   const rendered = selectBlobView(artifact.source.descriptor, artifact.viewKind)
-  const derivation = rendered?.derivations[0]
+  const derivation = rendered
+    ? selectViewDerivation(artifact.source.descriptor, rendered)
+    : undefined
 
   if (!rendered || !derivation) {
     return (
@@ -494,7 +521,7 @@ export function ArtifactRenderer({
         type="button"
         className="artifact-heading"
         aria-pressed={selected}
-        onClick={() => commandContext.dispatch(actions.artifactSelected(artifact.id))}
+        onClick={() => selectArtifact(commandContext, artifact.id)}
       >
         {artifactIcon(artifact)}
         <div>

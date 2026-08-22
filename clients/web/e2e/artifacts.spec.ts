@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
@@ -7,14 +8,27 @@ interface BrowserProblems {
   pageErrors: string[]
 }
 
-const previewPath = `/api/blobs/sha256:${'2b'.repeat(32)}/content/image-png`
-const originalPath = `/api/blobs/sha256:${'1a'.repeat(32)}/content/image-png`
+const previewPath =
+  '/api/blobs/sha256:071d25f582ba9e6a8725e198dab884d70a3d7ce3ea84a74c66e65a1443c41a8e/content/image-png'
+const originalPath =
+  '/api/blobs/sha256:3729b2319da081a0710ba27da7af330c1236325cf8ed0a619cf132375bb0fc1e/content/image-png'
 const remotePath = 'https://media.example.test/remote-status-diagram.png'
 const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.meta.url))
 const originalFixture = readFileSync(new URL('./fixtures/original.png', import.meta.url))
 // The owned 390 px crop is almost entirely text, so CI font rasterization accounts for 7% of its
 // pixels even when geometry is identical. Keep that measured host allowance local to this fixture.
 const MOBILE_ARTIFACT_RASTERIZATION_TOLERANCE = 0.08
+
+test('fixture bytes match their advertised immutable identities', () => {
+  expect(createHash('sha256').update(originalFixture).digest('hex')).toBe(
+    '3729b2319da081a0710ba27da7af330c1236325cf8ed0a619cf132375bb0fc1e',
+  )
+  expect(originalFixture.byteLength).toBe(33749)
+  expect(createHash('sha256').update(previewFixture).digest('hex')).toBe(
+    '071d25f582ba9e6a8725e198dab884d70a3d7ce3ea84a74c66e65a1443c41a8e',
+  )
+  expect(previewFixture.byteLength).toBe(215370)
+})
 
 const watchBrowser = (page: Page): BrowserProblems => {
   const problems: BrowserProblems = { consoleErrors: [], pageErrors: [] }

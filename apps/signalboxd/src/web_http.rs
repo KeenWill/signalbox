@@ -753,6 +753,12 @@ async fn append_image_derivative_view(
     let Ok(entry) = runtime.entry(output).await else {
         return;
     };
+    if open_recorded_blob_verified(runtime.registry(), &entry)
+        .await
+        .is_err()
+    {
+        return;
+    }
     let Some(provenance) = project_derivation(&derivation) else {
         return;
     };
@@ -1102,9 +1108,11 @@ fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
 }
 
 fn if_range_matches(headers: &HeaderMap, etag: &str) -> bool {
-    match headers.get(IF_RANGE) {
-        None => true,
-        Some(value) => value.to_str().is_ok_and(|value| value.trim() == etag),
+    let mut values = headers.get_all(IF_RANGE).iter();
+    match (values.next(), values.next()) {
+        (None, None) => true,
+        (Some(value), None) => value.to_str().is_ok_and(|value| value.trim() == etag),
+        _ => false,
     }
 }
 
@@ -1558,6 +1566,21 @@ mod tests {
             header::IF_RANGE,
             header::HeaderValue::from_bytes(&[0xff])
                 .expect("the fixture is an opaque HTTP field value"),
+        );
+
+        assert!(!super::if_range_matches(&headers, "\"matching\""));
+    }
+
+    #[test]
+    fn repeated_if_range_fields_fail_the_condition() {
+        let mut headers = header::HeaderMap::new();
+        headers.append(
+            header::IF_RANGE,
+            header::HeaderValue::from_static("\"matching\""),
+        );
+        headers.append(
+            header::IF_RANGE,
+            header::HeaderValue::from_static("\"other\""),
         );
 
         assert!(!super::if_range_matches(&headers, "\"matching\""));

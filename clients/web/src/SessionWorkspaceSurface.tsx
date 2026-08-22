@@ -34,10 +34,12 @@ export const visibleSessionItems = (
 
 export function SessionWorkspaceSurface({
   onFirstWindowAction,
+  onLatestWindowAction,
   onSessionId,
   onTimelineIds,
 }: {
   onFirstWindowAction: (action: (() => void) | null) => void
+  onLatestWindowAction: (action: (() => void) | null) => void
   onSessionId: (sessionId: string | null) => void
   onTimelineIds: (ids: readonly string[]) => void
 }) {
@@ -79,10 +81,15 @@ export function SessionWorkspaceSurface({
   useEffect(() => onSessionId(sessionId), [onSessionId, sessionId])
   useEffect(() => () => onSessionId(null), [onSessionId])
   const showFirstWindow = useCallback(() => setManualAnchor({ kind: 'first' }), [])
+  const showLatestWindow = useCallback(() => setManualAnchor({ kind: 'latest' }), [])
   useEffect(() => {
     onFirstWindowAction(showFirstWindow)
     return () => onFirstWindowAction(null)
   }, [onFirstWindowAction, showFirstWindow])
+  useEffect(() => {
+    onLatestWindowAction(showLatestWindow)
+    return () => onLatestWindowAction(null)
+  }, [onLatestWindowAction, showLatestWindow])
 
   const openSession = (event: FormEvent) => {
     event.preventDefault()
@@ -91,6 +98,7 @@ export function SessionWorkspaceSurface({
     setManualAnchor(null)
     setExpanded(new Set())
     dispatch(actions.timelineSelected(null))
+    if (candidate === sessionId && manualAnchor === null) void session.refetch()
     setSessionId(candidate)
   }
   const selected = app.selectedTimeline
@@ -203,7 +211,7 @@ export function SessionWorkspaceSurface({
             >
               Next window <ChevronRight aria-hidden="true" />
             </button>
-            <button type="button" onClick={() => setManualAnchor({ kind: 'latest' })}>
+            <button type="button" onClick={showLatestWindow}>
               <SkipForward aria-hidden="true" /> Latest <kbd>G</kbd>
             </button>
             <span>
