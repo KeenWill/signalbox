@@ -40,6 +40,12 @@ export const selectImageView = (descriptor: WebBlobDescriptor): WebBlobAvailable
     descriptor.available_views.find((view) => view.kind === kind),
   ).find((view) => view !== undefined)
 
+export const imageViewLabel = (kind: WebBlobViewKind): string => {
+  if (kind === 'browser_native') return 'Original'
+  if (kind === 'thumbnail') return 'Thumbnail'
+  return 'Preview'
+}
+
 const viewByKind = (
   descriptor: WebBlobDescriptor,
   kind: WebBlobViewKind,
@@ -186,7 +192,7 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
         {rendered ? (
           <img
             src={rendered.content_url}
-            alt={`${rendered.kind === 'browser_native' ? 'Original' : 'Preview'} of ${artifact.displayName}`}
+            alt={`${imageViewLabel(rendered.kind)} of ${artifact.displayName}`}
             loading="lazy"
           />
         ) : (
@@ -342,18 +348,6 @@ function RendererBoundary({
       </div>
     )
   }
-  if (artifact.kind === 'committed_unimplemented') {
-    return (
-      <div className="artifact-state unimplemented" role="status">
-        <FileQuestion aria-hidden="true" />
-        <div>
-          <strong>Typed renderer not implemented</strong>
-          <p>No admitted {artifact.attemptedKind} view is available. No bytes were read.</p>
-        </div>
-      </div>
-    )
-  }
-
   const Renderer = rendererRegistry[artifact.kind] as ComponentType<RendererProps<typeof artifact>>
   return <Renderer artifact={artifact} commandContext={commandContext} />
 }
@@ -390,11 +384,7 @@ export function ArtifactRenderer({
         {artifactIcon(artifact)}
         <div>
           <strong>{artifact.displayName}</strong>
-          <small>
-            {artifact.kind === 'blocked' || artifact.kind === 'committed_unimplemented'
-              ? artifact.attemptedKind
-              : artifact.kind}
-          </small>
+          <small>{artifact.kind === 'blocked' ? artifact.attemptedKind : artifact.kind}</small>
         </div>
       </button>
       <RendererBoundary artifact={artifact} commandContext={commandContext} />

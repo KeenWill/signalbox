@@ -172,13 +172,10 @@ test('keeps a generic descriptor available as metadata and download', async ({ p
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('renders unsupported and unauthorized kinds as typed safe states', async ({ page }) => {
+test('renders unauthorized kinds as typed safe states', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/blobs')
 
-  const document = page.getByRole('article', { name: 'Artifact architecture.pdf' })
-  await expect(document.getByText('Typed renderer not implemented')).toBeVisible()
-  await expect(document.getByText('No bytes were read.')).toBeVisible()
   const blocked = page.getByRole('article', { name: 'Artifact restricted.capture' })
   await expect(blocked.getByText('Artifact blocked')).toBeVisible()
   await expect(blocked.getByRole('link')).toHaveCount(0)
@@ -223,15 +220,6 @@ test('captures the remote-unavailable renderer state', async ({ page }, testInfo
     testInfo,
     'Artifact remote-status-diagram.png',
     'artifact-remote-unavailable-state.png',
-  )
-})
-
-test('captures the unimplemented renderer state', async ({ page }, testInfo) => {
-  await captureArtifactState(
-    page,
-    testInfo,
-    'Artifact architecture.pdf',
-    'artifact-unimplemented-state.png',
   )
 })
 

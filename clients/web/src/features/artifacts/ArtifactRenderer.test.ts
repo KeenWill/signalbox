@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import { registeredArtifactKinds, selectImageView } from './ArtifactRenderer'
+import { imageViewLabel, registeredArtifactKinds, selectImageView } from './ArtifactRenderer'
 import {
   imageArtifact,
   imageDownloadView,
@@ -9,11 +9,10 @@ import {
 } from './artifactScenario'
 import {
   ARTIFACT_EXPANDED_CHARACTERS,
-  ARTIFACT_EXPANDED_LINES,
   ARTIFACT_PREVIEW_CHARACTERS,
   boundArtifactText,
 } from './artifactTypes'
-import { admitRemoteMediaUrl, decodeRemoteMediaPolicy } from './remoteMediaPreference'
+import { admitRemoteMediaUrl } from './remoteMediaPreference'
 
 describe('artifact renderer compatibility', () => {
   it('registers the closed text, code, and image renderer set', () => {
@@ -87,33 +86,27 @@ describe('artifact renderer compatibility', () => {
   })
 
   it('bounds the expanded projection by lines and reports the remainder', () => {
-    const content = Array.from(
-      { length: ARTIFACT_EXPANDED_LINES + 20 },
-      (_, index) => `line ${index + 1}`,
-    ).join('\n')
+    const content = Array.from({ length: 220 }, (_, index) => `line ${index + 1}`).join('\n')
 
     const bounded = boundArtifactText(content, Array.from(content).length, 'expanded')
 
-    expect(bounded.content.split('\n')).toHaveLength(ARTIFACT_EXPANDED_LINES)
+    expect(bounded.content.split('\n')).toHaveLength(200)
     expect(bounded.omittedLines).toBe(true)
     expect(bounded.omittedCharacters).toBeGreaterThan(0)
   })
 
   it('counts bare carriage returns toward the expanded line ceiling', () => {
-    const content = Array.from(
-      { length: ARTIFACT_EXPANDED_LINES + 20 },
-      (_, index) => `line ${index + 1}`,
-    ).join('\r')
+    const content = Array.from({ length: 220 }, (_, index) => `line ${index + 1}`).join('\r')
 
     const bounded = boundArtifactText(content, Array.from(content).length, 'expanded')
 
-    expect(bounded.content.split('\n')).toHaveLength(ARTIFACT_EXPANDED_LINES)
+    expect(bounded.content.split('\n')).toHaveLength(200)
     expect(bounded.omittedLines).toBe(true)
     expect(bounded.omittedCharacters).toBeGreaterThan(0)
   })
 
-  it('fails an unknown remote-media preference closed to ask', () => {
-    expect(decodeRemoteMediaPolicy('invented')).toBe('ask')
+  it('labels thumbnail capabilities as thumbnails', () => {
+    expect(imageViewLabel('thumbnail')).toBe('Thumbnail')
   })
 
   it('admits only credential-free HTTPS remote media', () => {

@@ -51,11 +51,6 @@ export interface BlockedArtifact extends ArtifactIdentity {
   reason: string
 }
 
-export interface CommittedUnimplementedArtifact extends ArtifactIdentity {
-  kind: 'committed_unimplemented'
-  attemptedKind: string
-}
-
 export type RenderableArtifact =
   | TextArtifact
   | CodeArtifact
@@ -63,7 +58,7 @@ export type RenderableArtifact =
   | RemoteImageArtifact
   | GenericBlobArtifact
 
-export type ArtifactItem = RenderableArtifact | BlockedArtifact | CommittedUnimplementedArtifact
+export type ArtifactItem = RenderableArtifact | BlockedArtifact
 
 export interface BoundedArtifactText {
   content: string

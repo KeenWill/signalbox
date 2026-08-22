@@ -116,12 +116,6 @@ export const artifactScenario: ReadonlyArray<ArtifactItem> = [
     },
   },
   {
-    id: 'future-pdf',
-    kind: 'committed_unimplemented',
-    displayName: 'architecture.pdf',
-    attemptedKind: 'document',
-  },
-  {
     id: 'restricted-capture',
     kind: 'blocked',
     displayName: 'restricted.capture',
