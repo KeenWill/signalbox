@@ -101,6 +101,14 @@ export const scenarios = [
     tableTotal: 120,
   },
   {
+    id: 'attachments',
+    title: 'Artifact attachments',
+    description: 'Typed document, derivative, and media placeholders across attachment surfaces.',
+    connection: 'connected',
+    timelineTotal: 600,
+    tableTotal: 120,
+  },
+  {
     id: 'responsive',
     title: 'Responsive shell',
     description: 'The same workspace at narrow and wide breakpoints.',

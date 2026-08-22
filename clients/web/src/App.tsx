@@ -8,6 +8,7 @@ import {
   invokeCommand,
 } from './commands'
 import { FleetTable } from './FleetTable'
+import { AttachmentWorkbench } from './features/artifacts/ArtifactAttachments'
 import { ArtifactWorkbench } from './features/artifacts/ArtifactRenderer'
 import {
   SCENARIO_FLEET_WINDOW_ITEMS,
@@ -184,6 +185,8 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
         <div className="primary-stack">
           {knownId === 'blobs' ? (
             <ArtifactWorkbench />
+          ) : knownId === 'attachments' ? (
+            <AttachmentWorkbench />
           ) : (
             <Transcript
               key={`timeline-${knownId}`}

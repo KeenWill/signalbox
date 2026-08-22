@@ -2,9 +2,14 @@ import {
   Ban,
   Braces,
   Download,
+  ExternalLink,
+  File,
+  FileAudio,
   FileCode2,
   FileQuestion,
   FileText,
+  FileVideo,
+  GitBranch,
   Image as ImageIcon,
   Maximize2,
   Minimize2,
@@ -17,6 +22,9 @@ import {
   type ArtifactItem,
   boundArtifactText,
   type CodeArtifact,
+  type DerivativeArtifact,
+  type DocumentArtifact,
+  type MediaPlaceholderArtifact,
   type RemoteImageArtifact,
   type RenderableArtifact,
   type SignalboxImageArtifact,
@@ -40,7 +48,7 @@ export const selectImageView = (descriptor: WebBlobDescriptor): WebBlobAvailable
     descriptor.available_views.find((view) => view.kind === kind),
   ).find((view) => view !== undefined)
 
-const viewByKind = (
+export const selectBlobView = (
   descriptor: WebBlobDescriptor,
   kind: WebBlobViewKind,
 ): WebBlobAvailableView | undefined => descriptor.available_views.find((view) => view.kind === kind)
@@ -124,8 +132,8 @@ function SignalboxImageBody({ artifact }: RendererProps<SignalboxImageArtifact>)
   const [originalRequested, setOriginalRequested] = useState(false)
   const { descriptor } = artifact.source
   const automatic = selectImageView(descriptor)
-  const original = viewByKind(descriptor, 'browser_native')
-  const download = viewByKind(descriptor, 'download')
+  const original = selectBlobView(descriptor, 'browser_native')
+  const download = selectBlobView(descriptor, 'download')
   const rendered = originalRequested && original ? original : automatic
   const derivation = rendered?.derivations[0]
 
@@ -215,6 +223,103 @@ function ImageBody({
   )
 }
 
+function DocumentBody({ artifact }: RendererProps<DocumentArtifact>) {
+  const { descriptor } = artifact.source
+  const browserNative = selectBlobView(descriptor, 'browser_native')
+  const download = selectBlobView(descriptor, 'download')
+
+  return (
+    <div className="artifact-placeholder-layout">
+      <div className="artifact-document-placeholder">
+        <File aria-hidden="true" />
+        <strong>{artifact.documentKind === 'pdf' ? 'PDF document' : 'Document'}</strong>
+        <p>Document bytes stay unloaded until an explicit open or download action.</p>
+      </div>
+      <ArtifactMetadata
+        renderer="document placeholder"
+        mediaType={descriptor.declared_media_type}
+        provenance="Original blob"
+      >
+        {browserNative && (
+          <a href={browserNative.content_url} target="_blank" rel="noreferrer">
+            <ExternalLink aria-hidden="true" /> Open document
+          </a>
+        )}
+        {download && (
+          <a href={download.content_url} download={artifact.displayName}>
+            <Download aria-hidden="true" /> Download
+          </a>
+        )}
+      </ArtifactMetadata>
+    </div>
+  )
+}
+
+function DerivativeBody({ artifact }: RendererProps<DerivativeArtifact>) {
+  const rendered = selectBlobView(artifact.source.descriptor, artifact.viewKind)
+  const derivation = rendered?.derivations[0]
+
+  if (!rendered || !derivation) {
+    return (
+      <div className="artifact-state blocked" role="status">
+        <ShieldAlert aria-hidden="true" />
+        <div>
+          <strong>Derivative unavailable</strong>
+          <p>The descriptor does not authorize the requested derived view and no fallback ran.</p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="artifact-image-layout">
+      <div className="artifact-visual">
+        <img
+          src={rendered.content_url}
+          alt={`Derived ${artifact.viewKind} of ${artifact.displayName}`}
+          loading="lazy"
+        />
+      </div>
+      <ArtifactMetadata
+        renderer={`${artifact.viewKind} derivative`}
+        mediaType={rendered.media_type}
+        provenance={`${derivation.transformation_name} v${derivation.transformation_version}`}
+      >
+        <span className="artifact-provenance-count">
+          {derivation.input_digests.length} input · {derivation.output_digests.length} output
+        </span>
+      </ArtifactMetadata>
+    </div>
+  )
+}
+
+function MediaPlaceholderBody({ artifact }: RendererProps<MediaPlaceholderArtifact>) {
+  const { descriptor } = artifact.source
+  const download = selectBlobView(descriptor, 'download')
+  const MediaIcon = artifact.mediaKind === 'audio' ? FileAudio : FileVideo
+
+  return (
+    <div className="artifact-placeholder-layout">
+      <div className="artifact-document-placeholder media-placeholder">
+        <MediaIcon aria-hidden="true" />
+        <strong>{artifact.mediaKind === 'audio' ? 'Audio' : 'Video'} playback unavailable</strong>
+        <p>The current contract supplies bytes but no admitted inline media presentation.</p>
+      </div>
+      <ArtifactMetadata
+        renderer={`${artifact.mediaKind} placeholder`}
+        mediaType={descriptor.declared_media_type}
+        provenance="Original blob"
+      >
+        {download && (
+          <a href={download.content_url} download={artifact.displayName}>
+            <Download aria-hidden="true" /> Download
+          </a>
+        )}
+      </ArtifactMetadata>
+    </div>
+  )
+}
+
 function ArtifactMetadata({
   renderer,
   mediaType,
@@ -255,6 +360,9 @@ const rendererRegistry: {
   text: TextBody,
   code: CodeBody,
   image: ImageBody,
+  document: DocumentBody,
+  derivative: DerivativeBody,
+  media_placeholder: MediaPlaceholderBody,
 }
 
 export const registeredArtifactKinds = Object.freeze(Object.keys(rendererRegistry).sort())
@@ -300,6 +408,14 @@ const artifactIcon = (artifact: ArtifactItem) => {
   if (artifact.kind === 'text') return <FileText aria-hidden="true" />
   if (artifact.kind === 'code') return <FileCode2 aria-hidden="true" />
   if (artifact.kind === 'image') return <ImageIcon aria-hidden="true" />
+  if (artifact.kind === 'document') return <File aria-hidden="true" />
+  if (artifact.kind === 'derivative') return <GitBranch aria-hidden="true" />
+  if (artifact.kind === 'media_placeholder')
+    return artifact.mediaKind === 'audio' ? (
+      <FileAudio aria-hidden="true" />
+    ) : (
+      <FileVideo aria-hidden="true" />
+    )
   if (artifact.kind === 'blocked') return <ShieldAlert aria-hidden="true" />
   return <FileQuestion aria-hidden="true" />
 }

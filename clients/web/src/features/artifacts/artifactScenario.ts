@@ -1,8 +1,16 @@
 import { decodeWebBlobDescriptor, type WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import type { ArtifactItem } from './artifactTypes'
+import type {
+  ArtifactItem,
+  DerivativeArtifact,
+  DocumentArtifact,
+  MediaPlaceholderArtifact,
+} from './artifactTypes'
 
 const sourceDigest = `sha256:${'1a'.repeat(32)}`
 const previewDigest = `sha256:${'2b'.repeat(32)}`
+const documentDigest = `sha256:${'6f'.repeat(32)}`
+const audioDigest = `sha256:${'7a'.repeat(32)}`
+const videoDigest = `sha256:${'8c'.repeat(32)}`
 type BlobView = WebBlobDescriptor['available_views'][number]
 
 export const imageDownloadView: BlobView = {
@@ -49,6 +57,61 @@ export const imageDescriptor = decodeWebBlobDescriptor({
   declared_media_type: 'image/png',
   display_filename: ['orbital-map.png'],
   available_views: [imageDownloadView, imageOriginalView, imagePreviewView],
+})
+
+const documentDescriptor = decodeWebBlobDescriptor({
+  digest: documentDigest,
+  byte_length: '1843200',
+  declared_media_type: 'application/pdf',
+  display_filename: ['architecture.pdf'],
+  available_views: [
+    {
+      kind: 'download',
+      media_type: 'application/pdf',
+      byte_length: '1843200',
+      content_url: `/api/blobs/${documentDigest}/download?media_type=application%2Fpdf&display_filename=architecture.pdf`,
+      derivations: [],
+    },
+    {
+      kind: 'browser_native',
+      media_type: 'application/pdf',
+      byte_length: '1843200',
+      content_url: `/api/blobs/${documentDigest}/content/application-pdf`,
+      derivations: [],
+    },
+  ],
+})
+
+const audioDescriptor = decodeWebBlobDescriptor({
+  digest: audioDigest,
+  byte_length: '4194304',
+  declared_media_type: 'audio/ogg',
+  display_filename: ['operator-note.ogg'],
+  available_views: [
+    {
+      kind: 'download',
+      media_type: 'audio/ogg',
+      byte_length: '4194304',
+      content_url: `/api/blobs/${audioDigest}/download?media_type=audio%2Fogg&display_filename=operator-note.ogg`,
+      derivations: [],
+    },
+  ],
+})
+
+const videoDescriptor = decodeWebBlobDescriptor({
+  digest: videoDigest,
+  byte_length: '73400320',
+  declared_media_type: 'video/mp4',
+  display_filename: ['runner-capture.mp4'],
+  available_views: [
+    {
+      kind: 'download',
+      media_type: 'video/mp4',
+      byte_length: '73400320',
+      content_url: `/api/blobs/${videoDigest}/download?media_type=video%2Fmp4&display_filename=runner-capture.mp4`,
+      derivations: [],
+    },
+  ],
 })
 
 const generatedText = Array.from(
@@ -104,6 +167,46 @@ export const artifactScenario: ReadonlyArray<ArtifactItem> = [
     attemptedKind: 'unknown binary',
     reason: 'The current capability projection does not authorize a content view.',
   },
+]
+
+export const documentAttachment: DocumentArtifact = {
+  id: 'document-attachment',
+  kind: 'document',
+  displayName: 'architecture.pdf',
+  documentKind: 'pdf',
+  source: { kind: 'signalbox_blob', descriptor: documentDescriptor },
+}
+
+export const derivativeAttachment: DerivativeArtifact = {
+  id: 'derived-attachment',
+  kind: 'derivative',
+  displayName: 'orbital-map.preview.png',
+  presentation: 'image',
+  viewKind: 'preview',
+  source: { kind: 'signalbox_blob', descriptor: imageDescriptor },
+}
+
+export const audioAttachment: MediaPlaceholderArtifact = {
+  id: 'audio-attachment',
+  kind: 'media_placeholder',
+  displayName: 'operator-note.ogg',
+  mediaKind: 'audio',
+  source: { kind: 'signalbox_blob', descriptor: audioDescriptor },
+}
+
+export const videoAttachment: MediaPlaceholderArtifact = {
+  id: 'video-attachment',
+  kind: 'media_placeholder',
+  displayName: 'runner-capture.mp4',
+  mediaKind: 'video',
+  source: { kind: 'signalbox_blob', descriptor: videoDescriptor },
+}
+
+export const attachmentScenario: ReadonlyArray<ArtifactItem> = [
+  documentAttachment,
+  derivativeAttachment,
+  audioAttachment,
+  videoAttachment,
 ]
 
 export const imageArtifact = imageDescriptor

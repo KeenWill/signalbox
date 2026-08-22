@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import { registeredArtifactKinds, selectImageView } from './ArtifactRenderer'
+import { boundAttachments, MAX_VISIBLE_ATTACHMENTS } from './ArtifactAttachments'
+import { registeredArtifactKinds, selectBlobView, selectImageView } from './ArtifactRenderer'
 import {
+  documentAttachment,
   imageArtifact,
   imageDownloadView,
   imageOriginalView,
@@ -15,8 +17,15 @@ import {
 import { admitRemoteMediaUrl, decodeRemoteMediaPolicy } from './remoteMediaPreference'
 
 describe('artifact renderer compatibility', () => {
-  it('registers the closed text, code, and image renderer set', () => {
-    expect(registeredArtifactKinds).toEqual(['code', 'image', 'text'])
+  it('registers the closed artifact renderer set', () => {
+    expect(registeredArtifactKinds).toEqual([
+      'code',
+      'derivative',
+      'document',
+      'image',
+      'media_placeholder',
+      'text',
+    ])
   })
 
   it('selects the admitted view kind without interpreting its MIME string', () => {
@@ -55,6 +64,25 @@ describe('artifact renderer compatibility', () => {
     }
 
     expect(selectImageView(descriptor)).toBeUndefined()
+  })
+
+  it('selects document affordances only by their admitted capability', () => {
+    expect(selectBlobView(documentAttachment.source.descriptor, 'browser_native')?.kind).toBe(
+      'browser_native',
+    )
+    expect(selectBlobView(documentAttachment.source.descriptor, 'download')?.kind).toBe('download')
+  })
+
+  it('keeps attachment projection within its hard item ceiling', () => {
+    const source = Array.from({ length: 16 }, (_, index) => ({
+      ...documentAttachment,
+      id: `attachment-${index}`,
+    }))
+
+    const bounded = boundAttachments(source)
+
+    expect(bounded.visible).toHaveLength(MAX_VISIBLE_ATTACHMENTS)
+    expect(bounded.omitted).toBe(source.length - MAX_VISIBLE_ATTACHMENTS)
   })
 
   it('bounds the initial text projection by characters', () => {

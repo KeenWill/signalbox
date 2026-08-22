@@ -31,6 +31,25 @@ export interface RemoteImageArtifact extends ArtifactIdentity {
   source: { kind: 'remote'; url: string; alt: string }
 }
 
+export interface DocumentArtifact extends ArtifactIdentity {
+  kind: 'document'
+  source: { kind: 'signalbox_blob'; descriptor: WebBlobDescriptor }
+  documentKind: 'pdf' | 'document'
+}
+
+export interface DerivativeArtifact extends ArtifactIdentity {
+  kind: 'derivative'
+  source: { kind: 'signalbox_blob'; descriptor: WebBlobDescriptor }
+  viewKind: 'preview' | 'thumbnail'
+  presentation: 'image'
+}
+
+export interface MediaPlaceholderArtifact extends ArtifactIdentity {
+  kind: 'media_placeholder'
+  mediaKind: 'audio' | 'video'
+  source: { kind: 'signalbox_blob'; descriptor: WebBlobDescriptor }
+}
+
 export interface BlockedArtifact extends ArtifactIdentity {
   kind: 'blocked'
   attemptedKind: string
@@ -47,6 +66,9 @@ export type RenderableArtifact =
   | CodeArtifact
   | SignalboxImageArtifact
   | RemoteImageArtifact
+  | DocumentArtifact
+  | DerivativeArtifact
+  | MediaPlaceholderArtifact
 
 export type ArtifactItem = RenderableArtifact | BlockedArtifact | CommittedUnimplementedArtifact
 
