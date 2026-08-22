@@ -280,11 +280,13 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(inspector.getByText('78', { exact: true })).toBeVisible()
 
   await page.getByRole('button', { name: /First/ }).click()
+  await expect(timeline).toBeFocused()
   await expect(page.getByRole('option', { name: /41 input accepted/ })).toHaveAttribute(
     'aria-selected',
     'true',
   )
   await latest.click()
+  await expect(timeline).toBeFocused()
   await expect(completed).toHaveAttribute('aria-selected', 'true')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

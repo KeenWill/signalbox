@@ -84,7 +84,9 @@ describe('Session Workspace projection', () => {
 
   it('reconciles selection to a stable visible option', () => {
     expect(reconcileVisibleSessionSelection(null, ['41', '42'])).toBe('41')
+    expect(reconcileVisibleSessionSelection(null, ['41', '42', '43'], '42')).toBe('42')
     expect(reconcileVisibleSessionSelection('42', ['41', '42'])).toBe('42')
+    expect(reconcileVisibleSessionSelection(null, ['41', '42'], '44')).toBe('41')
     expect(reconcileVisibleSessionSelection('44', ['41', '42'])).toBe('41')
     expect(reconcileVisibleSessionSelection('44', [])).toBeNull()
   })

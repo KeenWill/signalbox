@@ -41,8 +41,13 @@ export const sessionHasLiveWork = (activeTurnCount: string, queuedTurnCount: str
 export const reconcileVisibleSessionSelection = (
   selected: string | null,
   visibleIds: readonly string[],
+  preferred: string | null = null,
 ): string | null =>
-  selected !== null && visibleIds.includes(selected) ? selected : (visibleIds[0] ?? null)
+  selected !== null && visibleIds.includes(selected)
+    ? selected
+    : preferred !== null && visibleIds.includes(preferred)
+      ? preferred
+      : (visibleIds[0] ?? null)
 
 export const visibleSessionItems = (
   items: WebSessionTimelineWindow['items'],
@@ -152,18 +157,25 @@ export function SessionWorkspaceSurface({
           boundarySessionItemId(result.data.window.items, store.getState().app.detail, anchor),
         ),
       )
+      timelineRef.current?.focus()
     },
-    [dispatch, refetchSession],
+    [dispatch, refetchSession, timelineRef],
   )
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   useEffect(() => {
-    const reconciled = reconcileVisibleSessionSelection(app.selectedTimeline, timelineIds)
+    const preferred =
+      session.data?.anchor.kind === 'around' ? session.data.anchor.eventSequence : null
+    const reconciled = reconcileVisibleSessionSelection(
+      app.selectedTimeline,
+      timelineIds,
+      preferred,
+    )
     if (reconciled !== app.selectedTimeline) {
       dispatch(actions.timelineSelected(reconciled))
     }
-  }, [app.selectedTimeline, dispatch, timelineIds])
+  }, [app.selectedTimeline, dispatch, session.data?.anchor, timelineIds])
   useEffect(() => {
     const selectedItem = session.data?.window.items.find(
       (item) => item.address.event_sequence === app.selectedTimeline,
