@@ -4,6 +4,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
   type RefObject,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -45,6 +46,25 @@ export const visibleSessionItems = (
       )
     : items
 
+export const boundarySessionItemId = (
+  items: WebSessionTimelineWindow['items'],
+  detail: 'full' | 'condensed' | 'results',
+  anchor: 'first' | 'latest',
+): string | null => {
+  const visible = visibleSessionItems(items, detail)
+  const boundary = anchor === 'first' ? visible[0] : visible[visible.length - 1]
+  return boundary?.address.event_sequence ?? null
+}
+
+export const pruneExpandedSessionItems = (
+  expanded: ReadonlySet<string>,
+  items: WebSessionTimelineWindow['items'],
+): ReadonlySet<string> => {
+  const loadedIds = new Set(items.map((item) => item.address.event_sequence))
+  const next = new Set([...expanded].filter((id) => loadedIds.has(id)))
+  return next.size === expanded.size ? expanded : next
+}
+
 export function SessionWorkspaceSurface({
   onTimelineIds,
   onTimelineWindowAvailable,
@@ -64,12 +84,13 @@ export function SessionWorkspaceSurface({
   const app = useAppSelector(selectApp)
   const [draftId, setDraftId] = useState('')
   const [sessionId, setSessionId] = useState<string | null>(null)
-  const [manualAnchor, setManualAnchor] = useState<SessionWindowAnchor | null>(null)
   const [openingPosition, setOpeningPosition] = useState<string | undefined>()
   const [refetchRequest, setRefetchRequest] = useState(0)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const rowRefs = useRef(new Map<string, HTMLDivElement>())
+  const manualAnchorRef = useRef<SessionWindowAnchor | null>(null)
   const handledRefetchRequest = useRef(0)
+  const boundaryRequest = useRef(0)
   const session = useQuery({
     queryKey: sessionWorkspaceQueryKey(sessionId),
     queryFn: async ({ signal }) => {
@@ -78,7 +99,7 @@ export function SessionWorkspaceSurface({
       const descriptor = await history.describe(signal)
       const active = BigInt(descriptor.work.active_turn_count) !== BigInt(0)
       const anchor: SessionWindowAnchor =
-        manualAnchor ??
+        manualAnchorRef.current ??
         (!active && openingPosition
           ? { kind: 'around', eventSequence: openingPosition }
           : { kind: 'latest' })
@@ -91,14 +112,34 @@ export function SessionWorkspaceSurface({
     },
     enabled: sessionId !== null && timelineCapability === 'available',
   })
+  const refetchSession = session.refetch
   const items = useMemo(
     () => visibleSessionItems(session.data?.window.items ?? [], app.detail),
     [app.detail, session.data?.window.items],
   )
   const timelineIds = useMemo(() => items.map((item) => item.address.event_sequence), [items])
+  const loadWindow = useCallback(
+    async (anchor: 'first' | 'latest') => {
+      const request = ++boundaryRequest.current
+      manualAnchorRef.current = { kind: anchor }
+      const result = await refetchSession()
+      if (!result.isSuccess || result.data === undefined || request !== boundaryRequest.current) {
+        return
+      }
+      dispatch(
+        actions.timelineSelected(
+          boundarySessionItemId(result.data.window.items, store.getState().app.detail, anchor),
+        ),
+      )
+    },
+    [dispatch, refetchSession],
+  )
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
+  useEffect(() => {
+    setExpanded((current) => pruneExpandedSessionItems(current, session.data?.window.items ?? []))
+  }, [session.data?.window.items])
   useEffect(
     () =>
       onTimelineWindowAvailable(timelineCapability === 'available' && session.data !== undefined),
@@ -107,10 +148,9 @@ export function SessionWorkspaceSurface({
   useEffect(() => () => onTimelineWindowAvailable(false), [onTimelineWindowAvailable])
   useEffect(() => {
     if (windowRequest === null || sessionId === null) return
-    setManualAnchor({ kind: windowRequest.anchor })
-    setRefetchRequest((current) => current + 1)
+    void loadWindow(windowRequest.anchor)
     onWindowRequestConsumed()
-  }, [onWindowRequestConsumed, sessionId, windowRequest])
+  }, [loadWindow, onWindowRequestConsumed, sessionId, windowRequest])
   useEffect(() => {
     if (
       refetchRequest === handledRefetchRequest.current ||
@@ -120,8 +160,8 @@ export function SessionWorkspaceSurface({
       return
     }
     handledRefetchRequest.current = refetchRequest
-    void session.refetch()
-  }, [refetchRequest, session.refetch, sessionId, timelineCapability])
+    void refetchSession()
+  }, [refetchRequest, refetchSession, sessionId, timelineCapability])
   useEffect(() => {
     if (sessionId !== null && app.selectedTimeline !== null) {
       dispatch(
@@ -144,17 +184,16 @@ export function SessionWorkspaceSurface({
     if (!isCanonicalSessionId(candidate) || timelineCapability !== 'available') return
     const reopeningCurrentSession = candidate === sessionId
     setOpeningPosition(app.lastLogicalPositions[candidate])
-    setManualAnchor(null)
+    manualAnchorRef.current = null
     setExpanded(new Set())
     dispatch(actions.timelineSelected(null))
     setSessionId(candidate)
-    if (reopeningCurrentSession) setRefetchRequest((current) => current + 1)
+    if (reopeningCurrentSession) {
+      boundaryRequest.current += 1
+      setRefetchRequest((current) => current + 1)
+    }
   }
   const selected = app.selectedTimeline
-  const loadWindow = (anchor: 'first' | 'latest') => {
-    setManualAnchor({ kind: anchor })
-    setRefetchRequest((current) => current + 1)
-  }
   const select = (eventSequence: string) => {
     dispatch(actions.timelineSelected(eventSequence))
   }
@@ -301,7 +340,7 @@ export function SessionWorkspaceSurface({
             }
             ref={timelineRef}
             role="listbox"
-            tabIndex={-1}
+            tabIndex={0}
             onKeyDown={handleTimelineKeyDown}
           >
             {items.map((item) => {

@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { decodeWebSessionTimelineWindow } from './generated/web-contract.mjs'
 import {
+  boundarySessionItemId,
   isCanonicalSessionId,
+  pruneExpandedSessionItems,
   sessionWorkspaceQueryKey,
   visibleSessionItems,
 } from './SessionWorkspaceSurface'
@@ -64,5 +66,17 @@ describe('Session Workspace projection', () => {
       'session-workspace',
       fixture.session_id,
     ])
+  })
+
+  it('selects the visible row at the successfully loaded boundary', () => {
+    expect(boundarySessionItemId(fixture.items, 'full', 'first')).toBe('41')
+    expect(boundarySessionItemId(fixture.items, 'full', 'latest')).toBe('44')
+    expect(boundarySessionItemId([], 'results', 'latest')).toBeNull()
+  })
+
+  it('retains expansion state only for the current bounded window', () => {
+    const expanded = new Set(['40', '41', '44', '45'])
+
+    expect([...pruneExpandedSessionItems(expanded, fixture.items)]).toEqual(['41', '44'])
   })
 })

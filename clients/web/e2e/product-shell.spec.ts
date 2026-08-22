@@ -58,7 +58,7 @@ const useDeterministicSession = async (page: Page) => {
             },
           ],
           projected_structured_bytes: sessionWorkspaceFixture.projectedBytes,
-          continuation_before: { event_sequence: sessionWorkspaceFixture.firstAddress },
+          continuation_before: null,
           continuation_after: null,
         },
       })
@@ -242,10 +242,24 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
+  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  const latest = page.getByRole('button', { name: /Latest/ })
+  await latest.focus()
+  await page.keyboard.press('Tab')
+  await expect(timeline).toBeFocused()
+
   const completed = page.getByRole('option', { name: /43 turn completed/ })
   await completed.click()
-  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeFocused()
+  await expect(timeline).toBeFocused()
   await expect(page.getByText('Header only; rich event detail is not exposed')).toBeVisible()
+
+  await page.getByRole('button', { name: /First/ }).click()
+  await expect(page.getByRole('option', { name: /41 input accepted/ })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  )
+  await latest.click()
+  await expect(completed).toHaveAttribute('aria-selected', 'true')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
