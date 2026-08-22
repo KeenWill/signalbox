@@ -711,7 +711,10 @@ mod tests {
         start_eligible_turn::StartEligibleTurnRepositoryError,
     };
 
-    use super::{ContextGuardedTurnPassError, guarded_failure_stage, report_guarded_ambiguity};
+    use super::{
+        ContextGuardedTurnPassError, ReportedUsageCompactionError, guarded_failure_stage,
+        report_guarded_ambiguity,
+    };
     use crate::{
         ActivatedTurnExecution, FatalExecutionSignal, FatalExecutionSupervisor,
         TurnPassExecutionStage, process_runtime::AutomaticContextCompactionError,
@@ -842,6 +845,30 @@ mod tests {
         report_guarded_ambiguity(&execution, &error);
 
         assert!(!signal.is_triggered());
+    }
+
+    /// The live activation-preview failure retains its dedicated searchable
+    /// `reported_usage_activation_preview` cause instead of collapsing into a
+    /// generic scheduler or context-compaction diagnostic.
+    #[test]
+    fn reported_usage_activation_preview_failure_keeps_its_operator_cause() {
+        let error =
+            ReportedUsageCompactionError::Activation(StartEligibleTurnRepositoryError::Database {
+                source: sqlx::Error::PoolClosed,
+                commit_ambiguous: false,
+            });
+
+        assert_eq!(
+            error.operator_failure_cause_code(),
+            "reported_usage_activation_preview"
+        );
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            }
+        );
+        assert_eq!(error.turn(), None);
     }
 
     /// S03 / INV-034: execution failures keep their own supervision rule, so
