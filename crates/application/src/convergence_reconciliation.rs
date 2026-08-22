@@ -33,10 +33,10 @@ impl PullRequestDraftState {
 /// Provider check source and its normalized state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PullRequestCheckState {
-    /// A GitHub check run.
-    CheckRun {
-        /// Whether GitHub reports the run complete.
-        completed: bool,
+    /// A GitHub check run that is not complete.
+    CheckRunInProgress,
+    /// A completed GitHub check run.
+    CheckRunCompleted {
         /// Provider conclusion when the run has one.
         conclusion: Option<String>,
     },
@@ -80,29 +80,23 @@ impl PullRequestCheck {
     /// Whether the provider state satisfies the convergence predicate.
     pub fn is_green(&self) -> bool {
         match &self.state {
-            PullRequestCheckState::CheckRun {
-                completed: true,
+            PullRequestCheckState::CheckRunCompleted {
                 conclusion: Some(conclusion),
             } => matches!(conclusion.as_str(), "SUCCESS" | "NEUTRAL" | "SKIPPED"),
             PullRequestCheckState::StatusContext { state } => state == "SUCCESS",
-            PullRequestCheckState::CheckRun { .. } => false,
+            PullRequestCheckState::CheckRunInProgress
+            | PullRequestCheckState::CheckRunCompleted { conclusion: None } => false,
         }
     }
 
     /// Returns the stable provider state rendered into commissioned context.
     pub fn observed_state(&self) -> &str {
         match &self.state {
-            PullRequestCheckState::CheckRun {
+            PullRequestCheckState::CheckRunCompleted {
                 conclusion: Some(conclusion),
-                ..
             } => conclusion,
-            PullRequestCheckState::CheckRun {
-                completed: true,
-                conclusion: None,
-            } => "COMPLETED",
-            PullRequestCheckState::CheckRun {
-                completed: false, ..
-            } => "IN_PROGRESS",
+            PullRequestCheckState::CheckRunCompleted { conclusion: None } => "COMPLETED",
+            PullRequestCheckState::CheckRunInProgress => "IN_PROGRESS",
             PullRequestCheckState::StatusContext { state } => state,
         }
     }
@@ -275,8 +269,7 @@ mod tests {
             MergeableState::Mergeable,
             vec![PullRequestCheck::new(
                 String::from("test"),
-                PullRequestCheckState::CheckRun {
-                    completed: true,
+                PullRequestCheckState::CheckRunCompleted {
                     conclusion: Some(String::from("SUCCESS")),
                 },
             )],
@@ -293,10 +286,7 @@ mod tests {
             MergeableState::Conflicting,
             vec![PullRequestCheck::new(
                 String::from("test"),
-                PullRequestCheckState::CheckRun {
-                    completed: false,
-                    conclusion: None,
-                },
+                PullRequestCheckState::CheckRunInProgress,
             )],
         ));
         assert_eq!(
@@ -322,8 +312,7 @@ mod tests {
             vec![
                 PullRequestCheck::new(
                     String::from("advisory (report only)"),
-                    PullRequestCheckState::CheckRun {
-                        completed: true,
+                    PullRequestCheckState::CheckRunCompleted {
                         conclusion: Some(String::from("FAILURE")),
                     },
                 ),
@@ -348,8 +337,7 @@ mod tests {
             MergeableState::Mergeable,
             vec![PullRequestCheck::new(
                 name.clone(),
-                PullRequestCheckState::CheckRun {
-                    completed: true,
+                PullRequestCheckState::CheckRunCompleted {
                     conclusion: Some(failure.clone()),
                 },
             )],

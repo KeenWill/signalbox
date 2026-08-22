@@ -2189,6 +2189,28 @@ async fn stopped_runtime_irrelevant_turn_releases_its_singleton() -> Result<(), 
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn convergence_census_loads_the_latest_repository_watch_session() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let pull_request = pull_request_number(&fixture.event);
+    let state = PostgresConvergenceSweepStore::new(fixture.pool.clone())
+        .load_target(&fixture.repository, pull_request)
+        .await?
+        .expect("loading enrolls the repository-watch target");
+
+    assert_eq!(
+        state
+            .latest_dispatch()
+            .expect("repository-watch dispatch is visible to convergence census")
+            .session_id(),
+        fixture.session(0)
+    );
+    assert_eq!(state.latest_dispatch_observation(), None);
+    Ok(())
+}
+
 /// The current taxonomy has no separate stale-dispatch terminal variant: an
 /// operator stop after stale classification is the durable `user_stopped`
 /// transition. It must retain work before its singleton becomes reusable.

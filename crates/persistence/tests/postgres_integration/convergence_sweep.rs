@@ -237,10 +237,10 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
             pull_request(),
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
-            ConvergenceSweepRetryPolicy::new(
-                Duration::from_secs(RETRY_DELAY_SECONDS),
-                Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
-            ),
+            ConvergenceSweepRetryPolicy {
+                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
+                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+            },
         )
         .await?;
     let second = store
@@ -250,10 +250,10 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
             pull_request(),
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
-            ConvergenceSweepRetryPolicy::new(
-                Duration::from_secs(RETRY_DELAY_SECONDS),
-                Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
-            ),
+            ConvergenceSweepRetryPolicy {
+                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
+                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+            },
         )
         .await?;
     let third = store
@@ -263,10 +263,10 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
             pull_request(),
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
-            ConvergenceSweepRetryPolicy::new(
-                Duration::from_secs(RETRY_DELAY_SECONDS),
-                Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
-            ),
+            ConvergenceSweepRetryPolicy {
+                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
+                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+            },
         )
         .await?;
     let fourth = store
@@ -276,10 +276,10 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
             pull_request(),
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
-            ConvergenceSweepRetryPolicy::new(
-                Duration::from_secs(RETRY_DELAY_SECONDS),
-                Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
-            ),
+            ConvergenceSweepRetryPolicy {
+                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
+                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+            },
         )
         .await?;
     let fifth = store
@@ -289,10 +289,10 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
             pull_request(),
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
-            ConvergenceSweepRetryPolicy::new(
-                Duration::from_secs(RETRY_DELAY_SECONDS),
-                Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
-            ),
+            ConvergenceSweepRetryPolicy {
+                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
+                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+            },
         )
         .await?;
     let retry_delays: Vec<i64> = sqlx::query_scalar(
@@ -344,10 +344,10 @@ async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), 
             pull_request(),
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
-            ConvergenceSweepRetryPolicy::new(
-                Duration::from_secs(RETRY_DELAY_SECONDS),
-                Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
-            ),
+            ConvergenceSweepRetryPolicy {
+                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
+                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+            },
         )
         .await?;
     store
@@ -357,10 +357,10 @@ async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), 
             pull_request(),
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
-            ConvergenceSweepRetryPolicy::new(
-                Duration::from_secs(RETRY_DELAY_SECONDS),
-                Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
-            ),
+            ConvergenceSweepRetryPolicy {
+                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
+                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+            },
         )
         .await?;
     store
@@ -370,10 +370,10 @@ async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), 
             pull_request(),
             Some(&observation),
             ConvergenceSweepFailureKind::CommissionRefused,
-            ConvergenceSweepRetryPolicy::new(
-                Duration::from_secs(RETRY_DELAY_SECONDS),
-                Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
-            ),
+            ConvergenceSweepRetryPolicy {
+                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
+                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+            },
         )
         .await?;
     let state = store
@@ -621,10 +621,10 @@ async fn no_model_activity_parks_immediately_with_its_typed_need() -> Result<(),
             inactive_pull_request(),
             Some(&observation),
             ConvergenceSweepFailureKind::NoModelActivity,
-            ConvergenceSweepRetryPolicy::new(
-                Duration::from_secs(RETRY_DELAY_SECONDS),
-                Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
-            ),
+            ConvergenceSweepRetryPolicy {
+                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
+                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+            },
         )
         .await?;
     let parked: (String, String) = sqlx::query_as(
@@ -663,10 +663,10 @@ async fn configured_target_reenrollment_clears_a_durable_park() -> Result<(), Bo
             inactive_pull_request(),
             Some(&observation),
             ConvergenceSweepFailureKind::NoModelActivity,
-            ConvergenceSweepRetryPolicy::new(
-                Duration::from_secs(RETRY_DELAY_SECONDS),
-                Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
-            ),
+            ConvergenceSweepRetryPolicy {
+                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
+                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+            },
         )
         .await?;
     store
@@ -731,10 +731,10 @@ async fn removed_targets_leave_the_parked_operator_view() -> Result<(), Box<dyn 
             inactive_pull_request(),
             Some(&observation),
             ConvergenceSweepFailureKind::NoModelActivity,
-            ConvergenceSweepRetryPolicy::new(
-                Duration::from_secs(RETRY_DELAY_SECONDS),
-                Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
-            ),
+            ConvergenceSweepRetryPolicy {
+                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
+                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+            },
         )
         .await?;
 

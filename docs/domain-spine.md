@@ -7156,8 +7156,8 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
 
 ```rust
 pub enum PullRequestCheckState {
-    CheckRun {
-        completed: bool,
+    CheckRunInProgress,
+    CheckRunCompleted {
         conclusion: Option<String>,
     },
     StatusContext {

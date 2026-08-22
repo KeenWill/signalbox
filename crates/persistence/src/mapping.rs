@@ -2453,18 +2453,18 @@ mod tests {
 
     #[test]
     fn convergence_sweep_state_mapping_is_closed() {
-        let values = [
-            ConvergenceSweepStateStorageKind::Observed,
-            ConvergenceSweepStateStorageKind::RetryWait,
-            ConvergenceSweepStateStorageKind::Parked,
-        ];
-        for value in values {
-            assert_eq!(
-                convergence_sweep_state_from_str(convergence_sweep_state_to_str(value)),
-                Some(value)
-            );
-        }
+        assert_convergence_sweep_state_mapping(ConvergenceSweepStateStorageKind::Observed);
+        assert_convergence_sweep_state_mapping(ConvergenceSweepStateStorageKind::RetryWait);
+        assert_convergence_sweep_state_mapping(ConvergenceSweepStateStorageKind::Parked);
         assert_eq!(convergence_sweep_state_from_str("unknown"), None);
+    }
+
+    #[track_caller]
+    fn assert_convergence_sweep_state_mapping(value: ConvergenceSweepStateStorageKind) {
+        assert_eq!(
+            convergence_sweep_state_from_str(convergence_sweep_state_to_str(value)),
+            Some(value)
+        );
     }
 
     #[test]

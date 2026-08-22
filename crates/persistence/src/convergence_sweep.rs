@@ -153,18 +153,13 @@ pub enum ConvergenceSweepFailureDisposition {
 /// Delay bounds for one convergence-sweep failure lineage.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConvergenceSweepRetryPolicy {
-    backoff_base: Duration,
-    backoff_cap: Duration,
+    /// Delay used for the first retry in a failure lineage.
+    pub backoff_base: Duration,
+    /// Maximum delay permitted for a retry in the lineage.
+    pub backoff_cap: Duration,
 }
 
 impl ConvergenceSweepRetryPolicy {
-    pub const fn new(backoff_base: Duration, backoff_cap: Duration) -> Self {
-        Self {
-            backoff_base,
-            backoff_cap,
-        }
-    }
-
     fn stored_backoff_base_seconds(self) -> i64 {
         i64::try_from(self.backoff_base.as_secs()).unwrap_or(i64::MAX)
     }
@@ -364,23 +359,34 @@ impl PostgresConvergenceSweepStore {
                      LIMIT 1
                ) AS pending ON true
                LEFT JOIN LATERAL (
-                    SELECT dispatch.dispatch_id, dispatch.session_id,
-                           dispatch.recorded_at,
+                    SELECT source.dispatch_id, source.session_id,
+                           source.recorded_at,
                            coalesce((
                                SELECT event.event_kind IN ('commissioned', 'resumed', 'superseded')
                                  FROM goal_event AS event
-                                WHERE event.session_id = dispatch.session_id
+                                WHERE event.session_id = source.session_id
                                 ORDER BY event.event_ordinal DESC LIMIT 1
                            ), false) AS live,
                            EXISTS (
                                SELECT 1 FROM model_call AS call
-                                WHERE call.session_id = dispatch.session_id
+                                WHERE call.session_id = source.session_id
                            ) AS has_model_activity
-                      FROM commissioned_dispatch AS dispatch
-                     WHERE dispatch.target_kind = 'pull_request'
-                       AND dispatch.repository = target.repository
-                       AND dispatch.pull_request_number = target.pull_request_number
-                     ORDER BY live DESC, dispatch.recorded_at DESC, dispatch.dispatch_id DESC
+                      FROM (
+                           SELECT dispatch.dispatch_id, dispatch.session_id,
+                                  dispatch.recorded_at
+                             FROM commissioned_dispatch AS dispatch
+                            WHERE dispatch.target_kind = 'pull_request'
+                              AND dispatch.repository = target.repository
+                              AND dispatch.pull_request_number = target.pull_request_number
+                           UNION ALL
+                           SELECT action.dispatch_id, action.session_id, action.recorded_at
+                             FROM repo_watch_dispatch_action AS action
+                             JOIN repo_watch_event AS event ON event.event_id = action.event_id
+                            WHERE event.target_kind = 'pull_request'
+                              AND event.repository = target.repository
+                              AND event.pull_request_number = target.pull_request_number
+                      ) AS source
+                     ORDER BY live DESC, source.recorded_at DESC, source.dispatch_id DESC
                      LIMIT 1
                ) AS latest ON true
               WHERE target.repository = $1
@@ -596,7 +602,10 @@ impl PostgresConvergenceSweepStore {
             FailureRecord {
                 observation: Some(observation),
                 failure: ConvergenceSweepFailureKind::NoModelActivity,
-                retry_policy: ConvergenceSweepRetryPolicy::new(Duration::ZERO, Duration::ZERO),
+                retry_policy: ConvergenceSweepRetryPolicy {
+                    backoff_base: Duration::ZERO,
+                    backoff_cap: Duration::ZERO,
+                },
             },
             Some(expected_session),
         )

@@ -629,7 +629,10 @@ impl ConvergenceSweepRuntime {
                 target.pull_request,
                 observation,
                 failure,
-                ConvergenceSweepRetryPolicy::new(RETRY_BACKOFF_BASE, RETRY_BACKOFF_CAP),
+                ConvergenceSweepRetryPolicy {
+                    backoff_base: RETRY_BACKOFF_BASE,
+                    backoff_cap: RETRY_BACKOFF_CAP,
+                },
             )
             .await
         {
@@ -932,12 +935,15 @@ fn decode_checks(values: &[Value]) -> Result<Vec<PullRequestCheck>, CensusError>
                             .and_then(Value::as_str)
                             .ok_or(CensusError::Shape)?
                             .to_owned(),
-                        PullRequestCheckState::CheckRun {
-                            completed: status == "COMPLETED",
-                            conclusion: value
-                                .get("conclusion")
-                                .and_then(Value::as_str)
-                                .map(str::to_owned),
+                        if status == "COMPLETED" {
+                            PullRequestCheckState::CheckRunCompleted {
+                                conclusion: value
+                                    .get("conclusion")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned),
+                            }
+                        } else {
+                            PullRequestCheckState::CheckRunInProgress
                         },
                     ))
                 }
@@ -1119,8 +1125,7 @@ mod tests {
         );
         let run = PullRequestCheck::new(
             String::from("CodeRabbit"),
-            PullRequestCheckState::CheckRun {
-                completed: true,
+            PullRequestCheckState::CheckRunCompleted {
                 conclusion: Some(String::from("FAILURE")),
             },
         );
