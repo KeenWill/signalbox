@@ -366,11 +366,20 @@ impl StartEligibleTurnRepository {
                 .map_err(CommitActivationPreviewError::Activation)?;
             return Ok(CommitActivationPreviewOutcome::Stale);
         }
+        let outbox_order_guard =
+            crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
+                .await
+                .map_err(CommitActivationPreviewError::ModelCall)?;
         let activated = insert_prepared_activation(&mut transaction, current)
             .await
             .map_err(CommitActivationPreviewError::Activation)?;
         model_calls
-            .checkpoint_counted_activation_in_transaction(&mut transaction, session, call)
+            .checkpoint_counted_activation_in_transaction(
+                &mut transaction,
+                session,
+                call,
+                outbox_order_guard,
+            )
             .await
             .map_err(CommitActivationPreviewError::ModelCall)?;
         transaction.commit().await.map_err(|error| {

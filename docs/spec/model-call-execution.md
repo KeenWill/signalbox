@@ -13,7 +13,7 @@ Non-ambiguous execution-failure containment is verified against this PR
 (`agent/daemon-live-nonambiguous-execution-containment`).
 
 Credential-pool action and outbox allocator lock ordering is verified against
-this PR (`agent/daemon-live-outbox-prefix-read`).
+this PR (`agent/daemon-live-outbox-order-guard`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -998,19 +998,22 @@ the active turn) into the same SELECT, so lock-before-read is guaranteed at
 statement granularity, not within the statement. Why: one lock statement issued
 first in every transaction makes per-session serialization total and lock-order
 cycles on one session impossible. A model-call transaction that both appends an
-outbox event and locks shared credential-pool action heads explicitly takes the
-global outbox sequence allocator first. Tool-result continuation already takes
-the allocator when it projects results; initial-call preparation and terminal
-observation take it before credential selection or action persistence. Why: a
-credential action head is shared across sessions, so taking it before the
-allocator could deadlock against a different session already holding the
-allocator while selecting that same profile. Prospective preparation takes no
-allocator lock because it rolls back without appending or consuming actions. The
-in-process per-attempt dispatch gate is the only other ordering primitive; in
-this slice the execution service is its sole consumer. Interrupt application
-deliberately does not acquire it: once `InFlight` commits, the call is issued
-work, so a later interrupt durably requests cancellation and the runtime signal
-races any provider progress without claiming that acceptance was prevented.
+outbox event and locks shared credential-pool action heads first takes one
+global transaction-scoped ordering guard. Ordinary initial-call preparation,
+tool-result continuation, and terminal observation then finish credential action
+locking before taking the global outbox sequence allocator immediately ahead of
+their writes. Counted activation takes the same guard before its atomic
+activation append; that append necessarily allocates before the newly active
+turn can select a credential, but the guard excludes every reverse-order
+model-call writer until commit. Why: the guard prevents a credential/allocator
+cycle without making unrelated outbox writers wait through credential selection
+and validation. Prospective preparation takes neither guard nor allocator lock
+because it rolls back without appending or consuming actions. The in-process
+per-attempt dispatch gate is the only other ordering primitive; in this slice
+the execution service is its sole consumer. Interrupt application deliberately
+does not acquire it: once `InFlight` commits, the call is issued work, so a
+later interrupt durably requests cancellation and the runtime signal races any
+provider progress without claiming that acceptance was prevented.
 
 ## Crash, restart, and supervision
 
