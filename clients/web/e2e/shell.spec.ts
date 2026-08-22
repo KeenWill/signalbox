@@ -33,6 +33,7 @@ const streamingFixture = {
   firstLoadedItemId: 'event-0',
   secondLoadedItemId: 'event-1',
   lastLoadedItemId: 'event-239',
+  timelineHeading: 'Bounded timeline',
 } as const
 
 const cachedScenarioFixture = {
@@ -443,6 +444,7 @@ test('keeps the fleet surface reachable on a short wide viewport', async ({ page
 test('Mod+K opens the registered command palette', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
+  await expect(page.getByRole('heading', { name: streamingFixture.timelineHeading })).toBeVisible()
 
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
@@ -463,11 +465,16 @@ test('Escape closes the command palette', async ({ page }) => {
 test('the command palette opens keyboard help without closing it', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
+  await expect(page.getByRole('heading', { name: streamingFixture.timelineHeading })).toBeVisible()
 
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   await page.getByRole('button', { name: /Open keyboard help/ }).click()
-  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  const help = page.getByRole('dialog', { name: 'Keyboard help' })
+  await expect(help).toBeVisible()
+  await expect(help.getByText('Go to Attention')).toBeHidden()
+  await expect(help.getByText('Go to Sessions')).toBeHidden()
+  await expect(help.getByText('Go to Settings')).toBeHidden()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

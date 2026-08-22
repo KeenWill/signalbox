@@ -1,18 +1,23 @@
 import { configureStore, createSlice, type Middleware } from '@reduxjs/toolkit'
 import { useDispatch, useSelector } from 'react-redux'
+import {
+  type BrowserPreferences,
+  loadBrowserPreferences,
+  saveBrowserPreferences,
+} from './preferences'
 
 export type LayoutMode = 'focus' | 'workbench'
 export type DensityMode = 'compact' | 'comfortable'
 export type DetailMode = 'full' | 'condensed' | 'results'
 export type ThemeMode = 'light' | 'dark'
-export type Overlay = 'palette' | 'help' | 'navigation' | null
+export type Overlay = 'artifact' | 'palette' | 'help' | 'navigation' | null
 
 export interface VisibleRange {
   start: number
   end: number
 }
 
-interface AppState {
+interface AppState extends BrowserPreferences {
   layout: LayoutMode
   density: DensityMode
   detail: DetailMode
@@ -25,10 +30,7 @@ interface AppState {
 }
 
 const initialState: AppState = {
-  layout: 'workbench',
-  density: 'compact',
-  detail: 'condensed',
-  theme: 'dark',
+  ...loadBrowserPreferences(),
   overlay: null,
   selectedTimeline: null,
   transcriptRange: { start: 0, end: 0 },
@@ -93,9 +95,35 @@ const traceMiddleware: Middleware = () => (next) => (action) => {
   return next(action)
 }
 
+const preferenceActionTypes = new Set<string>([
+  appSlice.actions.layoutSet.type,
+  appSlice.actions.densitySet.type,
+  appSlice.actions.detailSet.type,
+  appSlice.actions.themeSet.type,
+])
+const preferenceMiddleware: Middleware = (api) => (next) => (action) => {
+  const result = next(action)
+  if (
+    typeof action === 'object' &&
+    action !== null &&
+    'type' in action &&
+    preferenceActionTypes.has(String(action.type))
+  ) {
+    const app = (api.getState() as { app: AppState }).app
+    saveBrowserPreferences({
+      layout: app.layout,
+      density: app.density,
+      detail: app.detail,
+      theme: app.theme,
+    })
+  }
+  return result
+}
+
 export const store = configureStore({
   reducer: { app: appSlice.reducer },
-  middleware: (getDefaultMiddleware) => getDefaultMiddleware().concat(traceMiddleware),
+  middleware: (getDefaultMiddleware) =>
+    getDefaultMiddleware().concat(traceMiddleware, preferenceMiddleware),
   devTools: { maxAge: REDUX_DEVTOOLS_ACTIONS, trace: false },
 })
 

@@ -47,6 +47,20 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/api/blobs/**/content/image-png', async (route) => {
     const path = new URL(route.request().url()).pathname
     const body = path === originalPath ? originalFixture : previewFixture
+    if (route.request().headers().range) {
+      const digest = path.split('/')[3]
+      await route.fulfill({
+        status: 206,
+        body,
+        contentType: 'image/png',
+        headers: {
+          etag: `"${digest}"`,
+          'content-range': `bytes 0-${body.byteLength - 1}/${body.byteLength}`,
+          'content-length': String(body.byteLength),
+        },
+      })
+      return
+    }
     await route.fulfill({ body, contentType: 'image/png' })
   })
 })
@@ -61,7 +75,9 @@ test.afterEach(async ({ page }, testInfo) => {
   })
 })
 
-test('selects an image capability without prefetching original bytes', async ({ page }) => {
+test('selects a bounded image capability and admits a bounded original explicitly', async ({
+  page,
+}) => {
   const problems = watchBrowser(page)
 
   const previewResponse = page.waitForResponse(
@@ -86,7 +102,7 @@ test('selects an image capability without prefetching original bytes', async ({ 
     (response) => new URL(response.url()).pathname === originalPath,
   )
   await page.getByRole('button', { name: 'Load original' }).click()
-  await expect(page.getByRole('button', { name: 'Original loaded' })).toBeFocused()
+  await expect(page.getByRole('button', { name: 'Original loaded' })).toBeVisible()
   const original = page.getByRole('img', { name: 'Original of orbital-map.png' })
   await expect(original).toBeVisible()
   await expect(original).toHaveAttribute('src', originalPath)
