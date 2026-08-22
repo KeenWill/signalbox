@@ -2353,19 +2353,42 @@ mod tests {
 
     #[test]
     fn active_turn_phase_mapping_is_closed() {
-        for phase in [
-            ActiveTurnPhaseStorageKind::Running,
-            ActiveTurnPhaseStorageKind::AwaitingToolApproval,
-            ActiveTurnPhaseStorageKind::AwaitingChild,
-            ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery,
-            ActiveTurnPhaseStorageKind::AwaitingToolRecovery,
-            ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery,
-        ] {
-            assert_eq!(
-                active_turn_phase_from_str(active_turn_phase_to_str(phase)),
-                Some(phase)
-            );
-        }
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::Running,
+            )),
+            Some(ActiveTurnPhaseStorageKind::Running)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingToolApproval,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingToolApproval)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingChild,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingChild)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingToolRecovery,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingToolRecovery)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery)
+        );
         assert_eq!(active_turn_phase_from_str("unknown"), None);
     }
 
