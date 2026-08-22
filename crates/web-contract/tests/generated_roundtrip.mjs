@@ -484,6 +484,50 @@ test("generated blob decoder ties content routes to advertised digests", () => {
   );
 });
 
+test("generated blob decoder rejects provenance on original views", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const derivation = {
+    derivation_id: "01990f5f-55c0-7000-8000-000000000001",
+    input_digests: [digest],
+    output_digests: [digest],
+    transformation_name: "image.preview",
+    transformation_version: 1,
+    parameters_json: "{}",
+    producer: {
+      class: "executed",
+      execution_id: "01990f5f-55c0-7000-8000-000000000002",
+      implementation_digest: digest,
+    },
+  };
+
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        digest,
+        byte_length: "1",
+        declared_media_type: "image/png",
+        display_filename: [],
+        available_views: [
+          {
+            kind: "download",
+            content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
+            media_type: "image/png",
+            byte_length: "1",
+            derivations: [],
+          },
+          {
+            kind: "browser_native",
+            content_url: `/api/blobs/${digest}/content/image-png`,
+            media_type: "image/png",
+            byte_length: "1",
+            derivations: [derivation],
+          },
+        ],
+      }),
+    /derivations must be empty for an original representation/,
+  );
+});
+
 test("generated blob decoder binds derivative provenance to the descriptor input", () => {
   const digest = `sha256:${"a1".repeat(32)}`;
   const unrelatedDigest = `sha256:${"b2".repeat(32)}`;

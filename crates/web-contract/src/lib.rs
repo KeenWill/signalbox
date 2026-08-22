@@ -90,7 +90,7 @@ impl WebContractBootstrap {
                 same_origin_json_mutations: true,
                 ndjson_streaming: true,
                 immutable_blob_content,
-                blob_derivations: immutable_blob_content,
+                blob_derivations: image_derivatives,
                 image_derivatives,
             },
             limits: WebContractLimits {
@@ -681,6 +681,9 @@ export function decodeWebBlobDescriptor(value) {{
     const contentRoute = assertSameOriginBlobUrl(view.content_url, contentPath);
     const contentDigest = contentRoute.digest;
     if (view.kind === "download" || view.kind === "browser_native") {{
+      if (view.derivations.length !== 0) {{
+        fail(`blob_descriptor.available_views[${{index}}].derivations`, "empty for an original representation");
+      }}
       if (contentDigest !== value.digest) {{
         fail(contentPath, "a route for the descriptor digest");
       }}
@@ -881,6 +884,15 @@ mod tests {
             serde_json::from_slice(&encoded).expect("bootstrap decodes");
 
         assert_eq!(decoded, bootstrap);
+    }
+
+    #[test]
+    fn blob_derivation_capability_requires_exposed_derivative_views() {
+        let bootstrap = WebContractBootstrap::for_runtime(true, false);
+
+        assert!(bootstrap.capabilities.immutable_blob_content);
+        assert!(!bootstrap.capabilities.blob_derivations);
+        assert!(!bootstrap.capabilities.image_derivatives);
     }
 
     #[test]

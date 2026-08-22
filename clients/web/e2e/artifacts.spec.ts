@@ -84,9 +84,20 @@ test('selects a bounded image capability and admits a bounded original explicitl
     ),
   ).toBe(0)
 
+  const originalResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === originalPath,
+  )
   await page.getByRole('button', { name: 'Load original' }).click()
-  await expect(page.getByRole('button', { name: 'Original loaded' })).toBeVisible()
-  await expect(page.getByRole('img', { name: 'Original of orbital-map.png' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Original loaded' })).toBeFocused()
+  const original = page.getByRole('img', { name: 'Original of orbital-map.png' })
+  await expect(original).toBeVisible()
+  await expect(original).toHaveAttribute('src', originalPath)
+  await expect
+    .poll(() => original.evaluate((element) => (element as HTMLImageElement).naturalWidth))
+    .toBeGreaterThan(0)
+  expect((await originalResponse).headers()['content-type']).toContain('image/png')
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('region', { name: 'Blob evidence' })).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
