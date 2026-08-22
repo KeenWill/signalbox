@@ -3606,10 +3606,10 @@ struct QueuedFrontierFixture {
     container: ContainerAsync<Postgres>,
     pool: PgPool,
     repository: SubmitInputRepository,
-    command: SubmitInput,
-    first_outcome: SubmitInputHandlingOutcome,
-    expected: SubmitInputHandlingOutcome,
     session: SessionId,
+    first_digest: BlobDigest,
+    second_digest: BlobDigest,
+    maximum: NonZeroU64,
 }
 
 impl QueuedFrontierFixture {
@@ -3657,52 +3657,14 @@ async fn queued_frontier_fixture() -> Result<QueuedFrontierFixture, Box<dyn Erro
     };
     let repository =
         SubmitInputRepository::new(pool.clone()).with_maximum_attachment_bytes(maximum);
-    let first = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0xb334)),
-        session,
-        attachment_content(first_digest),
-        delivery,
-    );
-    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-        SubmitInputAppliedResult::TurnOrigin(_),
-    )) = repository
-        .handle(
-            first,
-            AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
-        )
-        .await?
-    else {
-        panic!("the first bounded input must remain queued");
-    };
-    let second = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0xb337)),
-        session,
-        attachment_content(second_digest),
-        delivery,
-    );
-    let expected = SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-        SubmitInputRejectedResult::AttachmentBytesTooLarge {
-            session,
-            maximum_bytes: maximum,
-            observed_bytes: NonZeroU64::new(14).expect("the aggregate is positive"),
-        },
-    ));
-    let first_outcome = repository
-        .handle(
-            second.clone(),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0xb338)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
-        )
-        .await?;
     Ok(QueuedFrontierFixture {
         container,
         pool,
         repository,
-        command: second,
-        first_outcome,
-        expected,
         session,
+        first_digest,
+        second_digest,
+        maximum,
     })
 }
 
@@ -3714,7 +3676,52 @@ async fn queued_frontier_fixture() -> Result<QueuedFrontierFixture, Box<dyn Erro
 async fn inv071_queued_input_checks_the_complete_prospective_attachment_frontier()
 -> Result<(), Box<dyn Error>> {
     let fixture = queued_frontier_fixture().await?;
-    assert_eq!(fixture.first_outcome, fixture.expected);
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn {
+        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+    };
+    let first = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb334)),
+        fixture.session,
+        attachment_content(fixture.first_digest),
+        delivery,
+    );
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(_),
+    )) = fixture
+        .repository
+        .handle(
+            first,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
+        )
+        .await?
+    else {
+        panic!("the first seven-byte attachment must remain within the ten-byte bound");
+    };
+    let second = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb337)),
+        fixture.session,
+        attachment_content(fixture.second_digest),
+        delivery,
+    );
+
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                second,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb338)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentBytesTooLarge {
+                session: fixture.session,
+                maximum_bytes: fixture.maximum,
+                observed_bytes: NonZeroU64::new(14).expect("the aggregate is positive"),
+            },
+        ))
+    );
     fixture.finish().await;
     Ok(())
 }
@@ -3724,16 +3731,56 @@ async fn inv071_queued_input_checks_the_complete_prospective_attachment_frontier
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_queued_frontier_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
     let fixture = queued_frontier_fixture().await?;
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn {
+        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+    };
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb334)),
+                fixture.session,
+                attachment_content(fixture.first_digest),
+                delivery,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
+        )
+        .await?;
+    let rejected = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb337)),
+        fixture.session,
+        attachment_content(fixture.second_digest),
+        delivery,
+    );
+    let expected = SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::AttachmentBytesTooLarge {
+            session: fixture.session,
+            maximum_bytes: fixture.maximum,
+            observed_bytes: NonZeroU64::new(14).expect("the aggregate is positive"),
+        },
+    ));
     assert_eq!(
         fixture
             .repository
             .handle(
-                fixture.command.clone(),
+                rejected.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb338)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
+            )
+            .await?,
+        expected
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                rejected,
                 AcceptedInputId::from_uuid(Uuid::from_u128(0xb33a)),
                 Some(TurnId::from_uuid(Uuid::from_u128(0xb33b))),
             )
             .await?,
-        fixture.expected
+        expected
     );
     fixture.finish().await;
     Ok(())
@@ -3746,14 +3793,51 @@ async fn inv012_queued_frontier_rejection_replays_exactly() -> Result<(), Box<dy
 async fn inv071_queued_frontier_rejection_rolls_back_provisional_effects()
 -> Result<(), Box<dyn Error>> {
     let fixture = queued_frontier_fixture().await?;
-    let effects: (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1),
-                (SELECT count(*) FROM queued_input_origin WHERE session_id = $1)",
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn {
+        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+    };
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb334)),
+                fixture.session,
+                attachment_content(fixture.first_digest),
+                delivery,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
+        )
+        .await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb337)),
+                fixture.session,
+                attachment_content(fixture.second_digest),
+                delivery,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb338)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
+        )
+        .await?;
+    #[derive(sqlx::FromRow)]
+    struct QueuedFrontierEffectCounts {
+        accepted_inputs: i64,
+        queued_origins: i64,
+    }
+    let effects = sqlx::query_as::<_, QueuedFrontierEffectCounts>(
+        "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1)
+                    AS accepted_inputs,
+                (SELECT count(*) FROM queued_input_origin WHERE session_id = $1)
+                    AS queued_origins",
     )
     .bind(fixture.session.into_uuid())
     .fetch_one(&fixture.pool)
     .await?;
-    assert_eq!(effects, (1, 1));
+    assert_eq!(effects.accepted_inputs, 1);
+    assert_eq!(effects.queued_origins, 1);
 
     fixture.finish().await;
     Ok(())
@@ -3763,11 +3847,11 @@ struct SteeringFrontierFixture {
     container: ContainerAsync<Postgres>,
     pool: PgPool,
     repository: SubmitInputRepository,
-    command: SubmitInput,
-    first_outcome: SubmitInputHandlingOutcome,
-    expected: SubmitInputHandlingOutcome,
     session: SessionId,
     active_turn: TurnId,
+    queued_digest: BlobDigest,
+    steering_digest: BlobDigest,
+    maximum: NonZeroU64,
 }
 
 impl SteeringFrontierFixture {
@@ -3836,58 +3920,15 @@ async fn steering_frontier_fixture() -> Result<SteeringFrontierFixture, Box<dyn 
         },
     )
     .await?;
-    let queued = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0xb34a)),
-        session,
-        attachment_content(queued_digest),
-        DeliveryRequest::AfterCurrentTurn {
-            expected_active_turn: active_turn,
-            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
-        },
-    );
-    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-        SubmitInputAppliedResult::TurnOrigin(_),
-    )) = repository
-        .handle(
-            queued,
-            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
-        )
-        .await?
-    else {
-        panic!("the first queued attachment remains within the bound");
-    };
-    let steering = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
-        session,
-        attachment_content(steering_digest),
-        DeliveryRequest::NextSafePoint {
-            expected_active_turn: active_turn,
-        },
-    );
-    let expected = SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-        SubmitInputRejectedResult::AttachmentBytesTooLarge {
-            session,
-            maximum_bytes: maximum,
-            observed_bytes: NonZeroU64::new(14).expect("the aggregate is positive"),
-        },
-    ));
-    let first_outcome = repository
-        .handle(
-            steering.clone(),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34e)),
-            None,
-        )
-        .await?;
     Ok(SteeringFrontierFixture {
         container,
         pool,
         repository,
-        command: steering,
-        first_outcome,
-        expected,
         session,
         active_turn,
+        queued_digest,
+        steering_digest,
+        maximum,
     })
 }
 
@@ -3898,7 +3939,54 @@ async fn steering_frontier_fixture() -> Result<SteeringFrontierFixture, Box<dyn 
 async fn inv071_pending_steering_rechecks_affected_queued_attachment_frontiers()
 -> Result<(), Box<dyn Error>> {
     let fixture = steering_frontier_fixture().await?;
-    assert_eq!(fixture.first_outcome, fixture.expected);
+    let queued = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb34a)),
+        fixture.session,
+        attachment_content(fixture.queued_digest),
+        DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: fixture.active_turn,
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(_),
+    )) = fixture
+        .repository
+        .handle(
+            queued,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
+        )
+        .await?
+    else {
+        panic!("the queued seven-byte attachment must remain within the ten-byte bound");
+    };
+    let steering = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
+        fixture.session,
+        attachment_content(fixture.steering_digest),
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: fixture.active_turn,
+        },
+    );
+
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                steering,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb34e)),
+                None,
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentBytesTooLarge {
+                session: fixture.session,
+                maximum_bytes: fixture.maximum,
+                observed_bytes: NonZeroU64::new(14).expect("the aggregate is positive"),
+            },
+        ))
+    );
     fixture.finish().await;
     Ok(())
 }
@@ -3908,16 +3996,58 @@ async fn inv071_pending_steering_rechecks_affected_queued_attachment_frontiers()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_steering_frontier_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
     let fixture = steering_frontier_fixture().await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb34a)),
+                fixture.session,
+                attachment_content(fixture.queued_digest),
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: fixture.active_turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
+        )
+        .await?;
+    let steering = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
+        fixture.session,
+        attachment_content(fixture.steering_digest),
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: fixture.active_turn,
+        },
+    );
+    let expected = SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::AttachmentBytesTooLarge {
+            session: fixture.session,
+            maximum_bytes: fixture.maximum,
+            observed_bytes: NonZeroU64::new(14).expect("the aggregate is positive"),
+        },
+    ));
     assert_eq!(
         fixture
             .repository
             .handle(
-                fixture.command.clone(),
+                steering.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb34e)),
+                None,
+            )
+            .await?,
+        expected
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                steering,
                 AcceptedInputId::from_uuid(Uuid::from_u128(0xb34f)),
                 None,
             )
             .await?,
-        fixture.expected
+        expected
     );
     fixture.finish().await;
     Ok(())
@@ -3930,18 +4060,58 @@ async fn inv012_steering_frontier_rejection_replays_exactly() -> Result<(), Box<
 async fn inv071_steering_frontier_rejection_rolls_back_provisional_effects()
 -> Result<(), Box<dyn Error>> {
     let fixture = steering_frontier_fixture().await?;
-    let effects: (i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1),
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb34a)),
+                fixture.session,
+                attachment_content(fixture.queued_digest),
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: fixture.active_turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
+        )
+        .await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
+                fixture.session,
+                attachment_content(fixture.steering_digest),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: fixture.active_turn,
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34e)),
+            None,
+        )
+        .await?;
+    #[derive(sqlx::FromRow)]
+    struct SteeringFrontierEffectCounts {
+        accepted_inputs: i64,
+        queued_successor_origins: i64,
+        pending_steering: i64,
+    }
+    let effects = sqlx::query_as::<_, SteeringFrontierEffectCounts>(
+        "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1)
+                    AS accepted_inputs,
                 (SELECT count(*) FROM queued_input_origin WHERE session_id = $1
-                    AND turn_id <> $2),
+                    AND turn_id <> $2) AS queued_successor_origins,
                 (SELECT count(*) FROM accepted_input WHERE session_id = $1
-                    AND disposition_kind = 'pending_steering')",
+                    AND disposition_kind = 'pending_steering') AS pending_steering",
     )
     .bind(fixture.session.into_uuid())
     .bind(fixture.active_turn.into_uuid())
     .fetch_one(&fixture.pool)
     .await?;
-    assert_eq!(effects, (2, 1, 0));
+    assert_eq!(effects.accepted_inputs, 2);
+    assert_eq!(effects.queued_successor_origins, 1);
+    assert_eq!(effects.pending_steering, 0);
 
     fixture.finish().await;
     Ok(())

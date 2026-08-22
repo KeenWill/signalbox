@@ -31,8 +31,9 @@ use signalbox_domain::{
     NonAcceptedTurnPredecessorReconstitutionInput, NonEmptyUnicodeTextFailure, OriginConfiguration,
     OriginConfigurationReconstitutionInput, OriginModelSettingsError, PerInputConfigurationChoices,
     PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
-    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
-    RunnerGeneration, RunnerId, SemanticTranscriptEntryId,
+    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
+    ResolvedContextFrontierSnapshot, ResolvedProviderTarget, RunnerGeneration, RunnerId,
+    SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -255,6 +256,13 @@ mod tests {
     #[test]
     fn attachment_byte_aggregation_saturates_at_the_durable_evidence_bound() {
         assert_eq!(saturating_attachment_byte_sum(u64::MAX, 1), u64::MAX,);
+    }
+
+    #[test]
+    fn attachment_byte_maximum_rejects_a_bound_without_exceeded_evidence_space() {
+        let maximum = NonZeroU64::new(u64::MAX).expect("the maximum is positive");
+
+        assert!(validate_attachment_byte_maximum(maximum).is_err());
     }
 
     #[test]
@@ -1725,6 +1733,7 @@ async fn prospective_attachment_frontier_exceeds_bound(
     result: &SubmitInputResult,
     maximum_bytes: NonZeroU64,
 ) -> Result<Option<NonZeroU64>, SubmitInputRepositoryError> {
+    let maximum_bytes = validate_attachment_byte_maximum(maximum_bytes)?;
     let current = match load_session_from_connection(connection, session).await {
         Ok(Some(session)) => session,
         Ok(None) => {
@@ -1738,7 +1747,18 @@ async fn prospective_attachment_frontier_exceeds_bound(
             return Err(SubmitInputCorruption::CurrentSession(error).into());
         }
     };
-    let scheduling = load_scheduling_projection(connection, current).await?;
+    let delegated_parked_frontier =
+        load_delegated_parked_attachment_frontier(connection, session).await?;
+    let supplemental_semantic_frontiers = delegated_parked_frontier
+        .as_ref()
+        .map(|frontier| vec![frontier.snapshot.frontier().snapshot()])
+        .unwrap_or_default();
+    let scheduling = load_scheduling_projection_with_semantic_frontiers(
+        connection,
+        current,
+        &supplemental_semantic_frontiers,
+    )
+    .await?;
     let live_execution = match require_live_execution_for_restart(connection, session).await {
         Err(ModelCallRepositoryError::Corruption(ModelCallCorruption::Unsupported {
             field: "delegated turn attempt state",
@@ -1891,10 +1911,14 @@ async fn prospective_attachment_frontier_exceeds_bound(
                         SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
                     ),
                 )
-            } else if let Some(origins) =
-                delegated_parked_attachment_frontier_origins(connection, session, &scheduling)
-                    .await?
-            {
+            } else if let Some(frontier) = delegated_parked_frontier.as_ref() {
+                let origins = delegated_parked_attachment_frontier_origins(
+                    connection,
+                    session,
+                    &scheduling,
+                    frontier,
+                )
+                .await?;
                 (
                     origins,
                     matches!(
@@ -2025,11 +2049,15 @@ async fn prospective_attachment_frontier_exceeds_bound(
     Ok(None)
 }
 
-async fn delegated_parked_attachment_frontier_origins(
+struct DelegatedParkedAttachmentFrontier {
+    turn: TurnId,
+    snapshot: ResolvedContextFrontierSnapshot,
+}
+
+async fn load_delegated_parked_attachment_frontier(
     connection: &mut PgConnection,
     session: SessionId,
-    scheduling: &AcceptedInputSchedulingProjection,
-) -> Result<Option<Vec<AcceptedInputId>>, SubmitInputRepositoryError> {
+) -> Result<Option<DelegatedParkedAttachmentFrontier>, SubmitInputRepositoryError> {
     let row = sqlx::query(
         "SELECT turn_id, active_phase_kind, recovery_model_call_id,
                 (
@@ -2131,7 +2159,17 @@ async fn delegated_parked_attachment_frontier_origins(
             .into());
         }
     };
-    let complete_entries = snapshot
+    Ok(Some(DelegatedParkedAttachmentFrontier { turn, snapshot }))
+}
+
+async fn delegated_parked_attachment_frontier_origins(
+    connection: &mut PgConnection,
+    session: SessionId,
+    scheduling: &AcceptedInputSchedulingProjection,
+    frontier: &DelegatedParkedAttachmentFrontier,
+) -> Result<Vec<AcceptedInputId>, SubmitInputRepositoryError> {
+    let complete_entries = frontier
+        .snapshot
         .ordered_entries()
         .map(|reference| scheduling.semantic_entry(reference).cloned())
         .collect::<Option<Vec<_>>>()
@@ -2184,7 +2222,7 @@ async fn delegated_parked_attachment_frontier_origins(
           ORDER BY acceptance_position",
     )
     .bind(session_id_to_uuid(session))
-    .bind(turn_id_to_uuid(turn))
+    .bind(turn_id_to_uuid(frontier.turn))
     .fetch_all(&mut *connection)
     .await?;
     origins.extend(
@@ -2193,7 +2231,7 @@ async fn delegated_parked_attachment_frontier_origins(
             .map(accepted_input_id_from_uuid)
             .filter(|accepted_input| distinct.insert(*accepted_input)),
     );
-    Ok(Some(origins))
+    Ok(origins)
 }
 
 fn add_prospective_attachment_lengths(
@@ -2221,6 +2259,18 @@ fn add_prospective_attachment_lengths(
 
 const fn saturating_attachment_byte_sum(total: u64, length: u64) -> u64 {
     total.saturating_add(length)
+}
+
+fn validate_attachment_byte_maximum(
+    maximum_bytes: NonZeroU64,
+) -> Result<NonZeroU64, SubmitInputRepositoryError> {
+    if maximum_bytes.get() == u64::MAX {
+        return Err(SubmitInputCorruption::Inconsistent(
+            "attachment byte maximum cannot encode exceeded evidence",
+        )
+        .into());
+    }
+    Ok(maximum_bytes)
 }
 
 async fn prepare_attachment_admission(
@@ -2277,8 +2327,9 @@ async fn prepare_attachment_admission(
     if let Some(digest) = digests.iter().find(|digest| !lengths.contains_key(digest)) {
         return Ok(Some(command.prepare_blob_not_found(*digest)));
     }
-    let maximum_bytes =
-        maximum_attachment_bytes.ok_or(SubmitInputCorruption::AttachmentConfigurationMissing)?;
+    let maximum_bytes = validate_attachment_byte_maximum(
+        maximum_attachment_bytes.ok_or(SubmitInputCorruption::AttachmentConfigurationMissing)?,
+    )?;
     let aggregate = lengths.values().fold(0_u64, |total, length| {
         saturating_attachment_byte_sum(total, *length)
     });
@@ -2886,6 +2937,14 @@ fn map_model_settings_resolution_error(
 pub(crate) async fn load_scheduling_projection(
     connection: &mut PgConnection,
     session: Session,
+) -> Result<AcceptedInputSchedulingProjection, SubmitInputRepositoryError> {
+    load_scheduling_projection_with_semantic_frontiers(connection, session, &[]).await
+}
+
+async fn load_scheduling_projection_with_semantic_frontiers(
+    connection: &mut PgConnection,
+    session: Session,
+    supplemental_semantic_frontiers: &[ContextFrontierId],
 ) -> Result<AcceptedInputSchedulingProjection, SubmitInputRepositoryError> {
     let session_id = session.id();
     let imported_session = if matches!(
@@ -4898,6 +4957,12 @@ pub(crate) async fn load_scheduling_projection(
         return Err(SubmitInputCorruption::Missing("delegated turn scheduling fact").into());
     }
 
+    let scheduling_frontier_ids = required_frontiers.iter().copied().collect::<Vec<_>>();
+    required_frontiers.extend(
+        supplemental_semantic_frontiers
+            .iter()
+            .map(|frontier| frontier.into_uuid()),
+    );
     let required_frontier_ids = required_frontiers.iter().copied().collect::<Vec<_>>();
     let frontier_rows = sqlx::query(
         "WITH RECURSIVE frontier_ids (context_frontier_id) AS (
@@ -5798,7 +5863,7 @@ pub(crate) async fn load_scheduling_projection(
     if reconstructed.len() != stored_frontiers.len() {
         return Err(SubmitInputCorruption::Inconsistent("context frontier prefix cycle").into());
     }
-    let snapshots = required_frontier_ids
+    let snapshots = scheduling_frontier_ids
         .iter()
         .map(|frontier| {
             reconstructed
