@@ -105,7 +105,7 @@ test('keeps remote media behind the persisted ask policy', async ({ page }) => {
   await load.focus()
   await page.keyboard.press('Enter')
   await expect(artifact.getByRole('img', { name: 'Remote status diagram' })).toBeVisible()
-  expect(requests).toBe(1)
+  await expect.poll(() => requests).toBe(1)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -145,7 +145,9 @@ test('captures desktop dark artifact evidence', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.goto('/scenario/blobs')
   await expect(page.getByRole('heading', { name: 'Artifact renderers' })).toBeVisible()
-  await expect(page).toHaveScreenshot('artifacts-desktop-dark.png', { fullPage: true })
+  await expect(page.getByRole('region', { name: 'Artifact renderers' })).toHaveScreenshot(
+    'artifacts-desktop-dark.png',
+  )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -157,7 +159,9 @@ test('captures desktop light artifact evidence', async ({ page }, testInfo) => {
   await page.getByRole('button', { name: 'Use light theme' }).focus()
   await page.keyboard.press('Enter')
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
-  await expect(page).toHaveScreenshot('artifacts-desktop-light.png', { fullPage: true })
+  await expect(page.getByRole('region', { name: 'Artifact renderers' })).toHaveScreenshot(
+    'artifacts-desktop-light.png',
+  )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -167,6 +171,8 @@ test('captures mobile artifact evidence', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/scenario/blobs')
   await expect(page.getByRole('heading', { name: 'Artifact renderers' })).toBeVisible()
-  await expect(page).toHaveScreenshot('artifacts-mobile-dark.png', { fullPage: true })
+  await expect(page.getByRole('region', { name: 'Artifact renderers' })).toHaveScreenshot(
+    'artifacts-mobile-dark.png',
+  )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

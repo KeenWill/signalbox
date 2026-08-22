@@ -174,7 +174,7 @@ function RemoteImageBody({
     <div className="artifact-image-layout">
       <div className="artifact-visual remote-media">
         {visible ? (
-          <img src={admittedUrl} alt={artifact.source.alt} loading="lazy" />
+          <img src={admittedUrl} alt={artifact.source.alt} />
         ) : (
           <Ban aria-label="Remote media not loaded" />
         )}
