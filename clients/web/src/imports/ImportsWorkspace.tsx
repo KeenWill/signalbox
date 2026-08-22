@@ -174,7 +174,8 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   useEffect(() => {
     const snapshot: DiagnosticSnapshot = {
       scenario: scenario ? 'imports' : 'production-imports',
-      connection: importsQuery.isError || windowQuery.isError ? 'failed' : 'ready',
+      connection:
+        importsQuery.isError || descriptorQuery.isError || windowQuery.isError ? 'failed' : 'ready',
       loadedTimeline: 0,
       logicalTimeline: 0,
       loadedFleet: 0,
@@ -200,6 +201,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     }
   }, [
     descriptorQuery.fetchStatus,
+    descriptorQuery.isError,
     descriptorQuery.status,
     imports?.items.length,
     importsQuery.fetchStatus,
@@ -216,13 +218,13 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   ])
 
   const resetCatalog = () => {
-    resetContinuation()
+    if (!hasRetainedCommand) resetContinuation()
     setAfter(undefined)
     setSelectedImport(null)
   }
 
   const showCatalogPage = (cursor: string | undefined) => {
-    resetContinuation()
+    if (!hasRetainedCommand) resetContinuation()
     setAfter(cursor)
   }
 
@@ -260,6 +262,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
 
   const retryableContinuationFailure =
     continuation.isError && isRetryableContinuationError(continuation.error)
+  const modelSelectionMissing = modelSelectionId.trim().length === 0
 
   const continueAt = (relationship: WebImportedSessionRelationship) => {
     if (!selectedFrontier || modelSelectionId.trim().length === 0) return
@@ -280,7 +283,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     <>
       <div className="imports-shell">
         <aside className="navigation-pane imports-navigation">
-          <ScenarioNavigation activeId="imports" />
+          <ScenarioNavigation activeId="imports" disabled={hasRetainedCommand} />
         </aside>
         <main className="imports-workspace">
           <header className="imports-header">
@@ -468,6 +471,11 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                     </div>
                   </dl>
                 )}
+                {descriptorQuery.isError && (
+                  <p className="imports-state" role="alert">
+                    The selected import descriptor could not be loaded.
+                  </p>
+                )}
                 <div className="continuation-form">
                   <span className="eyebrow">Create native session from selected frontier</span>
                   <div className="model-selection">
@@ -494,14 +502,26 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                     <button
                       type="button"
                       onClick={() => continueAt('resume')}
-                      disabled={!selectedFrontier || continuation.isPending || hasRetainedCommand}
+                      disabled={
+                        !selectedFrontier ||
+                        modelSelectionMissing ||
+                        descriptorQuery.isError ||
+                        continuation.isPending ||
+                        hasRetainedCommand
+                      }
                     >
                       Resume
                     </button>
                     <button
                       type="button"
                       onClick={() => continueAt('fork')}
-                      disabled={!selectedFrontier || continuation.isPending || hasRetainedCommand}
+                      disabled={
+                        !selectedFrontier ||
+                        modelSelectionMissing ||
+                        descriptorQuery.isError ||
+                        continuation.isPending ||
+                        hasRetainedCommand
+                      }
                     >
                       Fork
                     </button>
@@ -578,7 +598,11 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
           </section>
         </main>
       </div>
-      <OverlaySurfaces context={commandContext} activeId="imports" />
+      <OverlaySurfaces
+        context={commandContext}
+        activeId="imports"
+        navigationDisabled={hasRetainedCommand}
+      />
     </>
   )
 }

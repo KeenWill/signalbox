@@ -69,10 +69,14 @@ pub(crate) fn router(pool: PgPool, model_configuration: HubModelConfiguration) -
     let mutation = Router::new()
         .route("/{conversation}/continuations", post(continue_import))
         .route_layer(middleware::from_fn(validate_json_mutation));
+    let searches = Router::new()
+        .route("/searches", post(search_imports))
+        .route_layer(middleware::from_fn(validate_json_mutation));
     Router::new()
         .route("/", get(list_imports))
         .route("/{conversation}", get(read_descriptor))
         .route("/{conversation}/entries", get(read_entry_window))
+        .merge(searches)
         .merge(mutation)
         .with_state(state)
 }
@@ -85,6 +89,27 @@ async fn list_imports(
         Ok(request) => request,
         Err(_) => return invalid_request("imports query is malformed"),
     };
+    if request.source_session_id.is_some() {
+        return invalid_request("exact source-session filters use the bounded search body");
+    }
+    execute_list_imports(state, request).await
+}
+
+async fn search_imports(
+    State(state): State<WebImportState>,
+    request: axum::extract::Request,
+) -> Response {
+    let request = match decode_bounded_json::<WebImportListRequest>(request).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    if request.source_session_id.is_none() {
+        return invalid_request("bounded import searches require an exact source session");
+    }
+    execute_list_imports(state, request).await
+}
+
+async fn execute_list_imports(state: WebImportState, request: WebImportListRequest) -> Response {
     let limit = request.limit.unwrap_or(DEFAULT_IMPORT_LIST_ITEMS);
     let Some(limit) = NonZeroU32::new(limit).filter(|limit| limit.get() <= MAX_IMPORT_LIST_ITEMS)
     else {

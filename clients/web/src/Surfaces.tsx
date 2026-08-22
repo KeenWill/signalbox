@@ -84,9 +84,11 @@ function DialogFrame({
 export function OverlaySurfaces({
   context,
   activeId,
+  navigationDisabled = false,
 }: {
   context: CommandContext
   activeId: string
+  navigationDisabled?: boolean
 }) {
   const overlay = useAppSelector((state) => state.app.overlay)
   const close = () => invokeCommand('surface.escape', context)
@@ -157,7 +159,7 @@ export function OverlaySurfaces({
         description="Deterministic projections exercise the real client shell."
         onClose={close}
       >
-        <ScenarioNavigation activeId={activeId} onSelect={close} />
+        <ScenarioNavigation activeId={activeId} onSelect={close} disabled={navigationDisabled} />
       </DialogFrame>
     </>
   )

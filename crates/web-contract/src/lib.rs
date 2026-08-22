@@ -123,7 +123,8 @@ pub enum WebImportFormat {
     CodexRolloutJsonlV1,
 }
 
-/// Bounded imports catalog request carried as query parameters.
+/// Bounded imports catalog request carried as query parameters, or as a bounded
+/// JSON search body when an exact source-session filter is present.
 #[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebImportListRequest {

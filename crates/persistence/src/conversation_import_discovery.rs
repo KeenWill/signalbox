@@ -8,14 +8,20 @@ use std::{error::Error, fmt, num::NonZeroU32};
 use rust_decimal::Decimal;
 use signalbox_domain::{
     ImportedConversationDisplayTitle, ImportedConversationFormat, ImportedConversationId,
-    ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptEntryId,
+    ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptContent,
+    ImportedTranscriptEntryId,
 };
 use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid};
 
-use crate::conversation_import::{
-    DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_PENDING, DISPLAY_TITLE_STATE_UNDERIVABLE,
-    decode_format, decode_source_speaker, encode_format, positive_u64,
+use crate::{
+    conversation_import::{
+        DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_PENDING, DISPLAY_TITLE_STATE_UNDERIVABLE,
+        decode_format, decode_source_speaker, encode_format, positive_u64,
+    },
+    conversation_import_codec::decode_content,
 };
+
+const NON_TEXT_VALIDATION_MAX_BYTES: i64 = 64 * 1024;
 
 /// Exact filters and exclusive keyset position for one imports page.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -461,6 +467,9 @@ impl ImportedConversationDiscoveryRepository {
                               AND get_byte(content_encoding, 3) = 2
                          THEN substring(content_encoding FROM 13 FOR $4) END
                          AS content_text_prefix,
+                    CASE WHEN get_byte(content_encoding, 2) <> 1
+                              AND octet_length(content_encoding) <= $5
+                         THEN content_encoding END AS validated_content_encoding,
                     octet_length(content_encoding)::bigint AS content_bytes,
                     $4::bigint AS content_projected_bytes
                FROM imported_transcript_entry
@@ -472,6 +481,7 @@ impl ImportedConversationDiscoveryRepository {
         .bind(Decimal::from(first_position))
         .bind(Decimal::from(last_position))
         .bind(i64::from(maximum_text_bytes.get()) + 3)
+        .bind(NON_TEXT_VALIDATION_MAX_BYTES)
         .fetch_all(&self.pool)
         .await?;
         let items = rows
@@ -617,83 +627,61 @@ fn checked_content_projection(
         return Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into());
     }
     match header[2] {
-        0 => {
-            checked_single_text_attestation(&header, total_bytes)?;
-            Ok(ImportedEntryContentProjection::SourceEvent)
-        }
+        0 => checked_non_text_content(row, ImportedEntryContentProjection::SourceEvent),
         1 => checked_text_projection(&header, row, total_bytes, projected_bytes)
             .map(ImportedEntryContentProjection::Text),
-        2 => {
-            checked_required_attestation_prefix(&header, total_bytes, 4)?;
-            Ok(ImportedEntryContentProjection::ToolCall)
-        }
-        3 => {
-            checked_required_attestation_prefix(&header, total_bytes, 3)?;
-            Ok(ImportedEntryContentProjection::ToolResult)
-        }
-        4 => {
-            checked_required_attestation_prefix(&header, total_bytes, 2)?;
-            Ok(ImportedEntryContentProjection::Thinking)
-        }
-        5 => {
-            checked_single_text_attestation(&header, total_bytes)?;
-            Ok(ImportedEntryContentProjection::RedactedThinking)
-        }
-        6 => {
-            checked_required_attestation_prefix(&header, total_bytes, 1)?;
-            Ok(ImportedEntryContentProjection::Document)
-        }
-        7 if header.get(3).is_some_and(|tag| *tag <= 4) && total_bytes == 4 => {
-            Ok(ImportedEntryContentProjection::MessageContentAbsent)
-        }
-        8 => {
-            checked_single_text_attestation(&header, total_bytes)?;
-            Ok(ImportedEntryContentProjection::SourceMessageBlock)
-        }
+        2 => checked_non_text_content(row, ImportedEntryContentProjection::ToolCall),
+        3 => checked_non_text_content(row, ImportedEntryContentProjection::ToolResult),
+        4 => checked_non_text_content(row, ImportedEntryContentProjection::Thinking),
+        5 => checked_non_text_content(row, ImportedEntryContentProjection::RedactedThinking),
+        6 => checked_non_text_content(row, ImportedEntryContentProjection::Document),
+        7 => checked_non_text_content(row, ImportedEntryContentProjection::MessageContentAbsent),
+        8 => checked_non_text_content(row, ImportedEntryContentProjection::SourceMessageBlock),
         _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
     }
 }
 
-fn checked_required_attestation_prefix(
-    header: &[u8],
-    total_bytes: i64,
-    required_attestations: i64,
-) -> Result<(), ImportedConversationDiscoveryError> {
-    let minimum_bytes = 3_i64
-        .checked_add(required_attestations)
-        .ok_or(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
-    if total_bytes < minimum_bytes {
+fn checked_non_text_content(
+    row: &PgRow,
+    projection: ImportedEntryContentProjection,
+) -> Result<ImportedEntryContentProjection, ImportedConversationDiscoveryError> {
+    let encoding: Option<Vec<u8>> = row.try_get("validated_content_encoding")?;
+    let content = decode_content(
+        &encoding.ok_or(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?,
+    )
+    .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
+    let kind_matches = matches!(
+        (&projection, content),
+        (
+            ImportedEntryContentProjection::SourceEvent,
+            ImportedTranscriptContent::SourceEvent { .. }
+        ) | (
+            ImportedEntryContentProjection::ToolCall,
+            ImportedTranscriptContent::ToolCall { .. }
+        ) | (
+            ImportedEntryContentProjection::ToolResult,
+            ImportedTranscriptContent::ToolResult { .. }
+        ) | (
+            ImportedEntryContentProjection::Thinking,
+            ImportedTranscriptContent::Thinking { .. }
+        ) | (
+            ImportedEntryContentProjection::RedactedThinking,
+            ImportedTranscriptContent::RedactedThinking { .. }
+        ) | (
+            ImportedEntryContentProjection::Document,
+            ImportedTranscriptContent::Document { .. }
+        ) | (
+            ImportedEntryContentProjection::MessageContentAbsent,
+            ImportedTranscriptContent::MessageContentAbsent(_)
+        ) | (
+            ImportedEntryContentProjection::SourceMessageBlock,
+            ImportedTranscriptContent::SourceMessageBlock { .. }
+        )
+    );
+    if !kind_matches {
         return Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into());
     }
-    match header.get(3) {
-        Some(0 | 1) => Ok(()),
-        Some(2) if header.len() >= 5 => Ok(()),
-        _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
-    }
-}
-
-fn checked_single_text_attestation(
-    header: &[u8],
-    total_bytes: i64,
-) -> Result<(), ImportedConversationDiscoveryError> {
-    match header.get(3) {
-        Some(0 | 1) if total_bytes == 4 => Ok(()),
-        Some(2) if header.len() == 12 => {
-            let declared_bytes = u64::from_be_bytes(
-                header[4..12]
-                    .try_into()
-                    .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?,
-            );
-            let declared_bytes = i64::try_from(declared_bytes)
-                .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
-            if total_bytes.checked_sub(12) == Some(declared_bytes) {
-                Ok(())
-            } else {
-                Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into())
-            }
-        }
-        _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
-    }
+    Ok(projection)
 }
 
 fn checked_text_projection(
@@ -795,7 +783,9 @@ fn bounded_utf8_projection(
     let candidate = &prefix[..prefix.len().min(maximum_bytes)];
     let end = match std::str::from_utf8(candidate) {
         Ok(_) => candidate.len(),
-        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        Err(error) if error.error_len().is_none() && total_bytes > maximum_bytes => {
+            error.valid_up_to()
+        }
         Err(_) => return Err(ImportedConversationDiscoveryCorruption::InvalidUtf8(field).into()),
     };
     let leading_text = std::str::from_utf8(&candidate[..end])
@@ -813,4 +803,35 @@ fn positive(
 ) -> Result<u64, ImportedConversationDiscoveryError> {
     positive_u64(value)
         .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidOrdinal(field).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ImportedConversationDiscoveryCorruption, ImportedConversationDiscoveryError,
+        bounded_utf8_projection,
+    };
+
+    #[test]
+    fn complete_projection_rejects_incomplete_utf8() {
+        let error = bounded_utf8_projection(vec![b'a', 0xe2], 2, 5, "fixture")
+            .expect_err("a complete stored value must be valid UTF-8");
+
+        assert!(matches!(
+            error,
+            ImportedConversationDiscoveryError::Corruption(
+                ImportedConversationDiscoveryCorruption::InvalidUtf8("fixture")
+            )
+        ));
+    }
+
+    #[test]
+    fn truncated_projection_drops_only_an_incomplete_boundary_scalar() {
+        let projection =
+            bounded_utf8_projection(vec![b'a', 0xe2, 0x82, 0xac, b'b'], 5, 5, "fixture")
+                .expect("a shortened prefix may end inside a valid scalar");
+
+        assert_eq!(projection.leading_text, "a");
+        assert!(!projection.complete);
+    }
 }

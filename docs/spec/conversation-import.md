@@ -434,8 +434,9 @@ model rather than adapting the complete inspection spool. `GET /api/imports/`
 returns at most 100 summaries in ascending `ImportedConversationId` order. An
 optional `after` identity is an exclusive keyset cursor; the response includes a
 next cursor only when a bounded lookahead finds another row. Exact
-format/converter and exact attested source-session filters compose with that
-cursor. Source-session filters retain the complete exact request value,
+format/converter filters compose with that cursor. Exact attested source-session
+filters use the bounded JSON body of `POST /api/imports/searches`, avoiding URL
+expansion while retaining the complete exact request value,
 including empty text and edge whitespace. Catalog and descriptor responses
 project at most 512 UTF-8 bytes of source-session evidence with explicit
 complete/truncated classification. The response deliberately has no total count

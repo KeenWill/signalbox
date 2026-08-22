@@ -484,30 +484,34 @@ pub(crate) async fn validate_json_mutation(request: Request, next: Next) -> Resp
 }
 
 async fn validate_loopback_host(request: Request, next: Next) -> Response {
-    if !has_literal_loopback_host(request.headers()) {
+    if !has_loopback_host(request.headers(), request.uri()) {
         return transport_error(
             StatusCode::FORBIDDEN,
             "loopback_host_required",
-            "browser requests require a literal loopback host",
+            "browser requests require a loopback host",
         );
     }
     next.run(request).await
 }
 
-fn has_literal_loopback_host(headers: &HeaderMap) -> bool {
+fn has_loopback_host(headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
     headers
         .get(HOST)
         .and_then(|host| host.to_str().ok())
         .and_then(|host| host.parse::<axum::http::uri::Authority>().ok())
-        .and_then(|authority| {
-            authority
-                .host()
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .parse::<IpAddr>()
-                .ok()
-        })
-        .is_some_and(|address| address.is_loopback())
+        .or_else(|| uri.authority().cloned())
+        .is_some_and(|authority| is_loopback_authority(&authority))
+}
+
+fn is_loopback_authority(authority: &axum::http::uri::Authority) -> bool {
+    let host = authority
+        .host()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 fn has_json_content_type(headers: &HeaderMap) -> bool {
@@ -962,6 +966,26 @@ mod tests {
 
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"]["code"], "loopback_host_required");
+    }
+
+    #[test]
+    fn loopback_host_accepts_localhost_and_uri_authority() {
+        let localhost = Request::get("/api/bootstrap")
+            .header(header::HOST, "localhost:37231")
+            .body(Body::empty())
+            .expect("the localhost request is valid");
+        let authority = Request::get("http://127.0.0.1:37231/api/bootstrap")
+            .body(Body::empty())
+            .expect("the authority request is valid");
+
+        assert!(super::has_loopback_host(
+            localhost.headers(),
+            localhost.uri()
+        ));
+        assert!(super::has_loopback_host(
+            authority.headers(),
+            authority.uri()
+        ));
     }
 
     #[tokio::test]

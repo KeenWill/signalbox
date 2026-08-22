@@ -1082,7 +1082,7 @@ const schemas = {
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "Bounded imports catalog request carried as query parameters.",
+    "description": "Bounded imports catalog request carried as query parameters, or as a bounded\nJSON search body when an exact source-session filter is present.",
     "properties": {
       "after": {
         "description": "Exclusive imported-conversation UUID cursor.",
