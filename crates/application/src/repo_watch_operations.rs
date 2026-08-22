@@ -510,7 +510,7 @@ mod tests {
             context: PullRequestEventContext::new(PullRequestEventContextInput {
                 number: PullRequestNumber::new(NonZeroU64::new(1).expect("positive number")),
                 head_sha: head.clone(),
-                head_repository: RepositorySlug::try_new(String::from("owner/repository"))
+                head_repository: RepositorySlug::try_new(String::from("namespace/repository"))
                     .expect("fixture repository is valid"),
                 base_branch: BranchName::try_new(String::from("main"))
                     .expect("fixture base branch is valid"),
