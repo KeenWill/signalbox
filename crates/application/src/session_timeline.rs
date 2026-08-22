@@ -447,6 +447,7 @@ pub enum TimelineTurnLifecycleKind {
 pub enum TimelineToolState {
     Prepared,
     InFlight,
+    AwaitingChild,
     Completed,
     KnownFailed,
     Ambiguous,
@@ -518,13 +519,51 @@ pub enum TimelineRunnerState {
     Abandoned,
 }
 
+/// Closed goal-event kind exposed by timeline detail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineGoalEventKind {
+    Commissioned,
+    Blocked,
+    Resumed,
+    Achieved,
+    UserStopped,
+    Superseded,
+}
+
+/// Closed reason carried by blocked goal events.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineGoalBlockedReason {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+    ExecutionFailure,
+}
+
 /// Typed goal-lineage event attached to the timeline fact that caused it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TimelineGoalEvent {
     pub generation: u64,
-    pub event_kind: String,
-    pub reason: Option<String>,
+    pub event_kind: TimelineGoalEventKind,
+    pub reason: Option<TimelineGoalBlockedReason>,
     pub text: Option<TimelineTextExcerpt>,
+}
+
+/// Closed action applied to a bound child after a parent terminal transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineBoundChildAction {
+    KeepRunning,
+    Stop,
+    Cancel,
+}
+
+/// Parent-selected child relationship policy preserved in delegation detail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineDelegationPolicy {
+    Background,
+    Bound {
+        on_parent_stopped: TimelineBoundChildAction,
+        on_parent_cancelled: TimelineBoundChildAction,
+    },
 }
 
 /// Imported-frontier provenance; source bytes remain reference-only.
@@ -625,6 +664,7 @@ pub enum SessionTimelineDetailBody {
         event_kind: String,
         relationship_id: String,
         subject_id: Option<String>,
+        policy: Option<TimelineDelegationPolicy>,
         outcome: Option<String>,
         reason: Option<String>,
         content: Option<TimelineTextExcerpt>,

@@ -749,6 +749,16 @@ const schemas = {
                   "null"
                 ]
               },
+              "policy": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineDelegationPolicy"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "reason": {
                 "type": [
                   "string",
@@ -931,6 +941,52 @@ const schemas = {
         ],
         "type": "string"
       },
+      "WebTimelineBoundChildAction": {
+        "enum": [
+          "keep_running",
+          "stop",
+          "cancel"
+        ],
+        "type": "string"
+      },
+      "WebTimelineDelegationPolicy": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "background",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "on_parent_cancelled": {
+                "$ref": "#/$defs/WebTimelineBoundChildAction"
+              },
+              "on_parent_stopped": {
+                "$ref": "#/$defs/WebTimelineBoundChildAction"
+              },
+              "type": {
+                "const": "bound",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "on_parent_stopped",
+              "on_parent_cancelled"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WebTimelineDetailContinuation": {
         "description": "Explicit next position after a bounded detail response.",
         "oneOf": [
@@ -975,19 +1031,32 @@ const schemas = {
         "pattern": "^[1-9][0-9]*$",
         "type": "string"
       },
+      "WebTimelineGoalBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure"
+        ],
+        "type": "string"
+      },
       "WebTimelineGoalEvent": {
         "additionalProperties": false,
         "properties": {
           "event_kind": {
-            "type": "string"
+            "$ref": "#/$defs/WebTimelineGoalEventKind"
           },
           "generation": {
             "$ref": "#/$defs/WebU64"
           },
           "reason": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineGoalBlockedReason"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "text": {
@@ -1006,6 +1075,17 @@ const schemas = {
           "event_kind"
         ],
         "type": "object"
+      },
+      "WebTimelineGoalEventKind": {
+        "enum": [
+          "commissioned",
+          "blocked",
+          "resumed",
+          "achieved",
+          "user_stopped",
+          "superseded"
+        ],
+        "type": "string"
       },
       "WebTimelineImportedEvidence": {
         "additionalProperties": false,
@@ -1293,6 +1373,7 @@ const schemas = {
         "enum": [
           "prepared",
           "in_flight",
+          "awaiting_child",
           "completed",
           "known_failed",
           "ambiguous"

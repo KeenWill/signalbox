@@ -30,11 +30,13 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
     SessionTimelineDescriptor, SessionTimelineDetailBody, SessionTimelineDetailPage,
     SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress, TimelineApprovalDecider,
-    TimelineApprovalSource, TimelineBodyContinuation, TimelineBodyField, TimelineContinuation,
-    TimelineDetailContinuation, TimelineDetailCursor, TimelineDetailLimits, TimelineGoalEvent,
-    TimelineModelCallDisposition, TimelineModelCallState, TimelineRunnerSandboxPosture,
-    TimelineRunnerState, TimelineTextExcerpt, TimelineToolAttempt, TimelineToolBatchState,
-    TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
+    TimelineApprovalSource, TimelineBodyContinuation, TimelineBodyField, TimelineBoundChildAction,
+    TimelineContinuation, TimelineDelegationPolicy, TimelineDetailContinuation,
+    TimelineDetailCursor, TimelineDetailLimits, TimelineGoalBlockedReason, TimelineGoalEvent,
+    TimelineGoalEventKind, TimelineModelCallDisposition, TimelineModelCallState,
+    TimelineRunnerSandboxPosture, TimelineRunnerState, TimelineTextExcerpt, TimelineToolAttempt,
+    TimelineToolBatchState, TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor,
+    TimelineWindowLimits,
 };
 use signalbox_domain::{SessionId, TurnId};
 use signalbox_persistence::outbox::OutboxDispatchError;
@@ -48,11 +50,13 @@ use signalbox_web_contract::{
     WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
     WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineApprovalDecider,
     WebTimelineApprovalSource, WebTimelineBlobReference, WebTimelineBodyContinuation,
-    WebTimelineBodyField, WebTimelineDetailContinuation, WebTimelineEventSequence,
-    WebTimelineGoalEvent, WebTimelineImportedEvidence, WebTimelineModelCallDisposition,
-    WebTimelineModelCallState, WebTimelineModelUsage, WebTimelineRunnerSandboxPosture,
-    WebTimelineRunnerState, WebTimelineTextExcerpt, WebTimelineToolAttempt,
-    WebTimelineToolBatchState, WebTimelineToolState, WebTimelineTurnLifecycleKind, WebU64,
+    WebTimelineBodyField, WebTimelineBoundChildAction, WebTimelineDelegationPolicy,
+    WebTimelineDetailContinuation, WebTimelineEventSequence, WebTimelineGoalBlockedReason,
+    WebTimelineGoalEvent, WebTimelineGoalEventKind, WebTimelineImportedEvidence,
+    WebTimelineModelCallDisposition, WebTimelineModelCallState, WebTimelineModelUsage,
+    WebTimelineRunnerSandboxPosture, WebTimelineRunnerState, WebTimelineTextExcerpt,
+    WebTimelineToolAttempt, WebTimelineToolBatchState, WebTimelineToolState,
+    WebTimelineTurnLifecycleKind, WebU64,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -1028,6 +1032,7 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             event_kind,
             relationship_id,
             subject_id,
+            policy,
             outcome,
             reason,
             content,
@@ -1035,6 +1040,7 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             event_kind,
             relationship_id,
             subject_id,
+            policy: policy.map(delegation_policy_dto),
             outcome,
             reason,
             content: content.map(text_excerpt_dto),
@@ -1045,9 +1051,50 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
 fn goal_event_dto(event: TimelineGoalEvent) -> WebTimelineGoalEvent {
     WebTimelineGoalEvent {
         generation: WebU64::from_u64(event.generation),
-        event_kind: event.event_kind,
-        reason: event.reason,
+        event_kind: match event.event_kind {
+            TimelineGoalEventKind::Commissioned => WebTimelineGoalEventKind::Commissioned,
+            TimelineGoalEventKind::Blocked => WebTimelineGoalEventKind::Blocked,
+            TimelineGoalEventKind::Resumed => WebTimelineGoalEventKind::Resumed,
+            TimelineGoalEventKind::Achieved => WebTimelineGoalEventKind::Achieved,
+            TimelineGoalEventKind::UserStopped => WebTimelineGoalEventKind::UserStopped,
+            TimelineGoalEventKind::Superseded => WebTimelineGoalEventKind::Superseded,
+        },
+        reason: event.reason.map(|reason| match reason {
+            TimelineGoalBlockedReason::UserInputRequired => {
+                WebTimelineGoalBlockedReason::UserInputRequired
+            }
+            TimelineGoalBlockedReason::ExternalChangeRequired => {
+                WebTimelineGoalBlockedReason::ExternalChangeRequired
+            }
+            TimelineGoalBlockedReason::AuthorizationRequired => {
+                WebTimelineGoalBlockedReason::AuthorizationRequired
+            }
+            TimelineGoalBlockedReason::ExecutionFailure => {
+                WebTimelineGoalBlockedReason::ExecutionFailure
+            }
+        }),
         text: event.text.map(text_excerpt_dto),
+    }
+}
+
+fn delegation_policy_dto(policy: TimelineDelegationPolicy) -> WebTimelineDelegationPolicy {
+    match policy {
+        TimelineDelegationPolicy::Background => WebTimelineDelegationPolicy::Background,
+        TimelineDelegationPolicy::Bound {
+            on_parent_stopped,
+            on_parent_cancelled,
+        } => WebTimelineDelegationPolicy::Bound {
+            on_parent_stopped: bound_child_action_dto(on_parent_stopped),
+            on_parent_cancelled: bound_child_action_dto(on_parent_cancelled),
+        },
+    }
+}
+
+const fn bound_child_action_dto(action: TimelineBoundChildAction) -> WebTimelineBoundChildAction {
+    match action {
+        TimelineBoundChildAction::KeepRunning => WebTimelineBoundChildAction::KeepRunning,
+        TimelineBoundChildAction::Stop => WebTimelineBoundChildAction::Stop,
+        TimelineBoundChildAction::Cancel => WebTimelineBoundChildAction::Cancel,
     }
 }
 
@@ -1067,6 +1114,7 @@ fn tool_attempt_dto(attempt: TimelineToolAttempt) -> WebTimelineToolAttempt {
         state: attempt.state.map(|state| match state {
             TimelineToolState::Prepared => WebTimelineToolState::Prepared,
             TimelineToolState::InFlight => WebTimelineToolState::InFlight,
+            TimelineToolState::AwaitingChild => WebTimelineToolState::AwaitingChild,
             TimelineToolState::Completed => WebTimelineToolState::Completed,
             TimelineToolState::KnownFailed => WebTimelineToolState::KnownFailed,
             TimelineToolState::Ambiguous => WebTimelineToolState::Ambiguous,

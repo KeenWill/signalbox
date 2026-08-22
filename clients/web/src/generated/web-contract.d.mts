@@ -114,6 +114,7 @@ type WebSessionTimelineDetailBody = {
   readonly content?: WebTimelineTextExcerpt | null;
   readonly event_kind: string;
   readonly outcome?: string | null;
+  readonly policy?: WebTimelineDelegationPolicy | null;
   readonly reason?: string | null;
   readonly relationship_id: string;
   readonly subject_id?: string | null;
@@ -171,6 +172,16 @@ type WebTimelineBodyContinuation = {
 
 type WebTimelineBodyField = "input_text" | "model_response" | "tool_arguments" | "tool_result" | "tool_failure" | "approval_rationale" | "goal_text" | "compaction_summary" | "delegation_content";
 
+type WebTimelineBoundChildAction = "keep_running" | "stop" | "cancel";
+
+type WebTimelineDelegationPolicy = {
+  readonly type: "background";
+} | {
+  readonly on_parent_cancelled: WebTimelineBoundChildAction;
+  readonly on_parent_stopped: WebTimelineBoundChildAction;
+  readonly type: "bound";
+};
+
 type WebTimelineDetailContinuation = {
   readonly address: WebTimelineAddress;
   readonly type: "more_at";
@@ -181,12 +192,16 @@ type WebTimelineDetailContinuation = {
 
 type WebTimelineEventSequence = string;
 
+type WebTimelineGoalBlockedReason = "user_input_required" | "external_change_required" | "authorization_required" | "execution_failure";
+
 type WebTimelineGoalEvent = {
-  readonly event_kind: string;
+  readonly event_kind: WebTimelineGoalEventKind;
   readonly generation: WebU64;
-  readonly reason?: string | null;
+  readonly reason?: WebTimelineGoalBlockedReason | null;
   readonly text?: WebTimelineTextExcerpt | null;
 };
+
+type WebTimelineGoalEventKind = "commissioned" | "blocked" | "resumed" | "achieved" | "user_stopped" | "superseded";
 
 type WebTimelineImportedEvidence = {
   readonly imported_entry_id: string;
@@ -242,7 +257,7 @@ type WebTimelineToolAttempt = {
 
 type WebTimelineToolBatchState = "proposed" | "results_projected" | "recovery_required";
 
-type WebTimelineToolState = "prepared" | "in_flight" | "completed" | "known_failed" | "ambiguous";
+type WebTimelineToolState = "prepared" | "in_flight" | "awaiting_child" | "completed" | "known_failed" | "ambiguous";
 
 type WebTimelineTurnLifecycleKind = "activated" | "terminalized";
 

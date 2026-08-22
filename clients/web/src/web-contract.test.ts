@@ -23,6 +23,25 @@ const ambiguousModelCallPage = {
   projected_body_bytes: 128,
 }
 
+function expectTimelineBodyRejected(kind: string, body: object) {
+  const page = {
+    session_id: ambiguousModelCallPage.session_id,
+    items: [
+      {
+        address: { event_sequence: '13' },
+        kind,
+        body,
+        projected_body_bytes: 128,
+      },
+    ],
+    projected_body_bytes: 128,
+  }
+
+  expect(() => decodeWebSessionTimelineDetailPage(page)).toThrow(
+    'timeline_detail_page.items[0].body must be one recognized variant',
+  )
+}
+
 describe('generated timeline detail decoder', () => {
   it('accepts an ambiguous terminal model call with its disposition in-band', () => {
     const page = decodeWebSessionTimelineDetailPage(ambiguousModelCallPage)
@@ -200,88 +219,205 @@ describe('generated timeline detail decoder', () => {
     )
   })
 
-  const checkedU64Bodies = [
-    {
-      name: 'goal generation',
-      kind: 'goal_turn_retired',
-      bodyForValue: (value: string) => ({
-        type: 'goal_event',
-        turn_id: '00000000-0000-0000-0000-000000000002',
-        event: { generation: value, event_kind: 'retired' },
-      }),
-    },
-    {
-      name: 'imported position',
-      kind: 'session_created',
-      bodyForValue: (value: string) => ({
-        type: 'session_created',
-        imported_evidence: {
-          imported_entry_id: '00000000-0000-0000-0000-000000000008',
-          imported_position: value,
-        },
-      }),
-    },
-    {
-      name: 'compaction through position',
-      kind: 'context_compacted',
-      bodyForValue: (value: string) => ({
-        type: 'context_compaction',
-        compaction_id: '00000000-0000-0000-0000-000000000009',
-        model_call_id: '00000000-0000-0000-0000-000000000003',
-        through_position: value,
-        summary_entry_id: '00000000-0000-0000-0000-00000000000a',
-        result_frontier_id: '00000000-0000-0000-0000-00000000000b',
-        summary: { text: 'summary', offset_bytes: '0', total_bytes: '7' },
-      }),
-    },
-    {
-      name: 'reconciliation attempt count',
-      kind: 'turn_reconciliation_required',
-      bodyForValue: (value: string) => ({
-        type: 'reconciliation',
-        turn_id: '00000000-0000-0000-0000-000000000002',
-        operation_kind: 'tool_attempt',
-        operation_id: '00000000-0000-0000-0000-00000000000c',
-        attempt_count: value,
-        exhausted: true,
-        operator_required: true,
-        cause_code: 'ambiguous_operation',
-      }),
-    },
-    {
-      name: 'runner placement revision',
-      kind: 'runner_state_transition',
-      bodyForValue: (value: string) => ({
-        type: 'runner',
-        runner_id: '00000000-0000-0000-0000-000000000007',
-        placement_revision: value,
-        sandbox_posture: 'sandboxed',
-        state: 'pinned',
-      }),
-    },
-  ]
-
-  it.each(checkedU64Bodies)(
-    'rejects malformed and out-of-range $name values',
-    ({ kind, bodyForValue }) => {
-      for (const invalid of ['+1', '01', '18446744073709551616']) {
-        const page = {
-          session_id: ambiguousModelCallPage.session_id,
-          items: [
-            {
-              address: { event_sequence: '13' },
-              kind,
-              body: bodyForValue(invalid),
-              projected_body_bytes: 128,
-            },
-          ],
+  it('accepts awaiting-child tool attempts', () => {
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '13' },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000002',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+            state: 'results_projected',
+            tools: [
+              {
+                request_id: '00000000-0000-0000-0000-000000000004',
+                tool_name: 'spawn_session',
+                approval_posture: 'allowed',
+                approval_judge_escalated: false,
+                operator_required: false,
+                state: 'awaiting_child',
+              },
+            ],
+            goal_events: [],
+          },
           projected_body_bytes: 128,
-        }
+        },
+      ],
+      projected_body_bytes: 128,
+    }
 
-        expect(() => decodeWebSessionTimelineDetailPage(page)).toThrow(
-          'timeline_detail_page.items[0].body must be one recognized variant',
-        )
-      }
-    },
-  )
+    expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
+  })
+
+  it('accepts closed goal values and rejects fabricated values', () => {
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '14' },
+          kind: 'goal_turn_retired',
+          body: {
+            type: 'goal_event',
+            turn_id: '00000000-0000-0000-0000-000000000002',
+            event: {
+              generation: '7',
+              event_kind: 'blocked',
+              reason: 'authorization_required',
+            },
+          },
+          projected_body_bytes: 128,
+        },
+      ],
+      projected_body_bytes: 128,
+    }
+
+    expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
+    expectTimelineBodyRejected('goal_turn_retired', {
+      type: 'goal_event',
+      turn_id: '00000000-0000-0000-0000-000000000002',
+      event: { generation: '7', event_kind: 'retired' },
+    })
+    expectTimelineBodyRejected('goal_turn_retired', {
+      type: 'goal_event',
+      turn_id: '00000000-0000-0000-0000-000000000002',
+      event: { generation: '7', event_kind: 'blocked', reason: 'future_reason' },
+    })
+  })
+
+  it('accepts background and bound delegation policies', () => {
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '15' },
+          kind: 'delegation_update',
+          body: {
+            type: 'delegation',
+            event_kind: 'child_spawned',
+            relationship_id: '00000000-0000-0000-0000-000000000004',
+            subject_id: '00000000-0000-0000-0000-000000000005',
+            policy: { type: 'background' },
+          },
+          projected_body_bytes: 128,
+        },
+        {
+          address: { event_sequence: '16' },
+          kind: 'delegation_update',
+          body: {
+            type: 'delegation',
+            event_kind: 'child_spawned',
+            relationship_id: '00000000-0000-0000-0000-000000000006',
+            subject_id: '00000000-0000-0000-0000-000000000007',
+            policy: {
+              type: 'bound',
+              on_parent_stopped: 'stop',
+              on_parent_cancelled: 'cancel',
+            },
+          },
+          projected_body_bytes: 128,
+        },
+      ],
+      projected_body_bytes: 256,
+    }
+
+    expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
+  })
+
+  it('rejects malformed and out-of-range goal generations', () => {
+    expectTimelineBodyRejected('goal_turn_retired', {
+      type: 'goal_event',
+      turn_id: '00000000-0000-0000-0000-000000000002',
+      event: { generation: '+1', event_kind: 'superseded' },
+    })
+    expectTimelineBodyRejected('goal_turn_retired', {
+      type: 'goal_event',
+      turn_id: '00000000-0000-0000-0000-000000000002',
+      event: { generation: '01', event_kind: 'superseded' },
+    })
+    expectTimelineBodyRejected('goal_turn_retired', {
+      type: 'goal_event',
+      turn_id: '00000000-0000-0000-0000-000000000002',
+      event: { generation: '18446744073709551616', event_kind: 'superseded' },
+    })
+  })
+
+  it('rejects malformed and out-of-range imported positions', () => {
+    expectTimelineBodyRejected('session_created', {
+      type: 'session_created',
+      imported_evidence: {
+        imported_entry_id: '00000000-0000-0000-0000-000000000008',
+        imported_position: '+1',
+      },
+    })
+    expectTimelineBodyRejected('session_created', {
+      type: 'session_created',
+      imported_evidence: {
+        imported_entry_id: '00000000-0000-0000-0000-000000000008',
+        imported_position: '01',
+      },
+    })
+    expectTimelineBodyRejected('session_created', {
+      type: 'session_created',
+      imported_evidence: {
+        imported_entry_id: '00000000-0000-0000-0000-000000000008',
+        imported_position: '18446744073709551616',
+      },
+    })
+  })
+
+  it('rejects malformed and out-of-range compaction positions', () => {
+    const body = {
+      type: 'context_compaction',
+      compaction_id: '00000000-0000-0000-0000-000000000009',
+      model_call_id: '00000000-0000-0000-0000-000000000003',
+      summary_entry_id: '00000000-0000-0000-0000-00000000000a',
+      result_frontier_id: '00000000-0000-0000-0000-00000000000b',
+      summary: { text: 'summary', offset_bytes: '0', total_bytes: '7' },
+    }
+
+    expectTimelineBodyRejected('context_compacted', { ...body, through_position: '+1' })
+    expectTimelineBodyRejected('context_compacted', { ...body, through_position: '01' })
+    expectTimelineBodyRejected('context_compacted', {
+      ...body,
+      through_position: '18446744073709551616',
+    })
+  })
+
+  it('rejects malformed and out-of-range reconciliation counts', () => {
+    const body = {
+      type: 'reconciliation',
+      turn_id: '00000000-0000-0000-0000-000000000002',
+      operation_kind: 'tool_attempt',
+      operation_id: '00000000-0000-0000-0000-00000000000c',
+      exhausted: true,
+      operator_required: true,
+      cause_code: 'ambiguous_operation',
+    }
+
+    expectTimelineBodyRejected('turn_reconciliation_required', { ...body, attempt_count: '+1' })
+    expectTimelineBodyRejected('turn_reconciliation_required', { ...body, attempt_count: '01' })
+    expectTimelineBodyRejected('turn_reconciliation_required', {
+      ...body,
+      attempt_count: '18446744073709551616',
+    })
+  })
+
+  it('rejects malformed and out-of-range runner placement revisions', () => {
+    const body = {
+      type: 'runner',
+      runner_id: '00000000-0000-0000-0000-000000000007',
+      sandbox_posture: 'sandboxed',
+      state: 'pinned',
+    }
+
+    expectTimelineBodyRejected('runner_state_transition', { ...body, placement_revision: '+1' })
+    expectTimelineBodyRejected('runner_state_transition', { ...body, placement_revision: '01' })
+    expectTimelineBodyRejected('runner_state_transition', {
+      ...body,
+      placement_revision: '18446744073709551616',
+    })
+  })
 })
