@@ -365,13 +365,14 @@ impl SandboxedFileMediaProcessor {
             .stderr(if probe { Stdio::null() } else { Stdio::piped() })
             .kill_on_drop(true);
         let ceilings = self.ceilings;
+        let seccomp_fd = seccomp.as_raw_fd();
         command.as_std_mut().process_group(0);
         unsafe {
-            // SAFETY: the closure performs direct setrlimit and keyctl syscalls
-            // before exec, and captures only the copy-only ceiling value.
+            // SAFETY: the closure performs direct setrlimit, fcntl, and keyctl
+            // syscalls before exec, and captures only copy-only values.
             command
                 .as_std_mut()
-                .pre_exec(move || prepare_sandbox_process(ceilings));
+                .pre_exec(move || prepare_sandbox_process(ceilings, seccomp_fd));
         }
         let child = command.spawn().map_err(|_| ProcessorFailure::Unavailable)?;
         drop(block_read);
@@ -719,8 +720,20 @@ fn apply_process_limits(ceilings: FileMediaProcessCeilings) -> Result<(), rustix
     set_limit(Resource::Nofile, ceilings.file_descriptors())
 }
 
-fn prepare_sandbox_process(ceilings: FileMediaProcessCeilings) -> Result<(), std::io::Error> {
+#[allow(unsafe_code)]
+fn prepare_sandbox_process(
+    ceilings: FileMediaProcessCeilings,
+    seccomp_fd: i32,
+) -> Result<(), std::io::Error> {
     apply_process_limits(ceilings).map_err(std::io::Error::from)?;
+    // This runs after fork in the child, so only bubblewrap inherits the
+    // descriptor; the multithreaded daemon keeps it close-on-exec.
+    rustix::io::fcntl_setfd(
+        // SAFETY: seccomp_fd names the live descriptor captured for this child.
+        unsafe { rustix::fd::BorrowedFd::borrow_raw(seccomp_fd) },
+        rustix::io::FdFlags::empty(),
+    )
+    .map_err(std::io::Error::from)?;
     detach_session_keyring()
 }
 
@@ -863,8 +876,6 @@ fn process_creation_filter() -> Result<fs::File, std::io::Error> {
         )
         .map_err(std::io::Error::from)?,
     );
-    rustix::io::fcntl_setfd(file.as_fd(), rustix::io::FdFlags::empty())
-        .map_err(std::io::Error::from)?;
     for instruction in seccomp_instructions()? {
         file.write_all(&instruction.code.to_ne_bytes())?;
         file.write_all(&[instruction.jump_true, instruction.jump_false])?;
@@ -908,6 +919,7 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         memfd_create,
         shmget,
         msgget,
+        mq_open,
         semget,
         add_key,
         request_key,
@@ -921,6 +933,7 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         319_u32,
         29_u32,
         68_u32,
+        240_u32,
         64_u32,
         248_u32,
         249_u32,
@@ -936,6 +949,7 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         memfd_create,
         shmget,
         msgget,
+        mq_open,
         semget,
         add_key,
         request_key,
@@ -949,6 +963,7 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         279_u32,
         194_u32,
         186_u32,
+        180_u32,
         190_u32,
         217_u32,
         218_u32,
@@ -963,6 +978,7 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         memfd_create,
         shmget,
         msgget,
+        mq_open,
         semget,
         add_key,
         request_key,
@@ -1407,6 +1423,33 @@ mod tests {
             program.get(denial).map(|entry| entry.value),
             Some(0x0005_0001)
         );
+    }
+
+    #[test]
+    fn descendant_filter_denies_posix_message_queue_creation() {
+        let program = seccomp_instructions().expect("the test architecture is supported");
+        #[cfg(target_arch = "x86_64")]
+        let mq_open = 240_u32;
+        #[cfg(target_arch = "aarch64")]
+        let mq_open = 180_u32;
+        let (index, check) = program
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.value == mq_open)
+            .expect("mq_open is checked");
+        assert_eq!(check.code, 0x15);
+        let denial = index + 1 + usize::from(check.jump_true);
+        assert_eq!(
+            program.get(denial).map(|entry| entry.value),
+            Some(0x0005_0001)
+        );
+    }
+
+    #[test]
+    fn seccomp_descriptor_is_close_on_exec_in_the_daemon() {
+        let filter = super::process_creation_filter().expect("seccomp filter is created");
+        let flags = rustix::io::fcntl_getfd(&filter).expect("descriptor flags are read");
+        assert!(flags.contains(rustix::io::FdFlags::CLOEXEC));
     }
 
     #[test]
