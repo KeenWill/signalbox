@@ -128,16 +128,16 @@ type WebSessionTimelineItem = {
 };
 
 type WebSessionTimelineSizeFacts = {
-  readonly item_count: string;
-  readonly projected_structured_bytes: string;
-  readonly projected_text_bytes: string;
-  readonly referenced_blob_bytes: string;
-  readonly referenced_blob_count: string;
+  readonly item_count: WebU64;
+  readonly projected_structured_bytes: WebU64;
+  readonly projected_text_bytes: WebU64;
+  readonly referenced_blob_bytes: WebU64;
+  readonly referenced_blob_count: WebU64;
 };
 
 type WebSessionWorkFacts = {
-  readonly active_turn_count: string;
-  readonly queued_turn_count: string;
+  readonly active_turn_count: WebU64;
+  readonly queued_turn_count: WebU64;
 };
 
 type WebTimelineAddress = {
@@ -230,6 +230,8 @@ type WebTimelineToolState = "prepared" | "in_flight" | "completed" | "known_fail
 
 type WebTimelineTurnLifecycleKind = "activated" | "terminalized";
 
+type WebU64 = string;
+
 export type WebContractBootstrap = {
   readonly capabilities: WebContractCapabilities;
   readonly contract: WebContractIdentity;
@@ -247,7 +249,7 @@ export type WebApiErrorResponse = {
 export type WebSessionTimelineDescriptor = {
   readonly first_address: WebTimelineAddress;
   readonly latest_address: WebTimelineAddress;
-  readonly observed_through: string;
+  readonly observed_through: WebU64;
   readonly session_id: string;
   readonly sizes: WebSessionTimelineSizeFacts;
   readonly work: WebSessionWorkFacts;
