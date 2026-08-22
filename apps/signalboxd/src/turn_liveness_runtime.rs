@@ -109,11 +109,11 @@ const QUIESCENT_ROTATION_PAGE_CEILING: usize = 4_096;
 /// Wall-clock bound for one detached durable recovery transaction.
 ///
 /// Recovery writes serialize through the shared outbox frontier after taking
-/// the session scheduler lock. Ten seconds leaves that ordinary serialization
-/// room to complete while keeping every inventory read, recovery attempt, and
-/// ambiguous commit bounded well below the watchdog's retry cadence.
+/// the session scheduler lock. One minute covers the observed outbox and
+/// deferred-final-state-validation convoy while keeping every inventory read,
+/// recovery attempt, and ambiguous commit bounded.
 // numeric-bound: ceiling - prevents one database operation from wedging liveness supervision
-const RECOVERY_ATTEMPT_BOUND: Duration = Duration::from_secs(10);
+const RECOVERY_ATTEMPT_BOUND: Duration = Duration::from_secs(60);
 /// Client-side observation bound after PostgreSQL has been told to terminate
 /// the recovery transaction at the supplied server bound.
 ///
@@ -1549,10 +1549,10 @@ mod tests {
     /// driver, leaving one full server-bound interval for the result to arrive.
     #[test]
     fn recovery_attempts_end_in_the_server_before_the_client_ceiling() {
-        assert_eq!(RECOVERY_ATTEMPT_BOUND, Duration::from_secs(10));
+        assert_eq!(RECOVERY_ATTEMPT_BOUND, Duration::from_secs(60));
         assert_eq!(
             recovery_client_observation_bound(RECOVERY_ATTEMPT_BOUND),
-            Duration::from_secs(20)
+            Duration::from_secs(120)
         );
     }
 
