@@ -27,6 +27,23 @@ const useDeterministicProductTransport = async (page: Page) => {
   await page.route('**/api/attention', (route) => route.fulfill({ json: emptyAttentionFixture }))
 }
 
+const useRecoveringBootstrap = async (page: Page) => {
+  let attempts = 0
+  await page.route('**/api/bootstrap', (route) => {
+    attempts += 1
+    return attempts === 1
+      ? route.fulfill({ status: 503 })
+      : route.fulfill({ json: bootstrapFixture })
+  })
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      body: `${JSON.stringify({ kind: 'snapshot', snapshot: emptyAttentionFixture })}\n`,
+      contentType: 'application/x-ndjson',
+    }),
+  )
+  await page.route('**/api/attention', (route) => route.fulfill({ json: emptyAttentionFixture }))
+}
+
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
   page.on('console', (message) => {
@@ -79,6 +96,18 @@ test('completes route switching from the command palette without a mouse', async
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(/\/sessions$/)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('moves focus to the destination after sequence navigation', async ({ page }) => {
+  await useDeterministicProductTransport(page)
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open command palette' }).focus()
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page.getByRole('main')).toBeFocused()
 })
 
 test('suspends product navigation sequences while the palette owns input', async ({ page }) => {
@@ -169,6 +198,38 @@ test('does not start Attention reads when bootstrap validation fails', async ({ 
 
   await expect(page.getByRole('heading', { name: 'Attention contract unavailable' })).toBeVisible()
   expect(attentionRequests).toBe(0)
+})
+
+test('does not start Attention reads for incompatible bootstrap values', async ({ page }) => {
+  let attentionRequests = 0
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        limits: { ...bootstrapFixture.limits, max_ndjson_item_bytes: 32_768 },
+      },
+    }),
+  )
+  await page.route('**/api/attention**', (route) => {
+    attentionRequests += 1
+    return route.abort()
+  })
+
+  await page.goto('/attention')
+
+  await expect(page.getByRole('heading', { name: 'Attention contract unavailable' })).toBeVisible()
+  expect(attentionRequests).toBe(0)
+})
+
+test('retries a transient bootstrap failure in place', async ({ page }) => {
+  await useRecoveringBootstrap(page)
+  await page.goto('/attention')
+
+  await expect(page.getByRole('heading', { name: 'Attention contract unavailable' })).toBeVisible()
+  await page.getByRole('button', { name: 'Retry contract check' }).click()
+
+  await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '0 sessions' })).toBeVisible()
 })
 
 test('gives iconless Attention contract errors the full empty-state width', async ({ page }) => {

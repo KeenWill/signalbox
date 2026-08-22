@@ -13,8 +13,31 @@ const MAX_ATTENTION_EVENT_BYTES = 65_536
 export const MAX_BOOTSTRAP_BYTES = 65_536
 export const MAX_ATTENTION_SNAPSHOT_BYTES = 65_536
 export const MAX_ATTENTION_SNAPSHOT_ITEMS = 64
+const MAX_UNSIGNED_64 = 18_446_744_073_709_551_615n
+
+const validateCursor = (cursor: string): void => {
+  if (!/^(0|[1-9]\d*)$/.test(cursor) || BigInt(cursor) > MAX_UNSIGNED_64) {
+    throw new TypeError('attention cursor must be a canonical unsigned 64-bit integer')
+  }
+}
+
+const validateBootstrap = (bootstrap: WebContractBootstrap): WebContractBootstrap => {
+  if (
+    bootstrap.contract.name !== 'signalbox.web-http' ||
+    bootstrap.contract.version !== '1' ||
+    !bootstrap.capabilities.bounded_json ||
+    !bootstrap.capabilities.same_origin_json_mutations ||
+    !bootstrap.capabilities.ndjson_streaming ||
+    bootstrap.limits.max_json_body_bytes !== MAX_BOOTSTRAP_BYTES ||
+    bootstrap.limits.max_ndjson_item_bytes !== MAX_ATTENTION_EVENT_BYTES
+  ) {
+    throw new TypeError('bootstrap carries an incompatible web contract')
+  }
+  return bootstrap
+}
 
 const validateAttentionSnapshot = (snapshot: WebAttentionSnapshot): WebAttentionSnapshot => {
+  validateCursor(snapshot.cursor)
   if (snapshot.summaries.length > MAX_ATTENTION_SNAPSHOT_ITEMS) {
     throw new TypeError('attention snapshot exceeds the contract item ceiling')
   }
@@ -116,6 +139,7 @@ const decodeAttentionLines = async function* (
           line = []
           const event = decodeWebAttentionStreamEvent(value)
           if (event.kind === 'snapshot') validateAttentionSnapshot(event.snapshot)
+          else validateCursor(event.cursor)
           yield event
         } else {
           if (line.length === MAX_ATTENTION_EVENT_BYTES) {
@@ -184,8 +208,10 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    return decodeWebContractBootstrap(
-      await readBoundedJson(response, MAX_BOOTSTRAP_BYTES, 'bootstrap response', signal),
+    return validateBootstrap(
+      decodeWebContractBootstrap(
+        await readBoundedJson(response, MAX_BOOTSTRAP_BYTES, 'bootstrap response', signal),
+      ),
     )
   }
 

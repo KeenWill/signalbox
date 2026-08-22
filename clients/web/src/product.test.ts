@@ -72,6 +72,25 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('rejects bootstrap values outside the exact supported contract', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...bootstrapFixture,
+              capabilities: { ...bootstrapFixture.capabilities, ndjson_streaming: false },
+            }),
+          ),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'bootstrap carries an incompatible web contract',
+    )
+  })
+
   it('rejects bootstrap before buffering beyond the JSON byte ceiling', async () => {
     vi.stubGlobal(
       'fetch',
@@ -162,6 +181,25 @@ describe('SameOriginProductTransport', () => {
     })
     await expect(events.next()).resolves.toEqual({ done: false, value: attentionUpdateFixture })
     await expect(events.next()).resolves.toEqual({ done: true, value: undefined })
+  })
+
+  it('rejects malformed cursors in HTTP snapshots and stream events', async () => {
+    const malformedSnapshot = { ...attentionFixture, cursor: '01' }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(malformedSnapshot)))
+      .mockResolvedValueOnce(
+        new Response(`${JSON.stringify({ ...attentionUpdateFixture, cursor: 'not-a-number' })}\n`),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
+      'attention cursor must be a canonical unsigned 64-bit integer',
+    )
+    const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
+    await expect(events.next()).rejects.toThrow(
+      'attention cursor must be a canonical unsigned 64-bit integer',
+    )
   })
 
   it('rejects an attention snapshot beyond the contract item ceiling', async () => {

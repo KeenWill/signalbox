@@ -302,7 +302,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       timelineIds: [],
       focusTimeline: () => primaryRef.current?.focus(),
       unwindSurface: () => surfaceEscape.current?.() ?? false,
-      navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      navigate: (path) => {
+        void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() =>
+          primaryRef.current?.focus(),
+        )
+      },
     }),
     [dispatch, navigate],
   )
@@ -341,6 +345,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               ? 'Attention reads remain disabled until the generated bootstrap contract validates.'
               : 'Attention reads will begin after the generated bootstrap contract validates.'}
           </p>
+          {bootstrap.isError && (
+            <button type="button" onClick={() => void bootstrap.refetch()}>
+              Retry contract check
+            </button>
+          )}
         </div>
       </section>
     ) : surface === 'sessions' ? (
