@@ -126,7 +126,9 @@ daemon's checked lease-only resume directives and canonical claim/dispatch
 replay are re-verified through this PR
 (`agent/runner-claimed-resume-transaction`). The reusable runner-restricted
 bubblewrap request profile is re-verified through this PR
-(`agent/runner-strict-sandbox-profile`). Runner consumption of the exact
+(`agent/runner-strict-sandbox-profile`). Its single explicit, bounded,
+debug-redacted environment channel is verified against this PR
+(`agent/runner-restricted-command-environment`). Runner consumption of the exact
 lease-only resume directive is re-verified through this PR
 (`agent/runner-claimed-resume-client`). Runner ingestion of the daemon's
 canonical claim and dispatch replay is re-verified through this PR
@@ -1765,8 +1767,33 @@ before both the availability probe and dispatch, recreates standard usr-merge
 aliases only when their targets are inside the configured mounts, and derives
 `PATH` only from configured mounts. The proof-only generic exec-family runner
 composes that constructor and advertises `WorkspaceRestricted`. Resource limits
-remain separate work, with first-release resource limits still owner-gated in
+remain separate work, with the first-release resource-limit decision still
+unresolved in
 [open questions](../open-questions.md#identity-credentials-and-resource-governance).
+
+The reusable process core can add one explicit environment value only to the
+runner-restricted dispatch request. The name is a canonical uppercase
+environment identifier of at most 4,096 UTF-8 bytes and cannot replace `HOME`,
+`HTTPS_PROXY`, `LANG`, `LC_ALL`, or `PATH`; every `LD_*` name is also reserved.
+The byte-preserving value is nonempty, NUL-free, and at most 65,536 bytes. The
+complete target argv, fixed cleared environment, optional HTTPS proxy entries,
+and injected name/value must fit the process core's conservative 128 KiB Linux
+launch budget. The fully constructed outer bubblewrap dispatch request,
+including every configured mount argument, must independently fit the same
+budget. The actual availability-probe request, including the selected sandbox
+shell, probe arguments, configured mounts, and non-secret delivery payload, must
+independently fit it as well. All three checks include terminators and pointer
+arrays, and an oversized request is rejected before the availability probe. The
+caller value is written to a private anonymous descriptor, materialized as a
+mode-`0600` file inside the namespace after configured mounts, read and removed
+by the namespace-local dispatcher, and added only to the final target
+environment. The outer supervisor and bubblewrap process never receive the
+caller value in argv or environment. The availability probe exercises the same
+descriptor/file shape with a fixed non-secret value rather than the caller
+value. Debug output retains only the name and a redaction marker. The
+daemon-local sandbox profile cannot use this channel. This core does not resolve
+credential files or redact captured command output; the runner preparer that
+owns a selected credential must do both before and after this boundary.
 
 Confinement is defined over that writable root, which need not be a repository.
 The root is the provisioned repository when the placement requires a worktree,

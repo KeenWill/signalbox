@@ -8,7 +8,10 @@
 //! completeness.
 
 #[cfg(target_os = "linux")]
-use std::os::{fd::AsFd, unix::fs::MetadataExt};
+use std::os::{
+    fd::AsFd,
+    unix::{ffi::OsStrExt, fs::MetadataExt},
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -65,6 +68,15 @@ const MAX_ARGUMENT_BYTES: usize = MAX_ARGUMENT_CHARACTERS * 4;
 const MAX_TOTAL_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_WORKING_DIRECTORY_CHARACTERS: usize = 4096;
 const MAX_WORKING_DIRECTORY_BYTES: usize = MAX_WORKING_DIRECTORY_CHARACTERS * 4;
+const MAX_SANDBOX_ENVIRONMENT_NAME_BYTES: usize = 4096;
+const MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES: usize =
+    crate::limits::MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES;
+#[cfg(target_os = "linux")]
+const MIN_LINUX_ARG_MAX_BYTES: usize = 128 * 1024;
+#[cfg(target_os = "linux")]
+const SANDBOX_ENVIRONMENT_PROBE_NAME: &str = "SIGNALBOX_ENVIRONMENT_PROBE";
+#[cfg(target_os = "linux")]
+const SANDBOX_ENVIRONMENT_PROBE_VALUE: &str = "probe";
 pub(crate) const EXEC_CAPTURE_BYTES: usize = 64 * 1024;
 const PROCESS_CAPTURE_BYTES_LIMIT: usize = 1024 * 1024;
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded direct-command arguments";
@@ -73,6 +85,9 @@ const SANDBOX_WORKSPACE: &str = "/workspace";
 const SANDBOX_DISPATCH_PROGRAM: &str = "/signalbox-exec-dispatch";
 const SANDBOX_HTTPS_BROKER_DIRECTORY: &str = "/run/signalbox";
 const SANDBOX_HTTPS_BROKER_SOCKET: &str = "/run/signalbox/https-broker.sock";
+const SANDBOX_ENVIRONMENT_FILE: &str = "/run/signalbox/restricted-environment";
+#[cfg(target_os = "linux")]
+const SANDBOX_ENVIRONMENT_DESCRIPTOR_PLACEHOLDER: &str = "signalbox-private-environment-descriptor";
 const SANDBOX_HTTPS_PROXY: &str = "http://127.0.0.1:18080";
 const SANDBOX_FALLBACK_PATH: &str = "/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 pub(crate) const SANDBOX_DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
@@ -120,6 +135,121 @@ pub struct ExecArguments {
     #[schemars(range(min = 1, max = MAX_TIMEOUT_SECONDS))]
     pub timeout_seconds: u64,
 }
+
+/// One checked name for an explicit restricted-process environment value.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SandboxEnvironmentName(String);
+
+impl SandboxEnvironmentName {
+    /// Validates one bounded canonical uppercase non-reserved name.
+    pub fn try_new(name: String) -> Result<Self, InvalidSandboxEnvironmentVariable> {
+        let mut name_bytes = name.bytes();
+        let valid_name = name_bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_uppercase() || byte == b'_')
+            && name_bytes
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
+        if !valid_name || name.len() > MAX_SANDBOX_ENVIRONMENT_NAME_BYTES {
+            return Err(InvalidSandboxEnvironmentVariable::Name);
+        }
+        if name.starts_with("LD_")
+            || matches!(
+                name.as_str(),
+                "HOME" | "HTTPS_PROXY" | "LANG" | "LC_ALL" | "PATH"
+            )
+        {
+            return Err(InvalidSandboxEnvironmentVariable::ReservedName);
+        }
+        Ok(Self(name))
+    }
+
+    /// Borrows the exact checked environment name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// One explicit value injected through the cleared restricted-process environment.
+#[derive(Eq, PartialEq)]
+pub struct SandboxEnvironmentVariable {
+    name: SandboxEnvironmentName,
+    value: OsString,
+}
+
+impl SandboxEnvironmentVariable {
+    /// Validates one nonempty bounded byte-preserving value under a checked name.
+    pub fn try_new(
+        name: String,
+        value: impl Into<OsString>,
+    ) -> Result<Self, InvalidSandboxEnvironmentVariable> {
+        let name = SandboxEnvironmentName::try_new(name)?;
+        let value = value.into();
+        let value_bytes = value.as_encoded_bytes();
+        if value_bytes.is_empty()
+            || value_bytes.len() > MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES
+            || value_bytes.contains(&0)
+        {
+            return Err(InvalidSandboxEnvironmentVariable::Value);
+        }
+        Ok(Self { name, value })
+    }
+}
+
+impl fmt::Debug for SandboxEnvironmentVariable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SandboxEnvironmentVariable")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Rejection while constructing one explicit restricted-process environment value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InvalidSandboxEnvironmentVariable {
+    /// The name is not a canonical uppercase environment identifier or exceeds
+    /// 4,096 UTF-8 bytes.
+    Name,
+    /// The name belongs to the fixed sandbox runtime environment or controls
+    /// the dynamic loader used to start the outer supervisor.
+    ReservedName,
+    /// The value is empty, contains NUL, or exceeds 65,536 bytes.
+    Value,
+}
+
+impl fmt::Display for InvalidSandboxEnvironmentVariable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("invalid restricted-process environment value")
+    }
+}
+
+impl Error for InvalidSandboxEnvironmentVariable {}
+
+/// Refusal before an explicit environment value can reach a restricted run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SandboxEnvironmentRunError {
+    /// The direct-command arguments or combined launch payload exceed their bounds.
+    Arguments,
+    /// Explicit environment delivery was requested for a non-runner profile.
+    UnsupportedProfile,
+    /// The private namespace-local delivery descriptor could not be prepared.
+    Delivery,
+}
+
+impl fmt::Display for SandboxEnvironmentRunError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Arguments => "invalid bounded direct-command arguments",
+            Self::UnsupportedProfile => {
+                "explicit environment requires the runner-restricted sandbox profile"
+            }
+            Self::Delivery => "restricted-process environment delivery setup failed",
+        })
+    }
+}
+
+impl Error for SandboxEnvironmentRunError {}
 
 struct SandboxedExecContract;
 
@@ -524,7 +654,7 @@ trait CommandExecution: Clone + Send {
 }
 
 /// Exact bounded request supplied to an injected process runner.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ProcessRequest {
     /// Executable name or path.
     pub program: OsString,
@@ -542,6 +672,70 @@ pub struct ProcessRequest {
     pub environment_inheritance: ProcessEnvironment,
     /// Trusted status protocol expected from the supervised target.
     pub status_protocol: ProcessStatusProtocol,
+    /// Private bytes delivered through this request's exact supervisor pipe.
+    #[cfg(target_os = "linux")]
+    #[doc(hidden)]
+    pub delivery_payload: Option<Vec<u8>>,
+}
+
+struct SandboxEnvironmentDelivery {
+    name: SandboxEnvironmentName,
+    #[cfg(target_os = "linux")]
+    value: OsString,
+}
+
+impl SandboxEnvironmentDelivery {
+    #[cfg(target_os = "linux")]
+    fn try_new(environment: SandboxEnvironmentVariable) -> Result<Self, ()> {
+        Ok(Self {
+            name: environment.name,
+            value: environment.value,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn try_probe() -> Result<Self, ()> {
+        Self::try_new(SandboxEnvironmentVariable {
+            name: SandboxEnvironmentName(String::from(SANDBOX_ENVIRONMENT_PROBE_NAME)),
+            value: OsString::from(SANDBOX_ENVIRONMENT_PROBE_VALUE),
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn try_new(_environment: SandboxEnvironmentVariable) -> Result<Self, ()> {
+        Err(())
+    }
+}
+
+impl fmt::Debug for ProcessRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessRequest")
+            .field("program", &self.program)
+            .field("arguments", &self.arguments)
+            .field("working_directory", &self.working_directory)
+            .field("timeout", &self.timeout)
+            .field("capture_bytes", &self.capture_bytes)
+            .field(
+                "environment",
+                &RedactedProcessEnvironment(&self.environment),
+            )
+            .field("environment_inheritance", &self.environment_inheritance)
+            .field("status_protocol", &self.status_protocol)
+            .finish()
+    }
+}
+
+struct RedactedProcessEnvironment<'a>(&'a BTreeMap<OsString, OsString>);
+
+impl fmt::Debug for RedactedProcessEnvironment<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut map = formatter.debug_map();
+        for name in self.0.keys() {
+            map.entry(name, &"<redacted>");
+        }
+        map.finish()
+    }
 }
 
 /// Ambient-environment posture for an injected process request.
@@ -574,6 +768,8 @@ pub enum BwrapAvailability {
     Unusable,
     /// The exact profile probe exhausted the request deadline.
     TimedOut,
+    /// The private restricted-environment descriptor could not be prepared.
+    EnvironmentDelivery,
 }
 
 /// Injectable one-shot process spawning and bubblewrap probing.
@@ -862,6 +1058,9 @@ fn classify_bwrap_availability(result: &ProcessRunResult) -> BwrapAvailability {
             BwrapAvailability::Missing
         }
         ProcessOutcome::TimedOut => BwrapAvailability::TimedOut,
+        ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::EnvironmentDelivery,
+        } => BwrapAvailability::EnvironmentDelivery,
         ProcessOutcome::Exited { .. }
         | ProcessOutcome::SpawnFailed { .. }
         | ProcessOutcome::SupervisionFailed { .. } => BwrapAvailability::Unusable,
@@ -1011,6 +1210,126 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         Ok(self.run_with_capture(arguments, EXEC_CAPTURE_BYTES).await)
     }
 
+    /// Runs with one explicit value added to the otherwise fixed cleared environment.
+    pub async fn try_run_with_environment(
+        &mut self,
+        arguments: ExecArguments,
+        environment: SandboxEnvironmentVariable,
+    ) -> Result<ExecResult, SandboxEnvironmentRunError> {
+        validate_arguments(&arguments).map_err(|_| SandboxEnvironmentRunError::Arguments)?;
+        if !matches!(
+            self.mount_profile.as_ref(),
+            SandboxMountProfile::RunnerRestricted { .. }
+        ) {
+            return Err(SandboxEnvironmentRunError::UnsupportedProfile);
+        }
+        #[cfg(target_os = "linux")]
+        if !sandbox_environment_fits_linux_arg_max(
+            &arguments,
+            &environment,
+            &self.mount_profile.executable_path(&self.workspace_root),
+            matches!(
+                self.mount_profile.as_ref(),
+                SandboxMountProfile::RunnerRestricted {
+                    https_broker: Some(_),
+                    ..
+                }
+            ),
+        ) {
+            return Err(SandboxEnvironmentRunError::Arguments);
+        }
+        let environment = SandboxEnvironmentDelivery::try_new(environment)
+            .map_err(|()| SandboxEnvironmentRunError::Delivery)?;
+        #[cfg(target_os = "linux")]
+        {
+            let sandbox_path = self.mount_profile.executable_path(&self.workspace_root);
+            let budget_request = bwrap_request(
+                SandboxLaunchContext {
+                    bind_source: &self.workspace_identity.bind_source,
+                    bind_descriptor: i32::MIN,
+                    launcher_descriptor: i32::MIN,
+                    working_directory_bind_descriptor: Some(i32::MIN),
+                },
+                &self.bubblewrap_program,
+                SandboxInvocation {
+                    program: &arguments.program,
+                    arguments: &arguments.arguments,
+                    working_directory: &arguments.working_directory,
+                    timeout: Duration::from_secs(arguments.timeout_seconds),
+                    capture_bytes: 0,
+                    environment: Some(&environment),
+                },
+                SandboxRequestProfile {
+                    mounts: &self.mount_profile,
+                    executable_path: &sandbox_path,
+                },
+            );
+            if !process_request_fits_linux_arg_max(
+                self.runner.sandbox_launcher_program(),
+                &budget_request,
+            ) {
+                return Err(SandboxEnvironmentRunError::Arguments);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        let probe_environment = SandboxEnvironmentDelivery::try_probe()
+            .map_err(|()| SandboxEnvironmentRunError::Delivery)?;
+        #[cfg(target_os = "linux")]
+        {
+            let sandbox_path = self.mount_profile.executable_path(&self.workspace_root);
+            let probe_program = executable_sandbox_shell(&sandbox_path)
+                .unwrap_or_else(|| PathBuf::from("/bin/sh"))
+                .to_string_lossy()
+                .into_owned();
+            let probe_request = bwrap_request(
+                SandboxLaunchContext {
+                    bind_source: &self.workspace_identity.bind_source,
+                    bind_descriptor: i32::MIN,
+                    launcher_descriptor: i32::MIN,
+                    working_directory_bind_descriptor: None,
+                },
+                &self.bubblewrap_program,
+                SandboxInvocation {
+                    program: &probe_program,
+                    arguments: &[String::from("-c"), String::from("exit 0")],
+                    working_directory: ".",
+                    timeout: Duration::from_secs(5),
+                    capture_bytes: 8 * 1024,
+                    environment: Some(&probe_environment),
+                },
+                SandboxRequestProfile {
+                    mounts: &self.mount_profile,
+                    executable_path: &sandbox_path,
+                },
+            );
+            if !process_request_fits_linux_arg_max(
+                self.runner.sandbox_launcher_program(),
+                &probe_request,
+            ) {
+                return Err(SandboxEnvironmentRunError::Arguments);
+            }
+        }
+        let result = self
+            .run_with_capture_environment(
+                arguments,
+                EXEC_CAPTURE_BYTES,
+                Some(&environment),
+                #[cfg(target_os = "linux")]
+                Some(&probe_environment),
+                #[cfg(not(target_os = "linux"))]
+                None,
+            )
+            .await;
+        if result.outcome
+            == (ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::EnvironmentDelivery,
+            })
+        {
+            return Err(SandboxEnvironmentRunError::Delivery);
+        }
+        Ok(result)
+    }
+
     pub(crate) fn pinned_workspace_root(&self) -> &Path {
         #[cfg(target_os = "linux")]
         {
@@ -1037,6 +1356,42 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         arguments: ExecArguments,
         requested_timeout: Duration,
         capture_bytes: usize,
+    ) -> ExecResult {
+        self.run_with_capture_environment_timeout(
+            arguments,
+            requested_timeout,
+            capture_bytes,
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn run_with_capture_environment(
+        &mut self,
+        arguments: ExecArguments,
+        capture_bytes: usize,
+        environment: Option<&SandboxEnvironmentDelivery>,
+        probe_environment: Option<&SandboxEnvironmentDelivery>,
+    ) -> ExecResult {
+        let requested_timeout = Duration::from_secs(arguments.timeout_seconds);
+        self.run_with_capture_environment_timeout(
+            arguments,
+            requested_timeout,
+            capture_bytes,
+            environment,
+            probe_environment,
+        )
+        .await
+    }
+
+    async fn run_with_capture_environment_timeout(
+        &mut self,
+        arguments: ExecArguments,
+        requested_timeout: Duration,
+        capture_bytes: usize,
+        environment: Option<&SandboxEnvironmentDelivery>,
+        probe_environment: Option<&SandboxEnvironmentDelivery>,
     ) -> ExecResult {
         let deadline = tokio::time::Instant::now() + requested_timeout;
         if !self.mount_profile.identities_are_current() {
@@ -1102,6 +1457,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 working_directory: ".",
                 timeout: probe_timeout,
                 capture_bytes: 8 * 1024,
+                environment: probe_environment,
             },
             SandboxRequestProfile {
                 mounts: &self.mount_profile,
@@ -1110,6 +1466,14 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         );
         let availability = self.runner.bwrap_availability(probe).await;
         match availability {
+            BwrapAvailability::EnvironmentDelivery if environment.is_some() => ExecResult {
+                confinement: ExecutionConfinement::SandboxSetupFailed,
+                outcome: ProcessOutcome::SpawnFailed {
+                    reason: ProcessSpawnFailure::EnvironmentDelivery,
+                },
+                stdout: OutputCapture::empty(),
+                stderr: OutputCapture::empty(),
+            },
             BwrapAvailability::Available => {
                 if !self.mount_profile.identities_are_current() {
                     return ExecResult {
@@ -1189,6 +1553,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                         working_directory: &arguments.working_directory,
                         timeout: remaining,
                         capture_bytes,
+                        environment,
                     },
                     SandboxRequestProfile {
                         mounts: &self.mount_profile,
@@ -1197,7 +1562,9 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 );
                 sandbox_process_result(self.runner.run(request).await, capture_bytes)
             }
-            BwrapAvailability::Missing | BwrapAvailability::Unusable => ExecResult {
+            BwrapAvailability::Missing
+            | BwrapAvailability::Unusable
+            | BwrapAvailability::EnvironmentDelivery => ExecResult {
                 confinement: ExecutionConfinement::SandboxRefused { availability },
                 outcome: ProcessOutcome::SpawnFailed {
                     reason: ProcessSpawnFailure::SandboxUnavailable,
@@ -1421,10 +1788,25 @@ fn capture_read_only_paths(
             source: None,
         });
     }
-    paths
+    let paths = paths
         .iter()
         .map(|path| ReadOnlyPathIdentity::capture(path))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(path) = paths
+        .iter()
+        .find(|path| read_only_path_overlaps_environment_file(&path.destination))
+    {
+        return Err(ExecToolConstructionError::ReadOnlyPath {
+            path: path.destination.clone(),
+            source: None,
+        });
+    }
+    Ok(paths)
+}
+
+fn read_only_path_overlaps_environment_file(path: &Path) -> bool {
+    let environment_file = Path::new(SANDBOX_ENVIRONMENT_FILE);
+    environment_file.starts_with(path) || path.starts_with(environment_file)
 }
 
 #[cfg(target_os = "linux")]
@@ -1597,6 +1979,106 @@ impl<Runner: ProcessRunner> CommandExecution for SandboxedCommandRunner<Runner> 
     }
 }
 
+#[cfg(target_os = "linux")]
+fn sandbox_environment_fits_linux_arg_max(
+    arguments: &ExecArguments,
+    environment: &SandboxEnvironmentVariable,
+    executable_path: &std::ffi::OsStr,
+    https_broker: bool,
+) -> bool {
+    fn string_bytes(value: &[u8]) -> usize {
+        value.len().saturating_add(1)
+    }
+
+    fn environment_bytes(name: &[u8], value: &[u8]) -> usize {
+        name.len()
+            .saturating_add(1)
+            .saturating_add(value.len())
+            .saturating_add(1)
+    }
+
+    let argument_strings = string_bytes(arguments.program.as_bytes()).saturating_add(
+        arguments
+            .arguments
+            .iter()
+            .map(|argument| string_bytes(argument.as_bytes()))
+            .sum::<usize>(),
+    );
+    let mut environment_strings = environment_bytes(b"HOME", SANDBOX_WORKSPACE.as_bytes())
+        .saturating_add(environment_bytes(b"LANG", b"C.UTF-8"))
+        .saturating_add(environment_bytes(b"LC_ALL", b"C.UTF-8"))
+        .saturating_add(environment_bytes(b"PATH", executable_path.as_bytes()))
+        .saturating_add(environment_bytes(
+            environment.name.as_str().as_bytes(),
+            environment.value.as_bytes(),
+        ));
+    let mut environment_count = 5_usize;
+    if https_broker {
+        environment_strings = environment_strings
+            .saturating_add(environment_bytes(
+                b"HTTPS_PROXY",
+                SANDBOX_HTTPS_PROXY.as_bytes(),
+            ))
+            .saturating_add(environment_bytes(
+                b"https_proxy",
+                SANDBOX_HTTPS_PROXY.as_bytes(),
+            ));
+        environment_count = environment_count.saturating_add(2);
+    }
+    let pointer_bytes = (1_usize
+        .saturating_add(arguments.arguments.len())
+        .saturating_add(environment_count)
+        .saturating_add(2))
+    .saturating_mul(std::mem::size_of::<usize>());
+
+    argument_strings
+        .saturating_add(environment_strings)
+        .saturating_add(pointer_bytes)
+        < MIN_LINUX_ARG_MAX_BYTES
+}
+
+#[cfg(target_os = "linux")]
+fn process_request_fits_linux_arg_max(supervisor_program: &Path, request: &ProcessRequest) -> bool {
+    fn string_bytes(value: &std::ffi::OsStr) -> usize {
+        value.as_bytes().len().saturating_add(1)
+    }
+
+    let timeout_milliseconds = request.timeout.as_millis().min(u128::from(u64::MAX));
+    let timeout_milliseconds = timeout_milliseconds.to_string();
+    let argument_strings = string_bytes(supervisor_program.as_os_str())
+        .saturating_add(string_bytes(std::ffi::OsStr::new(SUPERVISOR_OUTER_MODE)))
+        .saturating_add(string_bytes(std::ffi::OsStr::new(&timeout_milliseconds)))
+        .saturating_add(string_bytes(&request.program))
+        .saturating_add(
+            request
+                .arguments
+                .iter()
+                .map(|argument| string_bytes(argument))
+                .sum::<usize>(),
+        );
+    let environment_strings = request
+        .environment
+        .iter()
+        .map(|(name, value)| {
+            name.as_bytes()
+                .len()
+                .saturating_add(1)
+                .saturating_add(value.as_bytes().len())
+                .saturating_add(1)
+        })
+        .sum::<usize>();
+    let pointer_bytes = (4_usize
+        .saturating_add(request.arguments.len())
+        .saturating_add(request.environment.len())
+        .saturating_add(2))
+    .saturating_mul(std::mem::size_of::<usize>());
+
+    argument_strings
+        .saturating_add(environment_strings)
+        .saturating_add(pointer_bytes)
+        < MIN_LINUX_ARG_MAX_BYTES
+}
+
 /// Unsandboxed command service reusable by its tool executor.
 #[derive(Clone, Debug)]
 pub struct UnsandboxedCommandRunner<Runner> {
@@ -1716,6 +2198,8 @@ fn direct_request(
         environment: BTreeMap::new(),
         environment_inheritance: ProcessEnvironment::Inherit,
         status_protocol: ProcessStatusProtocol::Direct,
+        #[cfg(target_os = "linux")]
+        delivery_payload: None,
     }
 }
 
@@ -1741,6 +2225,7 @@ struct SandboxInvocation<'a> {
     working_directory: &'a str,
     timeout: Duration,
     capture_bytes: usize,
+    environment: Option<&'a SandboxEnvironmentDelivery>,
 }
 
 #[derive(Clone, Copy)]
@@ -1849,6 +2334,20 @@ fn bwrap_request(
                     OsString::from(SANDBOX_HTTPS_BROKER_SOCKET),
                 ]);
             }
+            // Apply private environment delivery after every configured mount
+            // so a read-only `/run` ancestor cannot hide the delivery file.
+            #[cfg(target_os = "linux")]
+            if invocation.environment.is_some() {
+                bwrap_arguments.extend([
+                    OsString::from("--dir"),
+                    OsString::from(SANDBOX_HTTPS_BROKER_DIRECTORY),
+                    OsString::from("--perms"),
+                    OsString::from("0600"),
+                    OsString::from("--file"),
+                    OsString::from(SANDBOX_ENVIRONMENT_DESCRIPTOR_PLACEHOLDER),
+                    OsString::from(SANDBOX_ENVIRONMENT_FILE),
+                ]);
+            }
         }
     }
     #[cfg(target_os = "linux")]
@@ -1918,14 +2417,26 @@ fn bwrap_request(
     bwrap_arguments.extend([
         OsString::from("--"),
         OsString::from(SANDBOX_DISPATCH_PROGRAM),
-        OsString::from(if https_broker {
+        OsString::from(if https_broker && invocation.environment.is_some() {
+            "--dispatch-with-https-proxy-and-environment"
+        } else if https_broker {
             "--dispatch-with-https-proxy"
+        } else if invocation.environment.is_some() {
+            "--dispatch-with-environment"
         } else {
             "--dispatch"
         }),
-        OsString::from(invocation.program),
     ]);
+    if let Some(environment) = invocation.environment {
+        bwrap_arguments.push(OsString::from(environment.name.as_str()));
+    }
+    bwrap_arguments.push(OsString::from(invocation.program));
     bwrap_arguments.extend(invocation.arguments.iter().map(OsString::from));
+    let environment = BTreeMap::from([
+        (OsString::from("LANG"), OsString::from("C.UTF-8")),
+        (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
+        (OsString::from("PATH"), profile.executable_path.to_owned()),
+    ]);
     ProcessRequest {
         program: bubblewrap_program.as_os_str().to_owned(),
         arguments: bwrap_arguments,
@@ -1934,13 +2445,13 @@ fn bwrap_request(
         capture_bytes: invocation
             .capture_bytes
             .saturating_add(SANDBOX_DISPATCH_MARKER.len()),
-        environment: BTreeMap::from([
-            (OsString::from("LANG"), OsString::from("C.UTF-8")),
-            (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
-            (OsString::from("PATH"), profile.executable_path.to_owned()),
-        ]),
+        environment,
         environment_inheritance: ProcessEnvironment::Clear,
         status_protocol: ProcessStatusProtocol::SandboxDispatch,
+        #[cfg(target_os = "linux")]
+        delivery_payload: invocation
+            .environment
+            .map(|environment| environment.value.as_bytes().to_vec()),
     }
 }
 
@@ -2162,6 +2673,8 @@ pub enum ProcessSpawnFailure {
     SandboxUnavailable,
     /// Bubblewrap did not confirm that it dispatched the requested target.
     SandboxSetup,
+    /// The private restricted-environment descriptor could not be prepared.
+    EnvironmentDelivery,
     /// Another sanitized spawn failure occurred.
     Other,
 }
@@ -2259,6 +2772,13 @@ fn sandbox_process_result(mut result: ProcessRunResult, capture_bytes: usize) ->
     truncate_process_output(&mut result.stderr, capture_bytes);
     if dispatched {
         return process_result(ExecutionConfinement::FilesystemConfined, result);
+    }
+    if result.outcome
+        == (ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::EnvironmentDelivery,
+        })
+    {
+        return process_result(ExecutionConfinement::SandboxSetupFailed, result);
     }
     let outcome = match result.outcome {
         ProcessOutcome::TimedOut => ProcessOutcome::TimedOut,
@@ -2365,7 +2885,10 @@ async fn read_supervised_stdout(
     let status = serde_json::from_slice(encoded)
         .map_err(|_| std::io::Error::other("supervisor status trailer is malformed"))?;
     let launcher_trailer = match (status_protocol, status) {
-        (ProcessStatusProtocol::SandboxDispatch, SupervisorStatus::SpawnFailed { .. }) => None,
+        (
+            ProcessStatusProtocol::SandboxDispatch,
+            SupervisorStatus::SpawnFailed { .. } | SupervisorStatus::DeliveryFailed,
+        ) => None,
         (ProcessStatusProtocol::SandboxDispatch, _) => {
             let (launcher_marker, launcher_status) = parse_launcher_status(&tail[..marker])
                 .ok_or_else(|| {
@@ -2399,6 +2922,7 @@ async fn read_supervised_stdout(
             | SupervisorStatus::TimedOut
             | SupervisorStatus::Cancelled
             | SupervisorStatus::SpawnFailed { .. }
+            | SupervisorStatus::DeliveryFailed
             | SupervisorStatus::SupervisionFailed { .. } => None,
         },
     ))
@@ -2947,6 +3471,21 @@ async fn run_process(supervisor_program: &Path, request: ProcessRequest) -> Proc
 }
 
 #[cfg(target_os = "linux")]
+async fn write_control_payload(
+    control: &mut tokio::process::ChildStdin,
+    payload: Option<&[u8]>,
+) -> Result<(), ()> {
+    let payload = payload.unwrap_or_default();
+    let length = u32::try_from(payload.len()).map_err(|_| ())?;
+    control.write_all(&[1]).await.map_err(|_| ())?;
+    control
+        .write_all(&length.to_be_bytes())
+        .await
+        .map_err(|_| ())?;
+    control.write_all(payload).await.map_err(|_| ())
+}
+
+#[cfg(target_os = "linux")]
 async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -> ProcessRunResult {
     if request.capture_bytes > PROCESS_CAPTURE_BYTES_LIMIT {
         return empty_process_result(ProcessOutcome::SpawnFailed {
@@ -3059,7 +3598,7 @@ async fn run_process_linux(supervisor_program: &Path, request: ProcessRequest) -
     let mut stderr_task = tokio::spawn(read_bounded(stderr, request.capture_bytes));
     let startup = tokio::time::timeout_at(asynchronous_request_deadline, async {
         let control = control.as_mut().ok_or(())?;
-        control.write_all(&[1]).await.map_err(|_| ())
+        write_control_payload(control, request.delivery_payload.as_deref()).await
     })
     .await;
     if !matches!(startup, Ok(Ok(()))) {
@@ -3223,6 +3762,9 @@ fn supervisor_outcome(
             .unwrap_or(ProcessOutcome::Exited { code }),
         SupervisorStatus::TimedOut => ProcessOutcome::TimedOut,
         SupervisorStatus::SpawnFailed { reason } => process_spawn_failure(reason),
+        SupervisorStatus::DeliveryFailed => ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::EnvironmentDelivery,
+        },
         SupervisorStatus::Cancelled => ProcessOutcome::SupervisionFailed {
             reason: ProcessSupervisionFailure::Wait,
         },
@@ -3240,6 +3782,9 @@ fn launcher_outcome(status: LauncherStatus) -> ProcessOutcome {
     match status {
         LauncherStatus::Exited { code, .. } => ProcessOutcome::Exited { code },
         LauncherStatus::SpawnFailed { reason } => process_spawn_failure(reason),
+        LauncherStatus::DeliveryFailed => ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::EnvironmentDelivery,
+        },
         LauncherStatus::SupervisionFailed => ProcessOutcome::SupervisionFailed {
             reason: ProcessSupervisionFailure::Wait,
         },
@@ -3269,6 +3814,7 @@ fn supervisor_capture_completeness(
         SupervisorStatus::Exited { stdout, stderr, .. } => (stdout, stderr),
         SupervisorStatus::TimedOut
         | SupervisorStatus::Cancelled
+        | SupervisorStatus::DeliveryFailed
         | SupervisorStatus::SupervisionFailed { .. } => (
             SupervisorCaptureCompleteness::Incomplete,
             SupervisorCaptureCompleteness::Incomplete,
@@ -3284,7 +3830,7 @@ fn supervisor_capture_completeness(
             SupervisorCaptureCompleteness::Incomplete,
             SupervisorCaptureCompleteness::Incomplete,
         ),
-        Some(LauncherStatus::SpawnFailed { .. }) | None => (
+        Some(LauncherStatus::SpawnFailed { .. }) | Some(LauncherStatus::DeliveryFailed) | None => (
             SupervisorCaptureCompleteness::Complete,
             SupervisorCaptureCompleteness::Complete,
         ),
@@ -3373,6 +3919,7 @@ fn discarded_process_result(outcome: ProcessOutcome) -> ProcessRunResult {
 mod tests {
     #[cfg(target_os = "linux")]
     use std::os::unix::{
+        ffi::OsStringExt,
         fs::{PermissionsExt, symlink},
         net::UnixListener,
     };
@@ -3401,6 +3948,26 @@ mod tests {
     const TEST_SANDBOX_BIND_DESCRIPTOR: i32 = 90;
     const TEST_SANDBOX_WORKSPACE_ROOT: &str = "/fixture/workspace";
     const ISOLATION_FIXTURE_TIMEOUT: Duration = Duration::from_secs(30);
+    const SYNTHETIC_ENVIRONMENT_NAME: &str = "GH_TOKEN";
+    const SYNTHETIC_ENVIRONMENT_VALUE: &str = "synthetic-runner-token";
+    #[cfg(target_os = "linux")]
+    const OVERSIZED_MOUNT_INVENTORY_COUNT: usize = 512;
+    #[cfg(target_os = "linux")]
+    const OVERSIZED_MOUNT_COMPONENT_BYTES: usize = 220;
+
+    #[cfg(target_os = "linux")]
+    fn oversized_mount_inventory(root: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
+        (0..OVERSIZED_MOUNT_INVENTORY_COUNT)
+            .map(|index| {
+                let path = root.join(format!(
+                    "{index:03}-{}",
+                    "m".repeat(OVERSIZED_MOUNT_COMPONENT_BYTES)
+                ));
+                std::fs::create_dir(&path)?;
+                Ok(path)
+            })
+            .collect()
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -3536,6 +4103,7 @@ mod tests {
                 environment: BTreeMap::new(),
                 environment_inheritance: ProcessEnvironment::Clear,
                 status_protocol: ProcessStatusProtocol::Direct,
+                delivery_payload: None,
             },
         )
         .await;
@@ -3562,6 +4130,7 @@ mod tests {
                 environment: BTreeMap::new(),
                 environment_inheritance: ProcessEnvironment::Clear,
                 status_protocol: ProcessStatusProtocol::Direct,
+                delivery_payload: None,
             },
         )
         .await;
@@ -4291,6 +4860,19 @@ mod tests {
     }
 
     #[test]
+    fn production_probe_classifies_environment_delivery_failure() {
+        let mut delivery_failure = successful_process(b"");
+        delivery_failure.outcome = ProcessOutcome::SpawnFailed {
+            reason: ProcessSpawnFailure::EnvironmentDelivery,
+        };
+
+        assert_eq!(
+            classify_bwrap_availability(&delivery_failure),
+            BwrapAvailability::EnvironmentDelivery
+        );
+    }
+
+    #[test]
     fn production_probe_classifies_timeout_and_nonzero_exit_as_unusable() {
         let mut timed_out = successful_process(b"");
         timed_out.outcome = ProcessOutcome::TimedOut;
@@ -4744,6 +5326,627 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    async fn runner_environment_reports_probe_descriptor_failure_as_delivery()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let read_only = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::EnvironmentDelivery,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let mut command_runner = SandboxedCommandRunner::try_new_runner_restricted(
+            runner,
+            workspace.path(),
+            &[read_only.path().to_owned()],
+        )?;
+        let arguments = ExecArguments {
+            program: String::from("fixture-program"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+        let environment = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        )?;
+
+        let error = command_runner
+            .try_run_with_environment(arguments, environment)
+            .await
+            .expect_err("descriptor preparation failure must remain typed");
+
+        assert_eq!(error, SandboxEnvironmentRunError::Delivery);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn runner_restricted_environment_uses_a_private_namespace_file()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let read_only = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new_runner_restricted(
+            runner,
+            workspace.path(),
+            &[read_only.path().to_owned()],
+        )?;
+        let arguments = ExecArguments {
+            program: String::from("fixture-program"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+        let environment = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        )?;
+
+        let result = command_runner
+            .try_run_with_environment(arguments, environment)
+            .await?;
+        let requests = observation.recorded_requests();
+        let request = requests
+            .first()
+            .ok_or_else(|| std::io::Error::other("one requested process"))?;
+        let probes = observation.recorded_probes();
+        let probe = probes
+            .first()
+            .ok_or_else(|| std::io::Error::other("one sandbox probe"))?;
+
+        let private_file_prefix = [
+            OsString::from("--perms"),
+            OsString::from("0600"),
+            OsString::from("--file"),
+        ];
+        let dispatch_arguments = [
+            OsString::from("--"),
+            OsString::from(SANDBOX_DISPATCH_PROGRAM),
+            OsString::from("--dispatch-with-environment"),
+            OsString::from(SYNTHETIC_ENVIRONMENT_NAME),
+            OsString::from("fixture-program"),
+        ];
+
+        assert_eq!(request.environment_inheritance, ProcessEnvironment::Clear);
+        assert!(
+            !request
+                .environment
+                .contains_key(&OsString::from(SYNTHETIC_ENVIRONMENT_NAME))
+        );
+        assert!(
+            !request
+                .environment
+                .values()
+                .any(|value| value == SYNTHETIC_ENVIRONMENT_VALUE)
+        );
+        let private_file_arguments = request
+            .arguments
+            .windows(5)
+            .find(|arguments| {
+                arguments.starts_with(&private_file_prefix)
+                    && arguments[4] == SANDBOX_ENVIRONMENT_FILE
+            })
+            .ok_or_else(|| std::io::Error::other("one private environment file"))?;
+        let read_only_mount_position = request
+            .arguments
+            .windows(3)
+            .position(|arguments| arguments[0] == "--ro-bind" && arguments[2] == read_only.path())
+            .ok_or_else(|| std::io::Error::other("one configured read-only mount"))?;
+        let private_file_position = request
+            .arguments
+            .iter()
+            .position(|argument| argument == SANDBOX_ENVIRONMENT_FILE)
+            .ok_or_else(|| std::io::Error::other("private environment file position"))?;
+        assert_eq!(
+            private_file_arguments[3],
+            SANDBOX_ENVIRONMENT_DESCRIPTOR_PLACEHOLDER
+        );
+        assert_eq!(
+            request.delivery_payload.as_deref(),
+            Some(SYNTHETIC_ENVIRONMENT_VALUE.as_bytes())
+        );
+        assert_eq!(
+            probe.delivery_payload.as_deref(),
+            Some(SANDBOX_ENVIRONMENT_PROBE_VALUE.as_bytes())
+        );
+        assert!(private_file_position > read_only_mount_position);
+        assert!(request.arguments.ends_with(&dispatch_arguments));
+        assert!(
+            !request
+                .arguments
+                .contains(&OsString::from(SYNTHETIC_ENVIRONMENT_VALUE))
+        );
+        assert_ne!(request.program, OsString::from(SYNTHETIC_ENVIRONMENT_VALUE));
+        assert!(
+            !probe
+                .environment
+                .contains_key(&OsString::from(SYNTHETIC_ENVIRONMENT_NAME))
+        );
+        assert_eq!(result.stdout.text, SANDBOXED_STDOUT);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn runner_environment_probe_uses_a_non_secret_private_file() -> Result<(), Box<dyn Error>>
+    {
+        let workspace = ReplacementWorkspace::new()?;
+        let read_only = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new_runner_restricted(
+            runner,
+            workspace.path(),
+            &[read_only.path().to_owned()],
+        )?;
+        let arguments = ExecArguments {
+            program: String::from("fixture-program"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+        let environment = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        )?;
+        let private_file_prefix = [
+            OsString::from("--perms"),
+            OsString::from("0600"),
+            OsString::from("--file"),
+        ];
+
+        command_runner
+            .try_run_with_environment(arguments, environment)
+            .await?;
+        let probes = observation.recorded_probes();
+        let probe = probes
+            .first()
+            .ok_or_else(|| std::io::Error::other("one sandbox probe"))?;
+        let private_file_arguments = probe
+            .arguments
+            .windows(5)
+            .find(|arguments| {
+                arguments.starts_with(&private_file_prefix)
+                    && arguments[4] == SANDBOX_ENVIRONMENT_FILE
+            })
+            .ok_or_else(|| std::io::Error::other("one probe environment file"))?;
+
+        assert_eq!(
+            private_file_arguments[3],
+            SANDBOX_ENVIRONMENT_DESCRIPTOR_PLACEHOLDER
+        );
+        assert_eq!(
+            probe.delivery_payload.as_deref(),
+            Some(SANDBOX_ENVIRONMENT_PROBE_VALUE.as_bytes())
+        );
+        assert_ne!(
+            probe.delivery_payload.as_deref(),
+            Some(SYNTHETIC_ENVIRONMENT_VALUE.as_bytes())
+        );
+        assert!(
+            probe
+                .arguments
+                .contains(&OsString::from(SANDBOX_ENVIRONMENT_PROBE_NAME))
+        );
+        assert!(
+            !probe
+                .arguments
+                .contains(&OsString::from(SYNTHETIC_ENVIRONMENT_NAME))
+        );
+        assert!(
+            !probe
+                .arguments
+                .contains(&OsString::from(SYNTHETIC_ENVIRONMENT_VALUE))
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn daemon_local_profile_cannot_receive_an_explicit_environment_value()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new(runner, workspace.path())?;
+        let arguments = ExecArguments {
+            program: String::from("fixture-program"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+        let environment = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        )?;
+
+        let error = command_runner
+            .try_run_with_environment(arguments, environment)
+            .await
+            .expect_err("the daemon-local profile cannot receive a runner environment");
+
+        assert_eq!(error, SandboxEnvironmentRunError::UnsupportedProfile);
+        assert_eq!(observation.recorded_probes(), Vec::new());
+        assert_eq!(observation.recorded_requests(), Vec::new());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn runner_environment_rejects_invalid_arguments_before_the_sandbox_probe()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let read_only = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new_runner_restricted(
+            runner,
+            workspace.path(),
+            &[read_only.path().to_owned()],
+        )?;
+        let arguments = ExecArguments {
+            program: String::new(),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+        let environment = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        )?;
+
+        let error = command_runner
+            .try_run_with_environment(arguments, environment)
+            .await
+            .expect_err("invalid arguments cannot reach the sandbox probe");
+
+        assert_eq!(error, SandboxEnvironmentRunError::Arguments);
+        assert_eq!(observation.recorded_probes(), Vec::new());
+        assert_eq!(observation.recorded_requests(), Vec::new());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn runner_environment_rejects_an_oversized_launch_payload_before_the_probe()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let read_only = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new_runner_restricted(
+            runner,
+            workspace.path(),
+            &[read_only.path().to_owned()],
+        )?;
+        let arguments = ExecArguments {
+            program: "🦀".repeat(MAX_PROGRAM_CHARACTERS),
+            arguments: vec!["🦀".repeat(MAX_ARGUMENT_CHARACTERS); MAX_ARGUMENTS],
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+        let environment = SandboxEnvironmentVariable::try_new(
+            "A".repeat(MAX_SANDBOX_ENVIRONMENT_NAME_BYTES),
+            "s".repeat(MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES),
+        )?;
+
+        let error = command_runner
+            .try_run_with_environment(arguments, environment)
+            .await
+            .expect_err("an oversized launch payload cannot reach the sandbox probe");
+
+        assert_eq!(error, SandboxEnvironmentRunError::Arguments);
+        assert_eq!(observation.recorded_probes(), Vec::new());
+        assert_eq!(observation.recorded_requests(), Vec::new());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn runner_environment_rejects_an_oversized_mount_inventory_before_the_probe()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let read_only = ReplacementWorkspace::new()?;
+        let read_only_paths = oversized_mount_inventory(read_only.path())?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new_runner_restricted(
+            runner,
+            workspace.path(),
+            &read_only_paths,
+        )?;
+        let arguments = ExecArguments {
+            program: String::from("fixture-program"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+        let environment = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        )?;
+
+        let error = command_runner
+            .try_run_with_environment(arguments, environment)
+            .await
+            .expect_err("an oversized mount inventory cannot reach the sandbox probe");
+
+        assert_eq!(error, SandboxEnvironmentRunError::Arguments);
+        assert_eq!(observation.recorded_probes(), Vec::new());
+        assert_eq!(observation.recorded_requests(), Vec::new());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runner_restricted_profile_rejects_a_read_only_delivery_ancestor()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let ancestor = PathBuf::from("/");
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+
+        let error = SandboxedCommandRunner::try_new_runner_restricted(
+            runner,
+            workspace.path(),
+            std::slice::from_ref(&ancestor),
+        )
+        .expect_err("a read-only delivery ancestor must be rejected at construction");
+        let ExecToolConstructionError::ReadOnlyPath { path, source } = error else {
+            panic!("expected a read-only path construction failure");
+        };
+
+        assert_eq!(path, ancestor);
+        assert!(source.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn runner_restricted_profile_rejects_a_read_only_delivery_descendant() {
+        let descendant = PathBuf::from(SANDBOX_ENVIRONMENT_FILE).join("cache");
+
+        assert!(read_only_path_overlaps_environment_file(&descendant));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_launch_budget_includes_the_supervisor_wrapper() {
+        let request = ProcessRequest {
+            program: OsString::from("p".repeat(MIN_LINUX_ARG_MAX_BYTES - 66)),
+            arguments: Vec::new(),
+            working_directory: PathBuf::from("/workspace"),
+            timeout: Duration::from_secs(30),
+            capture_bytes: 0,
+            environment: BTreeMap::new(),
+            environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::SandboxDispatch,
+            delivery_payload: None,
+        };
+        let long_supervisor = PathBuf::from("s".repeat(64));
+
+        assert!(process_request_fits_linux_arg_max(Path::new("s"), &request));
+        assert!(!process_request_fits_linux_arg_max(
+            &long_supervisor,
+            &request
+        ));
+    }
+
+    #[test]
+    fn sandbox_environment_debug_output_redacts_the_value() {
+        let environment = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        )
+        .expect("the synthetic environment fixture is valid");
+        let rendered = format!("{environment:?}");
+        let expected = format!(
+            "SandboxEnvironmentVariable {{ name: SandboxEnvironmentName({name:?}), value: \"<redacted>\" }}",
+            name = OsString::from(SYNTHETIC_ENVIRONMENT_NAME)
+        );
+
+        assert_eq!(rendered, expected);
+        assert!(!rendered.contains(SYNTHETIC_ENVIRONMENT_VALUE));
+    }
+
+    #[test]
+    fn process_request_debug_output_redacts_environment_values() {
+        let request = ProcessRequest {
+            program: OsString::from("fixture-program"),
+            arguments: Vec::new(),
+            working_directory: PathBuf::from("."),
+            timeout: Duration::from_secs(REQUEST_TIMEOUT_SECONDS),
+            capture_bytes: SETUP_CAPTURE_BYTES,
+            environment: BTreeMap::from([(
+                OsString::from(SYNTHETIC_ENVIRONMENT_NAME),
+                OsString::from(SYNTHETIC_ENVIRONMENT_VALUE),
+            )]),
+            environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::Direct,
+            #[cfg(target_os = "linux")]
+            delivery_payload: None,
+        };
+
+        let rendered = format!("{request:?}");
+
+        assert!(rendered.contains(SYNTHETIC_ENVIRONMENT_NAME));
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains(SYNTHETIC_ENVIRONMENT_VALUE));
+    }
+
+    #[test]
+    fn sandbox_environment_rejects_the_fixed_runtime_names() {
+        let home = SandboxEnvironmentVariable::try_new(
+            String::from("HOME"),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        );
+        let https_proxy = SandboxEnvironmentVariable::try_new(
+            String::from("HTTPS_PROXY"),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        );
+        let lang = SandboxEnvironmentVariable::try_new(
+            String::from("LANG"),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        );
+        let locale = SandboxEnvironmentVariable::try_new(
+            String::from("LC_ALL"),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        );
+        let path = SandboxEnvironmentVariable::try_new(
+            String::from("PATH"),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        );
+        assert_eq!(home, Err(InvalidSandboxEnvironmentVariable::ReservedName));
+        assert_eq!(
+            https_proxy,
+            Err(InvalidSandboxEnvironmentVariable::ReservedName)
+        );
+        assert_eq!(lang, Err(InvalidSandboxEnvironmentVariable::ReservedName));
+        assert_eq!(locale, Err(InvalidSandboxEnvironmentVariable::ReservedName));
+        assert_eq!(path, Err(InvalidSandboxEnvironmentVariable::ReservedName));
+    }
+
+    #[test]
+    fn sandbox_environment_rejects_loader_control_names() {
+        let loader_preload = SandboxEnvironmentVariable::try_new(
+            String::from("LD_PRELOAD"),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        );
+        let loader_audit = SandboxEnvironmentVariable::try_new(
+            String::from("LD_AUDIT"),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        );
+
+        assert_eq!(
+            loader_preload,
+            Err(InvalidSandboxEnvironmentVariable::ReservedName)
+        );
+        assert_eq!(
+            loader_audit,
+            Err(InvalidSandboxEnvironmentVariable::ReservedName)
+        );
+    }
+
+    #[test]
+    fn sandbox_environment_rejects_noncanonical_names() {
+        let result = SandboxEnvironmentVariable::try_new(
+            String::from("lowercase"),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        );
+
+        assert_eq!(result, Err(InvalidSandboxEnvironmentVariable::Name));
+    }
+
+    #[test]
+    fn sandbox_environment_rejects_names_beyond_the_byte_bound() {
+        let result = SandboxEnvironmentVariable::try_new(
+            "A".repeat(MAX_SANDBOX_ENVIRONMENT_NAME_BYTES + 1),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        );
+
+        assert_eq!(result, Err(InvalidSandboxEnvironmentVariable::Name));
+    }
+
+    #[test]
+    fn sandbox_environment_accepts_the_exact_name_byte_bound() {
+        let result = SandboxEnvironmentVariable::try_new(
+            "A".repeat(MAX_SANDBOX_ENVIRONMENT_NAME_BYTES),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn sandbox_environment_rejects_an_empty_value() {
+        let result = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            String::new(),
+        );
+
+        assert_eq!(result, Err(InvalidSandboxEnvironmentVariable::Value));
+    }
+
+    #[test]
+    fn sandbox_environment_rejects_a_nul_value() {
+        let result = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            String::from("synthetic\0value"),
+        );
+
+        assert_eq!(result, Err(InvalidSandboxEnvironmentVariable::Value));
+    }
+
+    #[test]
+    fn sandbox_environment_rejects_a_value_beyond_the_byte_bound() {
+        let result = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            "s".repeat(MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES + 1),
+        );
+
+        assert_eq!(result, Err(InvalidSandboxEnvironmentVariable::Value));
+    }
+
+    #[test]
+    fn sandbox_environment_accepts_the_exact_value_byte_bound() {
+        let result = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            "s".repeat(MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES),
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sandbox_environment_accepts_non_utf8_value_bytes() {
+        let value = OsString::from_vec(vec![b's', 0xff, b'x']);
+
+        let result =
+            SandboxEnvironmentVariable::try_new(String::from(SYNTHETIC_ENVIRONMENT_NAME), value);
+
+        assert!(result.is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sandbox_environment_delivery_holds_the_exact_value_byte_bound() -> Result<(), Box<dyn Error>>
+    {
+        let expected = "s".repeat(MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES);
+        let environment = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            expected.clone(),
+        )?;
+
+        let delivery = SandboxEnvironmentDelivery::try_new(environment)
+            .map_err(|()| std::io::Error::other("create sandbox environment delivery"))?;
+
+        assert_eq!(delivery.value.as_bytes(), expected.as_bytes());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
     async fn runner_restricted_https_bridge_binds_only_the_pinned_socket_and_proxy_mode()
     -> Result<(), Box<dyn Error>> {
         let workspace = ReplacementWorkspace::new()?;
@@ -4974,6 +6177,7 @@ mod tests {
                 working_directory: ".",
                 timeout: ISOLATION_FIXTURE_TIMEOUT,
                 capture_bytes: EXEC_CAPTURE_BYTES,
+                environment: None,
             },
             SandboxRequestProfile {
                 mounts: &mount_profile,
@@ -5015,6 +6219,7 @@ mod tests {
                 working_directory: ".",
                 timeout: ISOLATION_FIXTURE_TIMEOUT,
                 capture_bytes: EXEC_CAPTURE_BYTES,
+                environment: None,
             },
             SandboxRequestProfile {
                 mounts: &mount_profile,
@@ -5058,6 +6263,7 @@ mod tests {
                 working_directory: ".",
                 timeout: ISOLATION_FIXTURE_TIMEOUT,
                 capture_bytes: EXEC_CAPTURE_BYTES,
+                environment: None,
             },
             SandboxRequestProfile {
                 mounts: &mount_profile,

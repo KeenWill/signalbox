@@ -214,7 +214,7 @@ ALLOWLIST = (
     Allowance(
         "Unix file-owner and permission semantics",
         re.compile(
-            r"^(?:apps/signalbox-runner/src/(?:configuration|protocol|state)[.]rs|"
+            r"^(?:apps/signalbox-runner/src/(?:configuration|dispatch_https|main|protocol|state|workspace)[.]rs|"
             r"apps/signalboxd/src/(?:local_socket|runner_protocol_runtime)[.]rs|"
             r"apps/signalboxd/tests/process_substrate[.]rs|"
             r"crates/model-runtime-(?:claude|codex)-cli/tests/live_smoke[.]rs|"
@@ -222,11 +222,13 @@ ALLOWLIST = (
             r"runner-protocol)[.]md)$"
         ),
         re.compile(
-            r"(?:socket|listener|directory|file|root|state|parent|sidecar|spool|mode|"
-            r"permissions|fixture|enrollment|durable)(?:(?!owner).)*"
+            r"(?:socket|listener|directory|file|root|state|storage|store|descriptor|"
+            r"connection|parent|sidecar|spool|mode|permissions|fixture|enrollment|"
+            r"durable)(?:(?!owner).)*"
             r"owner-(?:only|private)|"
             r"owner-(?:only|private)(?:(?!owner).)*(?:socket|listener|directory|file|root|state|"
-            r"parent|sidecar|spool|mode|permissions|fixture|enrollment|durable)|"
+            r"storage|store|descriptor|connection|parent|sidecar|spool|mode|permissions|"
+            r"fixture|enrollment|durable)|"
             r"unreadable, oversized, wrong-owner, wrong-mode|"
             r"unprivileged different owner cannot make a currently protected directory|"
             r"An untrusted owner, a non-sticky writable ancestor|"
@@ -242,6 +244,11 @@ ALLOWLIST = (
             r"ancestor_owner_must_be_root_or_the_effective_user|file owner|"
             r"dropping the owner|its owner, so it cannot shadow|"
             r"owner-vs-other|"
+            r"endpoint fixture root is owner-private|"
+            r"concurrent winner directory is owner-private|"
+            r"real runner-root fixture is owner-private|"
+            r"trash fixture is owner-private|"
+            r"live owner connection|"
             r"guarded_bind_listens_only_with_owner_access",
             re.IGNORECASE,
         ),
@@ -491,7 +498,7 @@ ALLOWLIST = (
             r"replace_session_defaults|review_workflow|runner|session|submit_input|"
             r"tool_execution|turn_eligibility)[.]rs|"
             r"crates/persistence/tests/(?:postgres_integration/[a-z_]+|"
-            r"review_workflow_postgres)[.]rs|"
+            r"review_workflow_postgres|runner_protocol_postgres)[.]rs|"
             r"docs/spec/(?:conversation-import|model-call-execution|persistence-protocol|"
             r"process-protocol|review-workflows|sessions-and-transcript|"
             r"turn-lifecycle-and-scheduling)[.]md)$"
@@ -509,6 +516,11 @@ ALLOWLIST = (
             r"attachment owner must match the aggregate link|terminal-record owner,|"
             r"loss before and after pin, owner replacement|complete owner facts|"
             r"operation-owner facts|"
+            r"validate_operation_journal_owner|"
+            r"[A-Za-z0-9_]*lost_cleanup_owner[A-Za-z0-9_]*|"
+            r"lost cleanup owner|"
+            r"live owner connection|"
+            r"only command owner|"
             r"(?:defaults|pending steering|snapshot) owner cross-wired|"
             r"OwnerMismatch|"
             r"ModelCallOwners|attempt_owners|wrong_owner|wrong_terminal_owner|"

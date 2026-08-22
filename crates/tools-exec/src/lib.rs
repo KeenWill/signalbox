@@ -51,6 +51,7 @@
 
 mod diagnostics;
 mod exec_supervisor;
+mod limits;
 mod process;
 #[cfg(target_os = "linux")]
 mod supervisor_protocol;
@@ -66,10 +67,12 @@ pub use diagnostics::{
 pub use process::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecExecutor, ExecExecutorError,
     ExecResult, ExecToolConstructionError, ExecutionConfinement, InvalidExecArguments,
-    OutputCapture, OutputEncoding, ProcessEnvironment, ProcessOutcome, ProcessOutput,
-    ProcessRequest, ProcessRunResult, ProcessRunner, ProcessSpawnFailure, ProcessStatusProtocol,
-    ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool,
-    TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
+    InvalidSandboxEnvironmentVariable, OutputCapture, OutputEncoding, ProcessEnvironment,
+    ProcessOutcome, ProcessOutput, ProcessRequest, ProcessRunResult, ProcessRunner,
+    ProcessSpawnFailure, ProcessStatusProtocol, ProcessSupervisionFailure, SANDBOXED_EXEC_NAME,
+    SandboxEnvironmentName, SandboxEnvironmentRunError, SandboxEnvironmentVariable,
+    SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner, UNSANDBOXED_EXEC_NAME,
+    UnsandboxedCommandRunner, UnsandboxedExecTool,
 };
 
 /// Runs the separately packaged process-tree supervisor entrypoint.
