@@ -458,7 +458,7 @@ pub enum WebUsageCostUnavailableReason {
 }
 
 /// Canonical nonnegative fixed-point USD amount derived by the daemon.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct WebDollarAmount(
     #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)(\.[0-9]{1,28})?$"))] String,
@@ -469,6 +469,34 @@ impl WebDollarAmount {
     #[must_use]
     pub fn from_derived(value: String) -> Self {
         Self(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebDollarAmount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let (whole, fractional) = value
+            .split_once('.')
+            .map_or((value.as_str(), None), |(whole, fractional)| {
+                (whole, Some(fractional))
+            });
+        let whole_is_canonical = !whole.is_empty()
+            && whole.bytes().all(|byte| byte.is_ascii_digit())
+            && (whole == "0" || !whole.starts_with('0'));
+        let fractional_is_canonical = fractional.is_none_or(|fractional| {
+            !fractional.is_empty()
+                && fractional.len() <= 28
+                && fractional.bytes().all(|byte| byte.is_ascii_digit())
+        });
+        if !whole_is_canonical || !fractional_is_canonical {
+            return Err(de::Error::custom(
+                "dollar amount must be a canonical nonnegative decimal",
+            ));
+        }
+        Ok(Self(value))
     }
 }
 
@@ -1063,8 +1091,8 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        WebContractBootstrap, WebContractExample, WebTimelineEventSequence, WebU64,
-        generated_artifacts,
+        WebContractBootstrap, WebContractExample, WebDollarAmount, WebTimelineEventSequence,
+        WebU64, generated_artifacts,
     };
 
     #[track_caller]
@@ -1136,5 +1164,18 @@ mod tests {
         assert!(serde_json::from_str::<WebU64>(r#""18446744073709551616""#).is_err());
         assert!(serde_json::from_str::<WebU64>(r#""0""#).is_ok());
         assert!(serde_json::from_str::<WebU64>(r#""18446744073709551615""#).is_ok());
+    }
+
+    #[test]
+    fn dollar_amount_rejects_noncanonical_wire_spellings() {
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""-1""#).is_err());
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""01""#).is_err());
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""1.""#).is_err());
+        assert!(
+            serde_json::from_str::<WebDollarAmount>(r#""0.12345678901234567890123456789""#)
+                .is_err()
+        );
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""0""#).is_ok());
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""0.17""#).is_ok());
     }
 }
