@@ -175,7 +175,7 @@ impl ModelAdapter {
         match self {
             Self::Anthropic | Self::OpenAi => matches!(delivery, "file"),
             Self::ClaudeCli => matches!(delivery, "ambient" | "file"),
-            Self::CodexCli => matches!(delivery, "ambient"),
+            Self::CodexCli => matches!(delivery, "ambient" | "codex_home"),
         }
     }
 
@@ -870,21 +870,9 @@ impl HubModelConfiguration {
                     continue;
                 }
             };
-            // Codex still carries one credential reference into its runtime,
-            // so two families preferring different profiles cannot both be
-            // served. Claude now receives the complete adapter-scoped catalog
-            // and resolves each operation's pinned reference, so differing
-            // preferences are admitted; the retained value is only the
-            // runtime's default for an operation that pins nothing.
-            if adapter == ModelAdapter::CodexCli
-                && adapter_profile
-                    .as_ref()
-                    .is_some_and(|profile| profile != &credential_profile)
-            {
-                return Err(
-                    HubModelConfigurationError::ConflictingAdapterCredentialProfiles { adapter },
-                );
-            }
+            // CLI runtimes receive their complete adapter-scoped delivery
+            // catalogs. The retained value is only the default for an ambient
+            // operation that pins no catalog member.
             adapter_profile.get_or_insert_with(|| Arc::clone(&credential_profile));
             let entry = AdapterMapping {
                 adapter,
@@ -1587,6 +1575,14 @@ impl HubModelConfiguration {
                     configuration.executable.clone(),
                     configuration.working_directory.clone(),
                     CredentialReference::new(credential_profile),
+                );
+                runtime_configuration = runtime_configuration.with_credential_homes(
+                    self.credential_profiles.values().filter_map(|profile| {
+                        let CredentialDelivery::CodexHome { path, .. } = profile.delivery() else {
+                            return None;
+                        };
+                        Some((CredentialReference::new(profile.name()), path.to_path_buf()))
+                    }),
                 );
                 runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
                 CodexCliRuntime::new(runtime_configuration)
@@ -3245,6 +3241,13 @@ pub enum HubModelConfigurationError {
     /// A credential profile named no delivery, or its delivery's own fields
     /// were absent or malformed.
     InvalidCredentialDelivery,
+    /// One member's Codex home failed path/directory admission.
+    InvalidCredentialHome {
+        /// Non-secret profile reference identifying the failed member.
+        credential_profile: Arc<str>,
+        /// Closed startup failure class; never path or auth material.
+        failure: crate::credential_pools::CredentialHomeAdmissionFailure,
+    },
     /// A credential profile named a delivery its adapter does not admit.
     UnsupportedCredentialDelivery {
         /// Build-provided adapter whose admitted deliveries were checked.
@@ -3478,6 +3481,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidCredentialDelivery => {
                 "model configuration contains an invalid credential delivery"
+            }
+            Self::InvalidCredentialHome { .. } => {
+                "model configuration contains an unavailable Codex credential home"
             }
             Self::UnsupportedCredentialDelivery { .. } => {
                 "model configuration names a credential delivery its adapter does not admit"
@@ -6688,25 +6694,104 @@ members = [{ profile = "anthropic-primary", priority = 1, weight = 3 }]"#,
     }
 
     #[test]
-    fn configuration_rejects_a_delivery_this_build_supplies_no_surface_for() {
+    fn configuration_admits_an_existing_nonempty_credential_home() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-a");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
         let credential_home = CONFIGURATION.replace(
             "delivery = \"ambient\"",
-            "delivery = \"codex_home\"\ncodex_home = \"/var/lib/signalbox/codex/account-a\"",
+            &format!(
+                "delivery = \"codex_home\"\ncodex_home = {:?}",
+                home.to_string_lossy()
+            ),
+        );
+
+        let parsed = HubModelConfiguration::parse(&credential_home)
+            .expect("existing nonempty synthetic home is admitted");
+        assert_eq!(
+            parsed
+                .credential_profile(CODEX_SUBSCRIPTION_PROFILE)
+                .expect("Codex profile remains present")
+                .delivery()
+                .path(),
+            Some(&home)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_relative_credential_home_with_a_typed_member_error() {
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            "delivery = \"codex_home\"\ncodex_home = \"relative/account-a\"",
         );
 
         assert_eq!(
             HubModelConfiguration::parse(&credential_home).err(),
-            Some(HubModelConfigurationError::UndeliveredCredentialDelivery {
-                delivery: Arc::from("codex_home"),
+            Some(HubModelConfigurationError::InvalidCredentialHome {
+                credential_profile: Arc::from(CODEX_SUBSCRIPTION_PROFILE),
+                failure: crate::CredentialHomeAdmissionFailure::InvalidPath,
             })
         );
     }
 
     #[test]
-    fn configuration_validates_an_undelivered_credential_home_before_refusing_it() {
+    fn configuration_rejects_a_missing_credential_home_with_a_typed_member_error() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let missing = temporary.path().join("missing-account");
         let credential_home = CONFIGURATION.replace(
             "delivery = \"ambient\"",
-            "delivery = \"codex_home\"\ncodex_home = \"relative/account-a\"",
+            &format!(
+                "delivery = \"codex_home\"\ncodex_home = {:?}",
+                missing.to_string_lossy()
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_home).err(),
+            Some(HubModelConfigurationError::InvalidCredentialHome {
+                credential_profile: Arc::from(CODEX_SUBSCRIPTION_PROFILE),
+                failure: crate::CredentialHomeAdmissionFailure::MissingOrNotDirectory,
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_empty_credential_home_with_a_typed_member_error() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let empty = temporary.path().join("empty-account");
+        std::fs::create_dir(&empty).expect("empty synthetic home is created");
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            &format!(
+                "delivery = \"codex_home\"\ncodex_home = {:?}",
+                empty.to_string_lossy()
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_home).err(),
+            Some(HubModelConfigurationError::InvalidCredentialHome {
+                credential_profile: Arc::from(CODEX_SUBSCRIPTION_PROFILE),
+                failure: crate::CredentialHomeAdmissionFailure::EmptyDirectory,
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_credential_home_concurrency_bound_until_reservations_exist() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-a");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            &format!(
+                "delivery = \"codex_home\"\ncodex_home = {:?}\nmax_concurrent_invocations = {MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS}",
+                home.to_string_lossy()
+            ),
         );
 
         assert_eq!(
@@ -6716,31 +6801,17 @@ members = [{ profile = "anthropic-primary", priority = 1, weight = 3 }]"#,
     }
 
     #[test]
-    fn configuration_admits_the_largest_credential_home_concurrency_bound() {
-        // The bound is capped because a contended wait durably names every live
-        // reservation holding it. At the cap the grammar admits the field, so
-        // the profile reaches its undelivered refusal rather than a range one.
-        let credential_home = CONFIGURATION.replace(
-            "delivery = \"ambient\"",
-            &format!(
-                "delivery = \"codex_home\"\ncodex_home = \"/srv/account-a\"\nmax_concurrent_invocations = {MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS}"
-            ),
-        );
-
-        assert_eq!(
-            HubModelConfiguration::parse(&credential_home).err(),
-            Some(HubModelConfigurationError::UndeliveredCredentialDelivery {
-                delivery: Arc::from("codex_home"),
-            })
-        );
-    }
-
-    #[test]
     fn configuration_rejects_a_credential_home_concurrency_bound_past_its_cap() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-a");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
         let credential_home = CONFIGURATION.replace(
             "delivery = \"ambient\"",
             &format!(
-                "delivery = \"codex_home\"\ncodex_home = \"/srv/account-a\"\nmax_concurrent_invocations = {}",
+                "delivery = \"codex_home\"\ncodex_home = {:?}\nmax_concurrent_invocations = {}",
+                home.to_string_lossy(),
                 MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS + 1
             ),
         );
@@ -6761,7 +6832,10 @@ members = [{ profile = "anthropic-primary", priority = 1, weight = 3 }]"#,
 
         assert_eq!(
             HubModelConfiguration::parse(&credential_home).err(),
-            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+            Some(HubModelConfigurationError::InvalidCredentialHome {
+                credential_profile: Arc::from(CODEX_SUBSCRIPTION_PROFILE),
+                failure: crate::CredentialHomeAdmissionFailure::InvalidPath,
+            })
         );
     }
 
@@ -7205,6 +7279,42 @@ delivery = "ambient""#,
 
         assert_eq!(
             HubModelConfiguration::parse(&duplicate_ambient).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_mixed_ambient_and_home_delivery_for_codex() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-b");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
+        let mixed_delivery = CONFIGURATION.replace(
+            r#"[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+            &format!(
+                r#"[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_profiles]]
+name = "codex-subscription-overflow"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "codex_home"
+codex_home = {:?}"#,
+                home.to_string_lossy()
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&mixed_delivery).err(),
             Some(HubModelConfigurationError::InvalidCredentialDelivery)
         );
     }
