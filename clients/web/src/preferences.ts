@@ -34,6 +34,14 @@ export const createDefaultBrowserPreferences = (): BrowserPreferences => ({
 export const BROWSER_PREFERENCES_KEY = 'signalbox.web.preferences.v1'
 export const MAX_SAVED_LOGICAL_POSITIONS = 128
 export const MAX_KEY_OVERRIDES = 64
+export const MAX_LOGICAL_POSITION_KEY_BYTES = 512
+export const MAX_LOGICAL_POSITION_VALUE_BYTES = 4_096
+
+const utf8ByteLength = (value: string) => new TextEncoder().encode(value).byteLength
+
+export const isBoundedLogicalPosition = (sessionId: string, position: string): boolean =>
+  utf8ByteLength(sessionId) <= MAX_LOGICAL_POSITION_KEY_BYTES &&
+  utf8ByteLength(position) <= MAX_LOGICAL_POSITION_VALUE_BYTES
 
 const exactKeys = (value: Record<string, unknown>, expected: readonly string[]) =>
   Object.keys(value).length === expected.length &&
@@ -53,13 +61,21 @@ const boundedNumber = (value: unknown, minimum: number, maximum: number, path: s
   return Math.min(Math.max(Math.round(value), minimum), maximum)
 }
 
-const boundedRecord = (value: unknown, maximum: number, path: string): Record<string, string> => {
+const boundedRecord = (
+  value: unknown,
+  maximum: number,
+  path: string,
+  entryIsValid: (key: string, value: string) => boolean = () => true,
+): Record<string, string> => {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new TypeError(`${path} must be an object`)
   }
   const entries = Object.entries(value)
   if (entries.some(([, entry]) => typeof entry !== 'string')) {
     throw new TypeError(`${path} values must be strings`)
+  }
+  if (entries.some(([key, entry]) => !entryIsValid(key, entry as string))) {
+    throw new TypeError(`${path} keys or values exceed their byte limits`)
   }
   return Object.fromEntries(entries.slice(-maximum) as [string, string][])
 }
@@ -108,6 +124,7 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
       candidate.lastLogicalPositions,
       MAX_SAVED_LOGICAL_POSITIONS,
       'preferences.lastLogicalPositions',
+      isBoundedLogicalPosition,
     ),
     keyOverrides: boundedRecord(
       candidate.keyOverrides,
@@ -118,9 +135,10 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
 }
 
 export const loadBrowserPreferences = (): BrowserPreferences => {
-  if (typeof localStorage === 'undefined') return createDefaultBrowserPreferences()
   try {
-    const stored = localStorage.getItem(BROWSER_PREFERENCES_KEY)
+    const storage = globalThis.localStorage
+    if (storage === undefined) return createDefaultBrowserPreferences()
+    const stored = storage.getItem(BROWSER_PREFERENCES_KEY)
     if (stored === null) return createDefaultBrowserPreferences()
     return decodeBrowserPreferences(JSON.parse(stored))
   } catch {
@@ -129,9 +147,10 @@ export const loadBrowserPreferences = (): BrowserPreferences => {
 }
 
 export const saveBrowserPreferences = (preferences: BrowserPreferences): void => {
-  if (typeof localStorage === 'undefined') return
   try {
-    localStorage.setItem(BROWSER_PREFERENCES_KEY, JSON.stringify(preferences))
+    const storage = globalThis.localStorage
+    if (storage === undefined) return
+    storage.setItem(BROWSER_PREFERENCES_KEY, JSON.stringify(preferences))
   } catch {
     // Browser persistence is optional; the active Redux state remains authoritative.
   }

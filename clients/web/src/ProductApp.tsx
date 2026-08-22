@@ -16,6 +16,7 @@ import {
 import { type CSSProperties, type RefObject, useEffect, useMemo, useRef } from 'react'
 import {
   type CommandContext,
+  type CommandId,
   commandRegistry,
   globalHotkeyBindings,
   globalHotkeySequenceBindings,
@@ -79,11 +80,25 @@ const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; ques
   },
 }
 
+const productNavigationCommandIds: Record<ProductRouteId, CommandId> = {
+  attention: 'navigate.attention',
+  sessions: 'navigate.sessions',
+  search: 'navigate.search',
+  activity: 'navigate.activity',
+  runners: 'navigate.runners',
+  reviews: 'navigate.reviews',
+  imports: 'navigate.imports',
+  usage: 'navigate.usage',
+  settings: 'navigate.settings',
+}
+
 function ProductNavigation({
   active,
+  context,
   onNavigate,
 }: {
   active: ProductRouteId
+  context: CommandContext
   onNavigate?: () => void
 }) {
   return (
@@ -101,7 +116,19 @@ function ProductNavigation({
             params={{ surface: route.id }}
             className={active === route.id ? 'product-link active' : 'product-link'}
             aria-current={active === route.id ? 'page' : undefined}
-            onClick={onNavigate}
+            onClick={(event) => {
+              if (
+                event.button === 0 &&
+                !event.altKey &&
+                !event.ctrlKey &&
+                !event.metaKey &&
+                !event.shiftKey
+              ) {
+                event.preventDefault()
+                onNavigate?.()
+                invokeCommand(productNavigationCommandIds[route.id], context)
+              }
+            }}
           >
             <span>{route.label}</span>
             <small>{route.description}</small>
@@ -372,7 +399,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   return (
     <div className={`product-shell layout-${app.layout}`} style={shellStyle}>
       <aside className="product-navigation-pane">
-        <ProductNavigation active={surface} />
+        <ProductNavigation active={surface} context={context} />
       </aside>
       <main className="product-main" tabIndex={-1} ref={primaryRef}>
         <header className="product-header">
@@ -451,6 +478,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             </Dialog.Description>
             <ProductNavigation
               active={surface}
+              context={context}
               onNavigate={() => dispatch(actions.overlaySet(null))}
             />
           </Dialog.Content>

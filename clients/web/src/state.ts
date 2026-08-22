@@ -3,6 +3,7 @@ import { useDispatch, useSelector } from 'react-redux'
 import {
   type BrowserPreferences,
   createDefaultBrowserPreferences,
+  isBoundedLogicalPosition,
   loadBrowserPreferences,
   MAX_SAVED_LOGICAL_POSITIONS,
   type RemoteMediaPolicy,
@@ -79,6 +80,7 @@ const appSlice = createSlice({
       state.activitySequence += 1
     },
     logicalPositionRecorded(state, action: { payload: { sessionId: string; position: string } }) {
+      if (!isBoundedLogicalPosition(action.payload.sessionId, action.payload.position)) return
       delete state.lastLogicalPositions[action.payload.sessionId]
       state.lastLogicalPositions[action.payload.sessionId] = action.payload.position
       const retained = Object.entries(state.lastLogicalPositions).slice(
