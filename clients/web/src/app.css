@@ -1378,6 +1378,40 @@ kbd {
   padding: 2px 34px 10px 98px;
 }
 
+.session-item-expanded {
+  display: grid;
+  gap: 8px;
+  padding-bottom: 10px;
+}
+
+.session-item-expanded .session-item-detail {
+  padding-bottom: 2px;
+}
+
+.session-item-expanded .attachment-missing {
+  margin: 0 10px 0 98px;
+}
+
+.session-composer {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-1);
+}
+
+.session-composer > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.session-composer h3 {
+  margin: 2px 0 0;
+  font-size: 0.74rem;
+}
+
 @media (max-width: 760px) {
   .session-open-form,
   .session-workspace-header {
@@ -1403,5 +1437,12 @@ kbd {
   .session-item-detail {
     grid-template-columns: 1fr;
     padding-left: 84px;
+  }
+  .session-item-expanded .attachment-missing {
+    margin-left: 84px;
+  }
+  .session-composer > header {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

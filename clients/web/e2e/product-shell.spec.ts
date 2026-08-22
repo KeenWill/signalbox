@@ -106,7 +106,7 @@ test('opens the product at Attention with generated-contract transport status', 
 
   await expect(page).toHaveURL(/\/attention$/)
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
-  await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
+  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
   await expect(page.getByRole('link', { name: /Attention/ })).toHaveAttribute(
     'aria-current',
     'page',
@@ -187,10 +187,20 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
+  const accepted = page.getByRole('button', { name: /41 input accepted/ })
+  await accepted.focus()
+  await page.keyboard.press('Enter')
+  await expect(
+    page.getByRole('region', { name: 'transcript attachments unavailable' }),
+  ).toBeVisible()
+  await expect(page.getByRole('region', { name: 'composer attachments unavailable' })).toBeVisible()
   const completed = page.getByRole('button', { name: /43 turn completed/ })
   await completed.focus()
   await page.keyboard.press('Enter')
   await expect(completed).toHaveAttribute('aria-expanded', 'true')
-  await expect(page.getByText('Header only; rich event detail is not exposed')).toBeVisible()
+  const completedItem = page.getByRole('listitem').filter({ has: completed })
+  await expect(
+    completedItem.getByText('Header only; rich event detail is not exposed'),
+  ).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

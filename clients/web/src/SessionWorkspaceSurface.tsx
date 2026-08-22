@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
+import { MissingAttachmentState } from './features/artifacts/ArtifactAttachments'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import { HttpSessionTimelineSource, type SessionWindowAnchor } from './session-timeline/model'
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
@@ -189,23 +190,38 @@ export function SessionWorkspaceSurface({
                     <small>{item.projected_structured_bytes} B</small>
                   </button>
                   {isExpanded && (
-                    <dl className="session-item-detail">
-                      <div>
-                        <dt>Address</dt>
-                        <dd>
-                          {sessionId}:{id}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Projection</dt>
-                        <dd>Header only; rich event detail is not exposed</dd>
-                      </div>
-                    </dl>
+                    <div className="session-item-expanded">
+                      <dl className="session-item-detail">
+                        <div>
+                          <dt>Address</dt>
+                          <dd>
+                            {sessionId}:{id}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>Projection</dt>
+                          <dd>Header only; rich event detail is not exposed</dd>
+                        </div>
+                      </dl>
+                      {item.kind === 'input_accepted' && (
+                        <MissingAttachmentState placement="transcript" />
+                      )}
+                    </div>
                   )}
                 </li>
               )
             })}
           </ol>
+          <section className="session-composer" aria-labelledby="session-composer-heading">
+            <header>
+              <div>
+                <span className="eyebrow">Input surface</span>
+                <h3 id="session-composer-heading">Composer</h3>
+              </div>
+              <span className="availability-tag">Committed · unavailable</span>
+            </header>
+            <MissingAttachmentState placement="composer" />
+          </section>
         </section>
       )}
     </div>
