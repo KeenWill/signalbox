@@ -1,67 +1,109 @@
 import { decodeWebBlobDescriptor, type WebBlobDescriptor } from '../../generated/web-contract.mjs'
+import type { ArtifactItem } from './artifactTypes'
 
 const sourceDigest = `sha256:${'1a'.repeat(32)}`
 const previewDigest = `sha256:${'2b'.repeat(32)}`
-const binaryDigest = `sha256:${'3c'.repeat(32)}`
+type BlobView = WebBlobDescriptor['available_views'][number]
 
-export const imageArtifact = decodeWebBlobDescriptor({
+export const imageDownloadView: BlobView = {
+  kind: 'download',
+  media_type: 'image/png',
+  byte_length: '62914560',
+  content_url: `/api/blobs/${sourceDigest}/download?media_type=image%2Fpng&display_filename=orbital-map.png`,
+  derivations: [],
+}
+
+export const imageOriginalView: BlobView = {
+  kind: 'browser_native',
+  media_type: 'image/png',
+  byte_length: '62914560',
+  content_url: `/api/blobs/${sourceDigest}/content/image-png`,
+  derivations: [],
+}
+
+export const imagePreviewView: BlobView = {
+  kind: 'preview',
+  media_type: 'image/png',
+  byte_length: '842',
+  content_url: `/api/blobs/${previewDigest}/content/image-png`,
+  derivations: [
+    {
+      derivation_id: '0198f321-2300-7000-8000-000000000001',
+      input_digests: [sourceDigest],
+      transformation_name: 'image.preview',
+      transformation_version: 1,
+      parameters_json: '{"edge_px":1600,"format":"image/png"}',
+      producer: {
+        class: 'deterministic',
+        implementation_digest: `sha256:${'4d'.repeat(32)}`,
+        cache_key: `sha256:${'5e'.repeat(32)}`,
+      },
+      output_digests: [previewDigest],
+    },
+  ],
+}
+
+export const imageDescriptor = decodeWebBlobDescriptor({
   digest: sourceDigest,
   byte_length: '62914560',
   declared_media_type: 'image/png',
   display_filename: ['orbital-map.png'],
-  available_views: [
-    {
-      kind: 'download',
-      media_type: 'image/png',
-      byte_length: '62914560',
-      content_url: `/api/blobs/${sourceDigest}/download?media_type=image%2Fpng&display_filename=orbital-map.png`,
-      derivations: [],
-    },
-    {
-      kind: 'browser_native',
-      media_type: 'image/png',
-      byte_length: '62914560',
-      content_url: `/api/blobs/${sourceDigest}/content/image-png`,
-      derivations: [],
-    },
-    {
-      kind: 'preview',
-      media_type: 'image/png',
-      byte_length: '842',
-      content_url: `/api/blobs/${previewDigest}/content/image-png`,
-      derivations: [
-        {
-          derivation_id: '0198f321-2300-7000-8000-000000000001',
-          input_digests: [sourceDigest],
-          transformation_name: 'image.preview',
-          transformation_version: 1,
-          parameters_json: '{"edge_px":1600,"format":"image/png"}',
-          producer: {
-            class: 'deterministic',
-            implementation_digest: `sha256:${'4d'.repeat(32)}`,
-            cache_key: `sha256:${'5e'.repeat(32)}`,
-          },
-          output_digests: [previewDigest],
-        },
-      ],
-    },
-  ],
+  available_views: [imageDownloadView, imageOriginalView, imagePreviewView],
 })
 
-export const binaryArtifact = decodeWebBlobDescriptor({
-  digest: binaryDigest,
-  byte_length: '734003200',
-  declared_media_type: 'application/octet-stream',
-  display_filename: ['telemetry.capture'],
-  available_views: [
-    {
-      kind: 'download',
-      media_type: 'application/octet-stream',
-      byte_length: '734003200',
-      content_url: `/api/blobs/${binaryDigest}/download?media_type=application%2Foctet-stream&display_filename=telemetry.capture`,
-      derivations: [],
-    },
-  ],
-})
+const generatedText = Array.from(
+  { length: 260 },
+  (_, index) => `line ${String(index + 1).padStart(3, '0')} — bounded incident chronology`,
+).join('\n')
 
-export const artifactScenario: ReadonlyArray<WebBlobDescriptor> = [imageArtifact, binaryArtifact]
+const generatedCode = Array.from(
+  { length: 240 },
+  (_, index) => `const sample_${index + 1} = inspectArtifact(${index + 1})`,
+).join('\n')
+
+export const artifactScenario: ReadonlyArray<ArtifactItem> = [
+  {
+    id: 'incident-notes',
+    kind: 'text',
+    displayName: 'incident-notes.txt',
+    content: generatedText,
+  },
+  {
+    id: 'renderer-source',
+    kind: 'code',
+    displayName: 'renderer.ts',
+    language: 'TypeScript',
+    content: generatedCode,
+  },
+  {
+    id: 'orbital-map',
+    kind: 'image',
+    displayName: 'orbital-map.png',
+    source: { kind: 'signalbox_blob', descriptor: imageDescriptor },
+  },
+  {
+    id: 'remote-diagram',
+    kind: 'image',
+    displayName: 'remote-status-diagram.png',
+    source: {
+      kind: 'remote',
+      url: 'https://media.example.test/remote-status-diagram.png',
+      alt: 'Remote status diagram',
+    },
+  },
+  {
+    id: 'future-pdf',
+    kind: 'committed_unimplemented',
+    displayName: 'architecture.pdf',
+    attemptedKind: 'document',
+  },
+  {
+    id: 'restricted-capture',
+    kind: 'blocked',
+    displayName: 'restricted.capture',
+    attemptedKind: 'unknown binary',
+    reason: 'The current capability projection does not authorize a content view.',
+  },
+]
+
+export const imageArtifact = imageDescriptor
