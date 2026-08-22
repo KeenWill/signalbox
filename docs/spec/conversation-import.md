@@ -436,13 +436,13 @@ optional `after` identity is an exclusive keyset cursor; the response includes a
 next cursor only when a bounded lookahead finds another row. Exact
 format/converter filters compose with that cursor. Exact attested source-session
 filters use the bounded raw `text/plain` body of `POST /api/imports/searches`.
-The body is the exact UTF-8 identifier, preserving empty text and edge whitespace,
-while avoiding URL expansion. A client-selected correlation UUID and SHA-256 of
-the complete exact value are echoed so truncated evidence remains unambiguous.
-Catalog and descriptor responses project at most 512 UTF-8
-bytes of source-session evidence with explicit complete/truncated
-classification. The response deliberately has no total count and never
-reconstructs a complete imported aggregate.
+The body is the exact UTF-8 identifier, preserving empty text and edge
+whitespace, while avoiding URL expansion. A client-selected correlation UUID and
+SHA-256 of the complete exact value are echoed so truncated evidence remains
+unambiguous. Catalog and descriptor responses project at most 512 UTF-8 bytes of
+source-session evidence with explicit complete/truncated classification. The
+response deliberately has no total count and never reconstructs a complete
+imported aggregate.
 
 `GET /api/imports/{imported-conversation-id}` returns the immutable identity,
 evidence-derived display title, raw-record and normalized-entry counts, exact

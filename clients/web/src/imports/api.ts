@@ -1,5 +1,6 @@
 import {
   decodeWebApiErrorResponse,
+  decodeWebContractBootstrap,
   decodeWebImportContinuationResponse,
   decodeWebImportDescriptor,
   decodeWebImportEntryWindow,
@@ -155,6 +156,11 @@ const decodeResponse = async <Value>(
   return decoder(value)
 }
 
+export const validateWebContractBootstrap = async (): Promise<void> => {
+  const response = await fetch('/api/bootstrap')
+  await decodeResponse(response, decodeWebContractBootstrap)
+}
+
 const queryString = (request: WebImportListRequest | WebImportEntryWindowRequest): string => {
   const query = new URLSearchParams()
   for (const [name, value] of Object.entries(request)) {
@@ -165,7 +171,17 @@ const queryString = (request: WebImportListRequest | WebImportEntryWindowRequest
 }
 
 export class HttpImportApi implements ImportApi {
+  private bootstrapValidationPromise: Promise<void> | undefined
+
+  constructor(private readonly bootstrapValidation = validateWebContractBootstrap) {}
+
+  private validateBootstrap(): Promise<void> {
+    this.bootstrapValidationPromise ??= this.bootstrapValidation()
+    return this.bootstrapValidationPromise
+  }
+
   async list(request: WebImportListRequest, signal?: AbortSignal): Promise<WebImportListPage> {
+    await this.validateBootstrap()
     if (request.source_session_id !== undefined && request.source_session_id !== null) {
       const { source_session_id: sourceSessionId, ...catalogRequest } = request
       const searchCorrelation = crypto.randomUUID()
@@ -195,6 +211,7 @@ export class HttpImportApi implements ImportApi {
     importedConversationId: string,
     signal?: AbortSignal,
   ): Promise<WebImportDescriptor> {
+    await this.validateBootstrap()
     const response = await fetch(`/api/imports/${encodeURIComponent(importedConversationId)}`, {
       signal,
     })
@@ -210,6 +227,7 @@ export class HttpImportApi implements ImportApi {
     request: WebImportEntryWindowRequest,
     signal?: AbortSignal,
   ): Promise<WebImportEntryWindow> {
+    await this.validateBootstrap()
     const response = await fetch(
       `/api/imports/${encodeURIComponent(importedConversationId)}/entries${queryString(request)}`,
       { signal },
@@ -222,6 +240,7 @@ export class HttpImportApi implements ImportApi {
     importedConversationId: string,
     request: WebImportContinuationRequest,
   ): Promise<WebImportContinuationResponse> {
+    await this.validateBootstrap()
     const response = await fetch(
       `/api/imports/${encodeURIComponent(importedConversationId)}/continuations`,
       {

@@ -53,7 +53,7 @@ CREATE FUNCTION imported_encoding_skip_structured(encoded bytea, start_at intege
 RETURNS integer LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
 DECLARE tag integer; item_count bigint; item bigint; next_at integer;
 BEGIN
-    IF nesting_depth >= 128 OR start_at >= octet_length(encoded) THEN
+    IF start_at >= octet_length(encoded) THEN
         RAISE EXCEPTION 'invalid imported structured encoding' USING ERRCODE = '23514';
     END IF;
     tag := get_byte(encoded, start_at); next_at := start_at + 1;
@@ -61,6 +61,9 @@ BEGIN
     ELSIF tag = 1 THEN RETURN imported_encoding_skip_boolean(encoded, next_at);
     ELSIF tag IN (2, 3) THEN RETURN imported_encoding_skip_text(encoded, next_at);
     ELSIF tag IN (4, 5) THEN
+        IF nesting_depth >= 128 THEN
+            RAISE EXCEPTION 'imported structured container depth exceeded' USING ERRCODE = '23514';
+        END IF;
         item_count := imported_encoding_length_at(encoded, next_at); next_at := next_at + 8;
         IF item_count > octet_length(encoded) - next_at THEN
             RAISE EXCEPTION 'invalid imported structured item count' USING ERRCODE = '23514';

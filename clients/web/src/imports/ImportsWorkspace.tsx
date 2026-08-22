@@ -69,11 +69,18 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   const [selectedFrontier, setSelectedFrontier] = useState<WebImportContinuationReference | null>(
     null,
   )
-  const [modelKind, setModelKind] = useState<ModelKind>('direct')
-  const [modelSelectionId, setModelSelectionId] = useState(scenario ? SCENARIO_MODEL_SELECTION : '')
   const [pendingCommand, setPendingCommand] = useState<WebImportContinuationRequest | null>(() =>
     loadRetainedCommand(queryScope),
   )
+  const [modelKind, setModelKind] = useState<ModelKind>(
+    () => pendingCommand?.initial_model_selection.kind ?? 'direct',
+  )
+  const [modelSelectionId, setModelSelectionId] = useState(() => {
+    const retainedModel = pendingCommand?.initial_model_selection
+    if (retainedModel?.kind === 'direct') return retainedModel.selection_id
+    if (retainedModel?.kind === 'alias') return retainedModel.alias_id
+    return scenario ? SCENARIO_MODEL_SELECTION : ''
+  })
   const [retainedStorageFailed, setRetainedStorageFailed] = useState(false)
   const hasRetainedCommand = pendingCommand !== null
 

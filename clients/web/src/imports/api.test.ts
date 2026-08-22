@@ -18,6 +18,18 @@ const summary = (id: string) => ({
 afterEach(() => vi.unstubAllGlobals())
 
 describe('HttpImportApi correlation', () => {
+  it('does not issue production import I/O when bootstrap validation fails', async () => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    const incompatibleBootstrap = new TypeError('bootstrap carries an incompatible web contract')
+
+    await expect(
+      new HttpImportApi(() => Promise.reject(incompatibleBootstrap)).list({ limit: 1 }),
+    ).rejects.toBe(incompatibleBootstrap)
+
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it('accepts the documented omitted first-window anchor', async () => {
     vi.stubGlobal(
       'fetch',
@@ -49,7 +61,10 @@ describe('HttpImportApi correlation', () => {
       ),
     )
 
-    const window = await new HttpImportApi().entries(firstId, { before: 0, after: 0 })
+    const window = await new HttpImportApi(() => Promise.resolve()).entries(firstId, {
+      before: 0,
+      after: 0,
+    })
 
     expect(window.anchor_position).toBe(1)
   })
@@ -71,7 +86,7 @@ describe('HttpImportApi correlation', () => {
     )
 
     await expect(
-      new HttpImportApi().list({
+      new HttpImportApi(() => Promise.resolve()).list({
         after: secondId,
         format: 'codex_rollout_jsonl_v1',
       }),
@@ -100,7 +115,7 @@ describe('HttpImportApi correlation', () => {
     )
     vi.stubGlobal('fetch', fetch)
 
-    await new HttpImportApi().list({ source_session_id: exact, limit: 1 })
+    await new HttpImportApi(() => Promise.resolve()).list({ source_session_id: exact, limit: 1 })
 
     expect(fetch).toHaveBeenCalledWith(
       `/api/imports/searches?limit=1&search_correlation=${searchCorrelation}`,
@@ -132,7 +147,9 @@ describe('HttpImportApi correlation', () => {
     )
 
     await expect(
-      new HttpImportApi().list({ source_session_id: 'shared prefix and complete value' }),
+      new HttpImportApi(() => Promise.resolve()).list({
+        source_session_id: 'shared prefix and complete value',
+      }),
     ).rejects.toBeInstanceOf(ImportListCorrelationError)
   })
 })
