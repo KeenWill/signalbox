@@ -235,10 +235,12 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
           <button
             type="button"
             aria-pressed={originalState === 'loaded'}
-            aria-disabled={originalState === 'loading'}
-            onClick={() =>
-              invokeArtifactAction(commandContext, 'artifact.original.load', artifact.id)
-            }
+            aria-disabled={originalState === 'loading' || originalState === 'loaded'}
+            onClick={() => {
+              if (originalState !== 'loading' && originalState !== 'loaded') {
+                invokeArtifactAction(commandContext, 'artifact.original.load', artifact.id)
+              }
+            }}
           >
             <Maximize2 aria-hidden="true" />
             {originalState === 'loading'
