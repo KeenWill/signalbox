@@ -3,8 +3,6 @@ import { useDispatch, useSelector } from 'react-redux'
 import {
   type BrowserPreferences,
   loadBrowserPreferences,
-  MAX_SAVED_LOGICAL_POSITIONS,
-  type RemoteMediaPolicy,
   saveBrowserPreferences,
 } from './preferences'
 
@@ -65,22 +63,6 @@ const appSlice = createSlice({
       state.theme = action.payload
       state.activitySequence += 1
     },
-    paneSizesSet(state, action: { payload: BrowserPreferences['paneSizes'] }) {
-      state.paneSizes = action.payload
-      state.activitySequence += 1
-    },
-    remoteMediaSet(state, action: { payload: RemoteMediaPolicy }) {
-      state.remoteMedia = action.payload
-      state.activitySequence += 1
-    },
-    logicalPositionRecorded(state, action: { payload: { sessionId: string; position: string } }) {
-      delete state.lastLogicalPositions[action.payload.sessionId]
-      state.lastLogicalPositions[action.payload.sessionId] = action.payload.position
-      const retained = Object.entries(state.lastLogicalPositions).slice(
-        -MAX_SAVED_LOGICAL_POSITIONS,
-      )
-      state.lastLogicalPositions = Object.fromEntries(retained)
-    },
     overlaySet(state, action: { payload: Overlay }) {
       state.overlay = action.payload
       state.activitySequence += 1
@@ -118,9 +100,6 @@ const preferenceActionTypes = new Set<string>([
   appSlice.actions.densitySet.type,
   appSlice.actions.detailSet.type,
   appSlice.actions.themeSet.type,
-  appSlice.actions.paneSizesSet.type,
-  appSlice.actions.remoteMediaSet.type,
-  appSlice.actions.logicalPositionRecorded.type,
 ])
 const preferenceMiddleware: Middleware = (api) => (next) => (action) => {
   const result = next(action)
@@ -136,10 +115,6 @@ const preferenceMiddleware: Middleware = (api) => (next) => (action) => {
       density: app.density,
       detail: app.detail,
       theme: app.theme,
-      paneSizes: app.paneSizes,
-      remoteMedia: app.remoteMedia,
-      lastLogicalPositions: app.lastLogicalPositions,
-      keyOverrides: app.keyOverrides,
     })
   }
   return result

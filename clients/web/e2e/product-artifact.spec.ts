@@ -129,6 +129,22 @@ test('uses a focus-managed artifact sheet on a phone viewport', async ({ page })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('preserves an active artifact when the inspector changes composition', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useArtifactScenario(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/sessions')
+
+  await resolveArtifactWithoutMouse(page)
+  await page.setViewportSize({ width: 1024, height: 900 })
+  const sheet = page.getByRole('dialog', { name: 'Artifact inspector' })
+  await expect(sheet.getByRole('textbox', { name: 'Digest' })).toHaveValue(imageArtifact.digest)
+  await expect(
+    sheet.getByRole('article', { name: `Artifact ${imageArtifact.display_filename[0]}` }),
+  ).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('discovers the artifact inspector through the command palette', async ({ page }) => {
   const problems = watchBrowser(page)
   await useArtifactScenario(page)
@@ -176,7 +192,10 @@ test('captures desktop and responsive artifact evidence', async ({ page }, testI
   })
   await page.getByRole('button', { name: 'Close artifact inspector' }).click()
   await page.setViewportSize({ width: 390, height: 844 })
-  await resolveArtifactWithoutMouse(page)
+  await page.getByRole('button', { name: 'Open artifact inspector' }).click()
+  await expect(
+    page.getByRole('article', { name: `Artifact ${imageArtifact.display_filename[0]}` }),
+  ).toBeVisible()
   await expect(page).toHaveScreenshot('artifact-inspector-mobile-light.png', {
     animations: 'disabled',
   })

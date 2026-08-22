@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { imageArtifact } from './features/artifacts/artifactScenario'
-import { SameOriginProductTransport } from './product'
+import {
+  MAX_PRODUCT_JSON_BYTES,
+  ProductTransportError,
+  SameOriginProductTransport,
+} from './product'
 
 const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '2' },
@@ -40,6 +44,33 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('rejects a bootstrap response beyond the JSON byte ceiling', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response('x'.repeat(MAX_PRODUCT_JSON_BYTES + 1), {
+            headers: { 'content-type': 'application/json' },
+          }),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'response exceeded the product JSON byte limit',
+    )
+  })
+
+  it('classifies a rejected fetch as a transport failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Promise.reject(new TypeError('network failed'))),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toBeInstanceOf(
+      ProductTransportError,
+    )
+  })
+
   it('reports an unsuccessful HTTP response without decoding its body', async () => {
     vi.stubGlobal(
       'fetch',
@@ -64,6 +95,25 @@ describe('SameOriginProductTransport', () => {
       `/api/blobs/${encodeURIComponent(imageArtifact.digest)}/descriptor?media_type=image%2Fpng&display_filename=orbital-map.png`,
       expect.objectContaining({ credentials: 'same-origin' }),
     )
+  })
+
+  it('bounds descriptor error payloads before decoding them', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response('x'.repeat(MAX_PRODUCT_JSON_BYTES + 1), {
+            status: 500,
+            headers: { 'content-type': 'application/json' },
+          }),
+      ),
+    )
+
+    const request = new SameOriginProductTransport().readBlobDescriptor({
+      digest: imageArtifact.digest,
+      mediaType: imageArtifact.declared_media_type,
+    })
+    await expect(request).rejects.toThrow('response exceeded the product JSON byte limit')
   })
 
   it('preserves a typed daemon error from descriptor resolution', async () => {

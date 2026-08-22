@@ -72,6 +72,20 @@ test('completes route switching from the command palette without a mouse', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('runs advertised product navigation sequences', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/sessions$/)
+  await page.keyboard.press('g')
+  await page.keyboard.press(',')
+  await expect(page).toHaveURL(/\/settings$/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('uses a navigation sheet on a phone viewport and unwinds it with Escape', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -85,4 +99,41 @@ test('uses a navigation sheet on a phone viewport and unwinds it with Escape', a
   await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeHidden()
   await expect(openNavigation).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('closes the phone navigation sheet after route selection', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open navigation' }).click()
+  const navigation = page.getByRole('dialog', { name: 'Product navigation' })
+  await navigation.getByRole('link', { name: /Sessions/ }).click()
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(navigation).toBeHidden()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('retries a transient bootstrap failure without reloading', async ({ page }) => {
+  const problems = watchBrowser(page)
+  const state = { unavailable: true }
+  await page.route('**/api/bootstrap', (route) => {
+    if (state.unavailable) return route.fulfill({ status: 503 })
+    return route.fulfill({ json: bootstrapFixture })
+  })
+  await page.goto('/attention')
+
+  await expect(page.getByText('Transport unavailable')).toBeVisible()
+  state.unavailable = false
+  await page.getByRole('button', { name: 'Retry transport' }).click()
+  await expect(
+    page.getByText(`${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`),
+  ).toBeVisible()
+  expect(problems).toEqual({
+    consoleErrors: [
+      'Failed to load resource: the server responded with a status of 503 (Service Unavailable)',
+    ],
+    pageErrors: [],
+  })
 })

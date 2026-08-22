@@ -1,48 +1,49 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  BROWSER_PREFERENCES_KEY,
   decodeBrowserPreferences,
   defaultBrowserPreferences,
-  MAX_KEY_OVERRIDES,
-  MAX_SAVED_LOGICAL_POSITIONS,
+  loadBrowserPreferences,
 } from './preferences'
+
+afterEach(() => vi.unstubAllGlobals())
 
 describe('browser preferences', () => {
   it('fails closed to defaults for an unrelated stored value', () => {
     expect(decodeBrowserPreferences('not-an-object')).toEqual(defaultBrowserPreferences)
   })
 
-  it('clamps pane sizes and rejects unknown closed variants', () => {
+  it('rejects a non-current record as a whole', () => {
     const stored = {
-      layout: 'dashboard',
+      layout: 'focus',
       density: 'comfortable',
-      paneSizes: { navigation: -50, inspector: 50_000 },
-      remoteMedia: 'proxy',
+      detail: 'full',
+      theme: 'light',
+      keyOverrides: {},
     } as const
-    const decoded = decodeBrowserPreferences(stored)
 
-    expect(decoded.layout).toBe(defaultBrowserPreferences.layout)
-    expect(decoded.density).toBe(stored.density)
-    expect(decoded.paneSizes).toEqual({ navigation: 160, inspector: 480 })
-    expect(decoded.remoteMedia).toBe(defaultBrowserPreferences.remoteMedia)
+    expect(decodeBrowserPreferences(stored)).toEqual(defaultBrowserPreferences)
   })
 
-  it('bounds retained positions and future key overrides', () => {
-    const lastLogicalPositions = Object.fromEntries(
-      Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS + 3 }, (_, index) => [
-        `session-${index}`,
-        `cursor-${index}`,
-      ]),
-    )
-    const keyOverrides = Object.fromEntries(
-      Array.from({ length: MAX_KEY_OVERRIDES + 2 }, (_, index) => [
-        `command-${index}`,
-        `key-${index}`,
-      ]),
-    )
+  it('accepts only the exact current record', () => {
+    const stored = {
+      layout: 'focus',
+      density: 'comfortable',
+      detail: 'full',
+      theme: 'light',
+    } as const
 
-    const decoded = decodeBrowserPreferences({ lastLogicalPositions, keyOverrides })
+    expect(decodeBrowserPreferences(stored)).toEqual(stored)
+  })
 
-    expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
-    expect(Object.keys(decoded.keyOverrides)).toHaveLength(MAX_KEY_OVERRIDES)
+  it('falls back when browser storage access throws', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => {
+        throw new DOMException('denied', 'SecurityError')
+      },
+    })
+
+    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+    expect(BROWSER_PREFERENCES_KEY).toBe('signalbox.web.preferences.v1')
   })
 })

@@ -1,11 +1,30 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
-import { type FormEvent, type RefObject, useState } from 'react'
+import type { FormEvent, RefObject } from 'react'
 import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
-import { type BlobDescriptorInput, ProductRequestError, productTransport } from './product'
+import {
+  type BlobDescriptorInput,
+  ProductRequestError,
+  ProductTransportError,
+  productTransport,
+} from './product'
 
-interface ArtifactRequest extends BlobDescriptorInput {
+export interface ArtifactRequest extends BlobDescriptorInput {
   sequence: number
+}
+
+export interface ArtifactInspectorState {
+  digest: string
+  mediaType: string
+  displayFilename: string
+  request: ArtifactRequest | null
+}
+
+export const emptyArtifactInspectorState: ArtifactInspectorState = {
+  digest: '',
+  mediaType: '',
+  displayFilename: '',
+  request: null,
 }
 
 const descriptorQueryPrefix = ['production', 'blob-descriptor'] as const
@@ -14,6 +33,7 @@ const errorMessage = (error: Error): string => {
   if (error instanceof ProductRequestError) {
     return `${error.response.error.code}: ${error.message}`
   }
+  if (error instanceof ProductTransportError) return error.message
   return 'The descriptor response did not match the generated web contract.'
 }
 
@@ -21,16 +41,17 @@ export function ArtifactInspector({
   available,
   digestInputRef,
   onClose,
+  state,
+  onStateChange,
 }: {
   available: boolean
   digestInputRef?: RefObject<HTMLInputElement | null>
   onClose: () => void
+  state: ArtifactInspectorState
+  onStateChange: (state: ArtifactInspectorState) => void
 }) {
   const queryClient = useQueryClient()
-  const [digest, setDigest] = useState('')
-  const [mediaType, setMediaType] = useState('')
-  const [displayFilename, setDisplayFilename] = useState('')
-  const [request, setRequest] = useState<ArtifactRequest | null>(null)
+  const { digest, mediaType, displayFilename, request } = state
   const descriptor = useQuery({
     queryKey: request
       ? [...descriptorQueryPrefix, request.sequence, request.digest]
@@ -46,11 +67,14 @@ export function ArtifactInspector({
   const resolveDescriptor = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     queryClient.removeQueries({ queryKey: descriptorQueryPrefix })
-    setRequest({
-      digest,
-      mediaType,
-      displayFilename: displayFilename || undefined,
-      sequence: (request?.sequence ?? 0) + 1,
+    onStateChange({
+      ...state,
+      request: {
+        digest,
+        mediaType,
+        displayFilename: displayFilename || undefined,
+        sequence: (request?.sequence ?? 0) + 1,
+      },
     })
   }
 
@@ -86,7 +110,7 @@ export function ArtifactInspector({
               ref={digestInputRef}
               name="digest"
               value={digest}
-              onChange={(event) => setDigest(event.target.value)}
+              onChange={(event) => onStateChange({ ...state, digest: event.target.value })}
               placeholder="sha256:…"
               pattern="sha256:[0-9a-f]{64}"
               autoComplete="off"
@@ -98,7 +122,7 @@ export function ArtifactInspector({
             <input
               name="media-type"
               value={mediaType}
-              onChange={(event) => setMediaType(event.target.value)}
+              onChange={(event) => onStateChange({ ...state, mediaType: event.target.value })}
               placeholder="image/png"
               autoComplete="off"
               required
@@ -109,7 +133,7 @@ export function ArtifactInspector({
             <input
               name="display-filename"
               value={displayFilename}
-              onChange={(event) => setDisplayFilename(event.target.value)}
+              onChange={(event) => onStateChange({ ...state, displayFilename: event.target.value })}
               placeholder="evidence.png"
               autoComplete="off"
             />

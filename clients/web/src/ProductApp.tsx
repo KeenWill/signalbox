@@ -1,5 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog'
-import { useHotkeys } from '@tanstack/react-hotkeys'
+import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
 import {
@@ -15,11 +15,12 @@ import {
   X,
 } from 'lucide-react'
 import { type RefObject, useEffect, useMemo, useRef, useState } from 'react'
-import { ArtifactInspector } from './ArtifactInspector'
+import { ArtifactInspector, emptyArtifactInspectorState } from './ArtifactInspector'
 import {
   type CommandContext,
   commandRegistry,
   globalHotkeyBindings,
+  globalHotkeySequenceBindings,
   invokeCommand,
 } from './commands'
 import { type ProductRouteId, productRoutes, productTransport } from './product'
@@ -85,7 +86,13 @@ const surfaceCopy: Record<
   },
 }
 
-function ProductNavigation({ active }: { active: ProductRouteId }) {
+function ProductNavigation({
+  active,
+  onNavigate,
+}: {
+  active: ProductRouteId
+  onNavigate?: () => void
+}) {
   return (
     <div className="product-navigation">
       <div className="brand">
@@ -101,6 +108,7 @@ function ProductNavigation({ active }: { active: ProductRouteId }) {
             params={{ surface: route.id }}
             className={active === route.id ? 'product-link active' : 'product-link'}
             aria-current={active === route.id ? 'page' : undefined}
+            onClick={onNavigate}
           >
             <span>{route.label}</span>
             <small>{route.description}</small>
@@ -352,6 +360,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const artifactButtonRef = useRef<HTMLButtonElement>(null)
   const artifactDigestRef = useRef<HTMLInputElement>(null)
   const artifactSideWasOpen = useRef(false)
+  const [artifactInspectorState, setArtifactInspectorState] = useState(emptyArtifactInspectorState)
   const narrowInspector = useNarrowInspector()
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
@@ -376,6 +385,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
+      callback: () => invokeCommand(binding.commandId, context),
+    })),
+  )
+  useHotkeySequences(
+    globalHotkeySequenceBindings.map((binding) => ({
+      sequence: binding.sequence,
       callback: () => invokeCommand(binding.commandId, context),
     })),
   )
@@ -433,6 +448,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
                 ? 'Transport unavailable'
                 : 'Checking contract…'}
           </span>
+          {bootstrap.isError && (
+            <button type="button" onClick={() => void bootstrap.refetch()}>
+              Retry transport
+            </button>
+          )}
         </div>
         {content}
       </main>
@@ -443,6 +463,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               available={artifactAvailable}
               digestInputRef={artifactDigestRef}
               onClose={() => dispatch(actions.overlaySet(null))}
+              state={artifactInspectorState}
+              onStateChange={setArtifactInspectorState}
             />
           ) : (
             <SelectionInspector title={copy.title} />
@@ -470,7 +492,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <Dialog.Description id="mobile-navigation-description" className="sr-only">
               Choose a Signalbox surface.
             </Dialog.Description>
-            <ProductNavigation active={surface} />
+            <ProductNavigation
+              active={surface}
+              onNavigate={() => dispatch(actions.overlaySet(null))}
+            />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
@@ -502,6 +527,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               available={artifactAvailable}
               digestInputRef={artifactDigestRef}
               onClose={() => dispatch(actions.overlaySet(null))}
+              state={artifactInspectorState}
+              onStateChange={setArtifactInspectorState}
             />
           </Dialog.Content>
         </Dialog.Portal>
