@@ -11,7 +11,6 @@ pub const REDACTED: &str = "[redacted]";
 /// form still carries a credential shape after structural redaction, so the
 /// `arguments_json` raw-JSON contract is never broken by a bare sentinel.
 const REDACTED_JSON_OBJECT: &str = r#"{"redacted":"[redacted]"}"#;
-
 /// Whether CLI-controlled tool arguments remain executable after redaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolArgumentRedaction {
@@ -20,9 +19,9 @@ pub enum ToolArgumentRedaction {
     /// The argument object had to be suppressed as a whole.
     Suppressed,
 }
-// numeric-bound: ceiling - protects redaction memory from an unterminated stream value
+// numeric-bound: guard - prevents an unterminated stream from exhausting redaction memory
 const MAX_PENDING_STREAM_BYTES: usize = 64 * 1024;
-// numeric-bound: derived ceiling from MAX_PENDING_STREAM_BYTES
+// numeric-bound: derived guard from MAX_PENDING_STREAM_BYTES
 const MAX_PENDING_RESCAN_BYTES: usize = 6 * MAX_PENDING_STREAM_BYTES;
 const LINE_CREDENTIAL_MARKERS: &[&str] =
     &["authorization=", "authorization:", "cookie=", "cookie:"];

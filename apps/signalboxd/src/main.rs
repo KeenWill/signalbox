@@ -23,9 +23,10 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, GoalAwareEligibilityPass, InProcessAttemptDispatchGate,
     InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    OperatorFailureClass, SchedulerLoop, SchedulerLoopExit, StaleActiveTurnBound,
-    StartEligibleTurnService, StartupScanService, TurnLivenessScanInterval,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    OperatorFailureClass, ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
+    SchedulerPassOccupancyBound, StaleActiveTurnBound, StartEligibleTurnService,
+    StartupScanService, TurnLivenessScanInterval, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
@@ -34,7 +35,7 @@ use signalbox_model_provider_runtime::{
     ApprovalJudgeModel, ContextCompactionModel, RuntimeApprovalJudgeModel,
     RuntimeContextCompactionModel, RuntimeModelCallProvider,
 };
-use signalbox_model_runtime::{CredentialReference, DEFAULT_MODEL_EXCHANGE_TIMEOUT};
+use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{
     AnthropicConfig, AnthropicConstructionError, AnthropicRuntime,
 };
@@ -47,6 +48,7 @@ use signalbox_persistence::{
     scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
+    turn_liveness::TurnLivenessPersistenceBounds,
 };
 use signalbox_tools_web::BRAVE_SEARCH_CREDENTIAL_REFERENCE;
 use signalboxd::runner_protocol_runtime::{
@@ -55,16 +57,18 @@ use signalboxd::runner_protocol_runtime::{
 };
 use signalboxd::{
     ActivatedTurnPass, BaseDaemonCredentialInputs, BlobStoreRegistry,
-    CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError, ConvergenceSweepRuntime,
-    DaemonToolCatalog, DaemonToolComposition, DaemonTools, DaemonToolsConstructionError,
+    CODE_HOST_CREDENTIAL_REFERENCE, CodeHostNumericBounds, ConfiguredApprovalPostureError,
+    ConvergenceSweepNumericBounds, ConvergenceSweepRuntime, DaemonToolCatalog,
+    DaemonToolComposition, DaemonTools, DaemonToolsConstructionError, ExpiredPassRecoveryPolicy,
     FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess,
-    GitHubCodeHostTransport, HubModelConfiguration, HubModelConfigurationError,
-    LocalProcessListener, LocalSocketError, MappedDaemonCredentialInputs, ModelAdapter,
-    OtlpRuntime, PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
-    ProcessRuntimeError, PrometheusServer, ReportedUsageCompaction, RepositoryWatchRuntime,
-    RepositoryWatchRuntimeError, SessionTemplateConfiguration, SessionTemplateConfigurationError,
-    SingleHubGuardError, SystemCurrentTimeClock, TelemetryConfiguration,
-    TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics, TurnLivenessRuntime,
+    GitHubCodeHostTransport, GoalModeNumericBounds, HubModelConfiguration,
+    HubModelConfigurationError, LocalProcessListener, LocalSocketError,
+    MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
+    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
+    ReportedUsageCompaction, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
+    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
+    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
+    TelemetryExportFilter, TelemetryMetrics, TurnLivenessNumericBounds, TurnLivenessRuntime,
     model_adapter::ConfiguredModelRuntime,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
@@ -80,8 +84,6 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-// numeric-bound: tunable - allows runtime components to commit after scheduler work drains
-const GRACEFUL_SHUTDOWN_CLEANUP_WINDOW: Duration = Duration::from_secs(30);
 const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
 const DATABASE_URL_ENVIRONMENT: &str = "DATABASE_URL";
 const TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_TEMPLATE_CONFIG_FILE";
@@ -92,8 +94,13 @@ const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
 const RUNNER_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_SOCKET_PATH";
 const GUARD_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
-fn graceful_shutdown_window() -> Duration {
-    DEFAULT_MODEL_EXCHANGE_TIMEOUT.saturating_add(GRACEFUL_SHUTDOWN_CLEANUP_WINDOW)
+fn graceful_shutdown_window(
+    model_exchange_timeout: Option<Duration>,
+    cleanup_window: Option<Duration>,
+) -> Option<Duration> {
+    model_exchange_timeout
+        .zip(cleanup_window)
+        .map(|(exchange, cleanup)| exchange.saturating_add(cleanup))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1026,24 +1033,32 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
 async fn drain_runtime_tasks<GuardLoss>(
     runtime_tasks: &mut JoinSet<RuntimeTaskExit>,
     guard_loss: GuardLoss,
-    grace_window: Duration,
+    grace_window: Option<Duration>,
 ) -> (RuntimeDrainOutcome, RuntimeTaskCompletion)
 where
     GuardLoss: Future<Output = ()>,
 {
     let completion = Cell::new(RuntimeTaskCompletion::Clean);
-    let drain = select! {
-        () = guard_loss => RuntimeDrainOutcome::GuardLost,
-        result = timeout(grace_window, async {
-            while let Some(completed) = runtime_tasks.join_next().await {
-                completion.set(completion.get().combine(runtime_task_completion(completed)));
-            }
-        }) => match result {
-            Ok(()) => RuntimeDrainOutcome::Complete,
-            Err(_) => RuntimeDrainOutcome::GraceWindowExpired,
+    let drain = async {
+        while let Some(completed) = runtime_tasks.join_next().await {
+            completion.set(completion.get().combine(runtime_task_completion(completed)));
         }
     };
-    (drain, completion.get())
+    tokio::pin!(drain);
+    let outcome = match grace_window {
+        Some(grace_window) => select! {
+            () = guard_loss => RuntimeDrainOutcome::GuardLost,
+            result = timeout(grace_window, &mut drain) => match result {
+                Ok(()) => RuntimeDrainOutcome::Complete,
+                Err(_) => RuntimeDrainOutcome::GraceWindowExpired,
+            }
+        },
+        None => select! {
+            () = guard_loss => RuntimeDrainOutcome::GuardLost,
+            () = &mut drain => RuntimeDrainOutcome::Complete,
+        },
+    };
+    (outcome, completion.get())
 }
 
 const fn completed_runtime_outcome(
@@ -1158,6 +1173,157 @@ async fn run_hub(
                 SanitizedStartupCause::ModelConfiguration(&error),
             )
         })?;
+    let numeric_bounds = model_configuration.numeric_bounds();
+    let configured_duration = |field| numeric_bounds.duration(field).flatten();
+    let configured_usize = |field| {
+        numeric_bounds
+            .integer(field)
+            .flatten()
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("configured_numeric_bound_exceeds_platform"),
+                )
+            })
+    };
+    let configured_u32 = |field| {
+        numeric_bounds
+            .integer(field)
+            .flatten()
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("configured_numeric_bound_exceeds_u32"),
+                )
+            })
+    };
+    let model_exchange_timeout = configured_duration("model_exchange_timeout");
+    let scheduler_pass_occupancy_bound = configured_duration("scheduler_pass_occupancy_bound")
+        .map(SchedulerPassOccupancyBound::try_new)
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_scheduler_pass_occupancy_bound"),
+            )
+        })?
+        .unwrap_or_else(SchedulerPassOccupancyBound::unbounded);
+    let shutdown_grace_window = graceful_shutdown_window(
+        model_exchange_timeout,
+        configured_duration("graceful_shutdown_cleanup_window"),
+    );
+    let stale_active_turn_bound = configured_duration("stale_active_turn_bound")
+        .map(StaleActiveTurnBound::try_new)
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_stale_active_turn_bound"),
+            )
+        })?;
+    let turn_liveness_scan_interval = configured_duration("turn_liveness_scan_interval")
+        .map(TurnLivenessScanInterval::try_new)
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_turn_liveness_scan_interval"),
+            )
+        })?;
+    let reconciliation_sweep_interval = configured_duration("reconciliation_sweep_interval")
+        .map(ReconciliationSweepInterval::try_new)
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_reconciliation_sweep_interval"),
+            )
+        })?;
+    let nudge_buffer_capacity = match configured_usize("nudge_buffer_capacity")? {
+        Some(capacity) => Some(NonZeroUsize::new(capacity).ok_or_else(|| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_nudge_buffer_capacity"),
+            )
+        })?),
+        None => None,
+    };
+    let scheduler_pass_admission_cap = configured_usize("scheduler_pass_admission_cap")?;
+    let automatic_reconciliation_attempt_budget = numeric_bounds
+        .integer("automatic_reconciliation_attempt_budget")
+        .flatten()
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static(
+                    "automatic_reconciliation_attempt_budget_exceeds_platform",
+                ),
+            )
+        })?;
+    if automatic_reconciliation_attempt_budget.is_some_and(|budget| i32::try_from(budget).is_err())
+    {
+        return Err(erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static(
+                "automatic_reconciliation_attempt_budget_exceeds_storage",
+            ),
+        ));
+    }
+    let automatic_reconciliation_base_backoff =
+        configured_duration("automatic_reconciliation_base_backoff");
+    let automatic_reconciliation_backoff_cap =
+        configured_duration("automatic_reconciliation_backoff_cap");
+    let expired_pass_recovery_policy = ExpiredPassRecoveryPolicy::new(
+        configured_u32("expired_pass_recovery_attempts")?,
+        configured_duration("expired_pass_recovery_attempt_bound"),
+        configured_duration("expired_pass_recovery_lock_retry_delay"),
+        configured_duration("expired_pass_recovery_conservative_retry_delay"),
+    );
+    let repository_reconciliation_quantum = configured_usize("repository_reconciliation_quantum")?;
+    let convergence_sweep_numeric_bounds = ConvergenceSweepNumericBounds::new(
+        configured_duration("convergence_sweep_request_timeout"),
+        configured_usize("max_convergence_sweep_connection_pages")?,
+        configured_usize("max_concurrent_convergence_sweep_targets")?,
+        configured_usize("max_convergence_sweep_request_attempts")?,
+        configured_duration("convergence_sweep_request_retry_delay"),
+        configured_duration("convergence_sweep_retry_backoff_base"),
+        configured_duration("convergence_sweep_retry_backoff_cap"),
+    );
+    let turn_liveness_persistence_bounds = TurnLivenessPersistenceBounds::new(
+        configured_duration("terminalization_lock_wait"),
+        configured_duration("terminalization_acquire_wait"),
+        configured_duration("terminalization_write_lock_wait"),
+    );
+    let turn_liveness_numeric_bounds = TurnLivenessNumericBounds::new(
+        configured_usize("terminalizations_per_liveness_scan")?,
+        configured_duration("turn_liveness_recovery_attempt_bound"),
+        configured_usize("automatic_reconciliations_per_liveness_scan")?,
+        turn_liveness_persistence_bounds,
+    );
+    let goal_mode_numeric_bounds = GoalModeNumericBounds::new(
+        configured_duration("automatic_resume_base_backoff"),
+        configured_duration("automatic_resume_backoff_cap"),
+        configured_u32("automatic_resume_attempt_budget")?,
+        configured_duration("automatic_resume_startup_retry_delay"),
+    );
+    let diagnostic_model_identity_limit = configured_usize("diagnostic_model_identity_limit")?;
+    let automatic_tool_round_limit = configured_usize("max_automatic_tool_rounds_per_turn")?;
+    let post_kill_reap_bound = configured_duration("post_kill_reap_bound");
+    let native_message_limit = configured_usize("max_native_message_bytes")?;
+    let code_host_numeric_bounds = CodeHostNumericBounds::new(
+        configured_duration("code_host_request_timeout"),
+        configured_usize("max_job_log_bytes")?,
+        configured_usize("max_stack_comparisons_in_flight")?,
+        configured_usize("max_code_host_result_text_bytes")?,
+        configured_usize("max_code_host_result_items")?,
+        configured_usize("max_repository_file_content_bytes")?,
+    );
     if configuration.repository_watch_credential_conflicts(&model_configuration) {
         let error = HubConfigurationError::new(
             GITHUB_TOKEN_FILE_ENVIRONMENT,
@@ -1245,7 +1411,11 @@ async fn run_hub(
     );
     let compaction_anthropic = anthropic_credential_access
         .clone()
-        .map(|credential_access| AnthropicRuntime::new(AnthropicConfig::new(), credential_access))
+        .map(|credential_access| {
+            let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = model_exchange_timeout;
+            AnthropicRuntime::new(adapter_configuration, credential_access)
+        })
         .transpose()
         .map_err(|error| {
             erase_startup_cause(
@@ -1255,7 +1425,11 @@ async fn run_hub(
         })?;
     let compaction_openai = openai_credential_access
         .clone()
-        .map(|credential_access| OpenAiRuntime::new(OpenAiConfig::new(), credential_access))
+        .map(|credential_access| {
+            let mut adapter_configuration = OpenAiConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = model_exchange_timeout;
+            OpenAiRuntime::new(adapter_configuration, credential_access)
+        })
         .transpose()
         .map_err(|error| {
             erase_startup_cause(
@@ -1269,7 +1443,8 @@ async fn run_hub(
         .uses_anthropic_adapter()
         .then(|| anthropic_model_credentials.clone())
         .map(|credential_access| {
-            let mut adapter_configuration = AnthropicConfig::new();
+            let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = model_exchange_timeout;
             adapter_configuration.model_capabilities = anthropic_model_capabilities;
             AnthropicRuntime::new(adapter_configuration, credential_access)
         })
@@ -1282,7 +1457,8 @@ async fn run_hub(
         })?;
     let openai = openai_credential_access
         .map(|credential_access| {
-            let mut adapter_configuration = OpenAiConfig::new();
+            let mut adapter_configuration = OpenAiConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = model_exchange_timeout;
             adapter_configuration.model_capabilities = openai_model_capabilities;
             OpenAiRuntime::new(adapter_configuration, credential_access)
         })
@@ -1293,17 +1469,21 @@ async fn run_hub(
                 SanitizedStartupCause::Static(openai_construction_cause(&error)),
             )
         })?;
-    let code_host_transport = GitHubCodeHostTransport::try_new().map_err(|_| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static("github_transport_construction_failed"),
-        )
-    })?;
+    let code_host_transport =
+        GitHubCodeHostTransport::try_new(code_host_numeric_bounds).map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("github_transport_construction_failed"),
+            )
+        })?;
     let runtime_models = model_configuration.runtime_model_catalog();
     let compaction_runtime = ConfiguredModelRuntime::new(
         compaction_anthropic,
         compaction_openai,
         &model_configuration,
+        model_exchange_timeout,
+        post_kill_reap_bound,
+        native_message_limit,
     )
     .map_err(|error| {
         erase_startup_cause(
@@ -1311,20 +1491,31 @@ async fn run_hub(
             SanitizedStartupCause::Static(error.cause_code()),
         )
     })?;
-    let runtime =
-        ConfiguredModelRuntime::new(anthropic, openai, &model_configuration).map_err(|error| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static(error.cause_code()),
-            )
-        })?;
+    let runtime = ConfiguredModelRuntime::new(
+        anthropic,
+        openai,
+        &model_configuration,
+        model_exchange_timeout,
+        post_kill_reap_bound,
+        native_message_limit,
+    )
+    .map_err(|error| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static(error.cause_code()),
+        )
+    })?;
     let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
         RuntimeContextCompactionModel::new(compaction_runtime, runtime_models.clone()),
     );
     let approval_judge_model: Arc<dyn ApprovalJudgeModel> = Arc::new(
         RuntimeApprovalJudgeModel::new(runtime.clone(), runtime_models.clone()),
     );
-    let provider = RuntimeModelCallProvider::new(runtime, runtime_models.clone());
+    let provider = RuntimeModelCallProvider::new(
+        runtime,
+        runtime_models.clone(),
+        diagnostic_model_identity_limit,
+    );
     let model_targets = model_configuration.target_catalog();
     let mut database = FencedHubDatabase::connect_production(configuration.database_url())
         .await
@@ -1644,7 +1835,11 @@ async fn run_hub(
     }
     let scheduler_pool = pool.clone();
     let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
-    let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::with_options(
+        sweep,
+        reconciliation_sweep_interval,
+        nudge_buffer_capacity,
+    );
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let repository_watch_runtime = match model_configuration.repository_watch() {
         Some(configuration) => match RepositoryWatchRuntime::try_new(
@@ -1654,6 +1849,7 @@ async fn run_hub(
             model_configuration.clone(),
             model_configuration.session_credential_pin(),
             eligibility_nudge.clone(),
+            repository_reconciliation_quantum,
         ) {
             Ok(runtime) => Some(runtime),
             Err(_) => {
@@ -1678,6 +1874,7 @@ async fn run_hub(
             template_configuration.clone(),
             model_configuration.clone(),
             eligibility_nudge.clone(),
+            convergence_sweep_numeric_bounds,
         ) {
             Ok(runtime) => runtime,
             Err(_) => {
@@ -1777,6 +1974,7 @@ async fn run_hub(
             model_repository,
             InProcessAttemptDispatchGate::default(),
             UsageLimitedModelCallProvider::new(provider, &model_configuration),
+            automatic_tool_round_limit,
         )
         .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor)
         .with_approval_judge(
@@ -1798,16 +1996,26 @@ async fn run_hub(
         execution,
     )
     .with_reported_usage_compaction(reported_usage_compaction)
-    .with_occupancy_recovery(scheduler_pool.clone(), eligibility_nudge.clone());
+    .with_occupancy_recovery(
+        scheduler_pool.clone(),
+        eligibility_nudge.clone(),
+        expired_pass_recovery_policy,
+        turn_liveness_persistence_bounds,
+    );
     let turn_liveness_runtime = TurnLivenessRuntime::new(
         scheduler_pool.clone(),
-        StaleActiveTurnBound::hard_ceiling(),
-        TurnLivenessScanInterval::baseline(),
+        stale_active_turn_bound,
+        turn_liveness_scan_interval,
+        automatic_reconciliation_attempt_budget,
+        automatic_reconciliation_base_backoff,
+        automatic_reconciliation_backoff_cap,
+        turn_liveness_numeric_bounds,
     );
     let goal_disposition = PostgresGoalPassDisposition::new(
         scheduler_pool,
         model_configuration.clone(),
         eligibility_nudge,
+        goal_mode_numeric_bounds,
     );
     match goal_disposition
         .reconcile_automatic_resumptions_after_restart()
@@ -1826,7 +2034,7 @@ async fn run_hub(
         ),
     }
     let pass = GoalAwareEligibilityPass::new(activated_pass, goal_disposition);
-    let scheduler_max_in_flight_passes = model_configuration.scheduler_max_in_flight_passes();
+    let scheduler_max_in_flight_passes = scheduler_pass_admission_cap;
     let mut scheduler = match scheduler_max_in_flight_passes {
         Some(limit) => match NonZeroUsize::new(limit) {
             Some(limit) => SchedulerLoop::with_max_in_flight(work_source, pass, limit),
@@ -1834,6 +2042,7 @@ async fn run_hub(
         },
         None => SchedulerLoop::new(work_source, pass),
     };
+    scheduler = scheduler.with_occupancy_bound(scheduler_pass_occupancy_bound);
     if let Some((metrics, _server)) = prometheus_runtime.as_ref() {
         scheduler = scheduler.with_occupancy_observer(Arc::new(metrics.clone()));
     }
@@ -1995,7 +2204,7 @@ async fn run_hub(
             let (drain, components_clean) = drain_runtime_tasks(
                 &mut runtime_tasks,
                 guard_loss.as_mut(),
-                graceful_shutdown_window(),
+                shutdown_grace_window,
             )
             .await;
             cause = combine_runtime_stop_cause(cause, components_clean);
@@ -2211,10 +2420,7 @@ async fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(ShutdownOutcome::GraceWindowExpired) => {
-            tracing::warn!(
-                grace_window_seconds = graceful_shutdown_window().as_secs(),
-                "daemon shutdown grace window expired; abandoning in-flight work"
-            );
+            tracing::warn!("daemon shutdown grace window expired; abandoning in-flight work");
             ExitCode::SUCCESS
         }
         Ok(ShutdownOutcome::SignalListenerFailed) => {
@@ -2240,7 +2446,6 @@ async fn main() -> ExitCode {
             tracing::error!(
                 phase = ?error.phase,
                 failure_class = ?error.failure_class,
-                grace_window_seconds = graceful_shutdown_window().as_secs(),
                 "activated-turn execution failed and shutdown grace expired; abandoning in-flight work for startup recovery"
             );
             ExitCode::FAILURE
@@ -2268,7 +2473,6 @@ async fn main() -> ExitCode {
             tracing::error!(
                 phase = ?error.phase,
                 failure_class = ?error.failure_class,
-                grace_window_seconds = graceful_shutdown_window().as_secs(),
                 "daemon runtime component failed and shutdown grace expired; abandoning in-flight work"
             );
             ExitCode::FAILURE
@@ -2285,7 +2489,6 @@ async fn main() -> ExitCode {
             tracing::error!(
                 phase = ?RuntimePhase::Runtime,
                 failure_class = ?OperatorFailureClass::CallerOrHubBug,
-                grace_window_seconds = graceful_shutdown_window().as_secs(),
                 "daemon runtime task defect was followed by an expired shutdown grace window"
             );
             ExitCode::FAILURE
@@ -2335,20 +2538,20 @@ mod tests {
 
     use super::{
         AnthropicConstructionError, BRAVE_API_KEY_FILE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT,
-        DEFAULT_MODEL_EXCHANGE_TIMEOUT, GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration,
-        HubConfigurationError, HubConfigurationValues, HubRuntimeError,
-        MODEL_CONFIGURATION_FILE_ENVIRONMENT, OpenAiConstructionError, OperatorFilterDisposition,
-        PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT,
-        RepositoryWatchRuntimeError, RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase,
-        RuntimeStopCause, RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause,
-        SchedulerStopCause, ShutdownOutcome, SingleHubGuardError,
-        TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
-        combine_runtime_stop_cause, completed_runtime_outcome, credential_files_conflict,
-        database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
-        graceful_shutdown_window, migrate_scan_then_schedule, openai_construction_cause,
-        operator_filter, process_runtime_failure_class, report_database_close_failure,
-        repository_watch_rule_configuration_error, run_scheduler_until_shutdown,
-        runner_lifecycle_failure_class, should_close_pool, staging_sweep_failure_outcome,
+        GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration, HubConfigurationError,
+        HubConfigurationValues, HubRuntimeError, MODEL_CONFIGURATION_FILE_ENVIRONMENT,
+        OpenAiConstructionError, OperatorFilterDisposition, PROCESS_SOCKET_PATH_ENVIRONMENT,
+        ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT, RepositoryWatchRuntimeError,
+        RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
+        RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause,
+        ShutdownOutcome, SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
+        anthropic_construction_cause, combine_runtime_stop_cause, completed_runtime_outcome,
+        credential_files_conflict, database_close_failure_outcome, drain_runtime_tasks,
+        erase_startup_cause, graceful_shutdown_window, migrate_scan_then_schedule,
+        openai_construction_cause, operator_filter, process_runtime_failure_class,
+        report_database_close_failure, repository_watch_rule_configuration_error,
+        run_scheduler_until_shutdown, runner_lifecycle_failure_class, should_close_pool,
+        staging_sweep_failure_outcome,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
 
@@ -3050,11 +3253,11 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn adr0044_shutdown_drain_outlives_the_longest_expected_model_call() {
+    async fn adr0044_shutdown_drain_includes_the_configured_cleanup_window() {
         let (entered_sender, entered_receiver) = oneshot::channel();
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         let session = SessionId::from_uuid(Uuid::from_u128(1));
-        let pass_duration = DEFAULT_MODEL_EXCHANGE_TIMEOUT + Duration::from_secs(1);
+        let pass_duration = Duration::from_secs(2);
         let scheduler = SchedulerLoop::new(
             OneHintThenPending {
                 hints: VecDeque::from([session]),
@@ -3070,7 +3273,8 @@ mod tests {
                 shutdown_receiver.await.expect("the test requests shutdown");
                 SchedulerStopCause::Requested
             },
-            graceful_shutdown_window(),
+            graceful_shutdown_window(Some(Duration::from_secs(3)), Some(Duration::from_secs(1)))
+                .expect("the fixture cleanup window is bounded"),
         ));
 
         entered_receiver
@@ -3329,7 +3533,7 @@ mod tests {
         runtime_tasks.spawn(pending::<RuntimeTaskExit>());
 
         let (drain, completion) =
-            drain_runtime_tasks(&mut runtime_tasks, pending(), Duration::from_secs(5)).await;
+            drain_runtime_tasks(&mut runtime_tasks, pending(), Some(Duration::from_secs(5))).await;
         let cause = combine_runtime_stop_cause(RuntimeStopCause::Requested, completion);
 
         assert_eq!(drain, RuntimeDrainOutcome::GraceWindowExpired);
@@ -3349,7 +3553,7 @@ mod tests {
         runtime_tasks.spawn(pending::<RuntimeTaskExit>());
 
         let (drain, completion) =
-            drain_runtime_tasks(&mut runtime_tasks, pending(), Duration::from_secs(5)).await;
+            drain_runtime_tasks(&mut runtime_tasks, pending(), Some(Duration::from_secs(5))).await;
         let cause = combine_runtime_stop_cause(RuntimeStopCause::Requested, completion);
 
         assert_eq!(drain, RuntimeDrainOutcome::GraceWindowExpired);

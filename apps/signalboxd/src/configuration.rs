@@ -13,7 +13,6 @@ use std::{
 };
 
 use rust_decimal::Decimal;
-use signalbox_application::scheduler_pass_admission_cap;
 use signalbox_domain::{
     AnthropicServiceTier, BranchName, CheckConclusion, CodexCliServiceTier, DirectModelSelection,
     FastMode, FastModeOverlay, FastModeSupport, FrozenAliasDefinition, LabelName, MergeableState,
@@ -474,12 +473,6 @@ pub const DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES: usize = 256 * 1024 * 102
 
 const MAX_WATCHED_REPOSITORIES: usize = 128;
 const MAX_SIGNAL_REVIEWERS: usize = 128;
-// numeric-bound: ceiling - limits credentialed census work retained by one daemon tick
-const MAX_CONVERGENCE_SWEEP_TARGETS: usize = 256;
-// numeric-bound: ceiling - prevents an enabled target from remaining unobserved for too long
-pub const MAX_CONVERGENCE_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
-// numeric-bound: ceiling - bounds starvation after a dispatch that made no durable progress
-pub const MAX_CONVERGENCE_SWEEP_COOL_OFF: Duration = Duration::from_secs(1_800);
 
 /// Loopback-only reference address selected when the webhook listener table
 /// omits `bind_address`.
@@ -697,9 +690,264 @@ impl RepositoryWatchConfiguration {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NumericBoundKind {
+    Integer,
+    Duration,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NumericBoundValue {
+    Integer(u64),
+    Duration(Duration),
+    Unbounded,
+}
+
+/// Validated deployment policy for every non-structural numeric bound.
+#[derive(Clone, Debug)]
+pub struct NumericBoundsConfiguration {
+    values: HashMap<&'static str, NumericBoundValue>,
+}
+
+const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
+    (
+        "repository_reconciliation_quantum",
+        NumericBoundKind::Integer,
+    ),
+    ("max_concurrent_snapshot_readers", NumericBoundKind::Integer),
+    ("max_blob_replica_count", NumericBoundKind::Integer),
+    ("max_session_metadata_tags", NumericBoundKind::Integer),
+    ("max_session_metadata_attributes", NumericBoundKind::Integer),
+    (
+        "max_session_metadata_required_tags",
+        NumericBoundKind::Integer,
+    ),
+    ("max_system_prompt_utf8_bytes", NumericBoundKind::Integer),
+    (
+        "max_imported_text_preview_utf8_bytes",
+        NumericBoundKind::Integer,
+    ),
+    (
+        "max_review_orchestration_concerns",
+        NumericBoundKind::Integer,
+    ),
+    (
+        "max_imported_conversation_display_title_scalars",
+        NumericBoundKind::Integer,
+    ),
+    (
+        "graceful_shutdown_cleanup_window",
+        NumericBoundKind::Duration,
+    ),
+    ("model_exchange_timeout", NumericBoundKind::Duration),
+    ("expired_pass_recovery_attempts", NumericBoundKind::Integer),
+    (
+        "expired_pass_recovery_attempt_bound",
+        NumericBoundKind::Duration,
+    ),
+    (
+        "expired_pass_recovery_lock_retry_delay",
+        NumericBoundKind::Duration,
+    ),
+    (
+        "expired_pass_recovery_conservative_retry_delay",
+        NumericBoundKind::Duration,
+    ),
+    (
+        "convergence_sweep_request_timeout",
+        NumericBoundKind::Duration,
+    ),
+    (
+        "max_convergence_sweep_connection_pages",
+        NumericBoundKind::Integer,
+    ),
+    (
+        "max_concurrent_convergence_sweep_targets",
+        NumericBoundKind::Integer,
+    ),
+    (
+        "max_convergence_sweep_request_attempts",
+        NumericBoundKind::Integer,
+    ),
+    (
+        "convergence_sweep_request_retry_delay",
+        NumericBoundKind::Duration,
+    ),
+    (
+        "convergence_sweep_retry_backoff_base",
+        NumericBoundKind::Duration,
+    ),
+    (
+        "convergence_sweep_retry_backoff_cap",
+        NumericBoundKind::Duration,
+    ),
+    (
+        "terminalizations_per_liveness_scan",
+        NumericBoundKind::Integer,
+    ),
+    (
+        "turn_liveness_recovery_attempt_bound",
+        NumericBoundKind::Duration,
+    ),
+    (
+        "automatic_reconciliations_per_liveness_scan",
+        NumericBoundKind::Integer,
+    ),
+    ("max_convergence_sweep_targets", NumericBoundKind::Integer),
+    ("max_convergence_sweep_interval", NumericBoundKind::Duration),
+    ("max_convergence_sweep_cool_off", NumericBoundKind::Duration),
+    ("automatic_resume_base_backoff", NumericBoundKind::Duration),
+    ("automatic_resume_backoff_cap", NumericBoundKind::Duration),
+    ("automatic_resume_attempt_budget", NumericBoundKind::Integer),
+    (
+        "automatic_resume_startup_retry_delay",
+        NumericBoundKind::Duration,
+    ),
+    ("post_kill_reap_bound", NumericBoundKind::Duration),
+    ("stale_active_turn_bound", NumericBoundKind::Duration),
+    ("turn_liveness_scan_interval", NumericBoundKind::Duration),
+    (
+        "automatic_reconciliation_base_backoff",
+        NumericBoundKind::Duration,
+    ),
+    (
+        "automatic_reconciliation_backoff_cap",
+        NumericBoundKind::Duration,
+    ),
+    (
+        "automatic_reconciliation_attempt_budget",
+        NumericBoundKind::Integer,
+    ),
+    ("terminal_input_channel_capacity", NumericBoundKind::Integer),
+    ("max_message_utf8_bytes", NumericBoundKind::Integer),
+    ("min_metadata_page_size", NumericBoundKind::Integer),
+    ("max_metadata_page_size", NumericBoundKind::Integer),
+    ("max_review_findings_per_run", NumericBoundKind::Integer),
+    (
+        "max_automatic_tool_rounds_per_turn",
+        NumericBoundKind::Integer,
+    ),
+    ("max_required_tags", NumericBoundKind::Integer),
+    ("reconciliation_sweep_interval", NumericBoundKind::Duration),
+    ("nudge_buffer_capacity", NumericBoundKind::Integer),
+    ("scheduler_pass_admission_cap", NumericBoundKind::Integer),
+    ("scheduler_pass_occupancy_bound", NumericBoundKind::Duration),
+    ("max_native_message_bytes", NumericBoundKind::Integer),
+    ("terminalization_lock_wait", NumericBoundKind::Duration),
+    ("terminalization_acquire_wait", NumericBoundKind::Duration),
+    (
+        "terminalization_write_lock_wait",
+        NumericBoundKind::Duration,
+    ),
+    (
+        "disposable_postgres_state_ceiling_bytes",
+        NumericBoundKind::Integer,
+    ),
+    ("diagnostic_model_identity_limit", NumericBoundKind::Integer),
+    ("code_host_request_timeout", NumericBoundKind::Duration),
+    ("max_job_log_bytes", NumericBoundKind::Integer),
+    ("max_stack_comparisons_in_flight", NumericBoundKind::Integer),
+    ("max_code_host_result_text_bytes", NumericBoundKind::Integer),
+    ("max_code_host_result_items", NumericBoundKind::Integer),
+    (
+        "max_repository_file_content_bytes",
+        NumericBoundKind::Integer,
+    ),
+];
+
+impl NumericBoundsConfiguration {
+    fn parse(item: Option<&Item>) -> Result<Self, HubModelConfigurationError> {
+        let table = item.and_then(Item::as_table);
+        let missing = REQUIRED_NUMERIC_BOUNDS
+            .iter()
+            .filter_map(|(name, _)| {
+                table
+                    .is_none_or(|table| !table.contains_key(name))
+                    .then_some(*name)
+            })
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(HubModelConfigurationError::MissingNumericBounds { fields: missing });
+        }
+        let table = table.ok_or_else(|| HubModelConfigurationError::MissingNumericBounds {
+            fields: REQUIRED_NUMERIC_BOUNDS
+                .iter()
+                .map(|(name, _)| *name)
+                .collect(),
+        })?;
+        let allowed_fields = REQUIRED_NUMERIC_BOUNDS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        reject_unknown_fields(table, &allowed_fields)?;
+        let mut values = HashMap::with_capacity(REQUIRED_NUMERIC_BOUNDS.len());
+        for (name, kind) in REQUIRED_NUMERIC_BOUNDS {
+            let item = table.get(name).ok_or_else(|| {
+                HubModelConfigurationError::MissingNumericBounds {
+                    fields: vec![*name],
+                }
+            })?;
+            let value = if item.as_str() == Some("none") {
+                NumericBoundValue::Unbounded
+            } else {
+                match kind {
+                    NumericBoundKind::Integer => item
+                        .as_integer()
+                        .and_then(|value| u64::try_from(value).ok())
+                        .filter(|value| usize::try_from(*value).is_ok())
+                        .map(NumericBoundValue::Integer),
+                    NumericBoundKind::Duration => item
+                        .as_str()
+                        .and_then(parse_numeric_bound_duration)
+                        .map(NumericBoundValue::Duration),
+                }
+                .ok_or(HubModelConfigurationError::InvalidNumericBound { field: name })?
+            };
+            values.insert(*name, value);
+        }
+        Ok(Self { values })
+    }
+
+    /// Returns one integer policy, with inner `None` denoting configured `"none"`.
+    ///
+    /// Callers use field names from the checked-in schema inventory.
+    pub fn integer(&self, field: &'static str) -> Option<Option<u64>> {
+        match self.values.get(field) {
+            Some(NumericBoundValue::Integer(value)) => Some(Some(*value)),
+            Some(NumericBoundValue::Unbounded) => Some(None),
+            _ => None,
+        }
+    }
+
+    /// Returns one duration policy, with inner `None` denoting configured `"none"`.
+    ///
+    /// Callers use field names from the checked-in schema inventory.
+    pub fn duration(&self, field: &'static str) -> Option<Option<Duration>> {
+        match self.values.get(field) {
+            Some(NumericBoundValue::Duration(value)) => Some(Some(*value)),
+            Some(NumericBoundValue::Unbounded) => Some(None),
+            _ => None,
+        }
+    }
+}
+
+fn parse_numeric_bound_duration(value: &str) -> Option<Duration> {
+    value
+        .strip_suffix("ms")
+        .and_then(|amount| amount.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .or_else(|| {
+            value
+                .strip_suffix('s')
+                .and_then(|amount| amount.parse::<u64>().ok())
+                .map(Duration::from_secs)
+        })
+}
+
 /// Validated static model and alias definitions used by hub composition.
 #[derive(Clone, Debug)]
 pub struct HubModelConfiguration {
+    numeric_bounds: NumericBoundsConfiguration,
     targets: ModelTargetCatalog,
     runtime_models: RuntimeModelCatalog,
     tool_continuation_usage_limits: Vec<ToolContinuationUsageLimit>,
@@ -736,7 +984,6 @@ pub struct HubModelConfiguration {
     approval_judge_selection: Option<DirectModelSelection>,
     repository_watch: Option<RepositoryWatchConfiguration>,
     blob_storage: Option<BlobStorageConfiguration>,
-    scheduler_max_in_flight_passes: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -760,6 +1007,7 @@ impl HubModelConfiguration {
             document.as_table(),
             &[
                 "version",
+                "numeric_bounds",
                 "credential_profiles",
                 "credential_pools",
                 "adapter_mappings",
@@ -780,12 +1028,12 @@ impl HubModelConfiguration {
                 "approval_judge",
                 "repository_watch",
                 "blob_storage",
-                "scheduler",
             ],
         )?;
         if document.get("version").and_then(|item| item.as_integer()) != Some(1) {
             return Err(HubModelConfigurationError::UnsupportedVersion);
         }
+        let numeric_bounds = NumericBoundsConfiguration::parse(document.get("numeric_bounds"))?;
         let global_model_settings = parse_model_settings_overlay(document.get("model_settings"))?;
         let model_settings_profiles =
             parse_model_settings_profiles(document.get("model_settings_profiles"))?;
@@ -829,8 +1077,6 @@ impl HubModelConfiguration {
         let blob_storage =
             BlobStorageConfiguration::parse(document.get("blob_storage"), minimum_blob_bytes)
                 .map_err(|_| HubModelConfigurationError::InvalidBlobStorageConfiguration)?;
-        let scheduler_max_in_flight_passes =
-            parse_scheduler_max_in_flight_passes(document.get("scheduler"))?;
         let web_fetch_egress_policy = document
             .get("web_fetch")
             .map(|item| {
@@ -872,7 +1118,7 @@ impl HubModelConfiguration {
         let approval_judge_selection = parse_approval_judge(document.get("approval_judge"))?;
         let repository_watch = document
             .get("repository_watch")
-            .map(parse_repository_watch_configuration)
+            .map(|item| parse_repository_watch_configuration(item, &numeric_bounds))
             .transpose()?;
         let models = document
             .get("models")
@@ -1012,6 +1258,7 @@ impl HubModelConfiguration {
                         .as_deref()
                         .unwrap_or(CODEX_CLI_CREDENTIAL_REFERENCE),
                 ),
+                None,
             ))
             .map_err(|_| HubModelConfigurationError::InvalidCodexCliConfiguration)?;
         }
@@ -1065,6 +1312,8 @@ impl HubModelConfiguration {
                         .as_deref()
                         .unwrap_or(CLAUDE_CLI_CREDENTIAL_REFERENCE),
                 ),
+                None,
+                None,
             ))
             .map_err(|_| HubModelConfigurationError::InvalidClaudeCliConfiguration)?;
         }
@@ -1387,6 +1636,7 @@ impl HubModelConfiguration {
         .and_then(|catalog| catalog.with_fast_targets(target_fast_targets))
         .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
         Ok(Self {
+            numeric_bounds,
             targets,
             runtime_models,
             tool_continuation_usage_limits,
@@ -1417,8 +1667,25 @@ impl HubModelConfiguration {
             approval_judge_selection,
             repository_watch,
             blob_storage,
-            scheduler_max_in_flight_passes,
         })
+    }
+
+    /// Parses a test catalog after adding the checked-in example's bound table.
+    ///
+    /// Test-only catalogs intentionally state only the behavior under test. The
+    /// required deployment policy comes from the one source that owns today's
+    /// values instead of being re-encoded across fixtures.
+    #[doc(hidden)]
+    #[cfg(test)]
+    pub fn parse_test_fixture(content: &str) -> Result<Self, HubModelConfigurationError> {
+        let example = include_str!("../../../config/signalboxd.example.toml");
+        let (_, numeric_bounds_and_after) = example
+            .split_once("[numeric_bounds]")
+            .ok_or(HubModelConfigurationError::InvalidDocument)?;
+        let (numeric_bounds, _) = numeric_bounds_and_after
+            .split_once("\n# Blob bytes live outside PostgreSQL.")
+            .ok_or(HubModelConfigurationError::InvalidDocument)?;
+        Self::parse(&format!("{content}\n[numeric_bounds]{numeric_bounds}\n"))
     }
 
     /// Returns the immutable domain target catalog used by persistence.
@@ -1667,6 +1934,8 @@ impl HubModelConfiguration {
 
     pub(crate) fn codex_cli_runtime(
         &self,
+        model_exchange_timeout: Option<Duration>,
+        post_kill_reap_bound: Option<Duration>,
     ) -> Result<Option<CodexCliRuntime>, CodexCliConstructionError> {
         self.codex_cli
             .as_ref()
@@ -1679,7 +1948,9 @@ impl HubModelConfiguration {
                     configuration.executable.clone(),
                     configuration.working_directory.clone(),
                     CredentialReference::new(credential_profile),
+                    post_kill_reap_bound,
                 );
+                runtime_configuration.exchange_timeout = model_exchange_timeout;
                 runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
                 CodexCliRuntime::new(runtime_configuration)
             })
@@ -1693,6 +1964,9 @@ impl HubModelConfiguration {
 
     pub(crate) fn claude_cli_runtime(
         &self,
+        model_exchange_timeout: Option<Duration>,
+        post_kill_reap_bound: Option<Duration>,
+        native_message_limit: Option<usize>,
     ) -> Result<Option<ClaudeCliRuntime>, ClaudeCliConstructionError> {
         self.claude_cli
             .as_ref()
@@ -1706,7 +1980,10 @@ impl HubModelConfiguration {
                     configuration.mcp_bridge_executable.clone(),
                     configuration.working_directory.clone(),
                     CredentialReference::new(credential_profile),
+                    post_kill_reap_bound,
+                    native_message_limit,
                 );
+                runtime_configuration.exchange_timeout = model_exchange_timeout;
                 runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
                 let credentials = FileCredentialAccess::from_files(
                     self.file_credential_profiles(ModelAdapter::ClaudeCli).map(
@@ -1766,6 +2043,11 @@ impl HubModelConfiguration {
         &self.compaction_prompt
     }
 
+    /// Returns every required deployment-owned numeric-bound policy.
+    pub const fn numeric_bounds(&self) -> &NumericBoundsConfiguration {
+        &self.numeric_bounds
+    }
+
     /// Returns the maximum assembled source bytes for one conversation import.
     pub const fn conversation_import_max_source_bytes(&self) -> usize {
         self.conversation_import_max_source_bytes
@@ -1814,11 +2096,6 @@ impl HubModelConfiguration {
         self.repository_watch.as_ref()
     }
 
-    /// Returns the deployment override for concurrent scheduler passes.
-    pub const fn scheduler_max_in_flight_passes(&self) -> Option<usize> {
-        self.scheduler_max_in_flight_passes
-    }
-
     /// Resolves one configured alias to the immutable definition frozen at
     /// acceptance time.
     pub fn resolve_alias(&self, alias: ModelAlias) -> Option<FrozenAliasDefinition> {
@@ -1850,6 +2127,7 @@ pub(crate) fn checked_in_example_configuration()
 
 fn parse_repository_watch_configuration(
     item: &Item,
+    numeric_bounds: &NumericBoundsConfiguration,
 ) -> Result<RepositoryWatchConfiguration, HubModelConfigurationError> {
     let table = item
         .as_table()
@@ -1894,7 +2172,15 @@ fn parse_repository_watch_configuration(
     signal_reviewers.sort();
 
     let webhook = parse_repository_watch_webhook_configuration(table.get("webhook"))?;
-    let convergence_sweep = parse_convergence_sweep_configuration(table.get("convergence_sweep"))?;
+    let convergence_sweep = parse_convergence_sweep_configuration(
+        table.get("convergence_sweep"),
+        numeric_bounds
+            .duration("max_convergence_sweep_interval")
+            .flatten(),
+        numeric_bounds
+            .duration("max_convergence_sweep_cool_off")
+            .flatten(),
+    )?;
 
     let repository_tables = table
         .get("repositories")
@@ -2017,7 +2303,11 @@ fn parse_repository_watch_configuration(
         .iter()
         .map(|repository| repository.convergence_pull_requests.len())
         .sum::<usize>();
-    if convergence_target_count > MAX_CONVERGENCE_SWEEP_TARGETS
+    let convergence_target_limit = numeric_bounds
+        .integer("max_convergence_sweep_targets")
+        .flatten()
+        .and_then(|value| usize::try_from(value).ok());
+    if convergence_target_limit.is_some_and(|limit| convergence_target_count > limit)
         || (convergence_target_count == 0) != convergence_sweep.is_none()
     {
         return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
@@ -2033,6 +2323,8 @@ fn parse_repository_watch_configuration(
 
 fn parse_convergence_sweep_configuration(
     item: Option<&Item>,
+    interval_ceiling: Option<Duration>,
+    cool_off_ceiling: Option<Duration>,
 ) -> Result<Option<ConvergenceSweepConfiguration>, HubModelConfigurationError> {
     let Some(item) = item else {
         return Ok(None);
@@ -2044,10 +2336,8 @@ fn parse_convergence_sweep_configuration(
         .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
     let template = SessionTemplateName::try_new(required_string(table, "template")?.to_owned())
         .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
-    let interval =
-        bounded_positive_duration(table, "interval_seconds", MAX_CONVERGENCE_SWEEP_INTERVAL)?;
-    let cool_off =
-        bounded_positive_duration(table, "cool_off_seconds", MAX_CONVERGENCE_SWEEP_COOL_OFF)?;
+    let interval = bounded_positive_duration(table, "interval_seconds", interval_ceiling)?;
+    let cool_off = bounded_positive_duration(table, "cool_off_seconds", cool_off_ceiling)?;
     Ok(Some(ConvergenceSweepConfiguration {
         template,
         interval,
@@ -2058,7 +2348,7 @@ fn parse_convergence_sweep_configuration(
 fn bounded_positive_duration(
     table: &Table,
     field: &str,
-    ceiling: Duration,
+    ceiling: Option<Duration>,
 ) -> Result<Duration, HubModelConfigurationError> {
     table
         .get(field)
@@ -2066,7 +2356,7 @@ fn bounded_positive_duration(
         .and_then(|value| u64::try_from(value).ok())
         .filter(|value| *value > 0)
         .map(Duration::from_secs)
-        .filter(|value| *value <= ceiling)
+        .filter(|value| ceiling.is_none_or(|ceiling| *value <= ceiling))
         .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
 }
 
@@ -2880,26 +3170,6 @@ fn parse_daemon_tool_settings(
     }))
 }
 
-fn parse_scheduler_max_in_flight_passes(
-    item: Option<&Item>,
-) -> Result<Option<usize>, HubModelConfigurationError> {
-    let Some(item) = item else {
-        return Ok(None);
-    };
-    let table = item
-        .as_table()
-        .ok_or(HubModelConfigurationError::InvalidSchedulerConfiguration)?;
-    reject_unknown_fields(table, &["max_in_flight_passes"])
-        .map_err(|_| HubModelConfigurationError::InvalidSchedulerConfiguration)?;
-    let limit = table
-        .get("max_in_flight_passes")
-        .and_then(Item::as_integer)
-        .and_then(|value| usize::try_from(value).ok())
-        .filter(|value| *value <= scheduler_pass_admission_cap())
-        .ok_or(HubModelConfigurationError::InvalidSchedulerConfiguration)?;
-    Ok(Some(limit))
-}
-
 fn parse_git_identity(
     item: Option<&Item>,
 ) -> Result<Option<GitIdentity>, HubModelConfigurationError> {
@@ -3421,6 +3691,16 @@ pub enum HubModelConfigurationError {
     InvalidDocument,
     /// The document version is absent or unsupported.
     UnsupportedVersion,
+    /// One or more required deployment numeric-bound fields were absent.
+    MissingNumericBounds {
+        /// Every absent field, in schema order.
+        fields: Vec<&'static str>,
+    },
+    /// One required deployment numeric bound had the wrong type or spelling.
+    InvalidNumericBound {
+        /// The rejected field.
+        field: &'static str,
+    },
     /// No nonempty model-definition array exists.
     MissingModels,
     /// No nonempty static adapter mapping table exists.
@@ -3604,8 +3884,6 @@ pub enum HubModelConfigurationError {
     InvalidConversationImportLimit,
     /// The optional blob-store registry or its routes were malformed.
     InvalidBlobStorageConfiguration,
-    /// The optional scheduler pass-admission table was malformed or unsafe.
-    InvalidSchedulerConfiguration,
     /// The optional web-fetch table was malformed or named an invalid origin.
     InvalidWebFetchPolicy,
     /// The optional version-one repository-watch section was malformed.
@@ -3653,6 +3931,19 @@ pub enum HubModelConfigurationError {
 
 impl fmt::Display for HubModelConfigurationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Self::MissingNumericBounds { fields } = self {
+            return write!(
+                formatter,
+                "model configuration is missing required numeric bounds: {}",
+                fields.join(", ")
+            );
+        }
+        if let Self::InvalidNumericBound { field } = self {
+            return write!(
+                formatter,
+                "model configuration contains invalid numeric bound `{field}`"
+            );
+        }
         if let Self::InvalidRepositoryWatchRule { rule, reason } = self {
             return write!(
                 formatter,
@@ -3669,6 +3960,12 @@ impl fmt::Display for HubModelConfigurationError {
             Self::Read => "model configuration file could not be read",
             Self::InvalidDocument => "model configuration is not valid TOML",
             Self::UnsupportedVersion => "model configuration version is unsupported",
+            Self::MissingNumericBounds { .. } => {
+                "model configuration is missing required numeric bounds"
+            }
+            Self::InvalidNumericBound { .. } => {
+                "model configuration contains an invalid numeric bound"
+            }
             Self::MissingModels => "model configuration has no model definitions",
             Self::MissingAdapterMappings => "model configuration has no adapter mappings",
             Self::InvalidToolApprovalPostures => {
@@ -3803,9 +4100,6 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidBlobStorageConfiguration => {
                 "model configuration contains invalid blob-storage settings"
-            }
-            Self::InvalidSchedulerConfiguration => {
-                "model configuration contains invalid scheduler settings"
             }
             Self::InvalidWebFetchPolicy => {
                 "model configuration contains an invalid web_fetch egress policy"
@@ -4019,14 +4313,22 @@ mod tests {
         ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES,
         DEFAULT_REPOSITORY_WATCH_WEBHOOK_BIND_ADDRESS, FileCredentialAccess, HubModelConfiguration,
         HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES,
-        MAX_CONVERGENCE_SWEEP_COOL_OFF, MAX_CONVERGENCE_SWEEP_INTERVAL,
         MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, ModelCallInputUsage, UnknownSessionModel,
         absolute_search_entries, credential_bytes, resolved_mcp_bridge_reference,
-        scheduler_pass_admission_cap, validate_alias_count, validate_model_count,
+        validate_alias_count, validate_model_count,
     };
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
     const ANTHROPIC_OVERFLOW_PROFILE: &str = "anthropic-overflow";
+
+    fn example_numeric_duration(field: &'static str) -> Duration {
+        super::checked_in_example_configuration()
+            .expect("checked-in example parses")
+            .numeric_bounds()
+            .duration(field)
+            .flatten()
+            .expect("example field is bounded")
+    }
 
     /// The exact pool block [`CONFIGURATION`] declares, so a test that cares
     /// about pool shape states its own replacement in full.
@@ -4098,6 +4400,70 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
     const WATCH_TEMPLATE: &str = "merge-forward";
     const CONFIGURATION: &str = r#"
 version = 1
+
+[numeric_bounds]
+repository_reconciliation_quantum = 16
+max_concurrent_snapshot_readers = 8
+max_blob_replica_count = 32
+max_session_metadata_tags = 256
+max_session_metadata_attributes = 256
+max_session_metadata_required_tags = 256
+max_system_prompt_utf8_bytes = 1048576
+max_imported_text_preview_utf8_bytes = 256
+max_review_orchestration_concerns = 32
+max_imported_conversation_display_title_scalars = 256
+graceful_shutdown_cleanup_window = "30s"
+model_exchange_timeout = "600s"
+expired_pass_recovery_attempts = 4
+expired_pass_recovery_attempt_bound = "3s"
+expired_pass_recovery_lock_retry_delay = "6s"
+expired_pass_recovery_conservative_retry_delay = "120s"
+convergence_sweep_request_timeout = "30s"
+max_convergence_sweep_connection_pages = 100
+max_concurrent_convergence_sweep_targets = 8
+max_convergence_sweep_request_attempts = 3
+convergence_sweep_request_retry_delay = "250ms"
+convergence_sweep_retry_backoff_base = "60s"
+convergence_sweep_retry_backoff_cap = "900s"
+terminalizations_per_liveness_scan = 64
+turn_liveness_recovery_attempt_bound = "60s"
+automatic_reconciliations_per_liveness_scan = 64
+max_convergence_sweep_targets = 256
+max_convergence_sweep_interval = "300s"
+max_convergence_sweep_cool_off = "1800s"
+automatic_resume_base_backoff = "120s"
+automatic_resume_backoff_cap = "1800s"
+automatic_resume_attempt_budget = 20
+automatic_resume_startup_retry_delay = "1s"
+post_kill_reap_bound = "5s"
+stale_active_turn_bound = "1800s"
+turn_liveness_scan_interval = "60s"
+automatic_reconciliation_base_backoff = "120s"
+automatic_reconciliation_backoff_cap = "1800s"
+automatic_reconciliation_attempt_budget = 5
+terminal_input_channel_capacity = 1
+max_message_utf8_bytes = 1048576
+min_metadata_page_size = 1
+max_metadata_page_size = 100
+max_review_findings_per_run = 32
+max_automatic_tool_rounds_per_turn = 32
+max_required_tags = 256
+reconciliation_sweep_interval = "1s"
+nudge_buffer_capacity = 1024
+scheduler_pass_admission_cap = 16
+scheduler_pass_occupancy_bound = "3600s"
+max_native_message_bytes = 2048
+terminalization_lock_wait = "250ms"
+terminalization_acquire_wait = "250ms"
+terminalization_write_lock_wait = "1s"
+disposable_postgres_state_ceiling_bytes = 536870912
+diagnostic_model_identity_limit = 128
+code_host_request_timeout = "none"
+max_job_log_bytes = "none"
+max_stack_comparisons_in_flight = "none"
+max_code_host_result_text_bytes = "none"
+max_code_host_result_items = "none"
+max_repository_file_content_bytes = "none"
 
 [[credential_profiles]]
 name = "anthropic-primary"
@@ -4200,6 +4566,60 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             "the bound pool name is the one the fixture block declares"
         );
         CONFIGURATION.replace(ANTHROPIC_POOL, pool)
+    }
+
+    #[test]
+    fn configuration_lists_every_missing_required_numeric_bound() {
+        const FIRST_FIELD: &str = "max_session_metadata_tags";
+        const SECOND_FIELD: &str = "max_message_utf8_bytes";
+        let missing = CONFIGURATION
+            .replace("max_session_metadata_tags = 256\n", "")
+            .replace("max_message_utf8_bytes = 1048576\n", "");
+
+        let error = HubModelConfiguration::parse(&missing)
+            .expect_err("a configuration missing required numeric bounds is refused");
+
+        assert_eq!(
+            error,
+            HubModelConfigurationError::MissingNumericBounds {
+                fields: vec![FIRST_FIELD, SECOND_FIELD],
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "model configuration is missing required numeric bounds: {FIRST_FIELD}, {SECOND_FIELD}"
+            )
+        );
+    }
+
+    #[test]
+    fn configuration_admits_none_for_each_numeric_bound_kind() {
+        let unbounded = CONFIGURATION
+            .replace(
+                "max_message_utf8_bytes = 1048576",
+                "max_message_utf8_bytes = \"none\"",
+            )
+            .replace(
+                "turn_liveness_scan_interval = \"60s\"",
+                "turn_liveness_scan_interval = \"none\"",
+            );
+
+        let configuration = HubModelConfiguration::parse(&unbounded)
+            .expect("the exact none spelling is admitted for every bound kind");
+
+        assert_eq!(
+            configuration
+                .numeric_bounds()
+                .integer("max_message_utf8_bytes"),
+            Some(None)
+        );
+        assert_eq!(
+            configuration
+                .numeric_bounds()
+                .duration("turn_liveness_scan_interval"),
+            Some(None)
+        );
     }
 
     const OPENAI_PROFILE: &str = "openai-primary";
@@ -4442,8 +4862,8 @@ cool_off_seconds = {}
                     "repository = \"{PROVIDER_WATCH_REPOSITORY}\"\nconvergence_pull_requests = [{CONVERGENCE_PULL_REQUEST}]"
                 ),
             ),
-            MAX_CONVERGENCE_SWEEP_INTERVAL.as_secs(),
-            MAX_CONVERGENCE_SWEEP_COOL_OFF.as_secs(),
+            example_numeric_duration("max_convergence_sweep_interval").as_secs(),
+            example_numeric_duration("max_convergence_sweep_cool_off").as_secs(),
         )
     }
 
@@ -5128,8 +5548,14 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         );
 
         assert_eq!(policy.template().as_str(), WATCH_TEMPLATE);
-        assert_eq!(policy.interval(), MAX_CONVERGENCE_SWEEP_INTERVAL);
-        assert_eq!(policy.cool_off(), MAX_CONVERGENCE_SWEEP_COOL_OFF);
+        assert_eq!(
+            policy.interval(),
+            example_numeric_duration("max_convergence_sweep_interval")
+        );
+        assert_eq!(
+            policy.cool_off(),
+            example_numeric_duration("max_convergence_sweep_cool_off")
+        );
         assert_eq!(repository.convergence_pull_requests(), [pull_request]);
     }
 
@@ -5175,8 +5601,8 @@ template = "{WATCH_TEMPLATE}"
 interval_seconds = {}
 cool_off_seconds = {}
 "#,
-            MAX_CONVERGENCE_SWEEP_INTERVAL.as_secs(),
-            MAX_CONVERGENCE_SWEEP_COOL_OFF.as_secs(),
+            example_numeric_duration("max_convergence_sweep_interval").as_secs(),
+            example_numeric_duration("max_convergence_sweep_cool_off").as_secs(),
         );
         let configured = configuration_with_convergence_sweep().replace(&policy, "");
 
@@ -5191,11 +5617,11 @@ cool_off_seconds = {}
         let configured = configuration_with_convergence_sweep().replace(
             &format!(
                 "interval_seconds = {}",
-                MAX_CONVERGENCE_SWEEP_INTERVAL.as_secs()
+                example_numeric_duration("max_convergence_sweep_interval").as_secs()
             ),
             &format!(
                 "interval_seconds = {}",
-                MAX_CONVERGENCE_SWEEP_INTERVAL.as_secs() + 1
+                example_numeric_duration("max_convergence_sweep_interval").as_secs() + 1
             ),
         );
 
@@ -5210,11 +5636,11 @@ cool_off_seconds = {}
         let configured = configuration_with_convergence_sweep().replace(
             &format!(
                 "cool_off_seconds = {}",
-                MAX_CONVERGENCE_SWEEP_COOL_OFF.as_secs()
+                example_numeric_duration("max_convergence_sweep_cool_off").as_secs()
             ),
             &format!(
                 "cool_off_seconds = {}",
-                MAX_CONVERGENCE_SWEEP_COOL_OFF.as_secs() + 1
+                example_numeric_duration("max_convergence_sweep_cool_off").as_secs() + 1
             ),
         );
 
@@ -5676,68 +6102,15 @@ cool_off_seconds = {}
     }
 
     #[test]
-    fn scheduler_pass_limit_is_optional() {
-        let configuration = HubModelConfiguration::parse(CONFIGURATION)
-            .expect("the fixture configuration is valid");
-
-        assert_eq!(configuration.scheduler_max_in_flight_passes(), None);
-    }
-
-    #[test]
-    fn scheduler_pass_limit_accepts_a_bounded_override() {
-        let configured_limit = scheduler_pass_admission_cap();
+    fn retired_scheduler_table_is_an_unknown_top_level_field() {
         let configured = CONFIGURATION.replace(
             "[compaction]",
-            &format!("[scheduler]\nmax_in_flight_passes = {configured_limit}\n\n[compaction]"),
-        );
-        let configuration = HubModelConfiguration::parse(&configured)
-            .expect("the bounded scheduler override is valid");
-
-        assert_eq!(
-            configuration.scheduler_max_in_flight_passes(),
-            Some(configured_limit)
-        );
-    }
-
-    #[test]
-    fn scheduler_pass_limit_accepts_zero_as_an_explicit_pause() {
-        let configured_limit = 0;
-        let paused = CONFIGURATION.replace(
-            "[compaction]",
-            &format!("[scheduler]\nmax_in_flight_passes = {configured_limit}\n\n[compaction]"),
-        );
-
-        assert_eq!(
-            HubModelConfiguration::parse(&paused)
-                .expect("the paused scheduler setting is valid")
-                .scheduler_max_in_flight_passes(),
-            Some(configured_limit)
-        );
-    }
-
-    #[test]
-    fn scheduler_pass_limit_rejects_an_excessive_value() {
-        let configured = CONFIGURATION.replace(
-            "[compaction]",
-            "[scheduler]\nmax_in_flight_passes = 17\n\n[compaction]",
+            "[scheduler]\nmax_in_flight_passes = 4\n\n[compaction]",
         );
 
         assert_eq!(
             HubModelConfiguration::parse(&configured).err(),
-            Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
-        );
-    }
-
-    #[test]
-    fn scheduler_pass_limit_rejects_an_unknown_field() {
-        let configured = CONFIGURATION.replace(
-            "[compaction]",
-            "[scheduler]\nmax_in_flight_passes = 4\nextra = 1\n\n[compaction]",
-        );
-
-        assert_eq!(
-            HubModelConfiguration::parse(&configured).err(),
-            Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
+            Some(HubModelConfigurationError::UnknownField)
         );
     }
 
@@ -7651,7 +8024,7 @@ delivery = "ambient""#,
     fn codex_only_configuration_delivers_no_anthropic_file() {
         let executable = tempfile::NamedTempFile::new().expect("a temporary executable is created");
         let working_directory = tempfile::tempdir().expect("a temporary directory is created");
-        let configured = HubModelConfiguration::parse(&format!(
+        let configured = HubModelConfiguration::parse_test_fixture(&format!(
             r#"
 version = 1
 
@@ -7755,7 +8128,7 @@ context_window_tokens = 200000
         );
         assert!(
             configuration
-                .codex_cli_runtime()
+                .codex_cli_runtime(None, None)
                 .expect("the stored profile constructs the runtime")
                 .is_some()
         );
@@ -7959,7 +8332,7 @@ context_window_tokens = 200000
         );
         assert!(
             configuration
-                .claude_cli_runtime()
+                .claude_cli_runtime(None, None, None)
                 .expect("the stored profile constructs the runtime")
                 .is_some()
         );

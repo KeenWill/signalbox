@@ -135,8 +135,9 @@ pub struct CodexCliRuntime {
     executable: PathBuf,
     working_directory: PathBuf,
     credential_reference: signalbox_model_runtime::CredentialReference,
-    exchange_timeout: Duration,
+    exchange_timeout: Option<Duration>,
     interrupt_grace: Duration,
+    post_kill_reap_bound: Option<Duration>,
     event_limit: usize,
     stderr_limit: usize,
     model_capabilities: ModelCapabilityCatalog,
@@ -157,8 +158,9 @@ pub struct CodexCliPreparedRequest<C> {
     resolved_target: String,
     delivery: DeliveryMode,
     translated: crate::translate::TranslatedOperation,
-    exchange_timeout: Duration,
+    exchange_timeout: Option<Duration>,
     interrupt_grace: Duration,
+    post_kill_reap_bound: Option<Duration>,
     event_limit: usize,
     stderr_limit: usize,
     controls: CodexControls,
@@ -259,11 +261,9 @@ impl CodexCliRuntime {
         if !config.working_directory.is_dir() {
             return Err(CodexCliConstructionError::InvalidWorkingDirectory);
         }
-        if config.exchange_timeout.is_zero()
-            || tokio::time::Instant::now()
-                .checked_add(config.exchange_timeout)
-                .is_none()
-        {
+        if config.exchange_timeout.is_some_and(|timeout| {
+            timeout.is_zero() || tokio::time::Instant::now().checked_add(timeout).is_none()
+        }) {
             return Err(CodexCliConstructionError::InvalidExchangeTimeout);
         }
         if config.interrupt_grace.is_zero() {
@@ -278,6 +278,7 @@ impl CodexCliRuntime {
             credential_reference: config.credential_reference,
             exchange_timeout: config.exchange_timeout,
             interrupt_grace: config.interrupt_grace,
+            post_kill_reap_bound: config.post_kill_reap_bound,
             event_limit: config.event_limit,
             stderr_limit: config.stderr_limit,
             model_capabilities: config.model_capabilities,
@@ -424,6 +425,7 @@ impl CodexCliRuntime {
             translated,
             exchange_timeout: self.exchange_timeout,
             interrupt_grace: self.interrupt_grace,
+            post_kill_reap_bound: self.post_kill_reap_bound,
             event_limit: self.event_limit,
             stderr_limit: self.stderr_limit,
             controls,
@@ -600,6 +602,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         decoder,
         exchange_timeout: prepared.exchange_timeout,
         interrupt_grace: prepared.interrupt_grace,
+        post_kill_reap_bound: prepared.post_kill_reap_bound,
         event_limit: prepared.event_limit,
         stderr_limit: prepared.stderr_limit,
         environment: CODEX_ENVIRONMENT,

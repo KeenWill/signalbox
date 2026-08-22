@@ -145,7 +145,7 @@ pub use scheduler::{
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
     InvalidSchedulerPassOccupancyBound, ReconciliationSweepInterval, SchedulerLoop,
     SchedulerLoopExit, SchedulerOccupancyObserver, SchedulerOldestInFlightPass,
-    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, scheduler_pass_admission_cap,
+    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;
 pub use session_metadata::{

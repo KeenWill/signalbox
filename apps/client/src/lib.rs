@@ -35,17 +35,16 @@ use signalbox_process_protocol::{
     DelegationWaitMode, DescendantTerminationScope, ErrorCode, ErrorDetail, FrameEncodeError,
     GoalHistoryEvent, GoalLifecycleState, InputContent, InputDelivery, MAX_BLOB_CHUNK_BYTES,
     MAX_BLOB_READ_BYTES, MAX_CONTENT_FRAGMENT_BYTES, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
-    MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
-    ModelSelection, ModelSettingsOverlay, ProtocolVersion, RejectionDetail, RequestId,
-    ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
-    ReviewOrchestrationConcernInput, ReviewOrchestrationState, ReviewPassLifecycle,
-    ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
-    ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
-    ReviewRunSnapshot, RunnerConnectionHealth, RunnerProjection, RunnerProjectionState,
-    RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
-    SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
-    decode_server_line, encode_client_line, encode_server_line,
+    MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState, ModelSelection, ModelSettingsOverlay,
+    ProtocolVersion, RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent,
+    ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
+    ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput,
+    ReviewOrchestrationState, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
+    ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
+    ReviewRepairTerminalOutcome, ReviewRunSnapshot, RunnerConnectionHealth, RunnerProjection,
+    RunnerProjectionState, RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent,
+    SessionPlacement, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision,
+    TurnState, decode_server_line, encode_client_line, encode_server_line,
 };
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -58,23 +57,82 @@ mod error;
 mod presentation;
 mod transcript;
 
-// numeric-bound: ceiling - protects request memory and durable input storage
-const MAX_INPUT_CONTENT_BYTES: usize = 1_048_576;
-// numeric-bound: ceiling - protects frame memory while decoding review input
+// numeric-bound: guard - one submitted message exhausting wire-frame memory
+const MAX_INPUT_CONTENT_FRAME_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
+// numeric-bound: guard - prevents a system prompt from exceeding one wire frame
+const MAX_SYSTEM_PROMPT_FRAME_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
+// numeric-bound: guard - prevents review input from exceeding one wire frame
 const MAX_REVIEW_JSON_INPUT_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
-// numeric-bound: ceiling - protects frame memory while reading import source
+// numeric-bound: guard - prevents import source from exceeding one wire frame
 const MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 /// Bounded memory used while hashing one client-local blob source.
 const BLOB_HASH_BUFFER_BYTES: usize = 64 * 1024;
-/// Smallest bounded metadata page the process protocol admits.
-// numeric-bound: tunable - controls the smallest requested metadata page
-const MIN_METADATA_PAGE_SIZE: u64 = 1;
-/// Largest bounded metadata page the process protocol admits.
-// numeric-bound: tunable - controls the largest requested metadata page
-const MAX_METADATA_PAGE_SIZE: u64 = 100;
-/// Largest finding inventory one review run can own.
-// numeric-bound: ceiling - protects memory and writes from runaway model findings
-const MAX_REVIEW_FINDINGS_PER_RUN: u64 = 32;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ClientDeploymentLimits {
+    max_message_utf8_bytes: Option<usize>,
+    max_system_prompt_utf8_bytes: Option<usize>,
+    terminal_input_channel_capacity: Option<usize>,
+    min_metadata_page_size: Option<u64>,
+    max_metadata_page_size: Option<u64>,
+    max_review_findings_per_run: Option<u64>,
+}
+
+impl ClientDeploymentLimits {
+    #[cfg(test)]
+    const fn unbounded() -> Self {
+        Self {
+            max_message_utf8_bytes: None,
+            max_system_prompt_utf8_bytes: None,
+            terminal_input_channel_capacity: None,
+            min_metadata_page_size: None,
+            max_metadata_page_size: None,
+            max_review_findings_per_run: None,
+        }
+    }
+}
+
+async fn read_deployment_limits(
+    client: &mut ProcessClient,
+) -> Result<ClientDeploymentLimits, ClientError> {
+    let mut connection = client
+        .request(ClientRequest::ReadDeploymentLimits {})
+        .await?;
+    match connection.message().await? {
+        ServerMessage::DeploymentLimits {
+            max_message_utf8_bytes,
+            max_system_prompt_utf8_bytes,
+            terminal_input_channel_capacity,
+            min_metadata_page_size,
+            max_metadata_page_size,
+            max_review_findings_per_run,
+        } => Ok(ClientDeploymentLimits {
+            max_message_utf8_bytes: optional_usize_limit(max_message_utf8_bytes)?,
+            max_system_prompt_utf8_bytes: optional_usize_limit(max_system_prompt_utf8_bytes)?,
+            terminal_input_channel_capacity: optional_usize_limit(terminal_input_channel_capacity)?,
+            min_metadata_page_size: min_metadata_page_size.map(CanonicalU64::value),
+            max_metadata_page_size: max_metadata_page_size.map(CanonicalU64::value),
+            max_review_findings_per_run: max_review_findings_per_run.map(CanonicalU64::value),
+        }),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail)),
+        _ => Err(ClientError::Protocol(
+            "deployment limits read returned an unexpected response",
+        )),
+    }
+}
+
+fn optional_usize_limit(value: Option<CanonicalU64>) -> Result<Option<usize>, ClientError> {
+    value
+        .map(|value| {
+            usize::try_from(value.value())
+                .map_err(|_| ClientError::Protocol("deployment limit is not representable"))
+        })
+        .transpose()
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -534,7 +592,8 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::ReviewFindingsEnd { .. }
         | ServerMessage::ReviewOrchestrationStarted { .. }
         | ServerMessage::ReviewOrchestrationAdvanced { .. }
-        | ServerMessage::ReviewOrchestration { .. } => DelegationResponse::Unexpected,
+        | ServerMessage::ReviewOrchestration { .. }
+        | ServerMessage::DeploymentLimits { .. } => DelegationResponse::Unexpected,
     }
 }
 
@@ -636,7 +695,8 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::ReviewFindingsEnd { .. }
         | ServerMessage::ReviewOrchestrationStarted { .. }
         | ServerMessage::ReviewOrchestrationAdvanced { .. }
-        | ServerMessage::ReviewOrchestration { .. } => ConversationImportResponse::Unexpected,
+        | ServerMessage::ReviewOrchestration { .. }
+        | ServerMessage::DeploymentLimits { .. } => ConversationImportResponse::Unexpected,
     }
 }
 
@@ -750,7 +810,8 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::ReviewFindingsEnd { .. }
         | ServerMessage::ReviewOrchestrationStarted { .. }
         | ServerMessage::ReviewOrchestrationAdvanced { .. }
-        | ServerMessage::ReviewOrchestration { .. } => BlobUploadResponse::Unexpected,
+        | ServerMessage::ReviewOrchestration { .. }
+        | ServerMessage::DeploymentLimits { .. } => BlobUploadResponse::Unexpected,
     }
 }
 
@@ -836,8 +897,16 @@ pub async fn run_terminal(
         let mut stdout = std::io::stdout().lock();
         let mut stderr = std::io::stderr().lock();
         let mut output = Output::new(&mut stdout, &mut stderr, raw_output);
-        let input = chat::terminal_input()?;
-        chat::run(&mut client, &mut output, session_id, input).await
+        let deployment_limits = read_deployment_limits(&mut client).await?;
+        let input = chat::terminal_input(deployment_limits.terminal_input_channel_capacity)?;
+        chat::run(
+            &mut client,
+            &mut output,
+            session_id,
+            input,
+            deployment_limits,
+        )
+        .await
     }
     .await;
     match result {
@@ -850,6 +919,83 @@ pub async fn run_terminal(
             ExitCode::FAILURE
         }
     }
+}
+
+fn command_uses_deployment_limits(command: &Command) -> bool {
+    match command {
+        Command::Send { .. }
+        | Command::Steer { .. }
+        | Command::Reconcile { .. }
+        | Command::Stop { .. }
+        | Command::Search(_)
+        | Command::Conversations(_)
+        | Command::Create {
+            system_prompt_file: Some(_),
+            ..
+        }
+        | Command::Model {
+            system_prompt: SystemPromptArgument::File(_),
+            ..
+        } => true,
+        Command::Review(command) => matches!(
+            command.as_ref(),
+            ReviewCommand::RecordFinding { .. }
+                | ReviewCommand::RecordFindings { .. }
+                | ReviewCommand::ListFindings { .. }
+        ),
+        _ => false,
+    }
+}
+
+fn validate_message_policy(
+    content: &str,
+    limits: Option<ClientDeploymentLimits>,
+) -> Result<(), ClientError> {
+    let limits = limits.ok_or(ClientError::Protocol("deployment limits were not read"))?;
+    if limits
+        .max_message_utf8_bytes
+        .is_some_and(|maximum| content.len() > maximum)
+    {
+        return Err(ClientError::Input(
+            "standard-input content exceeds the deployment UTF-8 byte limit",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_system_prompt_policy(
+    system_prompt: &SystemPromptText,
+    limits: Option<ClientDeploymentLimits>,
+) -> Result<(), ClientError> {
+    let limits = limits.ok_or(ClientError::Protocol("deployment limits were not read"))?;
+    if limits
+        .max_system_prompt_utf8_bytes
+        .is_some_and(|maximum| system_prompt.as_str().len() > maximum)
+    {
+        return Err(ClientError::Input(
+            "system prompt exceeds the deployment UTF-8 byte limit",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_metadata_page_policy(
+    page_size: CanonicalU64,
+    limits: Option<ClientDeploymentLimits>,
+) -> Result<(), ClientError> {
+    let limits = limits.ok_or(ClientError::Protocol("deployment limits were not read"))?;
+    if limits
+        .min_metadata_page_size
+        .is_some_and(|minimum| page_size.value() < minimum)
+        || limits
+            .max_metadata_page_size
+            .is_some_and(|maximum| page_size.value() > maximum)
+    {
+        return Err(ClientError::Input(
+            "the result limit is outside the deployment page-size range",
+        ));
+    }
+    Ok(())
 }
 
 async fn execute(
@@ -972,6 +1118,24 @@ async fn execute(
     let socket = socket_path(arguments.socket, socket_environment)?;
     let mut client = ProcessClient::new(socket);
     let mut output = Output::new(stdout, stderr, arguments.raw_output);
+    let deployment_limits = if command_uses_deployment_limits(&arguments.command) {
+        Some(read_deployment_limits(&mut client).await?)
+    } else {
+        None
+    };
+    if let Some(input) = input.as_deref() {
+        validate_message_policy(input, deployment_limits)?;
+    }
+    if let Some(system_prompt) = system_prompt_text.as_ref() {
+        validate_system_prompt_policy(system_prompt, deployment_limits)?;
+    }
+    match &arguments.command {
+        Command::Search(page) => validate_metadata_page_policy(page.page_size, deployment_limits)?,
+        Command::Conversations(page) => {
+            validate_metadata_page_policy(page.page_size, deployment_limits)?
+        }
+        _ => {}
+    }
 
     match arguments.command {
         Command::Create {
@@ -1173,7 +1337,9 @@ async fn execute(
             )
             .await
         }
-        Command::Review(command) => review(&mut client, &mut output, *command).await,
+        Command::Review(command) => {
+            review(&mut client, &mut output, *command, deployment_limits).await
+        }
         Command::Stop {
             session_id,
             turn_id,
@@ -1611,7 +1777,7 @@ async fn read_system_prompt_file(path: &Path) -> Result<SystemPromptText, Client
     let file = tokio::fs::File::open(path)
         .await
         .map_err(ClientError::system_prompt_file)?;
-    let read_limit = u64::try_from(MAX_SYSTEM_PROMPT_UTF8_BYTES)
+    let read_limit = u64::try_from(MAX_SYSTEM_PROMPT_FRAME_BYTES)
         .ok()
         .and_then(|bound| bound.checked_add(1))
         .ok_or(ClientError::Protocol("system prompt read bound overflow"))?;
@@ -1626,9 +1792,9 @@ async fn read_system_prompt_file(path: &Path) -> Result<SystemPromptText, Client
             "the system prompt file must not be empty",
         ));
     }
-    if bytes.len() > MAX_SYSTEM_PROMPT_UTF8_BYTES {
+    if bytes.len() > MAX_SYSTEM_PROMPT_FRAME_BYTES {
         return Err(ClientError::Input(
-            "the system prompt exceeds the 1 MiB UTF-8 byte limit",
+            "the system prompt exceeds the wire-frame byte limit",
         ));
     }
     let text = String::from_utf8(bytes)
@@ -1757,16 +1923,16 @@ fn socket_path(
 fn read_input(stdin: &mut dyn Read) -> Result<String, ClientError> {
     let mut bytes = Vec::new();
     stdin
-        .take((MAX_INPUT_CONTENT_BYTES + 1) as u64)
+        .take((MAX_INPUT_CONTENT_FRAME_BYTES + 1) as u64)
         .read_to_end(&mut bytes)?;
     if bytes.is_empty() {
         return Err(ClientError::Input(
             "standard-input content must not be empty",
         ));
     }
-    if bytes.len() > MAX_INPUT_CONTENT_BYTES {
+    if bytes.len() > MAX_INPUT_CONTENT_FRAME_BYTES {
         return Err(ClientError::Input(
-            "standard-input content exceeds the 1 MiB UTF-8 byte limit",
+            "standard-input content exceeds the wire-frame UTF-8 byte guard",
         ));
     }
     let text = String::from_utf8(bytes)
@@ -4849,10 +5015,27 @@ fn placement_display(placement: &SessionPlacement) -> String {
     }
 }
 
+fn validate_review_finding_count(
+    count: usize,
+    limits: Option<ClientDeploymentLimits>,
+) -> Result<(), ClientError> {
+    let limits = limits.ok_or(ClientError::Protocol("deployment limits were not read"))?;
+    if limits
+        .max_review_findings_per_run
+        .is_some_and(|maximum| u64::try_from(count).map_or(true, |count| count > maximum))
+    {
+        return Err(ClientError::Input(
+            "review findings exceed the deployment count limit",
+        ));
+    }
+    Ok(())
+}
+
 async fn review(
     client: &mut ProcessClient,
     output: &mut Output<'_>,
     command: ReviewCommand,
+    deployment_limits: Option<ClientDeploymentLimits>,
 ) -> Result<(), ClientError> {
     match command {
         ReviewCommand::CreateTarget {
@@ -4982,6 +5165,7 @@ async fn review(
             output_frontier_id,
             finding,
         } => {
+            validate_review_finding_count(1, deployment_limits)?;
             let command_id = review_command_identity(output, command_id)?;
             let mut connection = client
                 .mutation_request(ClientRequest::RecordReviewFindings {
@@ -5028,6 +5212,7 @@ async fn review(
         } => {
             let file: ReviewFindingsFile = read_review_json_file(&findings_file).await?;
             let finding_count = file.findings.len();
+            validate_review_finding_count(finding_count, deployment_limits)?;
             let command_id = review_command_identity(output, command_id)?;
             let mut connection = client
                 .mutation_request(ClientRequest::RecordReviewFindings {
@@ -5625,7 +5810,10 @@ async fn review(
                         count = count.checked_add(1).ok_or(ClientError::Protocol(
                             "review finding list count overflowed",
                         ))?;
-                        if count > MAX_REVIEW_FINDINGS_PER_RUN {
+                        if deployment_limits
+                            .and_then(|limits| limits.max_review_findings_per_run)
+                            .is_some_and(|maximum| count > maximum)
+                        {
                             return Err(ClientError::Protocol(
                                 "review finding list exceeded its admitted bound",
                             ));
@@ -5868,8 +6056,8 @@ mod tests {
         ReviewRunSnapshot, ReviewSeverity, ReviewWorkflow, RunnerConnectionHealth,
         RunnerPlacementRevision, RunnerProjection, RunnerProjectionSelector, RunnerProjectionState,
         RunnerSandboxProfile, RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent,
-        SessionPlacement, SettingOverlay, SystemPromptMember, ToolBatchState, ToolDecision,
-        TurnState, decode_client_line, encode_server_line,
+        SessionPlacement, SettingOverlay, SystemPromptMember, SystemPromptText, ToolBatchState,
+        ToolDecision, TurnState, decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -5921,9 +6109,9 @@ mod tests {
     }
 
     use super::{
-        ConversationImportOutcome, ConversationsPageRequest, DelegationRejectionExpectation,
-        DelegationRejectionOperation, GoalHistoryReplay, MAX_CONTENT_FRAGMENT_BYTES,
-        MAX_INPUT_CONTENT_BYTES, MAX_REVIEW_FINDINGS_PER_RUN, MAX_REVIEW_JSON_INPUT_BYTES,
+        ClientDeploymentLimits, ConversationImportOutcome, ConversationsPageRequest,
+        DelegationRejectionExpectation, DelegationRejectionOperation, GoalHistoryReplay,
+        MAX_CONTENT_FRAGMENT_BYTES, MAX_INPUT_CONTENT_FRAME_BYTES, MAX_REVIEW_JSON_INPUT_BYTES,
         MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES, ModelSystemPromptChoice, PreparedBlobSource,
         ProcessClient, ReviewCommand, ReviewConcernsFile, ReviewFindingsFile,
         SessionMetadataPageRequest, SnapshotSelection, SubmitInputReceipt, ThroughPositionArgument,
@@ -5933,16 +6121,18 @@ mod tests {
         hash_blob_source, import_conversation_file, imported, model_call_recovery_transition,
         open_blob_source, open_scanned_import_source, placement_update_receipt_matches,
         placement_update_rejection_matches, queued_turn_recovery, queued_turn_runner_recovery,
-        read_blob_chunk, read_blob_metadata, read_delegation_content_file, read_goal_text_file,
-        read_import_file, read_input, read_review_json_file, read_system_prompt_file,
-        reconcile_turn, replace_session_model, replacement_receipt_settings_match, review,
-        review_concern_state_is_coherent, review_finding_event_status,
-        review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
-        review_pass_completion_is_coherent, review_publication_state_is_coherent,
-        review_repair_state_is_coherent, run, search, selected_turn_recovery_transition,
-        session_recovery_transition, socket_path, source_fits_single_shot_import, stop_turn,
-        submit_input, terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
-        tool_recovery_transition, upload_blob, write_blob_output,
+        read_blob_chunk, read_blob_metadata, read_delegation_content_file, read_deployment_limits,
+        read_goal_text_file, read_import_file, read_input, read_review_json_file,
+        read_system_prompt_file, reconcile_turn, replace_session_model,
+        replacement_receipt_settings_match, review, review_concern_state_is_coherent,
+        review_finding_event_status, review_judgment_effect_state_is_coherent,
+        review_judgment_plan_state_is_coherent, review_pass_completion_is_coherent,
+        review_publication_state_is_coherent, review_repair_state_is_coherent, run, search,
+        selected_turn_recovery_transition, session_recovery_transition, socket_path,
+        source_fits_single_shot_import, stop_turn, submit_input, terminal_event_state,
+        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
+        upload_blob, validate_message_policy, validate_metadata_page_policy,
+        validate_review_finding_count, validate_system_prompt_policy, write_blob_output,
     };
     use crate::{
         child_lifecycle_terminalization, error::ClientError, presentation::Output,
@@ -6285,6 +6475,86 @@ mod tests {
         writer
             .write_all(&encode_server_line(&frame).map_err(io::Error::other)?)
             .await
+    }
+
+    fn deployment_limits_message(limits: ClientDeploymentLimits) -> ServerMessage {
+        ServerMessage::DeploymentLimits {
+            max_message_utf8_bytes: limits.max_message_utf8_bytes.map(|value| {
+                CanonicalU64::new(u64::try_from(value).expect("fixture limit fits u64"))
+            }),
+            max_system_prompt_utf8_bytes: limits.max_system_prompt_utf8_bytes.map(|value| {
+                CanonicalU64::new(u64::try_from(value).expect("fixture limit fits u64"))
+            }),
+            terminal_input_channel_capacity: limits.terminal_input_channel_capacity.map(|value| {
+                CanonicalU64::new(u64::try_from(value).expect("fixture limit fits u64"))
+            }),
+            min_metadata_page_size: limits.min_metadata_page_size.map(CanonicalU64::new),
+            max_metadata_page_size: limits.max_metadata_page_size.map(CanonicalU64::new),
+            max_review_findings_per_run: limits.max_review_findings_per_run.map(CanonicalU64::new),
+        }
+    }
+
+    #[tokio::test]
+    async fn client_learns_the_exact_deployment_limits_over_the_connection()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let expected = ClientDeploymentLimits {
+            max_message_utf8_bytes: Some(7),
+            max_system_prompt_utf8_bytes: None,
+            terminal_input_channel_capacity: Some(3),
+            min_metadata_page_size: Some(2),
+            max_metadata_page_size: None,
+            max_review_findings_per_run: Some(5),
+        };
+        let server = tokio::spawn(async move {
+            accept_request_and_reply(
+                &listener,
+                &ClientRequest::ReadDeploymentLimits {},
+                deployment_limits_message(expected),
+            )
+            .await
+        });
+        let mut client = ProcessClient::new(socket);
+
+        let observed = read_deployment_limits(&mut client).await?;
+
+        assert_eq!(observed, expected);
+        server.await??;
+        Ok(())
+    }
+
+    #[test]
+    fn learned_limits_enforce_finite_policy_and_admit_unbounded_policy() {
+        let finite = ClientDeploymentLimits {
+            max_message_utf8_bytes: Some(3),
+            max_system_prompt_utf8_bytes: Some(3),
+            min_metadata_page_size: Some(2),
+            max_metadata_page_size: Some(4),
+            max_review_findings_per_run: Some(2),
+            ..ClientDeploymentLimits::unbounded()
+        };
+        let system_prompt = SystemPromptText::try_new(String::from("four"))
+            .expect("fixture prompt is structurally valid");
+
+        assert!(validate_message_policy("four", Some(finite)).is_err());
+        assert!(validate_system_prompt_policy(&system_prompt, Some(finite)).is_err());
+        assert!(validate_metadata_page_policy(CanonicalU64::new(1), Some(finite)).is_err());
+        assert!(validate_metadata_page_policy(CanonicalU64::new(5), Some(finite)).is_err());
+        assert!(validate_review_finding_count(3, Some(finite)).is_err());
+        assert!(validate_message_policy("four", Some(ClientDeploymentLimits::unbounded())).is_ok());
+        assert!(
+            validate_metadata_page_policy(
+                CanonicalU64::new(u64::MAX),
+                Some(ClientDeploymentLimits::unbounded()),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_review_finding_count(usize::MAX, Some(ClientDeploymentLimits::unbounded()))
+                .is_ok()
+        );
     }
 
     fn client_arguments(socket: &Path, command: &[&str]) -> Vec<OsString> {
@@ -6750,12 +7020,18 @@ mod tests {
 
     #[test]
     fn oversized_standard_input_is_rejected() {
-        assert!(read_input(&mut Cursor::new(vec![b'a'; MAX_INPUT_CONTENT_BYTES + 1])).is_err());
+        assert!(
+            read_input(&mut Cursor::new(vec![
+                b'a';
+                MAX_INPUT_CONTENT_FRAME_BYTES + 1
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
     fn exact_limit_standard_input_is_accepted() {
-        let exact = vec![b'a'; MAX_INPUT_CONTENT_BYTES];
+        let exact = vec![b'a'; MAX_INPUT_CONTENT_FRAME_BYTES];
         assert_eq!(
             read_input(&mut Cursor::new(exact.clone()))
                 .ok()
@@ -9082,6 +9358,7 @@ mod tests {
                 output_frontier_id,
                 findings_file,
             },
+            Some(ClientDeploymentLimits::unbounded()),
         )
         .await?;
 
@@ -9143,6 +9420,7 @@ mod tests {
                 provider: String::from("example-host"),
                 object_kind: ReviewExternalObjectKind::ReviewComment,
             },
+            None,
         )
         .await?;
 
@@ -9219,6 +9497,7 @@ mod tests {
                 external_object: String::from("provider-object-7"),
                 event_ordinal,
             },
+            None,
         )
         .await?;
 
@@ -9302,6 +9581,7 @@ mod tests {
             &mut client,
             &mut output,
             ReviewCommand::ListFindings { run_id },
+            Some(ClientDeploymentLimits::unbounded()),
         )
         .await
         .expect_err("the mismatched terminal count must reject the list");
@@ -9335,7 +9615,8 @@ mod tests {
                 &ClientRequest::ListReviewFindings { run_id }
             );
             let response =
-                over_bound_review_findings_response(&request, run_id).map_err(io::Error::other)?;
+                over_bound_review_findings_response(&request, run_id, REVIEW_FINDING_LIMIT_FIXTURE)
+                    .map_err(io::Error::other)?;
             writer.write_all(&response).await?;
             Ok::<(), io::Error>(())
         });
@@ -9348,6 +9629,10 @@ mod tests {
             &mut client,
             &mut output,
             ReviewCommand::ListFindings { run_id },
+            Some(ClientDeploymentLimits {
+                max_review_findings_per_run: Some(REVIEW_FINDING_LIMIT_FIXTURE),
+                ..ClientDeploymentLimits::unbounded()
+            }),
         )
         .await
         .expect_err("the over-bound finding inventory must be rejected");
@@ -10455,6 +10740,7 @@ mod tests {
     fn over_bound_review_findings_response(
         request: &ClientFrame,
         run_id: CanonicalUuid,
+        maximum: u64,
     ) -> Result<Vec<u8>, FrameEncodeError> {
         const FIRST_FINDING_IDENTITY: u128 = 10;
 
@@ -10463,7 +10749,7 @@ mod tests {
         };
         let mut response =
             encode_server_line(&frame(ServerMessage::ReviewFindingsStart { run_id })?)?;
-        for offset in 0..=MAX_REVIEW_FINDINGS_PER_RUN {
+        for offset in 0..=maximum {
             let finding_id = CanonicalUuid::from_uuid(Uuid::from_u128(
                 FIRST_FINDING_IDENTITY + u128::from(offset),
             ));
@@ -10494,11 +10780,13 @@ mod tests {
         }
         response.extend_from_slice(&encode_server_line(&frame(
             ServerMessage::ReviewFindingsEnd {
-                finding_count: CanonicalU64::new(MAX_REVIEW_FINDINGS_PER_RUN + 1),
+                finding_count: CanonicalU64::new(maximum + 1),
             },
         )?)?);
         Ok(response)
     }
+
+    const REVIEW_FINDING_LIMIT_FIXTURE: u64 = 3;
 
     fn review_run_snapshot(pass_id: Option<CanonicalUuid>) -> ReviewRunSnapshot {
         ReviewRunSnapshot {

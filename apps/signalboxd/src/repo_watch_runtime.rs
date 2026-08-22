@@ -155,8 +155,6 @@ const WEBHOOK_DRAIN_PAGE_LIMIT: usize = 1;
 // records before returning to the webhook-aware outer loop. The remaining work
 // is durable and re-arms that loop; bounding the phase prevents an event backlog
 // from owning the serialized repository task indefinitely.
-// numeric-bound: ceiling - bounds reconciliation work ahead of webhook wake observation
-const REPOSITORY_RECONCILIATION_QUANTUM: usize = 16;
 // How many times one terminal record may be re-attempted while PostgreSQL keeps
 // losing its commit result. Each attempt is settled by a read, so this bounds a
 // flapping connection rather than a genuinely undecided outcome.
@@ -237,6 +235,7 @@ impl RepositoryWatchRuntime {
         models: HubModelConfiguration,
         credential_pin: signalbox_persistence::SessionCredentialPin,
         eligibility_nudge: InProcessEligibilityNudge,
+        reconciliation_quantum: Option<usize>,
     ) -> Result<Self, RepositoryWatchRuntimeConstructionError> {
         let mut tasks = Vec::with_capacity(configuration.repositories().len());
         let mut webhook_workers = HashMap::new();
@@ -267,6 +266,7 @@ impl RepositoryWatchRuntime {
                     webhook_work,
                     webhook_nudge,
                     payload_purge: payload_purge.clone(),
+                    reconciliation_quantum,
                 },
             )?);
         }
@@ -822,8 +822,11 @@ fn initial_poll_deadline(now: Instant, interval: Duration, durable_cursor_exists
     }
 }
 
-fn repository_reconciliation_quantum_exhausted(processed: usize) -> bool {
-    processed >= REPOSITORY_RECONCILIATION_QUANTUM
+fn repository_reconciliation_quantum_exhausted(
+    processed: usize,
+    reconciliation_quantum: Option<usize>,
+) -> bool {
+    reconciliation_quantum.is_some_and(|quantum| processed >= quantum)
 }
 
 /// Awaits `work`, leaving it cancellable by shutdown.
@@ -1002,6 +1005,7 @@ struct RepositoryWatchTask {
     webhook_shadow_superseded: bool,
     payload_purge: WebhookPayloadPurgeSchedule,
     rules_activated: bool,
+    reconciliation_quantum: Option<usize>,
 }
 
 /// One process-wide schedule for the expired-payload purge.
@@ -1033,6 +1037,7 @@ struct RepositoryWatchTaskContext {
     webhook_work: Option<watch::Receiver<()>>,
     webhook_nudge: Option<Arc<watch::Sender<()>>>,
     payload_purge: WebhookPayloadPurgeSchedule,
+    reconciliation_quantum: Option<usize>,
 }
 
 impl RepositoryWatchTask {
@@ -1051,6 +1056,7 @@ impl RepositoryWatchTask {
             webhook_work,
             webhook_nudge,
             payload_purge,
+            reconciliation_quantum,
         } = context;
         let credential_reference = configuration.credential_reference();
         let credentials = FileCredentialAccess::new_bounded(
@@ -1081,6 +1087,7 @@ impl RepositoryWatchTask {
             webhook_shadow_superseded: false,
             payload_purge,
             rules_activated: false,
+            reconciliation_quantum,
         })
     }
 
@@ -2486,7 +2493,7 @@ impl RepositoryWatchTask {
     }
 
     fn yield_after_reconciliation_quantum(&self, phase: &'static str, processed: usize) -> bool {
-        if !repository_reconciliation_quantum_exhausted(processed) {
+        if !repository_reconciliation_quantum_exhausted(processed, self.reconciliation_quantum) {
             return false;
         }
         self.request_webhook_drain_continuation();
@@ -5417,8 +5424,8 @@ mod tests {
         ListedPullRequest, MAX_CACHED_WIRE_BYTES, MAX_CHECK_SUITES_PER_COMMIT_CHECK_RUN_SEARCH,
         MAX_CONCURRENT_PULL_REQUEST_FETCHES, MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS,
         MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE, PollAttemptWait, PollCache,
-        PullRequestSettlement, PullResponse, REPOSITORY_RECONCILIATION_QUANTUM, ReactionContent,
-        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
+        PullRequestSettlement, PullResponse, ReactionContent, RepoWatchAuthorLogin,
+        RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
         RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
         RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
         RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchChildExit,
@@ -5447,7 +5454,7 @@ mod tests {
     };
     use signalbox_model_runtime::CredentialReference;
     use signalbox_persistence::{
-        disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+        disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
         disposable_test_container_labels, local_test_connection_options, migrate,
         repo_watch::{PostgresRepoWatchStore, RepoWatchCommitRequest, RepoWatchCursorCandidate},
         repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
@@ -5616,7 +5623,7 @@ mod tests {
             .with_user(DATABASE_USER)
             .with_password(DATABASE_PASSWORD)
             .with_cmd(disposable_postgres_server_args())
-            .with_mount(disposable_postgres_state_tmpfs())
+            .with_mount(disposable_postgres_state_tmpfs_from_example()?)
             .with_tag(POSTGRES_IMAGE_TAG)
             .with_labels(disposable_test_container_labels())
             .start()
@@ -5757,6 +5764,7 @@ mod tests {
                 eligibility_nudge,
                 webhook_store: PostgresRepoWatchWebhookStore::new(pool.clone()),
                 webhook_work: None,
+                reconciliation_quantum: None,
                 payload_purge: WebhookPayloadPurgeSchedule::starting_now(),
                 rules_activated: true,
             },
@@ -8924,11 +8932,20 @@ mod tests {
 
     #[test]
     fn reconciliation_yields_at_the_audited_quantum() {
+        let quantum = checked_in_example_configuration()
+            .expect("checked-in example parses")
+            .numeric_bounds()
+            .integer("repository_reconciliation_quantum")
+            .flatten()
+            .and_then(|value| usize::try_from(value).ok())
+            .expect("example reconciliation quantum fits usize");
         assert!(!repository_reconciliation_quantum_exhausted(
-            REPOSITORY_RECONCILIATION_QUANTUM - 1
+            quantum - 1,
+            Some(quantum),
         ));
         assert!(repository_reconciliation_quantum_exhausted(
-            REPOSITORY_RECONCILIATION_QUANTUM
+            quantum,
+            Some(quantum),
         ));
     }
 

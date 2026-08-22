@@ -3,8 +3,6 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use signalbox_model_runtime::DEFAULT_MODEL_EXCHANGE_TIMEOUT;
-
 /// Configuration for [`crate::CodexCliRuntime`].
 ///
 /// It carries paths, bounds, and a non-secret credential reference only. The
@@ -22,10 +20,13 @@ pub struct CodexCliConfig {
     /// Codex login. Operations prepared by this runtime must carry this exact
     /// reference.
     pub credential_reference: signalbox_model_runtime::CredentialReference,
-    /// Positive whole-process timeout representable by the runtime clock.
-    pub exchange_timeout: Duration,
+    /// Optional positive whole-process timeout representable by the runtime clock.
+    pub exchange_timeout: Option<Duration>,
     /// Grace after a cancellation interrupt before force-killing the process.
     pub interrupt_grace: Duration,
+    /// Maximum post-kill wait, or unbounded when explicitly configured as
+    /// `none`.
+    pub post_kill_reap_bound: Option<Duration>,
     /// Maximum bytes admitted for one JSONL stdout event.
     pub event_limit: usize,
     /// Maximum stderr bytes retained as native failure evidence.
@@ -33,19 +34,21 @@ pub struct CodexCliConfig {
 }
 
 impl CodexCliConfig {
-    /// Builds configuration with conservative process and evidence bounds.
+    /// Builds configuration with the caller-supplied process-reap policy.
     pub fn new(
         executable: impl Into<PathBuf>,
         working_directory: impl Into<PathBuf>,
         credential_reference: signalbox_model_runtime::CredentialReference,
+        post_kill_reap_bound: Option<Duration>,
     ) -> Self {
         Self {
             model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog::empty(),
             executable: executable.into(),
             working_directory: working_directory.into(),
             credential_reference,
-            exchange_timeout: DEFAULT_MODEL_EXCHANGE_TIMEOUT,
+            exchange_timeout: None,
             interrupt_grace: Duration::from_secs(2),
+            post_kill_reap_bound,
             event_limit: 8 * 1024 * 1024,
             stderr_limit: 64 * 1024,
         }

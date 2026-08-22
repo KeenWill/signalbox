@@ -2,8 +2,6 @@
 
 use std::time::Duration;
 
-use signalbox_model_runtime::DEFAULT_MODEL_EXCHANGE_TIMEOUT;
-
 /// Configuration for [`crate::AnthropicRuntime`].
 ///
 /// Carries no credential: the operation pins a non-secret
@@ -25,34 +23,31 @@ pub struct AnthropicConfig {
     /// timeout fires before any request byte is written, so it classifies as
     /// proven-unsent.
     pub connect_timeout: Option<Duration>,
-    /// Positive whole-exchange timeout. It covers the full exchange
+    /// Optional positive whole-exchange timeout. It covers the full exchange
     /// including body or stream delivery; firing after send is boundary-loss
     /// evidence under the timeout rule in `docs/spec/runtime-substrate.md`.
-    pub exchange_timeout: Duration,
+    pub exchange_timeout: Option<Duration>,
     /// Positive upper bound on one SSE record's size; zero is rejected at
     /// construction and larger records are stream-protocol-violation
     /// evidence.
     pub sse_record_limit: usize,
+    /// Maximum retained provider-native diagnostic message bytes, or
+    /// unbounded when explicitly configured as `none`.
+    pub native_message_limit: Option<usize>,
 }
 
 impl AnthropicConfig {
-    /// The documented defaults: public API base URL, version `2023-06-01`,
-    /// no connect timeout, 10-minute exchange timeout, 8 MiB SSE record
-    /// limit.
-    pub fn new() -> Self {
+    /// Builds the baseline provider configuration with the caller-supplied
+    /// native-message retention policy.
+    pub fn new(native_message_limit: Option<usize>) -> Self {
         Self {
             model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog::empty(),
             base_url: "https://api.anthropic.com".to_string(),
             anthropic_version: "2023-06-01".to_string(),
             connect_timeout: None,
-            exchange_timeout: DEFAULT_MODEL_EXCHANGE_TIMEOUT,
+            exchange_timeout: None,
             sse_record_limit: 8 * 1024 * 1024,
+            native_message_limit,
         }
-    }
-}
-
-impl Default for AnthropicConfig {
-    fn default() -> Self {
-        Self::new()
     }
 }

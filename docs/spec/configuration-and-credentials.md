@@ -11,6 +11,9 @@ against this PR (`agent/web-session-timeline`).
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
 
+The required numeric-bound configuration grammar and scheduler admission policy
+are verified against this PR (`agent/bounds-required-config-protocol`).
+
 The delegated tool-approval posture, judge selection, and daemon composition are
 verified against the implementing stack through this PR
 (`agent/approval-judge-daemon`). The posture values `unsandboxed_exec` accepts,
@@ -19,9 +22,6 @@ and which of them changes its resolved approval, are re-verified against this PR
 
 The daemon-local Git and execution-tool dependencies are verified against this
 stack through this PR (`agent/daemon-exec-tools`).
-
-The scheduler pass-admission override is verified against this PR
-(`agent/scheduler-pass-pause`).
 
 The derivation of each session's workspace root from the configured root is
 verified against this PR (`agent/per-session-workspaces`).
@@ -582,6 +582,14 @@ fail-closed:
   this branch installs the grammar in the parser and updates that file in the
   same change, so it declares `adapter` and `delivery` on every profile and maps
   each family through a `[[credential_pools]]` entry.
+- The `[numeric_bounds]` table is required and contains every deployment-owned
+  numeric policy listed in `config/signalboxd.example.toml`. Integer policies
+  use nonnegative TOML integers and duration policies use an unsigned integer
+  followed by `ms` or `s`. Every field also accepts the single exact string
+  `"none"` for an unbounded deployment policy. Missing fields are one typed
+  startup failure whose sanitized message lists every absent field in schema
+  order; mistyped values, alternate spellings of `"none"`, and unknown fields
+  fail startup. The loader supplies no default for any member of this table.
 - At least one `[[models]]` entry is required: an absent, mistyped, or empty
   models array is rejected (`MissingModels`), so a document containing only
   `version = 1` fails startup.
@@ -626,15 +634,13 @@ fail-closed:
 - Parse errors are typed, sanitized values; no file content appears in error
   text. (signalboxd erases the type before logging, as described above.)
 
-The optional `[scheduler]` table has exactly one `max_in_flight_passes` integer
-from 0 through 16. It replaces the scheduler's fixed 16-pass baseline for this
-daemon process. Omission keeps that baseline. A positive limit bounds concurrent
-authoritative per-session passes, not the durable queue: excess eligible
-sessions remain recorded and are admitted as passes finish. Zero pauses
+The required `numeric_bounds.scheduler_pass_admission_cap` policy bounds
+concurrent authoritative per-session passes, not the durable queue: excess
+eligible sessions remain recorded and are admitted as passes finish. Zero pauses
 authoritative session execution while the scheduler task and the daemon's
-ingestion and process services remain live; durable queued work is unchanged. A
-value above 16, a mistyped value, or an unknown field fails startup as invalid
-scheduler settings.
+ingestion and process services remain live; `"none"` admits every currently
+eligible session. The retired optional `[scheduler]` table is an unknown root
+field.
 
 The optional `[model_settings]` table supplies the deployment-global settings
 overlay. Each `[[model_settings_profiles]]` entry gives an exact unique `name`

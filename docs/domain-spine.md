@@ -1869,14 +1869,12 @@ impl SessionConfigurationDefaultsVersion {
 
 pub struct SessionSystemPrompt(/* private String */);
 impl SessionSystemPrompt {
-    pub const MAX_UTF8_BYTES: usize;  // 1_048_576
     pub fn try_new(value: String) -> Result<Self, SessionSystemPromptError>;
     // accessors: as_str(), into_string()
 }
 
 pub enum SessionSystemPromptFailure {
     Empty,
-    TooLarge { bytes: usize },
     ContainsNull,
 }
 
@@ -5579,14 +5577,20 @@ pub struct SessionMetadataContent { /* private */ }
 impl SessionMetadataContent {
     pub const MAX_TOTAL_UTF8_BYTES: usize;
     pub const MAX_INDEXED_UTF8_BYTES: usize;
-    pub const MAX_TAGS: usize;
-    pub const MAX_ATTRIBUTES: usize;
     pub fn empty() -> Self;
     pub fn try_new(
         title: Option<String>,
         tags: Vec<String>,
         attributes: Vec<(String, String)>,
         archived: bool,
+    ) -> Result<Self, SessionMetadataContentError>;
+    pub fn try_new_with_count_limits(
+        title: Option<String>,
+        tags: Vec<String>,
+        attributes: Vec<(String, String)>,
+        archived: bool,
+        max_tags: Option<usize>,
+        max_attributes: Option<usize>,
     ) -> Result<Self, SessionMetadataContentError>;
     pub fn title(&self) -> Option<&str>;
     pub fn tags(&self) -> impl ExactSizeIterator<Item = &str>;
@@ -6314,13 +6318,22 @@ impl ConversationListCursor {
 
 pub struct ConversationListQuery { /* private */ }
 impl ConversationListQuery {
-    pub fn default_page() -> Self;
+    pub fn default_page(page_size: u64) -> Self;
     pub fn try_new(
         title_contains: Option<String>,
         origin: ConversationOriginFilter,
         include_archived: bool,
         page_size: u64,
         after: Option<ConversationListCursor>,
+    ) -> Result<Self, ConversationListQueryError>;
+    pub fn try_new_with_page_limits(
+        title_contains: Option<String>,
+        origin: ConversationOriginFilter,
+        include_archived: bool,
+        page_size: u64,
+        after: Option<ConversationListCursor>,
+        minimum_page_size: Option<u64>,
+        maximum_page_size: Option<u64>,
     ) -> Result<Self, ConversationListQueryError>;
     // accessors: title_contains(), origin(), include_archived(), page_size(),
     // after()
@@ -6909,6 +6922,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         observation: Observation,
         provider: Provider,
         gate: Gate,
+        max_automatic_tool_rounds_per_turn: Option<usize>,
     ) -> Self;
     pub fn with_tool_catalog(self, catalog: impl ToolCatalog + 'static) -> Self;
     pub fn from_parts(
@@ -6921,6 +6935,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         gate: Gate,
         catalog: Arc<dyn ToolCatalog>,
         retained_state: Option<RetainedModelCallExecutionState>,
+        max_automatic_tool_rounds_per_turn: Option<usize>,
     ) -> Self;
     pub fn into_parts(
         self,
@@ -6934,6 +6949,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         Gate,
         Arc<dyn ToolCatalog>,
         Option<RetainedModelCallExecutionState>,
+        Option<usize>,
     );
     pub const fn retained_state(&self) -> Option<&RetainedModelCallExecutionState>;
     pub fn retained_observation(&self) -> Option<&CorrelatedModelCallTerminalObservation>;
@@ -8431,14 +8447,31 @@ impl<Reader: SessionMetadataReader> LoadSessionMetadataService<Reader> {
 
 pub struct SessionMetadataListQuery { /* private */ }
 impl SessionMetadataListQuery {
-    pub const MAX_REQUIRED_TAGS: usize;
-    pub fn default_page() -> Self;
+    pub fn default_page(page_size: u64) -> Self;
     pub fn try_new(
         required_tags: Vec<String>,
         title_contains: Option<String>,
         include_archived: bool,
         page_size: u64,
         after_session: Option<SessionId>,
+    ) -> Result<Self, SessionMetadataListQueryError>;
+    pub fn try_new_with_required_tag_limit(
+        required_tags: Vec<String>,
+        title_contains: Option<String>,
+        include_archived: bool,
+        page_size: u64,
+        after_session: Option<SessionId>,
+        max_required_tags: Option<usize>,
+    ) -> Result<Self, SessionMetadataListQueryError>;
+    pub fn try_new_with_limits(
+        required_tags: Vec<String>,
+        title_contains: Option<String>,
+        include_archived: bool,
+        page_size: u64,
+        after_session: Option<SessionId>,
+        max_required_tags: Option<usize>,
+        minimum_page_size: Option<u64>,
+        maximum_page_size: Option<u64>,
     ) -> Result<Self, SessionMetadataListQueryError>;
     pub fn required_tags(&self) -> impl ExactSizeIterator<Item = &str>;
     // accessors: title_contains(), include_archived(), page_size(), after_session()
@@ -8586,11 +8619,8 @@ impl<
 ## application: scheduler
 
 ```rust
-pub const fn scheduler_pass_admission_cap() -> usize;
-
 pub struct ReconciliationSweepInterval(/* private */);
 impl ReconciliationSweepInterval {
-    pub const fn baseline() -> Self;
     pub fn try_new(
         interval: Duration,
     ) -> Result<Self, InvalidReconciliationSweepInterval>;
@@ -8687,8 +8717,8 @@ impl<Sweep: EligibilitySweep> InProcessEligibilityWorkSource<Sweep> {
     ) -> (InProcessEligibilityNudge, Self);
     pub fn with_options(
         sweep: Sweep,
-        sweep_interval: ReconciliationSweepInterval,
-        nudge_buffer_capacity: NonZeroUsize,
+        sweep_interval: Option<ReconciliationSweepInterval>,
+        nudge_buffer_capacity: Option<NonZeroUsize>,
     ) -> (InProcessEligibilityNudge, Self);
 }
 
@@ -8698,9 +8728,9 @@ pub enum SchedulerLoopExit {
 
 pub struct SchedulerPassOccupancyBound(/* private */);
 impl SchedulerPassOccupancyBound {
-    pub const fn hard_ceiling() -> Self;
-    pub fn try_lowered(bound: Duration) -> Result<Self, InvalidSchedulerPassOccupancyBound>;
-    pub const fn get(self) -> Duration;
+    pub const fn unbounded() -> Self;
+    pub fn try_new(bound: Duration) -> Result<Self, InvalidSchedulerPassOccupancyBound>;
+    pub const fn get(self) -> Option<Duration>;
 }
 pub struct InvalidSchedulerPassOccupancyBound;
 // impl Display + std::error::Error
@@ -8832,12 +8862,18 @@ pub enum SubmitInputRequestError {
 
 pub struct SubmitInputRequest { /* private */ }
 impl SubmitInputRequest {
-    pub const MAX_CONTENT_UTF8_BYTES: usize; // 1_048_576
     pub fn try_new(
         command_id: DurableCommandId,
         session: SessionId,
         content: UserContent,
         delivery: DeliveryRequest,
+    ) -> Result<Self, SubmitInputRequestError>;
+    pub fn try_new_with_content_limit(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        delivery: DeliveryRequest,
+        max_content_utf8_bytes: Option<usize>,
     ) -> Result<Self, SubmitInputRequestError>;
     // accessors: command_id(), session(), content(), delivery()
 }
@@ -9143,9 +9179,9 @@ impl AutomaticReconciliationAttempt {
     pub const fn first() -> Self;
     pub const fn try_from_u32(value: u32) -> Option<Self>;
     pub const fn get(self) -> u32;
-    pub fn retry_backoff(self) -> Duration;
+    pub fn retry_backoff(self, base: Duration, cap: Option<Duration>) -> Duration;
     pub const fn next(self) -> Option<Self>;
-    pub const fn budget() -> u32;
+    pub const fn is_within_budget(self, budget: Option<u32>) -> bool;
 }
 
 pub enum AutomaticReconciliationOperation {
@@ -9199,22 +9235,21 @@ pub enum AutomaticReconciliationOutcome {
 
 pub struct StaleActiveTurnBound(/* private */);
 impl StaleActiveTurnBound {
-    pub const fn hard_ceiling() -> Self;
-    pub fn try_lowered(bound: Duration) -> Result<Self, TurnLivenessBoundError>;
+    pub fn try_new(bound: Duration) -> Result<Self, TurnLivenessBoundError>;
     pub const fn as_secs(self) -> u64;
     pub const fn get(self) -> Duration;
 }
 
 pub struct TurnLivenessScanInterval(/* private */);
 impl TurnLivenessScanInterval {
-    pub const fn baseline() -> Self;
+    pub fn try_new(interval: Duration) -> Result<Self, TurnLivenessBoundError>;
     pub const fn get(self) -> Duration;
 }
 
 pub enum TurnLivenessBoundError {
     Zero,
-    AboveCeiling,
     Subsecond,
+    TimerRange,
 }
 // impl Display + std::error::Error
 
@@ -11377,7 +11412,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
 | application: session_metadata                      | 12 (incl. 4 traits)              |
-| application: scheduler                             | 20 (+1 free fn) (incl. 7 traits) |
+| application: scheduler                             | 20 (incl. 7 traits)              |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)               |
 | application: startup_scan                          | 7 (incl. 2 traits)               |
 | application: submit_input                          | 7 (incl. 2 traits)               |
@@ -11385,4 +11420,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
 | application: turn_liveness                         | 14                               |
-| **signalbox-application total**                    | **325 (+10 free fn)**            |
+| **signalbox-application total**                    | **325 (+9 free fn)**             |

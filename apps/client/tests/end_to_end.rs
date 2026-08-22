@@ -4,6 +4,8 @@
     reason = "the standalone integration test uses assertion panics and explicit fixture expectations"
 )]
 
+mod support;
+
 use std::{
     env,
     error::Error,
@@ -39,7 +41,7 @@ use signalbox_model_runtime::{
 };
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
     session::SessionRepository, start_eligible_turn::StartEligibleTurnRepository,
@@ -123,7 +125,7 @@ async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -298,7 +300,7 @@ impl MetadataSearchRuntime {
             pool.clone(),
             eligibility_nudge,
             InProcessToolDispatchGate::default(),
-            HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+            support::parse_model_configuration(IMPORT_MODEL_CONFIGURATION)?,
         );
         let (shutdown, shutdown_receiver) = watch::channel(false);
         let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
@@ -436,7 +438,7 @@ async fn s35_inv047_terminal_template_create_is_copy_on_create_across_daemon_rel
     let (container, pool) = postgres().await?;
     let deployment = tempfile::tempdir()?;
     let catalog_path = deployment.path().join("session-templates.toml");
-    let models = HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?;
+    let models = support::parse_model_configuration(IMPORT_MODEL_CONFIGURATION)?;
     let original_catalog = format!(
         r#"
 version = 1
@@ -1071,7 +1073,7 @@ async fn terminal_client_imports_one_file_and_reports_exact_reimport() -> Result
         pool.clone(),
         eligibility_nudge,
         InProcessToolDispatchGate::default(),
-        HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+        support::parse_model_configuration(IMPORT_MODEL_CONFIGURATION)?,
     );
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
@@ -1178,7 +1180,7 @@ async fn s28_terminal_client_completes_an_offline_imported_inspection() -> Resul
         pool.clone(),
         eligibility_nudge,
         InProcessToolDispatchGate::default(),
-        HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+        support::parse_model_configuration(IMPORT_MODEL_CONFIGURATION)?,
     );
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
@@ -1255,7 +1257,7 @@ async fn s28_terminal_client_completes_an_offline_latest_position_continuation()
         pool.clone(),
         eligibility_nudge,
         InProcessToolDispatchGate::default(),
-        HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+        support::parse_model_configuration(IMPORT_MODEL_CONFIGURATION)?,
     );
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
@@ -1396,7 +1398,7 @@ async fn s28_inv038_terminal_client_scan_selects_recursive_files_in_sorted_path_
         pool.clone(),
         eligibility_nudge,
         InProcessToolDispatchGate::default(),
-        HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+        support::parse_model_configuration(IMPORT_MODEL_CONFIGURATION)?,
     );
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
@@ -1513,7 +1515,7 @@ async fn s28_inv038_terminal_client_scan_replays_as_already_imported() -> Result
         pool.clone(),
         eligibility_nudge,
         InProcessToolDispatchGate::default(),
-        HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+        support::parse_model_configuration(IMPORT_MODEL_CONFIGURATION)?,
     );
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
@@ -1597,7 +1599,7 @@ async fn s33_inv008_inv046_terminal_client_installs_a_forward_only_model_default
         pool.clone(),
         eligibility_nudge,
         InProcessToolDispatchGate::default(),
-        HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+        support::parse_model_configuration(IMPORT_MODEL_CONFIGURATION)?,
     );
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));
@@ -1718,7 +1720,7 @@ async fn s28_inv038_inv014_terminal_client_completes_an_offline_imported_continu
     let target_uuid = Uuid::from_u128(0x9202);
     let selection = DirectModelSelection::from_uuid(selection_uuid);
     let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(target_uuid));
-    let model_configuration = HubModelConfiguration::parse(&format!(
+    let model_configuration = support::parse_model_configuration(&format!(
         r#"
 version = 1
 
@@ -1775,7 +1777,7 @@ context_window_tokens = 200000
             usage: TokenUsage::unreported(),
         },
     )));
-    let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models, None);
 
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
@@ -1796,6 +1798,7 @@ context_window_tokens = 200000
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -1957,7 +1960,7 @@ async fn terminal_client_completes_an_offline_scripted_conversation() -> Result<
     let target_uuid = Uuid::from_u128(0x9102);
     let selection = DirectModelSelection::from_uuid(selection_uuid);
     let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(target_uuid));
-    let model_configuration = HubModelConfiguration::parse(&format!(
+    let model_configuration = support::parse_model_configuration(&format!(
         r#"
 version = 1
 
@@ -2027,7 +2030,7 @@ context_window_tokens = 200000
             usage: TokenUsage::unreported(),
         })),
     ]);
-    let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models, None);
 
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
@@ -2048,6 +2051,7 @@ context_window_tokens = 200000
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2206,7 +2210,7 @@ async fn terminal_client_drives_review_target_to_finding() -> Result<(), Box<dyn
     let selection = DirectModelSelection::from_uuid(selection_uuid);
     let model_target =
         ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(model_target_uuid));
-    let model_configuration = HubModelConfiguration::parse(&format!(
+    let model_configuration = support::parse_model_configuration(&format!(
         r#"
 version = 1
 
@@ -2267,7 +2271,7 @@ context_window_tokens = 200000
             usage: TokenUsage::unreported(),
         },
     )));
-    let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models, None);
 
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
@@ -2434,6 +2438,7 @@ context_window_tokens = 200000
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     execution.execute(activated).await?;
     assert!(!fatal_execution.is_triggered());
@@ -2711,7 +2716,7 @@ async fn terminal_client_approval_from_a_second_client_completes_a_waiting_send(
     let target_uuid = Uuid::from_u128(0x9302);
     let selection = DirectModelSelection::from_uuid(selection_uuid);
     let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(target_uuid));
-    let model_configuration = HubModelConfiguration::parse(&format!(
+    let model_configuration = support::parse_model_configuration(&format!(
         r#"
 version = 1
 
@@ -2780,7 +2785,7 @@ context_window_tokens = 200000
             usage: TokenUsage::unreported(),
         })),
     ]);
-    let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models, None);
     let tool_catalog = CompiledToolCatalog::try_new([CompiledTool::new(
         ToolDefinition::new(
             ToolName::try_new(String::from("confirmed_probe"))
@@ -2817,6 +2822,7 @@ context_window_tokens = 200000
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         )
         .with_tool_loop(tool_dispatch_gate, tool_catalog, CompletingFixtureExecutor),
     );
@@ -2954,9 +2960,9 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
             .map(|(reference, path)| (CredentialReference::new(reference), path.to_path_buf())),
     );
     let credential_reference = ModelCallCredentialReference::new(credential_profile);
-    let anthropic = AnthropicRuntime::new(AnthropicConfig::new(), credential_access)?;
+    let anthropic = AnthropicRuntime::new(AnthropicConfig::new(None), credential_access)?;
     let provider =
-        RuntimeModelCallProvider::new(anthropic, model_configuration.runtime_model_catalog());
+        RuntimeModelCallProvider::new(anthropic, model_configuration.runtime_model_catalog(), None);
     let targets = model_configuration.target_catalog();
     // Captured before the configuration moves into the process runtime.
     // Production composition attaches this catalog so every call resolves the
@@ -2984,6 +2990,7 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
                 .with_session_credentials(credential_families),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -3073,7 +3080,7 @@ async fn s34_inv046_terminal_client_carries_the_session_system_prompt() -> Resul
         pool.clone(),
         eligibility_nudge,
         InProcessToolDispatchGate::default(),
-        HubModelConfiguration::parse(IMPORT_MODEL_CONFIGURATION)?,
+        support::parse_model_configuration(IMPORT_MODEL_CONFIGURATION)?,
     );
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let process_task = tokio::spawn(process_runtime.run(shutdown_receiver));

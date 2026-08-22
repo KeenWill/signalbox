@@ -1,6 +1,6 @@
 //! Model call execution transactions, startup scan classification, and steering reclassification after restart.
 
-use std::{collections::HashMap, num::NonZeroU32};
+use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
 use crate::*;
 
@@ -1188,6 +1188,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
             },
         )]),
         InProcessAttemptDispatchGate::default(),
+        None,
     );
 
     assert_eq!(
@@ -1276,7 +1277,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
             value: assistant_text,
         }
     );
-    let (_, _, _, _, _, provider, _, _, _) = service.into_parts();
+    let (_, _, _, _, _, provider, _, _, _, _) = service.into_parts();
     assert_eq!(provider.capability_preparation_count(), 1);
     assert_eq!(provider.interaction_count(), 1);
     let messages = provider
@@ -1744,7 +1745,11 @@ async fn s04_automatic_reconciliation_records_the_operator_transition() -> Resul
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xC100).await?;
-    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone()).with_policy(
+        Some(5),
+        Some(Duration::ZERO),
+        Some(Duration::ZERO),
+    );
     let steering = AcceptedInputId::from_uuid(Uuid::from_u128(0xC300));
     let steering_outcome = SubmitInputRepository::new(pool.clone())
         .handle(
@@ -2017,7 +2022,11 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xD100;
     let parked = park_restart_ambiguity(&pool, seed).await?;
-    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone()).with_policy(
+        Some(5),
+        Some(Duration::ZERO),
+        Some(Duration::ZERO),
+    );
     spend_automatic_reconciliation_budget(&repository, &pool).await?;
 
     let exhaustion = repository

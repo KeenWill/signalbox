@@ -35,7 +35,7 @@ use crate::{
 /// attempt deadline while earlier session-locked transactions run. The daemon
 /// still drains a bounded multi-operation scan by returning here after each
 /// completed attempt and claiming the next one just in time.
-// numeric-bound: ceiling - prevents durable attempt deadlines expiring before work starts
+// numeric-bound: guard - prevents a durable claim deadline from expiring before work starts
 const CLAIM_WINDOW: i64 = 1;
 
 fn decode_operation(
@@ -191,24 +191,51 @@ impl From<sqlx::Error> for AutomaticReconciliationRepositoryError {
 #[derive(Clone, Debug)]
 pub struct PostgresAutomaticReconciliationRepository {
     pool: PgPool,
+    attempt_budget: Option<u32>,
+    retry_backoff_base: Option<Duration>,
+    retry_backoff_cap: Option<Duration>,
 }
 
 impl PostgresAutomaticReconciliationRepository {
     /// Uses the shared daemon pool.
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            attempt_budget: None,
+            retry_backoff_base: None,
+            retry_backoff_cap: None,
+        }
     }
 
-    /// Discovers exact ambiguity waits and claims one bounded due window.
+    /// Applies the deployment's attempt and retry-timing policies.
+    pub const fn with_policy(
+        mut self,
+        attempt_budget: Option<u32>,
+        retry_backoff_base: Option<Duration>,
+        retry_backoff_cap: Option<Duration>,
+    ) -> Self {
+        self.attempt_budget = attempt_budget;
+        self.retry_backoff_base = retry_backoff_base;
+        self.retry_backoff_cap = retry_backoff_cap;
+        self
+    }
+
+    /// Discovers exact ambiguity waits and claims one due window under the
+    /// configured optional transaction bound.
     pub async fn claim_due(
         &self,
-        transaction_bound: Duration,
+        transaction_bound: impl Into<Option<Duration>>,
     ) -> Result<AutomaticReconciliationBatch, AutomaticReconciliationRepositoryError> {
-        let mut transaction = self.begin_bounded(transaction_bound).await?;
+        let mut transaction = self.begin_bounded(transaction_bound.into()).await?;
         discover_recoveries(&mut transaction).await?;
-        settle_abandoned_attempts(&mut transaction).await?;
+        let attempt_budget = self
+            .attempt_budget
+            .map(i32::try_from)
+            .transpose()
+            .map_err(|_| AutomaticReconciliationRepositoryError::Corruption("attempt budget"))?;
+        settle_abandoned_attempts(&mut transaction, attempt_budget).await?;
         mark_superseded_recoveries(&mut transaction).await?;
-        let exhausted_rows = mark_exhausted_recoveries(&mut transaction).await?;
+        let exhausted_rows = mark_exhausted_recoveries(&mut transaction, attempt_budget).await?;
         let rows = sqlx::query(crate::lock_inventory::AUTOMATIC_RECONCILIATION_CLAIM)
             .bind(CLAIM_WINDOW)
             .fetch_all(&mut *transaction)
@@ -256,9 +283,9 @@ impl PostgresAutomaticReconciliationRepository {
     pub async fn reconcile(
         &self,
         claimed: ClaimedAutomaticReconciliation,
-        transaction_bound: Duration,
+        transaction_bound: impl Into<Option<Duration>>,
     ) -> Result<AutomaticReconciliationOutcome, AutomaticReconciliationRepositoryError> {
-        let mut transaction = self.begin_bounded(transaction_bound).await?;
+        let mut transaction = self.begin_bounded(transaction_bound.into()).await?;
         sqlx::query(crate::lock_inventory::STARTUP_RECOVERY)
             .bind(session_id_to_uuid(claimed.session()))
             .fetch_optional(&mut *transaction)
@@ -418,9 +445,9 @@ impl PostgresAutomaticReconciliationRepository {
         &self,
         claimed: ClaimedAutomaticReconciliation,
         failure: AutomaticReconciliationFailureKind,
-        transaction_bound: Duration,
+        transaction_bound: impl Into<Option<Duration>>,
     ) -> Result<(), AutomaticReconciliationRepositoryError> {
-        let mut transaction = self.begin_bounded(transaction_bound).await?;
+        let mut transaction = self.begin_bounded(transaction_bound.into()).await?;
         let rows = sqlx::query(
             "UPDATE automatic_reconciliation_attempt
                 SET outcome_kind = $3, finished_at = statement_timestamp()
@@ -433,14 +460,29 @@ impl PostgresAutomaticReconciliationRepository {
         .execute(&mut *transaction)
         .await?
         .rows_affected();
+        let retry_delay_millis = self
+            .retry_backoff_base
+            .map(|base| {
+                claimed
+                    .attempt()
+                    .retry_backoff(base, self.retry_backoff_cap)
+            })
+            .map(|delay| i64::try_from(delay.as_millis()))
+            .transpose()
+            .map_err(|_| AutomaticReconciliationRepositoryError::Corruption("retry backoff"))?;
         let recovery_rows = sqlx::query(
             "UPDATE automatic_reconciliation
-                SET state_kind = 'scheduled'
+                SET state_kind = 'scheduled',
+                    next_attempt_at = CASE
+                        WHEN $3::bigint IS NULL THEN 'infinity'::timestamptz
+                        ELSE statement_timestamp() + $3 * INTERVAL '1 millisecond'
+                    END
               WHERE turn_id = $1 AND attempt_count = $2
                 AND state_kind = 'attempting'",
         )
         .bind(turn_id_to_uuid(claimed.turn()))
         .bind(i64::from(claimed.attempt().get()))
+        .bind(retry_delay_millis)
         .execute(&mut *transaction)
         .await?
         .rows_affected();
@@ -460,28 +502,30 @@ impl PostgresAutomaticReconciliationRepository {
         }
     }
 
-    /// Starts a transaction whose server-side lifetime cannot outlive its
-    /// daemon-owned recovery attempt.
+    /// Starts a transaction and installs its configured optional server bound.
     ///
     /// A client-side future timeout cannot cancel PostgreSQL work that is
-    /// already running. Installing the bound in PostgreSQL keeps an abandoned
-    /// client from leaving a transaction queued on the shared outbox allocator
-    /// after the daemon has moved on to later recovery work.
+    /// already running. When configured, installing the bound in PostgreSQL
+    /// keeps an abandoned client from leaving a transaction queued on the
+    /// shared outbox allocator after the daemon has moved on to later recovery
+    /// work.
     async fn begin_bounded(
         &self,
-        transaction_bound: Duration,
+        transaction_bound: Option<Duration>,
     ) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, AutomaticReconciliationRepositoryError> {
-        let timeout_millis = i64::try_from(transaction_bound.as_millis())
-            .ok()
-            .filter(|millis| *millis > 0)
-            .ok_or(AutomaticReconciliationRepositoryError::Corruption(
-                "transaction bound",
-            ))?;
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("SELECT set_config('transaction_timeout', $1, true)")
-            .bind(format!("{timeout_millis}ms"))
-            .execute(&mut *transaction)
-            .await?;
+        if let Some(transaction_bound) = transaction_bound {
+            let timeout_millis = i64::try_from(transaction_bound.as_millis())
+                .ok()
+                .filter(|millis| *millis > 0)
+                .ok_or(AutomaticReconciliationRepositoryError::Corruption(
+                    "transaction bound",
+                ))?;
+            sqlx::query("SELECT set_config('transaction_timeout', $1, true)")
+                .bind(format!("{timeout_millis}ms"))
+                .execute(&mut *transaction)
+                .await?;
+        }
         Ok(transaction)
     }
 }
@@ -509,6 +553,7 @@ async fn discover_recoveries(
 
 async fn settle_abandoned_attempts(
     connection: &mut PgConnection,
+    attempt_budget: Option<i32>,
 ) -> Result<(), AutomaticReconciliationRepositoryError> {
     sqlx::query(
         "UPDATE automatic_reconciliation_attempt AS attempt
@@ -527,9 +572,10 @@ async fn settle_abandoned_attempts(
         "UPDATE automatic_reconciliation
             SET state_kind = 'scheduled'
           WHERE state_kind = 'attempting'
-            AND attempt_count < 5
+            AND ($1::integer IS NULL OR attempt_count < $1)
             AND next_attempt_at <= statement_timestamp()",
     )
+    .bind(attempt_budget)
     .execute(connection)
     .await?;
     Ok(())
@@ -589,18 +635,21 @@ async fn mark_superseded_recoveries(
 
 async fn mark_exhausted_recoveries(
     connection: &mut PgConnection,
+    attempt_budget: Option<i32>,
 ) -> Result<Vec<sqlx::postgres::PgRow>, AutomaticReconciliationRepositoryError> {
     let rows = sqlx::query(
         "UPDATE automatic_reconciliation
             SET state_kind = 'exhausted', exhausted_at = statement_timestamp()
-          WHERE state_kind IN ('scheduled', 'attempting')
-            AND attempt_count = 5
+          WHERE $1::integer IS NOT NULL
+            AND state_kind IN ('scheduled', 'attempting')
+            AND attempt_count = $1
             AND (
                 state_kind = 'scheduled'
                 OR next_attempt_at <= statement_timestamp()
             )
       RETURNING session_id, turn_id, model_call_id, tool_attempt_id",
     )
+    .bind(attempt_budget)
     .fetch_all(connection)
     .await?;
     Ok(rows)

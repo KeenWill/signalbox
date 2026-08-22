@@ -4,6 +4,8 @@
     reason = "the standalone integration test uses assertion panics and explicit fixture expectations"
 )]
 
+mod support;
+
 use std::{
     collections::VecDeque,
     error::Error,
@@ -33,7 +35,7 @@ use signalbox_application::{
     ScriptedModelCallStep, StaleActiveTurnBound, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanService, TurnLivenessScanInterval,
     UuidV7ModelCallExecutionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
-    UuidV7StartupScanIdGenerator, scheduler_pass_admission_cap,
+    UuidV7StartupScanIdGenerator,
 };
 use signalbox_blob_store::BlobObjectKey;
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
@@ -66,13 +68,14 @@ use signalbox_persistence::{
     },
     conversation_import::ImportedConversationRepository,
     create_session_from_imported_frontier::ImportedSessionRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     scheduler::PostgresEligibilitySweep,
     session_metadata::SessionMetadataRepository,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
+    turn_liveness::TurnLivenessPersistenceBounds,
 };
 use signalbox_process_protocol::{
     BlobChunk, CanonicalBlobDigest, CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame,
@@ -81,24 +84,26 @@ use signalbox_process_protocol::{
     DescendantTerminationScope, EffectiveModelSettings, ErrorCode, ErrorDetail, FastMode,
     GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
     ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
-    MetadataActor, ModelChangeAdjustment, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
-    ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion, ReasoningLevel,
-    RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
-    ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome,
-    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus,
-    ReviewOrchestrationCounts, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
-    ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
-    ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
-    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SessionPlacement,
-    SettingOverlay, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
-    TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
+    MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MetadataActor, ModelChangeAdjustment, ModelSelection,
+    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot,
+    ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome,
+    ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput,
+    ReviewFindingStatus, ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
+    ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput,
+    ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
+    ReviewOrchestrationState, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
+    ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
+    ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent,
+    SessionMetadata, SessionPlacement, SettingOverlay, SystemPromptMember, SystemPromptText,
+    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line,
+    encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, BlobStorageClass, BlobStoreRegistry, ContextGuardedTurnPass,
-    ContextGuardedTurnPassError, FatalExecutionSupervisor, HubModelConfiguration,
-    LocalProcessListener, PostgresProviderModelExecution, ProcessProviderTextDeltaSink,
-    ProcessRuntime, ProcessRuntimeError, SessionTemplateConfiguration, TurnLivenessRuntime,
+    ContextGuardedTurnPassError, ExpiredPassRecoveryPolicy, FatalExecutionSupervisor,
+    HubModelConfiguration, LocalProcessListener, PostgresProviderModelExecution,
+    ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError,
+    SessionTemplateConfiguration, TurnLivenessNumericBounds, TurnLivenessRuntime,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tempfile::TempDir;
@@ -290,7 +295,7 @@ async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -624,7 +629,7 @@ impl RunningRuntime {
             || String::from(MODEL_CONFIGURATION),
             BlobStorageFixture::model_configuration,
         );
-        let model_configuration = HubModelConfiguration::parse(&configuration)?;
+        let model_configuration = support::parse_model_configuration(&configuration)?;
         let blob_store_registry = match blob_storage {
             BlobStorageFixtureMode::Disabled => None,
             BlobStorageFixtureMode::Enabled => BlobStoreRegistry::initialize_for_conformance(
@@ -683,7 +688,7 @@ impl RunningRuntime {
         &mut self,
         configuration: &str,
     ) -> Result<usize, Box<dyn Error>> {
-        let model_configuration = HubModelConfiguration::parse(configuration)?;
+        let model_configuration = support::parse_model_configuration(configuration)?;
         let template_configuration = session_template_configuration(&model_configuration)?;
         self.restart_with_templates(configuration, template_configuration)
             .await
@@ -713,7 +718,7 @@ impl RunningRuntime {
         let listener = LocalProcessListener::bind(self.socket())?;
         let sweep = PostgresEligibilitySweep::new(self.pool.clone());
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
-        let model_configuration = HubModelConfiguration::parse(configuration)?;
+        let model_configuration = support::parse_model_configuration(configuration)?;
         let mut runtime = ProcessRuntime::new_with_templates(
             listener,
             self.pool.clone(),
@@ -755,7 +760,7 @@ impl RunningRuntime {
         let listener = LocalProcessListener::bind(self.socket())?;
         let sweep = PostgresEligibilitySweep::new(self.pool.clone());
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
-        let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+        let model_configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
         let template_configuration = session_template_configuration(&model_configuration)?;
         let runtime = ProcessRuntime::new_with_templates(
             listener,
@@ -2054,10 +2059,10 @@ async fn execute_streamed_turn_until(
     turn_id: CanonicalUuid,
     settle: TurnSettle,
 ) -> Result<ScriptedModel<ModelCallId>, Box<dyn Error>> {
-    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let model_configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
     let probe = scripted.clone();
     let provider =
-        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog())
+        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog(), None)
             .with_text_delta_sink(runtime.provider_text_delta_sink());
     let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
@@ -2068,6 +2073,7 @@ async fn execute_streamed_turn_until(
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2104,7 +2110,7 @@ async fn execute_recorded_turn(
 ) -> Result<RecordingCountedScriptedModel, Box<dyn Error>> {
     let probe = scripted.clone();
     let provider =
-        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog())
+        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog(), None)
             .with_text_delta_sink(runtime.provider_text_delta_sink());
     let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
@@ -2115,6 +2121,7 @@ async fn execute_recorded_turn(
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2177,7 +2184,7 @@ async fn execute_guarded_turn(
 ) -> Result<RecordingCountedScriptedModel, Box<dyn Error>> {
     let probe = scripted.clone();
     let runtime_models = model_configuration.runtime_model_catalog();
-    let provider = RuntimeModelCallProvider::new(scripted, runtime_models.clone())
+    let provider = RuntimeModelCallProvider::new(scripted, runtime_models.clone(), None)
         .with_text_delta_sink(runtime.provider_text_delta_sink());
     let counter = provider.clone();
     let repository = PostgresModelCallRepository::new(
@@ -2192,6 +2199,7 @@ async fn execute_guarded_turn(
             repository,
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
         Arc::new(RuntimeContextCompactionModel::new(
@@ -2242,7 +2250,9 @@ fn completed_script(provider_model: &str, text: &str, usage: TokenUsage) -> Scri
 // unprovisioned workspace, and scheduled goal resumption are named follow-on
 // slices: they need the same fleet census but not more boot infrastructure.
 
-const FLEET_SESSION_COUNT: usize = scheduler_pass_admission_cap();
+const FLEET_SESSION_COUNT: usize = 16;
+// numeric-bound: test setup - preserves the ordinary production occupancy fixture
+const FLEET_BASELINE_OCCUPANCY_BOUND: Duration = Duration::from_secs(900);
 // numeric-bound: test deadline - exercises the production recovery path promptly
 const FLEET_OCCUPANCY_BOUND: Duration = Duration::from_secs(1);
 // numeric-bound: test deadline - keeps each fault probe inside one CI minute
@@ -2449,9 +2459,65 @@ fn start_fleet_scheduler(
     model: FleetScriptedModel,
     occupancy_bound: SchedulerPassOccupancyBound,
 ) -> Result<FleetRuntimeTasks, Box<dyn Error>> {
-    let configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
-    let provider = RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog())
-        .with_text_delta_sink(runtime.provider_text_delta_sink());
+    let configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    let bounds = configuration.numeric_bounds();
+    let expired_pass_recovery_policy = ExpiredPassRecoveryPolicy::new(
+        bounds
+            .integer("expired_pass_recovery_attempts")
+            .flatten()
+            .and_then(|value| u32::try_from(value).ok()),
+        bounds
+            .duration("expired_pass_recovery_attempt_bound")
+            .flatten(),
+        bounds
+            .duration("expired_pass_recovery_lock_retry_delay")
+            .flatten(),
+        bounds
+            .duration("expired_pass_recovery_conservative_retry_delay")
+            .flatten(),
+    );
+    let turn_liveness_persistence_bounds = TurnLivenessPersistenceBounds::new(
+        bounds.duration("terminalization_lock_wait").flatten(),
+        bounds.duration("terminalization_acquire_wait").flatten(),
+        bounds.duration("terminalization_write_lock_wait").flatten(),
+    );
+    let turn_liveness_numeric_bounds = TurnLivenessNumericBounds::new(
+        bounds
+            .integer("terminalizations_per_liveness_scan")
+            .flatten()
+            .and_then(|value| usize::try_from(value).ok()),
+        bounds
+            .duration("turn_liveness_recovery_attempt_bound")
+            .flatten(),
+        bounds
+            .integer("automatic_reconciliations_per_liveness_scan")
+            .flatten()
+            .and_then(|value| usize::try_from(value).ok()),
+        turn_liveness_persistence_bounds,
+    );
+    let stale_active_turn_bound = bounds
+        .duration("stale_active_turn_bound")
+        .flatten()
+        .map(StaleActiveTurnBound::try_new)
+        .transpose()?;
+    let turn_liveness_scan_interval = bounds
+        .duration("turn_liveness_scan_interval")
+        .flatten()
+        .map(TurnLivenessScanInterval::try_new)
+        .transpose()?;
+    let automatic_reconciliation_attempt_budget = bounds
+        .integer("automatic_reconciliation_attempt_budget")
+        .flatten()
+        .and_then(|value| u32::try_from(value).ok());
+    let automatic_reconciliation_base_backoff = bounds
+        .duration("automatic_reconciliation_base_backoff")
+        .flatten();
+    let automatic_reconciliation_backoff_cap = bounds
+        .duration("automatic_reconciliation_backoff_cap")
+        .flatten();
+    let provider =
+        RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog(), None)
+            .with_text_delta_sink(runtime.provider_text_delta_sink());
     let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
             PostgresModelCallRepository::new(
@@ -2461,6 +2527,7 @@ fn start_fleet_scheduler(
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2469,13 +2536,22 @@ fn start_fleet_scheduler(
         ),
         execution,
     )
-    .with_occupancy_recovery(runtime.pool.clone(), runtime.eligibility_nudge.clone());
+    .with_occupancy_recovery(
+        runtime.pool.clone(),
+        runtime.eligibility_nudge.clone(),
+        expired_pass_recovery_policy,
+        turn_liveness_persistence_bounds,
+    );
     let mut scheduler =
         SchedulerLoop::new(runtime.take_work_source(), pass).with_occupancy_bound(occupancy_bound);
     let turn_liveness = TurnLivenessRuntime::new(
         runtime.pool.clone(),
-        StaleActiveTurnBound::hard_ceiling(),
-        TurnLivenessScanInterval::baseline(),
+        stale_active_turn_bound,
+        turn_liveness_scan_interval,
+        automatic_reconciliation_attempt_budget,
+        automatic_reconciliation_base_backoff,
+        automatic_reconciliation_backoff_cap,
+        turn_liveness_numeric_bounds,
     );
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let scheduler_shutdown = shutdown_receiver.clone();
@@ -2625,7 +2701,7 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
     let baseline_tasks = start_fleet_scheduler(
         &mut runtime,
         model.clone(),
-        SchedulerPassOccupancyBound::hard_ceiling(),
+        SchedulerPassOccupancyBound::try_new(FLEET_BASELINE_OCCUPANCY_BOUND)?,
     )?;
     wait_for_fleet_terminal_count(
         &runtime.pool,
@@ -2636,7 +2712,7 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
     baseline_tasks.stop().await?;
     runtime.restart().await?;
     let fault_fleet = commission_fleet(&runtime, FLEET_SESSION_COUNT - 1, 1).await?;
-    let occupancy_bound = SchedulerPassOccupancyBound::try_lowered(FLEET_OCCUPANCY_BOUND)?;
+    let occupancy_bound = SchedulerPassOccupancyBound::try_new(FLEET_OCCUPANCY_BOUND)?;
     let tasks = start_fleet_scheduler(&mut runtime, model.clone(), occupancy_bound)?;
     wait_for_hangs(&model, 1).await?;
     wait_for_fleet_ambiguous_model_call_park(&runtime.pool, &model, FLEET_ASSERTION_BOUND).await?;
@@ -2669,7 +2745,7 @@ async fn fleet_soak_kill_restart_resumes_or_terminalizes_every_active_turn()
     let first_tasks = start_fleet_scheduler(
         &mut runtime,
         hanging_model.clone(),
-        SchedulerPassOccupancyBound::hard_ceiling(),
+        SchedulerPassOccupancyBound::try_new(FLEET_BASELINE_OCCUPANCY_BOUND)?,
     )?;
     wait_for_hangs(&hanging_model, FLEET_SESSION_COUNT).await?;
     wait_for_fleet_lifecycle_counts(
@@ -2684,7 +2760,7 @@ async fn fleet_soak_kill_restart_resumes_or_terminalizes_every_active_turn()
     let replacement_tasks = start_fleet_scheduler(
         &mut runtime,
         replacement_model,
-        SchedulerPassOccupancyBound::hard_ceiling(),
+        SchedulerPassOccupancyBound::try_new(FLEET_BASELINE_OCCUPANCY_BOUND)?,
     )?;
     wait_for_fleet_lifecycle_counts(
         &runtime.pool,
@@ -2982,6 +3058,7 @@ async fn complete_active_text_turn(
             },
         )]),
         InProcessAttemptDispatchGate::default(),
+        None,
     );
     assert!(matches!(
         service.execute(session).await?,
@@ -3664,9 +3741,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
 async fn metadata_shape_failure_is_a_malformed_frame() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
-    let required_tags = (0..=256)
-        .map(|index| format!("tag-{index:03}"))
-        .collect::<Vec<_>>();
+    let required_tags = vec!["x".repeat(MAX_SESSION_METADATA_INDEXED_UTF8_BYTES + 1)];
     let frame = format!(
         "{{\"version\":1,\"request_id\":\"21\",\"request\":{{\"type\":\"list_session_metadata\",\"required_tags\":{},\"title_contains\":null,\"include_archived\":false,\"page_size\":\"50\",\"after_session_id\":null}}}}\n",
         serde_json::to_string(&required_tags)?
@@ -4735,7 +4810,7 @@ async fn park_turn_on_ambiguous_model_call(
         return Err(io::Error::other("the queued fixture turn must activate").into());
     };
 
-    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let model_configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
     let calls = PostgresModelCallRepository::new(
         pool.clone(),
         model_configuration.target_catalog(),
@@ -5545,7 +5620,7 @@ async fn authorize_issued_model_call(
 > {
     let session = SessionId::from_uuid(session_id.into_uuid());
     activate_turn(pool, session).await?;
-    let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+    let targets = support::parse_model_configuration(MODEL_CONFIGURATION)?.target_catalog();
     let calls = PostgresModelCallRepository::new(
         pool.clone(),
         targets,
@@ -6700,7 +6775,7 @@ async fn s09_queued_inputs_deliver_in_acceptance_order_after_the_active_turn()
     .await?;
     assert_ne!(first_queued_turn, second_queued_turn);
 
-    let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+    let targets = support::parse_model_configuration(MODEL_CONFIGURATION)?.target_catalog();
     complete_active_text_turn(&runtime.pool, session, targets.clone()).await?;
     activate_expected_turn(&runtime.pool, session, first_queued_turn).await?;
     complete_active_text_turn(&runtime.pool, session, targets).await?;
@@ -7602,7 +7677,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     let second_probe = execute_recorded_turn(
         &mut runtime,
         second_model,
-        HubModelConfiguration::parse(MODEL_CONFIGURATION)?,
+        support::parse_model_configuration(MODEL_CONFIGURATION)?,
         session_id,
         second_turn,
     )
@@ -8074,7 +8149,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
         )
         .await?;
     let second_turn = accepted_successor_turn(&mut successor, session_id, 2).await?;
-    let guarded_configuration = HubModelConfiguration::parse(
+    let guarded_configuration = support::parse_model_configuration(
         &MODEL_CONFIGURATION
             .replace("max_output_tokens = 256", "max_output_tokens = 1")
             .replace(
@@ -8224,7 +8299,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
         )
         .await?;
     let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
-    let guarded_configuration = HubModelConfiguration::parse(
+    let guarded_configuration = support::parse_model_configuration(
         &MODEL_CONFIGURATION
             .replace("max_output_tokens = 256", "max_output_tokens = 1")
             .replace(
@@ -8242,7 +8317,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
     ));
     let summary_probe = summary_runtime.clone();
     let runtime_models = guarded_configuration.runtime_model_catalog();
-    let provider = RuntimeModelCallProvider::new(ordinary_runtime, runtime_models.clone())
+    let provider = RuntimeModelCallProvider::new(ordinary_runtime, runtime_models.clone(), None)
         .with_text_delta_sink(runtime.provider_text_delta_sink());
     let counter = provider.clone();
     let repository = PostgresModelCallRepository::new(
@@ -8257,6 +8332,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
             repository,
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
         Arc::new(RuntimeContextCompactionModel::new(
@@ -8378,11 +8454,12 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
         String::from("ambiguous guarded stage request"),
     )
     .await?;
-    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let model_configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
     let runtime_models = model_configuration.runtime_model_catalog();
     let provider = RuntimeModelCallProvider::new(
         ScriptedModel::<ModelCallId>::following(std::iter::empty::<Script>()),
         runtime_models.clone(),
+        None,
     )
     .with_text_delta_sink(runtime.provider_text_delta_sink());
     let repository = PostgresModelCallRepository::new(
@@ -8396,6 +8473,7 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
             repository,
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
         Arc::new(RuntimeContextCompactionModel::new(
@@ -8916,7 +8994,7 @@ impl ReviewRuntimeDriver {
             },
         )
         .await?;
-        let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+        let targets = support::parse_model_configuration(MODEL_CONFIGURATION)?.target_catalog();
         complete_active_text_turn(
             &self.pool,
             SessionId::from_uuid(session.into_uuid()),

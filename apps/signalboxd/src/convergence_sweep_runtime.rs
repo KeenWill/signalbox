@@ -42,24 +42,45 @@ use crate::{
 
 const GRAPHQL_URL: &str = "https://api.github.com/graphql";
 const USER_AGENT_VALUE: &str = "signalbox-convergence-sweep";
-// numeric-bound: ceiling - bounds one provider exchange and therefore one target's census latency
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-// numeric-bound: ceiling - bounds retained provider output before JSON decoding
+// numeric-bound: guard - prevents a provider response from exhausting process memory
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-// numeric-bound: ceiling - prevents one pathological PR from monopolizing a complete sweep
-const MAX_CONNECTION_PAGES: usize = 100;
-// numeric-bound: ceiling - prevents slow targets from serially delaying the complete target set
-const MAX_CONCURRENT_TARGETS: usize = 8;
-// numeric-bound: ceiling - bounds transport attempts for one idempotent GraphQL census request
-const MAX_REQUEST_ATTEMPTS: usize = 3;
-// numeric-bound: tunable - separates bounded transport retry attempts
-const REQUEST_RETRY_DELAY: Duration = Duration::from_millis(250);
-// numeric-bound: ceiling - bounds retained secret material and authorization header construction
+// numeric-bound: guard - prevents credential material from exhausting process memory
 const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
-// numeric-bound: tunable - separates a transient failure from its first automatic retry
-const RETRY_BACKOFF_BASE: Duration = Duration::from_secs(60);
-// numeric-bound: ceiling - prevents exhausted transient work from backing off beyond useful operator visibility
-const RETRY_BACKOFF_CAP: Duration = Duration::from_secs(15 * 60);
+
+/// Deployment policy for convergence census work and retry scheduling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConvergenceSweepNumericBounds {
+    request_timeout: Option<Duration>,
+    connection_pages: Option<usize>,
+    concurrent_targets: Option<usize>,
+    request_attempts: Option<usize>,
+    request_retry_delay: Option<Duration>,
+    retry_backoff_base: Option<Duration>,
+    retry_backoff_cap: Option<Duration>,
+}
+
+impl ConvergenceSweepNumericBounds {
+    /// Binds every convergence limit to the validated daemon configuration.
+    pub const fn new(
+        request_timeout: Option<Duration>,
+        connection_pages: Option<usize>,
+        concurrent_targets: Option<usize>,
+        request_attempts: Option<usize>,
+        request_retry_delay: Option<Duration>,
+        retry_backoff_base: Option<Duration>,
+        retry_backoff_cap: Option<Duration>,
+    ) -> Self {
+        Self {
+            request_timeout,
+            connection_pages,
+            concurrent_targets,
+            request_attempts,
+            request_retry_delay,
+            retry_backoff_base,
+            retry_backoff_cap,
+        }
+    }
+}
 
 const DETAILS_QUERY: &str = r#"
 query PullRequestConvergence($namespace: String!, $name: String!, $number: Int!) {
@@ -167,6 +188,7 @@ pub struct ConvergenceSweepRuntime {
     commissioned: PostgresCommissionedDispatchStore,
     state: PostgresConvergenceSweepStore,
     eligibility_nudge: InProcessEligibilityNudge,
+    numeric_bounds: ConvergenceSweepNumericBounds,
 }
 
 impl ConvergenceSweepRuntime {
@@ -177,20 +199,24 @@ impl ConvergenceSweepRuntime {
         templates: SessionTemplateConfiguration,
         models: HubModelConfiguration,
         eligibility_nudge: InProcessEligibilityNudge,
+        numeric_bounds: ConvergenceSweepNumericBounds,
     ) -> Result<Option<Self>, ConvergenceSweepRuntimeConstructionError> {
         let Some(policy) = configuration.convergence_sweep() else {
             return Ok(None);
         };
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let client = Client::builder()
+        let mut client = Client::builder()
             .tls_backend_rustls()
             .tls_version_min(reqwest::tls::Version::TLS_1_2)
             .tls_danger_accept_invalid_certs(false)
             .tls_danger_accept_invalid_hostnames(false)
             .no_proxy()
             .redirect(Policy::none())
-            .retry(reqwest::retry::never())
-            .timeout(REQUEST_TIMEOUT)
+            .retry(reqwest::retry::never());
+        if let Some(request_timeout) = numeric_bounds.request_timeout {
+            client = client.timeout(request_timeout);
+        }
+        let client = client
             .build()
             .map_err(|_| ConvergenceSweepRuntimeConstructionError)?;
         let targets = configuration
@@ -227,6 +253,7 @@ impl ConvergenceSweepRuntime {
             ),
             state: PostgresConvergenceSweepStore::new(pool),
             eligibility_nudge,
+            numeric_bounds,
         }))
     }
 
@@ -250,7 +277,7 @@ impl ConvergenceSweepRuntime {
 
     async fn sweep_once(&self, shutdown: &mut watch::Receiver<bool>) -> bool {
         let census = stream::iter(&self.targets)
-            .for_each_concurrent(Some(MAX_CONCURRENT_TARGETS), |target| {
+            .for_each_concurrent(self.numeric_bounds.concurrent_targets, |target| {
                 self.reconcile_target(target)
             });
         tokio::pin!(census);
@@ -552,7 +579,11 @@ impl ConvergenceSweepRuntime {
             .as_ref()
             .filter(|state| state.failure_kind() == Some(failure))
             .map_or(0, |state| u32::from(state.consecutive_failures()));
-        let delay = retry_delay(attempt);
+        let delay = retry_delay(
+            attempt,
+            self.numeric_bounds.retry_backoff_base,
+            self.numeric_bounds.retry_backoff_cap,
+        );
         match self
             .state
             .record_failure(
@@ -561,7 +592,7 @@ impl ConvergenceSweepRuntime {
                 target.pull_request,
                 observation,
                 failure,
-                delay.as_secs(),
+                delay.map(|delay| delay.as_secs()),
             )
             .await
         {
@@ -628,7 +659,11 @@ impl ConvergenceSweepRuntime {
         let mut pages = 1usize;
         while thread_page.has_next {
             pages += 1;
-            if pages > MAX_CONNECTION_PAGES {
+            if self
+                .numeric_bounds
+                .connection_pages
+                .is_some_and(|limit| pages > limit)
+            {
                 return Err(CensusError::Pagination);
             }
             let mut next = variables.clone();
@@ -647,7 +682,11 @@ impl ConvergenceSweepRuntime {
         }
         while check_page.has_next {
             pages += 1;
-            if pages > MAX_CONNECTION_PAGES {
+            if self
+                .numeric_bounds
+                .connection_pages
+                .is_some_and(|limit| pages > limit)
+            {
                 return Err(CensusError::Pagination);
             }
             let mut next = variables.clone();
@@ -700,6 +739,9 @@ impl ConvergenceSweepRuntime {
         let body = serde_json::to_vec(&json!({"query": query, "variables": variables}))
             .map_err(|_| CensusError::Decode)?;
         let mut attempt = 0usize;
+        if self.numeric_bounds.request_attempts == Some(0) {
+            return Err(CensusError::Request);
+        }
         let mut response = loop {
             attempt += 1;
             let sent = self
@@ -714,15 +756,23 @@ impl ConvergenceSweepRuntime {
                 .await;
             match sent {
                 Ok(response)
-                    if attempt < MAX_REQUEST_ATTEMPTS
+                    if self
+                        .numeric_bounds
+                        .request_attempts
+                        .is_none_or(|limit| attempt < limit)
                         && (response.status().is_server_error()
                             || response.status() == StatusCode::TOO_MANY_REQUESTS) =>
                 {
-                    sleep(REQUEST_RETRY_DELAY).await;
+                    sleep_for_policy(self.numeric_bounds.request_retry_delay).await;
                 }
                 Ok(response) => break response,
-                Err(_) if attempt < MAX_REQUEST_ATTEMPTS => {
-                    sleep(REQUEST_RETRY_DELAY).await;
+                Err(_)
+                    if self
+                        .numeric_bounds
+                        .request_attempts
+                        .is_none_or(|limit| attempt < limit) =>
+                {
+                    sleep_for_policy(self.numeric_bounds.request_retry_delay).await;
                 }
                 Err(_) => return Err(CensusError::Request),
             }
@@ -964,15 +1014,55 @@ fn blocker_text(blocker: &PullRequestConvergenceBlocker) -> String {
     }
 }
 
-fn retry_delay(attempt: u32) -> Duration {
-    RETRY_BACKOFF_BASE
-        .saturating_mul(2u32.saturating_pow(attempt.min(4)))
-        .min(RETRY_BACKOFF_CAP)
+fn retry_delay(attempt: u32, base: Option<Duration>, cap: Option<Duration>) -> Option<Duration> {
+    base.map(|base| {
+        let delay = base.saturating_mul(2u32.saturating_pow(attempt.min(4)));
+        cap.map_or(delay, |cap| delay.min(cap))
+    })
+}
+
+async fn sleep_for_policy(delay: Option<Duration>) {
+    match delay {
+        Some(delay) => sleep(delay).await,
+        None => std::future::pending().await,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn example_numeric_bounds() -> ConvergenceSweepNumericBounds {
+        let configured = crate::configuration::checked_in_example_configuration()
+            .expect("checked-in example parses");
+        let bounds = configured.numeric_bounds();
+        ConvergenceSweepNumericBounds::new(
+            bounds
+                .duration("convergence_sweep_request_timeout")
+                .flatten(),
+            bounds
+                .integer("max_convergence_sweep_connection_pages")
+                .flatten()
+                .and_then(|value| usize::try_from(value).ok()),
+            bounds
+                .integer("max_concurrent_convergence_sweep_targets")
+                .flatten()
+                .and_then(|value| usize::try_from(value).ok()),
+            bounds
+                .integer("max_convergence_sweep_request_attempts")
+                .flatten()
+                .and_then(|value| usize::try_from(value).ok()),
+            bounds
+                .duration("convergence_sweep_request_retry_delay")
+                .flatten(),
+            bounds
+                .duration("convergence_sweep_retry_backoff_base")
+                .flatten(),
+            bounds
+                .duration("convergence_sweep_retry_backoff_cap")
+                .flatten(),
+        )
+    }
 
     fn sha(value: char) -> CommitSha {
         CommitSha::try_new(value.to_string().repeat(40)).expect("fixture SHA is valid")
@@ -980,9 +1070,31 @@ mod tests {
 
     #[test]
     fn retry_delay_is_bounded() {
-        assert_eq!(retry_delay(0), Duration::from_secs(60));
-        assert_eq!(retry_delay(4), RETRY_BACKOFF_CAP);
-        assert_eq!(retry_delay(u32::MAX), RETRY_BACKOFF_CAP);
+        let bounds = example_numeric_bounds();
+        assert_eq!(
+            retry_delay(0, bounds.retry_backoff_base, bounds.retry_backoff_cap),
+            bounds.retry_backoff_base
+        );
+        assert_eq!(
+            retry_delay(4, bounds.retry_backoff_base, bounds.retry_backoff_cap),
+            bounds.retry_backoff_cap
+        );
+        assert_eq!(
+            retry_delay(
+                u32::MAX,
+                bounds.retry_backoff_base,
+                bounds.retry_backoff_cap
+            ),
+            bounds.retry_backoff_cap
+        );
+    }
+
+    #[test]
+    fn unbounded_retry_policy_has_no_finite_delay_or_cap() {
+        let base = Duration::from_secs(3);
+
+        assert_eq!(retry_delay(0, None, None), None);
+        assert_eq!(retry_delay(5, Some(base), None), Some(base * 16));
     }
 
     #[test]

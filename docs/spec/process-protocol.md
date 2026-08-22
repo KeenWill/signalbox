@@ -1,5 +1,8 @@
 # Process protocol
 
+Deployment-owned process limits and the `read_deployment_limits` projection are
+verified against this PR (`agent/bounds-required-config-protocol`).
+
 The bounded automatic model-call recovery status projected on active turns is
 verified against this PR (`agent/turn-lifecycle-hardening`). Its tool-attempt
 counterpart is verified against this PR
@@ -784,12 +787,9 @@ The `system_prompt` member is required on `create_session` and
 `replace_session_defaults`: JSON null states explicitly that the complete
 defaults carry no prompt, and a string carries the exact prompt. An absent
 member is a `malformed_frame`. A present prompt is nonempty exact Unicode text
-that rejects U+0000 and carries at most 1,048,576 UTF-8 bytes — the
-accepted-input content bound, restated by the wire constant
-`MAX_SYSTEM_PROMPT_UTF8_BYTES` — leaving response-envelope and worst-case
-JSON-escaping headroom below the 8 MiB frame limit when the same prompt is
-echoed by a receipt or defaults read. Bound, placement, and capacity reasoning
-are part of this contract.
+that rejects U+0000. The daemon applies
+`numeric_bounds.max_system_prompt_utf8_bytes` before domain construction;
+`"none"` removes that policy while the frame-size guard remains structural.
 
 A metadata object has exactly `title` (string or null), `tags` (string array),
 `attributes` (an object whose values are strings), and `archived` (boolean).
@@ -798,50 +798,48 @@ rejects U+0000. Attribute values may be empty. Duplicate tags produce
 `malformed_frame`. Repeating a decoded attribute member name also produces
 `malformed_frame` under the frame-wide duplicate-object-member rule above. Tag
 order and attribute member order do not affect durable command equality. Wire
-validation enforces the domain capacity contract: at most 262,144 total UTF-8
-bytes across the object, at most 256 tags, at most 256 attributes, and at most
-1,024 UTF-8 bytes in each tag or attribute key. Those bounds leave
-response-envelope and worst-case JSON-escaping headroom below the 8 MiB frame
-limit while bounding normalized satellite work when a complete accepted object
-is echoed by a read or replacement receipt. The exact capacity choice is owned
-by this contract.
+validation enforces the structural capacity contract: at most 262,144 total
+UTF-8 bytes across the object and at most 1,024 UTF-8 bytes in each tag or
+attribute key. The daemon separately applies the deployment-owned tag and
+attribute count policies before domain construction; either may be `"none"`.
 
-`list_session_metadata` admits one through 100 results. `required_tags` is an
-exact AND-filter, a present `title_contains` is nonempty and applies an exact
-case-sensitive substring filter, `include_archived = false` selects the default
-all-non-archived view, and `after_session_id` is an exclusive keyset cursor. An
-empty tag array, null title query, false archive switch, page size 50, and null
-cursor form the ordinary default request; the wire carries every field
-explicitly. At most 256 required tags are admitted. They are nonempty, reject
-U+0000, and carry at most 1,024 UTF-8 bytes each; a title query rejects U+0000;
-and all required tags plus the title query carry at most 262,144 UTF-8 bytes.
-Every metadata-object and metadata-filter string, shape, cardinality, and byte
-rule in these two paragraphs is client-frame field or size validation. A
-violation returns `malformed_frame` before application construction.
-`invalid_request` is reserved for the fail-closed case where an admitted wire
-value cannot construct the corresponding application input; no currently valid
-metadata frame is intended to reach that mapping error.
+`list_session_metadata` admits the configured metadata page-size range.
+`required_tags` is an exact AND-filter, a present `title_contains` is nonempty
+and applies an exact case-sensitive substring filter, `include_archived = false`
+selects the default all-non-archived view, and `after_session_id` is an
+exclusive keyset cursor. An empty tag array, null title query, false archive
+switch, page size 50, and null cursor form the ordinary default request; the
+wire carries every field explicitly. The daemon applies the configured
+required-tag count policy. Tags are nonempty, reject U+0000, and carry at most
+1,024 UTF-8 bytes each; a title query rejects U+0000; and all required tags plus
+the title query carry at most 262,144 UTF-8 bytes. Every metadata-object and
+metadata-filter string, shape, cardinality, and byte rule in these two
+paragraphs is client-frame field or size validation. A violation returns
+`malformed_frame` before application construction. `invalid_request` is reserved
+for the fail-closed case where an admitted wire value cannot construct the
+corresponding application input; no currently valid metadata frame is intended
+to reach that mapping error.
 
 `list_conversations` is the unified read surface over both conversation record
 classes and mirrors the metadata list's pagination discipline exactly: one
-bounded page per request, admitting one through 100 results, with no silent
-truncation. It is a plain keyset read over the authoritative session,
-current-defaults, metadata, and imported-conversation tables in one
-repeatable-read, read-only transaction — no materialized view, cache, or
-analytical artifact stands between the caller and committed state, so every
-listed row is transactionally fresh. If measured read cost requires a different
-physical shape, the first upgrade is write-time-maintained projection tables
-updated atomically with the authoritative writes, not a materialized,
-periodically refreshed, cached, or otherwise lagging product read. The unified
-order is by conversation identity UUID value, with a native session ordered
-before an imported conversation carrying a theoretical equal identity value. A
-cursor object has exactly `origin` (`native_session` or `imported_conversation`)
-and `conversation_id` (canonical UUID string); `after` is the exclusive keyset
-cursor at that total position, so no row can be skipped at a page boundary. A
-present `title_contains` is nonempty, rejects U+0000, carries at most 262,144
-UTF-8 bytes, and applies the same exact case-sensitive substring filter to a
-present native metadata title or imported display title; an absent title matches
-no title query, and a transitional pending imported title survives every title
+configured page per request, with no silent truncation. It is a plain keyset
+read over the authoritative session, current-defaults, metadata, and
+imported-conversation tables in one repeatable-read, read-only transaction — no
+materialized view, cache, or analytical artifact stands between the caller and
+committed state, so every listed row is transactionally fresh. If measured read
+cost requires a different physical shape, the first upgrade is
+write-time-maintained projection tables updated atomically with the
+authoritative writes, not a materialized, periodically refreshed, cached, or
+otherwise lagging product read. The unified order is by conversation identity
+UUID value, with a native session ordered before an imported conversation
+carrying a theoretical equal identity value. A cursor object has exactly
+`origin` (`native_session` or `imported_conversation`) and `conversation_id`
+(canonical UUID string); `after` is the exclusive keyset cursor at that total
+position, so no row can be skipped at a page boundary. A present
+`title_contains` is nonempty, rejects U+0000, carries at most 262,144 UTF-8
+bytes, and applies the same exact case-sensitive substring filter to a present
+native metadata title or imported display title; an absent title matches no
+title query, and a transitional pending imported title survives every title
 filter so the read fails closed on it
 ([conversation-import](conversation-import.md#derived-display-titles)) rather
 than silently omitting an unresolved row. `origin` selects native rows, imported
@@ -1284,8 +1282,8 @@ their full unsigned 64-bit range without JSON-number precision loss.
 The metadata list is a bounded sequence:
 
 1. `session_metadata_page_start`;
-2. zero through 100 `session_metadata_summary` messages in strictly increasing
-   session-identity order; and
+2. zero through the requested page size of `session_metadata_summary` messages
+   in strictly increasing session-identity order; and
 3. `session_metadata_page_end { session_count, next_after_session_id }`.
 
 Each summary carries `session_id`, current `defaults_version`,
@@ -1293,19 +1291,20 @@ Each summary carries `session_id`, current `defaults_version`,
 `archived`, and `last_writer`; the runner proposal also requires the exact
 `runner_projection`. `dangerous_tool_auto_approval` is a JSON boolean: `false`
 encodes domain `Disabled` and `true` encodes domain `ApproveAll`. Tags are
-strictly increasing by lexicographic UTF-8 byte sequence. Each summary admits at
-most 256 tags and applies the metadata object's 262,144-byte aggregate UTF-8
-bound across its title and tags, not merely to each member independently.
-Attributes are intentionally absent from the list projection. The end cursor is
-null when no later match existed in the page snapshot; otherwise it equals the
-last emitted session identity. The page sequence is spooled before output and
-becomes authoritative only after its count, ordering, and cursor validate.
+strictly increasing by lexicographic UTF-8 byte sequence. Each summary applies
+the deployment's tag-count policy and the metadata object's 262,144-byte
+aggregate UTF-8 bound across its title and tags, not merely to each member
+independently. Attributes are intentionally absent from the list projection. The
+end cursor is null when no later match existed in the page snapshot; otherwise
+it equals the last emitted session identity. The page sequence is spooled before
+output and becomes authoritative only after its count, ordering, and cursor
+validate.
 
 The unified conversation list is the same bounded sequence shape:
 
 1. `conversation_page_start`;
-2. zero through 100 `conversation_summary` messages in strictly increasing
-   unified cursor order; and
+2. zero through the requested page size of `conversation_summary` messages in
+   strictly increasing unified cursor order; and
 3. `conversation_page_end { conversation_count, next_after }`.
 
 Each summary carries one closed `conversation` object tagged by `origin`. A

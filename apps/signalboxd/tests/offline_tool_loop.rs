@@ -4,6 +4,8 @@
     reason = "the standalone integration tests use assertion panics and explicit fixture expectations"
 )]
 
+mod support;
+
 use std::{
     error::Error,
     fmt, fs,
@@ -48,7 +50,7 @@ use signalbox_model_runtime::{
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository, disposable_postgres_server_args,
-    disposable_postgres_state_tmpfs, disposable_test_container_labels,
+    disposable_postgres_state_tmpfs_from_example, disposable_test_container_labels,
     local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
     process_read::ProcessReadRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
@@ -77,25 +79,25 @@ use signalboxd::{
     CHANGE_REQUEST_THREAD_INVENTORY_NAME, CHANGE_REQUEST_THREAD_REPLY_NAME,
     CHANGE_REQUEST_THREAD_RESOLVE_NAME, ChangeRequestCommentResult, ChangeRequestSummaryFields,
     ChangeRequestSummaryResult, ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult,
-    CiJobLogResult, CodeHostOperation, CodeHostResult, CodeHostResultCompleteness,
-    CodeHostTransport, CodeHostTransportFailure, ConvergenceStateFields, ConvergenceStateResult,
-    ConversationIntrospectionPort, ConversationListPage, ConversationListRequest,
-    ConversationTranscriptRead, ConversationTranscriptRequest, DaemonTools,
-    DaemonToolsConstructionError, FilePatchResult, GitHubEgressPolicy, GitHubOperation,
-    GitHubResult, GitHubTransport, GitHubTransportFailure, HubModelConfiguration,
-    ImportedTranscriptRequest, LocalProcessListener, LocalWorkspaceFileSystem,
-    MappedDaemonCredentialInputs, PULL_REQUEST_METADATA_NAME, PULL_REQUEST_PUBLISH_REVIEW_NAME,
-    PostgresConversationIntrospection, PostgresProviderModelExecution,
-    PostgresProviderToolLoopExecution, PostgresSessionStatusWriter, ProcessRuntime, READ_FILE_NAME,
-    REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult, ReviewAuthorClass, ReviewDispositionClass,
-    ReviewGateCheckResult, ReviewGatePurpose, ReviewThread, ReviewThreadComment,
-    ReviewThreadFields, ReviewThreadInventoryFields, ReviewThreadInventoryItem,
-    ReviewThreadResolution, ReviewThreadsResult, ReviewerVerdictEvidence, ReviewerVerdictFields,
-    ReviewerVerdictStatus, SessionStatusWrite, SessionStatusWriteOutcome, SessionStatusWriter,
-    StackStateFields, StackStateResult, ThreadInventoryResult, ThreadReplyResult,
-    ThreadResolveResult, TranscriptPage, WRITE_FILE_NAME, WebFetchBodyCompleteness,
-    WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse, WebFetchTransport,
-    WebFetchTransportFailure,
+    CiJobLogResult, CodeHostNumericBounds, CodeHostOperation, CodeHostResult,
+    CodeHostResultCompleteness, CodeHostTransport, CodeHostTransportFailure,
+    ConvergenceStateFields, ConvergenceStateResult, ConversationIntrospectionPort,
+    ConversationListPage, ConversationListRequest, ConversationTranscriptRead,
+    ConversationTranscriptRequest, DaemonTools, DaemonToolsConstructionError, FilePatchResult,
+    GitHubEgressPolicy, GitHubOperation, GitHubResult, GitHubTransport, GitHubTransportFailure,
+    HubModelConfiguration, ImportedTranscriptRequest, LocalProcessListener,
+    LocalWorkspaceFileSystem, MappedDaemonCredentialInputs, PULL_REQUEST_METADATA_NAME,
+    PULL_REQUEST_PUBLISH_REVIEW_NAME, PostgresConversationIntrospection,
+    PostgresProviderModelExecution, PostgresProviderToolLoopExecution, PostgresSessionStatusWriter,
+    ProcessRuntime, READ_FILE_NAME, REVIEW_GATE_CHECK_NAME, RerunFailedJobsResult,
+    ReviewAuthorClass, ReviewDispositionClass, ReviewGateCheckResult, ReviewGatePurpose,
+    ReviewThread, ReviewThreadComment, ReviewThreadFields, ReviewThreadInventoryFields,
+    ReviewThreadInventoryItem, ReviewThreadResolution, ReviewThreadsResult,
+    ReviewerVerdictEvidence, ReviewerVerdictFields, ReviewerVerdictStatus, SessionStatusWrite,
+    SessionStatusWriteOutcome, SessionStatusWriter, StackStateFields, StackStateResult,
+    ThreadInventoryResult, ThreadReplyResult, ThreadResolveResult, TranscriptPage, WRITE_FILE_NAME,
+    WebFetchBodyCompleteness, WebFetchEgressPolicy, WebFetchRequest, WebFetchResponse,
+    WebFetchTransport, WebFetchTransportFailure,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use tempfile::tempdir;
@@ -135,6 +137,10 @@ fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin 
 const FIXTURE_ID_SEED: u128 = 0x3100;
 const DECISION_COMMAND_ID: u128 = 0x3110;
 const OFFLINE_CODE_HOST_TOKEN: &[u8] = b"offline-code-host-token";
+
+const fn code_host_bounds() -> CodeHostNumericBounds {
+    CodeHostNumericBounds::new(None, None, None, None, None, None)
+}
 const FIXTURE_USER_CONTENT: &str = "offline tool-loop request";
 const PROCESS_MODEL_CONFIGURATION: &str = r#"
 version = 1
@@ -171,7 +177,7 @@ context_window_tokens = 200000
 "#;
 
 fn approval_judge_model_configuration() -> HubModelConfiguration {
-    HubModelConfiguration::parse(&format!(
+    support::parse_model_configuration(&format!(
         r#"
 version = 1
 
@@ -419,6 +425,45 @@ impl ToolLoopFixture {
         FixtureExecution<Catalog, Executor>,
         Arc<ScriptedModel<ModelCallId>>,
     ) {
+        self.execution_with_model_shutdown_and_limit(
+            scripts,
+            catalog,
+            executor,
+            shutdown_after_execute,
+            None,
+        )
+    }
+
+    fn execution_with_tool_round_limit<Catalog, Executor>(
+        &self,
+        scripts: impl IntoIterator<Item = Script>,
+        catalog: Catalog,
+        executor: Executor,
+        automatic_tool_round_limit: Option<usize>,
+    ) -> (
+        FixtureExecution<Catalog, Executor>,
+        Arc<ScriptedModel<ModelCallId>>,
+    ) {
+        self.execution_with_model_shutdown_and_limit(
+            scripts,
+            catalog,
+            executor,
+            None,
+            automatic_tool_round_limit,
+        )
+    }
+
+    fn execution_with_model_shutdown_and_limit<Catalog, Executor>(
+        &self,
+        scripts: impl IntoIterator<Item = Script>,
+        catalog: Catalog,
+        executor: Executor,
+        shutdown_after_execute: Option<watch::Sender<bool>>,
+        automatic_tool_round_limit: Option<usize>,
+    ) -> (
+        FixtureExecution<Catalog, Executor>,
+        Arc<ScriptedModel<ModelCallId>>,
+    ) {
         let runtime = Arc::new(ScriptedModel::<ModelCallId>::following(scripts));
         let provider = RuntimeModelCallProvider::new(
             RecordingScriptedModel {
@@ -426,6 +471,7 @@ impl ToolLoopFixture {
                 shutdown_after_execute,
             },
             self.runtime_models.clone(),
+            None,
         );
         (
             PostgresProviderModelExecution::new(
@@ -436,6 +482,7 @@ impl ToolLoopFixture {
                 ),
                 InProcessAttemptDispatchGate::default(),
                 provider,
+                automatic_tool_round_limit,
             )
             .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor),
             runtime,
@@ -462,6 +509,7 @@ impl ToolLoopFixture {
                 shutdown_after_execute: None,
             },
             self.runtime_models.clone(),
+            None,
         );
         let judge: Arc<dyn ApprovalJudgeModel> = Arc::new(RuntimeApprovalJudgeModel::new(
             RecordingScriptedModel {
@@ -480,6 +528,7 @@ impl ToolLoopFixture {
                 ),
                 InProcessAttemptDispatchGate::default(),
                 provider,
+                None,
             )
             .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor)
             .with_approval_judge(judge, None, configuration),
@@ -648,7 +697,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -1177,6 +1226,10 @@ impl CredentialAccess for OfflineCodeHostCredentials {
 struct UnusedCodeHostTransport;
 
 impl CodeHostTransport for UnusedCodeHostTransport {
+    fn numeric_bounds(&self) -> CodeHostNumericBounds {
+        code_host_bounds()
+    }
+
     async fn execute(
         &mut self,
         _operation: CodeHostOperation,
@@ -1450,6 +1503,10 @@ impl RecordingCodeHostTransport {
 }
 
 impl CodeHostTransport for RecordingCodeHostTransport {
+    fn numeric_bounds(&self) -> CodeHostNumericBounds {
+        code_host_bounds()
+    }
+
     async fn execute(
         &mut self,
         operation: CodeHostOperation,
@@ -1752,22 +1809,25 @@ async fn code_host_tool_completes_offline(
 
 fn summary_result() -> CodeHostResult {
     CodeHostResult::Summary(
-        ChangeRequestSummaryResult::try_new(ChangeRequestSummaryFields {
-            number: 17,
-            title: format!(
-                "summary {}",
-                std::str::from_utf8(OFFLINE_CODE_HOST_TOKEN)
-                    .expect("fixture credential is valid UTF-8")
-            ),
-            body: Some(String::from("bounded body")),
-            state: String::from("open"),
-            draft: false,
-            author: Some(String::from("reviewer")),
-            base_ref: String::from("main"),
-            head_ref: String::from("feature"),
-            head_revision: String::from("0123456789abcdef0123456789abcdef01234567"),
-            url: String::from("https://github.example/owner/repository/pull/17"),
-        })
+        ChangeRequestSummaryResult::try_new(
+            code_host_bounds(),
+            ChangeRequestSummaryFields {
+                number: 17,
+                title: format!(
+                    "summary {}",
+                    std::str::from_utf8(OFFLINE_CODE_HOST_TOKEN)
+                        .expect("fixture credential is valid UTF-8")
+                ),
+                body: Some(String::from("bounded body")),
+                state: String::from("open"),
+                draft: false,
+                author: Some(String::from("reviewer")),
+                base_ref: String::from("main"),
+                head_ref: String::from("feature"),
+                head_revision: String::from("0123456789abcdef0123456789abcdef01234567"),
+                url: String::from("https://github.example/owner/repository/pull/17"),
+            },
+        )
         .expect("fixture summary is bounded"),
     )
 }
@@ -1775,9 +1835,16 @@ fn summary_result() -> CodeHostResult {
 fn changed_files_result() -> CodeHostResult {
     CodeHostResult::ChangedFiles(
         ChangedFilesResult::try_new(
+            code_host_bounds(),
             vec![
-                ChangedFile::try_new(String::from("src/lib.rs"), String::from("modified"), 7, 2)
-                    .expect("fixture changed file is bounded"),
+                ChangedFile::try_new(
+                    code_host_bounds(),
+                    String::from("src/lib.rs"),
+                    String::from("modified"),
+                    7,
+                    2,
+                )
+                .expect("fixture changed file is bounded"),
             ],
             CodeHostResultCompleteness::Complete,
         )
@@ -1788,8 +1855,15 @@ fn changed_files_result() -> CodeHostResult {
 fn file_patch_result() -> CodeHostResult {
     CodeHostResult::FilePatch(
         FilePatchResult::try_new(
-            ChangedFile::try_new(String::from("src/lib.rs"), String::from("modified"), 7, 2)
-                .expect("fixture changed file is bounded"),
+            code_host_bounds(),
+            ChangedFile::try_new(
+                code_host_bounds(),
+                String::from("src/lib.rs"),
+                String::from("modified"),
+                7,
+                2,
+            )
+            .expect("fixture changed file is bounded"),
             Some(String::from("@@ -1 +1 @@\n-old\n+new")),
         )
         .expect("fixture patch is bounded"),
@@ -1799,9 +1873,11 @@ fn file_patch_result() -> CodeHostResult {
 fn checks_status_result() -> CodeHostResult {
     CodeHostResult::ChecksStatus(
         ChecksStatusResult::try_new(
+            code_host_bounds(),
             String::from("0123456789abcdef0123456789abcdef01234567"),
             vec![
                 CheckStatus::try_new(
+                    code_host_bounds(),
                     9001,
                     String::from("validate"),
                     String::from("completed"),
@@ -1828,25 +1904,33 @@ fn comment_result() -> CodeHostResult {
 
 fn review_threads_result() -> CodeHostResult {
     let comment = ReviewThreadComment::try_new(
+        code_host_bounds(),
         String::from("PRRC_comment"),
         Some(String::from("reviewer")),
         String::from("please adjust"),
         String::from("https://github.example/comment/7001"),
     )
     .expect("fixture review comment is bounded");
-    let thread = ReviewThread::try_new(ReviewThreadFields {
-        id: String::from("PRRT_thread"),
-        resolved: false,
-        outdated: false,
-        path: String::from("src/lib.rs"),
-        line: Some(12),
-        comments: vec![comment],
-        comments_truncated: false,
-    })
+    let thread = ReviewThread::try_new(
+        code_host_bounds(),
+        ReviewThreadFields {
+            id: String::from("PRRT_thread"),
+            resolved: false,
+            outdated: false,
+            path: String::from("src/lib.rs"),
+            line: Some(12),
+            comments: vec![comment],
+            comments_truncated: false,
+        },
+    )
     .expect("fixture review thread is bounded");
     CodeHostResult::ReviewThreads(
-        ReviewThreadsResult::try_new(vec![thread], CodeHostResultCompleteness::Complete)
-            .expect("fixture review-thread page is bounded"),
+        ReviewThreadsResult::try_new(
+            code_host_bounds(),
+            vec![thread],
+            CodeHostResultCompleteness::Complete,
+        )
+        .expect("fixture review-thread page is bounded"),
     )
 }
 
@@ -1863,6 +1947,7 @@ fn thread_reply_result() -> CodeHostResult {
 fn thread_resolve_result() -> CodeHostResult {
     CodeHostResult::ThreadResolve(
         ThreadResolveResult::try_new(
+            code_host_bounds(),
             String::from("PRRT_thread"),
             ReviewThreadResolution::Resolved,
         )
@@ -1873,6 +1958,7 @@ fn thread_resolve_result() -> CodeHostResult {
 fn ci_job_log_result() -> CodeHostResult {
     CodeHostResult::CiJobLog(
         CiJobLogResult::try_new(
+            code_host_bounds(),
             9001,
             String::from("offline job log"),
             CodeHostResultCompleteness::Complete,
@@ -1896,37 +1982,43 @@ const REVIEW_SLOG_BASE_REF: &str = "main";
 const REVIEW_SLOG_HEAD_REF: &str = "feature";
 
 fn reviewer_verdict_result() -> ReviewerVerdictEvidence {
-    ReviewerVerdictEvidence::try_new(ReviewerVerdictFields {
-        status: ReviewerVerdictStatus::CurrentHead,
-        reviewed_revision: Some(String::from(REVIEW_SLOG_HEAD_REVISION)),
-        reviewed_at: Some(String::from(REVIEW_SLOG_REVIEWED_AT)),
-        starvation_after_verdict: false,
-        latest_starvation_at: None,
-        latest_review_request_at: None,
-        review_request_in_flight: false,
-        source_truncated: false,
-        comments_previous_cursor: None,
-        reviews_previous_cursor: None,
-    })
+    ReviewerVerdictEvidence::try_new(
+        code_host_bounds(),
+        ReviewerVerdictFields {
+            status: ReviewerVerdictStatus::CurrentHead,
+            reviewed_revision: Some(String::from(REVIEW_SLOG_HEAD_REVISION)),
+            reviewed_at: Some(String::from(REVIEW_SLOG_REVIEWED_AT)),
+            starvation_after_verdict: false,
+            latest_starvation_at: None,
+            latest_review_request_at: None,
+            review_request_in_flight: false,
+            source_truncated: false,
+            comments_previous_cursor: None,
+            reviews_previous_cursor: None,
+        },
+    )
     .expect("fixture reviewer verdict is bounded")
 }
 
 fn convergence_state_evidence() -> ConvergenceStateResult {
-    ConvergenceStateResult::try_new(ConvergenceStateFields {
-        head_revision: String::from(REVIEW_SLOG_HEAD_REVISION),
-        mergeable_state: String::from("MERGEABLE"),
-        ci_rollup_state: Some(String::from("SUCCESS")),
-        checks: Vec::new(),
-        checks_truncated: false,
-        checks_next_cursor: None,
-        unresolved_threads: Vec::new(),
-        open_escalations: Vec::new(),
-        buried_escalations: Vec::new(),
-        undispositioned_threads: Vec::new(),
-        threads_truncated: false,
-        threads_next_cursor: None,
-        reviewer: reviewer_verdict_result(),
-    })
+    ConvergenceStateResult::try_new(
+        code_host_bounds(),
+        ConvergenceStateFields {
+            head_revision: String::from(REVIEW_SLOG_HEAD_REVISION),
+            mergeable_state: String::from("MERGEABLE"),
+            ci_rollup_state: Some(String::from("SUCCESS")),
+            checks: Vec::new(),
+            checks_truncated: false,
+            checks_next_cursor: None,
+            unresolved_threads: Vec::new(),
+            open_escalations: Vec::new(),
+            buried_escalations: Vec::new(),
+            undispositioned_threads: Vec::new(),
+            threads_truncated: false,
+            threads_next_cursor: None,
+            reviewer: reviewer_verdict_result(),
+        },
+    )
     .expect("fixture convergence state is bounded")
 }
 
@@ -1935,20 +2027,23 @@ fn convergence_state_result() -> CodeHostResult {
 }
 
 fn stack_state_evidence() -> StackStateResult {
-    StackStateResult::try_new(StackStateFields {
-        number: REVIEW_SLOG_NUMBER,
-        base_ref: String::from(REVIEW_SLOG_BASE_REF),
-        base_revision: String::from(REVIEW_SLOG_BASE_REVISION),
-        head_ref: String::from(REVIEW_SLOG_HEAD_REF),
-        head_revision: String::from(REVIEW_SLOG_HEAD_REVISION),
-        default_ref: String::from(REVIEW_SLOG_BASE_REF),
-        default_revision: String::from(REVIEW_SLOG_BASE_REVISION),
-        base_commits_not_in_head: 0,
-        main_commits_not_in_base: 0,
-        children: Vec::new(),
-        children_truncated: false,
-        children_next_cursor: None,
-    })
+    StackStateResult::try_new(
+        code_host_bounds(),
+        StackStateFields {
+            number: REVIEW_SLOG_NUMBER,
+            base_ref: String::from(REVIEW_SLOG_BASE_REF),
+            base_revision: String::from(REVIEW_SLOG_BASE_REVISION),
+            head_ref: String::from(REVIEW_SLOG_HEAD_REF),
+            head_revision: String::from(REVIEW_SLOG_HEAD_REVISION),
+            default_ref: String::from(REVIEW_SLOG_BASE_REF),
+            default_revision: String::from(REVIEW_SLOG_BASE_REVISION),
+            base_commits_not_in_head: 0,
+            main_commits_not_in_base: 0,
+            children: Vec::new(),
+            children_truncated: false,
+            children_next_cursor: None,
+        },
+    )
     .expect("fixture stack state is bounded")
 }
 
@@ -1957,19 +2052,23 @@ fn stack_state_result() -> CodeHostResult {
 }
 
 fn thread_inventory_evidence() -> ThreadInventoryResult {
-    let thread = ReviewThreadInventoryItem::try_new(ReviewThreadInventoryFields {
-        id: String::from("PRRT_thread"),
-        path: String::from("src/lib.rs"),
-        line: Some(12),
-        resolved: true,
-        outdated: false,
-        author: Some(String::from("review-bot")),
-        author_class: ReviewAuthorClass::Bot,
-        finding_title: String::from("Finding title"),
-        disposition: ReviewDispositionClass::FixNamed,
-    })
+    let thread = ReviewThreadInventoryItem::try_new(
+        code_host_bounds(),
+        ReviewThreadInventoryFields {
+            id: String::from("PRRT_thread"),
+            path: String::from("src/lib.rs"),
+            line: Some(12),
+            resolved: true,
+            outdated: false,
+            author: Some(String::from("review-bot")),
+            author_class: ReviewAuthorClass::Bot,
+            finding_title: String::from("Finding title"),
+            disposition: ReviewDispositionClass::FixNamed,
+        },
+    )
     .expect("fixture inventory item is bounded");
     ThreadInventoryResult::try_new(
+        code_host_bounds(),
         String::from(REVIEW_SLOG_HEAD_REVISION),
         vec![thread],
         false,
@@ -2442,6 +2541,48 @@ async fn shutdown_checkpoints_after_the_issued_model_before_the_next_tool()
             "tool_execution_result",
             "assistant_text",
             "turn_completed",
+        ]
+    );
+    Ok(())
+}
+
+/// The daemon's required automatic tool-round policy reaches the production
+/// PostgreSQL tool loop and terminalizes before a disallowed provider call.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn configured_automatic_tool_round_limit_stops_before_the_next_provider_call()
+-> Result<(), Box<dyn Error>> {
+    const TOOL_NAME: &str = "effect_free";
+    const AUTOMATIC_TOOL_ROUND_LIMIT: usize = 1;
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let executor = RecordingExecutor::completing();
+    let (execution, runtime) = fixture.execution_with_tool_round_limit(
+        [
+            tool_use_script(&[(TOOL_NAME, "{}")]),
+            completion_script("must not be observed"),
+        ],
+        catalog([tool(
+            TOOL_NAME,
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::EffectFree,
+        )]),
+        executor.clone(),
+        Some(AUTOMATIC_TOOL_ROUND_LIMIT),
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+
+    assert_eq!(executor.events(), vec![String::from(TOOL_NAME)]);
+    assert_eq!(runtime.received_operations().len(), 1);
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_execution_result",
+            "turn_failed",
         ]
     );
     Ok(())
@@ -4369,7 +4510,7 @@ async fn submit_frame_through_process(
         fixture.pool.clone(),
         eligibility_nudge,
         fixture.tool_dispatch_gate.clone(),
-        HubModelConfiguration::parse(PROCESS_MODEL_CONFIGURATION)?,
+        support::parse_model_configuration(PROCESS_MODEL_CONFIGURATION)?,
     );
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let runtime_task = tokio::spawn(runtime.run(shutdown_receiver));

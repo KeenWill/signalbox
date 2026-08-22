@@ -1,6 +1,6 @@
 //! Exact static model-to-adapter runtime composition.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use signalbox_model_runtime::{
     CancellationSignal, ModelOperation, ModelRuntime, ObservationSink, PreparationDefect,
@@ -98,16 +98,23 @@ impl<A, O> ConfiguredModelRuntime<A, O> {
         anthropic: Option<A>,
         openai: Option<O>,
         configuration: &HubModelConfiguration,
+        model_exchange_timeout: Option<Duration>,
+        post_kill_reap_bound: Option<Duration>,
+        native_message_limit: Option<usize>,
     ) -> Result<Self, ConfiguredAdapterConstructionError> {
         Ok(Self {
             anthropic: anthropic.map(Arc::new),
             openai: openai.map(Arc::new),
             claude_cli: configuration
-                .claude_cli_runtime()
+                .claude_cli_runtime(
+                    model_exchange_timeout,
+                    post_kill_reap_bound,
+                    native_message_limit,
+                )
                 .map_err(ConfiguredAdapterConstructionError::ClaudeCli)?
                 .map(Arc::new),
             codex_cli: configuration
-                .codex_cli_runtime()
+                .codex_cli_runtime(model_exchange_timeout, post_kill_reap_bound)
                 .map_err(ConfiguredAdapterConstructionError::CodexCli)?
                 .map(Arc::new),
             routes: configuration.adapter_routes(),
@@ -348,7 +355,7 @@ mod tests {
     fn alternate_fast_target_projects_as_declared_runtime_lineage() {
         let standard_model = "claude-standard-fixture";
         let fast_model = "claude-fast-fixture";
-        let configuration = HubModelConfiguration::parse(&format!(
+        let configuration = HubModelConfiguration::parse_test_fixture(&format!(
             r#"
 version = 1
 
@@ -415,7 +422,7 @@ context_window_tokens = 200000
     #[tokio::test]
     async fn anthropic_mapping_executes_the_existing_runtime_path_unchanged() {
         let expected_completion = "unchanged Anthropic";
-        let configuration = HubModelConfiguration::parse(
+        let configuration = HubModelConfiguration::parse_test_fixture(
             r#"
 version = 1
 
@@ -460,6 +467,9 @@ context_window_tokens = 200000
             Some(anthropic),
             None::<ScriptedModel<String>>,
             &configuration,
+            None,
+            None,
+            None,
         )
         .expect("Anthropic-only runtime constructs");
         let operation = ModelOperation::new(
@@ -568,7 +578,7 @@ service_tiers = ["priority"]
     #[tokio::test]
     async fn openai_mapping_executes_through_its_own_configured_runtime() {
         let expected_completion = "routed through OpenAI";
-        let configuration = HubModelConfiguration::parse(OPENAI_CONFIGURATION)
+        let configuration = HubModelConfiguration::parse_test_fixture(OPENAI_CONFIGURATION)
             .expect("the OpenAI mapping and model are valid");
         let openai = ScriptedModel::single(Script::delivering(scripted_completion(
             expected_completion,
@@ -580,8 +590,15 @@ service_tiers = ["priority"]
             "claude-example",
         )));
         let unrouted = anthropic.clone();
-        let runtime = ConfiguredModelRuntime::new(Some(anthropic), Some(openai), &configuration)
-            .expect("configured adapters construct");
+        let runtime = ConfiguredModelRuntime::new(
+            Some(anthropic),
+            Some(openai),
+            &configuration,
+            None,
+            None,
+            None,
+        )
+        .expect("configured adapters construct");
 
         let prepared = prepared(
             runtime
@@ -604,12 +621,15 @@ service_tiers = ["priority"]
     /// defect, never a silent fallback onto another provider.
     #[tokio::test]
     async fn openai_route_without_its_adapter_is_a_composition_defect() {
-        let configuration = HubModelConfiguration::parse(OPENAI_CONFIGURATION)
+        let configuration = HubModelConfiguration::parse_test_fixture(OPENAI_CONFIGURATION)
             .expect("the OpenAI mapping and model are valid");
         let runtime = ConfiguredModelRuntime::new(
             None::<ScriptedModel<String>>,
             None::<ScriptedModel<String>>,
             &configuration,
+            None,
+            None,
+            None,
         )
         .expect("configured adapters construct");
 
@@ -661,7 +681,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
         std::fs::set_permissions(&executable, permissions)
             .expect("fake Claude executable permissions are set");
         std::fs::write(&bridge, "#!/bin/sh\nexit 0\n").expect("fake MCP bridge is writable");
-        let configuration = HubModelConfiguration::parse(&format!(
+        let configuration = HubModelConfiguration::parse_test_fixture(&format!(
             r#"
 version = 1
 
@@ -738,6 +758,9 @@ fast_mode = "request_control"
             None::<ScriptedModel<String>>,
             None::<ScriptedModel<String>>,
             &configuration,
+            None,
+            None,
+            None,
         )
         .expect("configured adapters construct");
         assert!(format!("{runtime:?}").contains("claude_cli: Some"));
@@ -791,7 +814,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":8,"cached_input_
         permissions.set_mode(0o700);
         std::fs::set_permissions(&executable, permissions)
             .expect("fake Codex executable permissions are set");
-        let configuration = HubModelConfiguration::parse(&format!(
+        let configuration = HubModelConfiguration::parse_test_fixture(&format!(
             r#"
 version = 1
 
@@ -866,6 +889,9 @@ service_tiers = ["priority"]
             None::<ScriptedModel<String>>,
             None::<ScriptedModel<String>>,
             &configuration,
+            None,
+            None,
+            None,
         )
         .expect("configured adapters construct");
         assert!(format!("{runtime:?}").contains("anthropic: None"));

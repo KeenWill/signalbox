@@ -8,7 +8,6 @@ use std::{collections::VecDeque, error::Error, fmt};
 
 use rust_decimal::Decimal;
 use serde_json::Value;
-use signalbox_application::AutomaticReconciliationAttempt;
 use signalbox_domain::{
     AcceptedInputId, ContextFrontierId, CredentialProfileName, DelegationMessageId,
     DirectModelSelection, FrozenAliasDefinition, FrozenModelSelection, ImportedConversationId,
@@ -1299,6 +1298,7 @@ pub struct ProcessTranscriptReader {
     entry_count: Option<u64>,
     next_entry_index: u64,
     summary: Option<ProcessTranscriptSummary>,
+    automatic_reconciliation_attempt_budget: Option<Option<u32>>,
 }
 
 impl ProcessTranscriptReader {
@@ -1336,7 +1336,8 @@ impl ProcessTranscriptReader {
             let row = load_next_transcript_turn(self.transaction_mut()?, session, next_turn_after)
                 .await?;
             if let Some(row) = row {
-                let decoded = decode_transcript_turn(&row)?;
+                let decoded =
+                    decode_transcript_turn(&row, self.automatic_reconciliation_attempt_budget)?;
                 match (decoded.start_lineage, decoded.latest_frontier) {
                     (None, None) => {}
                     (Some(_), Some(frontier)) => {
@@ -1608,12 +1609,25 @@ impl From<ProcessReadCorruption> for ProcessReadError {
 #[derive(Clone, Debug)]
 pub struct ProcessReadRepository {
     pool: PgPool,
+    automatic_reconciliation_attempt_budget: Option<Option<u32>>,
 }
 
 impl ProcessReadRepository {
     /// Uses the supplied pool for independent repeatable-read snapshots.
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            automatic_reconciliation_attempt_budget: None,
+        }
+    }
+
+    /// Applies the deployment's optional automatic reconciliation budget.
+    pub const fn with_automatic_reconciliation_attempt_budget(
+        mut self,
+        budget: Option<u32>,
+    ) -> Self {
+        self.automatic_reconciliation_attempt_budget = Some(budget);
+        self
     }
 
     /// Reads one complete current or named immutable session-defaults epoch.
@@ -2095,7 +2109,12 @@ impl ProcessReadRepository {
         }
 
         Ok(Some(
-            open_transcript_in_transaction(transaction, requested_session).await?,
+            open_transcript_in_transaction(
+                transaction,
+                requested_session,
+                self.automatic_reconciliation_attempt_budget,
+            )
+            .await?,
         ))
     }
 
@@ -2126,7 +2145,12 @@ impl ProcessReadRepository {
             .decide_cross_session_read(target_placement.placement())
         {
             SessionReadScopeDecision::Allowed => Ok(ProcessScopedTranscriptRead::Opened(Box::new(
-                open_transcript_in_transaction(transaction, target_session).await?,
+                open_transcript_in_transaction(
+                    transaction,
+                    target_session,
+                    self.automatic_reconciliation_attempt_budget,
+                )
+                .await?,
             ))),
             SessionReadScopeDecision::Refused(refusal) => {
                 transaction.commit().await?;
@@ -2165,6 +2189,7 @@ fn map_session_placement_read_error(
 async fn open_transcript_in_transaction(
     mut transaction: Transaction<'static, Postgres>,
     requested_session: SessionId,
+    automatic_reconciliation_attempt_budget: Option<Option<u32>>,
 ) -> Result<ProcessTranscriptReader, ProcessReadError> {
     let stored_cursor: Option<Decimal> = sqlx::query_scalar(
         "SELECT last_sequence
@@ -2209,6 +2234,7 @@ async fn open_transcript_in_transaction(
         entry_count: None,
         next_entry_index: 0,
         summary: None,
+        automatic_reconciliation_attempt_budget,
     })
 }
 
@@ -3296,14 +3322,19 @@ fn decode_transcript_turn_model_settings(
 fn admitted_automatic_reconciliation_attempts(
     attempts: i32,
     exhausted: bool,
+    budget: Option<Option<u32>>,
 ) -> Result<u32, ProcessReadError> {
     let attempts = u32::try_from(attempts).map_err(|_| {
         ProcessReadCorruption::Inconsistent("automatic reconciliation attempt count")
     })?;
     let admitted = if exhausted {
-        attempts == AutomaticReconciliationAttempt::budget()
+        match budget {
+            Some(Some(budget)) => attempts == budget,
+            Some(None) => false,
+            None => attempts > 0,
+        }
     } else {
-        attempts <= AutomaticReconciliationAttempt::budget()
+        budget.is_none_or(|budget| budget.is_none_or(|budget| attempts <= budget))
     };
     admitted
         .then_some(attempts)
@@ -3313,7 +3344,10 @@ fn admitted_automatic_reconciliation_attempts(
         .map_err(Into::into)
 }
 
-fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> {
+fn decode_transcript_turn(
+    row: &PgRow,
+    automatic_reconciliation_attempt_budget: Option<Option<u32>>,
+) -> Result<DecodedTurn, ProcessReadError> {
     let turn = TurnId::from_uuid(required(row, "turn_id")?);
     let acceptance_position = decode_positive(
         required(row, "acceptance_position")?,
@@ -3488,10 +3522,11 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
                     Some(attempts),
                     model_call,
                     tool_attempt,
-                ) if attempts >= 0
-                    && u32::try_from(attempts).is_ok_and(|attempts| {
-                        attempts <= AutomaticReconciliationAttempt::budget()
-                    })
+                ) if admitted_automatic_reconciliation_attempts(
+                        attempts,
+                        false,
+                        automatic_reconciliation_attempt_budget,
+                    ).is_ok()
                     && model_call == terminal_call
                     && tool_attempt == terminal_tool_attempt
                     && model_call.is_some() != tool_attempt.is_some()
@@ -3763,11 +3798,19 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         ) {
             (None, None, None) => (0, false),
             (Some("scheduled" | "attempting"), Some(attempts), Some(_)) => (
-                admitted_automatic_reconciliation_attempts(attempts, false)?,
+                admitted_automatic_reconciliation_attempts(
+                    attempts,
+                    false,
+                    automatic_reconciliation_attempt_budget,
+                )?,
                 false,
             ),
             (Some("exhausted"), Some(attempts), Some(_)) => (
-                admitted_automatic_reconciliation_attempts(attempts, true)?,
+                admitted_automatic_reconciliation_attempts(
+                    attempts,
+                    true,
+                    automatic_reconciliation_attempt_budget,
+                )?,
                 true,
             ),
             _ => {
@@ -3991,35 +4034,19 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             ) {
                 (None, None, None) => (0, false),
                 (Some("scheduled" | "attempting"), Some(attempts), Some(_)) => (
-                    u32::try_from(attempts)
-                        .map_err(|_| {
-                            ProcessReadCorruption::Inconsistent(
-                                "automatic model-call reconciliation attempt count",
-                            )
-                        })
-                        .and_then(|attempts| {
-                            (attempts <= AutomaticReconciliationAttempt::budget())
-                                .then_some(attempts)
-                                .ok_or(ProcessReadCorruption::Inconsistent(
-                                    "automatic model-call reconciliation attempt budget",
-                                ))
-                        })?,
+                    admitted_automatic_reconciliation_attempts(
+                        attempts,
+                        false,
+                        automatic_reconciliation_attempt_budget,
+                    )?,
                     false,
                 ),
                 (Some("exhausted"), Some(attempts), Some(_)) => (
-                    u32::try_from(attempts)
-                        .map_err(|_| {
-                            ProcessReadCorruption::Inconsistent(
-                                "exhausted model-call reconciliation attempt count",
-                            )
-                        })
-                        .and_then(|attempts| {
-                            (attempts == AutomaticReconciliationAttempt::budget())
-                                .then_some(attempts)
-                                .ok_or(ProcessReadCorruption::Inconsistent(
-                                    "exhausted model-call reconciliation attempt budget",
-                                ))
-                        })?,
+                    admitted_automatic_reconciliation_attempts(
+                        attempts,
+                        true,
+                        automatic_reconciliation_attempt_budget,
+                    )?,
                     true,
                 ),
                 _ => {

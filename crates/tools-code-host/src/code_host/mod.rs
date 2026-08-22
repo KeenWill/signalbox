@@ -22,7 +22,7 @@ mod result;
 mod review_gate_check;
 mod review_slog;
 
-use std::{error::Error, fmt, future::Future};
+use std::{error::Error, fmt, future::Future, time::Duration};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -78,6 +78,75 @@ pub use review_slog::{
 
 /// Non-secret name of the daemon-held code-host credential.
 pub const CODE_HOST_CREDENTIAL_REFERENCE: &str = "github-primary";
+
+/// Deployment-supplied policy bounds for code-host operations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CodeHostNumericBounds {
+    request_timeout: Option<Duration>,
+    job_log_bytes: Option<usize>,
+    stack_comparisons_in_flight: Option<usize>,
+    result_text_bytes: Option<usize>,
+    result_items: Option<usize>,
+    repository_file_content_bytes: Option<usize>,
+}
+
+impl CodeHostNumericBounds {
+    /// Records every required code-host policy bound. `None` means unbounded.
+    pub const fn new(
+        request_timeout: Option<Duration>,
+        job_log_bytes: Option<usize>,
+        stack_comparisons_in_flight: Option<usize>,
+        result_text_bytes: Option<usize>,
+        result_items: Option<usize>,
+        repository_file_content_bytes: Option<usize>,
+    ) -> Self {
+        Self {
+            request_timeout,
+            job_log_bytes,
+            stack_comparisons_in_flight,
+            result_text_bytes,
+            result_items,
+            repository_file_content_bytes,
+        }
+    }
+
+    const fn request_timeout(self) -> Option<Duration> {
+        self.request_timeout
+    }
+
+    const fn job_log_bytes(self) -> Option<usize> {
+        self.job_log_bytes
+    }
+
+    const fn stack_comparisons_in_flight(self) -> Option<usize> {
+        self.stack_comparisons_in_flight
+    }
+
+    const fn repository_file_content_bytes(self) -> Option<usize> {
+        self.repository_file_content_bytes
+    }
+
+    const fn result_text_bytes(self) -> Option<usize> {
+        self.result_text_bytes
+    }
+
+    const fn result_items(self) -> Option<usize> {
+        self.result_items
+    }
+
+    fn permits_result_text(self, observed: usize) -> bool {
+        self.result_text_bytes.is_none_or(|limit| observed <= limit)
+    }
+
+    fn permits_result_items(self, observed: usize) -> bool {
+        self.result_items.is_none_or(|limit| observed <= limit)
+    }
+}
+
+#[cfg(test)]
+pub(super) const fn test_numeric_bounds() -> CodeHostNumericBounds {
+    CodeHostNumericBounds::new(None, None, None, None, None, None)
+}
 
 /// Registry name for change-request summary lookup.
 pub const CHANGE_REQUEST_SUMMARY_NAME: &str = change_request_summary::NAME;
@@ -533,6 +602,9 @@ pub enum CodeHostTransportFailure {
 
 /// Mockable typed transport boundary for the code-host suite.
 pub trait CodeHostTransport: Send {
+    /// Returns the deployment policy used to construct results.
+    fn numeric_bounds(&self) -> CodeHostNumericBounds;
+
     /// Executes the exact typed operation with one request-scoped credential.
     fn execute(
         &mut self,
@@ -750,7 +822,9 @@ where
             }
         };
         let mut value = result.into_json_value();
-        if scrub_result_value(kind, &scrubber, &mut value).is_none() {
+        if scrub_result_value(self.transport.numeric_bounds(), kind, &scrubber, &mut value)
+            .is_none()
+        {
             return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.code_host_rejected_detail.clone()),
             }));
@@ -894,6 +968,7 @@ impl CredentialScrubber {
 }
 
 fn scrub_result_value(
+    bounds: CodeHostNumericBounds,
     kind: CodeHostToolKind,
     scrubber: &CredentialScrubber,
     value: &mut serde_json::Value,
@@ -914,7 +989,10 @@ fn scrub_result_value(
 
     let content = value.get("content")?.as_str()?;
     let returned_bytes = content.len();
-    if returned_bytes > repository_result::MAX_REPOSITORY_FILE_CONTENT_BYTES {
+    if bounds
+        .repository_file_content_bytes()
+        .is_some_and(|limit| returned_bytes > limit)
+    {
         return None;
     }
     let returned_lines = repository_result::line_count(content);
@@ -971,6 +1049,25 @@ mod tests {
             .expect("static code-host declarations compile")
             .into_parts()
             .0
+    }
+
+    #[test]
+    fn configured_result_policies_distinguish_finite_and_unbounded_values() {
+        const OBSERVED: usize = 5;
+        let finite = CodeHostNumericBounds::new(
+            None,
+            None,
+            None,
+            Some(OBSERVED - 1),
+            Some(OBSERVED - 1),
+            None,
+        );
+        let unbounded = test_numeric_bounds();
+
+        assert!(!finite.permits_result_text(OBSERVED));
+        assert!(!finite.permits_result_items(OBSERVED));
+        assert!(unbounded.permits_result_text(OBSERVED));
+        assert!(unbounded.permits_result_items(OBSERVED));
     }
 
     #[track_caller]
@@ -2091,6 +2188,7 @@ mod tests {
         }))
         .expect("fixture file arguments are admitted");
         let result = RepositoryReadFileResult::try_content(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -2106,8 +2204,13 @@ mod tests {
         .expect("fixture file result is admitted");
         let mut value = CodeHostResult::ReadFile(result).into_json_value();
 
-        scrub_result_value(CodeHostToolKind::ReadFile, &scrubber, &mut value)
-            .expect("typed file result remains shaped after scrubbing");
+        scrub_result_value(
+            test_numeric_bounds(),
+            CodeHostToolKind::ReadFile,
+            &scrubber,
+            &mut value,
+        )
+        .expect("typed file result remains shaped after scrubbing");
 
         let emitted_content = "before [redacted] after\n";
         assert_eq!(value["content"], emitted_content);
@@ -2127,6 +2230,8 @@ mod tests {
         let scrubber =
             CredentialScrubber::try_new(&credential).expect("fixture credential is usable");
         let source_content = CREDENTIAL.repeat(SOURCE_CONTENT_REPETITIONS);
+        let bounds =
+            CodeHostNumericBounds::new(None, None, None, None, None, Some(source_content.len()));
         let source_bytes =
             u64::try_from(source_content.len()).expect("fixture source size fits u64");
         let arguments: RepositoryReadFileArguments = serde_json::from_value(serde_json::json!({
@@ -2136,6 +2241,7 @@ mod tests {
         }))
         .expect("fixture file arguments are admitted");
         let result = RepositoryReadFileResult::try_content(
+            bounds,
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -2151,7 +2257,8 @@ mod tests {
         .expect("fixture file result is admitted");
         let mut value = CodeHostResult::ReadFile(result).into_json_value();
 
-        let scrubbed = scrub_result_value(CodeHostToolKind::ReadFile, &scrubber, &mut value);
+        let scrubbed =
+            scrub_result_value(bounds, CodeHostToolKind::ReadFile, &scrubber, &mut value);
 
         assert!(scrubbed.is_none());
     }
@@ -2175,6 +2282,7 @@ mod tests {
         }))
         .expect("fixture file arguments are admitted");
         let result = RepositoryReadFileResult::try_content(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             RepositoryFileContentFields {
                 source_bytes,
@@ -2190,7 +2298,12 @@ mod tests {
         .expect("fixture file result is admitted before scrubbing");
         let mut value = CodeHostResult::ReadFile(result).into_json_value();
 
-        let scrubbed = scrub_result_value(CodeHostToolKind::ReadFile, &scrubber, &mut value);
+        let scrubbed = scrub_result_value(
+            test_numeric_bounds(),
+            CodeHostToolKind::ReadFile,
+            &scrubber,
+            &mut value,
+        );
 
         assert!(scrubbed.is_none());
     }
@@ -2221,6 +2334,7 @@ mod tests {
         ];
         let observed_entries = entries.len();
         let result = RepositoryListDirectoryResult::try_entries(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             entries,
             observed_entries,
@@ -2229,7 +2343,12 @@ mod tests {
         .expect("fixture directory result is admitted before scrubbing");
         let mut value = CodeHostResult::ListDirectory(result).into_json_value();
 
-        let scrubbed = scrub_result_value(CodeHostToolKind::ListDirectory, &scrubber, &mut value);
+        let scrubbed = scrub_result_value(
+            test_numeric_bounds(),
+            CodeHostToolKind::ListDirectory,
+            &scrubber,
+            &mut value,
+        );
 
         assert!(scrubbed.is_none());
     }
@@ -2381,20 +2500,24 @@ mod tests {
         let oversized = "N".repeat(arguments::MAX_OPAQUE_ID_BYTES + 1);
 
         let comment = ReviewThreadComment::try_new(
+            crate::code_host::test_numeric_bounds(),
             oversized.clone(),
             Some(String::from("reviewer")),
             String::from("please adjust"),
             String::from("https://github.example/comment/7001"),
         );
-        let thread = ReviewThread::try_new(ReviewThreadFields {
-            id: oversized.clone(),
-            resolved: false,
-            outdated: false,
-            path: String::from("src/lib.rs"),
-            line: Some(12),
-            comments: Vec::new(),
-            comments_truncated: false,
-        });
+        let thread = ReviewThread::try_new(
+            crate::code_host::test_numeric_bounds(),
+            ReviewThreadFields {
+                id: oversized.clone(),
+                resolved: false,
+                outdated: false,
+                path: String::from("src/lib.rs"),
+                line: Some(12),
+                comments: Vec::new(),
+                comments_truncated: false,
+            },
+        );
         let reply = ThreadReplyResult::try_new(
             oversized.clone(),
             String::from("https://github.example/comment/7002"),
@@ -2415,18 +2538,21 @@ mod tests {
     fn returned_summary_revision_rejects_revisions_the_argument_side_refuses() {
         let malformed = String::from("HEAD");
 
-        let summary = ChangeRequestSummaryResult::try_new(ChangeRequestSummaryFields {
-            number: 17,
-            title: String::from("summary"),
-            body: None,
-            state: String::from("open"),
-            draft: false,
-            author: None,
-            base_ref: String::from("main"),
-            head_ref: String::from("feature"),
-            head_revision: malformed.clone(),
-            url: String::from("https://github.example/owner/repository/pull/17"),
-        });
+        let summary = ChangeRequestSummaryResult::try_new(
+            crate::code_host::test_numeric_bounds(),
+            ChangeRequestSummaryFields {
+                number: 17,
+                title: String::from("summary"),
+                body: None,
+                state: String::from("open"),
+                draft: false,
+                author: None,
+                base_ref: String::from("main"),
+                head_ref: String::from("feature"),
+                head_revision: malformed.clone(),
+                url: String::from("https://github.example/owner/repository/pull/17"),
+            },
+        );
 
         assert!(
             CodeHostRevision::try_new(malformed).is_err(),
@@ -2461,7 +2587,11 @@ mod tests {
     #[test]
     fn thread_resolve_result_rejects_open_acknowledgement() {
         assert_eq!(
-            ThreadResolveResult::try_new(String::from("PRRT_node"), ReviewThreadResolution::Open,),
+            ThreadResolveResult::try_new(
+                crate::code_host::test_numeric_bounds(),
+                String::from("PRRT_node"),
+                ReviewThreadResolution::Open,
+            ),
             None
         );
     }

@@ -38,7 +38,8 @@ producing calls was re-verified against this PR
 (`agent/cancelled-outbox-completed-call`).
 
 The deployment-owned scheduler pass limit is verified against this PR
-(`agent/scheduler-pass-pause`).
+(`agent/scheduler-pass-pause`). Deployment-owned scheduler and liveness bounds
+are verified against this PR (`agent/bounds-required-config-protocol`).
 
 Tool-attempt reconciliation predecessor replay was verified against this PR
 (`agent/tool-reconciliation-origin-replay`).
@@ -694,17 +695,12 @@ slow to finish; it may not stop watching. What deferral does not cost is the
 turn: one left alone had nothing change, so it is observed unchanged and comes
 due again on a later scan, waiting rather than being forgotten.
 
-**Constants.** The staleness bound is a hard safety ceiling of 30 minutes and
-the scan interval is one minute; both are compiled in. The bound the pass runs
-with is supplied at its composition site rather than reloaded from the ceiling,
-so whichever bound decides turns is also the bound the audit line reports. A
-shorter one is constructible only through a checked constructor that refuses
-zero, refuses precision finer than a whole second, and refuses anything above
-the compiled ceiling — the single place the ceiling is enforced as the only
-maximum, and the reason no caller can raise it. signalboxd composes the ceiling
-itself: no operator setting lowers it, and whether one should exist is an
-[open question](../open-questions.md#turn-lifecycle) it shares with the other
-scheduling cadences.
+**Deployment bounds.** The required daemon configuration owns the staleness
+bound and scan interval. Either may be `"none"`: no scan interval leaves the
+liveness task idle until shutdown, while no staleness bound leaves automatic
+ambiguity reconciliation active without stale-turn terminalization. Finite
+values pass checked constructors that reject zero, subsecond precision, and an
+unrepresentable timer range; no compiled policy value remains.
 
 **Terminalization.** A due turn ends through the same committed failed-turn
 transition startup recovery commits, through the same reviewed statement and so
@@ -1478,10 +1474,10 @@ from child transcript state nor depend on process-local wake memory.
   watchdog-ended turn from a restart-recovered one in the rows rather than only
   in the operator log, is an
   [open question](../open-questions.md#turn-lifecycle).
-- Operator control of scan gating, sweep interval, the turn-liveness staleness
-  bound, and fairness is an
-  [open question](../open-questions.md#turn-lifecycle); the process-wide
-  advisory singleton guard is specified by
+- Per-session scan gating and fairness remain an
+  [open question](../open-questions.md#turn-lifecycle); deployment configuration
+  now owns the sweep interval and turn-liveness staleness and scan bounds. The
+  process-wide advisory singleton guard is specified by
   [process-protocol](process-protocol.md).
 - LISTEN/NOTIFY remains the documented multi-process extension only; the
   baseline is single-process nudge plus sweep.
