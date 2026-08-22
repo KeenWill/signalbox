@@ -42,7 +42,7 @@ use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
     WebContractBootstrap, WebContractExample, WebSearchContentClass, WebSearchCursor,
     WebSearchHighlight, WebSearchPage, WebSearchProjectionId, WebSearchResult,
-    WebSearchResultSource, WebSessionTimelineDescriptor, WebSessionTimelineEventKind,
+    WebSearchResultSource, WebSessionId, WebSessionTimelineDescriptor, WebSessionTimelineEventKind,
     WebSessionTimelineItem, WebSessionTimelineSizeFacts, WebSessionTimelineWindow,
     WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence, WebU64,
 };
@@ -699,7 +699,8 @@ fn descriptor_dto(
         return Err(SessionTimelineRequestError::MissingBounds);
     };
     Ok(WebSessionTimelineDescriptor {
-        session_id: descriptor.session.into_uuid().to_string(),
+        session_id: WebSessionId::from_canonical(descriptor.session.into_uuid().to_string())
+            .expect("domain session UUID formats canonically"),
         sizes: WebSessionTimelineSizeFacts {
             item_count: WebU64::from_u64(descriptor.sizes.item_count),
             projected_text_bytes: WebU64::from_u64(descriptor.sizes.projected_text_bytes),
@@ -729,7 +730,8 @@ fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
         TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
     };
     WebSessionTimelineWindow {
-        session_id: window.session.into_uuid().to_string(),
+        session_id: WebSessionId::from_canonical(window.session.into_uuid().to_string())
+            .expect("domain session UUID formats canonically"),
         items: window
             .items
             .into_iter()
