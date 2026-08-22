@@ -25,6 +25,29 @@ describe('application state', () => {
     expect(selectApp(store.getState()).lastLogicalPositions['oversized-position']).toBeUndefined()
   })
 
+  it('retains a re-recorded session at the capacity boundary', () => {
+    for (let index = 0; index < 128; index += 1) {
+      store.dispatch(
+        actions.logicalPositionRecorded({
+          sessionId: `recent-${index}`,
+          position: `cursor-${index}`,
+        }),
+      )
+    }
+
+    store.dispatch(
+      actions.logicalPositionRecorded({ sessionId: 'recent-0', position: 'refreshed' }),
+    )
+    store.dispatch(
+      actions.logicalPositionRecorded({ sessionId: 'recent-overflow', position: 'cursor' }),
+    )
+
+    const positions = selectApp(store.getState()).lastLogicalPositions
+    expect(positions['recent-0']).toBe('refreshed')
+    expect(positions['recent-1']).toBeUndefined()
+    expect(positions['recent-overflow']).toBe('cursor')
+  })
+
   it('rejects logical positions that would exceed the serialized preference ceiling', () => {
     for (let index = 0; index < 128; index += 1) {
       store.dispatch(
@@ -47,6 +70,8 @@ describe('application state', () => {
       keyOverrides: app.keyOverrides,
     })
     expect(serialized).not.toBeNull()
-    expect(Object.keys(app.lastLogicalPositions)).not.toHaveLength(128)
+    expect(
+      Object.keys(app.lastLogicalPositions).filter((sessionId) => sessionId.startsWith('escaped-')),
+    ).not.toHaveLength(128)
   })
 })
