@@ -631,6 +631,7 @@ const schemas = {
         "description": "Closed model-call lifecycle checkpoint with terminal disposition in-band.",
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "type": {
                 "const": "prepared",
@@ -643,6 +644,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "type": {
                 "const": "in_flight",
@@ -655,6 +657,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "type": {
                 "const": "cancellation_requested",
@@ -667,6 +670,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "disposition": {
                 "$ref": "#/$defs/WebTimelineModelCallDisposition"

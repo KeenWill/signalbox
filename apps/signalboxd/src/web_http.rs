@@ -879,10 +879,10 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
 
 fn model_call_state_dto(state: TimelineModelCallState) -> WebTimelineModelCallState {
     match state {
-        TimelineModelCallState::Prepared => WebTimelineModelCallState::Prepared,
-        TimelineModelCallState::InFlight => WebTimelineModelCallState::InFlight,
+        TimelineModelCallState::Prepared => WebTimelineModelCallState::Prepared {},
+        TimelineModelCallState::InFlight => WebTimelineModelCallState::InFlight {},
         TimelineModelCallState::CancellationRequested => {
-            WebTimelineModelCallState::CancellationRequested
+            WebTimelineModelCallState::CancellationRequested {}
         }
         TimelineModelCallState::Terminal(disposition) => WebTimelineModelCallState::Terminal {
             disposition: match disposition {
