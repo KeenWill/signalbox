@@ -25,7 +25,7 @@ selection were verified through PR #314 (`agent/context-compaction-protocol`).
 The runner placement-entry payload and checked relational readback were verified
 against this PR (`agent/runner-placement-semantic-persistence`). The relocation
 predecessor-frontier composition that retains the model-identity boundary was
-re-verified through PR #866 (`agent/runner-restricted-command-environment`),
+re-verified against this PR (`agent/runner-restricted-command-environment`),
 including migration `202608150102_runner_relocation_model_boundary.sql`. The
 imported-conversation record and converter are owned by
 [conversation-import](conversation-import.md). Where a law is cited as
