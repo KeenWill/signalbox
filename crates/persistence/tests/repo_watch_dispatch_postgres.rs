@@ -3830,6 +3830,48 @@ async fn current_head_achievement_seals_without_requeue() -> Result<(), Box<dyn 
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_repository_status_reads_the_latest_achieved_settlement_projection()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    declare_dispatched_goal_achieved(&fixture, 0, 0x50_410).await?;
+
+    let statuses = PostgresRepoWatchOperations::new(fixture.pool.clone())
+        .repository_statuses(None)
+        .await?;
+
+    assert_eq!(
+        statuses.repositories[0]
+            .last_automation_settlement
+            .as_ref()
+            .map(|settlement| settlement.dispatch),
+        Some(fixture.dispatch_id)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_pull_request_reads_the_latest_achieved_settlement_projection()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    declare_dispatched_goal_achieved(&fixture, 0, 0x50_420).await?;
+
+    let pull_requests = PostgresRepoWatchOperations::new(fixture.pool.clone())
+        .pull_requests(fixture.repository.clone(), None)
+        .await?;
+
+    assert_eq!(
+        pull_requests.pull_requests[0]
+            .last_automation_settlement
+            .as_ref()
+            .map(|settlement| settlement.dispatch),
+        Some(fixture.dispatch_id)
+    );
+    Ok(())
+}
+
 /// A merge-forward dispatch moves the head it was dispatched against, so the
 /// exact-head seal must compare the state a batch delivered rather than the
 /// event that originated it. The obligation successor replays that still-
@@ -4764,6 +4806,30 @@ async fn operator_repository_status_counts_held_and_queued_work() -> Result<(), 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_repository_status_reads_the_latest_actionable_event_projection()
+-> Result<(), Box<dyn Error>> {
+    let (fixture, reader) = occupied_operations_fixture().await?;
+    let work = reader
+        .work(
+            fixture.repository.clone(),
+            RepoWatchPagePosition::Exhausted,
+            RepoWatchPagePosition::Start,
+        )
+        .await?;
+    let statuses = reader.repository_statuses(None).await?;
+
+    assert_eq!(
+        statuses.repositories[0]
+            .last_actionable_event
+            .as_ref()
+            .map(|event| event.id),
+        Some(work.queued_obligations[0].latest_event)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn operator_pull_request_counts_held_and_queued_work() -> Result<(), Box<dyn Error>> {
     let (fixture, reader) = occupied_operations_fixture().await?;
     let pull_requests = reader
@@ -4773,6 +4839,32 @@ async fn operator_pull_request_counts_held_and_queued_work() -> Result<(), Box<d
     assert_eq!(pull_requests.pull_requests.len(), 1);
     assert_eq!(pull_requests.pull_requests[0].held_slot_count, 1);
     assert_eq!(pull_requests.pull_requests[0].queued_obligation_count, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_pull_request_reads_the_latest_actionable_event_projection()
+-> Result<(), Box<dyn Error>> {
+    let (fixture, reader) = occupied_operations_fixture().await?;
+    let work = reader
+        .work(
+            fixture.repository.clone(),
+            RepoWatchPagePosition::Exhausted,
+            RepoWatchPagePosition::Start,
+        )
+        .await?;
+    let pull_requests = reader
+        .pull_requests(fixture.repository.clone(), None)
+        .await?;
+
+    assert_eq!(
+        pull_requests.pull_requests[0]
+            .last_actionable_event
+            .as_ref()
+            .map(|event| event.id),
+        Some(work.queued_obligations[0].latest_event)
+    );
     Ok(())
 }
 

@@ -33,6 +33,7 @@ use signalbox_persistence::{
         RepoWatchCursorCandidate, RepoWatchCursorGeneration, RepoWatchEventPageSize,
         RepoWatchPersistenceCorruption, RepoWatchStoreError,
     },
+    repo_watch_operations::PostgresRepoWatchOperations,
 };
 use sqlx::{PgPool, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -264,6 +265,7 @@ async fn seed_legacy_repo_watch_event(pool: &PgPool) -> Result<Uuid, Box<dyn Err
 
 struct CommittedFixture {
     _container: ContainerAsync<Postgres>,
+    pool: PgPool,
     repository: RepositorySlug,
     store: PostgresRepoWatchStore,
     second_candidate: RepoWatchCursorCandidate,
@@ -312,6 +314,7 @@ async fn committed_fixture() -> Result<CommittedFixture, Box<dyn Error>> {
     );
     Ok(CommittedFixture {
         _container: container,
+        pool,
         repository,
         store,
         second_candidate,
@@ -388,6 +391,47 @@ async fn cursor_round_trip_retains_check_completion_generations() -> Result<(), 
         .expect("fixture cursor is present");
 
     assert_eq!(loaded.candidate(), &fixture.second_candidate);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pull_request_pages_read_the_current_projection_without_decoding_the_cursor()
+-> Result<(), Box<dyn Error>> {
+    let fixture = committed_fixture().await?;
+    let mut connection = fixture.pool.acquire().await?;
+    sqlx::query("SET session_replication_role = replica")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "UPDATE repo_watch_cursor
+            SET cursor_payload = '{\"storage_version\":2}'::jsonb
+          WHERE repository = $1 AND generation = $2",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(i64::try_from(fixture.second_generation.get())?)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query("SET session_replication_role = origin")
+        .execute(&mut *connection)
+        .await?;
+    drop(connection);
+
+    let page = PostgresRepoWatchOperations::new(fixture.pool.clone())
+        .pull_requests(fixture.repository.clone(), None)
+        .await?;
+
+    assert_eq!(page.pull_requests.len(), 1);
+    assert_eq!(
+        page.pull_requests[0].number,
+        fixture
+            .second_candidate
+            .observation()
+            .state()
+            .pull_requests()[0]
+            .context()
+            .number()
+    );
     Ok(())
 }
 

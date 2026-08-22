@@ -725,6 +725,33 @@ async fn operations_webhook_window_counts_recent_projected_deliveries() -> Resul
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_health_includes_webhook_intake_before_the_first_cursor()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let webhook = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(OPERATIONS_BURST_BASE);
+    admit_fixture(&webhook, key).await?;
+
+    let statuses = PostgresRepoWatchOperations::new(pool)
+        .repository_statuses(None)
+        .await?;
+
+    assert_eq!(statuses.repositories.len(), 1);
+    assert_eq!(statuses.repositories[0].repository, repository()?);
+    assert_eq!(statuses.repositories[0].cursor_generation, None);
+    assert_eq!(statuses.repositories[0].observed_at, None);
+    assert_eq!(
+        statuses.repositories[0]
+            .latest_webhook
+            .as_ref()
+            .map(|webhook| webhook.receipt_sequence),
+        Some(1)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn operations_webhook_activity_is_bounded_and_keyset_paged() -> Result<(), Box<dyn Error>> {
     let (_container, repository, reader) = operations_webhook_fixture().await?;
     let first = reader

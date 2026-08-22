@@ -88,8 +88,8 @@ pub struct RepoWatchEventKindCount {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchRepositoryStatus {
     pub repository: RepositorySlug,
-    pub cursor_generation: u64,
-    pub observed_at: SystemTime,
+    pub cursor_generation: Option<u64>,
+    pub observed_at: Option<SystemTime>,
     pub latest_webhook: Option<RepoWatchLatestWebhook>,
     pub previous_five_minutes: RepoWatchWebhookWindow,
     pub previous_hour: RepoWatchWebhookWindow,
