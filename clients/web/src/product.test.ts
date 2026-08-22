@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { SameOriginProductTransport } from './product'
+import {
+  BootstrapContractError,
+  MAX_BOOTSTRAP_RESPONSE_BYTES,
+  SameOriginProductTransport,
+} from './product'
 
 const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '1' },
@@ -32,7 +36,29 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      'bootstrap.contract',
+      BootstrapContractError,
+    )
+  })
+
+  it('rejects malformed JSON as a contract failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{')),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'violates the web contract',
+    )
+  })
+
+  it('rejects a bootstrap response above the fixed byte ceiling', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('x'.repeat(MAX_BOOTSTRAP_RESPONSE_BYTES + 1))),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'exceeds the byte limit',
     )
   })
 

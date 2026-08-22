@@ -1,29 +1,31 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  BROWSER_PREFERENCES_KEY,
   decodeBrowserPreferences,
   defaultBrowserPreferences,
+  loadBrowserPreferences,
   MAX_KEY_OVERRIDES,
   MAX_SAVED_LOGICAL_POSITIONS,
+  saveBrowserPreferences,
 } from './preferences'
+
+afterEach(() => vi.unstubAllGlobals())
 
 describe('browser preferences', () => {
   it('fails closed to defaults for an unrelated stored value', () => {
-    expect(decodeBrowserPreferences('not-an-object')).toEqual(defaultBrowserPreferences)
+    expect(() => decodeBrowserPreferences('not-an-object')).toThrow('preferences must be an object')
   })
 
-  it('clamps pane sizes and rejects unknown closed variants', () => {
+  it('rejects partial and unknown preference schemas atomically', () => {
     const stored = {
       layout: 'dashboard',
       density: 'comfortable',
       paneSizes: { navigation: -50, inspector: 50_000 },
       remoteMedia: 'proxy',
     } as const
-    const decoded = decodeBrowserPreferences(stored)
-
-    expect(decoded.layout).toBe(defaultBrowserPreferences.layout)
-    expect(decoded.density).toBe(stored.density)
-    expect(decoded.paneSizes).toEqual({ navigation: 160, inspector: 480 })
-    expect(decoded.remoteMedia).toBe(defaultBrowserPreferences.remoteMedia)
+    expect(() => decodeBrowserPreferences(stored)).toThrow(
+      'preferences must match the current exact schema',
+    )
   })
 
   it('bounds retained positions and future key overrides', () => {
@@ -40,9 +42,36 @@ describe('browser preferences', () => {
       ]),
     )
 
-    const decoded = decodeBrowserPreferences({ lastLogicalPositions, keyOverrides })
+    const decoded = decodeBrowserPreferences({
+      ...defaultBrowserPreferences,
+      lastLogicalPositions,
+      keyOverrides,
+    })
 
     expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
     expect(Object.keys(decoded.keyOverrides)).toHaveLength(MAX_KEY_OVERRIDES)
+  })
+
+  it('loads defaults atomically when the stored schema is partial', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) =>
+        key === BROWSER_PREFERENCES_KEY ? JSON.stringify({ layout: 'focus' }) : null,
+    })
+
+    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+  })
+
+  it('treats browser storage access failures as optional', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => {
+        throw new DOMException('blocked', 'SecurityError')
+      },
+      setItem: () => {
+        throw new DOMException('full', 'QuotaExceededError')
+      },
+    })
+
+    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+    expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
   })
 })
