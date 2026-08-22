@@ -8,8 +8,8 @@
 use std::{error::Error, num::NonZeroU64};
 
 use signalbox_application::{
-    SessionTimelineDetailBody, TimelineAddress, TimelineContinuation, TimelineDetailLimits,
-    TimelineWindowAnchor, TimelineWindowLimits,
+    SessionTimelineDetailBody, TimelineAddress, TimelineContinuation, TimelineDelegationDetail,
+    TimelineDetailLimits, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::{
     CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
@@ -268,13 +268,8 @@ async fn tool_detail_selects_one_lease_generation_for_sandbox_posture() -> Resul
     let SessionTimelineDetailBody::ToolBatch { tools, .. } = &page.items[0].body else {
         panic!("the selected event projects a tool-batch body");
     };
-    let expected_attempt = attempt.into_uuid().to_string();
-
     assert_eq!(tools.len(), 1);
-    assert_eq!(
-        tools[0].attempt_id.as_deref(),
-        Some(expected_attempt.as_str())
-    );
+    assert_eq!(tools[0].attempt_id, Some(attempt));
     assert!(tools[0].sandbox_posture.is_some());
 
     pool.close().await;
@@ -284,8 +279,8 @@ async fn tool_detail_selects_one_lease_generation_for_sandbox_posture() -> Resul
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn item_detail_returns_absent_for_an_unallocated_future_address()
--> Result<(), Box<dyn Error>> {
+async fn item_detail_returns_absent_for_an_unallocated_future_address() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let identity = session(0x996);
     create_session(&pool, identity).await?;
@@ -379,10 +374,12 @@ async fn delegation_detail_validates_body_shape_without_projecting_body_text()
         .read_item_details(fixture.child, address, None, limits)
         .await?
         .expect("the delegation detail exists");
+    let SessionTimelineDetailBody::Delegation(delegation) = &detail.items[0].body else {
+        panic!("expected delegation detail");
+    };
     assert!(matches!(
-        &detail.items[0].body,
-        SessionTimelineDetailBody::Delegation { event_kind, .. }
-            if event_kind == "session_message"
+        delegation,
+        TimelineDelegationDetail::SessionMessage { .. }
     ));
 
     sqlx::query(

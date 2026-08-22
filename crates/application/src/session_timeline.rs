@@ -6,7 +6,11 @@
 
 use std::{fmt, future::Future, num::NonZeroU64};
 
-use signalbox_domain::{BlobDigest, ModelCallId, ProviderModelIdentity, SessionId, TurnId};
+use signalbox_domain::{
+    BlobDigest, ContextCompactionId, ContextFrontierId, DelegationMessageId, DirectModelSelection,
+    DurableCommandId, ModelCallId, ProviderModelIdentity, RunnerId, SemanticTranscriptEntryId,
+    SessionId, ToolAttemptId, ToolRequestId, TurnId,
+};
 
 /// Returns the hard ceiling on records in one historical window.
 #[must_use]
@@ -456,19 +460,34 @@ pub enum TimelineToolState {
 /// One request and its optional attempt, projected one member at a time.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TimelineToolAttempt {
-    pub request_id: String,
-    pub attempt_id: Option<String>,
+    pub request_id: ToolRequestId,
+    pub attempt_id: Option<ToolAttemptId>,
     pub tool_name: String,
     pub arguments: Option<TimelineTextExcerpt>,
     pub result: Option<TimelineTextExcerpt>,
     pub failure: Option<TimelineTextExcerpt>,
-    pub approval_posture: String,
+    pub approval_posture: TimelineToolApprovalPosture,
     pub approval_judge_escalated: bool,
     pub operator_required: bool,
-    pub effect_posture: Option<String>,
+    pub effect_posture: Option<TimelineToolEffectPosture>,
     pub sandbox_posture: Option<String>,
     pub state: Option<TimelineToolState>,
     pub cause_code: Option<String>,
+}
+
+/// Closed approval posture recorded for one tool request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineToolApprovalPosture {
+    Auto,
+    Delegated,
+    Human,
+}
+
+/// Closed effect classification recorded for one tool attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineToolEffectPosture {
+    EffectFree,
+    ExternalEffect,
 }
 
 /// Closed tool-batch projection state exposed by timeline detail.
@@ -487,15 +506,22 @@ pub enum TimelineApprovalSource {
     User,
 }
 
+/// Closed outcome of one explicit approval decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineApprovalDecision {
+    Approve,
+    Deny,
+}
+
 /// Exact durable actor that decided an explicit approval request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TimelineApprovalDecider {
     User {
-        command_id: String,
+        command_id: DurableCommandId,
     },
     Delegate {
-        model_selection_id: String,
-        model_call_id: String,
+        model_selection_id: DirectModelSelection,
+        model_call_id: ModelCallId,
     },
 }
 
@@ -566,10 +592,107 @@ pub enum TimelineDelegationPolicy {
     },
 }
 
+/// Delivery behavior selected by one child-wait registration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineDelegationWaitMode {
+    Foreground,
+    Background,
+}
+
+/// Closed result of one delegation relationship update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineDelegationOutcome {
+    ResultReturned,
+    ChildFailed,
+    ChildStopped,
+    ChildCancelled,
+    ContinueRunning,
+    AlreadyTerminal,
+}
+
+/// Closed reason carried alongside a delegation outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineDelegationReason {
+    ChildCompleted,
+    ChildExecutionFailed,
+    ChildResultUnavailable,
+    ChildCancelled,
+    ParentStoppedWithDescendants,
+    ParentCancelledWithDescendants,
+}
+
+/// Exact durable proof source retained by a delegation lifecycle update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineDelegationProvenance {
+    ChildTurn {
+        session: SessionId,
+        turn: TurnId,
+    },
+    ParentTurnCommand {
+        session: SessionId,
+        turn: TurnId,
+        command: DurableCommandId,
+    },
+    ParentGoalCommand {
+        session: SessionId,
+        goal_generation: u64,
+        command: DurableCommandId,
+    },
+}
+
+/// Closed delegation update or wake with variant-specific durable facts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TimelineDelegationDetail {
+    ChildSpawned {
+        relationship_id: ToolRequestId,
+        child: SessionId,
+        policy: TimelineDelegationPolicy,
+    },
+    ChildWaiting {
+        relationship_id: ToolRequestId,
+        child: SessionId,
+        awaiting_request: ToolRequestId,
+        mode: TimelineDelegationWaitMode,
+    },
+    ChildLifecycleDisposition {
+        relationship_id: ToolRequestId,
+        child: SessionId,
+        event_ordinal: u64,
+        outcome: TimelineDelegationOutcome,
+        reason: TimelineDelegationReason,
+        provenance: TimelineDelegationProvenance,
+    },
+    ChildResult {
+        relationship_id: ToolRequestId,
+        child: SessionId,
+        outcome: TimelineDelegationOutcome,
+        reason: TimelineDelegationReason,
+        provenance: TimelineDelegationProvenance,
+        content: Option<TimelineTextExcerpt>,
+    },
+    SessionMessage {
+        relationship_id: ToolRequestId,
+        message: DelegationMessageId,
+        sender: SessionId,
+        recipient: SessionId,
+        message_ordinal: u64,
+        delivery_sequence: u64,
+        content: TimelineTextExcerpt,
+    },
+    ResultWake {
+        relationship_id: ToolRequestId,
+        awaiting_request: Option<ToolRequestId>,
+    },
+    MessageWake {
+        relationship_id: ToolRequestId,
+        message: DelegationMessageId,
+    },
+}
+
 /// Imported-frontier provenance; source bytes remain reference-only.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TimelineImportedEvidence {
-    pub imported_entry_id: String,
+    pub imported_entry_id: SemanticTranscriptEntryId,
     pub imported_position: u64,
 }
 
@@ -582,7 +705,7 @@ pub enum SessionTimelineDetailBody {
     },
     /// A model-settings projection changed at session or turn scope.
     ModelSettings {
-        turn_id: Option<String>,
+        turn_id: Option<TurnId>,
         cause_code: String,
     },
     /// Exact accepted user input and reference-only attachments.
@@ -604,18 +727,18 @@ pub enum SessionTimelineDetailBody {
     },
     /// A tool batch with one progressively selected request/attempt member.
     ToolBatch {
-        turn_id: String,
-        producing_model_call_id: String,
+        turn_id: TurnId,
+        producing_model_call_id: ModelCallId,
         state: TimelineToolBatchState,
         tools: Vec<TimelineToolAttempt>,
         goal_events: Vec<TimelineGoalEvent>,
     },
     /// One explicit tool approval decision and complete provenance.
     ToolApprovalDecision {
-        turn_id: String,
-        request_id: String,
+        turn_id: TurnId,
+        request_id: ToolRequestId,
         tool_name: String,
-        decision: String,
+        decision: TimelineApprovalDecision,
         source: TimelineApprovalSource,
         decider: TimelineApprovalDecider,
         rationale: Option<TimelineTextExcerpt>,
@@ -623,16 +746,16 @@ pub enum SessionTimelineDetailBody {
     },
     /// One typed goal-lineage transition.
     GoalEvent {
-        turn_id: String,
+        turn_id: TurnId,
         event: TimelineGoalEvent,
     },
     /// One append-only context compaction and its bounded summary.
     ContextCompaction {
-        compaction_id: String,
-        model_call_id: String,
+        compaction_id: ContextCompactionId,
+        model_call_id: ModelCallId,
         through_position: u64,
-        summary_entry_id: String,
-        result_frontier_id: String,
+        summary_entry_id: SemanticTranscriptEntryId,
+        result_frontier_id: ContextFrontierId,
         summary: TimelineTextExcerpt,
     },
     /// Activated or terminalized turn boundary with a stable cause code.
@@ -643,9 +766,8 @@ pub enum SessionTimelineDetailBody {
     },
     /// Automatic reconciliation facts that explain operator-required parking.
     Reconciliation {
-        turn_id: String,
-        operation_kind: String,
-        operation_id: String,
+        turn_id: TurnId,
+        operation: TimelineReconciliationOperation,
         attempt_count: u64,
         exhausted: bool,
         operator_required: bool,
@@ -653,22 +775,21 @@ pub enum SessionTimelineDetailBody {
     },
     /// Runner placement fact, including sandbox posture.
     Runner {
-        runner_id: String,
+        runner_id: RunnerId,
         placement_revision: u64,
         sandbox_posture: TimelineRunnerSandboxPosture,
         working_directory: Option<String>,
         state: TimelineRunnerState,
     },
     /// Typed delegation update or wake with optional bounded delivered content.
-    Delegation {
-        event_kind: String,
-        relationship_id: String,
-        subject_id: Option<String>,
-        policy: Option<TimelineDelegationPolicy>,
-        outcome: Option<String>,
-        reason: Option<String>,
-        content: Option<TimelineTextExcerpt>,
-    },
+    Delegation(TimelineDelegationDetail),
+}
+
+/// Typed operation parked for automatic reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineReconciliationOperation {
+    ModelCall(ModelCallId),
+    ToolAttempt(ToolAttemptId),
 }
 
 /// One detail record at the same stable address as its lightweight header.

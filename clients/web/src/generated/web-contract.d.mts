@@ -72,7 +72,7 @@ type WebSessionTimelineDetailBody = {
 } | {
   readonly approval_judge_escalated: boolean;
   readonly decider: WebTimelineApprovalDecider;
-  readonly decision: string;
+  readonly decision: WebTimelineApprovalDecision;
   readonly rationale?: WebTimelineTextExcerpt | null;
   readonly request_id: string;
   readonly source: WebTimelineApprovalSource;
@@ -113,13 +113,7 @@ type WebSessionTimelineDetailBody = {
   readonly type: "runner";
   readonly working_directory?: string | null;
 } | {
-  readonly content?: WebTimelineTextExcerpt | null;
-  readonly event_kind: string;
-  readonly outcome?: string | null;
-  readonly policy?: WebTimelineDelegationPolicy | null;
-  readonly reason?: string | null;
-  readonly relationship_id: string;
-  readonly subject_id?: string | null;
+  readonly detail: WebTimelineDelegationDetail;
   readonly type: "delegation";
 };
 
@@ -157,6 +151,8 @@ type WebTimelineApprovalDecider = {
   readonly type: "delegate";
 };
 
+type WebTimelineApprovalDecision = "approve" | "deny";
+
 type WebTimelineApprovalSource = "policy" | "delegate" | "user";
 
 type WebTimelineBlobReference = {
@@ -176,6 +172,54 @@ type WebTimelineBodyField = "input_text" | "model_response" | "tool_arguments" |
 
 type WebTimelineBoundChildAction = "keep_running" | "stop" | "cancel";
 
+type WebTimelineDelegationDetail = {
+  readonly child_session_id: string;
+  readonly policy: WebTimelineDelegationPolicy;
+  readonly relationship_id: string;
+  readonly type: "child_spawned";
+} | {
+  readonly awaiting_request_id: string;
+  readonly child_session_id: string;
+  readonly mode: WebTimelineDelegationWaitMode;
+  readonly relationship_id: string;
+  readonly type: "child_waiting";
+} | {
+  readonly child_session_id: string;
+  readonly event_ordinal: WebU64;
+  readonly outcome: WebTimelineDelegationOutcome;
+  readonly provenance: WebTimelineDelegationProvenance;
+  readonly reason: WebTimelineDelegationReason;
+  readonly relationship_id: string;
+  readonly type: "child_lifecycle_disposition";
+} | {
+  readonly child_session_id: string;
+  readonly content?: WebTimelineTextExcerpt | null;
+  readonly outcome: WebTimelineDelegationOutcome;
+  readonly provenance: WebTimelineDelegationProvenance;
+  readonly reason: WebTimelineDelegationReason;
+  readonly relationship_id: string;
+  readonly type: "child_result";
+} | {
+  readonly content: WebTimelineTextExcerpt;
+  readonly delivery_sequence: WebU64;
+  readonly message_id: string;
+  readonly message_ordinal: WebU64;
+  readonly recipient_session_id: string;
+  readonly relationship_id: string;
+  readonly sender_session_id: string;
+  readonly type: "session_message";
+} | {
+  readonly awaiting_request_id?: string | null;
+  readonly relationship_id: string;
+  readonly type: "result_wake";
+} | {
+  readonly message_id: string;
+  readonly relationship_id: string;
+  readonly type: "message_wake";
+};
+
+type WebTimelineDelegationOutcome = "result_returned" | "child_failed" | "child_stopped" | "child_cancelled" | "continue_running" | "already_terminal";
+
 type WebTimelineDelegationPolicy = {
   readonly type: "background";
 } | {
@@ -183,6 +227,26 @@ type WebTimelineDelegationPolicy = {
   readonly on_parent_stopped: WebTimelineBoundChildAction;
   readonly type: "bound";
 };
+
+type WebTimelineDelegationProvenance = {
+  readonly session_id: string;
+  readonly turn_id: string;
+  readonly type: "child_turn";
+} | {
+  readonly command_id: string;
+  readonly session_id: string;
+  readonly turn_id: string;
+  readonly type: "parent_turn_command";
+} | {
+  readonly command_id: string;
+  readonly goal_generation: WebU64;
+  readonly session_id: string;
+  readonly type: "parent_goal_command";
+};
+
+type WebTimelineDelegationReason = "child_completed" | "child_execution_failed" | "child_result_unavailable" | "child_cancelled" | "parent_stopped_with_descendants" | "parent_cancelled_with_descendants";
+
+type WebTimelineDelegationWaitMode = "foreground" | "background";
 
 type WebTimelineDetailContinuation = {
   readonly address: WebTimelineAddress;
@@ -241,13 +305,15 @@ type WebTimelineTextExcerpt = {
   readonly total_bytes: WebU64;
 };
 
+type WebTimelineToolApprovalPosture = "auto" | "delegated" | "human";
+
 type WebTimelineToolAttempt = {
   readonly approval_judge_escalated: boolean;
-  readonly approval_posture: string;
+  readonly approval_posture: WebTimelineToolApprovalPosture;
   readonly arguments?: WebTimelineTextExcerpt | null;
   readonly attempt_id?: string | null;
   readonly cause_code?: string | null;
-  readonly effect_posture?: string | null;
+  readonly effect_posture?: WebTimelineToolEffectPosture | null;
   readonly failure?: WebTimelineTextExcerpt | null;
   readonly operator_required: boolean;
   readonly request_id: string;
@@ -258,6 +324,8 @@ type WebTimelineToolAttempt = {
 };
 
 type WebTimelineToolBatchState = "proposed" | "results_projected" | "recovery_required";
+
+type WebTimelineToolEffectPosture = "effect_free" | "external_effect";
 
 type WebTimelineToolState = "prepared" | "in_flight" | "awaiting_child" | "completed" | "known_failed" | "ambiguous";
 
