@@ -38,7 +38,7 @@ use signalbox_model_runtime::{
     ToolCallProposal as RuntimeToolCallProposal, ToolName as RuntimeToolName,
 };
 use signalbox_persistence::{
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
@@ -171,7 +171,7 @@ impl RunningIdleFixture {
             .with_user(DATABASE_USER)
             .with_password(DATABASE_PASSWORD)
             .with_cmd(disposable_postgres_server_args())
-            .with_mount(disposable_postgres_state_tmpfs())
+            .with_mount(disposable_postgres_state_tmpfs_from_example()?)
             .with_tag(POSTGRES_IMAGE_TAG)
             .with_labels(disposable_test_container_labels())
             .start()
@@ -269,7 +269,7 @@ impl RunningChatFixture {
             .with_user(DATABASE_USER)
             .with_password(DATABASE_PASSWORD)
             .with_cmd(disposable_postgres_server_args())
-            .with_mount(disposable_postgres_state_tmpfs())
+            .with_mount(disposable_postgres_state_tmpfs_from_example()?)
             .with_tag(POSTGRES_IMAGE_TAG)
             .with_labels(disposable_test_container_labels())
             .start()
@@ -396,7 +396,7 @@ context_window_tokens = {CONTEXT_WINDOW_TOKENS}
             tool_dispatch_gate.clone(),
             model_configuration,
         );
-        let provider = RuntimeModelCallProvider::new(scripted, runtime_models)
+        let provider = RuntimeModelCallProvider::new(scripted, runtime_models, None)
             .with_text_delta_sink(process_runtime.provider_text_delta_sink());
         let (execution, _) = FatalExecutionSupervisor::new(
             PostgresProviderModelExecution::new(

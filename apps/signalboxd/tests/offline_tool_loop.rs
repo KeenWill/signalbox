@@ -50,7 +50,7 @@ use signalbox_model_runtime::{
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository, disposable_postgres_server_args,
-    disposable_postgres_state_tmpfs, disposable_test_container_labels,
+    disposable_postgres_state_tmpfs_from_example, disposable_test_container_labels,
     local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
     process_read::ProcessReadRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
@@ -396,6 +396,7 @@ impl ToolLoopFixture {
                 inner: Arc::clone(&runtime),
             },
             self.runtime_models.clone(),
+            None,
         );
         (
             PostgresProviderModelExecution::new(
@@ -431,6 +432,7 @@ impl ToolLoopFixture {
                 inner: Arc::clone(&runtime),
             },
             self.runtime_models.clone(),
+            None,
         );
         let judge: Arc<dyn ApprovalJudgeModel> = Arc::new(RuntimeApprovalJudgeModel::new(
             RecordingScriptedModel {
@@ -616,7 +618,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()

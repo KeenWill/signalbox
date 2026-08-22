@@ -6,7 +6,17 @@ use signalbox_application::{
     ClassifyOperatorFailure, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
     UuidV7StartupScanIdGenerator,
 };
-use signalbox_persistence::turn_liveness::PostgresTurnLivenessRepository;
+use signalbox_persistence::turn_liveness::{
+    PostgresTurnLivenessRepository, TurnLivenessPersistenceBounds,
+};
+
+fn terminalization_bounds() -> TurnLivenessPersistenceBounds {
+    TurnLivenessPersistenceBounds::new(
+        Some(std::time::Duration::from_millis(7)),
+        Some(std::time::Duration::from_millis(11)),
+        Some(std::time::Duration::from_millis(13)),
+    )
+}
 
 struct WatchdogFixture {
     session: SessionId,
@@ -134,7 +144,7 @@ async fn checkpoint_model_call(
 async fn a_quiescent_active_turn_terminalizes_as_failed() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = activated_watchdog_session(&pool, 0x11_000).await?;
-    let repository = PostgresTurnLivenessRepository::new(pool.clone());
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
 
     let page = repository.quiescent_active_turns(None).await?;
     let candidate = *page
@@ -195,7 +205,7 @@ async fn an_outstanding_provider_call_moves_from_quiescent_to_slot_held_inventor
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = activated_watchdog_session(&pool, 0x12_000).await?;
-    let repository = PostgresTurnLivenessRepository::new(pool.clone());
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
     assert_eq!(
         repository
             .quiescent_active_turns(None)
@@ -229,7 +239,7 @@ async fn s10_slot_held_recovery_declines_changed_progress_evidence() -> Result<(
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = activated_watchdog_session(&pool, 0x12_500).await?;
     checkpoint_model_call(&pool, &fixture, 0x12_500).await?;
-    let repository = PostgresTurnLivenessRepository::new(pool.clone());
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
     let observed = repository
         .observed_slot_held_turn(fixture.session)
         .await?
@@ -273,7 +283,7 @@ async fn s10_slot_held_recovery_preserves_later_lock_refusal() -> Result<(), Box
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = activated_watchdog_session(&pool, 0x12_700).await?;
     checkpoint_model_call(&pool, &fixture, 0x12_700).await?;
-    let repository = PostgresTurnLivenessRepository::new(pool.clone());
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
     let observed = repository
         .observed_slot_held_turn(fixture.session)
         .await?
@@ -315,7 +325,7 @@ async fn s10_slot_held_recovery_preserves_later_lock_refusal() -> Result<(), Box
 async fn a_changed_observation_is_superseded() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = activated_watchdog_session(&pool, 0x13_000).await?;
-    let repository = PostgresTurnLivenessRepository::new(pool.clone());
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
     let page = repository.quiescent_active_turns(None).await?;
     let observed = *page
         .candidates()
@@ -414,7 +424,7 @@ async fn the_outbox_frontier_resolves_over_a_worked_session() -> Result<(), Box<
 }
 
 async fn repository_page(pool: &PgPool) -> Result<Box<[StaleTurnCandidate]>, Box<dyn Error>> {
-    let page = PostgresTurnLivenessRepository::new(pool.clone())
+    let page = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds())
         .quiescent_active_turns(None)
         .await?;
     Ok(page.candidates().to_vec().into_boxed_slice())
@@ -455,7 +465,7 @@ async fn pending_steering_leaves_a_wedged_turn_visible_and_unreachable()
         ),
         "steering a turn holding the slot is accepted as pending: {recorded:?}"
     );
-    let repository = PostgresTurnLivenessRepository::new(pool.clone());
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
 
     let page = repository.quiescent_active_turns(None).await?;
     let candidate = *page

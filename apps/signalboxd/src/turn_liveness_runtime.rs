@@ -21,7 +21,9 @@ use signalbox_persistence::{
     automatic_reconciliation::{
         AutomaticReconciliationRepositoryError, PostgresAutomaticReconciliationRepository,
     },
-    turn_liveness::{PostgresTurnLivenessRepository, TurnLivenessRepositoryError},
+    turn_liveness::{
+        PostgresTurnLivenessRepository, TurnLivenessPersistenceBounds, TurnLivenessRepositoryError,
+    },
 };
 use sqlx::PgPool;
 use tokio::{
@@ -99,6 +101,7 @@ pub struct TurnLivenessNumericBounds {
     terminalizations_per_scan: Option<usize>,
     recovery_attempt_bound: Option<Duration>,
     automatic_reconciliations_per_scan: Option<usize>,
+    persistence: TurnLivenessPersistenceBounds,
 }
 
 impl TurnLivenessNumericBounds {
@@ -107,11 +110,13 @@ impl TurnLivenessNumericBounds {
         terminalizations_per_scan: Option<usize>,
         recovery_attempt_bound: Option<Duration>,
         automatic_reconciliations_per_scan: Option<usize>,
+        persistence: TurnLivenessPersistenceBounds,
     ) -> Self {
         Self {
             terminalizations_per_scan,
             recovery_attempt_bound,
             automatic_reconciliations_per_scan,
+            persistence,
         }
     }
 }
@@ -325,7 +330,10 @@ impl TurnLivenessRuntime {
         numeric_bounds: TurnLivenessNumericBounds,
     ) -> Self {
         Self {
-            repository: PostgresTurnLivenessRepository::new(pool.clone()),
+            repository: PostgresTurnLivenessRepository::new(
+                pool.clone(),
+                numeric_bounds.persistence,
+            ),
             automatic_reconciliation: PostgresAutomaticReconciliationRepository::new(pool.clone())
                 .with_policy(
                     automatic_reconciliation_attempt_budget,
@@ -1089,7 +1097,9 @@ mod tests {
         TurnLivenessLedger,
     };
     use signalbox_domain::{AcceptedInputTurnFailureIdentities, SessionId, TurnAttemptId, TurnId};
-    use signalbox_persistence::turn_liveness::TurnLivenessRepositoryError;
+    use signalbox_persistence::turn_liveness::{
+        TurnLivenessPersistenceBounds, TurnLivenessRepositoryError,
+    };
     use std::{
         sync::{Mutex, atomic::AtomicUsize, atomic::Ordering},
         time::Duration,
@@ -1117,6 +1127,11 @@ mod tests {
                 .integer("automatic_reconciliations_per_liveness_scan")
                 .flatten()
                 .and_then(|value| usize::try_from(value).ok()),
+            TurnLivenessPersistenceBounds::new(
+                bounds.duration("terminalization_lock_wait").flatten(),
+                bounds.duration("terminalization_acquire_wait").flatten(),
+                bounds.duration("terminalization_write_lock_wait").flatten(),
+            ),
         )
     }
 

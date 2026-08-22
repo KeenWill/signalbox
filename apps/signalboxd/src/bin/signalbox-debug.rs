@@ -456,8 +456,16 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                     configuration.runtime_model_capability_catalog();
                 let runtime = AnthropicRuntime::new(adapter_configuration, credential_access)
                     .map_err(|_| DebugDriverError::Configuration)?;
-                let provider =
-                    RuntimeModelCallProvider::new(runtime, configuration.runtime_model_catalog());
+                let diagnostic_model_identity_limit = configuration
+                    .numeric_bounds()
+                    .integer("diagnostic_model_identity_limit")
+                    .flatten()
+                    .and_then(|value| usize::try_from(value).ok());
+                let provider = RuntimeModelCallProvider::new(
+                    runtime,
+                    configuration.runtime_model_catalog(),
+                    diagnostic_model_identity_limit,
+                );
                 (
                     selection,
                     configuration.target_catalog(),

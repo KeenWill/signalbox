@@ -108,7 +108,7 @@ use signalbox_persistence::{
     create_session_from_imported_frontier::{
         ImportedSessionRepository, ImportedSessionRepositoryError,
     },
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
@@ -1802,7 +1802,7 @@ async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, Stri
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
