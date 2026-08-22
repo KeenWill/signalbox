@@ -2,13 +2,10 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fmt, fs,
-    io::{Seek as _, SeekFrom, Write as _},
+    io::{Read as _, Seek as _, SeekFrom, Write as _},
     os::{
-        fd::AsRawFd as _,
-        unix::{
-            fs::{MetadataExt as _, PermissionsExt as _},
-            process::CommandExt as _,
-        },
+        fd::{AsRawFd as _, FromRawFd as _},
+        unix::{fs::PermissionsExt as _, process::CommandExt as _},
     },
     path::{Path, PathBuf},
     process::Stdio,
@@ -20,6 +17,7 @@ use rustix::{
     fd::AsFd as _,
     process::{Resource, Rlimit, geteuid, getuid},
 };
+use sha2::{Digest as _, Sha256};
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProcessCeilings, FileMediaProcessor, FileMediaProcessorFuture,
     FileMediaProviderDeclaration, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
@@ -60,13 +58,12 @@ pub struct WorkerBinding {
 struct PinnedExecutable {
     _file: fs::File,
     proc_path: PathBuf,
-    device: u64,
-    inode: u64,
+    digest: [u8; 32],
 }
 
 impl PinnedExecutable {
     fn same_file(&self, other: &Self) -> bool {
-        self.device == other.device && self.inode == other.inode
+        self.digest == other.digest
     }
 }
 
@@ -607,6 +604,9 @@ impl RunningWorker {
     }
 
     async fn terminate(&mut self) {
+        if !self.armed {
+            return;
+        }
         self.kill_tree();
         if let Ok(Ok(_)) = tokio::time::timeout(CLEANUP_TIMEOUT, self.child.wait()).await {
             self.armed = false;
@@ -1057,14 +1057,33 @@ fn open_worker_executable(
     if !path.is_absolute() {
         return Err(SandboxedFileMediaProcessorConstructionError::Worker);
     }
-    let file =
+    let mut source =
         fs::File::open(path).map_err(|_| SandboxedFileMediaProcessorConstructionError::Worker)?;
-    let metadata = file
+    let metadata = source
         .metadata()
         .map_err(|_| SandboxedFileMediaProcessorConstructionError::Worker)?;
     if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
         return Err(SandboxedFileMediaProcessorConstructionError::Worker);
     }
+    let mut file = create_executable_snapshot()?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1_024];
+    loop {
+        let read = source
+            .read(&mut buffer)
+            .map_err(|_| SandboxedFileMediaProcessorConstructionError::Worker)?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read])
+            .map_err(|_| SandboxedFileMediaProcessorConstructionError::Worker)?;
+        digest.update(&buffer[..read]);
+    }
+    file.flush()
+        .map_err(|_| SandboxedFileMediaProcessorConstructionError::Worker)?;
+    file.set_permissions(fs::Permissions::from_mode(0o500))
+        .map_err(|_| SandboxedFileMediaProcessorConstructionError::Worker)?;
+    seal_executable_snapshot(&file)?;
     let proc_path = PathBuf::from(format!(
         "/proc/{}/fd/{}",
         std::process::id(),
@@ -1073,9 +1092,40 @@ fn open_worker_executable(
     Ok(PinnedExecutable {
         _file: file,
         proc_path,
-        device: metadata.dev(),
-        inode: metadata.ino(),
+        digest: digest.finalize().into(),
     })
+}
+
+#[allow(unsafe_code)]
+fn create_executable_snapshot() -> Result<fs::File, SandboxedFileMediaProcessorConstructionError> {
+    let name = b"signalbox-file-media-worker\0";
+    // SAFETY: memfd_create receives a valid nul-terminated name and fixed flags.
+    let raw_fd = unsafe {
+        libc::syscall(
+            libc::SYS_memfd_create,
+            name.as_ptr().cast::<libc::c_char>(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        )
+    };
+    if raw_fd < 0 {
+        return Err(SandboxedFileMediaProcessorConstructionError::Worker);
+    }
+    // SAFETY: the successful syscall returned a new owned file descriptor.
+    Ok(unsafe { fs::File::from_raw_fd(raw_fd as i32) })
+}
+
+#[allow(unsafe_code)]
+fn seal_executable_snapshot(
+    file: &fs::File,
+) -> Result<(), SandboxedFileMediaProcessorConstructionError> {
+    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+    // SAFETY: fcntl receives an owned descriptor and the documented seal mask.
+    let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) };
+    if result == -1 {
+        Err(SandboxedFileMediaProcessorConstructionError::Worker)
+    } else {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1315,25 +1365,47 @@ mod tests {
     }
 
     #[test]
-    fn descendant_filter_denies_kernel_key_management() {
+    fn descendant_filter_denies_add_key() {
         let program = seccomp_instructions().expect("the test architecture is supported");
         #[cfg(target_arch = "x86_64")]
-        let key_syscalls = [248_u32, 249_u32, 250_u32];
+        let add_key = 248_u32;
         #[cfg(target_arch = "aarch64")]
-        let key_syscalls = [217_u32, 218_u32, 219_u32];
-        for syscall in key_syscalls {
-            let (index, check) = program
-                .iter()
-                .enumerate()
-                .find(|(_, entry)| entry.value == syscall)
-                .expect("key-management syscall is checked");
-            assert_eq!(check.code, 0x15);
-            let denial = index + 1 + usize::from(check.jump_true);
-            assert_eq!(
-                program.get(denial).map(|entry| entry.value),
-                Some(0x0005_0001)
-            );
-        }
+        let add_key = 217_u32;
+        assert_syscall_denied(&program, add_key, "add_key");
+    }
+
+    #[test]
+    fn descendant_filter_denies_request_key() {
+        let program = seccomp_instructions().expect("the test architecture is supported");
+        #[cfg(target_arch = "x86_64")]
+        let request_key = 249_u32;
+        #[cfg(target_arch = "aarch64")]
+        let request_key = 218_u32;
+        assert_syscall_denied(&program, request_key, "request_key");
+    }
+
+    #[test]
+    fn descendant_filter_denies_keyctl() {
+        let program = seccomp_instructions().expect("the test architecture is supported");
+        #[cfg(target_arch = "x86_64")]
+        let keyctl = 250_u32;
+        #[cfg(target_arch = "aarch64")]
+        let keyctl = 219_u32;
+        assert_syscall_denied(&program, keyctl, "keyctl");
+    }
+
+    fn assert_syscall_denied(program: &[super::FilterInstruction], syscall: u32, name: &str) {
+        let (index, check) = program
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.value == syscall)
+            .unwrap_or_else(|| panic!("{name} is checked"));
+        assert_eq!(check.code, 0x15);
+        let denial = index + 1 + usize::from(check.jump_true);
+        assert_eq!(
+            program.get(denial).map(|entry| entry.value),
+            Some(0x0005_0001)
+        );
     }
 
     #[test]
@@ -1355,6 +1427,25 @@ mod tests {
         );
         assert_eq!(
             fs::read(worker).expect("replacement path is readable"),
+            b"replacement"
+        );
+    }
+
+    #[test]
+    fn worker_executable_snapshot_ignores_in_place_rewrites() {
+        let directory = tempfile::tempdir().expect("temporary directory is available");
+        let worker = directory.path().join("worker");
+        fs::write(&worker, b"original").expect("fixture worker is written");
+        fs::set_permissions(&worker, fs::Permissions::from_mode(0o700))
+            .expect("fixture worker is executable");
+        let pinned = open_worker_executable(&worker).expect("worker is snapshotted");
+        fs::write(&worker, b"replacement").expect("worker inode is rewritten");
+        assert_eq!(
+            fs::read(&pinned.proc_path).expect("sealed snapshot remains readable"),
+            b"original"
+        );
+        assert_eq!(
+            fs::read(worker).expect("rewritten path is readable"),
             b"replacement"
         );
     }
