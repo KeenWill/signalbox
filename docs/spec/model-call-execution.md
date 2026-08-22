@@ -1006,16 +1006,16 @@ their writes. Counted activation takes the same guard before its atomic
 activation append; that append necessarily allocates before the newly active
 turn can select a credential, but the guard excludes every reverse-order
 model-call writer until commit. Tool-result continuation takes the guard before
-projecting its results outbox event, then carries that proof into same-transaction
-call preparation. Why: the guard prevents a credential/allocator cycle without
-making unrelated outbox writers wait through credential selection and validation.
-Prospective preparation takes neither guard nor allocator lock
-because it rolls back without appending or consuming actions. The in-process
-per-attempt dispatch gate is the only other ordering primitive; in this slice
-the execution service is its sole consumer. Interrupt application deliberately
-does not acquire it: once `InFlight` commits, the call is issued work, so a
-later interrupt durably requests cancellation and the runtime signal races any
-provider progress without claiming that acceptance was prevented.
+projecting its results outbox event, then carries that proof into
+same-transaction call preparation. Why: the guard prevents a
+credential/allocator cycle without making unrelated outbox writers wait through
+credential selection and validation. Prospective preparation takes neither guard
+nor allocator lock because it rolls back without appending or consuming actions.
+The in-process per-attempt dispatch gate is the only other ordering primitive;
+in this slice the execution service is its sole consumer. Interrupt application
+deliberately does not acquire it: once `InFlight` commits, the call is issued
+work, so a later interrupt durably requests cancellation and the runtime signal
+races any provider progress without claiming that acceptance was prevented.
 
 ## Crash, restart, and supervision
 
