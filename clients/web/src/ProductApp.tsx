@@ -340,6 +340,8 @@ export function ProductApp({
   const primaryRef = useRef<HTMLElement>(null)
   const paletteReturnFocusRef = useRef<HTMLElement | null>(null)
   const navigationReturnFocusRef = useRef<HTMLElement | null>(null)
+  const navigationSelectedRouteRef = useRef(false)
+  const restoreBootstrapFocusRef = useRef(false)
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -403,6 +405,13 @@ export function ProductApp({
     }
   }, [app.overlay])
 
+  useEffect(() => {
+    if (bootstrap.isSuccess && restoreBootstrapFocusRef.current) {
+      restoreBootstrapFocusRef.current = false
+      primaryRef.current?.focus()
+    }
+  }, [bootstrap.isSuccess])
+
   const copy = surfaceCopy[surface]
   const updateSearch = (next: ProductSearchState) =>
     void navigate({ to: '/$surface', params: { surface }, search: next })
@@ -452,7 +461,13 @@ export function ProductApp({
                   : 'Contract incompatible'
                 : 'Checking contract…'}
             {bootstrap.isError && (
-              <button type="button" onClick={() => void bootstrap.refetch()}>
+              <button
+                type="button"
+                onClick={() => {
+                  restoreBootstrapFocusRef.current = true
+                  void bootstrap.refetch()
+                }}
+              >
                 Retry contract check
               </button>
             )}
@@ -495,7 +510,9 @@ export function ProductApp({
             aria-describedby="mobile-navigation-description"
             onCloseAutoFocus={(event) => {
               event.preventDefault()
-              navigationReturnFocusRef.current?.focus()
+              if (navigationSelectedRouteRef.current) primaryRef.current?.focus()
+              else navigationReturnFocusRef.current?.focus()
+              navigationSelectedRouteRef.current = false
               navigationReturnFocusRef.current = null
             }}
           >
@@ -505,7 +522,10 @@ export function ProductApp({
             </Dialog.Description>
             <ProductNavigation
               active={surface}
-              onNavigate={() => dispatch(actions.overlaySet(null))}
+              onNavigate={() => {
+                navigationSelectedRouteRef.current = true
+                dispatch(actions.overlaySet(null))
+              }}
             />
           </Dialog.Content>
         </Dialog.Portal>

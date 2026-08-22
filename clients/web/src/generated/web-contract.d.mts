@@ -50,6 +50,7 @@ type WebSearchResult = {
   readonly address: WebTimelineAddress;
   readonly content_class: WebSearchContentClass;
   readonly highlights: ReadonlyArray<WebSearchHighlight>;
+  readonly projection_id: WebSearchProjectionId;
   readonly session_id: string;
   readonly snippet: string;
   readonly source: WebSearchResultSource;

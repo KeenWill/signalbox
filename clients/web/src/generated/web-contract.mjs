@@ -292,7 +292,11 @@ const schemas = {
             "items": {
               "$ref": "#/$defs/WebSearchHighlight"
             },
+            "maxItems": 64,
             "type": "array"
+          },
+          "projection_id": {
+            "$ref": "#/$defs/WebSearchProjectionId"
           },
           "session_id": {
             "type": "string"
@@ -308,6 +312,7 @@ const schemas = {
         "required": [
           "session_id",
           "address",
+          "projection_id",
           "source",
           "content_class",
           "snippet",
@@ -969,5 +974,14 @@ export function decodeWebSearchPage(value) {
       previousEnd = highlight.end_byte;
     });
   });
+  if (value.continuation !== null && value.results.length > 0) {
+    const last = value.results.at(-1);
+    if (
+      value.continuation.address.event_sequence !== last.address.event_sequence ||
+      value.continuation.projection_id !== last.projection_id
+    ) {
+      fail("search_page.continuation", "the last result ordering key");
+    }
+  }
   return value;
 }

@@ -12,6 +12,27 @@ import {
 type SearchResult = WebSearchPage['results'][number]
 
 const displayClass = (value: string) => value.replaceAll('_', ' ')
+const MAX_UUID_TEXT_LENGTH = 47
+const MAX_U64 = 18_446_744_073_709_551_615n
+const MAX_I64 = 9_223_372_036_854_775_807n
+
+const validUuid = (value: string) => {
+  if (value.length > MAX_UUID_TEXT_LENGTH) return false
+  const compact = value
+    .toLowerCase()
+    .replace(/^urn:uuid:/, '')
+    .replace(/^\{(.*)\}$/, '$1')
+    .replaceAll('-', '')
+  return /^[0-9a-f]{32}$/.test(compact)
+}
+
+const validPositiveDecimal = (value: string, maximum: bigint) =>
+  /^[1-9][0-9]*$/.test(value) && value.length <= 20 && BigInt(value) <= maximum
+
+const validCursor = (after: { address: string; projectionId: string } | undefined) =>
+  after === undefined ||
+  (validPositiveDecimal(after.address, MAX_U64) &&
+    validPositiveDecimal(after.projectionId, MAX_I64))
 
 const sourceIdentity = (result: SearchResult) => {
   const source = result.source
@@ -99,7 +120,22 @@ export function SearchSurface({
   const queryText = state.q?.trim() ?? ''
   const queryBytes = new TextEncoder().encode(queryText).length
   const queryLimit = bootstrap?.limits.max_search_query_bytes ?? 0
-  const requestIsValid = queryBytes > 0 && queryBytes <= queryLimit
+  const sessionIsValid = state.session === undefined || validUuid(state.session)
+  const routeSearch = new URLSearchParams(window.location.search)
+  const routeAfterAddress = routeSearch.get('afterAddress') ?? undefined
+  const routeAfterProjection = routeSearch.get('afterProjection') ?? undefined
+  const cursorMetadataIsValid =
+    routeAfterAddress === undefined && routeAfterProjection === undefined
+      ? true
+      : routeAfterAddress !== undefined && routeAfterProjection !== undefined
+        ? validCursor({ address: routeAfterAddress, projectionId: routeAfterProjection })
+        : false
+  const requestIsValid =
+    queryBytes > 0 &&
+    queryBytes <= queryLimit &&
+    sessionIsValid &&
+    cursorMetadataIsValid &&
+    validCursor(activeAfter)
   const results = useQuery({
     queryKey: ['production', 'search', queryText, state.session ?? null, activeAfter ?? null],
     queryFn: ({ signal }) =>
@@ -166,7 +202,8 @@ export function SearchSurface({
       </form>
       {bootstrap !== undefined && queryText && !requestIsValid && (
         <p className="search-notice" role="alert">
-          Search text uses {queryBytes} of {queryLimit} allowed UTF-8 bytes.
+          Search parameters are malformed or outside the contract bounds. Search text uses{' '}
+          {queryBytes} of {queryLimit} allowed UTF-8 bytes.
         </p>
       )}
       {!queryText && (
@@ -247,23 +284,26 @@ export function SearchSurface({
           {results.data.results.length === 0 ? (
             <p className="search-notice">No indexed durable text matched this query.</p>
           ) : (
-            <ol>
-              {results.data.results.map((result) => (
-                <li
-                  key={`${result.session_id}:${result.address.event_sequence}:${result.source.kind}:${result.content_class}:${sourceIdentity(result)}`}
-                >
-                  <div className="search-result-meta">
-                    <span>{displayClass(result.content_class)}</span>
-                    <code>{result.address.event_sequence}</code>
-                  </div>
-                  <p>{highlightedSnippet(result)}</p>
-                  <div className="search-result-footer">
-                    <span>{result.session_id}</span>
-                    <span>Session reveal unavailable</span>
-                  </div>
-                </li>
-              ))}
-            </ol>
+            <>
+              {/* biome-ignore lint/a11y/noRedundantRoles: Safari/VoiceOver needs an explicit role when CSS removes markers. */}
+              <ol role="list">
+                {results.data.results.map((result) => (
+                  <li
+                    key={`${result.session_id}:${result.address.event_sequence}:${result.source.kind}:${result.content_class}:${sourceIdentity(result)}`}
+                  >
+                    <div className="search-result-meta">
+                      <span>{displayClass(result.content_class)}</span>
+                      <code>{result.address.event_sequence}</code>
+                    </div>
+                    <p>{highlightedSnippet(result)}</p>
+                    <div className="search-result-footer">
+                      <span>{result.session_id}</span>
+                      <span>Session reveal unavailable</span>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            </>
           )}
         </section>
       )}

@@ -31,6 +31,7 @@ const searchPageFixture = {
     {
       session_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d',
       address: { event_sequence: '901' },
+      projection_id: '42',
       source: { kind: 'session', session_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d' },
       content_class: 'session_metadata',
       snippet: 'search fixture',
@@ -83,6 +84,25 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('rejects a mismatched bootstrap contract identity', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...bootstrapFixture,
+              contract: { ...bootstrapFixture.contract, version: '2' },
+            }),
+          ),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'incompatible web contract',
+    )
+  })
+
   it('rejects a bootstrap response beyond the fixed JSON byte bound', async () => {
     vi.stubGlobal(
       'fetch',
@@ -116,6 +136,22 @@ describe('SameOriginProductTransport', () => {
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toEqual(
       new ProductTransportError('The bootstrap request could not reach Signalbox.'),
+    )
+  })
+
+  it('preserves transport identity when a bootstrap response stream is interrupted', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new TypeError('connection reset'))
+      },
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body)),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toEqual(
+      new ProductTransportError('The bootstrap response stream was interrupted.'),
     )
   })
 
@@ -206,6 +242,26 @@ describe('SameOriginProductTransport', () => {
         maxSnippetBytes: 512,
       }),
     ).rejects.toEqual(new ProductTransportError('The search request could not reach Signalbox.'))
+  })
+
+  it('preserves transport identity when a search response stream is interrupted', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new TypeError('connection reset'))
+      },
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body)),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 1,
+        maxSnippetBytes: 512,
+      }),
+    ).rejects.toEqual(new ProductTransportError('The search response stream was interrupted.'))
   })
 
   it('rejects an encoded search response beyond its byte bound', async () => {
@@ -421,6 +477,38 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('UTF-8 boundaries')
   })
 
+  it('rejects more highlights than the generated contract permits', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...searchPageFixture,
+              results: [
+                {
+                  ...searchPageFixture.results[0],
+                  snippet: 'x'.repeat(130),
+                  highlights: Array.from({ length: 65 }, (_, index) => ({
+                    start_byte: index * 2,
+                    end_byte: index * 2 + 1,
+                  })),
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 1,
+        maxSnippetBytes: 512,
+      }),
+    ).rejects.toThrow('at most 64 items')
+  })
+
   it('rejects search pages that are not ordered newest first', async () => {
     vi.stubGlobal(
       'fetch',
@@ -468,7 +556,16 @@ describe('SameOriginProductTransport', () => {
   }
 
   it('rejects a continuation address detached from the returned page', () =>
-    rejectContinuation({ address: { event_sequence: '900' }, projection_id: '42' }))
+    rejectContinuation(
+      { address: { event_sequence: '900' }, projection_id: '42' },
+      'last result ordering key',
+    ))
+
+  it('rejects a continuation projection detached from the returned page', () =>
+    rejectContinuation(
+      { address: { event_sequence: '901' }, projection_id: '41' },
+      'last result ordering key',
+    ))
 
   it('rejects a nondecimal continuation projection ID', () =>
     rejectContinuation(
@@ -525,7 +622,7 @@ describe('readProductSearchState', () => {
     ).toEqual({
       q: 'term',
       session: undefined,
-      afterAddress: undefined,
+      afterAddress: '7',
       afterProjection: undefined,
       around: '901',
     })
@@ -535,5 +632,15 @@ describe('readProductSearchState', () => {
     expect(readProductSearchState({ q: 2026 }).q).toBe('2026')
     expect(readProductSearchState({ q: true }).q).toBe('true')
     expect(readProductSearchState({ q: null }).q).toBe('null')
+  })
+
+  it('preserves numeric-looking cursor fields for pair validation', () => {
+    expect(readProductSearchState({ q: 'term', afterAddress: 750 })).toEqual({
+      q: 'term',
+      session: undefined,
+      afterAddress: '750',
+      afterProjection: undefined,
+      around: undefined,
+    })
   })
 })

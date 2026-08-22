@@ -25,6 +25,7 @@ const firstPage = {
     {
       session_id: sessionId,
       address: { event_sequence: '901' },
+      projection_id: '84',
       source: {
         kind: 'accepted_input',
         accepted_input_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5010',
@@ -37,6 +38,7 @@ const firstPage = {
     {
       session_id: sessionId,
       address: { event_sequence: '750' },
+      projection_id: '42',
       source: {
         kind: 'derived_artifact',
         artifact_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5030',
@@ -53,6 +55,7 @@ const secondPage = {
     {
       session_id: sessionId,
       address: { event_sequence: '112' },
+      projection_id: '21',
       source: { kind: 'session', session_id: sessionId },
       content_class: 'session_metadata',
       snippet: 'release planning',
@@ -151,7 +154,9 @@ test('replaces the bounded result page through its typed cursor', async ({ page 
   await nextPage.focus()
   await nextPage.click()
   await expect(page.getByRole('heading', { name: '1 results on this page' })).toBeVisible()
-  await expect(page).toHaveURL(/afterAddress=750/)
+  await expect(page).toHaveURL(
+    new RegExp(`afterAddress=${firstPage.continuation.address.event_sequence}`),
+  )
   await expect(page.getByRole('heading', { name: '1 results on this page' })).toBeFocused()
   await expect(page.getByText('release planning')).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -180,7 +185,9 @@ test('synchronizes pagination with browser history', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Next page' }).click()
   await expect(page.getByRole('heading', { name: '1 results on this page' })).toBeVisible()
-  await expect(page).toHaveURL(/afterAddress=750/)
+  await expect(page).toHaveURL(
+    new RegExp(`afterAddress=${firstPage.continuation.address.event_sequence}`),
+  )
   await page.goBack()
 
   await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
@@ -196,6 +203,34 @@ test('restores focus after a successful search retry', async ({ page }) => {
   await retry.click()
 
   await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeFocused()
+})
+
+test('does not request malformed session or cursor URL state', async ({ page }) => {
+  let searchRequests = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/search?**', (route) => {
+    searchRequests += 1
+    return route.fulfill({ json: firstPage })
+  })
+  await page.goto(
+    `/search?q=release&session=${'x'.repeat(128)}&afterAddress=${'9'.repeat(128)}&afterProjection=${'9'.repeat(128)}`,
+  )
+
+  await expect(page.getByRole('alert')).toContainText('Search parameters are malformed')
+  expect(searchRequests).toBe(0)
+})
+
+test('does not request an unpaired cursor URL field', async ({ page }) => {
+  let searchRequests = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/search?**', (route) => {
+    searchRequests += 1
+    return route.fulfill({ json: firstPage })
+  })
+  await page.goto('/search?q=release&afterAddress=750')
+
+  await expect(page.getByRole('alert')).toContainText('Search parameters are malformed')
+  expect(searchRequests).toBe(0)
 })
 
 test('preserves search focus and announces asynchronous results', async ({ page }) => {

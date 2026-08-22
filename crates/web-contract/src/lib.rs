@@ -425,10 +425,12 @@ pub struct WebSearchCursor {
 pub struct WebSearchResult {
     pub session_id: String,
     pub address: WebTimelineAddress,
+    pub projection_id: WebSearchProjectionId,
     pub source: WebSearchResultSource,
     pub content_class: WebSearchContentClass,
     #[schemars(length(max = 512))]
     pub snippet: String,
+    #[schemars(length(max = 64))]
     pub highlights: Vec<WebSearchHighlight>,
 }
 
@@ -810,6 +812,15 @@ export function decodeWebSearchPage(value) {{
       previousEnd = highlight.end_byte;
     }});
   }});
+  if (value.continuation !== null && value.results.length > 0) {{
+    const last = value.results.at(-1);
+    if (
+      value.continuation.address.event_sequence !== last.address.event_sequence ||
+      value.continuation.projection_id !== last.projection_id
+    ) {{
+      fail("search_page.continuation", "the last result ordering key");
+    }}
+  }}
   return value;
 }}
 "##,

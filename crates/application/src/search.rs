@@ -29,6 +29,12 @@ pub const fn max_search_snippet_bytes() -> usize {
     512
 }
 
+/// Maximum highlighted ranges retained for one bounded search result.
+#[must_use]
+pub const fn max_search_highlights_per_result() -> usize {
+    64
+}
+
 /// Maximum UTF-8 bytes accepted in one explicit artifact projection.
 #[must_use]
 pub const fn max_search_projection_text_bytes() -> usize {
@@ -370,6 +376,8 @@ pub struct SearchResult {
     pub session: SessionId,
     /// Stable address used by an `around` timeline read.
     pub address: super::TimelineAddress,
+    /// Stable projection identity completing the strict search ordering key.
+    pub projection: NonZeroU64,
     /// Typed durable source rather than a storage record discriminator.
     pub source: SearchResultSource,
     /// Projection whose text matched.

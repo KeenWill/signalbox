@@ -7,7 +7,7 @@ use signalbox_application::{
     SearchArtifactId, SearchArtifactProjection, SearchArtifactProjectionClass, SearchContentClass,
     SearchCursor, SearchHighlight, SearchPage, SearchProjectionWriter, SearchQuery, SearchReader,
     SearchResult, SearchResultSource, SearchScope, SearchStrategy, TimelineAddress,
-    max_search_snippet_bytes,
+    max_search_highlights_per_result, max_search_snippet_bytes,
 };
 use signalbox_domain::{
     AcceptedInputId, SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnId,
@@ -321,6 +321,7 @@ fn decode_row(row: PgRow) -> Result<(SearchCursor, SearchResult), SearchReposito
         SearchResult {
             session,
             address,
+            projection,
             source,
             content_class,
             snippet,
@@ -508,6 +509,9 @@ fn append_highlight(
     let Some(start) = start.filter(|start| *start < end) else {
         return Ok(());
     };
+    if highlights.len() >= max_search_highlights_per_result() {
+        return Err(SearchProjectionCorruption::Invalid("highlight count"));
+    }
     highlights.push(SearchHighlight {
         start_byte: u16::try_from(start)
             .map_err(|_| SearchProjectionCorruption::Invalid("highlight start"))?,

@@ -38,12 +38,13 @@ export interface ProductSearchRequest {
 
 const MAX_SEARCH_RESPONSE_BYTES = 1_048_576
 const MAX_BOOTSTRAP_RESPONSE_BYTES = 65_536
-const MAX_SEARCH_HIGHLIGHTS_PER_RESULT = 64
 const MAX_SEARCH_QUERY_BYTES = 512
 const MAX_SEARCH_PAGE_ITEMS = 100
 const MAX_SEARCH_SNIPPET_BYTES = 512
 const ERROR_RESPONSE_BYTES = 16_384
 const MAX_I64 = 9_223_372_036_854_775_807n
+const WEB_CONTRACT_NAME = 'signalbox.web-http'
+const WEB_CONTRACT_VERSION = '1'
 const isUtf8ContinuationByte = (byte: number | undefined) =>
   byte !== undefined && (byte & 0xc0) === 0x80
 
@@ -78,14 +79,24 @@ const sourceUuids = (source: WebSearchPage['results'][number]['source']): string
   }
 }
 
-const readBoundedJson = async (response: Response, maximumBytes: number): Promise<unknown> => {
+const readBoundedJson = async (
+  response: Response,
+  maximumBytes: number,
+  streamFailureMessage: string,
+): Promise<unknown> => {
   const declaredLength = response.headers.get('content-length')
   if (declaredLength !== null && Number(declaredLength) > maximumBytes) {
     throw new TypeError(`response exceeds ${maximumBytes} bytes`)
   }
   const reader = response.body?.getReader()
   if (reader === undefined) {
-    const text = await response.text()
+    let text: string
+    try {
+      text = await response.text()
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') throw error
+      throw new ProductTransportError(streamFailureMessage)
+    }
     if (new TextEncoder().encode(text).byteLength > maximumBytes) {
       throw new TypeError(`response exceeds ${maximumBytes} bytes`)
     }
@@ -95,7 +106,14 @@ const readBoundedJson = async (response: Response, maximumBytes: number): Promis
   let length = 0
   try {
     while (true) {
-      const { done, value } = await reader.read()
+      let read: ReadableStreamReadResult<Uint8Array>
+      try {
+        read = await reader.read()
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') throw error
+        throw new ProductTransportError(streamFailureMessage)
+      }
+      const { done, value } = read
       if (done) break
       length += value.byteLength
       if (length > maximumBytes) {
@@ -155,9 +173,6 @@ const validateSearchPageBounds = (
     if (snippetLength > request.maxSnippetBytes) {
       throw new TypeError('search result exceeds snippet limit')
     }
-    if (result.highlights.length > MAX_SEARCH_HIGHLIGHTS_PER_RESULT) {
-      throw new TypeError('search result exceeds highlight limit')
-    }
     let previousEnd = 0
     for (const highlight of result.highlights) {
       if (
@@ -183,6 +198,7 @@ const validateSearchPageBounds = (
     if (
       lastResult === undefined ||
       continuation.address.event_sequence !== lastResult.address.event_sequence ||
+      continuation.projection_id !== lastResult.projection_id ||
       !/^[1-9][0-9]*$/.test(projectionId) ||
       BigInt(projectionId) > MAX_I64
     ) {
@@ -195,6 +211,11 @@ const validateSearchPageBounds = (
 export const readProductSearchState = (value: Record<string, unknown>): ProductSearchState => {
   const text = (key: keyof ProductSearchState) =>
     typeof value[key] === 'string' && value[key].length > 0 ? value[key] : undefined
+  const cursorText = (key: 'afterAddress' | 'afterProjection') => {
+    const field = value[key]
+    if (typeof field === 'string') return field.length > 0 ? field : undefined
+    return typeof field === 'number' && Number.isFinite(field) ? String(field) : undefined
+  }
   const query = value.q
   const q =
     typeof query === 'string'
@@ -205,13 +226,19 @@ export const readProductSearchState = (value: Record<string, unknown>): ProductS
   return {
     q,
     session: text('session'),
-    afterAddress: text('afterAddress'),
-    afterProjection: text('afterProjection'),
+    afterAddress: cursorText('afterAddress'),
+    afterProjection: cursorText('afterProjection'),
     around: text('around'),
   }
 }
 
 const validateBootstrapSearchLimits = (bootstrap: WebContractBootstrap): WebContractBootstrap => {
+  if (
+    bootstrap.contract.name !== WEB_CONTRACT_NAME ||
+    bootstrap.contract.version !== WEB_CONTRACT_VERSION
+  ) {
+    throw new TypeError('bootstrap carries an incompatible contract identity')
+  }
   const { limits } = bootstrap
   if (limits.max_search_query_bytes < 1 || limits.max_search_query_bytes > MAX_SEARCH_QUERY_BYTES) {
     throw new TypeError('bootstrap carries an invalid search query limit')
@@ -267,7 +294,13 @@ export class SameOriginProductTransport implements ProductTransport {
       throw new ProductTransportError(`Bootstrap request failed with status ${response.status}.`)
     }
     return validateBootstrapSearchLimits(
-      decodeWebContractBootstrap(await readBoundedJson(response, MAX_BOOTSTRAP_RESPONSE_BYTES)),
+      decodeWebContractBootstrap(
+        await readBoundedJson(
+          response,
+          MAX_BOOTSTRAP_RESPONSE_BYTES,
+          'The bootstrap response stream was interrupted.',
+        ),
+      ),
     )
   }
 
@@ -295,11 +328,21 @@ export class SameOriginProductTransport implements ProductTransport {
     }
     if (!response.ok) {
       const failure = decodeWebApiErrorResponse(
-        await readBoundedJson(response, ERROR_RESPONSE_BYTES),
+        await readBoundedJson(
+          response,
+          ERROR_RESPONSE_BYTES,
+          'The search response stream was interrupted.',
+        ),
       )
       throw new ProductRequestError(failure.error.code, failure.error.kind, failure.error.message)
     }
-    const page = decodeWebSearchPage(await readBoundedJson(response, MAX_SEARCH_RESPONSE_BYTES))
+    const page = decodeWebSearchPage(
+      await readBoundedJson(
+        response,
+        MAX_SEARCH_RESPONSE_BYTES,
+        'The search response stream was interrupted.',
+      ),
+    )
     return validateSearchPageBounds(page, request)
   }
 }

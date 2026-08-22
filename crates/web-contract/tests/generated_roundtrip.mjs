@@ -19,6 +19,7 @@ function searchPage() {
       {
         session_id: "00000000-0000-0000-0000-000000000991",
         address: { event_sequence: "1" },
+        projection_id: "1",
         source: {
           kind: "session",
           session_id: "00000000-0000-0000-0000-000000000991",
@@ -162,6 +163,30 @@ test("generated search decoder rejects more than one bounded page", () => {
   assert.throws(
     () => decodeWebSearchPage(page),
     /results must be at most 100 items/,
+  );
+});
+
+test("generated search decoder rejects too many highlight ranges", () => {
+  const page = searchPage();
+  page.results[0].snippet = "x".repeat(130);
+  page.results[0].highlights = Array.from({ length: 65 }, (_, index) => ({
+    start_byte: index * 2,
+    end_byte: index * 2 + 1,
+  }));
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /highlights must be at most 64 items/,
+  );
+});
+
+test("generated search decoder correlates continuation projection identity", () => {
+  const page = searchPage();
+  page.continuation.projection_id = "2";
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /continuation must be the last result ordering key/,
   );
 });
 

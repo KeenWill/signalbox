@@ -146,8 +146,8 @@ pub use search::{
     SearchCursor, SearchHighlight, SearchPage, SearchPageLimit, SearchPageLimitError,
     SearchProjectionText, SearchProjectionTextError, SearchProjectionWriter, SearchQuery,
     SearchReader, SearchResult, SearchResultSource, SearchScope, SearchService, SearchStrategy,
-    SearchText, SearchTextError, max_search_page_items, max_search_projection_text_bytes,
-    max_search_query_bytes, max_search_snippet_bytes,
+    SearchText, SearchTextError, max_search_highlights_per_result, max_search_page_items,
+    max_search_projection_text_bytes, max_search_query_bytes, max_search_snippet_bytes,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;
 pub use session_metadata::{
