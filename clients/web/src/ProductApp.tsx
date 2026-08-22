@@ -375,12 +375,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       dispatch,
       getState: store.getState,
       timelineIds: [],
+      configuresTranscriptDetail: surface === 'settings',
       focusTimeline: () => primaryRef.current?.focus(),
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
       navigateScenario: () =>
         void navigate({ to: '/scenario/$scenarioId', params: { scenarioId: 'streaming' } }),
     }),
-    [dispatch, navigate],
+    [dispatch, navigate, surface],
   )
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({

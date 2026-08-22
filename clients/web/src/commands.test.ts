@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { invokeCommand } from './commands'
+import { commandById, invokeCommand } from './commands'
 import { actions, selectApp, store } from './state'
 
 describe('command registry', () => {
@@ -28,6 +28,23 @@ describe('command registry', () => {
     })
 
     expect(selectApp(store.getState()).theme).toBe('light')
+  })
+
+  it('offers transcript detail only for transcript and Settings contexts', () => {
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+    }
+
+    expect(commandById('detail.full').available(context)).toBe(false)
+    expect(
+      commandById('detail.full').available({ ...context, configuresTranscriptDetail: true }),
+    ).toBe(true)
+    expect(commandById('detail.full').available({ ...context, timelineIds: ['event-0'] })).toBe(
+      true,
+    )
   })
 
   it('applies a pane size through its registered parameterized command', () => {

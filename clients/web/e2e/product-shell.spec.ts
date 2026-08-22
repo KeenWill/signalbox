@@ -81,6 +81,48 @@ test('describes Settings as browser-local rather than daemon-backed', async ({ p
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('keeps Settings single-column without horizontal overflow at intermediate widths', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 800, height: 800 })
+  await page.goto('/settings')
+
+  const navigationWidth = page
+    .getByRole('group', { name: 'Workbench panes' })
+    .getByRole('slider')
+    .nth(0)
+  await navigationWidth.fill('360')
+
+  const settingsGrid = page.locator('.settings-grid')
+  expect(
+    await settingsGrid.evaluate(
+      (element) => getComputedStyle(element).gridTemplateColumns.split(' ').length,
+    ),
+  ).toBe(1)
+  const settingsSurface = page.locator('.settings-surface')
+  expect(
+    await settingsSurface.evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('shows transcript-detail commands only on Settings among product routes', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('button', { name: /Show full transcript detail/ })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+
+  await page.goto('/settings')
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('button', { name: /Show full transcript detail/ })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('preserves a scenario-specific title after leaving the product shell', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)

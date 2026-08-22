@@ -11,6 +11,7 @@ export interface CommandContext {
   navigate?: (path: string) => void
   paneSize?: number
   navigateScenario?: () => void
+  configuresTranscriptDetail?: boolean
 }
 
 export interface CommandBinding {
@@ -34,6 +35,8 @@ const always = () => true
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
 const scenarioNavigation = (context: CommandContext) => context.navigateScenario !== undefined
 const scenarioTimeline = (context: CommandContext) => context.timelineIds.length > 0
+const transcriptDetail = (context: CommandContext) =>
+  context.timelineIds.length > 0 || context.configuresTranscriptDetail === true
 const paneSizeProvided = (context: CommandContext) => context.paneSize !== undefined
 const setLayout = (layout: LayoutMode) => (context: CommandContext) =>
   context.dispatch(actions.layoutSet(layout))
@@ -324,7 +327,7 @@ export const commandRegistry = [
     description: 'Show every supported timeline record.',
     category: 'View',
     bindings: [],
-    available: always,
+    available: transcriptDetail,
     run: (context) => context.dispatch(actions.detailSet('full')),
   },
   {
@@ -333,7 +336,7 @@ export const commandRegistry = [
     description: 'Keep origins, tools, progress, warnings, and results compact.',
     category: 'View',
     bindings: [],
-    available: always,
+    available: transcriptDetail,
     run: (context) => context.dispatch(actions.detailSet('condensed')),
   },
   {
@@ -342,7 +345,7 @@ export const commandRegistry = [
     description: 'Emphasize origins and durable results.',
     category: 'View',
     bindings: [],
-    available: always,
+    available: transcriptDetail,
     run: (context) => context.dispatch(actions.detailSet('results')),
   },
   {

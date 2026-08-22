@@ -494,6 +494,12 @@ kbd {
   }
 }
 
+@media (max-width: 839px) {
+  .settings-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 760px) {
   .product-shell,
   .product-shell.layout-focus {
@@ -521,9 +527,6 @@ kbd {
   }
   .session-columns span:nth-child(n + 3) {
     display: none;
-  }
-  .settings-grid {
-    grid-template-columns: minmax(0, 1fr);
   }
   .settings-actions {
     align-items: flex-start;
