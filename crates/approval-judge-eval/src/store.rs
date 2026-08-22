@@ -275,6 +275,7 @@ impl DiskCorpusStore {
     pub fn open(manifest_path: impl AsRef<Path>) -> Result<Self, CorpusStoreError> {
         let manifest_path = manifest_path.as_ref().to_path_buf();
         let loaded = load_manifest_corpus(&manifest_path).map_err(CorpusStoreError::Manifest)?;
+        require_disk_store_source(loaded.registration.source())?;
         Ok(Self {
             manifest_path,
             registration: loaded.registration,
@@ -286,6 +287,18 @@ impl DiskCorpusStore {
     #[must_use]
     pub fn manifest_path(&self) -> &Path {
         &self.manifest_path
+    }
+}
+
+fn require_disk_store_source(source: &CorpusSourceDescriptor) -> Result<(), CorpusStoreError> {
+    match source {
+        CorpusSourceDescriptor::Repository { .. } => Ok(()),
+        CorpusSourceDescriptor::DatabaseNative => {
+            Err(CorpusStoreError::DatabaseNativeRequiresDatabaseImport)
+        }
+        CorpusSourceDescriptor::BlobReference { .. } => {
+            Err(CorpusStoreError::BlobBackendUnavailable)
+        }
     }
 }
 
@@ -323,6 +336,8 @@ pub enum CorpusStoreError {
     BlobBackendUnavailable,
     /// Repository content was supplied without verified manifest source bytes.
     RepositorySourceRequiresManifestImport,
+    /// Embedded database-native content was supplied to the repository-file store.
+    DatabaseNativeRequiresDatabaseImport,
 }
 
 /// Closed corruption classifications for durable corpus rows and registrations.
@@ -431,6 +446,9 @@ impl fmt::Display for CorpusStoreError {
             Self::RepositorySourceRequiresManifestImport => formatter.write_str(
                 "repository-backed corpus content must be imported through a verified manifest",
             ),
+            Self::DatabaseNativeRequiresDatabaseImport => formatter.write_str(
+                "database-native corpus content must be imported through the database store",
+            ),
         }
     }
 }
@@ -445,7 +463,8 @@ impl Error for CorpusStoreError {
             Self::NotFound(_)
             | Self::CorruptRegistration(_)
             | Self::BlobBackendUnavailable
-            | Self::RepositorySourceRequiresManifestImport => None,
+            | Self::RepositorySourceRequiresManifestImport
+            | Self::DatabaseNativeRequiresDatabaseImport => None,
         }
     }
 }
@@ -458,7 +477,18 @@ impl From<sqlx::Error> for CorpusStoreError {
 
 #[cfg(test)]
 mod tests {
-    use super::CorpusSourceDescriptor;
+    use super::{CorpusSourceDescriptor, CorpusStoreError, require_disk_store_source};
+
+    #[test]
+    fn disk_store_rejects_database_native_sources() {
+        let error = require_disk_store_source(&CorpusSourceDescriptor::DatabaseNative)
+            .expect_err("database-native content requires database import");
+
+        assert!(matches!(
+            error,
+            CorpusStoreError::DatabaseNativeRequiresDatabaseImport
+        ));
+    }
 
     #[test]
     fn source_descriptor_rejects_unknown_variant_fields() {

@@ -33,6 +33,8 @@ pub use store::{
 
 /// The only corpus format this pre-alpha harness currently accepts.
 pub const CORPUS_FORMAT_VERSION: u32 = 1;
+// Hard safety ceiling bounding manifest, hashing, and durable-index memory and
+// storage amplification from attacker-controlled case identities.
 const MAX_CASE_ID_BYTES: usize = 128;
 
 /// A versioned collection of labeled approval-judge cases.
