@@ -38,6 +38,25 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('fails closed when the daemon returns another contract identity', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...bootstrapFixture,
+              contract: { name: 'another.web-http', version: '3' },
+            }),
+          ),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'incompatible web contract',
+    )
+  })
+
   it('reports an unsuccessful HTTP response without decoding its body', async () => {
     vi.stubGlobal(
       'fetch',

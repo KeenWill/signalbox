@@ -9,17 +9,26 @@ import {
   Outlet,
   RouterProvider,
 } from '@tanstack/react-router'
-import { lazy, StrictMode, Suspense } from 'react'
+import { lazy, StrictMode, Suspense, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import { ScenarioImportApi } from './imports/scenario'
 import { ProductApp } from './ProductApp'
 import { type ProductRouteId, productRoutes } from './product'
-import { store } from './state'
+import { selectApp, store, useAppSelector } from './state'
 import './app.css'
 
-const rootRoute = createRootRoute({ component: () => <Outlet /> })
+function ApplicationRoot() {
+  const { density, theme } = useAppSelector(selectApp)
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    document.documentElement.dataset.density = density
+  }, [density, theme])
+  return <Outlet />
+}
+
+const rootRoute = createRootRoute({ component: ApplicationRoot })
 const scenarioImportApi = new ScenarioImportApi()
 const ScenarioWorkspace = lazy(() =>
   import('./App').then((module) => ({ default: module.Workspace })),

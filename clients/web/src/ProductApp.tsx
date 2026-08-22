@@ -1,5 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog'
-import { useHotkeys } from '@tanstack/react-hotkeys'
+import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
 import {
@@ -13,11 +13,12 @@ import {
   Sun,
   X,
 } from 'lucide-react'
-import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type CSSProperties, useCallback, useMemo, useRef, useState } from 'react'
 import {
   type CommandContext,
   commandRegistry,
   globalHotkeyBindings,
+  globalHotkeySequenceBindings,
   invokeCommand,
 } from './commands'
 import { HttpImportApi } from './imports/api'
@@ -81,7 +82,13 @@ const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; ques
   },
 }
 
-function ProductNavigation({ active }: { active: ProductRouteId }) {
+function ProductNavigation({
+  active,
+  onNavigate,
+}: {
+  active: ProductRouteId
+  onNavigate?: () => void
+}) {
   return (
     <div className="product-navigation">
       <div className="brand">
@@ -97,6 +104,7 @@ function ProductNavigation({ active }: { active: ProductRouteId }) {
             params={{ surface: route.id }}
             className={active === route.id ? 'product-link active' : 'product-link'}
             aria-current={active === route.id ? 'page' : undefined}
+            onClick={onNavigate}
           >
             <span>{route.label}</span>
             <small>{route.description}</small>
@@ -107,6 +115,7 @@ function ProductNavigation({ active }: { active: ProductRouteId }) {
         className="scenario-entry"
         to="/scenario/$scenarioId"
         params={{ scenarioId: 'streaming' }}
+        onClick={onNavigate}
       >
         Scenario studio <span aria-hidden="true">↗</span>
       </Link>
@@ -321,11 +330,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       callback: () => invokeCommand(binding.commandId, context),
     })),
   )
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = app.theme
-    document.documentElement.dataset.density = app.density
-  }, [app.density, app.theme])
+  useHotkeySequences(
+    globalHotkeySequenceBindings.map((binding) => ({
+      sequence: binding.sequence,
+      callback: () => invokeCommand(binding.commandId, context),
+    })),
+  )
 
   const copy = surfaceCopy[surface]
   const content =
@@ -368,6 +378,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           <p>{copy.question}</p>
           <span
             className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
+            role="status"
+            aria-atomic="true"
           >
             {bootstrap.isSuccess
               ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
@@ -390,11 +402,23 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             </div>
             <div>
               <dt>Authority</dt>
-              <dd>{surface === 'settings' ? 'Browser' : 'Daemon'}</dd>
+              <dd>
+                {productSurfaceStates[surface].kind === 'browser-local'
+                  ? 'Browser'
+                  : productSurfaceStates[surface].kind === 'server-backed'
+                    ? 'Daemon'
+                    : 'Unavailable'}
+              </dd>
             </div>
             <div>
               <dt>Cache</dt>
-              <dd>{surface === 'settings' ? 'Local settings' : 'Bounded query'}</dd>
+              <dd>
+                {productSurfaceStates[surface].kind === 'browser-local'
+                  ? 'Local settings'
+                  : productSurfaceStates[surface].kind === 'server-backed'
+                    ? 'Bounded query'
+                    : 'None'}
+              </dd>
             </div>
           </dl>
         </aside>
@@ -420,7 +444,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <Dialog.Description id="mobile-navigation-description" className="sr-only">
               Choose a Signalbox surface.
             </Dialog.Description>
-            <ProductNavigation active={surface} />
+            <ProductNavigation
+              active={surface}
+              onNavigate={() => dispatch(actions.overlaySet(null))}
+            />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>

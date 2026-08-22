@@ -98,6 +98,52 @@ test('uses a navigation sheet on a phone viewport and unwinds it with Escape', a
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('closes the navigation sheet after selecting a phone route', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open navigation' }).click()
+  const navigation = page.getByRole('dialog', { name: 'Product navigation' })
+  await navigation.getByRole('link', { name: /Sessions/ }).click()
+
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(navigation).toBeHidden()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('uses the advertised product navigation sequences', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/sessions$/)
+  await page.keyboard.press('g')
+  await page.keyboard.press(',')
+  await expect(page).toHaveURL(/\/settings$/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('applies saved presentation preferences on a direct Imports scenario load', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await page.addInitScript(() => {
+    localStorage.setItem(
+      'signalbox.web.preferences.v1',
+      JSON.stringify({ theme: 'light', density: 'comfortable' }),
+    )
+  })
+  await page.goto('/scenario/imports')
+
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
+  await expect(page.locator('html')).toHaveAttribute('data-density', 'comfortable')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('changes and restores a Settings preference without a mouse', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
