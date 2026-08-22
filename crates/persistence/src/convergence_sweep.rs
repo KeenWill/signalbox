@@ -1,6 +1,10 @@
 //! Durable state, retry, parking, and commissioned-session census for convergence sweeps.
 
-use std::{error::Error, fmt, time::SystemTime};
+use std::{
+    error::Error,
+    fmt,
+    time::{Duration, SystemTime},
+};
 
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_domain::{CommitSha, DurableCommandId, PullRequestNumber, RepositorySlug, SessionId};
@@ -143,6 +147,60 @@ pub enum ConvergenceSweepFailureDisposition {
     RetryScheduled,
     Parked,
     ActivityObserved,
+}
+
+/// Delay bounds for one convergence-sweep failure lineage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConvergenceSweepRetryPolicy {
+    backoff_base: Duration,
+    backoff_cap: Duration,
+}
+
+impl ConvergenceSweepRetryPolicy {
+    pub const fn new(backoff_base: Duration, backoff_cap: Duration) -> Self {
+        Self {
+            backoff_base,
+            backoff_cap,
+        }
+    }
+
+    fn stored_backoff_base_seconds(self) -> i64 {
+        i64::try_from(self.backoff_base.as_secs()).unwrap_or(i64::MAX)
+    }
+
+    fn stored_backoff_cap_seconds(self) -> i64 {
+        i64::try_from(self.backoff_cap.as_secs()).unwrap_or(i64::MAX)
+    }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct FailureTransitionRow {
+    consecutive_failures: i16,
+    parking_kind: String,
+}
+
+struct FailureRecord<'a> {
+    observation: Option<&'a ConvergenceSweepObservation>,
+    failure: ConvergenceSweepFailureKind,
+    retry_policy: ConvergenceSweepRetryPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FailureParking {
+    RetryScheduled,
+    Parked,
+}
+
+impl FailureParking {
+    fn decode(value: &str) -> Result<Self, ConvergenceSweepStoreError> {
+        match value {
+            "retry_scheduled" => Ok(Self::RetryScheduled),
+            "parked" => Ok(Self::Parked),
+            _ => Err(ConvergenceSweepStoreError::Corruption(
+                "failure transition has an invalid parking kind",
+            )),
+        }
+    }
 }
 
 /// Database or durable-shape failure in convergence sweep storage.
@@ -486,10 +544,6 @@ impl PostgresConvergenceSweepStore {
     }
 
     /// Advances one typed failure lineage, scheduling retry or parking atomically.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the durable failure transition receives each persisted fact explicitly"
-    )]
     pub async fn record_failure(
         &self,
         event_id: Uuid,
@@ -497,17 +551,17 @@ impl PostgresConvergenceSweepStore {
         pull_request: PullRequestNumber,
         observation: Option<&ConvergenceSweepObservation>,
         failure: ConvergenceSweepFailureKind,
-        retry_backoff_base_seconds: u64,
-        retry_backoff_cap_seconds: u64,
+        retry_policy: ConvergenceSweepRetryPolicy,
     ) -> Result<ConvergenceSweepFailureDisposition, ConvergenceSweepStoreError> {
         self.record_failure_guarded(
             event_id,
             repository,
             pull_request,
-            observation,
-            failure,
-            retry_backoff_base_seconds,
-            retry_backoff_cap_seconds,
+            FailureRecord {
+                observation,
+                failure,
+                retry_policy,
+            },
             None,
         )
         .await
@@ -526,33 +580,38 @@ impl PostgresConvergenceSweepStore {
             event_id,
             repository,
             pull_request,
-            Some(observation),
-            ConvergenceSweepFailureKind::NoModelActivity,
-            0,
-            0,
+            FailureRecord {
+                observation: Some(observation),
+                failure: ConvergenceSweepFailureKind::NoModelActivity,
+                retry_policy: ConvergenceSweepRetryPolicy::new(Duration::ZERO, Duration::ZERO),
+            },
             Some(expected_session),
         )
         .await
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the durable failure transition carries its complete typed fence"
-    )]
     async fn record_failure_guarded(
         &self,
         event_id: Uuid,
         repository: &RepositorySlug,
         pull_request: PullRequestNumber,
-        observation: Option<&ConvergenceSweepObservation>,
-        failure: ConvergenceSweepFailureKind,
-        retry_backoff_base_seconds: u64,
-        retry_backoff_cap_seconds: u64,
+        record: FailureRecord<'_>,
         expected_inactive_session: Option<SessionId>,
     ) -> Result<ConvergenceSweepFailureDisposition, ConvergenceSweepStoreError> {
+        let FailureRecord {
+            observation,
+            failure,
+            retry_policy,
+        } = record;
         let mut transaction = self.pool.begin().await?;
         ensure_target(&mut transaction, repository, pull_request).await?;
         if let Some(session) = expected_inactive_session {
+            crate::commissioned_dispatch::lock_pull_request_target(
+                &mut transaction,
+                repository.as_str(),
+                &Decimal::from(pull_request.get()),
+            )
+            .await?;
             lock_model_activity_fence(&mut transaction, session).await?;
         }
         let budget: i16 = sqlx::query_scalar("SELECT convergence_sweep_retry_budget()")
@@ -566,7 +625,7 @@ impl PostgresConvergenceSweepStore {
                 )
             })
             .unwrap_or((None, None));
-        let updated: Option<(i16, bool)> = sqlx::query_as(
+        let updated: Option<FailureTransitionRow> = sqlx::query_as(
             "WITH selected_dispatch AS (
                 SELECT dispatch.session_id,
                        coalesce((
@@ -635,22 +694,26 @@ impl PostgresConvergenceSweepStore {
                      WHERE session_id = $11
                        AND NOT has_model_activity
                 ))
-          RETURNING consecutive_failures, state_kind = 'parked'",
+          RETURNING consecutive_failures AS consecutive_failures,
+                    CASE state_kind
+                        WHEN 'parked' THEN 'parked'
+                        ELSE 'retry_scheduled'
+                    END AS parking_kind",
         )
         .bind(repository.as_str())
         .bind(Decimal::from(pull_request.get()))
         .bind(convergence_sweep_failure_to_str(failure))
         .bind(failure == ConvergenceSweepFailureKind::NoModelActivity)
         .bind(budget)
-        .bind(i64::try_from(retry_backoff_base_seconds).unwrap_or(i64::MAX))
-        .bind(i64::try_from(retry_backoff_cap_seconds).unwrap_or(i64::MAX))
+        .bind(retry_policy.stored_backoff_base_seconds())
+        .bind(retry_policy.stored_backoff_cap_seconds())
         .bind(convergence_sweep_operator_need_to_str(failure))
         .bind(head)
         .bind(threads)
         .bind(expected_inactive_session.map(SessionId::into_uuid))
         .fetch_optional(&mut *transaction)
         .await?;
-        let Some((failures, parked)) = updated else {
+        let Some(updated) = updated else {
             transaction.commit().await?;
             return if expected_inactive_session.is_some() {
                 Ok(ConvergenceSweepFailureDisposition::ActivityObserved)
@@ -660,6 +723,7 @@ impl PostgresConvergenceSweepStore {
                 ))
             };
         };
+        let parking = FailureParking::decode(&updated.parking_kind)?;
         insert_event(
             &mut transaction,
             event_id,
@@ -669,12 +733,13 @@ impl PostgresConvergenceSweepStore {
             Some(failure),
             observation,
             None,
-            failures,
-            parked.then_some(convergence_sweep_operator_need_to_str(failure)),
+            updated.consecutive_failures,
+            (parking == FailureParking::Parked)
+                .then_some(convergence_sweep_operator_need_to_str(failure)),
         )
         .await?;
         transaction.commit().await?;
-        Ok(if parked {
+        Ok(if parking == FailureParking::Parked {
             ConvergenceSweepFailureDisposition::Parked
         } else {
             ConvergenceSweepFailureDisposition::RetryScheduled

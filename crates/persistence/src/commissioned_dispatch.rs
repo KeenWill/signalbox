@@ -373,13 +373,23 @@ async fn recent_pull_request_session(
         return Ok(None);
     };
     let session: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT session_id
-           FROM commissioned_dispatch
-          WHERE target_kind = 'pull_request'
-            AND repository = $1
-            AND pull_request_number = $2
-            AND recorded_at > clock_timestamp() - $3 * interval '1 second'
-          ORDER BY recorded_at DESC, dispatch_id DESC
+        "SELECT recent.session_id
+           FROM (
+                SELECT dispatch.session_id, dispatch.recorded_at, dispatch.dispatch_id
+                  FROM commissioned_dispatch AS dispatch
+                 WHERE dispatch.target_kind = 'pull_request'
+                   AND dispatch.repository = $1
+                   AND dispatch.pull_request_number = $2
+                UNION ALL
+                SELECT action.session_id, action.recorded_at, action.dispatch_id
+                  FROM repo_watch_dispatch_action AS action
+                  JOIN repo_watch_event AS event ON event.event_id = action.event_id
+                 WHERE event.target_kind = 'pull_request'
+                   AND event.repository = $1
+                   AND event.pull_request_number = $2
+           ) AS recent
+          WHERE recent.recorded_at > clock_timestamp() - $3 * interval '1 second'
+          ORDER BY recent.recorded_at DESC, recent.dispatch_id DESC, recent.session_id DESC
           LIMIT 1",
     )
     .bind(repository.as_str())

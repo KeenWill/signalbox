@@ -267,15 +267,13 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(outcome);
         }
-        if matches!(
-            command.action(),
-            GoalUserAction::Attach(_) | GoalUserAction::Resume(_) | GoalUserAction::Supersede(_)
-        ) && let Some(session) =
-            crate::commissioned_dispatch::lock_competing_pull_request_session(
-                &mut transaction,
-                command.session(),
-            )
-            .await?
+        if command.action().starts_pursuit()
+            && let Some(session) =
+                crate::commissioned_dispatch::lock_competing_pull_request_session(
+                    &mut transaction,
+                    command.session(),
+                )
+                .await?
         {
             transaction.rollback().await?;
             return Ok(GoalCommandHandlingOutcome::TargetBusy { session });

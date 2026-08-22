@@ -2,6 +2,34 @@
 
 use signalbox_domain::{CommitSha, MergeableState};
 
+/// Whether the provider reports a pull request as draft.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PullRequestDraftState {
+    /// The pull request is ready for review.
+    ReadyForReview,
+    /// The pull request is a draft.
+    Draft,
+}
+
+impl PullRequestDraftState {
+    /// Constructs the named state from the provider flag.
+    pub const fn from_provider_flag(draft: bool) -> Self {
+        if draft {
+            Self::Draft
+        } else {
+            Self::ReadyForReview
+        }
+    }
+
+    /// Returns the provider-compatible draft flag.
+    pub const fn is_draft(self) -> bool {
+        match self {
+            Self::ReadyForReview => false,
+            Self::Draft => true,
+        }
+    }
+}
+
 /// Provider check source and its normalized state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PullRequestCheckState {
@@ -85,7 +113,7 @@ impl PullRequestCheck {
 pub struct PullRequestConvergenceFacts {
     head_sha: CommitSha,
     checked_head_sha: Option<CommitSha>,
-    draft: bool,
+    draft: PullRequestDraftState,
     unresolved_review_threads: u64,
     mergeable_state: MergeableState,
     checks: Box<[PullRequestCheck]>,
@@ -96,7 +124,7 @@ impl PullRequestConvergenceFacts {
     pub fn new(
         head_sha: CommitSha,
         checked_head_sha: Option<CommitSha>,
-        draft: bool,
+        draft: PullRequestDraftState,
         unresolved_review_threads: u64,
         mergeable_state: MergeableState,
         checks: Vec<PullRequestCheck>,
@@ -122,7 +150,7 @@ impl PullRequestConvergenceFacts {
     }
 
     /// Reports the provider draft flag. Draft is context, not a blocker.
-    pub const fn draft(&self) -> bool {
+    pub const fn draft(&self) -> PullRequestDraftState {
         self.draft
     }
 
@@ -232,7 +260,7 @@ mod tests {
         PullRequestConvergenceFacts::new(
             sha('a'),
             checked_head_sha,
-            false,
+            PullRequestDraftState::ReadyForReview,
             unresolved,
             mergeable,
             checks,

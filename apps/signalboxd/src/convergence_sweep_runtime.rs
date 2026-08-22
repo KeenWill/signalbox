@@ -25,7 +25,7 @@ use signalbox_persistence::{
     commissioned_dispatch::{CommissionDispatchOutcome, PostgresCommissionedDispatchStore},
     convergence_sweep::{
         ConvergenceSweepDecision, ConvergenceSweepFailureKind, ConvergenceSweepObservation,
-        PostgresConvergenceSweepStore,
+        ConvergenceSweepRetryPolicy, PostgresConvergenceSweepStore,
     },
 };
 use sqlx::PgPool;
@@ -630,8 +630,7 @@ impl ConvergenceSweepRuntime {
                 target.pull_request,
                 observation,
                 failure,
-                RETRY_BACKOFF_BASE.as_secs(),
-                RETRY_BACKOFF_CAP.as_secs(),
+                ConvergenceSweepRetryPolicy::new(RETRY_BACKOFF_BASE, RETRY_BACKOFF_CAP),
             )
             .await
         {
@@ -743,9 +742,11 @@ impl ConvergenceSweepRuntime {
             facts: PullRequestConvergenceFacts::new(
                 head_sha,
                 checked_head_sha,
-                pull.get("isDraft")
-                    .and_then(Value::as_bool)
-                    .ok_or(CensusError::Shape)?,
+                signalbox_application::PullRequestDraftState::from_provider_flag(
+                    pull.get("isDraft")
+                        .and_then(Value::as_bool)
+                        .ok_or(CensusError::Shape)?,
+                ),
                 unresolved,
                 mergeable_state,
                 checks,
@@ -1075,7 +1076,7 @@ fn commission_content(
         "head_repository": fetched.head_repository.as_str(),
         "base_branch": fetched.base_branch.as_str(),
         "head_branch": fetched.head_branch.as_str(),
-        "draft": fetched.facts.draft(),
+        "draft": fetched.facts.draft().is_draft(),
         "unresolved_review_threads": fetched.facts.unresolved_review_threads(),
         "mergeable_state": format!("{:?}", fetched.facts.mergeable_state()).to_lowercase(),
         "gating_checks": gating_checks,

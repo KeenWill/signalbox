@@ -852,7 +852,7 @@ impl PostgresRepoWatchDispatchStore {
                     crate::repo_watch_dispatch_obligation::record_dispatch_obligation(
                         &mut transaction,
                         dispatch_id,
-                        None,
+                        crate::repo_watch_dispatch_obligation::DispatchObligationBlocker::Existing,
                         &event,
                         &rule_id,
                         rule_version,
@@ -878,7 +878,9 @@ impl PostgresRepoWatchDispatchStore {
                         crate::repo_watch_dispatch_obligation::record_dispatch_obligation(
                             &mut transaction,
                             dispatch_id,
-                            Some(blocking_dispatch),
+                            crate::repo_watch_dispatch_obligation::DispatchObligationBlocker::RepoWatchDispatch(
+                                blocking_dispatch,
+                            ),
                             &event,
                             &rule_id,
                             rule_version,
@@ -892,13 +894,13 @@ impl PostgresRepoWatchDispatchStore {
                     return Ok(RepoWatchRuleEvaluationOutcome::Occupied);
                 }
                 if let RepoWatchEventTarget::PullRequest(context) = event.target()
-                    && crate::commissioned_dispatch::lock_live_pull_request_target_identity(
-                        &mut transaction,
-                        event.repository(),
-                        context.number(),
-                    )
-                    .await?
-                    .is_some()
+                    && let Some(blocking_session) =
+                        crate::commissioned_dispatch::lock_live_pull_request_target_identity(
+                            &mut transaction,
+                            event.repository(),
+                            context.number(),
+                        )
+                        .await?
                 {
                     if matched_admission == MatchedAdmission::Fresh {
                         insert_evaluation(
@@ -913,7 +915,9 @@ impl PostgresRepoWatchDispatchStore {
                         crate::repo_watch_dispatch_obligation::record_dispatch_obligation(
                             &mut transaction,
                             dispatch_id,
-                            None,
+                            crate::repo_watch_dispatch_obligation::DispatchObligationBlocker::ExternalSession(
+                                blocking_session,
+                            ),
                             &event,
                             &rule_id,
                             rule_version,

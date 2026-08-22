@@ -45,7 +45,7 @@ pub use commissioned_dispatch::{
 };
 pub use convergence_reconciliation::{
     PullRequestCheck, PullRequestCheckState, PullRequestConvergence, PullRequestConvergenceBlocker,
-    PullRequestConvergenceFacts, evaluate_pull_request_convergence,
+    PullRequestConvergenceFacts, PullRequestDraftState, evaluate_pull_request_convergence,
 };
 pub use conversation_import::{
     ImportConversationError, ImportConversationOutcome, ImportConversationReport,
