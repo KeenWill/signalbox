@@ -39,7 +39,7 @@ use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
     WebContractBootstrap, WebContractExample, WebSessionTimelineDescriptor,
     WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
-    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
+    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -460,7 +460,7 @@ fn parse_window_anchor(
 
 fn address_dto(address: TimelineAddress) -> WebTimelineAddress {
     WebTimelineAddress {
-        event_sequence: address.sequence().get().to_string(),
+        event_sequence: WebTimelineEventSequence::from_nonzero(address.sequence()),
     }
 }
 
