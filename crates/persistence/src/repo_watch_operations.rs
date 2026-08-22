@@ -8,13 +8,14 @@ use signalbox_application::{
     RepoWatchEventKindCount, RepoWatchHeldCursor, RepoWatchHeldSlot, RepoWatchHeldSlotBlocker,
     RepoWatchLatestWebhook, RepoWatchObligationCursor, RepoWatchObligationId,
     RepoWatchObligationReadiness, RepoWatchOperationsReader, RepoWatchOperatorDispatch,
-    RepoWatchOperatorEvent, RepoWatchOperatorSettlement, RepoWatchPullRequestLifecycle,
-    RepoWatchPullRequestOperations, RepoWatchPullRequestOperationsFacts, RepoWatchPullRequestPage,
-    RepoWatchPullRequestSession, RepoWatchPullRequestSessionPage, RepoWatchQueuedObligation,
-    RepoWatchRepositoryStatus, RepoWatchRepositoryStatusPage, RepoWatchSessionCursor,
-    RepoWatchSessionPurpose, RepoWatchSingletonKey, RepoWatchWebhookActivity,
-    RepoWatchWebhookDisposition, RepoWatchWebhookWindow, RepoWatchWorkPage,
-    max_repo_watch_activity_page_items, max_repo_watch_operations_page_items,
+    RepoWatchOperatorEvent, RepoWatchOperatorSettlement, RepoWatchPagePosition,
+    RepoWatchPullRequestLifecycle, RepoWatchPullRequestOperations,
+    RepoWatchPullRequestOperationsFacts, RepoWatchPullRequestPage, RepoWatchPullRequestSession,
+    RepoWatchPullRequestSessionPage, RepoWatchQueuedObligation, RepoWatchRepositoryStatus,
+    RepoWatchRepositoryStatusPage, RepoWatchSessionCursor, RepoWatchSessionPurpose,
+    RepoWatchSingletonKey, RepoWatchWebhookActivity, RepoWatchWebhookDisposition,
+    RepoWatchWebhookWindow, RepoWatchWorkPage, max_repo_watch_activity_page_items,
+    max_repo_watch_operations_page_items,
 };
 use signalbox_domain::{
     PullRequestNumber, RepoWatchDispatchId, RepoWatchEventId, RepoWatchEventKindNameV1,
@@ -243,24 +244,42 @@ impl PostgresRepoWatchOperations {
     pub async fn work(
         &self,
         repository: RepositorySlug,
-        held_after: Option<RepoWatchHeldCursor>,
-        obligation_after: Option<RepoWatchObligationCursor>,
+        held_after: RepoWatchPagePosition<RepoWatchHeldCursor>,
+        obligation_after: RepoWatchPagePosition<RepoWatchObligationCursor>,
     ) -> Result<RepoWatchWorkPage, RepoWatchOperationsError> {
         let mut transaction = self.read_transaction().await?;
-        let held_rows = sqlx::query(HELD_SLOTS_SQL)
-            .bind(repository.as_str())
-            .bind(held_after.map(|cursor| OffsetDateTime::from(cursor.held_since)))
-            .bind(held_after.map(|cursor| cursor.dispatch.into_uuid()))
-            .bind(i64::from(max_repo_watch_operations_page_items()) + 1)
-            .fetch_all(&mut *transaction)
-            .await?;
-        let obligation_rows = sqlx::query(OBLIGATIONS_SQL)
-            .bind(repository.as_str())
-            .bind(obligation_after.map(|cursor| OffsetDateTime::from(cursor.owed_since)))
-            .bind(obligation_after.map(|cursor| cursor.obligation.into_uuid()))
-            .bind(i64::from(max_repo_watch_operations_page_items()) + 1)
-            .fetch_all(&mut *transaction)
-            .await?;
+        let held_rows = match held_after {
+            RepoWatchPagePosition::Exhausted => Vec::new(),
+            RepoWatchPagePosition::Start | RepoWatchPagePosition::After(_) => {
+                let cursor = match held_after {
+                    RepoWatchPagePosition::After(cursor) => Some(cursor),
+                    RepoWatchPagePosition::Start | RepoWatchPagePosition::Exhausted => None,
+                };
+                sqlx::query(HELD_SLOTS_SQL)
+                    .bind(repository.as_str())
+                    .bind(cursor.map(|cursor| OffsetDateTime::from(cursor.held_since)))
+                    .bind(cursor.map(|cursor| cursor.dispatch.into_uuid()))
+                    .bind(i64::from(max_repo_watch_operations_page_items()) + 1)
+                    .fetch_all(&mut *transaction)
+                    .await?
+            }
+        };
+        let obligation_rows = match obligation_after {
+            RepoWatchPagePosition::Exhausted => Vec::new(),
+            RepoWatchPagePosition::Start | RepoWatchPagePosition::After(_) => {
+                let cursor = match obligation_after {
+                    RepoWatchPagePosition::After(cursor) => Some(cursor),
+                    RepoWatchPagePosition::Start | RepoWatchPagePosition::Exhausted => None,
+                };
+                sqlx::query(OBLIGATIONS_SQL)
+                    .bind(repository.as_str())
+                    .bind(cursor.map(|cursor| OffsetDateTime::from(cursor.owed_since)))
+                    .bind(cursor.map(|cursor| cursor.obligation.into_uuid()))
+                    .bind(i64::from(max_repo_watch_operations_page_items()) + 1)
+                    .fetch_all(&mut *transaction)
+                    .await?
+            }
+        };
         let held_has_more = held_rows.len() > usize::from(max_repo_watch_operations_page_items());
         let obligation_has_more =
             obligation_rows.len() > usize::from(max_repo_watch_operations_page_items());
@@ -274,24 +293,32 @@ impl PostgresRepoWatchOperations {
             .take(usize::from(max_repo_watch_operations_page_items()))
             .map(decode_obligation)
             .collect::<Result<Vec<_>, _>>()?;
-        let held_continuation_after = held_has_more
-            .then(|| {
-                held_slots.last().map(|slot| RepoWatchHeldCursor {
-                    held_since: slot.held_since,
-                    dispatch: slot.dispatch,
-                })
+        let held_continuation_after = if held_has_more {
+            let Some(slot) = held_slots.last() else {
+                return Err(
+                    RepoWatchOperationsCorruption::Invalid("held continuation page").into(),
+                );
+            };
+            RepoWatchPagePosition::After(RepoWatchHeldCursor {
+                held_since: slot.held_since,
+                dispatch: slot.dispatch,
             })
-            .flatten();
-        let obligation_continuation_after = obligation_has_more
-            .then(|| {
-                queued_obligations
-                    .last()
-                    .map(|obligation| RepoWatchObligationCursor {
-                        owed_since: obligation.owed_since,
-                        obligation: obligation.id,
-                    })
+        } else {
+            RepoWatchPagePosition::Exhausted
+        };
+        let obligation_continuation_after = if obligation_has_more {
+            let Some(obligation) = queued_obligations.last() else {
+                return Err(
+                    RepoWatchOperationsCorruption::Invalid("obligation continuation page").into(),
+                );
+            };
+            RepoWatchPagePosition::After(RepoWatchObligationCursor {
+                owed_since: obligation.owed_since,
+                obligation: obligation.id,
             })
-            .flatten();
+        } else {
+            RepoWatchPagePosition::Exhausted
+        };
         transaction.commit().await?;
         Ok(RepoWatchWorkPage {
             held_slots,
@@ -352,40 +379,58 @@ impl PostgresRepoWatchOperations {
     pub async fn activity(
         &self,
         repository: RepositorySlug,
-        events_before: Option<RepoWatchEventCursor>,
-        webhooks_before: Option<u64>,
+        events_before: RepoWatchPagePosition<RepoWatchEventCursor>,
+        webhooks_before: RepoWatchPagePosition<u64>,
     ) -> Result<RepoWatchActivityPage, RepoWatchOperationsError> {
         let mut transaction = self.read_transaction().await?;
-        let event_rows = sqlx::query(ACTIVITY_EVENTS_SQL)
-            .bind(repository.as_str())
-            .bind(
-                events_before
-                    .map(|cursor| i64::try_from(cursor.cursor_generation))
-                    .transpose()
-                    .map_err(|_| {
-                        RepoWatchOperationsCorruption::Invalid("event cursor generation")
-                    })?,
-            )
-            .bind(
-                events_before
-                    .map(|cursor| i32::try_from(cursor.event_ordinal))
-                    .transpose()
-                    .map_err(|_| RepoWatchOperationsCorruption::Invalid("event cursor ordinal"))?,
-            )
-            .bind(i64::from(max_repo_watch_activity_page_items()) + 1)
-            .fetch_all(&mut *transaction)
-            .await?;
-        let webhook_rows = sqlx::query(ACTIVITY_WEBHOOKS_SQL)
-            .bind(repository.as_str())
-            .bind(
-                webhooks_before
-                    .map(i64::try_from)
-                    .transpose()
-                    .map_err(|_| RepoWatchOperationsCorruption::Invalid("webhook cursor"))?,
-            )
-            .bind(i64::from(max_repo_watch_activity_page_items()) + 1)
-            .fetch_all(&mut *transaction)
-            .await?;
+        let event_rows = match events_before {
+            RepoWatchPagePosition::Exhausted => Vec::new(),
+            RepoWatchPagePosition::Start | RepoWatchPagePosition::After(_) => {
+                let cursor = match events_before {
+                    RepoWatchPagePosition::After(cursor) => Some(cursor),
+                    RepoWatchPagePosition::Start | RepoWatchPagePosition::Exhausted => None,
+                };
+                sqlx::query(ACTIVITY_EVENTS_SQL)
+                    .bind(repository.as_str())
+                    .bind(
+                        cursor
+                            .map(|cursor| i64::try_from(cursor.cursor_generation))
+                            .transpose()
+                            .map_err(|_| {
+                                RepoWatchOperationsCorruption::Invalid("event cursor generation")
+                            })?,
+                    )
+                    .bind(
+                        cursor
+                            .map(|cursor| i32::try_from(cursor.event_ordinal))
+                            .transpose()
+                            .map_err(|_| {
+                                RepoWatchOperationsCorruption::Invalid("event cursor ordinal")
+                            })?,
+                    )
+                    .bind(i64::from(max_repo_watch_activity_page_items()) + 1)
+                    .fetch_all(&mut *transaction)
+                    .await?
+            }
+        };
+        let webhook_rows =
+            match webhooks_before {
+                RepoWatchPagePosition::Exhausted => Vec::new(),
+                RepoWatchPagePosition::Start | RepoWatchPagePosition::After(_) => {
+                    let cursor = match webhooks_before {
+                        RepoWatchPagePosition::After(cursor) => Some(cursor),
+                        RepoWatchPagePosition::Start | RepoWatchPagePosition::Exhausted => None,
+                    };
+                    sqlx::query(ACTIVITY_WEBHOOKS_SQL)
+                        .bind(repository.as_str())
+                        .bind(cursor.map(i64::try_from).transpose().map_err(|_| {
+                            RepoWatchOperationsCorruption::Invalid("webhook cursor")
+                        })?)
+                        .bind(i64::from(max_repo_watch_activity_page_items()) + 1)
+                        .fetch_all(&mut *transaction)
+                        .await?
+                }
+            };
         let event_has_more = event_rows.len() > usize::from(max_repo_watch_activity_page_items());
         let webhook_has_more =
             webhook_rows.len() > usize::from(max_repo_watch_activity_page_items());
@@ -399,17 +444,29 @@ impl PostgresRepoWatchOperations {
             .take(usize::from(max_repo_watch_activity_page_items()))
             .map(decode_webhook_activity)
             .collect::<Result<Vec<_>, _>>()?;
-        let event_continuation_before = event_has_more
-            .then(|| {
-                events.last().map(|event| RepoWatchEventCursor {
-                    cursor_generation: event.cursor_generation,
-                    event_ordinal: event.event_ordinal,
-                })
+        let event_continuation_before = if event_has_more {
+            let Some(event) = events.last() else {
+                return Err(
+                    RepoWatchOperationsCorruption::Invalid("event continuation page").into(),
+                );
+            };
+            RepoWatchPagePosition::After(RepoWatchEventCursor {
+                cursor_generation: event.cursor_generation,
+                event_ordinal: event.event_ordinal,
             })
-            .flatten();
-        let webhook_continuation_before = webhook_has_more
-            .then(|| webhooks.last().map(|webhook| webhook.receipt_sequence))
-            .flatten();
+        } else {
+            RepoWatchPagePosition::Exhausted
+        };
+        let webhook_continuation_before = if webhook_has_more {
+            let Some(webhook) = webhooks.last() else {
+                return Err(
+                    RepoWatchOperationsCorruption::Invalid("webhook continuation page").into(),
+                );
+            };
+            RepoWatchPagePosition::After(webhook.receipt_sequence)
+        } else {
+            RepoWatchPagePosition::Exhausted
+        };
         transaction.commit().await?;
         Ok(RepoWatchActivityPage {
             events,
@@ -441,8 +498,8 @@ impl RepoWatchOperationsReader for PostgresRepoWatchOperations {
     async fn work(
         &self,
         repository: RepositorySlug,
-        held_after: Option<RepoWatchHeldCursor>,
-        obligation_after: Option<RepoWatchObligationCursor>,
+        held_after: RepoWatchPagePosition<RepoWatchHeldCursor>,
+        obligation_after: RepoWatchPagePosition<RepoWatchObligationCursor>,
     ) -> Result<RepoWatchWorkPage, Self::Error> {
         Self::work(self, repository, held_after, obligation_after).await
     }
@@ -459,8 +516,8 @@ impl RepoWatchOperationsReader for PostgresRepoWatchOperations {
     async fn activity(
         &self,
         repository: RepositorySlug,
-        events_before: Option<RepoWatchEventCursor>,
-        webhooks_before: Option<u64>,
+        events_before: RepoWatchPagePosition<RepoWatchEventCursor>,
+        webhooks_before: RepoWatchPagePosition<u64>,
     ) -> Result<RepoWatchActivityPage, Self::Error> {
         Self::activity(self, repository, events_before, webhooks_before).await
     }
@@ -548,13 +605,22 @@ SELECT delivery.receipt_sequence, delivery.event_name, delivery.action_name,
 "#;
 
 const REPOSITORY_STATUS_SQL: &str = r#"
-WITH latest_cursor AS (
-    SELECT DISTINCT ON (repository) repository, generation, recorded_at
+WITH selected_repositories AS (
+    SELECT DISTINCT repository
       FROM repo_watch_cursor
      WHERE ($1::text IS NULL OR repository > $1)
-     ORDER BY repository, generation DESC
+     ORDER BY repository
+     LIMIT $2
 ), selected AS (
-    SELECT * FROM latest_cursor ORDER BY repository LIMIT $2
+    SELECT selected_repository.repository, latest.generation, latest.recorded_at
+      FROM selected_repositories AS selected_repository
+      CROSS JOIN LATERAL (
+            SELECT generation, recorded_at
+              FROM repo_watch_cursor
+             WHERE repository = selected_repository.repository
+             ORDER BY generation DESC
+             LIMIT 1
+      ) AS latest
 )
 SELECT selected.repository, selected.generation, selected.recorded_at,
        webhook.receipt_sequence, webhook.event_name, webhook.action_name,
