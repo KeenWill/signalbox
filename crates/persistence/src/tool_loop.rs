@@ -1138,14 +1138,25 @@ impl PostgresToolLoopRepository {
                     "tool batch is not ready for continuation",
                 )
             })?;
-            let outbox_order_guard =
-                crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
-                    .await
-                    .map_err(map_model_call_error)?;
             persist_result_entries(&mut transaction, &projection).await?;
             insert_snapshot(&mut transaction, projection.snapshot())
                 .await
                 .map_err(|_| ToolLoopCorruption::Inconsistent("result frontier"))?;
+            // Full frontier reconstruction can scan a long-lived session. Keep
+            // that read outside the global writer guard while the session lock
+            // preserves the transaction-local result projection unchanged.
+            let execution = crate::model_execution::load_tool_continuation_execution(
+                &mut transaction,
+                session,
+                targets,
+                &projection,
+            )
+            .await
+            .map_err(map_model_call_error)?;
+            let outbox_order_guard =
+                crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
+                    .await
+                    .map_err(map_model_call_error)?;
             outbox::append(
                 &mut transaction,
                 OutboxEvent::ToolBatchTransition {
@@ -1161,6 +1172,7 @@ impl PostgresToolLoopRepository {
             let outcome = crate::model_execution::prepare_tool_continuation_call(
                 &mut transaction,
                 outbox_order_guard,
+                execution,
                 session,
                 turn,
                 targets,

@@ -2517,6 +2517,30 @@ async fn delegated_nonterminal_result_absent(
     .await?)
 }
 
+/// Reconstitutes one continuation against caller-owned, transaction-local tool
+/// results before the shared model-call/outbox ordering guard is acquired.
+pub(crate) async fn load_tool_continuation_execution(
+    connection: &mut PgConnection,
+    session: SessionId,
+    targets: &ModelTargetCatalog,
+    projection: &PreparedToolResultProjection,
+) -> Result<ModelCallExecution, ModelCallRepositoryError> {
+    let continuation_snapshot = projection.snapshot();
+    let continuation = ResolvedContextFrontierReconstitutionInput::new(
+        session,
+        continuation_snapshot.frontier().snapshot(),
+        continuation_snapshot.ordered_entries().collect(),
+    );
+    require_live_execution_with_targets(
+        connection,
+        session,
+        Some(targets),
+        Some(continuation),
+        Some(projection.clone()),
+    )
+    .await
+}
+
 /// Prepares one continuation call inside a caller-owned tool-result
 /// transaction. The caller must hold the session scheduler lock and the shared
 /// model-call/outbox ordering guard before projecting any result outbox event,
@@ -2525,6 +2549,7 @@ async fn delegated_nonterminal_result_absent(
 pub(crate) async fn prepare_tool_continuation_call<NextSteeringIdentities>(
     connection: &mut PgConnection,
     _outbox_order_guard: ModelCallOutboxOrderGuard,
+    execution: ModelCallExecution,
     session: SessionId,
     turn: TurnId,
     targets: &ModelTargetCatalog,
@@ -2545,19 +2570,6 @@ where
         FnMut(AcceptedInputId) -> (signalbox_domain::SemanticTranscriptEntryId, TurnId),
 {
     let continuation_snapshot = projection.snapshot();
-    let continuation = ResolvedContextFrontierReconstitutionInput::new(
-        session,
-        continuation_snapshot.frontier().snapshot(),
-        continuation_snapshot.ordered_entries().collect(),
-    );
-    let execution = require_live_execution_with_targets(
-        connection,
-        session,
-        Some(targets),
-        Some(continuation),
-        Some(projection.clone()),
-    )
-    .await?;
     if execution.turn() != turn || execution.current_call().is_some() {
         return Ok(PrepareToolContinuationOutcome::NoWork);
     }
