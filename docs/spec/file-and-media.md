@@ -190,30 +190,35 @@ terminates the in-flight worker and admits no result (INV-087).
 
 The version-one compiled ceilings are:
 
-| Resource                              | Maximum                |
-| ------------------------------------- | ---------------------- |
-| Probe prefix and suffix               | 65,536 bytes each      |
-| Probe ranges / cumulative bytes       | 16 / 262,144           |
-| Processor frame / text-or-JSON body   | 1,048,576 / 170,000    |
-| Serialized read options               | 65,536 bytes           |
-| Structured depth / nodes              | 64 / 100,000           |
-| Observed container entries            | 10,000                 |
-| Image axis / decoded pixels           | 8,192 / 16,777,216     |
-| Presented image bytes                 | 8,388,608              |
-| Audio channels / sample rate          | 8 / 192,000 Hz         |
-| Audio duration / presented bytes      | 60 s / 8,388,608       |
-| Presented general-file bytes          | 8,388,608              |
-| References / aggregate media per call | 16 / 33,554,432 bytes  |
-| Worker memory budget / CPU / wall     | 512 MiB / 60 s / 120 s |
-| Worker descriptors / retained stderr  | 32 / 16,384 bytes      |
-| Worker descendants                    | 0                      |
+| Resource                              | Maximum                   |
+| ------------------------------------- | ------------------------- |
+| Probe prefix and suffix               | 65,536 bytes each         |
+| Probe ranges / cumulative bytes       | 16 / 262,144              |
+| Processor frame                       | 1,048,576 bytes           |
+| Text body / JSON body                 | 174,000 / 786,432 bytes   |
+| Serialized read options               | 65,536 bytes              |
+| Structured depth / nodes              | 64 / 100,000              |
+| Observed container entries            | 10,000                    |
+| Image axis / decoded pixels           | 8,192 / 16,777,216        |
+| Presented image bytes                 | 8,388,608                 |
+| Audio channels / sample rate          | 8 / 192,000 Hz            |
+| Audio duration / presented bytes      | 60 s / 8,388,608          |
+| Presented general-file bytes          | 8,388,608                 |
+| References / aggregate media per call | 16 / 33,554,432 bytes     |
+| Worker memory budget / CPU / wall     | 512 MiB / 60 s / 120 s    |
+| Worker descriptors / retained stderr  | 32 / 16,384 bytes         |
+| One / aggregate executable snapshots  | 64 MiB / 64 MiB           |
+| Worker descendants                    | 0                         |
 
 `FileMediaCeilings` admits only positive effective values at or below its
 compiled maxima. `FileMediaProcessCeilings` keeps the protocol frame fixed at
 1,048,576 bytes while admitting only positive resource values at or below their
-compiled maxima; descendants are fixed at zero (INV-072). The text-or-JSON body
-ceiling reserves enough frame space for worst-case JSON escaping and envelope
-fields. A stored source may be larger. A streaming view must request it in
+compiled maxima; descendants are fixed at zero (INV-072). Each worker snapshot
+is additionally capped by its effective worker address-space budget; bubblewrap
+and all distinct worker snapshots together cannot exceed the 64 MiB aggregate
+snapshot ceiling. The text body ceiling reserves enough frame space for
+worst-case JSON escaping and envelope fields. A stored source may be larger. A
+streaming view must request it in
 bounded frames under its finite declared source-work envelope; a whole-decode
 view may reject it without changing the blob.
 

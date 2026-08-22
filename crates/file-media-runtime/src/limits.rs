@@ -328,6 +328,24 @@ mod tests {
             media.aggregate_media_bytes_per_call,
             MAX_AGGREGATE_MEDIA_BYTES_PER_CALL
         );
+        assert!(!FileMediaCeilings::version_one().admits(FileMediaCeilings {
+            media_references_per_call: MAX_MEDIA_REFERENCES_PER_CALL + 1,
+            ..media
+        }));
+        assert!(!FileMediaCeilings::version_one().admits(FileMediaCeilings {
+            aggregate_media_bytes_per_call: MAX_AGGREGATE_MEDIA_BYTES_PER_CALL + 1,
+            ..media
+        }));
+        assert_eq!(
+            FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
+                memory_bytes: MAX_WORKER_MEMORY_BYTES + 1,
+                cpu_seconds: MAX_WORKER_CPU_SECONDS,
+                wall_seconds: MAX_WORKER_WALL_SECONDS,
+                file_descriptors: MAX_WORKER_FILE_DESCRIPTORS,
+                stderr_bytes: MAX_WORKER_STDERR_BYTES,
+            }),
+            None
+        );
         assert_eq!(
             FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
                 memory_bytes: MAX_WORKER_MEMORY_BYTES,
@@ -335,6 +353,36 @@ mod tests {
                 wall_seconds: MAX_WORKER_WALL_SECONDS,
                 file_descriptors: MAX_WORKER_FILE_DESCRIPTORS,
                 stderr_bytes: MAX_WORKER_STDERR_BYTES,
+            }),
+            None
+        );
+        assert_eq!(
+            FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
+                memory_bytes: MAX_WORKER_MEMORY_BYTES,
+                cpu_seconds: MAX_WORKER_CPU_SECONDS,
+                wall_seconds: MAX_WORKER_WALL_SECONDS + 1,
+                file_descriptors: MAX_WORKER_FILE_DESCRIPTORS,
+                stderr_bytes: MAX_WORKER_STDERR_BYTES,
+            }),
+            None
+        );
+        assert_eq!(
+            FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
+                memory_bytes: MAX_WORKER_MEMORY_BYTES,
+                cpu_seconds: MAX_WORKER_CPU_SECONDS,
+                wall_seconds: MAX_WORKER_WALL_SECONDS,
+                file_descriptors: MAX_WORKER_FILE_DESCRIPTORS + 1,
+                stderr_bytes: MAX_WORKER_STDERR_BYTES,
+            }),
+            None
+        );
+        assert_eq!(
+            FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
+                memory_bytes: MAX_WORKER_MEMORY_BYTES,
+                cpu_seconds: MAX_WORKER_CPU_SECONDS,
+                wall_seconds: MAX_WORKER_WALL_SECONDS,
+                file_descriptors: MAX_WORKER_FILE_DESCRIPTORS,
+                stderr_bytes: MAX_WORKER_STDERR_BYTES + 1,
             }),
             None
         );

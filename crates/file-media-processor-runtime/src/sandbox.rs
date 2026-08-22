@@ -44,6 +44,9 @@ const BWRAP_PROBE_ARGUMENT: &str = "--signalbox-file-media-isolation-probe";
 const CANCELLATION_POLL: Duration = Duration::from_millis(5);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const WRITABLE_TMPFS_BUDGET_DIVISOR: u64 = 2;
+/// Maximum bytes retained across all sealed executable snapshots in one processor.
+const MAX_AGGREGATE_EXECUTABLE_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
+/// Maximum bytes retained by one sealed executable snapshot.
 const MAX_EXECUTABLE_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// One checked mapping from a provider declaration to its worker executable.
@@ -57,6 +60,7 @@ pub struct WorkerBinding {
 struct PinnedExecutable {
     _file: fs::File,
     proc_path: PathBuf,
+    byte_length: u64,
 }
 
 impl WorkerBinding {
@@ -113,6 +117,7 @@ impl SandboxedFileMediaProcessor {
             ConstructionTarget::Bubblewrap,
             MAX_EXECUTABLE_SNAPSHOT_BYTES,
         )?);
+        let mut aggregate_snapshot_bytes = bubblewrap.byte_length;
         let worker_snapshot_limit = worker_memory_budget(ceilings.memory_bytes())
             .address_space_bytes
             .min(MAX_EXECUTABLE_SNAPSHOT_BYTES);
@@ -125,11 +130,19 @@ impl SandboxedFileMediaProcessor {
             let group = match worker_declarations.entry(binding.source) {
                 std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::btree_map::Entry::Vacant(entry) => {
+                    let remaining_snapshot_bytes = MAX_AGGREGATE_EXECUTABLE_SNAPSHOT_BYTES
+                        .checked_sub(aggregate_snapshot_bytes)
+                        .filter(|remaining| *remaining > 0)
+                        .ok_or(SandboxedFileMediaProcessorConstructionError::ExecutableSnapshots)?;
                     let program = Arc::new(open_executable_snapshot(
                         entry.key(),
                         ConstructionTarget::Worker,
-                        worker_snapshot_limit,
+                        worker_snapshot_limit.min(remaining_snapshot_bytes),
                     )?);
+                    aggregate_snapshot_bytes = admit_executable_snapshot_bytes(
+                        aggregate_snapshot_bytes,
+                        program.byte_length,
+                    )?;
                     entry.insert((program, Vec::new()))
                 }
             };
@@ -1115,7 +1128,18 @@ fn open_executable_snapshot(
     Ok(PinnedExecutable {
         _file: file,
         proc_path,
+        byte_length: copied,
     })
+}
+
+fn admit_executable_snapshot_bytes(
+    retained_bytes: u64,
+    additional_bytes: u64,
+) -> Result<u64, SandboxedFileMediaProcessorConstructionError> {
+    retained_bytes
+        .checked_add(additional_bytes)
+        .filter(|total| *total <= MAX_AGGREGATE_EXECUTABLE_SNAPSHOT_BYTES)
+        .ok_or(SandboxedFileMediaProcessorConstructionError::ExecutableSnapshots)
 }
 
 #[allow(unsafe_code)]
@@ -1165,6 +1189,8 @@ pub enum SandboxedFileMediaProcessorConstructionError {
     Bubblewrap,
     /// A worker was not an absolute executable file.
     Worker,
+    /// Sealed executable snapshots exceeded their aggregate byte ceiling.
+    ExecutableSnapshots,
     /// A process ceiling was zero or exceeded its compiled maximum.
     Ceilings,
     /// The current identity is exempt from the configured task ceiling.
@@ -1181,6 +1207,9 @@ impl fmt::Display for SandboxedFileMediaProcessorConstructionError {
             Self::Unsupported => "file-media sandbox is unsupported",
             Self::Bubblewrap => "file-media bubblewrap executable is invalid",
             Self::Worker => "file-media worker executable is invalid",
+            Self::ExecutableSnapshots => {
+                "file-media executable snapshots exceed their aggregate ceiling"
+            }
             Self::Ceilings => "file-media process ceilings are invalid",
             Self::TaskCeiling => "file-media task ceiling is unenforceable for this identity",
             Self::DuplicateProvider => "file-media worker provider is duplicated",
@@ -1200,7 +1229,8 @@ mod tests {
     };
 
     use super::{
-        CompletedOutput, ConstructionTarget, MAX_EXECUTABLE_SNAPSHOT_BYTES, admit_completed,
+        CompletedOutput, ConstructionTarget, MAX_AGGREGATE_EXECUTABLE_SNAPSHOT_BYTES,
+        MAX_EXECUTABLE_SNAPSHOT_BYTES, admit_completed, admit_executable_snapshot_bytes,
         open_executable_snapshot, open_worker_executable, sandbox_arguments, seccomp_instructions,
         task_ceiling_is_enforceable, worker_memory_budget,
     };
@@ -1211,6 +1241,17 @@ mod tests {
         fn is_cancelled(&self) -> bool {
             true
         }
+    }
+
+    #[test]
+    fn aggregate_executable_snapshots_reject_bytes_above_their_bound() {
+        assert_eq!(
+            admit_executable_snapshot_bytes(MAX_AGGREGATE_EXECUTABLE_SNAPSHOT_BYTES - 1, 1,),
+            Ok(MAX_AGGREGATE_EXECUTABLE_SNAPSHOT_BYTES)
+        );
+        assert!(
+            admit_executable_snapshot_bytes(MAX_AGGREGATE_EXECUTABLE_SNAPSHOT_BYTES, 1).is_err()
+        );
     }
 
     #[test]

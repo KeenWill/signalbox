@@ -12,7 +12,9 @@ use std::{
     time::Duration,
 };
 
-use signalbox_file_media_processor_runtime::{SandboxedFileMediaProcessor, WorkerBinding};
+use signalbox_file_media_processor_runtime::{
+    SandboxedFileMediaProcessor, SandboxedFileMediaProcessorConstructionError, WorkerBinding,
+};
 use signalbox_file_media_runtime::{
     AttachmentKind, CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType,
     DeclaredMediaType, FileDigest, FileMediaCeilings, FileMediaFailure, FileMediaProcessCeilings,
@@ -231,7 +233,17 @@ async fn worker_cancellation_scenario() -> Result<(), Box<dyn Error>> {
 async fn available_processor(
     ceilings: FileMediaProcessCeilings,
 ) -> Result<Option<(SandboxedFileMediaProcessor, ReaderIdentity)>, Box<dyn Error>> {
-    let built = processor(ceilings)?;
+    let built = match processor(ceilings) {
+        Ok(built) => built,
+        Err(error)
+            if std::env::var_os("CI").is_none()
+                && error.downcast_ref::<SandboxedFileMediaProcessorConstructionError>()
+                    == Some(&SandboxedFileMediaProcessorConstructionError::TaskCeiling) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
     if built.0.verify_isolation().await == ProcessorIsolation::Available {
         return Ok(Some(built));
     }

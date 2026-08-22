@@ -260,6 +260,7 @@ pub(crate) enum WireReadEnvelope {
         cumulative_bytes: u64,
     },
     Streaming {
+        ranges: u32,
         cumulative_bytes: u64,
     },
     RandomAccess {
@@ -280,7 +281,8 @@ impl WireReadEnvelope {
 
     pub(crate) const fn for_view(view: &ReadViewDeclaration) -> Self {
         match view.access() {
-            ReadAccessPattern::Streaming { .. } => Self::Streaming {
+            ReadAccessPattern::Streaming { maximum_ranges } => Self::Streaming {
+                ranges: maximum_ranges,
                 cumulative_bytes: view.bounds().source_bytes(),
             },
             ReadAccessPattern::RandomAccess { maximum_ranges } => Self::RandomAccess {

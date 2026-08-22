@@ -74,8 +74,14 @@ impl RangeBroker {
                 }
                 self.arbitrary_range_count = arbitrary;
             }
-            WireReadEnvelope::Streaming { cumulative_bytes } => {
-                if offset != self.next_stream_offset || cumulative > cumulative_bytes {
+            WireReadEnvelope::Streaming {
+                ranges,
+                cumulative_bytes,
+            } => {
+                if offset != self.next_stream_offset
+                    || count > ranges
+                    || cumulative > cumulative_bytes
+                {
                     return Err(BrokerError::Range);
                 }
                 self.next_stream_offset = end;
@@ -199,12 +205,27 @@ mod tests {
         let mut broker = RangeBroker::new(
             100,
             WireReadEnvelope::Streaming {
+                ranges: 2,
                 cumulative_bytes: 100,
             },
             100,
         );
         assert!(broker.admit(0, 10).is_ok());
         assert_eq!(broker.admit(9, 10), Err(BrokerError::Range));
+    }
+
+    #[test]
+    fn streaming_envelope_rejects_range_fanout_excess() {
+        let mut broker = RangeBroker::new(
+            100,
+            WireReadEnvelope::Streaming {
+                ranges: 1,
+                cumulative_bytes: 100,
+            },
+            100,
+        );
+        assert!(broker.admit(0, 10).is_ok());
+        assert_eq!(broker.admit(10, 10), Err(BrokerError::Range));
     }
 
     #[test]
@@ -226,6 +247,7 @@ mod tests {
         let mut broker = RangeBroker::new(
             1_000,
             WireReadEnvelope::Streaming {
+                ranges: 10,
                 cumulative_bytes: 1_000,
             },
             100,
