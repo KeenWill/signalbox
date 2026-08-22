@@ -1,6 +1,6 @@
 //! Bounded operator read models over durable repository-watch facts.
 
-use std::{future::Future, time::SystemTime};
+use std::{collections::BTreeMap, future::Future, time::SystemTime};
 
 use signalbox_domain::{
     BranchName, CommitSha, MergeableState, PullRequestNumber, PullRequestTitle,
@@ -10,7 +10,7 @@ use signalbox_domain::{
 
 use crate::{
     AttentionSummary, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
-    RepoWatchThreadState,
+    RepoWatchSingletonKey, RepoWatchThreadState,
 };
 
 /// Maximum rows returned by one current repository-watch operations page.
@@ -217,27 +217,29 @@ impl RepoWatchPullRequestOperations {
         } else {
             RepoWatchChecksStatus::Passing
         };
-        let mut current_approved = false;
-        let mut current_changes_requested = false;
-        let mut current_commented = false;
+        let mut current_reviews = BTreeMap::new();
         let mut stale_review_count = 0_u64;
         for review in state.reviews() {
             if review.commit() != context.head_sha() {
                 stale_review_count = stale_review_count.saturating_add(1);
                 continue;
             }
-            match review.state() {
-                Some(ReviewState::Approved) => current_approved = true,
-                Some(ReviewState::ChangesRequested) => current_changes_requested = true,
-                Some(ReviewState::Commented) => current_commented = true,
-                None => {}
-            }
+            current_reviews.insert(review.reviewer(), review.state());
         }
-        let review_decision = if current_changes_requested {
+        let review_decision = if current_reviews
+            .values()
+            .any(|state| *state == Some(ReviewState::ChangesRequested))
+        {
             RepoWatchReviewDecision::ChangesRequested
-        } else if current_approved {
+        } else if current_reviews
+            .values()
+            .any(|state| *state == Some(ReviewState::Approved))
+        {
             RepoWatchReviewDecision::Approved
-        } else if current_commented {
+        } else if current_reviews
+            .values()
+            .any(|state| *state == Some(ReviewState::Commented))
+        {
             RepoWatchReviewDecision::Commented
         } else {
             RepoWatchReviewDecision::None
@@ -299,7 +301,7 @@ pub enum RepoWatchHeldSlotBlocker {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchHeldSlot {
     pub dispatch: RepoWatchDispatchId,
-    pub pull_request: Option<PullRequestNumber>,
+    pub singleton: RepoWatchSingletonKey,
     pub rule: RepoWatchRuleId,
     pub held_since: SystemTime,
     pub sessions: Vec<SessionId>,
@@ -314,7 +316,7 @@ pub enum RepoWatchObligationReadiness {
         sessions: Vec<SessionId>,
     },
     Cooldown {
-        eligible_at: SystemTime,
+        eligible_at: Option<SystemTime>,
     },
     Parked {
         parked_at: SystemTime,
@@ -340,7 +342,7 @@ impl RepoWatchObligationId {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchQueuedObligation {
     pub id: RepoWatchObligationId,
-    pub pull_request: Option<PullRequestNumber>,
+    pub singleton: RepoWatchSingletonKey,
     pub rule: RepoWatchRuleId,
     pub first_event: RepoWatchEventId,
     pub latest_event: RepoWatchEventId,
@@ -482,11 +484,84 @@ pub trait RepoWatchOperationsReader {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
+
+    use signalbox_domain::{
+        GitHubObjectId, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
+        RepoWatchAuthorLogin, ReviewState,
+    };
+
     use super::*;
+    use crate::{RepoWatchPullRequestStateInput, RepoWatchReviewObservation};
 
     #[test]
     fn operations_page_bounds_are_pinned() {
         assert_eq!(max_repo_watch_operations_page_items(), 64);
         assert_eq!(max_repo_watch_activity_page_items(), 100);
+    }
+
+    #[test]
+    fn latest_current_head_review_is_effective_per_reviewer() {
+        let head = CommitSha::try_new(String::from("1111111111111111111111111111111111111111"))
+            .expect("fixture head is valid");
+        let reviewer = RepoWatchAuthorLogin::try_new(String::from("reviewer"))
+            .expect("fixture reviewer is valid");
+        let state = RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+            context: PullRequestEventContext::new(PullRequestEventContextInput {
+                number: PullRequestNumber::new(NonZeroU64::new(1).expect("positive number")),
+                head_sha: head.clone(),
+                head_repository: RepositorySlug::try_new(String::from("owner/repository"))
+                    .expect("fixture repository is valid"),
+                base_branch: BranchName::try_new(String::from("main"))
+                    .expect("fixture base branch is valid"),
+                head_branch: BranchName::try_new(String::from("feature"))
+                    .expect("fixture head branch is valid"),
+                title: PullRequestTitle::try_new(String::from("Feature"))
+                    .expect("fixture title is valid"),
+                body: PullRequestBody::try_new(String::from("Body"))
+                    .expect("fixture body is valid"),
+                labels: Vec::new(),
+                draft: false,
+                author: None,
+            }),
+            lifecycle: RepoWatchPullRequestLifecycle::Open,
+            mergeable_state: MergeableState::Mergeable,
+            completed_check_suites: Vec::new(),
+            completed_check_runs: Vec::new(),
+            reviews: vec![
+                RepoWatchReviewObservation::new(
+                    GitHubObjectId::new(NonZeroU64::new(1).expect("positive review id")),
+                    reviewer.clone(),
+                    Some(ReviewState::ChangesRequested),
+                    head.clone(),
+                ),
+                RepoWatchReviewObservation::new(
+                    GitHubObjectId::new(NonZeroU64::new(2).expect("positive review id")),
+                    reviewer,
+                    Some(ReviewState::Approved),
+                    head,
+                ),
+            ],
+            threads: Vec::new(),
+            reactions: Vec::new(),
+        })
+        .expect("fixture state is valid");
+        let projected = RepoWatchPullRequestOperations::from_state(
+            &state,
+            RepoWatchPullRequestOperationsFacts {
+                open_parent: None,
+                open_child_count: 0,
+                automation: RepoWatchAutomationStatus::Unattempted,
+                last_observed_event: None,
+                last_actionable_event: None,
+                last_dispatch_attempt: None,
+                last_automation_settlement: None,
+                held_slot_count: 0,
+                queued_obligation_count: 0,
+                commissioned_session_count: 0,
+            },
+        );
+
+        assert_eq!(projected.review_decision, RepoWatchReviewDecision::Approved);
     }
 }
