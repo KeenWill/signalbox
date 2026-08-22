@@ -61,3 +61,11 @@ export const saveBrowserPreferences = (preferences: BrowserPreferences): void =>
     // Browser policy may make storage unavailable after startup.
   }
 }
+
+export const applyPresentationPreferences = (
+  preferences: Pick<BrowserPreferences, 'density' | 'theme'>,
+  root: HTMLElement = document.documentElement,
+): void => {
+  root.dataset.theme = preferences.theme
+  root.dataset.density = preferences.density
+}

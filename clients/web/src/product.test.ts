@@ -20,6 +20,15 @@ const bootstrapFixture = {
   limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 262_144 },
 } as const
 
+const interruptedResponse = (): Response =>
+  new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.error(new TypeError('response stream interrupted'))
+      },
+    }),
+  )
+
 afterEach(() => vi.unstubAllGlobals())
 
 describe('SameOriginProductTransport', () => {
@@ -72,6 +81,17 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('classifies an interrupted bootstrap response stream as a transport failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => interruptedResponse()),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toBeInstanceOf(
+      ProductTransportError,
+    )
+  })
+
   it('reports an unsuccessful HTTP response without decoding its body', async () => {
     vi.stubGlobal(
       'fetch',
@@ -115,6 +135,20 @@ describe('SameOriginProductTransport', () => {
       mediaType: imageArtifact.declared_media_type,
     })
     await expect(request).rejects.toThrow('response exceeded the product JSON byte limit')
+  })
+
+  it('classifies an interrupted descriptor response stream as a transport failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => interruptedResponse()),
+    )
+
+    const request = new SameOriginProductTransport().readBlobDescriptor({
+      digest: imageArtifact.digest,
+      mediaType: imageArtifact.declared_media_type,
+    })
+
+    await expect(request).rejects.toBeInstanceOf(ProductTransportError)
   })
 
   it('preserves a typed daemon error from descriptor resolution', async () => {

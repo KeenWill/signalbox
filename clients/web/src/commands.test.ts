@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { invokeCommand } from './commands'
+import { commandById, invokeCommand } from './commands'
 import { actions, selectApp, store } from './state'
 
 describe('command registry', () => {
@@ -10,10 +10,37 @@ describe('command registry', () => {
     invokeCommand('selection.next', {
       dispatch: store.dispatch,
       getState: store.getState,
+      scenarioSurface: true,
       timelineIds,
       focusTimeline: () => undefined,
     })
 
     expect(selectApp(store.getState()).selectedTimeline).toBe(timelineIds[0])
+  })
+
+  it('keeps keyboard help available on an empty scenario surface', () => {
+    const help = commandById('help.open')
+    expect(
+      help.available({
+        dispatch: store.dispatch,
+        getState: store.getState,
+        scenarioSurface: true,
+        timelineIds: [],
+        focusTimeline: () => undefined,
+      }),
+    ).toBe(true)
+  })
+
+  it('keeps scenario keyboard help out of product surfaces', () => {
+    const help = commandById('help.open')
+    expect(
+      help.available({
+        dispatch: store.dispatch,
+        getState: store.getState,
+        scenarioSurface: false,
+        timelineIds: [],
+        focusTimeline: () => undefined,
+      }),
+    ).toBe(false)
   })
 })

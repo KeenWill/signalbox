@@ -272,7 +272,7 @@ function ProductToolbar({
         className="icon-button mobile-only"
         type="button"
         aria-label="Open navigation"
-        onClick={() => context.dispatch(actions.overlaySet('navigation'))}
+        onClick={() => invokeCommand('navigation.open', context)}
       >
         <Menu />
       </button>
@@ -387,6 +387,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     () => ({
       dispatch,
       getState: store.getState,
+      scenarioSurface: false,
       timelineIds: [],
       focusTimeline: () => primaryRef.current?.focus(),
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
@@ -455,6 +456,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           <p>{copy.question}</p>
           <span
             className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
           >
             {bootstrap.isSuccess
               ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`

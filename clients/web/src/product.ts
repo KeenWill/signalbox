@@ -72,7 +72,12 @@ const readBoundedJson = async (response: Response): Promise<unknown> => {
   const chunks: Uint8Array[] = []
   let received = 0
   while (true) {
-    const result = await reader.read()
+    let result: ReadableStreamReadResult<Uint8Array>
+    try {
+      result = await reader.read()
+    } catch (error) {
+      throw new ProductTransportError(error)
+    }
     if (result.done) break
     received += result.value.byteLength
     if (received > MAX_PRODUCT_JSON_BYTES) {
@@ -110,6 +115,7 @@ export class SameOriginProductTransport implements ProductTransport {
     try {
       return decodeWebContractBootstrap(await readBoundedJson(response))
     } catch (error) {
+      if (error instanceof ProductTransportError) throw error
       throw new ProductContractError(error)
     }
   }

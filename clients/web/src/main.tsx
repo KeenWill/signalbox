@@ -13,8 +13,9 @@ import { lazy, StrictMode, Suspense } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
 import { ProductApp } from './ProductApp'
+import { applyPresentationPreferences } from './preferences'
 import { type ProductRouteId, productRoutes } from './product'
-import { store } from './state'
+import { selectApp, store } from './state'
 import './app.css'
 
 const rootRoute = createRootRoute({ component: () => <Outlet /> })
@@ -67,6 +68,8 @@ declare module '@tanstack/react-router' {
 
 const root = document.getElementById('root')
 if (!root) throw new Error('Missing web application root')
+
+applyPresentationPreferences(selectApp(store.getState()))
 
 createRoot(root).render(
   <StrictMode>

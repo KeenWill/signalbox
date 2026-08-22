@@ -87,6 +87,7 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
     () => ({
       dispatch,
       getState: store.getState,
+      scenarioSurface: true,
       timelineIds,
       focusTimeline: () => {
         const active = document.activeElement

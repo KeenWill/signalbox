@@ -5,6 +5,7 @@ import { actions } from './state'
 export interface CommandContext {
   dispatch: AppDispatch
   getState: () => RootState
+  scenarioSurface: boolean
   timelineIds: readonly string[]
   focusTimeline: () => void
   navigate?: (path: string) => void
@@ -31,6 +32,7 @@ interface CommandDefinitionShape {
 const always = () => true
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
 const scenarioTimeline = (context: CommandContext) => context.timelineIds.length > 0
+const scenarioSurface = (context: CommandContext) => context.scenarioSurface
 const artifactInspector = (context: CommandContext) => context.openArtifactInspector !== undefined
 export const commandRegistry = [
   {
@@ -138,7 +140,7 @@ export const commandRegistry = [
     description: 'Review modal navigation and command bindings.',
     category: 'Surface',
     bindings: [{ label: '?', registration: { kind: 'hotkey', hotkey: { key: '/', shift: true } } }],
-    available: scenarioTimeline,
+    available: scenarioSurface,
     run: (context) => context.dispatch(actions.overlaySet('help')),
   },
   {

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import { selectImageView } from './ArtifactRenderer'
+import {
+  isInlineOriginalByteLengthAdmitted,
+  MAX_INLINE_ORIGINAL_BYTES,
+  selectImageView,
+} from './ArtifactRenderer'
 import { imageArtifact } from './artifactScenario'
 
 describe('artifact renderer compatibility', () => {
@@ -41,5 +45,13 @@ describe('artifact renderer compatibility', () => {
     }
 
     expect(selectImageView(descriptor)).toBeUndefined()
+  })
+
+  it('admits an original at the inline byte ceiling', () => {
+    expect(isInlineOriginalByteLengthAdmitted(String(MAX_INLINE_ORIGINAL_BYTES))).toBe(true)
+  })
+
+  it('rejects an original beyond the inline byte ceiling', () => {
+    expect(isInlineOriginalByteLengthAdmitted(String(MAX_INLINE_ORIGINAL_BYTES + 1))).toBe(false)
   })
 })

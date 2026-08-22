@@ -9,6 +9,13 @@ type WebBlobViewKind = WebBlobAvailableView['kind']
 
 const IMAGE_VIEW_PRIORITY: ReadonlyArray<WebBlobViewKind> = ['preview', 'thumbnail']
 
+// Hard client ceiling: larger originals remain download-only so one image cannot force the
+// browser to fetch and decode deployment-sized blob content.
+export const MAX_INLINE_ORIGINAL_BYTES = 16 * 1024 * 1024
+
+export const isInlineOriginalByteLengthAdmitted = (byteLength: string): boolean =>
+  BigInt(byteLength) <= BigInt(MAX_INLINE_ORIGINAL_BYTES)
+
 export const selectImageView = (descriptor: WebBlobDescriptor): WebBlobAvailableView | undefined =>
   IMAGE_VIEW_PRIORITY.map((kind) =>
     descriptor.available_views.find((view) => view.kind === kind),
@@ -35,8 +42,11 @@ export function ArtifactRenderer({
 }) {
   const automatic = selectImageView(descriptor)
   const original = viewByKind(descriptor, 'browser_native')
+  const originalAdmitted = original
+    ? isInlineOriginalByteLengthAdmitted(original.byte_length)
+    : false
   const download = viewByKind(descriptor, 'download')
-  const rendered = originalRequested && original ? original : automatic
+  const rendered = originalRequested && originalAdmitted ? original : automatic
   const derivation = rendered?.derivations[0]
 
   return (
@@ -79,9 +89,18 @@ export function ArtifactRenderer({
         </dl>
         <div className="artifact-actions">
           {original && (
-            <button type="button" aria-pressed={originalRequested} onClick={onOriginalRequested}>
+            <button
+              type="button"
+              aria-pressed={originalRequested && originalAdmitted}
+              disabled={!originalAdmitted}
+              onClick={onOriginalRequested}
+            >
               <Maximize2 aria-hidden="true" />
-              {originalRequested ? 'Original loaded' : 'Load original'}
+              {originalAdmitted
+                ? originalRequested
+                  ? 'Original loaded'
+                  : 'Load original'
+                : 'Original exceeds 16 MiB inline limit'}
             </button>
           )}
           {download && (

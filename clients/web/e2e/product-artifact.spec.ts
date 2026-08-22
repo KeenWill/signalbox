@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
 import { imageArtifact } from '../src/features/artifacts/artifactScenario'
+import { decodeWebBlobDescriptor } from '../src/generated/web-contract.mjs'
 
 const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '2' },
@@ -20,6 +21,12 @@ const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.met
 const incompatibleDescriptorFixture = { invented: true } as const
 const incompatibleDescriptorMessage =
   'The descriptor response did not match the generated web contract.'
+const admittedOriginalArtifact = decodeWebBlobDescriptor({
+  ...imageArtifact,
+  available_views: imageArtifact.available_views.map((view) =>
+    view.kind === 'browser_native' ? { ...view, byte_length: '1048576' } : view,
+  ),
+})
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
@@ -33,11 +40,9 @@ const watchBrowser = (page: Page) => {
 const platformModifier = (page: Page) =>
   page.evaluate(() => (/Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Meta' : 'Control'))
 
-const useArtifactScenario = async (page: Page) => {
+const useArtifactScenario = async (page: Page, descriptor = imageArtifact) => {
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
-  await page.route('**/api/blobs/**/descriptor?*', (route) =>
-    route.fulfill({ json: imageArtifact }),
-  )
+  await page.route('**/api/blobs/**/descriptor?*', (route) => route.fulfill({ json: descriptor }))
   await page.route('**/api/blobs/**/content/image-png', (route) =>
     route.fulfill({ body: previewFixture, contentType: 'image/png' }),
   )
@@ -131,7 +136,7 @@ test('uses a focus-managed artifact sheet on a phone viewport', async ({ page })
 
 test('preserves an active artifact when the inspector changes composition', async ({ page }) => {
   const problems = watchBrowser(page)
-  await useArtifactScenario(page)
+  await useArtifactScenario(page, admittedOriginalArtifact)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/sessions')
 
@@ -148,6 +153,21 @@ test('preserves an active artifact when the inspector changes composition', asyn
   ).toBeVisible()
   await expect(
     sheet.getByRole('img', { name: `Original of ${imageArtifact.display_filename[0]}` }),
+  ).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('keeps an oversized browser-native original download-only', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useArtifactScenario(page)
+  await page.goto('/sessions')
+
+  await resolveArtifactWithoutMouse(page)
+  await expect(
+    page.getByRole('button', { name: 'Original exceeds 16 MiB inline limit' }),
+  ).toBeDisabled()
+  await expect(
+    page.getByRole('img', { name: `Preview of ${imageArtifact.display_filename[0]}` }),
   ).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

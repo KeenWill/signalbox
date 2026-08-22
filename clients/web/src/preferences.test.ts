@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  applyPresentationPreferences,
   BROWSER_PREFERENCES_KEY,
   decodeBrowserPreferences,
   defaultBrowserPreferences,
@@ -45,5 +46,13 @@ describe('browser preferences', () => {
 
     expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
     expect(BROWSER_PREFERENCES_KEY).toBe('signalbox.web.preferences.v1')
+  })
+
+  it('applies decoded presentation settings synchronously', () => {
+    const root = { dataset: {} } as unknown as HTMLElement
+
+    applyPresentationPreferences({ density: 'comfortable', theme: 'light' }, root)
+
+    expect(root.dataset).toEqual({ density: 'comfortable', theme: 'light' })
   })
 })
