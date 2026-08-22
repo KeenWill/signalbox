@@ -63,6 +63,19 @@ test('navigates from Attention to Sessions with the shared semantic link', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('describes Settings as browser-local rather than daemon-backed', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/settings')
+
+  await expect(page.getByRole('heading', { name: 'Operator preferences' })).toBeVisible()
+  await expect(page.getByText(/Presentation choices stay in this browser/)).toBeVisible()
+  await expect(page.getByText('Browser-local preferences', { exact: true })).toBeVisible()
+  await expect(
+    page.getByText('Operational data is not exposed by this daemon contract'),
+  ).toHaveCount(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('preserves a scenario-specific title after leaving the product shell', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
