@@ -7,6 +7,7 @@ import { isCompatibleDetailBody } from './SessionItemDetail'
 import {
   hasUsableSessionTimeline,
   isCanonicalSessionId,
+  projectedTimelineSelection,
   restoredTimelineSelection,
   sameSessionWindowAnchor,
   timelineArrowTarget,
@@ -79,6 +80,12 @@ describe('Session Workspace projection', () => {
     expect(restoredTimelineSelection('42', true, ['41', '42'])).toBe('42')
     expect(restoredTimelineSelection('42', true, ['41'])).toBeUndefined()
     expect(restoredTimelineSelection('42', false, ['42'])).toBeUndefined()
+  })
+
+  it('re-homes a selection removed by detail projection', () => {
+    expect(projectedTimelineSelection('44', ['41', '42', '45'])).toBe('41')
+    expect(projectedTimelineSelection('42', ['41', '42', '45'])).toBe('42')
+    expect(projectedTimelineSelection('44', [])).toBeNull()
   })
 
   it('identifies repeated window anchors without allocating query attempts', () => {
@@ -195,18 +202,25 @@ describe('Session Workspace projection', () => {
       type: 'delegation',
       event_kind: 'child_spawned',
       relationship_id: '00000000-0000-0000-0000-000000000041',
-      subject_id: null,
-      policy: null,
+      subject_id: '00000000-0000-0000-0000-000000000042',
+      policy: { type: 'background' },
       outcome: null,
       reason: null,
       content: null,
     } as const
     expect(isCompatibleDetailBody('delegation_update', delegation)).toBe(true)
+    expect(isCompatibleDetailBody('delegation_update', { ...delegation, subject_id: null })).toBe(
+      false,
+    )
     expect(
       isCompatibleDetailBody('delegation_update', { ...delegation, event_kind: 'result_wake' }),
     ).toBe(false)
     expect(
-      isCompatibleDetailBody('delegation_wake', { ...delegation, event_kind: 'message_wake' }),
+      isCompatibleDetailBody('delegation_wake', {
+        ...delegation,
+        event_kind: 'message_wake',
+        policy: null,
+      }),
     ).toBe(true)
     expect(
       isCompatibleDetailBody('delegation_wake', { ...delegation, event_kind: 'invented' }),
@@ -257,6 +271,42 @@ describe('Session Workspace projection', () => {
         goal_events: [{ ...goalEvent.event, reason: null }],
       }),
     ).toBe(false)
+    expect(
+      isCompatibleDetailBody('tool_batch_transition', {
+        ...toolBatch,
+        tools: [
+          {
+            request_id: '00000000-0000-0000-0000-000000000043',
+            tool_name: 'workspace_read',
+            approval_posture: 'human',
+            approval_judge_escalated: false,
+            operator_required: false,
+          },
+        ],
+      }),
+    ).toBe(false)
+
+    const modelCall = {
+      type: 'model_call',
+      turn_id: '00000000-0000-0000-0000-000000000041',
+      model_call_id: '00000000-0000-0000-0000-000000000042',
+      model_identity_id: '00000000-0000-0000-0000-000000000043',
+      request_context_items: '1',
+      response: null,
+      usage: {},
+      state: { type: 'terminal', disposition: 'known_failed' },
+      cause_code: 'quota_exhausted',
+    } as const
+    expect(isCompatibleDetailBody('model_call_transition', modelCall)).toBe(true)
+    expect(
+      isCompatibleDetailBody('model_call_transition', { ...modelCall, cause_code: 'invented' }),
+    ).toBe(false)
+    expect(
+      isCompatibleDetailBody('model_call_transition', {
+        ...modelCall,
+        state: { type: 'in_flight' },
+      }),
+    ).toBe(false)
 
     const reconciliation = {
       type: 'reconciliation',
@@ -300,5 +350,8 @@ describe('Session Workspace projection', () => {
     expect(isCompatibleDetailBody('tool_approval_decided', { ...approval, source: 'policy' })).toBe(
       true,
     )
+    expect(
+      isCompatibleDetailBody('tool_approval_decided', { ...approval, decision: 'defer' }),
+    ).toBe(false)
   })
 })

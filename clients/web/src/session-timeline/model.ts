@@ -275,6 +275,32 @@ const excerptStartsAtCursor = (
   return Object.values(record).some((entry) => excerptStartsAtCursor(entry, cursor, continuation))
 }
 
+const isCompatibleBodyContinuation = (
+  body: WebSessionTimelineDetailPage['items'][number]['body'],
+  continuation: TimelineBodyCursor,
+): boolean => {
+  switch (body.type) {
+    case 'user_input':
+      return continuation.field === 'input_text' && continuation.member_index === 0
+    case 'model_call':
+      return continuation.field === 'model_response' && continuation.member_index === 0
+    case 'tool_batch':
+      return ['tool_arguments', 'tool_result', 'tool_failure', 'goal_text'].includes(
+        continuation.field,
+      )
+    case 'tool_approval_decision':
+      return continuation.field === 'approval_rationale' && continuation.member_index === 0
+    case 'goal_event':
+      return continuation.field === 'goal_text' && continuation.member_index === 0
+    case 'context_compaction':
+      return continuation.field === 'compaction_summary' && continuation.member_index === 0
+    case 'delegation':
+      return continuation.field === 'delegation_content' && continuation.member_index === 0
+    default:
+      return false
+  }
+}
+
 const isCanonicalCrossFieldContinuation = (
   body: WebSessionTimelineDetailPage['items'][number]['body'],
   continuation: TimelineBodyCursor,
@@ -452,6 +478,13 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
         throw new TypeError('item detail returned a different timeline address')
       }
       validateDetailIntegerFacts(item.body)
+      if (
+        bodyContinuations(item.body).some(
+          (continuation) => !isCompatibleBodyContinuation(item.body, continuation),
+        )
+      ) {
+        throw new TypeError('timeline detail continuation field does not match its body')
+      }
       const expectedBodyBytes = TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + detailExcerptBytes(item.body)
       if (item.projected_body_bytes !== expectedBodyBytes) {
         throw new TypeError('timeline detail body charge does not match its encoded excerpts')
@@ -480,6 +513,9 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       }
       if (page.continuation.type === 'more_body') {
         const continuation = page.continuation.body
+        if (!page.items.some((item) => isCompatibleBodyContinuation(item.body, continuation))) {
+          throw new TypeError('timeline detail continuation field does not match its body')
+        }
         if (
           cursor?.type === 'more_body' &&
           continuation.field === cursor.body.field &&

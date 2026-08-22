@@ -1123,7 +1123,7 @@ describe('BoundedSessionHistory', () => {
     ).rejects.toThrow('does not follow its text')
   })
 
-  it('rejects a page continuation with a different excerpt identity', async () => {
+  it('rejects a continuation field that is impossible for its body variant', async () => {
     const excerptContinuation = {
       address: { event_sequence: '41' },
       field: 'input_text',
@@ -1153,13 +1153,13 @@ describe('BoundedSessionHistory', () => {
       projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
       continuation: {
         type: 'more_body',
-        body: { ...excerptContinuation, member_index: 1 },
+        body: { ...excerptContinuation, field: 'model_response' },
       },
     })
 
     await expect(
       source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
-    ).rejects.toThrow('disagrees with its excerpt')
+    ).rejects.toThrow('continuation field does not match its body')
   })
 
   it('accepts a canonical tool continuation from arguments to result', async () => {

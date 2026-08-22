@@ -73,6 +73,11 @@ export const restoredTimelineSelection = (
 ): string | undefined =>
   restored && restorePosition && ids.includes(restorePosition) ? restorePosition : undefined
 
+export const projectedTimelineSelection = (
+  selected: string | null,
+  ids: readonly string[],
+): string | null => (selected !== null && !ids.includes(selected) ? (ids[0] ?? null) : selected)
+
 export const sameSessionWindowAnchor = (
   left: SessionWindowAnchor | null,
   right: SessionWindowAnchor | null,
@@ -155,9 +160,25 @@ export function SessionWorkspaceSurface({
     [app.detail, session.data?.window.items],
   )
   const timelineIds = useMemo(() => items.map((item) => item.address.event_sequence), [items])
+  const selected = app.selectedTimeline
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
+  useEffect(() => {
+    setExpanded((current) => {
+      const visible = new Set([...current].filter((id) => timelineIds.includes(id)))
+      return visible.size === current.size ? current : visible
+    })
+    const next = projectedTimelineSelection(selected, timelineIds)
+    if (next === selected) return
+    dispatch(actions.timelineSelected(next))
+    if (next !== null && sessionId !== null) {
+      dispatch(actions.logicalPositionRecorded({ sessionId, position: next }))
+      requestAnimationFrame(() => {
+        document.querySelector<HTMLButtonElement>(`[data-timeline-id="${next}"]`)?.focus()
+      })
+    }
+  }, [dispatch, selected, sessionId, timelineIds])
   const openTimelineAnchor = useCallback(
     (anchor: SessionWindowAnchor) => {
       const refetchCurrentAnchor = sameSessionWindowAnchor(manualAnchor, anchor)
@@ -178,11 +199,7 @@ export function SessionWorkspaceSurface({
         if (sessionId !== null) {
           dispatch(actions.logicalPositionRecorded({ sessionId, position: eventSequence }))
         }
-        requestAnimationFrame(() => {
-          document
-            .querySelector<HTMLButtonElement>(`[data-timeline-id="${eventSequence}"]`)
-            ?.focus()
-        })
+        document.querySelector<HTMLButtonElement>(`[data-timeline-id="${eventSequence}"]`)?.focus()
       },
       openTimelineWindow,
     })
@@ -223,7 +240,6 @@ export function SessionWorkspaceSurface({
     setSessionId(candidate)
     if (refetchCurrentSession) void session.refetch()
   }
-  const selected = app.selectedTimeline
   const select = (eventSequence: string) => {
     dispatch(actions.timelineSelected(eventSequence))
     if (sessionId !== null) {

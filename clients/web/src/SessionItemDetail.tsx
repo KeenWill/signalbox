@@ -46,11 +46,86 @@ const goalBlockedReasons = new Set([
   'execution_failure',
 ])
 
+const modelFailureCauses = new Set([
+  'credential_rejected',
+  'permission_denied',
+  'invalid_request',
+  'target_not_found',
+  'request_too_large',
+  'rate_limited',
+  'quota_exhausted',
+  'overloaded',
+  'provider_internal',
+  'unrecognized',
+])
+const delegationOutcomes = new Set([
+  'result_returned',
+  'child_failed',
+  'child_stopped',
+  'child_cancelled',
+  'continue_running',
+  'already_terminal',
+])
+const delegationReasons = new Set([
+  'child_completed',
+  'child_execution_failed',
+  'child_result_unavailable',
+  'child_cancelled',
+  'parent_stopped_with_descendants',
+  'parent_cancelled_with_descendants',
+])
+
 const hasCompatibleGoalReason = (event: GoalEvent): boolean =>
   goalEventKinds.has(event.event_kind) &&
   (event.event_kind === 'blocked'
     ? typeof event.reason === 'string' && goalBlockedReasons.has(event.reason)
     : event.reason == null)
+
+const hasCompatibleDelegationFacts = (
+  body: Extract<DetailBody, { type: 'delegation' }>,
+): boolean => {
+  const absent = (...values: unknown[]) => values.every((value) => value == null)
+  switch (body.event_kind) {
+    case 'child_spawned':
+      return (
+        body.subject_id != null &&
+        body.policy != null &&
+        absent(body.outcome, body.reason, body.content)
+      )
+    case 'child_waiting':
+      return body.subject_id != null && absent(body.policy, body.outcome, body.reason, body.content)
+    case 'child_lifecycle_disposition':
+      return (
+        body.subject_id != null &&
+        body.outcome != null &&
+        delegationOutcomes.has(body.outcome) &&
+        body.reason != null &&
+        delegationReasons.has(body.reason) &&
+        absent(body.policy, body.content)
+      )
+    case 'child_result':
+      return (
+        body.subject_id != null &&
+        body.outcome != null &&
+        delegationOutcomes.has(body.outcome) &&
+        body.reason != null &&
+        delegationReasons.has(body.reason) &&
+        body.policy == null
+      )
+    case 'session_message':
+      return (
+        body.subject_id != null &&
+        body.content != null &&
+        absent(body.policy, body.outcome, body.reason)
+      )
+    case 'result_wake':
+      return absent(body.policy, body.outcome, body.reason, body.content)
+    case 'message_wake':
+      return body.subject_id != null && absent(body.policy, body.outcome, body.reason, body.content)
+    default:
+      return false
+  }
+}
 
 const compatibleKinds = {
   session_created: ['session_created'],
@@ -93,17 +168,37 @@ export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): bool
     return expected?.[0] === body.lifecycle && expected[1] === body.cause_code
   }
   if (body.type === 'delegation') {
-    return kind === 'delegation_update'
-      ? delegationUpdateKinds.has(body.event_kind)
-      : kind === 'delegation_wake'
-        ? delegationWakeKinds.has(body.event_kind)
-        : false
+    return (
+      hasCompatibleDelegationFacts(body) &&
+      (kind === 'delegation_update'
+        ? delegationUpdateKinds.has(body.event_kind)
+        : kind === 'delegation_wake'
+          ? delegationWakeKinds.has(body.event_kind)
+          : false)
+    )
+  }
+  if (body.type === 'model_call') {
+    const knownFailure = body.state.type === 'terminal' && body.state.disposition === 'known_failed'
+    return (
+      kind === 'model_call_transition' &&
+      (knownFailure
+        ? body.cause_code == null || modelFailureCauses.has(body.cause_code)
+        : body.cause_code == null)
+    )
   }
   if (body.type === 'goal_event') {
     return kind === 'goal_turn_retired' && hasCompatibleGoalReason(body.event)
   }
   if (body.type === 'tool_batch') {
-    return kind === 'tool_batch_transition' && body.goal_events.every(hasCompatibleGoalReason)
+    return (
+      kind === 'tool_batch_transition' &&
+      body.goal_events.every(hasCompatibleGoalReason) &&
+      body.tools.every(
+        (tool) =>
+          tool.operator_required ===
+          (tool.approval_judge_escalated || tool.approval_posture === 'human'),
+      )
+    )
   }
   if (body.type === 'reconciliation') {
     return (
@@ -117,6 +212,7 @@ export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): bool
   if (body.type === 'tool_approval_decision') {
     return (
       kind === 'tool_approval_decided' &&
+      (body.decision === 'approve' || body.decision === 'deny') &&
       (body.source === 'policy' || body.source === body.decider.type)
     )
   }
