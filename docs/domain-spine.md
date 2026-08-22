@@ -5868,6 +5868,283 @@ pub trait AttentionReader {
 }
 ```
 
+## application: repo_watch_operations
+
+```rust
+pub const fn max_repo_watch_operations_page_items() -> u16;
+pub const fn max_repo_watch_activity_page_items() -> u16;
+
+pub struct RepoWatchOperatorEvent {
+    pub id: RepoWatchEventId,
+    pub cursor_generation: u64,
+    pub event_ordinal: u32,
+    pub kind: RepoWatchEventKindNameV1,
+    pub pull_request: Option<PullRequestNumber>,
+    pub observed_at: SystemTime,
+}
+pub struct RepoWatchOperatorDispatch {
+    pub id: RepoWatchDispatchId,
+    pub event: RepoWatchEventId,
+    pub rule: RepoWatchRuleId,
+    pub attempted_at: SystemTime,
+}
+pub struct RepoWatchOperatorSettlement {
+    pub dispatch: RepoWatchDispatchId,
+    pub event: RepoWatchEventId,
+    pub settled_at: SystemTime,
+}
+pub struct RepoWatchLatestWebhook {
+    pub receipt_sequence: u64,
+    pub event_name: String,
+    pub action_name: Option<String>,
+    pub received_at: SystemTime,
+}
+pub struct RepoWatchWebhookWindow {
+    pub seconds: u32,
+    pub received: u64,
+    pub projected: u64,
+    pub terminal: u64,
+    pub quarantined: u64,
+}
+pub struct RepoWatchEventKindCount {
+    pub kind: RepoWatchEventKindNameV1,
+    pub count: u64,
+}
+pub struct RepoWatchRepositoryStatus {
+    pub repository: RepositorySlug,
+    pub cursor_generation: Option<u64>,
+    pub observed_at: Option<SystemTime>,
+    pub latest_webhook: Option<RepoWatchLatestWebhook>,
+    pub previous_five_minutes: RepoWatchWebhookWindow,
+    pub previous_hour: RepoWatchWebhookWindow,
+    pub latest_projection_latency_milliseconds: Option<u64>,
+    pub maximum_projection_latency_milliseconds_previous_hour: Option<u64>,
+    pub event_kind_counts_previous_hour: Vec<RepoWatchEventKindCount>,
+    pub last_observed_event: Option<RepoWatchOperatorEvent>,
+    pub last_actionable_event: Option<RepoWatchOperatorEvent>,
+    pub last_dispatch_attempt: Option<RepoWatchOperatorDispatch>,
+    pub last_automation_settlement: Option<RepoWatchOperatorSettlement>,
+    pub held_slot_count: u64,
+    pub queued_obligation_count: u64,
+}
+pub struct RepoWatchRepositoryStatusPage {
+    pub repositories: Vec<RepoWatchRepositoryStatus>,
+    pub continuation_after: Option<RepositorySlug>,
+}
+
+pub enum RepoWatchDraftStatus { Draft, ReadyForReview }
+pub enum RepoWatchChecksStatus { NoCompletedSuites, Passing, Failing }
+pub enum RepoWatchReviewDecision { None, Commented, Approved, ChangesRequested }
+pub enum RepoWatchAutomationStatus {
+    Unattempted,
+    Held { dispatch: RepoWatchDispatchId },
+    Queued { latest_event: RepoWatchEventId },
+    NonConverged { dispatch: RepoWatchDispatchId },
+    StaleSeal {
+        dispatch: RepoWatchDispatchId,
+        sealed_event: RepoWatchEventId,
+    },
+    CurrentHeadSealed {
+        dispatch: RepoWatchDispatchId,
+        sealed_event: RepoWatchEventId,
+        settled_at: SystemTime,
+    },
+}
+pub struct RepoWatchPullRequestOperationsFacts {
+    pub open_parent: Option<PullRequestNumber>,
+    pub open_child_count: u64,
+    pub automation: RepoWatchAutomationStatus,
+    pub last_observed_event: Option<RepoWatchOperatorEvent>,
+    pub last_actionable_event: Option<RepoWatchOperatorEvent>,
+    pub last_dispatch_attempt: Option<RepoWatchOperatorDispatch>,
+    pub last_automation_settlement: Option<RepoWatchOperatorSettlement>,
+    pub held_slot_count: u64,
+    pub queued_obligation_count: u64,
+    pub commissioned_session_count: u64,
+}
+pub struct RepoWatchPullRequestOperations {
+    pub number: PullRequestNumber,
+    pub title: PullRequestTitle,
+    pub head: CommitSha,
+    pub head_repository: RepositorySlug,
+    pub head_branch: BranchName,
+    pub base_branch: BranchName,
+    pub lifecycle: RepoWatchPullRequestLifecycle,
+    pub mergeable: MergeableState,
+    pub draft: RepoWatchDraftStatus,
+    pub checks: RepoWatchChecksStatus,
+    pub review_decision: RepoWatchReviewDecision,
+    pub stale_review_count: u64,
+    pub unresolved_thread_count: u64,
+    pub open_parent: Option<PullRequestNumber>,
+    pub open_child_count: u64,
+    pub automation: RepoWatchAutomationStatus,
+    pub last_observed_event: Option<RepoWatchOperatorEvent>,
+    pub last_actionable_event: Option<RepoWatchOperatorEvent>,
+    pub last_dispatch_attempt: Option<RepoWatchOperatorDispatch>,
+    pub last_automation_settlement: Option<RepoWatchOperatorSettlement>,
+    pub held_slot_count: u64,
+    pub queued_obligation_count: u64,
+    pub commissioned_session_count: u64,
+}
+impl RepoWatchPullRequestOperations {
+    pub fn from_state(
+        state: &RepoWatchPullRequestState,
+        facts: RepoWatchPullRequestOperationsFacts,
+    ) -> Self;
+}
+pub struct RepoWatchPullRequestPage {
+    pub repository: RepositorySlug,
+    pub pull_requests: Vec<RepoWatchPullRequestOperations>,
+    pub continuation_after: Option<PullRequestNumber>,
+}
+
+pub enum RepoWatchHeldSlotBlocker {
+    UndeliveredAction,
+    DeliveryTurnRuntimeRelevant,
+    LiveRuntimeTurn,
+    PursuingGoal,
+}
+pub struct RepoWatchHeldSlot {
+    pub dispatch: RepoWatchDispatchId,
+    pub singleton: RepoWatchSingletonKey,
+    pub rule: RepoWatchRuleId,
+    pub held_since: SystemTime,
+    pub sessions: Vec<SessionId>,
+    pub blockers: Vec<RepoWatchHeldSlotBlocker>,
+}
+pub enum RepoWatchObligationReadiness {
+    Ready,
+    Occupied {
+        dispatch: RepoWatchDispatchId,
+        sessions: Vec<SessionId>,
+    },
+    Cooldown { eligible_at: Option<SystemTime> },
+    Parked { parked_at: SystemTime },
+}
+pub struct RepoWatchObligationId(/* private uuid::Uuid */);
+impl RepoWatchObligationId {
+    pub const fn from_uuid(value: uuid::Uuid) -> Self;
+    pub const fn into_uuid(self) -> uuid::Uuid;
+}
+pub struct RepoWatchQueuedObligation {
+    pub id: RepoWatchObligationId,
+    pub singleton: RepoWatchSingletonKey,
+    pub rule: RepoWatchRuleId,
+    pub first_repository: RepositorySlug,
+    pub first_event: RepoWatchEventId,
+    pub latest_event: RepoWatchEventId,
+    pub matched_event_count: u64,
+    pub owed_since: SystemTime,
+    pub latest_match_at: SystemTime,
+    pub failed_attempts: u64,
+    pub readiness: RepoWatchObligationReadiness,
+}
+pub struct RepoWatchHeldCursor {
+    pub held_since: SystemTime,
+    pub dispatch: RepoWatchDispatchId,
+}
+pub struct RepoWatchObligationCursor {
+    pub owed_since: SystemTime,
+    pub obligation: RepoWatchObligationId,
+}
+pub enum RepoWatchPagePosition<T> {
+    Start,
+    After(T),
+    Exhausted,
+}
+pub struct RepoWatchWorkPage {
+    pub held_slots: Vec<RepoWatchHeldSlot>,
+    pub held_continuation_after: RepoWatchPagePosition<RepoWatchHeldCursor>,
+    pub queued_obligations: Vec<RepoWatchQueuedObligation>,
+    pub obligation_continuation_after: RepoWatchPagePosition<RepoWatchObligationCursor>,
+}
+
+pub enum RepoWatchSessionPurpose {
+    RuleDispatch {
+        dispatch: RepoWatchDispatchId,
+        event: RepoWatchEventId,
+        rule: RepoWatchRuleId,
+        template: String,
+    },
+    OperatorCommission {
+        dispatch: RepoWatchDispatchId,
+        template: String,
+    },
+}
+pub struct RepoWatchPullRequestSession {
+    pub commissioned_at: SystemTime,
+    pub purpose: RepoWatchSessionPurpose,
+    pub attention: AttentionSummary,
+}
+pub struct RepoWatchSessionCursor {
+    pub commissioned_at: SystemTime,
+    pub session: SessionId,
+}
+pub struct RepoWatchPullRequestSessionPage {
+    pub sessions: Vec<RepoWatchPullRequestSession>,
+    pub continuation_before: Option<RepoWatchSessionCursor>,
+}
+
+pub struct RepoWatchEventCursor {
+    pub cursor_generation: u64,
+    pub event_ordinal: u32,
+}
+pub enum RepoWatchWebhookDisposition {
+    Projected,
+    DuplicateState,
+    Superseded,
+    Ignored,
+    Quarantined,
+}
+pub struct RepoWatchWebhookActivity {
+    pub receipt_sequence: u64,
+    pub event_name: String,
+    pub action_name: Option<String>,
+    pub received_at: SystemTime,
+    pub projection_count: u64,
+    pub latest_projected_at: Option<SystemTime>,
+    pub disposition: Option<RepoWatchWebhookDisposition>,
+}
+pub struct RepoWatchActivityPage {
+    pub events: Vec<RepoWatchOperatorEvent>,
+    pub event_continuation_before: RepoWatchPagePosition<RepoWatchEventCursor>,
+    pub webhooks: Vec<RepoWatchWebhookActivity>,
+    pub webhook_continuation_before: RepoWatchPagePosition<u64>,
+}
+
+pub trait RepoWatchOperationsReader {
+    type Error;
+    fn repository_statuses(
+        &self,
+        after: Option<RepositorySlug>,
+    ) -> impl Future<Output = Result<RepoWatchRepositoryStatusPage, Self::Error>> + Send;
+    fn pull_requests(
+        &self,
+        repository: RepositorySlug,
+        after: Option<PullRequestNumber>,
+    ) -> impl Future<Output = Result<RepoWatchPullRequestPage, Self::Error>> + Send;
+    fn work(
+        &self,
+        repository: RepositorySlug,
+        held_after: RepoWatchPagePosition<RepoWatchHeldCursor>,
+        obligation_after: RepoWatchPagePosition<RepoWatchObligationCursor>,
+    ) -> impl Future<Output = Result<RepoWatchWorkPage, Self::Error>> + Send;
+    fn pull_request_sessions(
+        &self,
+        repository: RepositorySlug,
+        pull_request: PullRequestNumber,
+        before: Option<RepoWatchSessionCursor>,
+    ) -> impl Future<Output = Result<RepoWatchPullRequestSessionPage, Self::Error>> + Send;
+    fn activity(
+        &self,
+        repository: RepositorySlug,
+        events_before: RepoWatchPagePosition<RepoWatchEventCursor>,
+        webhooks_before: RepoWatchPagePosition<u64>,
+    ) -> impl Future<Output = Result<RepoWatchActivityPage, Self::Error>> + Send;
+}
+```
+
 ## application: approval_judge
 
 ```rust
@@ -11166,6 +11443,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: workspace                                  | 4                                |
 | **signalbox-domain total**                         | **806 (+12 free fn)**            |
 | application: attention                             | 12 (+3 free fn) (incl. 1 trait)  |
+| application: repo_watch_operations                 | 33 (+2 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
@@ -11192,4 +11470,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
 | application: turn_liveness                         | 7                                |
-| **signalbox-application total**                    | **307 (+9 free fn)**             |
+| **signalbox-application total**                    | **340 (+11 free fn)**            |
