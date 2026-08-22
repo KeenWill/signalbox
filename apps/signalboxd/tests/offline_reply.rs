@@ -400,9 +400,12 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         "post-activation execution failure must stop this isolated scheduler"
     );
 
-    let transcript = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+    let transcript = sqlx::query_as::<_, (String, Option<serde_json::Value>, Option<String>)>(
         "SELECT entry.payload_kind,
-                accepted.content_text,
+                CASE WHEN accepted.accepted_input_id IS NULL THEN NULL
+                     ELSE accepted_input_content_parts_json(
+                        accepted.accepted_input_id)
+                END,
                 entry.assistant_text_value
            FROM turn_lifecycle AS lifecycle
            JOIN context_frontier_member AS member
@@ -427,7 +430,15 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         vec![
             (
                 String::from("origin_accepted_input"),
-                Some(String::from("offline user request")),
+                Some(serde_json::json!([{
+                    "position": 0,
+                    "part_kind": "text",
+                    "text_value": "offline user request",
+                    "blob_digest": null,
+                    "attachment_kind": null,
+                    "declared_media_type": null,
+                    "display_filename": null,
+                }])),
                 None,
             ),
             (
