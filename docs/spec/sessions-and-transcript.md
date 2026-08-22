@@ -729,10 +729,10 @@ escalation, closed goal transitions and blocked reasons, context compaction,
 reconciliation and operator-required parking, runner sandbox posture, and
 delegation updates and wakes. Child-spawn detail preserves the selected
 background or bound policy, including both bound parent-terminal actions. Tool
-arguments, results, failures, approval rationale, goal text,
-compaction summaries, and delegation content use their own continuation fields;
-repeated tool members advance by explicit member index. An unknown durable event
-or state is corruption, never a generic body or guessed prose.
+arguments, results, failures, approval rationale, goal text, compaction
+summaries, and delegation content use their own continuation fields; repeated
+tool members advance by explicit member index. An unknown durable event or state
+is corruption, never a generic body or guessed prose.
 
 Browser DTOs remain distinct from the application projection, persistence rows,
 and process messages. Text already masked before durable storage remains masked:
