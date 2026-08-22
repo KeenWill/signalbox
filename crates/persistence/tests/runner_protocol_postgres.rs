@@ -5656,6 +5656,9 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_created_placement()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = unmigrated_postgres().await?;
     MIGRATOR.run_to(PRE_PLACEMENT_LOSS_MIGRATION, &pool).await?;
+    MIGRATOR
+        .run_to(PRE_RUNNER_LOSS_CURSOR_MIGRATION, &pool)
+        .await?;
     insert_legacy_session(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
     let expected = SessionRunnerPlacement::new(
@@ -5691,9 +5694,6 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_created_placement()
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
-    MIGRATOR
-        .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
-        .await?;
     migrate(&pool).await?;
     let loaded = RunnerProtocolStore::new(pool.clone(), catalog())
         .load_placement(expected.session())
@@ -5713,6 +5713,9 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_pinned_placement()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = unmigrated_postgres().await?;
     MIGRATOR.run_to(PRE_PLACEMENT_LOSS_MIGRATION, &pool).await?;
+    MIGRATOR
+        .run_to(PRE_RUNNER_LOSS_CURSOR_MIGRATION, &pool)
+        .await?;
     insert_legacy_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -5851,9 +5854,6 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_pinned_placement()
     )
     .execute(&pool)
     .await?;
-    MIGRATOR
-        .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
-        .await?;
     migrate(&pool).await?;
     let loaded = RunnerProtocolStore::new(pool.clone(), catalog())
         .load_placement(pin.placement.session())
