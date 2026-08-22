@@ -195,6 +195,84 @@ describe('SameOriginProductTransport', () => {
       }),
     ).rejects.toThrow('snippet limit')
   })
+  it('rejects results outside an exact-session request', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...searchPageFixture,
+              results: [{ ...searchPageFixture.results[0], session_id: 'wrong-session' }],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        sessionId: searchPageFixture.results[0].session_id,
+        maxItems: 1,
+        maxSnippetBytes: 512,
+      }),
+    ).rejects.toThrow('outside the requested session')
+  })
+
+  it('rejects highlight offsets inside a UTF-8 character', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...searchPageFixture,
+              results: [
+                {
+                  ...searchPageFixture.results[0],
+                  snippet: 'évidence',
+                  highlights: [{ start_byte: 1, end_byte: 2 }],
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 1,
+        maxSnippetBytes: 512,
+      }),
+    ).rejects.toThrow('invalid highlight range')
+  })
+
+  it('rejects search pages that are not ordered newest first', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...searchPageFixture,
+              results: [
+                { ...searchPageFixture.results[0], address: { event_sequence: '750' } },
+                { ...searchPageFixture.results[0], address: { event_sequence: '901' } },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 2,
+        maxSnippetBytes: 512,
+      }),
+    ).rejects.toThrow('not ordered newest first')
+  })
 })
 
 describe('readProductSearchState', () => {

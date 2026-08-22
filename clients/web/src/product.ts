@@ -40,6 +40,8 @@ const MAX_SEARCH_RESPONSE_BYTES = 1_048_576
 const MAX_BOOTSTRAP_RESPONSE_BYTES = 65_536
 const MAX_SEARCH_HIGHLIGHTS_PER_RESULT = 64
 const ERROR_RESPONSE_BYTES = 16_384
+const isUtf8ContinuationByte = (byte: number | undefined) =>
+  byte !== undefined && (byte & 0xc0) === 0x80
 
 const readBoundedJson = async (response: Response, maximumBytes: number): Promise<unknown> => {
   const declaredLength = response.headers.get('content-length')
@@ -85,8 +87,18 @@ const validateSearchPageBounds = (
 ): WebSearchPage => {
   if (page.results.length > request.maxItems) throw new TypeError('search page exceeds item limit')
   const encoder = new TextEncoder()
+  let previousAddress: bigint | undefined
   for (const result of page.results) {
-    const snippetLength = encoder.encode(result.snippet).byteLength
+    if (request.sessionId !== undefined && result.session_id !== request.sessionId) {
+      throw new TypeError('search result falls outside the requested session')
+    }
+    const address = BigInt(result.address.event_sequence)
+    if (previousAddress !== undefined && address > previousAddress) {
+      throw new TypeError('search page is not ordered newest first')
+    }
+    previousAddress = address
+    const snippetBytes = encoder.encode(result.snippet)
+    const snippetLength = snippetBytes.byteLength
     if (snippetLength > request.maxSnippetBytes) {
       throw new TypeError('search result exceeds snippet limit')
     }
@@ -98,7 +110,13 @@ const validateSearchPageBounds = (
       if (
         highlight.start_byte < previousEnd ||
         highlight.end_byte < highlight.start_byte ||
-        highlight.end_byte > snippetLength
+        highlight.end_byte > snippetLength ||
+        (highlight.start_byte > 0 &&
+          highlight.start_byte < snippetLength &&
+          isUtf8ContinuationByte(snippetBytes[highlight.start_byte])) ||
+        (highlight.end_byte > 0 &&
+          highlight.end_byte < snippetLength &&
+          isUtf8ContinuationByte(snippetBytes[highlight.end_byte]))
       ) {
         throw new TypeError('search result carries an invalid highlight range')
       }
