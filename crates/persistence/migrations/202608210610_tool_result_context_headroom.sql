@@ -3,13 +3,10 @@
 -- allowance so a large result batch cannot bypass the context-headroom guard.
 
 ALTER TABLE tool_continuation_context_headroom
-    ADD COLUMN projected_result_content_bytes numeric(20, 0);
-
-UPDATE tool_continuation_context_headroom
-   SET projected_result_content_bytes = 0;
+    ADD COLUMN projected_result_content_bytes numeric(20, 0) NOT NULL DEFAULT 0;
 
 ALTER TABLE tool_continuation_context_headroom
-    ALTER COLUMN projected_result_content_bytes SET NOT NULL,
+    ALTER COLUMN projected_result_content_bytes DROP DEFAULT,
     ADD CONSTRAINT tool_continuation_context_headroom_result_bytes_nonnegative
         CHECK (projected_result_content_bytes >= 0),
     DROP CONSTRAINT tool_continuation_context_headroom_proves_exhaustion,
