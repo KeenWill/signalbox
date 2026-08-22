@@ -11,7 +11,8 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Value, json};
 use signalbox_application::{
     max_search_page_items, max_search_query_bytes, max_search_snippet_bytes,
-    max_timeline_window_bytes, max_timeline_window_items,
+    max_timeline_window_bytes, max_timeline_window_items, max_usage_aggregate_groups,
+    max_usage_call_page_items,
 };
 
 /// Exact browser HTTP contract version served by this daemon build.
@@ -48,6 +49,8 @@ pub struct WebContractCapabilities {
     pub bounded_session_timeline: bool,
     /// Bounded lexical search with stable history reveal addresses is available.
     pub bounded_lexical_search: bool,
+    /// Dedicated bounded aggregate and per-call usage/cost reads are available.
+    pub bounded_usage_cost: bool,
 }
 
 /// Effective hard limits clients must honor for this contract version.
@@ -68,6 +71,10 @@ pub struct WebContractLimits {
     pub max_search_page_items: u32,
     /// Maximum UTF-8 bytes in one search result snippet.
     pub max_search_snippet_bytes: u32,
+    /// Maximum compatibility-preserving groups in one usage summary.
+    pub max_usage_aggregate_groups: u32,
+    /// Maximum individual calls in one usage detail page.
+    pub max_usage_call_page_items: u32,
 }
 
 /// Response from the contract bootstrap endpoint.
@@ -97,6 +104,7 @@ impl WebContractBootstrap {
                 ndjson_streaming: true,
                 bounded_session_timeline: true,
                 bounded_lexical_search: true,
+                bounded_usage_cost: true,
             },
             limits: WebContractLimits {
                 max_json_body_bytes: MAX_JSON_BODY_BYTES as u32,
@@ -106,6 +114,8 @@ impl WebContractBootstrap {
                 max_search_query_bytes: max_search_query_bytes() as u32,
                 max_search_page_items: u32::from(max_search_page_items()),
                 max_search_snippet_bytes: max_search_snippet_bytes() as u32,
+                max_usage_aggregate_groups: u32::from(max_usage_aggregate_groups()),
+                max_usage_call_page_items: u32::from(max_usage_call_page_items()),
             },
         }
     }
@@ -364,6 +374,172 @@ pub struct WebSearchPage {
     pub continuation: Option<WebSearchCursor>,
 }
 
+/// Closed physical class of one terminal usage record.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUsageCallKind {
+    ModelCall,
+    ApprovalJudge,
+}
+
+/// Closed provenance of one token-evidence projection.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUsageProvenance {
+    Reported,
+    Estimated,
+}
+
+/// Meaning of one provider target's input-token axis.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUsageInputSemantics {
+    Unknown,
+    CacheExclusive,
+    CacheInclusive,
+}
+
+/// Independently nullable token axes; null is never interpreted as zero.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum WebNullableU64 {
+    Value(WebU64),
+    Null,
+}
+
+impl WebNullableU64 {
+    /// Preserves a missing axis as an explicit JSON null.
+    #[must_use]
+    pub fn from_option(value: Option<u64>) -> Self {
+        match value {
+            Some(value) => Self::Value(WebU64::from_u64(value)),
+            None => Self::Null,
+        }
+    }
+}
+
+/// Independently nullable token axes; null is never interpreted as zero.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageTokenAxes {
+    pub input: WebNullableU64,
+    pub output: WebNullableU64,
+    pub cache_creation_input: WebNullableU64,
+    pub cache_read_input: WebNullableU64,
+}
+
+/// Explicit presence shape retained by compatibility-preserving aggregates.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageTokenCoverage {
+    pub input: bool,
+    pub output: bool,
+    pub cache_creation_input: bool,
+    pub cache_read_input: bool,
+}
+
+/// Browser-visible billing label derived from the serving credential profile.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUsageCostLabel {
+    Real,
+    MeteredEquivalent,
+}
+
+/// Why no configured dollar derivation is available for exact token evidence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUsageCostUnavailableReason {
+    NoTokenEvidence,
+    UnknownInputSemantics,
+    IncompleteCacheAxes,
+    InvalidCacheBreakdown,
+    ConfigurationUnavailable,
+}
+
+/// Canonical nonnegative fixed-point USD amount derived by the daemon.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebDollarAmount(
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)(\.[0-9]{1,28})?$"))] String,
+);
+
+impl WebDollarAmount {
+    /// Wraps configuration arithmetic already represented by `rust_decimal`.
+    #[must_use]
+    pub fn from_derived(value: String) -> Self {
+        Self(value)
+    }
+}
+
+/// Labeled configured cost, or an explicit reason it cannot be derived.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebUsageCost {
+    Derived {
+        amount_usd: WebDollarAmount,
+        rate_version: String,
+        label: WebUsageCostLabel,
+    },
+    Unavailable {
+        reason: WebUsageCostUnavailableReason,
+    },
+}
+
+/// One compatibility-preserving usage and configured-cost summary row.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageAggregateGroup {
+    pub call_kind: WebUsageCallKind,
+    pub model_id: String,
+    pub provenance: WebUsageProvenance,
+    pub input_semantics: WebUsageInputSemantics,
+    pub coverage: WebUsageTokenCoverage,
+    pub call_count: WebU64,
+    pub tokens: WebUsageTokenAxes,
+    pub cost: WebUsageCost,
+}
+
+/// Bounded aggregate response; truncation is never implicit.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageSummary {
+    pub groups: Vec<WebUsageAggregateGroup>,
+    pub truncated: bool,
+}
+
+/// One terminal call with exact token, provenance, rate, and billing evidence.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageCall {
+    pub call_kind: WebUsageCallKind,
+    pub call_id: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub model_id: String,
+    pub provenance: WebUsageProvenance,
+    pub input_semantics: WebUsageInputSemantics,
+    pub tokens: WebUsageTokenAxes,
+    pub recorded_at_micros: WebU64,
+    pub cost: WebUsageCost,
+}
+
+/// Stable terminal-time/UUID keyset boundary for usage detail traversal.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageCallCursor {
+    pub recorded_at_micros: WebU64,
+    pub call_id: String,
+}
+
+/// One bounded page of exact call evidence.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageCallPage {
+    pub calls: Vec<WebUsageCall>,
+    pub continuation: Option<WebUsageCallCursor>,
+}
+
 /// Layer that owns one browser API failure.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -448,6 +624,9 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     let window_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
     let search_page_schema = canonical_schema(schemars::schema_for!(WebSearchPage).to_value());
+    let usage_summary_schema = canonical_schema(schemars::schema_for!(WebUsageSummary).to_value());
+    let usage_call_page_schema =
+        canonical_schema(schemars::schema_for!(WebUsageCallPage).to_value());
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -466,6 +645,8 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
                 &descriptor_schema,
                 &window_schema,
                 &search_page_schema,
+                &usage_summary_schema,
+                &usage_call_page_schema,
             )?,
         },
         GeneratedArtifact {
@@ -477,6 +658,8 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
                 &descriptor_schema,
                 &window_schema,
                 &search_page_schema,
+                &usage_summary_schema,
+                &usage_call_page_schema,
             )?,
         },
         GeneratedArtifact {
@@ -501,6 +684,8 @@ fn runtime_module(
     descriptor_schema: &Value,
     window_schema: &Value,
     search_page_schema: &Value,
+    usage_summary_schema: &Value,
+    usage_call_page_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut schemas = json!({
         "WebContractBootstrap": bootstrap_schema,
@@ -509,6 +694,8 @@ fn runtime_module(
         "WebSessionTimelineDescriptor": descriptor_schema,
         "WebSessionTimelineWindow": window_schema,
         "WebSearchPage": search_page_schema,
+        "WebUsageSummary": usage_summary_schema,
+        "WebUsageCallPage": usage_call_page_schema,
     });
     schemas.sort_all_objects();
     let schemas = serde_json::to_string_pretty(&schemas)
@@ -697,6 +884,16 @@ export function decodeWebSearchPage(value) {{
   assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
   return value;
 }}
+
+export function decodeWebUsageSummary(value) {{
+  assertSchema(schemas.WebUsageSummary, schemas.WebUsageSummary, value, "usage_summary");
+  return value;
+}}
+
+export function decodeWebUsageCallPage(value) {{
+  assertSchema(schemas.WebUsageCallPage, schemas.WebUsageCallPage, value, "usage_call_page");
+  return value;
+}}
 "##,
         contract_name = WEB_CONTRACT_NAME,
         contract_version = WEB_CONTRACT_VERSION,
@@ -710,6 +907,8 @@ fn declaration_module(
     descriptor_schema: &Value,
     window_schema: &Value,
     search_page_schema: &Value,
+    usage_summary_schema: &Value,
+    usage_call_page_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut definitions = BTreeMap::new();
     let bootstrap = typescript_type(bootstrap_schema, bootstrap_schema, &mut definitions)?;
@@ -718,6 +917,13 @@ fn declaration_module(
     let descriptor = typescript_type(descriptor_schema, descriptor_schema, &mut definitions)?;
     let window = typescript_type(window_schema, window_schema, &mut definitions)?;
     let search_page = typescript_type(search_page_schema, search_page_schema, &mut definitions)?;
+    let usage_summary =
+        typescript_type(usage_summary_schema, usage_summary_schema, &mut definitions)?;
+    let usage_call_page = typescript_type(
+        usage_call_page_schema,
+        usage_call_page_schema,
+        &mut definitions,
+    )?;
     let mut output = String::from(
         "// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.\n// Do not edit by hand.\n\n",
     );
@@ -736,8 +942,14 @@ fn declaration_module(
         "export type WebSessionTimelineWindow = {window};\n\n"
     ));
     output.push_str(&format!("export type WebSearchPage = {search_page};\n\n"));
+    output.push_str(&format!(
+        "export type WebUsageSummary = {usage_summary};\n\n"
+    ));
+    output.push_str(&format!(
+        "export type WebUsageCallPage = {usage_call_page};\n\n"
+    ));
     output.push_str(
-        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\nexport function decodeWebSearchPage(value: unknown): WebSearchPage;\n",
+        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\nexport function decodeWebSearchPage(value: unknown): WebSearchPage;\nexport function decodeWebUsageSummary(value: unknown): WebUsageSummary;\nexport function decodeWebUsageCallPage(value: unknown): WebUsageCallPage;\n",
     );
     Ok(output)
 }
@@ -828,17 +1040,15 @@ fn typescript_object(
         .get("properties")
         .and_then(Value::as_object)
         .ok_or(GenerateWebContractError::UnsupportedSchema)?;
-    let required = schema
-        .get("required")
-        .and_then(Value::as_array)
-        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    let required = schema.get("required").and_then(Value::as_array);
     let mut output = String::from("{\n");
     for (name, property) in properties {
-        let optional = if required.iter().any(|required| required == name) {
-            ""
-        } else {
-            "?"
-        };
+        let optional =
+            if required.is_some_and(|required| required.iter().any(|required| required == name)) {
+                ""
+            } else {
+                "?"
+            };
         output.push_str(&format!(
             "  readonly {name}{optional}: {};\n",
             typescript_type(root, property, definitions)?

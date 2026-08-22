@@ -4,7 +4,9 @@ The browser HTTP listener, same-origin static assets, and generated contract
 bootstrap are verified against this PR (`agent/web-http-transport`). The
 composed bounded session descriptor and historical-window routes are verified
 against this PR (`agent/web-session-timeline`). The bounded lexical-search route
-and generated DTOs are verified against this PR (`agent/web-search-usage`).
+and generated DTOs are verified against this PR (`agent/web-search-usage`). The
+dedicated browser usage/cost routes and generated DTOs are verified against this
+PR (`agent/web-usage-http`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -178,14 +180,15 @@ requires an explicit authentication and transport-security design first.
 `GET /api/bootstrap` describes the production browser contract. It returns the
 exact contract family `signalbox.web-http`, version `1`, the `bounded_json`,
 `same_origin_json_mutations`, and `ndjson_streaming` capabilities, the
-`bounded_session_timeline` and `bounded_lexical_search` capabilities, the
-effective 65,536-byte JSON-body and NDJSON-item hard ceilings, the 256-item and
-65,536-projected-byte timeline ceilings, and the 512-byte query, 100-item page,
-and 512-byte snippet search ceilings. The generated browser decoder rejects an
-unknown field, wrong shape, different family, or different version rather than
-interpreting it as the local process protocol. No process-protocol frame is a
-browser DTO. The descriptor, historical-window, and lexical-search route shapes
-and semantics are owned by
+`bounded_session_timeline`, `bounded_lexical_search`, and `bounded_usage_cost`
+capabilities, the effective 65,536-byte JSON-body and NDJSON-item hard ceilings,
+the 256-item and 65,536-projected-byte timeline ceilings, and the 512-byte
+query, 100-item page, and 512-byte snippet search ceilings. It also advertises
+the 256-group usage summary and 100-call usage-detail ceilings. The generated
+browser decoder rejects an unknown field, wrong shape, different family, or
+different version rather than interpreting it as the local process protocol. No
+process-protocol frame is a browser DTO. The descriptor, historical-window, and
+lexical-search route shapes and semantics are owned by
 [Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline)
 and its
 [lexical-search section](sessions-and-transcript.md#bounded-browser-lexical-search).
@@ -216,6 +219,36 @@ when the response body polls it, carries one trailing newline, and is at most
 own bounded channel supplies backpressure; dropping the browser response drops
 that stream and closes its receiver, cancelling a blocked producer. Static files
 use ordinary HTTP bodies rather than JSON wrapping.
+
+### Bounded browser usage and cost reads
+
+`GET /api/usage/summary` reads the dedicated terminal-call usage projection and
+returns at most 256 compatibility-preserving groups. `GET /api/usage/calls`
+returns at most 100 individual calls in an explicit newest-first or oldest-first
+order with an exact terminal-microsecond and model-call UUID keyset cursor. Both
+routes accept the same optional half-open time range and exact session, turn,
+resolved-model, reported-versus-estimated provenance, and ordinary-versus-
+approval-judge call filters. Malformed bounds, closed values, UUIDs, or partial
+cursors are application errors; neither route scans or materializes transcript
+content.
+
+Every response retains independently nullable input, output, cache-creation, and
+cache-read axes. Summary rows additionally carry the exact presence shape,
+input-axis semantics, provenance, physical call class, resolved-model identity,
+and call count that make the aggregate compatible. The response says when the
+hard group ceiling truncated a summary rather than presenting it as complete.
+
+Dollar cost is never stored in the web projection. Signalboxd derives it at read
+time from the exact configured target rates and the call-pinned non-secret
+credential profile, using the same configuration-owned derivation as transcript
+snapshots. Each derived amount carries its rate version and either the `real` or
+`metered_equivalent` billing label. A result that cannot be derived instead
+carries one closed reason: no token evidence, unknown input semantics,
+incomplete cache axes, an invalid cache-inclusive breakdown, or unavailable
+configuration. The API does not sum across provenance, token coverage, input
+semantics, billing labels, rate versions, targets, credential partitions, or
+physical call classes; the browser therefore never receives an unlabeled blend
+of incompatible evidence.
 
 `deterministic_test_router` supplies a database-free page plus bounded read,
 mutation, and two-item stream routes. It composes the same bootstrap, mutation
