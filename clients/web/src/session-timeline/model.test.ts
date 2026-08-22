@@ -953,6 +953,60 @@ describe('BoundedSessionHistory', () => {
     ).rejects.toThrow('disagrees with its excerpt')
   })
 
+  it('accepts a canonical tool continuation from arguments to result', async () => {
+    const continuation = {
+      address: { event_sequence: '41' },
+      field: 'tool_result',
+      member_index: 0,
+      offset_bytes: '0',
+    } as const
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000141',
+            state: 'proposed',
+            tools: [
+              {
+                request_id: '00000000-0000-0000-0000-000000000241',
+                tool_name: 'workspace_read',
+                approval_posture: 'auto',
+                approval_judge_escalated: false,
+                operator_required: false,
+                arguments: {
+                  text: '{}',
+                  offset_bytes: '0',
+                  total_bytes: '2',
+                  continuation: null,
+                },
+                attempt_id: null,
+                state: null,
+                effect_posture: null,
+                sandbox_posture: null,
+                result: null,
+                failure: null,
+                cause_code: null,
+              },
+            ],
+            goal_events: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 2,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 2,
+      continuation: { type: 'more_body', body: continuation },
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).resolves.toMatchObject({ continuation: { type: 'more_body', body: continuation } })
+  })
+
   it('rejects a body-page continuation when no excerpt continues', async () => {
     const source = await detailSource({
       session_id: sessionId,

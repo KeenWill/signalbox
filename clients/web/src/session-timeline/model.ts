@@ -241,6 +241,30 @@ const bodyContinuations = (value: unknown): TimelineBodyCursor[] => {
   return 'address' in candidate && 'field' in candidate ? [candidate, ...nested] : nested
 }
 
+const isCanonicalCrossFieldContinuation = (
+  body: WebSessionTimelineDetailPage['items'][number]['body'],
+  continuation: TimelineBodyCursor,
+  cursor: TimelineDetailCursor | undefined,
+): boolean => {
+  if (body.type !== 'tool_batch' || continuation.offset_bytes !== '0') return false
+  const current = cursor?.type === 'more_body' ? cursor.body : undefined
+  const currentField = current?.field ?? 'tool_arguments'
+  const currentMember = current?.member_index ?? 0
+  if (continuation.field === 'goal_text') {
+    return continuation.member_index === 0 && body.goal_events.length === 0
+  }
+  if (continuation.field === 'tool_result' || continuation.field === 'tool_failure') {
+    return currentField === 'tool_arguments' && continuation.member_index === currentMember
+  }
+  if (continuation.field === 'tool_arguments') {
+    return (
+      ['tool_arguments', 'tool_result', 'tool_failure'].includes(currentField) &&
+      continuation.member_index === currentMember + 1
+    )
+  }
+  return false
+}
+
 export class SessionTimelineClientError extends Error {
   constructor(readonly response: WebApiErrorResponse) {
     super(response.error.message)
@@ -395,7 +419,11 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       if (page.continuation.type === 'more_body') {
         const continuation = page.continuation.body
         const excerpts = page.items.flatMap((item) => bodyContinuations(item.body))
-        if (!excerpts.some((entry) => sameBodyContinuation(entry, continuation))) {
+        const continuesExcerpt = excerpts.some((entry) => sameBodyContinuation(entry, continuation))
+        const continuesCanonicalBodyField = page.items.some((item) =>
+          isCanonicalCrossFieldContinuation(item.body, continuation, cursor),
+        )
+        if (!continuesExcerpt && !continuesCanonicalBodyField) {
           throw new TypeError('timeline detail continuation disagrees with its excerpt')
         }
       }

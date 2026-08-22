@@ -1024,11 +1024,14 @@ async fn project_tool_batch(
     }
     let member_index = cursor.map_or(0, |cursor| cursor.member_index);
     let member_ordinal = i64::from(member_index) + 1;
-    let selected_field = match requested_field {
-        TimelineBodyField::ToolArguments => "tool_arguments",
-        TimelineBodyField::ToolResult => "tool_result",
-        TimelineBodyField::ToolFailure => "tool_failure",
-        _ => unreachable!("tool detail field was validated above"),
+    let selected_field = if requested_field == TimelineBodyField::ToolArguments {
+        "tool_arguments"
+    } else if requested_field == TimelineBodyField::ToolResult {
+        "tool_result"
+    } else if requested_field == TimelineBodyField::ToolFailure {
+        "tool_failure"
+    } else {
+        return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
     };
     let row = sqlx::query(
         "WITH ordered_members AS (
