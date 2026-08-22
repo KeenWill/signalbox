@@ -2615,6 +2615,7 @@ where
 struct ToolContinuationHeadroomEvidence {
     usage: ProviderReportedTokenUsage,
     input_includes_cache_tokens: bool,
+    projected_result_content_bytes: u64,
     limit: ToolContinuationUsageLimit,
 }
 
@@ -2629,7 +2630,41 @@ async fn load_tool_continuation_headroom_evidence(
         "SELECT usage_input_includes_cache_tokens,
                 usage_input_tokens, usage_output_tokens,
                 usage_cache_creation_input_tokens,
-                usage_cache_read_input_tokens
+                usage_cache_read_input_tokens,
+                (
+                    SELECT COALESCE(SUM(projected.content_bytes), 0)::numeric
+                      FROM (
+                            SELECT COALESCE(octet_length(attempt.result_text), 0)
+                                   + COALESCE(octet_length(attempt.error_detail), 0)
+                                       AS content_bytes
+                              FROM semantic_transcript_entry AS entry
+                              JOIN tool_attempt AS attempt
+                                ON attempt.attempt_id = entry.tool_result_attempt_id
+                               AND attempt.session_id = entry.source_session_id
+                              JOIN tool_request AS request
+                                ON request.request_id = attempt.request_id
+                               AND request.session_id = attempt.session_id
+                               AND request.turn_id = attempt.turn_id
+                             WHERE request.producing_model_call_id = model_call.model_call_id
+                               AND request.session_id = model_call.session_id
+                               AND request.turn_id = model_call.turn_id
+
+                            UNION ALL
+
+                            SELECT COALESCE(octet_length(decision.denial_reason), 0)
+                                       AS content_bytes
+                              FROM semantic_transcript_entry AS entry
+                              JOIN tool_request AS request
+                                ON request.request_id = entry.tool_result_request_id
+                               AND request.session_id = entry.source_session_id
+                              JOIN tool_approval_decision AS decision
+                                ON decision.request_id = request.request_id
+                             WHERE entry.payload_kind = 'tool_denied'
+                               AND request.producing_model_call_id = model_call.model_call_id
+                               AND request.session_id = model_call.session_id
+                               AND request.turn_id = model_call.turn_id
+                      ) AS projected
+                ) AS projected_result_content_bytes
            FROM model_call
           WHERE model_call_id = $1
             AND session_id = $2
@@ -2667,6 +2702,9 @@ async fn load_tool_continuation_headroom_evidence(
         .with_cache_creation_input_tokens(decode("usage_cache_creation_input_tokens")?)
         .with_cache_read_input_tokens(decode("usage_cache_read_input_tokens")?);
     let input_includes_cache_tokens = row.try_get("usage_input_includes_cache_tokens")?;
+    let projected_result_content_bytes = decode("projected_result_content_bytes")?.ok_or(
+        ModelCallCorruption::Missing("projected tool-result content byte count"),
+    )?;
     let Some(input_tokens) = usage.input_tokens() else {
         return Ok(None);
     };
@@ -2679,11 +2717,16 @@ async fn load_tool_continuation_headroom_evidence(
     };
     let exhausted = input_tokens
         .saturating_add(usage.output_tokens().unwrap_or(0))
+        // Provider-neutral CLI adapters expose no tokenizer-only operation.
+        // UTF-8 payload bytes therefore reserve a deliberately conservative
+        // allowance for result material appended after the reported input.
+        .saturating_add(projected_result_content_bytes)
         .saturating_add(limit.max_output_tokens())
         > limit.context_window_tokens();
     Ok(exhausted.then_some(ToolContinuationHeadroomEvidence {
         usage,
         input_includes_cache_tokens,
+        projected_result_content_bytes,
         limit,
     }))
 }
@@ -7296,9 +7339,9 @@ async fn persist_tool_continuation_headroom_exhaustion(
             (terminal_attempt_id, producing_model_call_id, session_id, turn_id,
              usage_input_includes_cache_tokens, usage_input_tokens,
              usage_output_tokens, usage_cache_creation_input_tokens,
-             usage_cache_read_input_tokens, max_output_tokens,
-             context_window_tokens)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+             usage_cache_read_input_tokens, projected_result_content_bytes,
+             max_output_tokens, context_window_tokens)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(required.failed().attempt().id().into_uuid())
     .bind(required.producing_call().into_uuid())
@@ -7309,6 +7352,7 @@ async fn persist_tool_continuation_headroom_exhaustion(
     .bind(usage.output_tokens)
     .bind(usage.cache_creation_input_tokens)
     .bind(usage.cache_read_input_tokens)
+    .bind(Decimal::from(evidence.projected_result_content_bytes))
     .bind(Decimal::from(evidence.limit.max_output_tokens()))
     .bind(Decimal::from(evidence.limit.context_window_tokens()))
     .execute(&mut *connection)

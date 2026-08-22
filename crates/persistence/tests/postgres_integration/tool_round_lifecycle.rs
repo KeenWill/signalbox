@@ -152,9 +152,10 @@ async fn inv007_inv009_inv012_tool_continuation_guards_before_result_outbox()
     Ok(())
 }
 
-/// INV-014: exact provider usage that exhausts configured headroom preserves
-/// tool results, closes the turn with typed evidence, and prepares no oversized
-/// continuation call. The daemon-owned closure is budget-neutral for goals.
+/// INV-014: provider usage plus newly projected result content that exhausts
+/// configured headroom preserves the results, closes the turn with typed
+/// evidence, and prepares no oversized continuation call. The daemon-owned
+/// closure is budget-neutral for goals.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Result<(), Box<dyn Error>>
@@ -167,7 +168,7 @@ async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Resul
         "current_time",
         "{}",
         ProviderReportedTokenUsage::unreported()
-            .with_input_tokens(Some(90))
+            .with_input_tokens(Some(70))
             .with_output_tokens(Some(5)),
     )
     .await?;
@@ -195,14 +196,15 @@ async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Resul
     let authorized = tool_repository
         .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
         .await?;
+    let result_text = String::from("2026-08-22T04:00:00Z");
+    let result_content_bytes = u64::try_from(result_text.len())?;
     tool_repository
         .commit_observation(
             authorized
                 .executor_fence()
                 .bind(ToolAttemptObservation::Completed {
                     result: ToolResultContent::Text(
-                        ToolResultText::try_new(String::from("2026-08-22T04:00:00Z"))
-                            .expect("bounded result"),
+                        ToolResultText::try_new(result_text).expect("bounded result"),
                     ),
                 }),
         )
@@ -251,10 +253,11 @@ async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Resul
     assert_eq!(required.producing_call(), fixture.call);
     assert_eq!(required.failed().turn(), fixture.turn);
 
-    let stored: (String, Option<Uuid>, Uuid, Decimal, Decimal, i64) = sqlx::query_as(
+    let stored: (String, Option<Uuid>, Uuid, Decimal, Decimal, Decimal, i64) = sqlx::query_as(
         "SELECT lifecycle.terminal_disposition_kind,
                 lifecycle.terminal_model_call_id,
                 headroom.producing_model_call_id,
+                headroom.projected_result_content_bytes,
                 headroom.max_output_tokens,
                 headroom.context_window_tokens,
                 (SELECT count(*) FROM model_call WHERE model_call_id = $3)
@@ -277,6 +280,7 @@ async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Resul
             String::from("failed"),
             None,
             fixture.call.into_uuid(),
+            Decimal::from(result_content_bytes),
             Decimal::from(10_u64),
             Decimal::from(100_u64),
             0,
