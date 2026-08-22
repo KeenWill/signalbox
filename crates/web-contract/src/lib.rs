@@ -292,7 +292,7 @@ pub struct WebTimelineBodyContinuation {
     pub address: WebTimelineAddress,
     pub field: WebTimelineBodyField,
     pub member_index: u32,
-    pub offset_bytes: String,
+    pub offset_bytes: WebU64,
 }
 
 /// Bounded UTF-8 excerpt with explicit completeness evidence.
@@ -300,8 +300,8 @@ pub struct WebTimelineBodyContinuation {
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineTextExcerpt {
     pub text: String,
-    pub offset_bytes: String,
-    pub total_bytes: String,
+    pub offset_bytes: WebU64,
+    pub total_bytes: WebU64,
     pub continuation: Option<WebTimelineBodyContinuation>,
 }
 
@@ -310,7 +310,7 @@ pub struct WebTimelineTextExcerpt {
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineBlobReference {
     pub blob_id: String,
-    pub length_bytes: String,
+    pub length_bytes: WebU64,
     pub media_type: Option<String>,
 }
 
@@ -341,10 +341,10 @@ pub enum WebTimelineModelCallDisposition {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineModelUsage {
-    pub input_tokens: Option<String>,
-    pub output_tokens: Option<String>,
-    pub cache_creation_input_tokens: Option<String>,
-    pub cache_read_input_tokens: Option<String>,
+    pub input_tokens: Option<WebU64>,
+    pub output_tokens: Option<WebU64>,
+    pub cache_creation_input_tokens: Option<WebU64>,
+    pub cache_read_input_tokens: Option<WebU64>,
 }
 
 /// Closed turn lifecycle boundary.
@@ -369,7 +369,7 @@ pub enum WebSessionTimelineDetailBody {
         model_call_id: String,
         state: WebTimelineModelCallState,
         model_identity_id: String,
-        request_context_items: String,
+        request_context_items: WebU64,
         response: Option<WebTimelineTextExcerpt>,
         usage: WebTimelineModelUsage,
         cause_code: Option<String>,

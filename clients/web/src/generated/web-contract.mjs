@@ -395,7 +395,7 @@ const schemas = {
                 "type": "string"
               },
               "request_context_items": {
-                "type": "string"
+                "$ref": "#/$defs/WebU64"
               },
               "response": {
                 "anyOf": [
@@ -522,7 +522,7 @@ const schemas = {
             "type": "string"
           },
           "length_bytes": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           },
           "media_type": {
             "type": [
@@ -553,7 +553,7 @@ const schemas = {
             "type": "integer"
           },
           "offset_bytes": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           }
         },
         "required": [
@@ -689,27 +689,43 @@ const schemas = {
         "description": "Independently optional provider-reported usage counts.",
         "properties": {
           "cache_creation_input_tokens": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "cache_read_input_tokens": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "input_tokens": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "output_tokens": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
             ]
           }
         },
@@ -730,13 +746,13 @@ const schemas = {
             ]
           },
           "offset_bytes": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           },
           "text": {
             "type": "string"
           },
           "total_bytes": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           }
         },
         "required": [
@@ -752,6 +768,11 @@ const schemas = {
           "activated",
           "terminalized"
         ],
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
         "type": "string"
       }
     },
