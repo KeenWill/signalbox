@@ -4762,6 +4762,7 @@ async fn load_runner_placement_conversation_entries(
 ) -> Result<Box<[ResolvedRunnerPlacementConversationEntry]>, ModelCallRepositoryError> {
     let expected = request
         .frontier_entries()
+        .filter(|entry| entry.source_session() == request.session())
         .filter_map(|entry| match entry.payload() {
             SemanticTranscriptEntryPayload::RunnerPlacementChanged { placement_revision } => {
                 Some((entry.reference(), *placement_revision))
