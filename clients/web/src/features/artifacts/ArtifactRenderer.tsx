@@ -1,5 +1,5 @@
 import { Download, FileQuestion, Image as ImageIcon, Maximize2 } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import { artifactScenario } from './artifactScenario'
 import './artifacts.css'
@@ -133,6 +133,7 @@ export function ArtifactRenderer({
   const [originalStatus, setOriginalStatus] = useState<
     'idle' | 'checking' | 'admitted' | 'rejected'
   >('idle')
+  const originalButtonRef = useRef<HTMLButtonElement>(null)
   const originalAdmitted = originalStatus === 'admitted'
   const download = viewByKind(descriptor, 'download')
   const rendered = originalRequested && originalAdmitted ? original : automatic
@@ -155,6 +156,7 @@ export function ArtifactRenderer({
         }
         setOriginalStatus('admitted')
         onOriginalRequested?.()
+        requestAnimationFrame(() => originalButtonRef.current?.focus())
       })
       .catch(() => setOriginalStatus('rejected'))
   }, [onOriginalRequested, original, originalStatus, originalWithinByteLimit])
@@ -206,6 +208,7 @@ export function ArtifactRenderer({
         <div className="artifact-actions">
           {original && (
             <button
+              ref={originalButtonRef}
               type="button"
               aria-pressed={originalRequested && originalAdmitted}
               disabled={

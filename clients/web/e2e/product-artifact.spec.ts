@@ -102,9 +102,9 @@ const resolveArtifactWithoutMouse = async (page: Page) => {
     name: `Artifact ${imageArtifact.display_filename[0]}`,
   })
   await expect(artifact).toBeVisible()
-  await expect(page.getByRole('status')).toContainText(
-    `Resolved artifact ${imageArtifact.display_filename[0]}`,
-  )
+  await expect(
+    page.getByText(`Resolved artifact ${imageArtifact.display_filename[0]}`, { exact: true }),
+  ).toHaveAttribute('role', 'status')
   await expect(artifact).toHaveClass(/artifact-row-compact/)
   const preview = artifact.getByRole('img', {
     name: `Preview of ${imageArtifact.display_filename[0]}`,

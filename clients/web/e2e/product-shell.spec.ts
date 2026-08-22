@@ -155,7 +155,8 @@ test('clears scenario keyboard help when browser history returns to a product ro
   await page.goto('/attention')
   await page.getByRole('link', { name: /Scenario studio/ }).click()
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
-  await page.keyboard.press('?')
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /Open keyboard help/ }).click()
   await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
 
   await page.goBack()
