@@ -1,0 +1,143 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ProductRequestError, SameOriginProductTransport } from './product'
+
+const bootstrapFixture = {
+  contract: { name: 'signalbox.web-http', version: '1' },
+  capabilities: {
+    bounded_json: true,
+    same_origin_json_mutations: true,
+    ndjson_streaming: true,
+  },
+  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 65_536 },
+} as const
+
+const sessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
+const attentionFixture = {
+  continuation_after_session_id: sessionId,
+  cursor: '17',
+  summaries: [
+    {
+      action: 'decide_approval',
+      current_turn_id: 'turn-31',
+      goal_block: null,
+      judge: { actionable: '2', completed: '7', escalated: '1', failed: '0' },
+      last_activity: { kind: 'approval_judge', unix_milliseconds: '1724200000000' },
+      session_id: sessionId,
+      state: 'awaiting_approval',
+    },
+  ],
+} as const
+const attentionUpdateFixture = {
+  kind: 'update',
+  cursor: '18',
+  summaries: [{ ...attentionFixture.summaries[0], state: 'active', action: null }],
+} as const
+const errorFixture = {
+  error: {
+    code: 'attention_projection_unavailable',
+    kind: 'application',
+    message: 'attention projection is not configured',
+  },
+} as const
+
+afterEach(() => vi.unstubAllGlobals())
+
+describe('SameOriginProductTransport', () => {
+  it('decodes the Rust-authored bootstrap contract', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(bootstrapFixture))),
+    )
+
+    const bootstrap = await new SameOriginProductTransport().readBootstrap()
+
+    expect(bootstrap).toEqual(bootstrapFixture)
+  })
+
+  it('fails closed when the daemon returns an unknown contract shape', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ invented: true }))),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'bootstrap.contract',
+    )
+  })
+
+  it('reports an unsuccessful HTTP response without decoding its body', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 503 })),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow('status 503')
+  })
+
+  it('decodes one bounded attention page and preserves its typed continuation', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(attentionFixture)))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const snapshot = await new SameOriginProductTransport().readAttention(sessionId)
+
+    expect(snapshot).toEqual(attentionFixture)
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/attention?after_session_id=${sessionId}`,
+      expect.objectContaining({ credentials: 'same-origin' }),
+    )
+  })
+
+  it('preserves a typed attention projection failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(errorFixture), { status: 503 })),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).rejects.toEqual(
+      new ProductRequestError(
+        errorFixture.error.code,
+        errorFixture.error.kind,
+        errorFixture.error.message,
+      ),
+    )
+  })
+
+  it('decodes complete NDJSON attention events without buffering stream history', async () => {
+    const body = `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n${JSON.stringify(attentionUpdateFixture)}\n`
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body)),
+    )
+    const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
+
+    await expect(events.next()).resolves.toEqual({
+      done: false,
+      value: { kind: 'snapshot', snapshot: attentionFixture },
+    })
+    await expect(events.next()).resolves.toEqual({ done: false, value: attentionUpdateFixture })
+    await expect(events.next()).resolves.toEqual({ done: true, value: undefined })
+  })
+
+  it('rejects an attention event beyond the advertised NDJSON item ceiling', async () => {
+    const body = `${' '.repeat(bootstrapFixture.limits.max_ndjson_item_bytes + 1)}\n`
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body)),
+    )
+    const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
+
+    await expect(events.next()).rejects.toThrow(
+      'attention stream item exceeds the contract ceiling',
+    )
+  })
+
+  it('rejects a final attention event without its record delimiter', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(attentionUpdateFixture))),
+    )
+    const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
+
+    await expect(events.next()).rejects.toThrow('attention stream ended with an incomplete item')
+  })
+})
