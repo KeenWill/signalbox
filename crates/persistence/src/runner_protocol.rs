@@ -80,6 +80,8 @@ use crate::lock_inventory::{
     RUNNER_PRISTINE_ACTIVE_ENROLLMENTS, RUNNER_PRISTINE_PENDING_ENROLLMENTS,
     RUNNER_REGISTRATION_HEAD, RUNNER_REGISTRATION_RECONCILIATION,
     RUNNER_REGISTRATION_RECONCILIATION_STATE, RUNNER_RETRY_REPLACEMENT_SCHEDULER,
+    RUNNER_WORKSPACE_CLEANUP_CONNECTION_AUTHORITY, RUNNER_WORKSPACE_RELEASE,
+    RUNNER_WORKSPACE_RELEASE_LOSS_RETIREMENT,
 };
 use crate::mapping::{
     AbandonLostRunnerRejectionStorageKind, AbandonLostRunnerResultStorageKind,
@@ -4242,21 +4244,11 @@ impl RunnerProtocolStore {
             .fetch_optional(&mut *transaction)
             .await?
             .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
-        let connection = sqlx::query(
-            "SELECT head.connection_epoch, head.connection_event_ordinal,
-                    event.state_kind
-               FROM runner_connection_authority_head AS head
-               JOIN runner_connection_event AS event
-                 ON event.enrollment_id = head.enrollment_id
-                AND event.connection_epoch = head.connection_epoch
-                AND event.event_ordinal = head.connection_event_ordinal
-              WHERE head.enrollment_id = $1
-              FOR UPDATE OF head",
-        )
-        .bind(source_enrollment.into_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
+        let connection = sqlx::query(RUNNER_WORKSPACE_CLEANUP_CONNECTION_AUTHORITY)
+            .bind(source_enrollment.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
         sqlx::query(RUNNER_CONNECTION_LOSS_HEAD)
             .bind(source_enrollment.into_uuid())
             .fetch_optional(&mut *transaction)
@@ -4271,19 +4263,14 @@ impl RunnerProtocolStore {
             .fetch_optional(&mut *transaction)
             .await?
             .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
-        let release = sqlx::query(
-            "SELECT runner_id, manifest_id, enrollment_id, connection_epoch
-               FROM runner_workspace_release
-              WHERE session_id = $1 AND placement_revision = $2
-              FOR UPDATE",
-        )
-        .bind(failure.session().into_uuid())
-        .bind(Decimal::from(failure.placement_revision().get()))
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or(RunnerProtocolStoreError::Domain(
-            RunnerDomainError::CorrelationMismatch,
-        ))?;
+        let release = sqlx::query(RUNNER_WORKSPACE_RELEASE)
+            .bind(failure.session().into_uuid())
+            .bind(Decimal::from(failure.placement_revision().get()))
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ))?;
         let release_enrollment =
             RunnerEnrollmentId::from_uuid(release.decode_column("enrollment_id")?);
         let release_connection_epoch: Decimal = release.decode_column("connection_epoch")?;
@@ -4379,19 +4366,14 @@ impl RunnerProtocolStore {
             .fetch_optional(&mut *transaction)
             .await?
             .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
-        let release = sqlx::query(
-            "SELECT runner_id, manifest_id, enrollment_id, connection_epoch
-               FROM runner_workspace_release
-              WHERE session_id = $1 AND placement_revision = $2
-              FOR UPDATE",
-        )
-        .bind(acknowledgement.session().into_uuid())
-        .bind(Decimal::from(acknowledgement.placement_revision().get()))
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or(RunnerProtocolStoreError::Domain(
-            RunnerDomainError::CorrelationMismatch,
-        ))?;
+        let release = sqlx::query(RUNNER_WORKSPACE_RELEASE)
+            .bind(acknowledgement.session().into_uuid())
+            .bind(Decimal::from(acknowledgement.placement_revision().get()))
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ))?;
         let stored_runner = runner_id(release.decode_column("runner_id")?);
         let stored_manifest = WorkspaceManifestId::from_uuid(release.decode_column("manifest_id")?);
         if stored_runner != acknowledgement.runner()
@@ -10729,19 +10711,12 @@ async fn retire_workspace_releases_for_connection_loss(
     loss: RunnerConnectionLossSnapshot,
     session: SessionId,
 ) -> Result<(), RunnerProtocolStoreError> {
-    sqlx::query(
-        "SELECT placement_revision
-           FROM runner_workspace_release
-          WHERE session_id = $1
-            AND enrollment_id = $2
-            AND connection_epoch = $3
-          FOR UPDATE",
-    )
-    .bind(session.into_uuid())
-    .bind(loss.enrollment().into_uuid())
-    .bind(Decimal::from(loss.connection_epoch().get()))
-    .fetch_all(&mut **transaction)
-    .await?;
+    sqlx::query(RUNNER_WORKSPACE_RELEASE_LOSS_RETIREMENT)
+        .bind(session.into_uuid())
+        .bind(loss.enrollment().into_uuid())
+        .bind(Decimal::from(loss.connection_epoch().get()))
+        .fetch_all(&mut **transaction)
+        .await?;
     sqlx::query(
         "INSERT INTO runner_workspace_release_loss_retirement
             (session_id, placement_revision, runner_id, manifest_id,
