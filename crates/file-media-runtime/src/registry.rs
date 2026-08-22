@@ -423,12 +423,12 @@ impl FileMediaRegistry {
         source: &dyn VerifiedBlobSource,
         cancellation: &dyn crate::CancellationSignal,
     ) -> Result<FileReadResult, FileMediaFailure> {
-        let initial_request = match (&request.options, &request.continuation) {
-            (Some(options), None) if options.is_object() => true,
-            (None, Some(_)) => false,
-            (Some(_), None) | (Some(_), Some(_)) | (None, None) => {
+        let initial_request = match &request.input {
+            crate::FileReadInput::Initial { options } if options.is_object() => true,
+            crate::FileReadInput::Initial { .. } => {
                 return Err(FileMediaFailure::InvalidViewArguments);
             }
+            crate::FileReadInput::Continuation { .. } => false,
         };
         let inspection = self
             .inspect(processor, request.inspection.clone(), source, cancellation)
@@ -471,8 +471,7 @@ impl FileMediaRegistry {
                 FileMediaProviderReadRequest {
                     file: validated.clone(),
                     view: request.view,
-                    options: request.options,
-                    continuation: request.continuation,
+                    input: request.input,
                 },
                 source,
                 cancellation,
@@ -620,6 +619,7 @@ fn sanitize_read(
                 return Err(FileMediaFailure::ProcessorFailed);
             };
             if body.len() > output_bytes
+                || body.len() > crate::MAX_TEXT_BODY_BYTES
                 || body.len() > ceilings.text_or_json_bytes
                 || body.contains('\0')
             {
@@ -924,7 +924,8 @@ fn validate_view(
 ) -> Result<(), FileMediaRegistryConstructionError> {
     if matches!(
         access,
-        ReadAccessPattern::RandomAccess { maximum_ranges }
+        ReadAccessPattern::Streaming { maximum_ranges }
+            | ReadAccessPattern::RandomAccess { maximum_ranges }
             if maximum_ranges == 0 || maximum_ranges > ceilings.read_ranges
     ) || bounds.source_bytes() == 0
         || bounds.source_bytes() > ceilings.read_source_bytes
@@ -933,7 +934,9 @@ fn validate_view(
     }
     let valid = match bounds {
         ReadViewBounds::Text { output_bytes, .. } => {
-            output_bytes > 0 && output_bytes <= ceilings.text_or_json_bytes
+            output_bytes > 0
+                && output_bytes <= crate::MAX_TEXT_BODY_BYTES
+                && output_bytes <= ceilings.text_or_json_bytes
         }
         ReadViewBounds::Structured {
             output_bytes,

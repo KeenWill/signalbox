@@ -8,6 +8,8 @@ const SHA256_PREFIX: &str = "sha256:";
 const SHA256_HEX_BYTES: usize = 64;
 // numeric-bound: ceiling - bounds retained caller media-type text
 const MAX_DECLARED_MEDIA_TYPE_BYTES: usize = 255;
+// numeric-bound: ceiling - enforces the RFC 6838 restricted-name token width
+const MAX_MEDIA_TYPE_TOKEN_BYTES: usize = 127;
 // numeric-bound: ceiling - bounds retained caller display-name text
 const MAX_DISPLAY_FILENAME_BYTES: usize = 255;
 // numeric-bound: ceiling - bounds registry identity and selector storage
@@ -264,6 +266,9 @@ impl FromStr for CanonicalMediaType {
 }
 
 fn valid_media_token(value: &str) -> bool {
+    if value.len() > MAX_MEDIA_TYPE_TOKEN_BYTES {
+        return false;
+    }
     let mut bytes = value.bytes();
     bytes
         .next()
@@ -710,6 +715,8 @@ mod tests {
         assert!(CanonicalMediaType::from_str("Text/plain").is_err());
         assert!(CanonicalMediaType::from_str("!text/plain").is_err());
         assert!(CanonicalMediaType::from_str("text/!plain").is_err());
+        assert!(CanonicalMediaType::from_str(&format!("{}/b", "a".repeat(128))).is_err());
+        assert!(CanonicalMediaType::from_str(&format!("a/{}", "b".repeat(128))).is_err());
     }
 
     #[test]

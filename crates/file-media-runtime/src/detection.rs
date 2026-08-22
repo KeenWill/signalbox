@@ -245,10 +245,23 @@ pub struct FileReadRequest {
     pub inspection: InspectionRequest,
     /// Exact provider-owned view name.
     pub view: ReadViewName,
-    /// Structured model-supplied options on an initial request.
-    pub options: Option<serde_json::Value>,
-    /// Prior processor cursor on a continuation request.
-    pub continuation: Option<ReadContinuationCursor>,
+    /// Closed initial-options or continuation input.
+    pub input: FileReadInput,
+}
+
+/// Closed input mode for one typed read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FileReadInput {
+    /// Initial request carrying structured model-supplied options.
+    Initial {
+        /// Provider-owned view options.
+        options: serde_json::Value,
+    },
+    /// Continuation request carrying a checked prior-page cursor.
+    Continuation {
+        /// Opaque restart-ephemeral continuation.
+        cursor: ReadContinuationCursor,
+    },
 }
 
 /// Sanitized continuation state for one typed read.

@@ -3,8 +3,8 @@ use std::{error::Error, fmt, future::Future, pin::Pin};
 use crate::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileReaderName,
     FileReaderProviderName, FileReaderRevision, FileUse, ProcessorFailure, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadContinuationCursor, ReadViewName,
-    ReaderIdentity, ReasonCode, ValidatedFile, VerifiedBlobSource,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadViewName, ReaderIdentity, ReasonCode,
+    ValidatedFile, VerifiedBlobSource,
 };
 
 // numeric-bound: ceiling - bounds retained model-facing view-description memory
@@ -83,7 +83,10 @@ pub enum StreamingTextFallback {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadAccessPattern {
     /// Monotonic streaming access.
-    Streaming,
+    Streaming {
+        /// Maximum sequential range requests for one read.
+        maximum_ranges: u32,
+    },
     /// Bounded exact-range access.
     RandomAccess {
         /// Maximum ranges requested for one read.
@@ -396,10 +399,8 @@ pub struct FileMediaProviderReadRequest {
     pub file: ValidatedFile,
     /// Exact provider-owned view.
     pub view: ReadViewName,
-    /// Model-supplied options retained on an initial request.
-    pub options: Option<serde_json::Value>,
-    /// Checked opaque cursor retained on a continuation request.
-    pub continuation: Option<ReadContinuationCursor>,
+    /// Closed initial-options or continuation input.
+    pub input: crate::FileReadInput,
 }
 
 /// Boxed adapter future used by isolated worker-side provider implementations.
