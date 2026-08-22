@@ -93,6 +93,14 @@ export const scenarios = [
     tableTotal: 300,
   },
   {
+    id: 'imports',
+    title: 'Million-row imports',
+    description: 'Bounded discovery and immutable imported-entry windows.',
+    connection: 'connected',
+    timelineTotal: 250_000,
+    tableTotal: 1_000_000,
+  },
+  {
     id: 'blobs',
     title: 'Blob evidence',
     description: 'Artifact summaries avoid eager binary materialization.',

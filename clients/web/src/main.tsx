@@ -12,12 +12,15 @@ import {
 import { lazy, StrictMode, Suspense } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
+import { ImportsWorkspace } from './imports/ImportsWorkspace'
+import { ScenarioImportApi } from './imports/scenario'
 import { ProductApp } from './ProductApp'
 import { type ProductRouteId, productRoutes } from './product'
 import { store } from './state'
 import './app.css'
 
 const rootRoute = createRootRoute({ component: () => <Outlet /> })
+const scenarioImportApi = new ScenarioImportApi()
 const ScenarioWorkspace = lazy(() =>
   import('./App').then((module) => ({ default: module.Workspace })),
 )
@@ -40,12 +43,18 @@ const productRoute = createRoute({
 const scenarioRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/scenario/$scenarioId',
-  component: () => (
-    <Suspense fallback={<main className="loading">Loading scenario studio…</main>}>
-      <ScenarioWorkspace scenarioId={scenarioRoute.useParams().scenarioId} />
-    </Suspense>
-  ),
+  component: ScenarioRoute,
 })
+function ScenarioRoute() {
+  const { scenarioId } = scenarioRoute.useParams()
+  return scenarioId === 'imports' ? (
+    <ImportsWorkspace api={scenarioImportApi} scenario />
+  ) : (
+    <Suspense fallback={<main className="loading">Loading scenario studio…</main>}>
+      <ScenarioWorkspace scenarioId={scenarioId} />
+    </Suspense>
+  )
+}
 const router = createRouter({
   routeTree: rootRoute.addChildren([indexRoute, productRoute, scenarioRoute]),
 })

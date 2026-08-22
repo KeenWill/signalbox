@@ -1,14 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { imageArtifact } from './features/artifacts/artifactScenario'
 import { productRoutes, productSurfaceStates, SameOriginProductTransport } from './product'
 
 const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '2' },
   capabilities: {
+    blob_derivations: true,
     bounded_json: true,
     bounded_session_timeline: true,
-    blob_derivations: true,
     image_derivatives: true,
     immutable_blob_content: true,
+    import_discovery: true,
+    imported_continuations: true,
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
@@ -53,6 +56,49 @@ describe('SameOriginProductTransport', () => {
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow('status 503')
   })
+
+  it('resolves a blob descriptor through the generated contract decoder', async () => {
+    const fetchRequest = vi.fn(async () => new Response(JSON.stringify(imageArtifact)))
+    vi.stubGlobal('fetch', fetchRequest)
+
+    const descriptor = await new SameOriginProductTransport().readBlobDescriptor({
+      digest: imageArtifact.digest,
+      mediaType: imageArtifact.declared_media_type,
+      displayFilename: imageArtifact.display_filename[0],
+    })
+
+    expect(descriptor).toEqual(imageArtifact)
+    expect(fetchRequest).toHaveBeenCalledWith(
+      `/api/blobs/${encodeURIComponent(imageArtifact.digest)}/descriptor?media_type=image%2Fpng&display_filename=orbital-map.png`,
+      expect.objectContaining({ credentials: 'same-origin' }),
+    )
+  })
+
+  it('preserves a typed daemon error from descriptor resolution', async () => {
+    const responseFixture = {
+      error: {
+        code: 'blob_not_found',
+        kind: 'application',
+        message: 'blob is not present',
+      },
+    } as const
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(responseFixture), { status: 404 })),
+    )
+
+    const request = new SameOriginProductTransport().readBlobDescriptor({
+      digest: imageArtifact.digest,
+      mediaType: imageArtifact.declared_media_type,
+    })
+
+    await expect(request).rejects.toEqual(
+      expect.objectContaining({
+        status: 404,
+        response: responseFixture,
+      }),
+    )
+  })
 })
 
 describe('product surface availability', () => {
@@ -80,6 +126,14 @@ describe('product surface availability', () => {
       kind: 'server-backed',
       owningTrack: '#991 session projections',
       facts: ['bounded session descriptors', 'stable-address timeline windows'],
+    })
+  })
+
+  it('marks the available import discovery facts as server-backed', () => {
+    expect(productSurfaceStates.imports).toEqual({
+      kind: 'server-backed',
+      owningTrack: '#995 discovery reads',
+      facts: ['bounded import catalog', 'descriptor and imported-entry windows', 'continuation'],
     })
   })
 })

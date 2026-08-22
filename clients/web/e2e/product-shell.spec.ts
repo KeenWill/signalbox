@@ -1,13 +1,16 @@
 import { expect, type Page, test } from '@playwright/test'
+import { useDeterministicImportApi } from './import-api-fixture'
 
 const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '2' },
   capabilities: {
+    blob_derivations: true,
     bounded_json: true,
     bounded_session_timeline: true,
-    blob_derivations: true,
     image_derivatives: true,
     immutable_blob_content: true,
+    import_discovery: true,
+    imported_continuations: true,
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
@@ -32,6 +35,12 @@ const settingsPreferenceFixture = {
   changedTheme: 'Light',
   defaultTheme: 'Dark',
   restoreAction: 'Restore defaults',
+} as const
+
+const importsProductFixture = {
+  path: '/imports',
+  loadedImports: '100',
+  latestLoadedPosition: '51',
 } as const
 
 const useDeterministicBootstrap = (page: Page) =>
@@ -106,7 +115,9 @@ test('opens the product at Attention with generated-contract transport status', 
 
   await expect(page).toHaveURL(/\/attention$/)
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
-  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
+  await expect(
+    page.getByText(`${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`),
+  ).toBeVisible()
   await expect(page.getByRole('link', { name: /Attention/ })).toHaveAttribute(
     'aria-current',
     'page',
@@ -202,5 +213,32 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(
     completedItem.getByText('Header only; rich event detail is not exposed'),
   ).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('operates the bounded Imports surface and leaves through one command palette', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+
+  const importRows = page.getByRole('rowgroup', { name: 'Imported conversation rows' })
+  await expect(importRows).toHaveAttribute('data-total-loaded', importsProductFixture.loadedImports)
+  const entries = page.getByRole('listbox', { name: 'Imported source entries' })
+  await entries.focus()
+  await entries.press('End')
+  await expect(entries.getByRole('option', { selected: true })).toHaveAttribute(
+    'aria-posinset',
+    importsProductFixture.latestLoadedPosition,
+  )
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toHaveCount(1)
+  await page.getByRole('button', { name: /Go to Settings/ }).focus()
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(/\/settings$/)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

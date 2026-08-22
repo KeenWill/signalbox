@@ -514,6 +514,24 @@
   line-height: 1.45;
 }
 
+.artifact-row-compact {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.artifact-row-compact .artifact-visual {
+  min-height: 144px;
+  border-right: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.artifact-row-compact .artifact-detail {
+  padding: 0.75rem;
+}
+
+.artifact-row-compact .artifact-detail dl div {
+  grid-template-columns: 78px minmax(0, 1fr);
+}
+
 @media (max-width: 760px) {
   .artifact-panel {
     grid-template-rows: auto auto minmax(0, 1fr);

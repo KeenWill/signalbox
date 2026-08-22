@@ -14,6 +14,7 @@ pub mod blob_derivation;
 pub mod commissioned_dispatch;
 pub mod context_compaction;
 pub mod conversation_import;
+pub mod conversation_import_discovery;
 pub mod conversation_listing;
 pub mod create_session;
 pub mod create_session_from_imported_frontier;

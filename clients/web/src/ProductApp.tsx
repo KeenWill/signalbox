@@ -2,9 +2,32 @@ import * as Dialog from '@radix-ui/react-dialog'
 import { useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
-import { AlertTriangle, Command, Menu, Moon, PanelLeftClose, Rows3, Sun, X } from 'lucide-react'
-import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { globalHotkeyBindings } from './commands'
+import {
+  AlertTriangle,
+  Command,
+  FileSearch,
+  Menu,
+  Moon,
+  PanelLeftClose,
+  Rows3,
+  Sun,
+  X,
+} from 'lucide-react'
+import {
+  type CSSProperties,
+  type RefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+import { ArtifactInspector } from './ArtifactInspector'
+import { type CommandContext, globalHotkeyBindings } from './commands'
+import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
+import type { ArtifactItem } from './features/artifacts/artifactTypes'
+import { HttpImportApi } from './imports/api'
+import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import {
   type ProductRouteId,
   productRoutes,
@@ -19,6 +42,8 @@ import {
 import { SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
+
+const productImportApi = new HttpImportApi()
 
 const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; question: string }> = {
   attention: {
@@ -208,7 +233,41 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   )
 }
 
-function ProductToolbar({ context }: { context: ProductCommandContext }) {
+const reviewEvidenceUnavailable: ArtifactItem = {
+  id: 'review-evidence-unavailable',
+  displayName: 'Review evidence',
+  kind: 'committed_unimplemented',
+  attemptedKind: 'review evidence artifact',
+}
+
+function ReviewsArtifactSurface() {
+  return (
+    <div className="surface-body reviews-artifact-surface">
+      <SurfaceUnavailable surface="reviews" />
+      <section aria-labelledby="review-artifact-heading">
+        <header>
+          <span className="eyebrow">Typed artifact view</span>
+          <h2 id="review-artifact-heading">Review evidence</h2>
+          <p>
+            Review facts and their artifact identities are not exposed by this daemon contract. The
+            client preserves that missing typed boundary instead of fabricating a preview.
+          </p>
+        </header>
+        <ArtifactRenderer artifact={reviewEvidenceUnavailable} />
+      </section>
+    </div>
+  )
+}
+
+function ProductToolbar({
+  artifactAvailable,
+  artifactButtonRef,
+  context,
+}: {
+  artifactAvailable: boolean
+  artifactButtonRef: RefObject<HTMLButtonElement | null>
+  context: ProductCommandContext
+}) {
   const app = useAppSelector(selectApp)
   return (
     <div className="toolbar" role="toolbar" aria-label="Application controls">
@@ -219,6 +278,16 @@ function ProductToolbar({ context }: { context: ProductCommandContext }) {
         onClick={() => context.dispatch(actions.overlaySet('navigation'))}
       >
         <Menu />
+      </button>
+      <button
+        ref={artifactButtonRef}
+        className="icon-button"
+        type="button"
+        aria-label="Open artifact inspector"
+        disabled={!artifactAvailable}
+        onClick={() => invokeProductCommand('artifact.open', context)}
+      >
+        <FileSearch />
       </button>
       <button
         className="icon-button"
@@ -256,6 +325,43 @@ function ProductToolbar({ context }: { context: ProductCommandContext }) {
   )
 }
 
+const INSPECTOR_SHEET_MEDIA = '(max-width: 1080px)'
+
+function useNarrowInspector(): boolean {
+  const [narrow, setNarrow] = useState(() => window.matchMedia(INSPECTOR_SHEET_MEDIA).matches)
+  useEffect(() => {
+    const query = window.matchMedia(INSPECTOR_SHEET_MEDIA)
+    const update = () => setNarrow(query.matches)
+    query.addEventListener('change', update)
+    return () => query.removeEventListener('change', update)
+  }, [])
+  return narrow
+}
+
+function SelectionInspector({ surface, title }: { surface: ProductRouteId; title: string }) {
+  return (
+    <>
+      <span className="eyebrow">Inspector</span>
+      <h2>Selection details</h2>
+      <p>Select an available operational record to inspect its server-provided evidence.</p>
+      <dl className="selection-inspector-details">
+        <div>
+          <dt>Surface</dt>
+          <dd>{title}</dd>
+        </div>
+        <div>
+          <dt>Authority</dt>
+          <dd>{surface === 'settings' ? 'Browser' : 'Daemon'}</dd>
+        </div>
+        <div>
+          <dt>Cache</dt>
+          <dd>{surface === 'settings' ? 'Local settings' : 'Bounded query'}</dd>
+        </div>
+      </dl>
+    </>
+  )
+}
+
 export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
@@ -263,21 +369,36 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const primaryRef = useRef<HTMLElement>(null)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
+  const artifactButtonRef = useRef<HTMLButtonElement>(null)
+  const artifactDigestRef = useRef<HTMLInputElement>(null)
+  const artifactSideWasOpen = useRef(false)
+  const narrowInspector = useNarrowInspector()
+  const [importsCommandContext, setImportsCommandContext] = useState<CommandContext | null>(null)
+  const updateImportsCommandContext = useCallback(
+    (nextContext: CommandContext | null) => setImportsCommandContext(nextContext),
+    [],
+  )
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
     staleTime: Number.POSITIVE_INFINITY,
   })
-  const context = useMemo<ProductCommandContext>(
-    () => ({
+  const artifactAvailable = bootstrap.data?.capabilities.immutable_blob_content === true
+  const inspectorInSheet = app.layout === 'focus' || narrowInspector
+  const context = useMemo<ProductCommandContext>(() => {
+    const surfaceContext = surface === 'imports' ? importsCommandContext : null
+    return {
+      ...surfaceContext,
       dispatch,
       getState: store.getState,
-      timelineIds,
-      focusTimeline: () => primaryRef.current?.focus(),
+      timelineIds: surfaceContext?.timelineIds ?? timelineIds,
+      focusTimeline: surfaceContext?.focusTimeline ?? (() => primaryRef.current?.focus()),
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
-    }),
-    [dispatch, navigate, timelineIds],
-  )
+      openArtifactInspector: artifactAvailable
+        ? () => dispatch(actions.overlaySet('artifact'))
+        : undefined,
+    }
+  }, [artifactAvailable, dispatch, importsCommandContext, navigate, surface, timelineIds])
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
@@ -290,6 +411,16 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
 
+  useEffect(() => {
+    if (app.overlay === 'artifact' && !inspectorInSheet) {
+      artifactSideWasOpen.current = true
+      artifactDigestRef.current?.focus()
+    } else if (artifactSideWasOpen.current && !inspectorInSheet) {
+      artifactSideWasOpen.current = false
+      artifactButtonRef.current?.focus()
+    }
+  }, [app.overlay, inspectorInSheet])
+
   const copy = surfaceCopy[surface]
   const content =
     surface === 'attention' ? (
@@ -298,6 +429,15 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <SessionWorkspaceSurface onTimelineIds={updateTimelineIds} />
     ) : surface === 'settings' ? (
       <SettingsSurface />
+    ) : surface === 'imports' ? (
+      <ImportsWorkspace
+        api={productImportApi}
+        scenario={false}
+        presentation="product"
+        onCommandContext={updateImportsCommandContext}
+      />
+    ) : surface === 'reviews' ? (
+      <ReviewsArtifactSurface />
     ) : (
       <DeferredSurface surface={surface} />
     )
@@ -312,13 +452,17 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <aside className="product-navigation-pane">
         <ProductNavigation active={surface} />
       </aside>
-      <main className="product-main" tabIndex={-1} ref={primaryRef}>
+      <main className={`product-main product-main-${surface}`} tabIndex={-1} ref={primaryRef}>
         <header className="product-header">
           <div>
             <span className="eyebrow">{copy.eyebrow}</span>
             <h1>{copy.title}</h1>
           </div>
-          <ProductToolbar context={context} />
+          <ProductToolbar
+            artifactAvailable={artifactAvailable}
+            artifactButtonRef={artifactButtonRef}
+            context={context}
+          />
         </header>
         <div className="surface-question">
           <p>{copy.question}</p>
@@ -336,23 +480,15 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       </main>
       {app.layout === 'workbench' && (
         <aside className="product-inspector" aria-label="Inspector">
-          <span className="eyebrow">Inspector</span>
-          <h2>Selection details</h2>
-          <p>Select an available operational record to inspect its server-provided evidence.</p>
-          <dl>
-            <div>
-              <dt>Surface</dt>
-              <dd>{copy.title}</dd>
-            </div>
-            <div>
-              <dt>Authority</dt>
-              <dd>{surface === 'settings' ? 'Browser' : 'Daemon'}</dd>
-            </div>
-            <div>
-              <dt>Cache</dt>
-              <dd>{surface === 'settings' ? 'Local settings' : 'Bounded query'}</dd>
-            </div>
-          </dl>
+          {app.overlay === 'artifact' && !inspectorInSheet ? (
+            <ArtifactInspector
+              available={artifactAvailable}
+              digestInputRef={artifactDigestRef}
+              onClose={() => dispatch(actions.overlaySet(null))}
+            />
+          ) : (
+            <SelectionInspector surface={surface} title={copy.title} />
+          )}
         </aside>
       )}
       <CommandPalette context={context} />
@@ -377,6 +513,38 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               Choose a Signalbox surface.
             </Dialog.Description>
             <ProductNavigation active={surface} />
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+      <Dialog.Root
+        open={app.overlay === 'artifact' && inspectorInSheet}
+        onOpenChange={(open) => {
+          if (!open) dispatch(actions.overlaySet(null))
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content
+            className="artifact-sheet"
+            aria-describedby="artifact-sheet-description"
+            onOpenAutoFocus={(event) => {
+              event.preventDefault()
+              artifactDigestRef.current?.focus()
+            }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault()
+              artifactButtonRef.current?.focus()
+            }}
+          >
+            <Dialog.Title className="sr-only">Artifact inspector</Dialog.Title>
+            <Dialog.Description id="artifact-sheet-description" className="sr-only">
+              Resolve and inspect an immutable Signalbox blob.
+            </Dialog.Description>
+            <ArtifactInspector
+              available={artifactAvailable}
+              digestInputRef={artifactDigestRef}
+              onClose={() => dispatch(actions.overlaySet(null))}
+            />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
