@@ -25,7 +25,7 @@ const admittedOriginalArtifact = decodeWebBlobDescriptor({
   ...imageArtifact,
   byte_length: String(previewFixture.byteLength),
   available_views: imageArtifact.available_views.map((view) =>
-    view.kind === 'browser_native'
+    view.kind === 'download' || view.kind === 'browser_native'
       ? { ...view, byte_length: String(previewFixture.byteLength) }
       : view,
   ),
@@ -34,7 +34,9 @@ const oversizedOriginalArtifact = decodeWebBlobDescriptor({
   ...imageArtifact,
   byte_length: '16777217',
   available_views: imageArtifact.available_views.map((view) =>
-    view.kind === 'browser_native' ? { ...view, byte_length: '16777217' } : view,
+    view.kind === 'download' || view.kind === 'browser_native'
+      ? { ...view, byte_length: '16777217' }
+      : view,
   ),
 })
 

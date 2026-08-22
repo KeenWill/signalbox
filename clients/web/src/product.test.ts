@@ -145,6 +145,13 @@ describe('SameOriginProductTransport', () => {
               ...imageArtifact,
               declared_media_type: 'image/jpeg',
               display_filename: ['different.jpg'],
+              available_views: [
+                {
+                  ...imageArtifact.available_views[0],
+                  media_type: 'image/jpeg',
+                  content_url: `/api/blobs/${imageArtifact.digest}/download?media_type=image%2Fjpeg&display_filename=different.jpg`,
+                },
+              ],
             }),
           ),
       ),
@@ -219,6 +226,16 @@ describe('SameOriginProductTransport', () => {
       ...imageArtifact,
       declared_media_type: mediaType,
       display_filename: [displayFilename],
+      available_views: [
+        {
+          ...imageArtifact.available_views[0],
+          media_type: mediaType,
+          content_url: `/api/blobs/${imageArtifact.digest}/download?${new URLSearchParams({
+            media_type: mediaType,
+            display_filename: displayFilename,
+          }).toString()}`,
+        },
+      ],
     }
     const fetchRequest = vi.fn(async () => new Response(JSON.stringify(descriptor)))
     vi.stubGlobal('fetch', fetchRequest)
