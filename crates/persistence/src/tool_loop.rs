@@ -1127,6 +1127,10 @@ impl PostgresToolLoopRepository {
                     "tool batch is not ready for continuation",
                 )
             })?;
+            let outbox_order_guard =
+                crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
+                    .await
+                    .map_err(map_model_call_error)?;
             persist_result_entries(&mut transaction, &projection).await?;
             insert_snapshot(&mut transaction, projection.snapshot())
                 .await
@@ -1145,6 +1149,7 @@ impl PostgresToolLoopRepository {
             .await?;
             let outcome = crate::model_execution::prepare_tool_continuation_call(
                 &mut transaction,
+                outbox_order_guard,
                 session,
                 turn,
                 targets,

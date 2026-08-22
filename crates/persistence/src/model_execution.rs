@@ -2279,11 +2279,13 @@ async fn delegated_nonterminal_result_absent(
 }
 
 /// Prepares one continuation call inside a caller-owned tool-result
-/// transaction. The caller must hold the session scheduler lock and commits or
-/// rolls back this function's writes together with the result projection.
+/// transaction. The caller must hold the session scheduler lock and the shared
+/// model-call/outbox ordering guard before projecting any result outbox event,
+/// and commits or rolls back this function's writes together with that result.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn prepare_tool_continuation_call<NextSteeringIdentities>(
     connection: &mut PgConnection,
+    _outbox_order_guard: ModelCallOutboxOrderGuard,
     session: SessionId,
     turn: TurnId,
     targets: &ModelTargetCatalog,
@@ -2366,7 +2368,6 @@ where
                 credential_families,
             )
             .await?;
-            acquire_model_call_outbox_order_guard(connection).await?;
             let selected = Some(
                 select_runtime_pool_credential(
                     connection,
