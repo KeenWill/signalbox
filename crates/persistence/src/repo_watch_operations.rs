@@ -547,12 +547,31 @@ SELECT obligation_id, singleton_scope, singleton_repository,
        rule_id, first_repository, first_event_id,
        latest_event_id, matched_event_count, owed_since, latest_match_at,
        failed_attempts, occupying_dispatch_id, occupying_session_ids,
-       CASE WHEN eligible_at = 'infinity'::timestamptz THEN NULL ELSE eligible_at END
+       CASE WHEN effective_eligible_at = 'infinity'::timestamptz
+            THEN NULL ELSE effective_eligible_at END
            AS eligible_at,
-       COALESCE(eligible_at = 'infinity'::timestamptz, false)
+       COALESCE(effective_eligible_at = 'infinity'::timestamptz, false)
            AS eligibility_is_infinite,
-       ready, parked_at
-  FROM repo_watch_outstanding_dispatch_obligation
+       occupying_dispatch_id IS NULL
+           AND (effective_eligible_at IS NULL
+                OR effective_eligible_at <= clock_timestamp())
+           AND parked_at IS NULL
+           AND failed_attempts < repo_watch_dispatch_attempt_budget() AS ready,
+       parked_at
+  FROM repo_watch_outstanding_dispatch_obligation AS obligation
+  CROSS JOIN LATERAL (
+        SELECT GREATEST(
+            obligation.eligible_at,
+            CASE WHEN obligation.last_failed_attempt_at IS NULL THEN NULL
+                 ELSE obligation.last_failed_attempt_at + LEAST(
+                     600::bigint << LEAST(
+                         GREATEST(obligation.failed_attempts - 1, 0), 30
+                     )::integer,
+                     3600::bigint
+                 ) * interval '1 second'
+            END
+        ) AS effective_eligible_at
+  ) AS eligibility
  WHERE repository = $1
    AND ($2::timestamptz IS NULL OR (owed_since, obligation_id) > ($2, $3))
  ORDER BY owed_since, obligation_id
@@ -728,25 +747,19 @@ SELECT selected.repository, selected.generation, selected.recorded_at,
            AND delivery.received_at >= transaction_timestamp() - interval '1 hour'
   ) AS webhook_window ON true
   LEFT JOIN LATERAL (
-        SELECT floor(extract(epoch FROM (projection.projected_at - delivery.received_at)) * 1000)::bigint
+        SELECT floor(extract(epoch FROM (projection.projected_at - projection.received_at)) * 1000)::bigint
                    AS latest_latency_ms
-          FROM repo_watch_webhook_delivery AS delivery
-          JOIN repo_watch_webhook_projection AS projection
-            ON projection.hook_id = delivery.hook_id
-           AND projection.delivery_id = delivery.delivery_id
-         WHERE delivery.repository = selected.repository
-         ORDER BY projection.projected_at DESC, delivery.receipt_sequence DESC,
+          FROM repo_watch_webhook_projection AS projection
+         WHERE projection.repository = selected.repository
+         ORDER BY projection.projected_at DESC, projection.delivery_id DESC,
                   projection.projection_ordinal DESC
          LIMIT 1
   ) AS latest_latency ON true
   LEFT JOIN LATERAL (
-        SELECT max(floor(extract(epoch FROM (projection.projected_at - delivery.received_at)) * 1000)::bigint)
+        SELECT max(floor(extract(epoch FROM (projection.projected_at - projection.received_at)) * 1000)::bigint)
                    AS maximum_latency_ms_1h
-          FROM repo_watch_webhook_delivery AS delivery
-          JOIN repo_watch_webhook_projection AS projection
-            ON projection.hook_id = delivery.hook_id
-           AND projection.delivery_id = delivery.delivery_id
-         WHERE delivery.repository = selected.repository
+          FROM repo_watch_webhook_projection AS projection
+         WHERE projection.repository = selected.repository
            AND projection.projected_at >= transaction_timestamp() - interval '1 hour'
   ) AS latency_window ON true
   LEFT JOIN LATERAL (
@@ -1407,18 +1420,9 @@ SELECT selected.pull_request_number,
                  WHERE latest_event.repository = $1
                    AND latest_event.pull_request_number = selected.pull_request_number) AS queued_count
   ) AS counts ON true
-  LEFT JOIN LATERAL (
-        SELECT count(*) AS session_count FROM (
-            SELECT action.session_id
-              FROM repo_watch_dispatch_action AS action
-             WHERE action.repository = $1
-               AND action.pull_request_number = selected.pull_request_number
-            UNION ALL
-            SELECT commissioned.session_id FROM commissioned_dispatch AS commissioned
-             WHERE commissioned.repository = $1
-               AND commissioned.pull_request_number = selected.pull_request_number
-        ) AS correlated
-  ) AS sessions ON true
+  LEFT JOIN repo_watch_current_pull_request_session_count AS sessions
+    ON sessions.repository = $1
+   AND sessions.pull_request_number = selected.pull_request_number
  ORDER BY selected.pull_request_number
 "#;
 
