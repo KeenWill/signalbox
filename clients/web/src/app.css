@@ -545,8 +545,11 @@ kbd {
 }
 .imports-shell-product {
   height: auto;
-  min-height: 0;
+  min-height: 520px;
   grid-template-columns: minmax(0, 1fr);
+}
+.product-main-imports {
+  overflow: auto;
 }
 .imports-workspace-product {
   overflow: hidden;

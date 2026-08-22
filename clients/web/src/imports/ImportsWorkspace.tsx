@@ -66,7 +66,8 @@ export function ImportsWorkspace({
   onNavigationDisabledChange?: (disabled: boolean) => void
 }) {
   const queryClient = useQueryClient()
-  const density = useAppSelector(selectApp).density
+  const app = useAppSelector(selectApp)
+  const density = app.density
   const queryScope = scenario ? 'scenario' : 'production'
   const [format, setFormat] = useState<FormatFilter>(EMPTY_FILTER)
   const [sourceSession, setSourceSession] = useState('')
@@ -195,6 +196,7 @@ export function ImportsWorkspace({
       (binding) => ({
         hotkey: binding.hotkey,
         callback: () => invokeCommand(binding.commandId, commandContext),
+        options: { enabled: app.overlay === null },
       }),
     ),
   )
@@ -205,6 +207,7 @@ export function ImportsWorkspace({
     ].map((binding) => ({
       sequence: binding.sequence,
       callback: () => invokeCommand(binding.commandId, commandContext),
+      options: { enabled: app.overlay === null },
     })),
   )
 

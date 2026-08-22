@@ -363,7 +363,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <SessionsSurface />
     ) : surface === 'settings' ? (
       <SettingsSurface />
-    ) : surface === 'imports' ? (
+    ) : surface === 'imports' && bootstrap.isSuccess ? (
       <ImportsWorkspace
         api={productImportApi}
         scenario={false}
@@ -371,6 +371,22 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         onCommandContext={updateImportsCommandContext}
         onNavigationDisabledChange={setNavigationDisabled}
       />
+    ) : surface === 'imports' ? (
+      <div className="surface-body">
+        <section className="surface-empty" aria-labelledby="imports-unavailable-heading">
+          <AlertTriangle aria-hidden="true" />
+          <div>
+            <span className="availability-tag">Contract required</span>
+            <h2 id="imports-unavailable-heading">
+              Imports are unavailable until bootstrap admission succeeds
+            </h2>
+            <p>
+              Signalbox will not issue import reads or enable continuation mutations without an
+              admitted daemon contract.
+            </p>
+          </div>
+        </section>
+      </div>
     ) : (
       <DeferredSurface surface={surface} />
     )

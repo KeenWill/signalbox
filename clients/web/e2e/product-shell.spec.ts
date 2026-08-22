@@ -234,6 +234,26 @@ test('operates the bounded Imports surface and leaves through one command palett
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('withholds Imports until bootstrap admission succeeds', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let importRequests = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ status: 503 }))
+  await page.route('**/api/imports/**', (route) => {
+    importRequests += 1
+    return route.abort()
+  })
+  await page.goto('/imports')
+
+  await expect(
+    page.getByRole('heading', {
+      name: 'Imports are unavailable until bootstrap admission succeeds',
+    }),
+  ).toBeVisible()
+  await expect(page.getByText('Transport unavailable')).toBeVisible()
+  expect(importRequests).toBe(0)
+  expect(problems.pageErrors).toEqual([])
+})
+
 test('serves exact source-session searches through the deterministic adapter', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -268,6 +288,41 @@ test('applies product density to Imports virtual rows', async ({ page }) => {
   await expect
     .poll(() => row.evaluate((element) => element.getBoundingClientRect().height))
     .toBeGreaterThan(compactHeight)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('suspends Imports hotkeys while the palette owns keyboard scope', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto('/imports')
+
+  const entries = page.locator('[aria-label="Imported source entries"]')
+  await entries.focus()
+  const initialSelection = await entries.getAttribute('aria-activedescendant')
+  expect(initialSelection).not.toBeNull()
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
+  await page.keyboard.press('j')
+  await expect(entries).toHaveAttribute('aria-activedescendant', initialSelection ?? '')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('scrolls short Imports workbenches instead of clipping the inspector', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.setViewportSize({ width: 1200, height: 560 })
+  await page.goto('/imports')
+
+  const main = page.locator('.product-main-imports')
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  expect(await main.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true)
+  await main.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  await expect(page.getByRole('heading', { name: 'Import inspector' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
