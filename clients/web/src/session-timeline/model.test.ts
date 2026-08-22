@@ -94,6 +94,17 @@ describe('BoundedSessionHistory', () => {
     ).resolves.toBeDefined()
   })
 
+  it('rejects UUID spellings outside the server grammar', () => {
+    const scenario = new EnormousSessionScenarioSource()
+
+    expect(() => new BoundedSessionHistory(`{${sessionId.replaceAll('-', '')}}`, scenario)).toThrow(
+      'session id must be a UUID',
+    )
+    expect(
+      () => new BoundedSessionHistory('00000000-00000000-0000-0000-000000000991', scenario),
+    ).toThrow('session id must be a UUID')
+  })
+
   it('rejects contradictory descriptor boundaries', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const descriptor = await scenario.readDescriptor(sessionId)
@@ -296,6 +307,39 @@ describe('BoundedSessionHistory', () => {
         { maxItems: 2, maxBytes: 256 },
       ),
     ).rejects.toThrow('returned boundary')
+  })
+
+  it('rejects a window on the wrong side of a strict anchor', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '100' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 96,
+          },
+          {
+            address: { event_sequence: '200' },
+            kind: 'turn_activated',
+            projected_structured_bytes: 96,
+          },
+        ],
+        projected_structured_bytes: 192,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    }
+
+    await expect(
+      new BoundedSessionHistory(sessionId, source).load(
+        { kind: 'after', eventSequence: '500' },
+        { maxItems: 2, maxBytes: 256 },
+      ),
+    ).rejects.toThrow('strictly after')
   })
 
   it('bounds an HTTP timeline response before JSON decoding', async () => {
