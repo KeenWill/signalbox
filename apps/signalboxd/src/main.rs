@@ -1770,6 +1770,7 @@ async fn run_hub(
         model_configuration.clone(),
         Arc::clone(&context_compaction_model),
     );
+    let (turn_execution_shutdown, turn_execution_shutdown_receiver) = watch::channel(false);
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(
             model_repository,
@@ -1781,7 +1782,8 @@ async fn run_hub(
             approval_judge_model,
             model_configuration.configured_approval_judge_selection(),
             model_configuration.clone(),
-        ),
+        )
+        .with_shutdown_checkpoint(turn_execution_shutdown_receiver),
     );
     // The connection runtime has no execution role, so it reaches the same
     // fatal recovery signal through this handle rather than ending an
@@ -1981,6 +1983,7 @@ async fn run_hub(
             while runtime_tasks.join_next().await.is_some() {}
             ShutdownOutcome::GuardLost
         } else {
+            let _ = turn_execution_shutdown.send(true);
             let _ = scheduler_shutdown.send(());
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
