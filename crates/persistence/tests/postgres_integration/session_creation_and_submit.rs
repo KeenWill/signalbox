@@ -2976,6 +2976,13 @@ const MULTIPART_ATTACHMENT_PAYLOAD: &[u8] = b"multipart attachment";
 const MULTIPART_BLOB_STORE_NAME: &str = "multipart_test";
 const MULTIPART_BLOB_OBJECT_KEY: &str = "multipart/object";
 
+fn multipart_input_choices() -> PerInputConfigurationChoices {
+    PerInputConfigurationChoices::new(
+        SessionConfigurationDefaultsVersion::first(),
+        ModelSelectionOverride::UseSessionDefault,
+    )
+}
+
 #[derive(sqlx::FromRow)]
 struct MultipartProjectionFacts {
     command_projection: Value,
@@ -3073,7 +3080,7 @@ async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
         SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
         content,
         DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            configuration: multipart_input_choices(),
         },
     );
     let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
@@ -3119,7 +3126,7 @@ async fn inv012_durable_multipart_command_reconstructs_the_original_value()
         SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
         content,
         DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            configuration: multipart_input_choices(),
         },
     );
     let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
@@ -3162,7 +3169,7 @@ async fn inv012_reordered_multipart_submit_is_conflicting_reuse() -> Result<(), 
         SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
         content,
         DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            configuration: multipart_input_choices(),
         },
     );
     let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
@@ -3219,7 +3226,7 @@ async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(),
         SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
         content,
         DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            configuration: multipart_input_choices(),
         },
     );
     let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
@@ -3287,7 +3294,7 @@ async fn inv012_multipart_command_and_accepted_satellites_are_identical()
         SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
         content,
         DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            configuration: multipart_input_choices(),
         },
     );
     let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;

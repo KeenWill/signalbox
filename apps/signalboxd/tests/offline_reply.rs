@@ -39,6 +39,7 @@ use signalbox_persistence::{
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
+    process_read::{ProcessReadRepository, ProcessTranscriptEntry},
     scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
@@ -316,14 +317,15 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         nudge,
         tool_dispatch_gate.clone(),
     );
+    let submitted_content = UserContent::try_text(String::from("offline user request"))
+        .expect("fixture user content is admitted");
     let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
         SubmitInputAppliedResult::TurnOrigin(origin),
     )) = submit
         .execute(SubmitInputRequest::try_new(
             DurableCommandId::from_uuid(Uuid::from_u128(0x2003)),
             session,
-            UserContent::try_text(String::from("offline user request"))
-                .expect("fixture user content is admitted"),
+            submitted_content.clone(),
             DeliveryRequest::StartWhenNoActiveTurn {
                 configuration: PerInputConfigurationChoices::new(
                     SessionConfigurationDefaultsVersion::first(),
@@ -400,55 +402,27 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         "post-activation execution failure must stop this isolated scheduler"
     );
 
-    let transcript = sqlx::query_as::<_, (String, Option<serde_json::Value>, Option<String>)>(
-        "SELECT entry.payload_kind,
-                CASE WHEN accepted.accepted_input_id IS NULL THEN NULL
-                     ELSE accepted_input_content_parts_json(
-                        accepted.accepted_input_id)
-                END,
-                entry.assistant_text_value
-           FROM turn_lifecycle AS lifecycle
-           JOIN context_frontier_member AS member
-             ON member.owning_session_id = lifecycle.session_id
-            AND member.context_frontier_id = lifecycle.terminal_frontier_id
-           JOIN semantic_transcript_entry AS entry
-             ON entry.source_session_id = member.source_session_id
-            AND entry.semantic_entry_id = member.semantic_entry_id
-           LEFT JOIN accepted_input AS accepted
-             ON accepted.session_id = entry.source_session_id
-            AND accepted.accepted_input_id = entry.origin_accepted_input_id
-          WHERE lifecycle.session_id = $1
-            AND lifecycle.turn_id = $2
-          ORDER BY member.member_position",
-    )
-    .bind(session.into_uuid())
-    .bind(turn.into_uuid())
-    .fetch_all(&pool)
-    .await?;
-    assert_eq!(
-        transcript,
-        vec![
-            (
-                String::from("origin_accepted_input"),
-                Some(serde_json::json!([{
-                    "position": 0,
-                    "part_kind": "text",
-                    "text_value": "offline user request",
-                    "blob_digest": null,
-                    "attachment_kind": null,
-                    "declared_media_type": null,
-                    "display_filename": null,
-                }])),
-                None,
-            ),
-            (
-                String::from("assistant_text"),
-                None,
-                Some(String::from("offline assistant reply")),
-            ),
-            (String::from("turn_completed"), None, None),
-        ]
-    );
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("the fixture session has a transcript");
+    let [user_entry, assistant_entry, completed_entry] = transcript.entries() else {
+        panic!("the completed fixture transcript has exactly three entries");
+    };
+    assert!(matches!(
+        user_entry,
+        ProcessTranscriptEntry::User { content, .. } if content == &submitted_content
+    ));
+    assert!(matches!(
+        assistant_entry,
+        ProcessTranscriptEntry::Assistant { content, .. }
+            if content == "offline assistant reply"
+    ));
+    assert!(matches!(
+        completed_entry,
+        ProcessTranscriptEntry::TurnCompleted { turn: completed_turn, .. }
+            if *completed_turn == turn
+    ));
 
     let terminal_shape: (i64, i64, i64) = sqlx::query_as(
         "SELECT
