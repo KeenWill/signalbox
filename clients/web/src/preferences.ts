@@ -52,6 +52,21 @@ const boundedRecord = (value: unknown, maximum: number): Record<string, string> 
   )
 }
 
+const isPositiveDecimalU64 = (value: string): boolean =>
+  /^[1-9]\d*$/.test(value) && BigInt(value) <= (1n << 64n) - 1n
+
+const boundedLogicalPositions = (value: unknown): Record<string, string> => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {}
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(
+        (entry): entry is [string, string] =>
+          typeof entry[1] === 'string' && isPositiveDecimalU64(entry[1]),
+      )
+      .slice(-MAX_SAVED_LOGICAL_POSITIONS),
+  )
+}
+
 export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => {
   const candidate =
     value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -93,10 +108,7 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
       ['ask', 'block', 'allow'],
       defaultBrowserPreferences.remoteMedia,
     ),
-    lastLogicalPositions: boundedRecord(
-      candidate.lastLogicalPositions,
-      MAX_SAVED_LOGICAL_POSITIONS,
-    ),
+    lastLogicalPositions: boundedLogicalPositions(candidate.lastLogicalPositions),
     keyOverrides: boundedRecord(candidate.keyOverrides, MAX_KEY_OVERRIDES),
   }
 }

@@ -143,6 +143,24 @@ describe('BoundedSessionHistory', () => {
     ).rejects.toThrow('continuation after does not match the last item')
   })
 
+  it('requires continuations when the descriptor proves more history remains', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async (requestedSessionId, anchor, limits) => {
+        const window = await scenario.readWindow(requestedSessionId, anchor, limits)
+        return { ...window, continuation_after: null }
+      },
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(history.load({ kind: 'first' }, { maxItems: 4, maxBytes: 1024 })).rejects.toThrow(
+      'omits a required continuation after',
+    )
+  })
+
   it('stops a scenario before window strictly before its anchor', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const window = await scenario.readWindow(
@@ -235,6 +253,39 @@ describe('BoundedSessionHistory', () => {
 
     await expect(HttpSessionTimelineSource.connect(request)).rejects.toThrow(
       'timeline capability is unavailable',
+    )
+  })
+
+  it('rejects oversized timeline bodies before JSON materialization', async () => {
+    const bootstrap = {
+      contract: { name: 'signalbox.web-http', version: '2' },
+      capabilities: {
+        bounded_json: true,
+        same_origin_json_mutations: true,
+        ndjson_streaming: true,
+        immutable_blob_content: false,
+        blob_derivations: false,
+        image_derivatives: false,
+        bounded_session_timeline: true,
+      },
+      limits: {
+        max_json_body_bytes: 1024,
+        max_ndjson_item_bytes: 1024,
+        max_timeline_window_items: 80,
+        max_timeline_window_bytes: 65536,
+      },
+    }
+    let requests = 0
+    const request = async () => {
+      requests += 1
+      return requests === 1
+        ? new Response(JSON.stringify(bootstrap))
+        : new Response('{}', { headers: { 'content-length': '1048577' } })
+    }
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    await expect(source.readDescriptor(sessionId)).rejects.toThrow(
+      'exceeds the browser byte ceiling',
     )
   })
 

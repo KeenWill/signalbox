@@ -86,6 +86,24 @@ describe('command registry', () => {
     expect(latestWindowRequests).toBe(1)
   })
 
+  it('keeps the latest-window action available when filtering hides every row', () => {
+    let latestWindowRequests = 0
+
+    invokeCommand('selection.last', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      focusTimeline: () => undefined,
+      openLatestTimelineWindow: () => {
+        latestWindowRequests += 1
+      },
+    })
+
+    expect(latestWindowRequests).toBe(1)
+  })
+
   it('lets the registered artifact command own selection state', () => {
     invokeCommand('artifact.select', {
       dispatch: store.dispatch,

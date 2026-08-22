@@ -39,6 +39,45 @@ export interface SessionTimelineSource {
 }
 
 const MAX_U64 = (1n << 64n) - 1n
+const MAX_TIMELINE_RESPONSE_BYTES = 1024 * 1024
+const MAX_ERROR_RESPONSE_BYTES = 64 * 1024
+
+const readBoundedJson = async (response: Response, maximumBytes: number): Promise<unknown> => {
+  const declaredLength = response.headers.get('content-length')
+  if (declaredLength !== null) {
+    const parsedLength = Number(declaredLength)
+    if (!Number.isSafeInteger(parsedLength) || parsedLength < 0 || parsedLength > maximumBytes) {
+      throw new TypeError('timeline response exceeds the browser byte ceiling')
+    }
+  }
+  if (response.body === null) {
+    const text = await response.text()
+    if (new TextEncoder().encode(text).byteLength > maximumBytes) {
+      throw new TypeError('timeline response exceeds the browser byte ceiling')
+    }
+    return JSON.parse(text)
+  }
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > maximumBytes) {
+      await reader.cancel()
+      throw new TypeError('timeline response exceeds the browser byte ceiling')
+    }
+    chunks.push(value)
+  }
+  const bytes = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return JSON.parse(new TextDecoder().decode(bytes))
+}
 
 const decimalU64 = (value: string): bigint => {
   if (!/^(0|[1-9]\d*)$/.test(value)) throw new TypeError('timeline fact must be unsigned decimal')
@@ -78,7 +117,9 @@ export class SessionTimelineClientError extends Error {
 }
 
 const throwApiError = async (response: Response): Promise<never> => {
-  throw new SessionTimelineClientError(decodeWebApiErrorResponse(await response.json()))
+  throw new SessionTimelineClientError(
+    decodeWebApiErrorResponse(await readBoundedJson(response, MAX_ERROR_RESPONSE_BYTES)),
+  )
 }
 
 export class HttpSessionTimelineSource implements SessionTimelineSource {
@@ -105,7 +146,9 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       signal,
     })
     if (!response.ok) return throwApiError(response)
-    return decodeWebSessionTimelineDescriptor(await response.json())
+    return decodeWebSessionTimelineDescriptor(
+      await readBoundedJson(response, MAX_TIMELINE_RESPONSE_BYTES),
+    )
   }
 
   async readWindow(
@@ -126,7 +169,9 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       { signal },
     )
     if (!response.ok) return throwApiError(response)
-    return decodeWebSessionTimelineWindow(await response.json())
+    return decodeWebSessionTimelineWindow(
+      await readBoundedJson(response, MAX_TIMELINE_RESPONSE_BYTES),
+    )
   }
 }
 
@@ -237,6 +282,16 @@ export class BoundedSessionHistory {
       decimalAddress(window.continuation_after.event_sequence)
       if (window.continuation_after.event_sequence !== lastAddress) {
         throw new TypeError('timeline continuation after does not match the last item')
+      }
+    }
+    if (this.descriptorValue && firstAddress !== undefined && lastAddress !== undefined) {
+      const descriptorFirst = decimalAddress(this.descriptorValue.first_address.event_sequence)
+      const descriptorLatest = decimalAddress(this.descriptorValue.latest_address.event_sequence)
+      if (decimalAddress(firstAddress) > descriptorFirst && !window.continuation_before) {
+        throw new TypeError('timeline window omits a required continuation before')
+      }
+      if (decimalAddress(lastAddress) < descriptorLatest && !window.continuation_after) {
+        throw new TypeError('timeline window omits a required continuation after')
       }
     }
     const candidates = [

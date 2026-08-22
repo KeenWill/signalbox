@@ -194,7 +194,8 @@ export const commandRegistry = [
       { label: 'g g', registration: { kind: 'sequence', sequence: ['G', 'G'] } },
       { label: 'Home' },
     ],
-    available: (context) => context.timelineIds.length > 0,
+    available: (context) =>
+      context.openFirstTimelineWindow !== undefined || context.timelineIds.length > 0,
     run: (context) => {
       if (context.openFirstTimelineWindow) context.openFirstTimelineWindow()
       else selectTimeline(context, context.timelineIds[0])
@@ -209,7 +210,8 @@ export const commandRegistry = [
       { label: 'G', registration: { kind: 'hotkey', hotkey: 'Shift+G' } },
       { label: 'End' },
     ],
-    available: (context) => context.timelineIds.length > 0,
+    available: (context) =>
+      context.openLatestTimelineWindow !== undefined || context.timelineIds.length > 0,
     run: (context) => {
       if (context.openLatestTimelineWindow) context.openLatestTimelineWindow()
       else selectTimeline(context, context.timelineIds.at(-1))

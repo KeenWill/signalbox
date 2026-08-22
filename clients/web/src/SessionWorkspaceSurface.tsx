@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronLeft, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { MissingAttachmentState } from './features/artifacts/ArtifactAttachments'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import {
@@ -49,6 +49,7 @@ export function SessionWorkspaceSurface({
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [manualAnchor, setManualAnchor] = useState<SessionWindowAnchor | null>(null)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
+  const timelineRef = useRef<HTMLOListElement>(null)
   const remembered = sessionId === null ? undefined : app.lastLogicalPositions[sessionId]
   const session = useQuery({
     queryKey: ['production', 'session-workspace', sessionId, manualAnchor],
@@ -65,7 +66,13 @@ export function SessionWorkspaceSurface({
         { maxItems: SESSION_WINDOW_ITEMS, maxBytes: SESSION_WINDOW_BYTES },
         signal,
       )
-      return { active, descriptor, window: timelineWindow }
+      return {
+        active,
+        anchor,
+        descriptor,
+        restoredRememberedPosition: manualAnchor === null && !active && remembered !== undefined,
+        window: timelineWindow,
+      }
     },
     enabled: sessionId !== null,
     gcTime: 0,
@@ -75,6 +82,7 @@ export function SessionWorkspaceSurface({
     [app.detail, session.data?.window.items],
   )
   const timelineIds = useMemo(() => items.map((item) => item.address.event_sequence), [items])
+  const selected = app.selectedTimeline
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => {
@@ -87,6 +95,14 @@ export function SessionWorkspaceSurface({
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   useEffect(() => onSessionId(sessionId), [onSessionId, sessionId])
   useEffect(() => () => onSessionId(null), [onSessionId])
+  useEffect(() => {
+    if (selected === null) return
+    const row = timelineRef.current?.querySelector<HTMLElement>(
+      `[data-event-sequence="${CSS.escape(selected)}"]`,
+    )
+    row?.focus({ preventScroll: true })
+    row?.scrollIntoView({ block: 'nearest' })
+  }, [selected])
   const showFirstWindow = useCallback(() => setManualAnchor({ kind: 'first' }), [])
   const showLatestWindow = useCallback(() => setManualAnchor({ kind: 'latest' }), [])
   useEffect(() => {
@@ -108,7 +124,6 @@ export function SessionWorkspaceSurface({
     if (candidate === sessionId && manualAnchor === null) void session.refetch()
     setSessionId(candidate)
   }
-  const selected = app.selectedTimeline
   const select = (eventSequence: string) => {
     dispatch(actions.timelineSelected(eventSequence))
     if (sessionId !== null) {
@@ -166,9 +181,11 @@ export function SessionWorkspaceSurface({
               <span className="eyebrow">Stable timeline identity</span>
               <h2 id="session-workspace-heading">{sessionId}</h2>
               <p>
-                {session.data.active
-                  ? 'Active · opened near latest'
-                  : 'Inactive · restored logical position'}
+                {session.data.anchor.kind === 'latest'
+                  ? `${session.data.active ? 'Active' : 'Inactive'} · opened near latest`
+                  : session.data.restoredRememberedPosition
+                    ? 'Inactive · restored logical position'
+                    : `${session.data.active ? 'Active' : 'Inactive'} · inspecting ${session.data.anchor.kind} window`}
               </p>
             </div>
             <dl className="session-telemetry">
@@ -226,7 +243,7 @@ export function SessionWorkspaceSurface({
               {session.data.window.projected_structured_bytes} B
             </span>
           </div>
-          <ol className="session-timeline" aria-label="Session timeline">
+          <ol ref={timelineRef} className="session-timeline" aria-label="Session timeline">
             {items.map((item) => {
               const id = item.address.event_sequence
               const isExpanded = expanded.has(id)
@@ -235,6 +252,8 @@ export function SessionWorkspaceSurface({
                   <button
                     type="button"
                     className="session-item-summary"
+                    data-event-sequence={id}
+                    aria-current={selected === id ? 'true' : undefined}
                     aria-expanded={isExpanded}
                     onClick={() => {
                       select(id)
