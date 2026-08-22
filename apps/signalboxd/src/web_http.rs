@@ -29,7 +29,7 @@ use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
     SessionTimelineDescriptor, SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress,
-    TimelineWindowAnchor, TimelineWindowLimits,
+    TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::SessionId;
 use signalbox_persistence::session_timeline::{
@@ -39,7 +39,8 @@ use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
     WebContractBootstrap, WebContractExample, WebSessionTimelineDescriptor,
     WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
-    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
+    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence,
+    WebU64,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -460,7 +461,7 @@ fn parse_window_anchor(
 
 fn address_dto(address: TimelineAddress) -> WebTimelineAddress {
     WebTimelineAddress {
-        event_sequence: address.sequence().get().to_string(),
+        event_sequence: WebTimelineEventSequence::from_nonzero(address.sequence()),
     }
 }
 
@@ -476,31 +477,33 @@ fn descriptor_dto(
     Ok(WebSessionTimelineDescriptor {
         session_id: descriptor.session.into_uuid().to_string(),
         sizes: WebSessionTimelineSizeFacts {
-            item_count: descriptor.sizes.item_count.to_string(),
-            projected_text_bytes: descriptor.sizes.projected_text_bytes.to_string(),
-            projected_structured_bytes: descriptor.sizes.projected_structured_bytes.to_string(),
-            referenced_blob_count: descriptor.sizes.referenced_blob_count.to_string(),
-            referenced_blob_bytes: descriptor.sizes.referenced_blob_bytes.to_string(),
+            item_count: WebU64::from_u64(descriptor.sizes.item_count),
+            projected_text_bytes: WebU64::from_u64(descriptor.sizes.projected_text_bytes),
+            projected_structured_bytes: WebU64::from_u64(
+                descriptor.sizes.projected_structured_bytes,
+            ),
+            referenced_blob_count: WebU64::from_u64(descriptor.sizes.referenced_blob_count),
+            referenced_blob_bytes: WebU64::from_u64(descriptor.sizes.referenced_blob_bytes),
         },
         first_address: address_dto(first_address),
         latest_address: address_dto(latest_address),
         work: WebSessionWorkFacts {
-            active_turn_count: descriptor.work.active_turn_count.to_string(),
-            queued_turn_count: descriptor.work.queued_turn_count.to_string(),
+            active_turn_count: WebU64::from_u64(descriptor.work.active_turn_count),
+            queued_turn_count: WebU64::from_u64(descriptor.work.queued_turn_count),
         },
-        observed_through: descriptor.observed_through.to_string(),
+        observed_through: WebU64::from_u64(descriptor.observed_through),
     })
 }
 
 fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
-    let continuation_before = window
-        .has_more_before
-        .then(|| window.items.first().map(|item| address_dto(item.address)))
-        .flatten();
-    let continuation_after = window
-        .has_more_after
-        .then(|| window.items.last().map(|item| address_dto(item.address)))
-        .flatten();
+    let continuation_before = match window.continuation_before {
+        TimelineContinuation::Exhausted => None,
+        TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
+    };
+    let continuation_after = match window.continuation_after {
+        TimelineContinuation::Exhausted => None,
+        TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
+    };
     WebSessionTimelineWindow {
         session_id: window.session.into_uuid().to_string(),
         items: window
