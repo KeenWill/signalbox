@@ -288,9 +288,7 @@ const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
   )
 }
 
-test('pages a 101-delivery burst, preserves semantic states, and follows a PR session', async ({
-  page,
-}) => {
+test('pages a 101-delivery burst and preserves semantic session evidence', async ({ page }) => {
   const problems = watchBrowser(page)
   const apiRequests = await installActivityScenario(page)
   await page.goto('/activity')
@@ -306,8 +304,9 @@ test('pages a 101-delivery burst, preserves semantic states, and follows a PR se
   await page.getByRole('button', { name: /#103 Non-converged checks/ }).click()
   await expect(page.getByText(sessionOne)).toBeVisible()
   await expect(page.getByText(sessionTwo)).toBeVisible()
-  const sessionLink = page.getByRole('link', { name: new RegExp(sessionOne) })
-  await expect(sessionLink).toHaveAttribute('href', `/sessions?session=${sessionOne}`)
+  const sessionEvidence = page.getByText(sessionOne, { exact: true })
+  await expect(sessionEvidence).toBeVisible()
+  await expect(sessionEvidence).not.toHaveAttribute('href')
 
   await page.getByRole('button', { name: 'Load older window' }).click()
   await expect(page.getByText('106 loaded in browser window')).toBeVisible()
@@ -317,9 +316,6 @@ test('pages a 101-delivery burst, preserves semantic states, and follows a PR se
   expect(apiRequests.every((request) => request.startsWith('/api/'))).toBe(true)
   expect(apiRequests.join(' ')).not.toMatch(/postgres|database|sql/)
 
-  await sessionLink.click()
-  await expect(page).toHaveURL(new RegExp(`/sessions\\?session=${sessionOne}$`))
-  await expect(page.getByRole('heading', { name: 'Sessions', level: 1 })).toBeVisible()
   await page.keyboard.press('g')
   await page.keyboard.press('t')
   await expect(page).toHaveURL(/\/activity$/)
