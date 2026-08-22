@@ -13,7 +13,7 @@ import {
 import type { ComponentType, ReactNode } from 'react'
 import { type CommandContext, invokeCommand } from '../../commands'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import { actions, useAppSelector } from '../../state'
+import { useAppSelector } from '../../state'
 import { artifactScenario } from './artifactScenario'
 import {
   ARTIFACT_PREVIEW_CHARACTERS,
@@ -55,12 +55,19 @@ type ArtifactCommandId =
   | 'artifact.preview.collapse'
   | 'artifact.original.load'
 
+const selectArtifact = (commandContext: CommandContext, artifactId: string) => {
+  invokeCommand('artifact.select', {
+    ...commandContext,
+    artifactSelectionTarget: artifactId,
+  })
+}
+
 const invokeArtifactAction = (
   commandContext: CommandContext,
   commandId: ArtifactCommandId,
   artifactId: string,
 ) => {
-  commandContext.dispatch(actions.artifactSelected(artifactId))
+  selectArtifact(commandContext, artifactId)
   invokeCommand(commandId, commandContext)
 }
 
@@ -378,7 +385,7 @@ export function ArtifactRenderer({
         type="button"
         className="artifact-heading"
         aria-pressed={selected}
-        onClick={() => commandContext.dispatch(actions.artifactSelected(artifact.id))}
+        onClick={() => selectArtifact(commandContext, artifact.id)}
       >
         {artifactIcon(artifact)}
         <div>

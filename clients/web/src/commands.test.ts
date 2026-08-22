@@ -33,4 +33,18 @@ describe('command registry', () => {
 
     expect(selectApp(store.getState()).expandedArtifacts['artifact-1']).toBe(true)
   })
+
+  it('lets the registered artifact command own selection state', () => {
+    invokeCommand('artifact.select', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      artifactSelectionTarget: 'artifact-2',
+      focusTimeline: () => undefined,
+    })
+
+    expect(selectApp(store.getState()).selectedArtifact).toBe('artifact-2')
+  })
 })

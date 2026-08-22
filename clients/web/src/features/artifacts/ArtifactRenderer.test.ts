@@ -99,6 +99,19 @@ describe('artifact renderer compatibility', () => {
     expect(bounded.omittedCharacters).toBeGreaterThan(0)
   })
 
+  it('counts bare carriage returns toward the expanded line ceiling', () => {
+    const content = Array.from(
+      { length: ARTIFACT_EXPANDED_LINES + 20 },
+      (_, index) => `line ${index + 1}`,
+    ).join('\r')
+
+    const bounded = boundArtifactText(content, Array.from(content).length, 'expanded')
+
+    expect(bounded.content.split('\n')).toHaveLength(ARTIFACT_EXPANDED_LINES)
+    expect(bounded.omittedLines).toBe(true)
+    expect(bounded.omittedCharacters).toBeGreaterThan(0)
+  })
+
   it('fails an unknown remote-media preference closed to ask', () => {
     expect(decodeRemoteMediaPolicy('invented')).toBe('ask')
   })
