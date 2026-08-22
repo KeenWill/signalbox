@@ -29,10 +29,11 @@ use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
     SessionTimelineDescriptor, SessionTimelineDetailBody, SessionTimelineDetailPage,
-    SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress, TimelineBodyContinuation,
-    TimelineBodyField, TimelineContinuation, TimelineDetailContinuation, TimelineDetailCursor,
-    TimelineDetailLimits, TimelineModelCallDisposition, TimelineModelCallState,
-    TimelineTextExcerpt, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
+    SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress, TimelineApprovalSource,
+    TimelineBodyContinuation, TimelineBodyField, TimelineContinuation, TimelineDetailContinuation,
+    TimelineDetailCursor, TimelineDetailLimits, TimelineGoalEvent, TimelineModelCallDisposition,
+    TimelineModelCallState, TimelineTextExcerpt, TimelineToolAttempt, TimelineToolState,
+    TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::{SessionId, TurnId};
 use signalbox_persistence::session_timeline::{
@@ -43,10 +44,12 @@ use signalbox_web_contract::{
     WebContractBootstrap, WebContractExample, WebSessionTimelineDescriptor,
     WebSessionTimelineDetail, WebSessionTimelineDetailBody, WebSessionTimelineDetailPage,
     WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
-    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineBlobReference,
-    WebTimelineBodyContinuation, WebTimelineBodyField, WebTimelineDetailContinuation,
+    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineApprovalSource,
+    WebTimelineBlobReference, WebTimelineBodyContinuation, WebTimelineBodyField,
+    WebTimelineDetailContinuation, WebTimelineGoalEvent, WebTimelineImportedEvidence,
     WebTimelineModelCallDisposition, WebTimelineModelCallState, WebTimelineModelUsage,
-    WebTimelineTextExcerpt, WebTimelineTurnLifecycleKind,
+    WebTimelineTextExcerpt, WebTimelineToolAttempt, WebTimelineToolState,
+    WebTimelineTurnLifecycleKind,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -593,6 +596,13 @@ fn parse_body_field(value: &str) -> Result<TimelineBodyField, ()> {
     match value {
         "input_text" => Ok(TimelineBodyField::InputText),
         "model_response" => Ok(TimelineBodyField::ModelResponse),
+        "tool_arguments" => Ok(TimelineBodyField::ToolArguments),
+        "tool_result" => Ok(TimelineBodyField::ToolResult),
+        "tool_failure" => Ok(TimelineBodyField::ToolFailure),
+        "approval_rationale" => Ok(TimelineBodyField::ApprovalRationale),
+        "goal_text" => Ok(TimelineBodyField::GoalText),
+        "compaction_summary" => Ok(TimelineBodyField::CompactionSummary),
+        "delegation_content" => Ok(TimelineBodyField::DelegationContent),
         _ => Err(()),
     }
 }
@@ -774,6 +784,21 @@ fn detail_page_dto(page: SessionTimelineDetailPage) -> WebSessionTimelineDetailP
 
 fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailBody {
     match body {
+        SessionTimelineDetailBody::SessionCreated { imported_evidence } => {
+            WebSessionTimelineDetailBody::SessionCreated {
+                imported_evidence: imported_evidence.map(|evidence| WebTimelineImportedEvidence {
+                    imported_entry_id: evidence.imported_entry_id,
+                    imported_position: evidence.imported_position.to_string(),
+                }),
+            }
+        }
+        SessionTimelineDetailBody::ModelSettings {
+            turn_id,
+            cause_code,
+        } => WebSessionTimelineDetailBody::ModelSettings {
+            turn_id,
+            cause_code,
+        },
         SessionTimelineDetailBody::UserInput {
             turn_id,
             text,
@@ -818,6 +843,61 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             },
             cause_code,
         },
+        SessionTimelineDetailBody::ToolBatch {
+            turn_id,
+            producing_model_call_id,
+            state,
+            tools,
+            goal_events,
+        } => WebSessionTimelineDetailBody::ToolBatch {
+            turn_id,
+            producing_model_call_id,
+            state,
+            tools: tools.into_iter().map(tool_attempt_dto).collect(),
+            goal_events: goal_events.into_iter().map(goal_event_dto).collect(),
+        },
+        SessionTimelineDetailBody::ToolApprovalDecision {
+            turn_id,
+            request_id,
+            tool_name,
+            decision,
+            source,
+            rationale,
+            approval_judge_escalated,
+        } => WebSessionTimelineDetailBody::ToolApprovalDecision {
+            turn_id,
+            request_id,
+            tool_name,
+            decision,
+            source: match source {
+                TimelineApprovalSource::Policy => WebTimelineApprovalSource::Policy,
+                TimelineApprovalSource::Delegate => WebTimelineApprovalSource::Delegate,
+                TimelineApprovalSource::User => WebTimelineApprovalSource::User,
+            },
+            rationale: rationale.map(text_excerpt_dto),
+            approval_judge_escalated,
+        },
+        SessionTimelineDetailBody::GoalEvent { turn_id, event } => {
+            WebSessionTimelineDetailBody::GoalEvent {
+                turn_id,
+                event: goal_event_dto(event),
+            }
+        }
+        SessionTimelineDetailBody::ContextCompaction {
+            compaction_id,
+            model_call_id,
+            through_position,
+            summary_entry_id,
+            result_frontier_id,
+            summary,
+        } => WebSessionTimelineDetailBody::ContextCompaction {
+            compaction_id,
+            model_call_id,
+            through_position: through_position.to_string(),
+            summary_entry_id,
+            result_frontier_id,
+            summary: text_excerpt_dto(summary),
+        },
         SessionTimelineDetailBody::TurnLifecycle {
             turn_id,
             lifecycle,
@@ -832,9 +912,84 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             },
             cause_code,
         },
-        SessionTimelineDetailBody::EventFact { kind } => WebSessionTimelineDetailBody::EventFact {
-            kind: event_kind_dto(kind),
+        SessionTimelineDetailBody::Reconciliation {
+            turn_id,
+            operation_kind,
+            operation_id,
+            attempt_count,
+            exhausted,
+            operator_required,
+            cause_code,
+        } => WebSessionTimelineDetailBody::Reconciliation {
+            turn_id,
+            operation_kind,
+            operation_id,
+            attempt_count: attempt_count.to_string(),
+            exhausted,
+            operator_required,
+            cause_code,
         },
+        SessionTimelineDetailBody::Runner {
+            runner_id,
+            placement_revision,
+            sandbox_posture,
+            working_directory,
+            state,
+        } => WebSessionTimelineDetailBody::Runner {
+            runner_id,
+            placement_revision: placement_revision.to_string(),
+            sandbox_posture,
+            working_directory,
+            state,
+        },
+        SessionTimelineDetailBody::Delegation {
+            event_kind,
+            relationship_id,
+            subject_id,
+            outcome,
+            reason,
+            content,
+        } => WebSessionTimelineDetailBody::Delegation {
+            event_kind,
+            relationship_id,
+            subject_id,
+            outcome,
+            reason,
+            content: content.map(text_excerpt_dto),
+        },
+    }
+}
+
+fn goal_event_dto(event: TimelineGoalEvent) -> WebTimelineGoalEvent {
+    WebTimelineGoalEvent {
+        generation: event.generation.to_string(),
+        event_kind: event.event_kind,
+        reason: event.reason,
+        text: event.text.map(text_excerpt_dto),
+    }
+}
+
+fn tool_attempt_dto(attempt: TimelineToolAttempt) -> WebTimelineToolAttempt {
+    WebTimelineToolAttempt {
+        request_id: attempt.request_id,
+        attempt_id: attempt.attempt_id,
+        tool_name: attempt.tool_name,
+        arguments: attempt.arguments.map(text_excerpt_dto),
+        result: attempt.result.map(text_excerpt_dto),
+        failure: attempt.failure.map(text_excerpt_dto),
+        approval_posture: attempt.approval_posture,
+        approval_judge_escalated: attempt.approval_judge_escalated,
+        operator_required: attempt.operator_required,
+        effect_posture: attempt.effect_posture,
+        sandbox_posture: attempt.sandbox_posture,
+        state: attempt.state.map(|state| match state {
+            TimelineToolState::Prepared => WebTimelineToolState::Prepared,
+            TimelineToolState::InFlight => WebTimelineToolState::InFlight,
+            TimelineToolState::Completed => WebTimelineToolState::Completed,
+            TimelineToolState::KnownFailed => WebTimelineToolState::KnownFailed,
+            TimelineToolState::Ambiguous => WebTimelineToolState::Ambiguous,
+        }),
+        cause_code: attempt.cause_code,
     }
 }
 
@@ -880,6 +1035,13 @@ fn body_continuation_dto(continuation: TimelineBodyContinuation) -> WebTimelineB
         field: match continuation.field {
             TimelineBodyField::InputText => WebTimelineBodyField::InputText,
             TimelineBodyField::ModelResponse => WebTimelineBodyField::ModelResponse,
+            TimelineBodyField::ToolArguments => WebTimelineBodyField::ToolArguments,
+            TimelineBodyField::ToolResult => WebTimelineBodyField::ToolResult,
+            TimelineBodyField::ToolFailure => WebTimelineBodyField::ToolFailure,
+            TimelineBodyField::ApprovalRationale => WebTimelineBodyField::ApprovalRationale,
+            TimelineBodyField::GoalText => WebTimelineBodyField::GoalText,
+            TimelineBodyField::CompactionSummary => WebTimelineBodyField::CompactionSummary,
+            TimelineBodyField::DelegationContent => WebTimelineBodyField::DelegationContent,
         },
         member_index: continuation.member_index,
         offset_bytes: continuation.offset_bytes.to_string(),

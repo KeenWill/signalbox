@@ -332,6 +332,20 @@ pub enum TimelineBodyField {
     InputText,
     /// Authoritative assistant response text.
     ModelResponse,
+    /// One tool request's exact arguments.
+    ToolArguments,
+    /// One tool attempt's exact result.
+    ToolResult,
+    /// One tool attempt's exact failure detail.
+    ToolFailure,
+    /// One approval decision's rationale.
+    ApprovalRationale,
+    /// Goal statement, need, guidance, or report text.
+    GoalText,
+    /// Compaction summary text.
+    CompactionSummary,
+    /// Delegation message or result content.
+    DelegationContent,
 }
 
 /// Exact continuation within a body too large for one selected byte budget.
@@ -428,9 +442,70 @@ pub enum TimelineTurnLifecycleKind {
     Terminalized,
 }
 
+/// Closed tool-execution lifecycle state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineToolState {
+    Prepared,
+    InFlight,
+    Completed,
+    KnownFailed,
+    Ambiguous,
+}
+
+/// One request and its optional attempt, projected one member at a time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelineToolAttempt {
+    pub request_id: String,
+    pub attempt_id: Option<String>,
+    pub tool_name: String,
+    pub arguments: Option<TimelineTextExcerpt>,
+    pub result: Option<TimelineTextExcerpt>,
+    pub failure: Option<TimelineTextExcerpt>,
+    pub approval_posture: String,
+    pub approval_judge_escalated: bool,
+    pub operator_required: bool,
+    pub effect_posture: Option<String>,
+    pub sandbox_posture: Option<String>,
+    pub state: Option<TimelineToolState>,
+    pub cause_code: Option<String>,
+}
+
+/// Typed provenance of an approval decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineApprovalSource {
+    Policy,
+    Delegate,
+    User,
+}
+
+/// Typed goal-lineage event attached to the timeline fact that caused it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelineGoalEvent {
+    pub generation: u64,
+    pub event_kind: String,
+    pub reason: Option<String>,
+    pub text: Option<TimelineTextExcerpt>,
+}
+
+/// Imported-frontier provenance; source bytes remain reference-only.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelineImportedEvidence {
+    pub imported_entry_id: String,
+    pub imported_position: u64,
+}
+
 /// Typed detail body, separate from storage, process-wire, and browser DTOs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionTimelineDetailBody {
+    /// Session creation provenance, including an imported frontier when present.
+    SessionCreated {
+        imported_evidence: Option<TimelineImportedEvidence>,
+    },
+    /// A model-settings projection changed at session or turn scope.
+    ModelSettings {
+        turn_id: Option<String>,
+        cause_code: String,
+    },
     /// Exact accepted user input and reference-only attachments.
     UserInput {
         turn_id: String,
@@ -448,14 +523,71 @@ pub enum SessionTimelineDetailBody {
         usage: TimelineModelUsage,
         cause_code: Option<String>,
     },
+    /// A tool batch with one progressively selected request/attempt member.
+    ToolBatch {
+        turn_id: String,
+        producing_model_call_id: String,
+        state: String,
+        tools: Vec<TimelineToolAttempt>,
+        goal_events: Vec<TimelineGoalEvent>,
+    },
+    /// One explicit tool approval decision and complete provenance.
+    ToolApprovalDecision {
+        turn_id: String,
+        request_id: String,
+        tool_name: String,
+        decision: String,
+        source: TimelineApprovalSource,
+        rationale: Option<TimelineTextExcerpt>,
+        approval_judge_escalated: bool,
+    },
+    /// One typed goal-lineage transition.
+    GoalEvent {
+        turn_id: String,
+        event: TimelineGoalEvent,
+    },
+    /// One append-only context compaction and its bounded summary.
+    ContextCompaction {
+        compaction_id: String,
+        model_call_id: String,
+        through_position: u64,
+        summary_entry_id: String,
+        result_frontier_id: String,
+        summary: TimelineTextExcerpt,
+    },
     /// Activated or terminalized turn boundary with a stable cause code.
     TurnLifecycle {
         turn_id: String,
         lifecycle: TimelineTurnLifecycleKind,
         cause_code: String,
     },
-    /// Typed header fact whose richer body is supplied by the next stack slice.
-    EventFact { kind: SessionTimelineEventKind },
+    /// Automatic reconciliation facts that explain operator-required parking.
+    Reconciliation {
+        turn_id: String,
+        operation_kind: String,
+        operation_id: String,
+        attempt_count: u64,
+        exhausted: bool,
+        operator_required: bool,
+        cause_code: String,
+    },
+    /// Runner placement fact, including sandbox posture.
+    Runner {
+        runner_id: String,
+        placement_revision: u64,
+        sandbox_posture: String,
+        working_directory: Option<String>,
+        state: String,
+    },
+    /// Typed delegation update or wake with optional bounded delivered content.
+    Delegation {
+        event_kind: String,
+        relationship_id: String,
+        subject_id: Option<String>,
+        outcome: Option<String>,
+        reason: Option<String>,
+        content: Option<TimelineTextExcerpt>,
+    },
 }
 
 /// One detail record at the same stable address as its lightweight header.

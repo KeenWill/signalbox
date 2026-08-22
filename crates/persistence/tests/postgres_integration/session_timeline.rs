@@ -153,7 +153,9 @@ async fn item_and_region_details_share_the_stable_creation_address() -> Result<(
     assert_eq!(item.items[0].address, address);
     assert!(matches!(
         item.items[0].body,
-        SessionTimelineDetailBody::EventFact { .. }
+        SessionTimelineDetailBody::SessionCreated {
+            imported_evidence: None
+        }
     ));
     assert!(item.projected_body_bytes > 0);
     assert!(item.projected_body_bytes <= limits.max_projected_bytes());

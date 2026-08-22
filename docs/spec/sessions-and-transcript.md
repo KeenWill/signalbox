@@ -1,8 +1,9 @@
 # Sessions and the transcript
 
 The bounded browser session descriptor and historical timeline foundation are
-verified against the parent PR (`agent/web-session-timeline`). The first typed
-detail slice is verified against this PR (`agent/web-timeline-detail`).
+verified against the parent PR (`agent/web-session-timeline`). Typed detail
+bodies and progressive body continuation are verified against the detail stack
+through `agent/web-timeline-detail-bodies`.
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -702,9 +703,9 @@ from its required `first` address through its required `through` address. Every
 request supplies `max_items` from 1 through 128 and `max_bytes` from 256 through
 65,536. Turn and region reads select at most 129 addresses and return at most
 128 detail records; item reads retain the same explicit item ceiling for typed
-bodies with repeated members added by later slices. All selected rows are
-decoded through the same fail-closed typed outbox projection as durable
-dispatch, under one repeatable-read transaction.
+bodies with repeated members. All selected rows are decoded through the same
+fail-closed typed outbox projection as durable dispatch, under one
+repeatable-read transaction.
 
 The response reports `projected_body_bytes` and never silently truncates. A
 continuation is either `more_at`, naming the exact stable address at which the
@@ -718,13 +719,18 @@ projected-body budget. An oversized text is a typed bounded excerpt carrying its
 total byte length and exact continuation; it is never flattened into a summary
 that appears complete.
 
-The first detail slice projects accepted input with reference-only attachment
-facts; model-call request context count, selected model identity, response text,
+Detail bodies project accepted input with reference-only attachment facts;
+model-call request context count, selected model identity, response text,
 reported token usage, terminal disposition, and provider failure cause code; and
-activated or terminalized turn lifecycle with a cause code. Known valid
-categories awaiting their richer typed body in the next stack slice remain a
-closed `event_fact` carrying their existing event category. An unknown durable
-event or state is corruption, never a generic body or guessed prose.
+activated or terminalized turn lifecycle with a cause code. The remaining closed
+variants carry session creation and imported-frontier evidence, settings
+changes, tool requests and attempts, explicit approval provenance and judge
+escalation, goal transitions, context compaction, reconciliation and
+operator-required parking, runner sandbox posture, and delegation updates and
+wakes. Tool arguments, results, failures, approval rationale, goal text,
+compaction summaries, and delegation content use their own continuation fields;
+repeated tool members advance by explicit member index. An unknown durable event
+or state is corruption, never a generic body or guessed prose.
 
 Browser DTOs remain distinct from the application projection, persistence rows,
 and process messages. Text already masked before durable storage remains masked:

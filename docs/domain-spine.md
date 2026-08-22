@@ -6472,6 +6472,13 @@ impl TimelineDetailLimits {
 pub enum TimelineBodyField {
     InputText,
     ModelResponse,
+    ToolArguments,
+    ToolResult,
+    ToolFailure,
+    ApprovalRationale,
+    GoalText,
+    CompactionSummary,
+    DelegationContent,
 }
 pub struct TimelineBodyContinuation {
     pub address: TimelineAddress,
@@ -6520,11 +6527,24 @@ pub struct TimelineModelUsage {
     pub cache_read_input_tokens: Option<u64>,
 }
 pub enum TimelineTurnLifecycleKind { Activated, Terminalized }
+pub enum TimelineToolState { Prepared, InFlight, Completed, KnownFailed, Ambiguous }
+pub struct TimelineToolAttempt { /* fields */ }
+pub enum TimelineApprovalSource { Policy, Delegate, User }
+pub struct TimelineGoalEvent { /* fields */ }
+pub struct TimelineImportedEvidence { /* fields */ }
 pub enum SessionTimelineDetailBody {
+    SessionCreated { /* fields */ },
+    ModelSettings { /* fields */ },
     UserInput { /* fields */ },
     ModelCall { /* fields */ },
+    ToolBatch { /* fields */ },
+    ToolApprovalDecision { /* fields */ },
+    GoalEvent { /* fields */ },
+    ContextCompaction { /* fields */ },
     TurnLifecycle { /* fields */ },
-    EventFact { kind: SessionTimelineEventKind },
+    Reconciliation { /* fields */ },
+    Runner { /* fields */ },
+    Delegation { /* fields */ },
 }
 pub struct SessionTimelineDetail {
     pub address: TimelineAddress,
@@ -11315,7 +11335,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)               |
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
-| application: session_timeline                      | 29 (+6 free fn) (incl. 1 trait)  |
+| application: session_timeline                      | 34 (+6 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 35 (incl. 8 traits)              |
 | application: tool_loop                             | 26 (incl. 5 traits)              |
 | application: operator_failure                      | 2 (incl. 1 trait)                |
@@ -11334,4 +11354,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
 | application: turn_liveness                         | 7                                |
-| **signalbox-application total**                    | **324 (+12 free fn)**            |
+| **signalbox-application total**                    | **329 (+12 free fn)**            |

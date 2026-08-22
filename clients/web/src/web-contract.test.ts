@@ -45,4 +45,52 @@ describe('generated timeline detail decoder', () => {
       'timeline_detail_page.items[0].body must be one recognized variant',
     )
   })
+
+  it('accepts a progressively bounded denied tool attempt with judge evidence', () => {
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '9' },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000002',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+            state: 'results_projected',
+            tools: [
+              {
+                request_id: '00000000-0000-0000-0000-000000000004',
+                tool_name: 'exec',
+                arguments: {
+                  text: '{"cmd":"cargo test"}',
+                  offset_bytes: '0',
+                  total_bytes: '20',
+                },
+                approval_posture: 'delegated',
+                approval_judge_escalated: true,
+                operator_required: true,
+                state: 'known_failed',
+                cause_code: 'denied',
+              },
+            ],
+            goal_events: [],
+          },
+          projected_body_bytes: 148,
+        },
+      ],
+      projected_body_bytes: 148,
+      continuation: {
+        type: 'more_body',
+        body: {
+          address: { event_sequence: '9' },
+          field: 'tool_failure',
+          member_index: 0,
+          offset_bytes: '0',
+        },
+      },
+    }
+
+    expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
+  })
 })

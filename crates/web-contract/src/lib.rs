@@ -207,6 +207,13 @@ pub struct WebSessionTimelineWindow {
 pub enum WebTimelineBodyField {
     InputText,
     ModelResponse,
+    ToolArguments,
+    ToolResult,
+    ToolFailure,
+    ApprovalRationale,
+    GoalText,
+    CompactionSummary,
+    DelegationContent,
 }
 
 /// Exact continuation within an oversized typed body.
@@ -279,10 +286,69 @@ pub enum WebTimelineTurnLifecycleKind {
     Terminalized,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineToolState {
+    Prepared,
+    InFlight,
+    Completed,
+    KnownFailed,
+    Ambiguous,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineToolAttempt {
+    pub request_id: String,
+    pub attempt_id: Option<String>,
+    pub tool_name: String,
+    pub arguments: Option<WebTimelineTextExcerpt>,
+    pub result: Option<WebTimelineTextExcerpt>,
+    pub failure: Option<WebTimelineTextExcerpt>,
+    pub approval_posture: String,
+    pub approval_judge_escalated: bool,
+    pub operator_required: bool,
+    pub effect_posture: Option<String>,
+    pub sandbox_posture: Option<String>,
+    pub state: Option<WebTimelineToolState>,
+    pub cause_code: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineApprovalSource {
+    Policy,
+    Delegate,
+    User,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineGoalEvent {
+    pub generation: String,
+    pub event_kind: String,
+    pub reason: Option<String>,
+    pub text: Option<WebTimelineTextExcerpt>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineImportedEvidence {
+    pub imported_entry_id: String,
+    pub imported_position: String,
+}
+
 /// Typed browser body, distinct from application and persistence projections.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 pub enum WebSessionTimelineDetailBody {
+    SessionCreated {
+        imported_evidence: Option<WebTimelineImportedEvidence>,
+    },
+    ModelSettings {
+        turn_id: Option<String>,
+        cause_code: String,
+    },
     UserInput {
         turn_id: String,
         text: WebTimelineTextExcerpt,
@@ -298,13 +364,62 @@ pub enum WebSessionTimelineDetailBody {
         usage: WebTimelineModelUsage,
         cause_code: Option<String>,
     },
+    ToolBatch {
+        turn_id: String,
+        producing_model_call_id: String,
+        state: String,
+        tools: Vec<WebTimelineToolAttempt>,
+        goal_events: Vec<WebTimelineGoalEvent>,
+    },
+    ToolApprovalDecision {
+        turn_id: String,
+        request_id: String,
+        tool_name: String,
+        decision: String,
+        source: WebTimelineApprovalSource,
+        rationale: Option<WebTimelineTextExcerpt>,
+        approval_judge_escalated: bool,
+    },
+    GoalEvent {
+        turn_id: String,
+        event: WebTimelineGoalEvent,
+    },
+    ContextCompaction {
+        compaction_id: String,
+        model_call_id: String,
+        through_position: String,
+        summary_entry_id: String,
+        result_frontier_id: String,
+        summary: WebTimelineTextExcerpt,
+    },
     TurnLifecycle {
         turn_id: String,
         lifecycle: WebTimelineTurnLifecycleKind,
         cause_code: String,
     },
-    EventFact {
-        kind: WebSessionTimelineEventKind,
+    Reconciliation {
+        turn_id: String,
+        operation_kind: String,
+        operation_id: String,
+        attempt_count: String,
+        exhausted: bool,
+        operator_required: bool,
+        cause_code: String,
+    },
+    Runner {
+        runner_id: String,
+        placement_revision: String,
+        sandbox_posture: String,
+        working_directory: Option<String>,
+        state: String,
+    },
+    Delegation {
+        event_kind: String,
+        relationship_id: String,
+        subject_id: Option<String>,
+        outcome: Option<String>,
+        reason: Option<String>,
+        content: Option<WebTimelineTextExcerpt>,
     },
 }
 
