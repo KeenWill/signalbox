@@ -98,6 +98,46 @@ async fn credential_action_head_is_available(
     Ok(available)
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn deferred_final_state_validation_claims_are_typed_and_transaction_local()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7730_u128;
+    let (_session, turn, _repository) =
+        active_credential_pool_fixture(&pool, seed, "claim-pool", "claim-member").await?;
+
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT assert_turn_lifecycle_final_state($1)")
+        .bind(turn.into_uuid())
+        .execute(&mut *transaction)
+        .await?;
+    let duplicate_turn_claim: bool =
+        sqlx::query_scalar("SELECT claim_deferred_final_state_validation('turn_lifecycle', $1)")
+            .bind(turn.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+    let distinct_kind_claim: bool =
+        sqlx::query_scalar("SELECT claim_deferred_final_state_validation('model_call', $1)")
+            .bind(turn.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+    assert!(!duplicate_turn_claim);
+    assert!(distinct_kind_claim);
+    transaction.rollback().await?;
+
+    let renewed_turn_claim: bool =
+        sqlx::query_scalar("SELECT claim_deferred_final_state_validation('turn_lifecycle', $1)")
+            .bind(turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert!(renewed_turn_claim);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-007 / INV-009 / INV-012: model-call writers acquire credential action
 /// heads ahead of the shared outbox allocator, serializing one pool before it
 /// can occupy the global append queue.
