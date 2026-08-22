@@ -21,6 +21,7 @@ import {
 } from './productCommands'
 import { type SessionSelectionEvidence, SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
+import { hasValidSessionTimelineContract } from './session-timeline/model'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
 const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; question: string }> = {
@@ -333,7 +334,6 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
-  const primaryRef = useRef<HTMLElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
@@ -359,7 +359,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       getState: store.getState,
       timelineIds,
       timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
-      focusTimeline: () => (timelineRef.current ?? primaryRef.current)?.focus(),
+      focusTimeline: () => timelineRef.current?.focus(),
       loadTimelineWindow: (anchor) =>
         setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 })),
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
@@ -408,7 +408,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const cacheLabel = productSurfaceCacheLabel(surface)
   const timelineCapability = bootstrap.isPending
     ? 'checking'
-    : bootstrap.isSuccess && bootstrap.data.capabilities.bounded_session_timeline
+    : bootstrap.isSuccess && hasValidSessionTimelineContract(bootstrap.data)
       ? 'available'
       : 'unavailable'
 
@@ -449,7 +449,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <aside className="product-navigation-pane">
         <ProductNavigation active={surface} />
       </aside>
-      <main className="product-main" tabIndex={-1} ref={primaryRef}>
+      <main className="product-main" tabIndex={-1}>
         <header className="product-header">
           <div>
             <span className="eyebrow">{copy.eyebrow}</span>

@@ -164,6 +164,36 @@ test('gates Sessions on the validated bootstrap capability', async ({ page }) =>
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('gates Sessions on valid timeline limits', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        limits: { ...bootstrapFixture.limits, max_timeline_window_items: 257 },
+      },
+    }),
+  )
+  await page.goto('/sessions')
+
+  await expect(page.getByText('Timeline reads unavailable')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Open workspace' })).toBeDisabled()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('leaves focus in place when Escape has no surface to unwind', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const sessionsLink = page.getByRole('link', { name: /Sessions/ })
+  await sessionsLink.focus()
+  await page.keyboard.press('Escape')
+
+  await expect(sessionsLink).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('retries a failed product bootstrap after the daemon recovers', async ({ page }) => {
   const problems = watchBrowser(page)
   let attempts = 0

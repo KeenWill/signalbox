@@ -15,7 +15,12 @@ function PreferenceGroup({ legend, children }: { legend: string; children: React
 export function SettingsSurface() {
   const app = useAppSelector(selectApp)
   const dispatch = useAppDispatch()
-  const invokeDetailCommand = (command: Extract<CommandId, `detail.${string}`>) =>
+  const invokeSettingsCommand = (
+    command: Extract<
+      CommandId,
+      `detail.${string}` | 'layout.toggle' | 'density.toggle' | 'theme.toggle'
+    >,
+  ) =>
     invokeCommand(command, {
       dispatch,
       getState: store.getState,
@@ -40,7 +45,7 @@ export function SettingsSurface() {
               type="radio"
               name="layout"
               checked={app.layout === 'workbench'}
-              onChange={() => dispatch(actions.layoutSet('workbench'))}
+              onChange={() => invokeSettingsCommand('layout.toggle')}
             />
             <span>Workbench</span>
             <small>Navigation, primary surface, and contextual inspector.</small>
@@ -50,7 +55,7 @@ export function SettingsSurface() {
               type="radio"
               name="layout"
               checked={app.layout === 'focus'}
-              onChange={() => dispatch(actions.layoutSet('focus'))}
+              onChange={() => invokeSettingsCommand('layout.toggle')}
             />
             <span>Focus</span>
             <small>A quiet primary surface with secondary panes removed.</small>
@@ -63,7 +68,7 @@ export function SettingsSurface() {
               type="radio"
               name="density"
               checked={app.density === 'compact'}
-              onChange={() => dispatch(actions.densitySet('compact'))}
+              onChange={() => invokeSettingsCommand('density.toggle')}
             />
             <span>Compact</span>
             <small>Dense rows for high-volume operator work.</small>
@@ -73,7 +78,7 @@ export function SettingsSurface() {
               type="radio"
               name="density"
               checked={app.density === 'comfortable'}
-              onChange={() => dispatch(actions.densitySet('comfortable'))}
+              onChange={() => invokeSettingsCommand('density.toggle')}
             />
             <span>Comfortable</span>
             <small>More separation without changing information detail.</small>
@@ -86,7 +91,7 @@ export function SettingsSurface() {
               type="radio"
               name="detail"
               checked={app.detail === 'full'}
-              onChange={() => invokeDetailCommand('detail.full')}
+              onChange={() => invokeSettingsCommand('detail.full')}
             />
             <span>Full</span>
           </label>
@@ -95,7 +100,7 @@ export function SettingsSurface() {
               type="radio"
               name="detail"
               checked={app.detail === 'condensed'}
-              onChange={() => invokeDetailCommand('detail.condensed')}
+              onChange={() => invokeSettingsCommand('detail.condensed')}
             />
             <span>Condensed</span>
           </label>
@@ -104,7 +109,7 @@ export function SettingsSurface() {
               type="radio"
               name="detail"
               checked={app.detail === 'results'}
-              onChange={() => invokeDetailCommand('detail.results')}
+              onChange={() => invokeSettingsCommand('detail.results')}
             />
             <span>Results</span>
           </label>
@@ -116,7 +121,7 @@ export function SettingsSurface() {
               type="radio"
               name="theme"
               checked={app.theme === 'dark'}
-              onChange={() => dispatch(actions.themeSet('dark'))}
+              onChange={() => invokeSettingsCommand('theme.toggle')}
             />
             <span>Dark</span>
           </label>
@@ -125,7 +130,7 @@ export function SettingsSurface() {
               type="radio"
               name="theme"
               checked={app.theme === 'light'}
-              onChange={() => dispatch(actions.themeSet('light'))}
+              onChange={() => invokeSettingsCommand('theme.toggle')}
             />
             <span>Light</span>
           </label>

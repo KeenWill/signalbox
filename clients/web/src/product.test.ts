@@ -6,6 +6,7 @@ import {
   productSurfaceStates,
   SameOriginProductTransport,
 } from './product'
+import { hasValidSessionTimelineContract } from './session-timeline/model'
 
 const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '1' },
@@ -70,6 +71,22 @@ describe('SameOriginProductTransport', () => {
 })
 
 describe('product surface availability', () => {
+  it('rejects timeline capability with unusable semantic limits', () => {
+    expect(hasValidSessionTimelineContract(bootstrapFixture)).toBe(true)
+    expect(
+      hasValidSessionTimelineContract({
+        ...bootstrapFixture,
+        limits: { ...bootstrapFixture.limits, max_timeline_window_items: 0 },
+      }),
+    ).toBe(false)
+    expect(
+      hasValidSessionTimelineContract({
+        ...bootstrapFixture,
+        limits: { ...bootstrapFixture.limits, max_timeline_window_bytes: 65_537 },
+      }),
+    ).toBe(false)
+  })
+
   it('defines one typed authority state for every product route', () => {
     expect(productSurfaceStates).toHaveProperty(productRoutes[0].id)
     expect(productSurfaceStates).toHaveProperty(productRoutes[1].id)

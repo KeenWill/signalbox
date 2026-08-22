@@ -24,6 +24,13 @@ type TimelineContractLimits = Pick<
   'max_timeline_window_items' | 'max_timeline_window_bytes'
 >
 
+export const hasValidSessionTimelineContract = (bootstrap: WebContractBootstrap): boolean =>
+  bootstrap.capabilities.bounded_session_timeline &&
+  bootstrap.limits.max_timeline_window_items >= 1 &&
+  bootstrap.limits.max_timeline_window_items <= MAX_CONTRACT_TIMELINE_WINDOW_ITEMS &&
+  bootstrap.limits.max_timeline_window_bytes >= 256 &&
+  bootstrap.limits.max_timeline_window_bytes <= MAX_CONTRACT_TIMELINE_WINDOW_BYTES
+
 export type SessionWindowAnchor =
   | { kind: 'first' | 'latest' }
   | { kind: 'before' | 'after' | 'around'; eventSequence: string }
@@ -168,12 +175,7 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     if (!bootstrap.capabilities.bounded_session_timeline) {
       throw new TypeError('bounded session timeline capability is unavailable')
     }
-    if (
-      bootstrap.limits.max_timeline_window_items < 1 ||
-      bootstrap.limits.max_timeline_window_items > MAX_CONTRACT_TIMELINE_WINDOW_ITEMS ||
-      bootstrap.limits.max_timeline_window_bytes < 256 ||
-      bootstrap.limits.max_timeline_window_bytes > MAX_CONTRACT_TIMELINE_WINDOW_BYTES
-    ) {
+    if (!hasValidSessionTimelineContract(bootstrap)) {
       throw new TypeError('bounded session timeline limits are invalid')
     }
     return new HttpSessionTimelineSource(bootstrap.limits, request)
