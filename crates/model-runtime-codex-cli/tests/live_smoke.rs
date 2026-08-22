@@ -294,7 +294,7 @@ async fn the_pinned_codex_cli_completes_one_exchange() {
         credential_reference.clone(),
         None,
     );
-    config.exchange_timeout = Duration::from_secs(4 * 60);
+    config.exchange_timeout = Some(Duration::from_secs(4 * 60));
     let runtime = CodexCliRuntime::new(config).expect("smoke runtime configuration is valid");
 
     let mut operation = ModelOperation::new(

@@ -11,6 +11,7 @@ type WebApiErrorKind = "transport" | "application";
 
 type WebContractCapabilities = {
   readonly bounded_json: boolean;
+  readonly bounded_session_timeline: boolean;
   readonly ndjson_streaming: boolean;
   readonly same_origin_json_mutations: boolean;
 };
@@ -23,6 +24,33 @@ type WebContractIdentity = {
 type WebContractLimits = {
   readonly max_json_body_bytes: number;
   readonly max_ndjson_item_bytes: number;
+  readonly max_timeline_window_bytes: number;
+  readonly max_timeline_window_items: number;
+};
+
+type WebSessionTimelineEventKind = "session_created" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
+
+type WebSessionTimelineItem = {
+  readonly address: WebTimelineAddress;
+  readonly kind: WebSessionTimelineEventKind;
+  readonly projected_structured_bytes: number;
+};
+
+type WebSessionTimelineSizeFacts = {
+  readonly item_count: string;
+  readonly projected_structured_bytes: string;
+  readonly projected_text_bytes: string;
+  readonly referenced_blob_bytes: string;
+  readonly referenced_blob_count: string;
+};
+
+type WebSessionWorkFacts = {
+  readonly active_turn_count: string;
+  readonly queued_turn_count: string;
+};
+
+type WebTimelineAddress = {
+  readonly event_sequence: string;
 };
 
 export type WebContractBootstrap = {
@@ -39,6 +67,25 @@ export type WebApiErrorResponse = {
   readonly error: WebApiError;
 };
 
+export type WebSessionTimelineDescriptor = {
+  readonly first_address: WebTimelineAddress;
+  readonly latest_address: WebTimelineAddress;
+  readonly observed_through: string;
+  readonly session_id: string;
+  readonly sizes: WebSessionTimelineSizeFacts;
+  readonly work: WebSessionWorkFacts;
+};
+
+export type WebSessionTimelineWindow = {
+  readonly continuation_after?: WebTimelineAddress | null;
+  readonly continuation_before?: WebTimelineAddress | null;
+  readonly items: ReadonlyArray<WebSessionTimelineItem>;
+  readonly projected_structured_bytes: number;
+  readonly session_id: string;
+};
+
 export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;
 export function decodeWebContractExample(value: unknown): WebContractExample;
 export function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;
+export function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;
+export function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;

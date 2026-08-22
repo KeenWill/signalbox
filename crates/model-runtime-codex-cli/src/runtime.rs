@@ -135,7 +135,7 @@ pub struct CodexCliRuntime {
     executable: PathBuf,
     working_directory: PathBuf,
     credential_reference: signalbox_model_runtime::CredentialReference,
-    exchange_timeout: Duration,
+    exchange_timeout: Option<Duration>,
     interrupt_grace: Duration,
     post_kill_reap_bound: Option<Duration>,
     event_limit: usize,
@@ -158,7 +158,7 @@ pub struct CodexCliPreparedRequest<C> {
     resolved_target: String,
     delivery: DeliveryMode,
     translated: crate::translate::TranslatedOperation,
-    exchange_timeout: Duration,
+    exchange_timeout: Option<Duration>,
     interrupt_grace: Duration,
     post_kill_reap_bound: Option<Duration>,
     event_limit: usize,
@@ -261,11 +261,9 @@ impl CodexCliRuntime {
         if !config.working_directory.is_dir() {
             return Err(CodexCliConstructionError::InvalidWorkingDirectory);
         }
-        if config.exchange_timeout.is_zero()
-            || tokio::time::Instant::now()
-                .checked_add(config.exchange_timeout)
-                .is_none()
-        {
+        if config.exchange_timeout.is_some_and(|timeout| {
+            timeout.is_zero() || tokio::time::Instant::now().checked_add(timeout).is_none()
+        }) {
             return Err(CodexCliConstructionError::InvalidExchangeTimeout);
         }
         if config.interrupt_grace.is_zero() {

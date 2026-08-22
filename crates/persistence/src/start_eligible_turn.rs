@@ -10,9 +10,8 @@ use signalbox_domain::{
     AcceptedInputEligibilityFailure, AcceptedInputSchedulingProjection,
     AcceptedInputStartingLineage, AcceptedInputTurnActivationIdentities, ActivatedTurn,
     ActiveTurnPhase, CurrentTurnAttemptState, DelegatedTurnActivationInput,
-    DelegatedWakeTurnActivationInput, DelegationContent, ModelCallId,
-    PreparedAcceptedInputTurnActivation, PreparedDelegatedTurnActivation, PreparedTurnActivation,
-    SemanticTranscriptEntryId,
+    DelegatedWakeTurnActivationInput, DelegationContent, PreparedAcceptedInputTurnActivation,
+    PreparedDelegatedTurnActivation, PreparedTurnActivation, SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, SessionId,
     ToolRequestId, TurnId,
@@ -321,7 +320,7 @@ impl StartEligibleTurnRepository {
     pub async fn commit_counted_preview(
         &self,
         preview: PreparedActivationPreview,
-        call: ModelCallId,
+        prospective: crate::model_execution::ProspectiveModelCall,
         model_calls: &crate::model_execution::PostgresModelCallRepository,
     ) -> Result<CommitActivationPreviewOutcome, CommitActivationPreviewError> {
         let session = preview.prepared.turn().session();
@@ -366,11 +365,20 @@ impl StartEligibleTurnRepository {
                 .map_err(CommitActivationPreviewError::Activation)?;
             return Ok(CommitActivationPreviewOutcome::Stale);
         }
+        let outbox_order_guard =
+            crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
+                .await
+                .map_err(CommitActivationPreviewError::ModelCall)?;
         let activated = insert_prepared_activation(&mut transaction, current)
             .await
             .map_err(CommitActivationPreviewError::Activation)?;
         model_calls
-            .checkpoint_counted_activation_in_transaction(&mut transaction, session, call)
+            .checkpoint_counted_activation_in_transaction(
+                &mut transaction,
+                &activated,
+                &prospective,
+                outbox_order_guard,
+            )
             .await
             .map_err(CommitActivationPreviewError::ModelCall)?;
         transaction.commit().await.map_err(|error| {

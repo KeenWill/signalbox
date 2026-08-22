@@ -13,7 +13,10 @@
 # after completion. It is an operator budget, not a declaration of the model's
 # capability: the working default below is well under each model's hard cap,
 # which is recorded beside the entry. Raise it per selection as the deployment
-# requires, up to but never above the model's cap.
+# requires, up to but never above the model's cap. The daemon also reserves this
+# complete budget before a Codex continuation. Keep it aligned with the reply
+# budget the deployment actually needs: an inflated advisory value cannot make
+# the CLI emit more, but it can force otherwise-unnecessary early compaction.
 version = 1
 
 [numeric_bounds]
@@ -39,6 +42,8 @@ max_review_orchestration_concerns = 32
 max_imported_conversation_display_title_scalars = 256
 # Time allowed for runtime cleanup after scheduler work drains.
 graceful_shutdown_cleanup_window = "30s"
+# Time allowed for one complete model-provider exchange.
+model_exchange_timeout = "600s"
 # Detached recovery attempts made for one expired scheduler pass.
 expired_pass_recovery_attempts = 4
 # Time allowed for one expired-pass recovery database operation.
@@ -64,7 +69,7 @@ convergence_sweep_retry_backoff_cap = "900s"
 # Stale turns terminalized during one liveness scan.
 terminalizations_per_liveness_scan = 64
 # Time allowed for one liveness recovery transaction.
-turn_liveness_recovery_attempt_bound = "10s"
+turn_liveness_recovery_attempt_bound = "60s"
 # Automatic reconciliation transactions performed in one liveness scan.
 automatic_reconciliations_per_liveness_scan = 64
 # Credentialed targets retained by one convergence sweep.
@@ -114,7 +119,7 @@ nudge_buffer_capacity = 1024
 # Authoritative scheduler passes admitted concurrently.
 scheduler_pass_admission_cap = 16
 # Time one authoritative scheduler pass may occupy admission.
-scheduler_pass_occupancy_bound = "900s"
+scheduler_pass_occupancy_bound = "3600s"
 # Provider diagnostic bytes retained in one native message.
 max_native_message_bytes = 2048
 # Time a terminalization waits for the scheduler row.

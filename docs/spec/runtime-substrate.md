@@ -61,7 +61,9 @@ authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
 companion pages. This page also owns the shared
 [operator failure taxonomy](#operator-failure-taxonomy) — defined in
-`crates/application` and consumed by signalboxd telemetry.
+`crates/application` and consumed by signalboxd telemetry. The required
+model-exchange deployment policy and its unbounded spelling are verified against
+this PR (`agent/bounds-required-config-gate`).
 
 ## Boundary and crate layout
 
@@ -471,9 +473,9 @@ per operation (`/v1/messages` for Anthropic with `x-api-key` and
 dependency, and typed evidence out. Construction validates configuration: the
 base URL must be absolute HTTPS, except that plain HTTP is admitted for an
 IP-literal loopback host used by deterministic tests; user information, a query,
-or a fragment is forbidden; and the SSE record limit and whole-exchange timeout
-must both be positive. Construction failure is a configuration defect, not
-operation evidence.
+or a fragment is forbidden; the SSE record limit must be positive, and a
+configured whole-exchange timeout must be positive. Construction failure is a
+configuration defect, not operation evidence.
 
 Provider traffic uses reqwest 0.13 with default features disabled and only its
 providerless rustls-platform-verifier and byte-stream features enabled. Both
@@ -496,15 +498,12 @@ request):
   opens a fresh connection. Why: this eliminates the stale-connection replay
   path and makes a connect failure provably precede any request byte, which is
   what lets `ConnectFailed` claim proven-unsent.
-- Every request has a positive whole-exchange timeout, covering connection
-  establishment through the complete buffered body or streamed terminal record.
-  The provisional default is ten minutes; callers may configure another positive
-  budget, and may additionally configure a shorter connect timeout. A connect
-  timeout is proven-unsent, while a timeout after send is boundary loss. Why: a
-  provider that stalls forever must not hold a turn attempt forever, while the
-  deliberately generous first budget accommodates long streamed generations
-  until production latency data supports a tighter provider/model-specific
-  policy.
+- A configured whole-exchange timeout covers connection establishment through
+  the complete buffered body or streamed terminal record. The daemon obtains it
+  from the required `numeric_bounds.model_exchange_timeout` deployment policy;
+  the exact value `"none"` makes the exchange unbounded. Callers may
+  additionally configure a shorter connect timeout. A connect timeout is
+  proven-unsent, while a whole-exchange timeout after send is boundary loss.
 
 Success is specifically HTTP 200; another 2xx is not recognized terminal
 success. 4xx/5xx responses are classified through each adapter's exhaustive

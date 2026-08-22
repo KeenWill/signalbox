@@ -29,6 +29,7 @@ use signalbox_domain::{
     ActiveTurnSchedulingReconstitutionInput, AmbiguousModelCallTurn, AssistantResponsePart,
     AssistantText, AuthorizedModelCall, AvailabilitySuccessorModelCallTurn, CancelledModelCallTurn,
     CancelledToolRoundModelCallTurn, CompletedModelCallTurn, ConsumedSteeringReconstitutionInput,
+    ContextFrontierId, ContextHeadroomExhaustedModelCallTurn,
     CorrelatedModelCallTerminalObservation, CredentialPoolExhaustedModelCallTurn,
     DelegatedTurnActivationInput, DelegatedWakeTurnActivationInput, DelegationContent,
     DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason, DirectModelSelection,
@@ -74,23 +75,64 @@ use crate::{
     },
 };
 
+/// Immutable usage boundary for one resolved continuation mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToolContinuationUsageLimit {
+    target: ResolvedProviderTarget,
+    fast_mode: FastMode,
+    max_output_tokens: u64,
+    context_window_tokens: u64,
+}
+
+impl ToolContinuationUsageLimit {
+    /// Defines one deployment-owned continuation boundary.
+    pub const fn new(
+        target: ResolvedProviderTarget,
+        fast_mode: FastMode,
+        max_output_tokens: u64,
+        context_window_tokens: u64,
+    ) -> Self {
+        Self {
+            target,
+            fast_mode,
+            max_output_tokens,
+            context_window_tokens,
+        }
+    }
+
+    pub(crate) const fn max_output_tokens(self) -> u64 {
+        self.max_output_tokens
+    }
+
+    pub(crate) const fn context_window_tokens(self) -> u64 {
+        self.context_window_tokens
+    }
+}
+
+/// Exact continuation limits derived from immutable model configuration.
+pub type ToolContinuationUsageLimitCatalog =
+    HashMap<(ResolvedProviderTarget, FastMode), ToolContinuationUsageLimit>;
+
 /// Exact prospective first-call material derived from one activation preview.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProspectiveModelCall {
+    prepared: signalbox_domain::PreparedInitialModelCall,
     request: PreparedModelCallRequest,
     credential_reference: ModelCallCredentialReference,
     system_prompt: Option<signalbox_domain::SessionSystemPrompt>,
     tool_entries: Box<[ResolvedToolConversationEntry]>,
 }
 
-/// Latest completed-call usage usable as a conservative next-call lower bound.
+/// Latest terminal-call usage usable as a conservative next-call lower bound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CompletedModelCallUsage {
+pub struct ReportedModelCallUsage {
     usage: ProviderReportedTokenUsage,
     input_includes_cache_tokens: bool,
+    output_is_retained: bool,
+    projected_unreported_content_bytes: u64,
 }
 
-impl CompletedModelCallUsage {
+impl ReportedModelCallUsage {
     /// Returns the exact provider-reported fields retained for the call.
     pub const fn usage(self) -> ProviderReportedTokenUsage {
         self.usage
@@ -100,24 +142,39 @@ impl CompletedModelCallUsage {
     pub const fn input_includes_cache_tokens(self) -> bool {
         self.input_includes_cache_tokens
     }
+
+    /// Whether reported output became assistant transcript for the next call.
+    pub const fn output_is_retained(self) -> bool {
+        self.output_is_retained
+    }
+
+    /// Returns a conservative byte allowance for model-visible transcript
+    /// material appended after the reported call's input.
+    pub const fn projected_unreported_content_bytes(self) -> u64 {
+        self.projected_unreported_content_bytes
+    }
 }
 
 impl ProspectiveModelCall {
     /// Applies the canonical application frontier renderer with the supplied tool catalog.
     pub fn render(
-        self,
+        &self,
         tools: Box<[signalbox_application::ToolDefinition]>,
     ) -> Result<
         signalbox_application::PreparedModelOperation,
         signalbox_application::ModelFrontierRenderingError,
     > {
         signalbox_application::PreparedModelOperation::render(
-            self.request,
-            self.credential_reference,
-            self.system_prompt,
+            self.request.clone(),
+            self.credential_reference.clone(),
+            self.system_prompt.clone(),
             tools,
             &self.tool_entries,
         )
+    }
+
+    const fn prepared(&self) -> &signalbox_domain::PreparedInitialModelCall {
+        &self.prepared
     }
 }
 
@@ -475,7 +532,15 @@ pub struct PostgresModelCallRepository {
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
     credential_pools: CredentialPoolRuntimeCatalog,
     cache_inclusive_input_targets: HashSet<ResolvedProviderTarget>,
+    continuation_usage_limits: ToolContinuationUsageLimitCatalog,
 }
+
+/// Proof that one model-call transaction serialized before either shared lock class.
+pub(crate) struct ModelCallOutboxOrderGuard {
+    _private: (),
+}
+
+const MODEL_CALL_OUTBOX_ORDER_GUARD: &str = "model_call_outbox_order_guard:v1";
 
 impl PostgresModelCallRepository {
     /// Uses the shared pool, immutable target catalog, and current non-secret
@@ -492,6 +557,7 @@ impl PostgresModelCallRepository {
             credential_families: None,
             credential_pools: HashMap::new(),
             cache_inclusive_input_targets: HashSet::new(),
+            continuation_usage_limits: HashMap::new(),
         }
     }
 
@@ -519,58 +585,237 @@ impl PostgresModelCallRepository {
         self
     }
 
+    /// Pins configured usage headroom for same-turn tool continuations.
+    pub fn with_continuation_usage_limits(
+        mut self,
+        limits: impl IntoIterator<Item = ToolContinuationUsageLimit>,
+    ) -> Self {
+        self.continuation_usage_limits = limits
+            .into_iter()
+            .map(|limit| ((limit.target, limit.fast_mode), limit))
+            .collect();
+        self
+    }
+
     /// Borrows the shared pool for composition-owned adjacent transactions.
     pub const fn pool(&self) -> &PgPool {
         &self.pool
     }
 
-    /// Reads the newest completed call with reported input usage for one exact target.
+    /// Reads the newest ordinary or dedicated-compaction call with reported input
+    /// usage for one exact target.
     ///
     /// A later failed call with no usage does not erase the last provider-confirmed
     /// context size. Callers may use this only as a lower bound: later transcript
     /// entries can make the next request larger, never smaller absent compaction.
-    pub async fn latest_completed_usage(
+    pub async fn latest_reported_usage(
         &self,
         session: SessionId,
         target: ResolvedProviderTarget,
-    ) -> Result<Option<CompletedModelCallUsage>, ModelCallRepositoryError> {
+        prospective_frontier: ContextFrontierId,
+    ) -> Result<Option<ReportedModelCallUsage>, ModelCallRepositoryError> {
         let row = sqlx::query(
-            "SELECT usage_input_includes_cache_tokens,
+            "WITH latest_compaction AS MATERIALIZED (
+                SELECT compaction.context_compaction_id,
+                       compaction.source_frontier_id,
+                       compaction.summary_entry_id,
+                       compaction.through_source_session_id,
+                       compaction.through_entry_id,
+                       call.model_call_id,
+                       call.resolved_provider_model_identity_id,
+                       call.state_kind,
+                       call.terminal_disposition_kind,
+                       COALESCE(call.usage_input_includes_cache_tokens, false) AS
+                           usage_input_includes_cache_tokens,
+                       call.input_tokens AS usage_input_tokens,
+                       call.output_tokens AS usage_output_tokens,
+                       call.cache_creation_input_tokens AS
+                           usage_cache_creation_input_tokens,
+                       call.cache_read_input_tokens AS usage_cache_read_input_tokens
+                  FROM context_compaction AS compaction
+                 JOIN context_compaction_model_call AS call
+                    ON call.session_id = compaction.session_id
+                   AND call.model_call_id = compaction.producing_call_id
+                 WHERE compaction.session_id = $1
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM context_compaction AS successor
+                        WHERE successor.session_id = compaction.session_id
+                          AND successor.predecessor_compaction_id =
+                              compaction.context_compaction_id
+                   )
+             ), ordinary_candidate AS (
+                SELECT 'ordinary'::text AS call_kind,
+                       model_call.model_call_id,
+                       model_call.context_frontier_id,
+                       model_call.usage_input_includes_cache_tokens,
+                       model_call.terminal_disposition_kind = 'completed' AS output_is_retained,
+                       model_call.usage_input_tokens,
+                       model_call.usage_output_tokens,
+                       model_call.usage_cache_creation_input_tokens,
+                       model_call.usage_cache_read_input_tokens,
+                       NULL::numeric AS reported_through_position,
+                       NULL::uuid AS reported_summary_entry_id
+                  FROM model_call
+                 WHERE model_call.session_id = $1
+                   AND model_call.resolved_provider_model_identity_id = $2
+                   AND model_call.state_kind = 'terminal'
+                   AND model_call.usage_input_tokens IS NOT NULL
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM latest_compaction AS latest
+                        WHERE NOT EXISTS (
+                            SELECT 1
+                              FROM context_frontier_member AS member
+                             WHERE member.owning_session_id = model_call.session_id
+                               AND member.context_frontier_id =
+                                   model_call.context_frontier_id
+                               AND member.source_session_id = model_call.session_id
+                               AND member.semantic_entry_id = latest.summary_entry_id
+                        )
+                   )
+             ), compaction_candidate AS (
+                SELECT 'context_compaction'::text AS call_kind,
+                       latest.model_call_id,
+                       latest.source_frontier_id AS context_frontier_id,
+                       latest.usage_input_includes_cache_tokens,
+                       true AS output_is_retained,
+                       latest.usage_input_tokens,
+                       latest.usage_output_tokens,
+                       latest.usage_cache_creation_input_tokens,
+                       latest.usage_cache_read_input_tokens,
+                       member.member_position AS reported_through_position,
+                       latest.summary_entry_id AS reported_summary_entry_id
+                  FROM latest_compaction AS latest
+                  JOIN context_frontier_member AS member
+                    ON member.owning_session_id = $1
+                   AND member.context_frontier_id = latest.source_frontier_id
+                   AND member.source_session_id = latest.through_source_session_id
+                   AND member.semantic_entry_id = latest.through_entry_id
+                 WHERE latest.resolved_provider_model_identity_id = $2
+                   AND latest.state_kind = 'terminal'
+                   AND latest.terminal_disposition_kind = 'completed'
+                   AND latest.usage_input_tokens IS NOT NULL
+             ), latest_call AS (
+                SELECT *
+                  FROM (
+                      SELECT * FROM ordinary_candidate
+                      UNION ALL
+                      SELECT * FROM compaction_candidate
+                  ) AS candidate
+                 ORDER BY model_call_id DESC
+                 LIMIT 1
+             ), prospective_member AS MATERIALIZED (
+                SELECT member.source_session_id, member.semantic_entry_id
+                  FROM context_frontier_member AS member
+                 WHERE member.owning_session_id = $1
+                   AND member.context_frontier_id = $3
+             ), reported_member AS MATERIALIZED (
+                SELECT member.source_session_id, member.semantic_entry_id
+                  FROM latest_call
+                  JOIN context_frontier_member AS member
+                    ON member.owning_session_id = $1
+                   AND member.context_frontier_id = latest_call.context_frontier_id
+                   AND (
+                       latest_call.call_kind = 'ordinary'
+                       OR member.member_position <= latest_call.reported_through_position
+                   )
+             ), unreported_member AS MATERIALIZED (
+                SELECT prospective.source_session_id,
+                       prospective.semantic_entry_id
+                  FROM prospective_member AS prospective
+                EXCEPT
+                SELECT reported.source_session_id,
+                       reported.semantic_entry_id
+                  FROM reported_member AS reported
+             )
+             SELECT usage_input_includes_cache_tokens, output_is_retained,
                     usage_input_tokens, usage_output_tokens,
                     usage_cache_creation_input_tokens,
-                    usage_cache_read_input_tokens
-               FROM model_call
-              WHERE session_id = $1
-                AND resolved_provider_model_identity_id = $2
-                AND state_kind = 'terminal'
-                AND terminal_disposition_kind = 'completed'
-                AND usage_input_tokens IS NOT NULL
-                AND NOT EXISTS (
-                    SELECT 1
-                      FROM context_compaction AS latest
-                     WHERE latest.session_id = model_call.session_id
-                       AND NOT EXISTS (
-                           SELECT 1
-                             FROM context_compaction AS successor
-                            WHERE successor.session_id = latest.session_id
-                              AND successor.predecessor_compaction_id =
-                                  latest.context_compaction_id
-                       )
-                       AND NOT EXISTS (
-                           SELECT 1
-                             FROM context_frontier_member AS member
-                            WHERE member.owning_session_id = model_call.session_id
-                              AND member.context_frontier_id =
-                                  model_call.context_frontier_id
-                              AND member.source_session_id = latest.session_id
-                              AND member.semantic_entry_id = latest.summary_entry_id
-                       )
-                )
-              ORDER BY model_call_id DESC
-              LIMIT 1",
+                    usage_cache_read_input_tokens,
+                    (
+                        SELECT COALESCE(SUM(
+                            CASE entry.payload_kind
+                                WHEN 'imported_entry' THEN
+                                    COALESCE(octet_length(imported.content_encoding), 0)
+                                WHEN 'origin_accepted_input' THEN
+                                    COALESCE(octet_length(input.content_text), 0)
+                                WHEN 'steering_accepted_input' THEN
+                                    COALESCE(octet_length(input.content_text), 0)
+                                WHEN 'context_summary' THEN
+                                    COALESCE(octet_length(entry.context_summary_value), 0)
+                                WHEN 'assistant_text' THEN
+                                    COALESCE(octet_length(entry.assistant_text_value), 0)
+                                WHEN 'assistant_tool_use' THEN
+                                    COALESCE(octet_length(request.tool_name), 0)
+                                    + COALESCE(octet_length(request.arguments_text), 0)
+                                WHEN 'tool_execution_result' THEN
+                                    COALESCE(octet_length(attempt.result_text), 0)
+                                    + COALESCE(octet_length(attempt.error_detail), 0)
+                                WHEN 'tool_denied' THEN
+                                    COALESCE(octet_length(decision.denial_reason), 0)
+                                WHEN 'delegated_task' THEN
+                                    COALESCE(octet_length(task.task_content), 0)
+                                WHEN 'delegation_message' THEN
+                                    COALESCE(octet_length(message.content_text), 0)
+                                WHEN 'delegation_result' THEN
+                                    COALESCE(octet_length(child_result.content_text), 0)
+                                ELSE 0
+                            END
+                        ), 0)::numeric
+                          FROM unreported_member AS prospective
+                          JOIN semantic_transcript_entry AS entry
+                            ON entry.source_session_id = prospective.source_session_id
+                           AND entry.semantic_entry_id = prospective.semantic_entry_id
+                          LEFT JOIN accepted_input AS input
+                            ON input.accepted_input_id = entry.origin_accepted_input_id
+                           AND input.session_id = entry.source_session_id
+                          LEFT JOIN imported_transcript_entry AS imported
+                            ON imported.imported_conversation_id = entry.imported_conversation_id
+                           AND imported.imported_transcript_entry_id =
+                               entry.imported_transcript_entry_id
+                          LEFT JOIN tool_request AS request
+                            ON request.request_id = entry.assistant_tool_request_id
+                           AND request.session_id = entry.source_session_id
+                          LEFT JOIN tool_attempt AS attempt
+                            ON attempt.attempt_id = entry.tool_result_attempt_id
+                           AND attempt.session_id = entry.source_session_id
+                          LEFT JOIN tool_approval_decision AS decision
+                            ON decision.request_id = entry.tool_result_request_id
+                          LEFT JOIN session_delegation_initial_task AS task
+                            ON task.child_session_id = entry.source_session_id
+                           AND task.semantic_entry_id = entry.semantic_entry_id
+                          LEFT JOIN session_message AS message
+                            ON message.message_id = entry.delegation_message_id
+                          LEFT JOIN session_child_result AS child_result
+                            ON child_result.spawning_tool_request_id =
+                               entry.delegation_result_spawning_tool_request_id
+                         WHERE NOT (
+                                   latest_call.usage_output_tokens IS NOT NULL
+                               AND (
+                                      (
+                                          latest_call.call_kind = 'ordinary'
+                                          AND entry.payload_kind IN (
+                                              'assistant_text',
+                                              'assistant_tool_use'
+                                          )
+                                          AND entry.producing_model_call_id =
+                                              latest_call.model_call_id
+                                      )
+                                      OR (
+                                          latest_call.call_kind = 'context_compaction'
+                                          AND entry.source_session_id = $1
+                                          AND entry.semantic_entry_id =
+                                              latest_call.reported_summary_entry_id
+                                      )
+                               )
+                           )
+                    ) AS projected_unreported_content_bytes
+               FROM latest_call",
         )
         .bind(session_id_to_uuid(session))
         .bind(target.identity().into_uuid())
+        .bind(prospective_frontier.into_uuid())
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
@@ -591,13 +836,18 @@ impl PostgresModelCallRepository {
                 })
                 .transpose()
         };
-        Ok(Some(CompletedModelCallUsage {
+        Ok(Some(ReportedModelCallUsage {
             usage: ProviderReportedTokenUsage::unreported()
                 .with_input_tokens(decode("usage_input_tokens")?)
                 .with_output_tokens(decode("usage_output_tokens")?)
                 .with_cache_creation_input_tokens(decode("usage_cache_creation_input_tokens")?)
                 .with_cache_read_input_tokens(decode("usage_cache_read_input_tokens")?),
             input_includes_cache_tokens: row.try_get("usage_input_includes_cache_tokens")?,
+            output_is_retained: row.try_get("output_is_retained")?,
+            projected_unreported_content_bytes: decode("projected_unreported_content_bytes")?
+                .ok_or(ModelCallCorruption::Missing(
+                    "projected unreported transcript content byte count",
+                ))?,
         }))
     }
 
@@ -629,6 +879,7 @@ impl PostgresModelCallRepository {
             self.credential_reference.clone(),
         )
         .with_cache_inclusive_input_targets(self.cache_inclusive_input_targets.clone())
+        .with_continuation_usage_limits(self.continuation_usage_limits.clone())
         .with_session_credentials(self.credential_families.clone())
         .with_credential_pools(self.credential_pools.clone())
     }
@@ -707,6 +958,10 @@ impl PostgresModelCallRepository {
             let (_, failure) = error.into_parts();
             ModelCallCorruption::Execution(failure)
         })?;
+        let prepared = execution
+            .clone()
+            .prepare_initial_call(call)
+            .map_err(|_| ModelCallRepositoryError::InvalidTransition("preview initial call"))?;
         let request = execution
             .preview_initial_call(call)
             .map_err(|_| ModelCallRepositoryError::InvalidTransition("preview initial call"))?;
@@ -762,6 +1017,7 @@ impl PostgresModelCallRepository {
         };
         transaction.rollback().await?;
         Ok(Some(ProspectiveModelCall {
+            prepared,
             request,
             credential_reference,
             system_prompt,
@@ -774,47 +1030,43 @@ impl PostgresModelCallRepository {
     pub(crate) async fn checkpoint_counted_activation_in_transaction(
         &self,
         connection: &mut PgConnection,
-        session: SessionId,
-        call: ModelCallId,
+        activated: &signalbox_domain::ActivatedTurn,
+        prospective: &ProspectiveModelCall,
+        _outbox_order_guard: ModelCallOutboxOrderGuard,
     ) -> Result<(), ModelCallRepositoryError> {
-        let execution = require_live_execution_with_targets(
-            connection,
-            session,
-            Some(&self.targets),
-            None,
-            None,
-        )
-        .await?;
-        if execution.current_call().is_some()
-            || !execution.active_turn().pending_steering().is_empty()
+        let prepared = prospective.prepared();
+        let signalbox_domain::ActiveTurnPhase::Running { current_attempt } = activated.phase()
+        else {
+            return Err(ModelCallRepositoryError::InvalidTransition(
+                "counted activation is not running",
+            ));
+        };
+        if prepared.session() != activated.session()
+            || prepared.turn() != activated.turn()
+            || prepared.attempt() != current_attempt.id()
+            || current_attempt.state() != &signalbox_domain::CurrentTurnAttemptState::Prepared
+            || !prepared.consumed_steering().is_empty()
+            || prepared.steering_snapshot().is_some()
         {
             return Err(ModelCallRepositoryError::InvalidTransition(
-                "counted activation gained uncounted call input",
+                "counted preparation does not match activated turn",
             ));
         }
-        let fast_mode = execution
+        let fast_mode = activated
             .configuration()
             .effective()
             .model_settings()
             .effective()
             .fast_mode();
-        let prepared = execution
-            .prepare_initial_call_consuming_steering(call, Vec::new(), None)
-            .map_err(|_| {
-                ModelCallRepositoryError::InvalidTransition(
-                    "counted activation initial call cannot be prepared",
-                )
-            })?;
         let credential_reference = resolve_session_credential(
             connection,
-            session,
+            activated.session(),
             prepared.call().target(),
             fast_mode,
             &self.credential_reference,
             self.credential_families.as_ref(),
         )
         .await?;
-        outbox::lock_sequence_allocator(connection).await?;
         let selected = select_runtime_pool_credential(
             connection,
             prepared.session(),
@@ -829,6 +1081,7 @@ impl PostgresModelCallRepository {
             &self.credential_pools,
         )
         .await?;
+        outbox::lock_sequence_allocator(connection).await?;
         let Some(credential_reference) = selected.reference.as_ref() else {
             // The activated turn remains call-free; the ordinary preparation
             // pass owns the typed pool-exhaustion closure and its identities.
@@ -836,7 +1089,7 @@ impl PostgresModelCallRepository {
         };
         insert_prepared_call(
             connection,
-            &prepared,
+            prepared,
             credential_reference,
             selected.policy.as_ref(),
             self.cache_inclusive_input_targets
@@ -978,8 +1231,8 @@ impl PostgresModelCallRepository {
                     self.credential_families.as_ref(),
                 )
                 .await?;
-                outbox::lock_sequence_allocator(&mut transaction).await?;
-                Some(
+                acquire_model_call_outbox_order_guard(&mut transaction).await?;
+                let selected = Some(
                     select_runtime_pool_credential(
                         &mut transaction,
                         session,
@@ -994,7 +1247,9 @@ impl PostgresModelCallRepository {
                         &self.credential_pools,
                     )
                     .await?,
-                )
+                );
+                outbox::lock_sequence_allocator(&mut transaction).await?;
+                selected
             } else {
                 None
             };
@@ -1248,14 +1503,14 @@ impl PostgresModelCallRepository {
                 successor_attempt,
             } = identities
             {
-                outbox::lock_sequence_allocator(&mut transaction).await?;
                 let cause =
                     provider_failure_cause.ok_or(ModelCallRepositoryError::InvalidTransition(
                         "availability candidates require a classified provider failure",
                     ))?;
-                let Some(policy) =
-                    load_call_pool_policy(&mut transaction, observation.call().into_uuid()).await?
-                else {
+                let policy =
+                    load_call_pool_policy(&mut transaction, observation.call().into_uuid()).await?;
+                let Some(policy) = policy else {
+                    outbox::lock_sequence_allocator(&mut transaction).await?;
                     // The call carried no credential pool, so no configured
                     // action governs this availability cause. Close the turn on
                     // the ordinary terminal path rather than failing the commit.
@@ -1280,6 +1535,9 @@ impl PostgresModelCallRepository {
                         outcome,
                     ))));
                 };
+                acquire_model_call_outbox_order_guard(&mut transaction).await?;
+                lock_credential_pool_action_heads(&mut transaction, &policy).await?;
+                outbox::lock_sequence_allocator(&mut transaction).await?;
                 let action = policy.action(cause);
                 let mut pool_exhausted_name = None;
                 let current_reference = if action == CredentialPoolRuntimeAction::Stay {
@@ -2265,12 +2523,39 @@ async fn delegated_nonterminal_result_absent(
     .await?)
 }
 
+/// Reconstitutes one continuation against caller-owned, transaction-local tool
+/// results before the shared model-call/outbox ordering guard is acquired.
+pub(crate) async fn load_tool_continuation_execution(
+    connection: &mut PgConnection,
+    session: SessionId,
+    targets: &ModelTargetCatalog,
+    projection: &PreparedToolResultProjection,
+) -> Result<ModelCallExecution, ModelCallRepositoryError> {
+    let continuation_snapshot = projection.snapshot();
+    let continuation = ResolvedContextFrontierReconstitutionInput::new(
+        session,
+        continuation_snapshot.frontier().snapshot(),
+        continuation_snapshot.ordered_entries().collect(),
+    );
+    require_live_execution_with_targets(
+        connection,
+        session,
+        Some(targets),
+        Some(continuation),
+        Some(projection.clone()),
+    )
+    .await
+}
+
 /// Prepares one continuation call inside a caller-owned tool-result
-/// transaction. The caller must hold the session scheduler lock and commits or
-/// rolls back this function's writes together with the result projection.
+/// transaction. The caller must hold the session scheduler lock and the shared
+/// model-call/outbox ordering guard before projecting any result outbox event,
+/// and commits or rolls back this function's writes together with that result.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn prepare_tool_continuation_call<NextSteeringIdentities>(
     connection: &mut PgConnection,
+    _outbox_order_guard: ModelCallOutboxOrderGuard,
+    execution: ModelCallExecution,
     session: SessionId,
     turn: TurnId,
     targets: &ModelTargetCatalog,
@@ -2278,7 +2563,9 @@ pub(crate) async fn prepare_tool_continuation_call<NextSteeringIdentities>(
     credential_families: Option<&crate::ModelCredentialFamilyCatalog>,
     credential_pools: &CredentialPoolRuntimeCatalog,
     cache_inclusive_input_targets: &HashSet<ResolvedProviderTarget>,
+    continuation_usage_limits: &ToolContinuationUsageLimitCatalog,
     projection: &PreparedToolResultProjection,
+    producing_call: ModelCallId,
     call: ModelCallId,
     failure_identities: FailedModelCallTurnIdentities,
     steering_frontier: signalbox_domain::ContextFrontierId,
@@ -2289,19 +2576,6 @@ where
         FnMut(AcceptedInputId) -> (signalbox_domain::SemanticTranscriptEntryId, TurnId),
 {
     let continuation_snapshot = projection.snapshot();
-    let continuation = ResolvedContextFrontierReconstitutionInput::new(
-        session,
-        continuation_snapshot.frontier().snapshot(),
-        continuation_snapshot.ordered_entries().collect(),
-    );
-    let execution = require_live_execution_with_targets(
-        connection,
-        session,
-        Some(targets),
-        Some(continuation),
-        Some(projection.clone()),
-    )
-    .await?;
     if execution.turn() != turn || execution.current_call().is_some() {
         return Ok(PrepareToolContinuationOutcome::NoWork);
     }
@@ -2342,33 +2616,82 @@ where
         .model_settings()
         .effective()
         .fast_mode();
-    let selected =
-        if let Ok(resolved) = targets.resolve(*execution.configuration().effective().model()) {
-            let default_reference = resolve_session_credential(
+    let resolved_target = targets.resolve(*execution.configuration().effective().model());
+    if let Ok(resolved) = resolved_target
+        && let Some(limit) = continuation_usage_limits.get(&(resolved.target(), fast_mode))
+        && let Some(evidence) = load_tool_continuation_headroom_evidence(
+            connection,
+            session,
+            turn,
+            producing_call,
+            *limit,
+        )
+        .await?
+    {
+        let source_turn = execution.turn();
+        let reclassifications = steering_identities
+            .iter()
+            .map(|(_, reclassification)| *reclassification)
+            .collect::<Vec<_>>();
+        let mut proposed_turns = BTreeSet::new();
+        for reclassification in &reclassifications {
+            record_reclassified_turn_candidate(
+                source_turn,
+                reclassification.turn(),
+                &mut proposed_turns,
+            )?;
+        }
+        let required = execution
+            .require_context_compaction_after_tool_results(
+                producing_call,
+                failure_identities
+                    .clone()
+                    .with_pending_steering_reclassifications(reclassifications),
+            )
+            .map_err(|_| {
+                ModelCallRepositoryError::InvalidTransition(
+                    "context headroom exhaustion could not close tool continuation",
+                )
+            })?;
+        persist_failed_with_delegated_child_result(
+            connection,
+            required.failed(),
+            ProviderReportedTokenUsage::unreported(),
+            None,
+        )
+        .await?;
+        persist_tool_continuation_headroom_exhaustion(connection, &required, evidence).await?;
+        return Ok(PrepareToolContinuationOutcome::ContextCompactionRequired(
+            Box::new(required),
+        ));
+    }
+    let selected = if let Ok(resolved) = resolved_target {
+        let default_reference = resolve_session_credential(
+            connection,
+            session,
+            resolved.target(),
+            fast_mode,
+            credential_reference,
+            credential_families,
+        )
+        .await?;
+        let selected = Some(
+            select_runtime_pool_credential(
                 connection,
                 session,
-                resolved.target(),
-                fast_mode,
-                credential_reference,
-                credential_families,
+                turn,
+                execution.current_attempt().id(),
+                serving_pool_target(credential_families, resolved.target(), fast_mode),
+                default_reference,
+                credential_pools,
             )
-            .await?;
-            outbox::lock_sequence_allocator(connection).await?;
-            Some(
-                select_runtime_pool_credential(
-                    connection,
-                    session,
-                    turn,
-                    execution.current_attempt().id(),
-                    serving_pool_target(credential_families, resolved.target(), fast_mode),
-                    default_reference,
-                    credential_pools,
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
+            .await?,
+        );
+        outbox::lock_sequence_allocator(connection).await?;
+        selected
+    } else {
+        None
+    };
     if let Some(SelectedRuntimePoolCredential {
         reference: None,
         policy: Some(policy),
@@ -2483,6 +2806,126 @@ where
     )
     .await?;
     Ok(PrepareToolContinuationOutcome::Checkpointed(call))
+}
+
+#[derive(Clone, Copy)]
+struct ToolContinuationHeadroomEvidence {
+    usage: ProviderReportedTokenUsage,
+    input_includes_cache_tokens: bool,
+    projected_result_content_bytes: u64,
+    limit: ToolContinuationUsageLimit,
+}
+
+async fn load_tool_continuation_headroom_evidence(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    producing_call: ModelCallId,
+    limit: ToolContinuationUsageLimit,
+) -> Result<Option<ToolContinuationHeadroomEvidence>, ModelCallRepositoryError> {
+    let row = sqlx::query(
+        "SELECT usage_input_includes_cache_tokens,
+                usage_input_tokens, usage_output_tokens,
+                usage_cache_creation_input_tokens,
+                usage_cache_read_input_tokens,
+                (
+                    SELECT COALESCE(SUM(projected.content_bytes), 0)::numeric
+                      FROM (
+                            SELECT COALESCE(octet_length(attempt.result_text), 0)
+                                   + COALESCE(octet_length(attempt.error_detail), 0)
+                                       AS content_bytes
+                              FROM semantic_transcript_entry AS entry
+                              JOIN tool_attempt AS attempt
+                                ON attempt.attempt_id = entry.tool_result_attempt_id
+                               AND attempt.session_id = entry.source_session_id
+                              JOIN tool_request AS request
+                                ON request.request_id = attempt.request_id
+                               AND request.session_id = attempt.session_id
+                               AND request.turn_id = attempt.turn_id
+                             WHERE request.producing_model_call_id = model_call.model_call_id
+                               AND request.session_id = model_call.session_id
+                               AND request.turn_id = model_call.turn_id
+
+                            UNION ALL
+
+                            SELECT COALESCE(octet_length(decision.denial_reason), 0)
+                                       AS content_bytes
+                              FROM semantic_transcript_entry AS entry
+                              JOIN tool_request AS request
+                                ON request.request_id = entry.tool_result_request_id
+                               AND request.session_id = entry.source_session_id
+                              JOIN tool_approval_decision AS decision
+                                ON decision.request_id = request.request_id
+                             WHERE entry.payload_kind = 'tool_denied'
+                               AND request.producing_model_call_id = model_call.model_call_id
+                               AND request.session_id = model_call.session_id
+                               AND request.turn_id = model_call.turn_id
+                      ) AS projected
+                ) AS projected_result_content_bytes
+           FROM model_call
+          WHERE model_call_id = $1
+            AND session_id = $2
+            AND turn_id = $3
+            AND state_kind = 'terminal'
+            AND terminal_disposition_kind = 'completed'",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Err(ModelCallCorruption::Missing("completed tool-producing call").into());
+    };
+    let decode = |field: &'static str| -> Result<Option<u64>, ModelCallRepositoryError> {
+        row.try_get::<Option<Decimal>, _>(field)?
+            .map(|value| {
+                if !value.fract().is_zero() || value.is_sign_negative() {
+                    return Err(ModelCallCorruption::Inconsistent(
+                        "tool-producing model-call token usage",
+                    )
+                    .into());
+                }
+                u64::try_from(value).map_err(|_| {
+                    ModelCallCorruption::Inconsistent("tool-producing model-call token usage")
+                        .into()
+                })
+            })
+            .transpose()
+    };
+    let usage = ProviderReportedTokenUsage::unreported()
+        .with_input_tokens(decode("usage_input_tokens")?)
+        .with_output_tokens(decode("usage_output_tokens")?)
+        .with_cache_creation_input_tokens(decode("usage_cache_creation_input_tokens")?)
+        .with_cache_read_input_tokens(decode("usage_cache_read_input_tokens")?);
+    let input_includes_cache_tokens = row.try_get("usage_input_includes_cache_tokens")?;
+    let projected_result_content_bytes = decode("projected_result_content_bytes")?.ok_or(
+        ModelCallCorruption::Missing("projected tool-result content byte count"),
+    )?;
+    let Some(input_tokens) = usage.input_tokens() else {
+        return Ok(None);
+    };
+    let input_tokens = if input_includes_cache_tokens {
+        input_tokens
+    } else {
+        input_tokens
+            .saturating_add(usage.cache_creation_input_tokens().unwrap_or(0))
+            .saturating_add(usage.cache_read_input_tokens().unwrap_or(0))
+    };
+    let exhausted = input_tokens
+        .saturating_add(usage.output_tokens().unwrap_or(0))
+        // Provider-neutral CLI adapters expose no tokenizer-only operation.
+        // UTF-8 payload bytes therefore reserve a deliberately conservative
+        // allowance for result material appended after the reported input.
+        .saturating_add(projected_result_content_bytes)
+        .saturating_add(limit.max_output_tokens())
+        > limit.context_window_tokens();
+    Ok(exhausted.then_some(ToolContinuationHeadroomEvidence {
+        usage,
+        input_includes_cache_tokens,
+        projected_result_content_bytes,
+        limit,
+    }))
 }
 
 pub(crate) async fn resolve_session_credential(
@@ -5443,6 +5886,39 @@ async fn lock_credential_pool_action_head(
     Ok(())
 }
 
+/// Serializes model-call transactions before either credential or outbox locks.
+pub(crate) async fn acquire_model_call_outbox_order_guard(
+    connection: &mut PgConnection,
+) -> Result<ModelCallOutboxOrderGuard, ModelCallRepositoryError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(MODEL_CALL_OUTBOX_ORDER_GUARD)
+        .execute(&mut *connection)
+        .await?;
+    Ok(ModelCallOutboxOrderGuard { _private: () })
+}
+
+/// Takes every action-head lock for one pool in deterministic profile order.
+async fn lock_credential_pool_action_heads(
+    connection: &mut PgConnection,
+    policy: &CredentialPoolRuntimePolicy,
+) -> Result<(), ModelCallRepositoryError> {
+    let members = credential_pool_member_references(policy);
+    let mut locked = members.iter().copied().collect::<Vec<_>>();
+    locked.sort_unstable();
+    for reference in locked {
+        lock_credential_pool_action_head(connection, reference).await?;
+    }
+    Ok(())
+}
+
+fn credential_pool_member_references(policy: &CredentialPoolRuntimePolicy) -> HashSet<&str> {
+    policy
+        .members()
+        .iter()
+        .map(CredentialPoolRuntimeMember::credential_reference)
+        .collect()
+}
+
 /// Reads the durable exclusions governing one pool under its members' locks.
 ///
 /// Selection and the availability-successor test must apply exactly the same
@@ -5456,16 +5932,8 @@ async fn load_durable_pool_exclusions(
     turn: TurnId,
     policy: &CredentialPoolRuntimePolicy,
 ) -> Result<DurablePoolExclusions, ModelCallRepositoryError> {
-    let members = policy
-        .members()
-        .iter()
-        .map(CredentialPoolRuntimeMember::credential_reference)
-        .collect::<HashSet<_>>();
-    let mut locked = members.iter().copied().collect::<Vec<_>>();
-    locked.sort_unstable();
-    for reference in locked {
-        lock_credential_pool_action_head(connection, reference).await?;
-    }
+    let members = credential_pool_member_references(policy);
+    lock_credential_pool_action_heads(connection, policy).await?;
     let mut excluded = sqlx::query_scalar::<_, String>(
         "SELECT credential_reference
            FROM credential_pool_chain_exclusion
@@ -7055,6 +7523,38 @@ async fn persist_credential_pool_exhaustion(
         None,
     )
     .await
+}
+
+async fn persist_tool_continuation_headroom_exhaustion(
+    connection: &mut PgConnection,
+    required: &ContextHeadroomExhaustedModelCallTurn,
+    evidence: ToolContinuationHeadroomEvidence,
+) -> Result<(), ModelCallRepositoryError> {
+    let usage = encode_token_usage(evidence.usage);
+    sqlx::query(
+        "INSERT INTO tool_continuation_context_headroom
+            (terminal_attempt_id, producing_model_call_id, session_id, turn_id,
+             usage_input_includes_cache_tokens, usage_input_tokens,
+             usage_output_tokens, usage_cache_creation_input_tokens,
+             usage_cache_read_input_tokens, projected_result_content_bytes,
+             max_output_tokens, context_window_tokens)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+    )
+    .bind(required.failed().attempt().id().into_uuid())
+    .bind(required.producing_call().into_uuid())
+    .bind(session_id_to_uuid(required.failed().session()))
+    .bind(turn_id_to_uuid(required.failed().turn()))
+    .bind(evidence.input_includes_cache_tokens)
+    .bind(usage.input_tokens)
+    .bind(usage.output_tokens)
+    .bind(usage.cache_creation_input_tokens)
+    .bind(usage.cache_read_input_tokens)
+    .bind(Decimal::from(evidence.projected_result_content_bytes))
+    .bind(Decimal::from(evidence.limit.max_output_tokens()))
+    .bind(Decimal::from(evidence.limit.context_window_tokens()))
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
 }
 
 const MAX_AVAILABILITY_BACKOFF: Duration = Duration::from_secs(300);

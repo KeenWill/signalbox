@@ -160,15 +160,19 @@ fn configured_usage_limit_excess(
         .then_some(ConfiguredUsageLimitExcess::Context)
 }
 
-/// Whether one completed call proves the next un-compacted call cannot retain
-/// the configured output reservation.
+/// Whether one terminal call's reported usage proves the next un-compacted
+/// call cannot retain the configured output reservation.
 ///
-/// The completed output becomes part of the next input. Tool results, steering,
-/// and the next origin can only increase that input, so this is deliberately a
-/// lower-bound trigger rather than an estimate of the prospective request.
-pub(crate) fn completed_usage_requires_compaction(
+/// Later transcript entries can only increase the next input, so this is
+/// deliberately a lower-bound trigger rather than an estimate of the
+/// prospective request. A completed call's output also becomes part of that
+/// next input; output reported by another terminal disposition did not become
+/// assistant transcript and is excluded from the lower bound.
+pub(crate) fn reported_usage_requires_compaction(
     usage: ProviderReportedTokenUsage,
     input_includes_cache_tokens: bool,
+    output_is_retained: bool,
+    projected_unreported_content_bytes: u64,
     max_output_tokens: u64,
     context_window_tokens: u64,
 ) -> bool {
@@ -183,7 +187,15 @@ pub(crate) fn completed_usage_requires_compaction(
             .saturating_add(usage.cache_read_input_tokens().unwrap_or(0))
     };
     input_tokens
-        .saturating_add(usage.output_tokens().unwrap_or(0))
+        .saturating_add(if output_is_retained {
+            usage.output_tokens().unwrap_or(0)
+        } else {
+            0
+        })
+        // CLI-backed adapters expose no tokenizer-only operation. UTF-8
+        // bytes for model-visible transcript additions after the reported
+        // input therefore form a deliberately conservative token allowance.
+        .saturating_add(projected_unreported_content_bytes)
         .saturating_add(max_output_tokens)
         > context_window_tokens
 }
@@ -327,8 +339,7 @@ mod tests {
 
     use super::{
         ConfiguredUsageLimitExcess, ConfiguredUsageLimits, UsageLimitedProviderError,
-        completed_usage_requires_compaction, configured_usage_limit_excess,
-        configured_usage_limits,
+        configured_usage_limit_excess, configured_usage_limits, reported_usage_requires_compaction,
     };
 
     #[derive(Debug)]
@@ -474,30 +485,66 @@ mod tests {
     }
 
     #[test]
-    fn completed_usage_triggers_compaction_before_the_next_output_reservation() {
+    fn reported_usage_triggers_compaction_before_the_next_output_reservation() {
         let usage = ProviderReportedTokenUsage::unreported()
             .with_input_tokens(Some(80))
             .with_output_tokens(Some(5));
 
-        assert!(completed_usage_requires_compaction(usage, true, 16, 100));
+        assert!(reported_usage_requires_compaction(
+            usage, true, true, 0, 16, 100
+        ));
     }
 
     #[test]
-    fn completed_usage_trigger_uses_the_stored_cache_semantics() {
+    fn reported_usage_trigger_uses_the_stored_cache_semantics() {
         let usage = ProviderReportedTokenUsage::unreported()
             .with_input_tokens(Some(60))
             .with_output_tokens(Some(5))
             .with_cache_read_input_tokens(Some(20));
 
-        assert!(!completed_usage_requires_compaction(usage, true, 15, 100));
-        assert!(completed_usage_requires_compaction(usage, false, 16, 100));
+        assert!(!reported_usage_requires_compaction(
+            usage, true, true, 0, 15, 100
+        ));
+        assert!(reported_usage_requires_compaction(
+            usage, false, true, 0, 16, 100
+        ));
     }
 
     #[test]
-    fn completed_usage_trigger_does_not_invent_a_missing_input_count() {
+    fn reported_usage_trigger_does_not_invent_a_missing_input_count() {
         let usage = ProviderReportedTokenUsage::unreported().with_output_tokens(Some(100));
 
-        assert!(!completed_usage_requires_compaction(usage, true, 100, 100));
+        assert!(!reported_usage_requires_compaction(
+            usage, true, true, 0, 100, 100
+        ));
+    }
+
+    #[test]
+    fn reported_usage_excludes_output_that_did_not_enter_the_transcript() {
+        let usage = ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(80))
+            .with_output_tokens(Some(10));
+
+        assert!(!reported_usage_requires_compaction(
+            usage, true, false, 0, 11, 100
+        ));
+        assert!(reported_usage_requires_compaction(
+            usage, true, true, 0, 11, 100
+        ));
+    }
+
+    #[test]
+    fn reported_usage_includes_model_visible_content_appended_after_the_call() {
+        let usage = ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(60))
+            .with_output_tokens(Some(5));
+
+        assert!(!reported_usage_requires_compaction(
+            usage, true, true, 0, 10, 100
+        ));
+        assert!(reported_usage_requires_compaction(
+            usage, true, true, 26, 10, 100
+        ));
     }
 
     #[test]

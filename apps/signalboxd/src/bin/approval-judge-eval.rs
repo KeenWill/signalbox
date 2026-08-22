@@ -396,6 +396,10 @@ async fn run(options: RunOptions) -> Result<(), String> {
         .numeric_bounds()
         .duration("post_kill_reap_bound")
         .ok_or_else(|| String::from("configuration has no post_kill_reap_bound policy"))?;
+    let model_exchange_timeout = configuration
+        .numeric_bounds()
+        .duration("model_exchange_timeout")
+        .ok_or_else(|| String::from("configuration has no model_exchange_timeout policy"))?;
     let native_message_limit = configuration
         .numeric_bounds()
         .integer("max_native_message_bytes")
@@ -455,6 +459,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
                     }),
             );
             let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = model_exchange_timeout;
             adapter_configuration.model_capabilities =
                 configuration.runtime_model_capability_catalog();
             AnthropicRuntime::new(adapter_configuration, credentials)
@@ -472,6 +477,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
                     }),
             );
             let mut adapter_configuration = OpenAiConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = model_exchange_timeout;
             adapter_configuration.model_capabilities =
                 configuration.runtime_model_capability_catalog();
             OpenAiRuntime::new(adapter_configuration, credentials)
@@ -482,6 +488,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
         anthropic,
         openai,
         &configuration,
+        model_exchange_timeout,
         post_kill_reap_bound,
         native_message_limit,
     )

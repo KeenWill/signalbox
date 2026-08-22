@@ -2034,6 +2034,7 @@ fn direct_compaction_request(
         target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
             3,
         ))),
+        input_includes_cache_tokens: false,
         credential_reference: String::from("synthetic-compaction-transaction-credential"),
         call: ModelCallId::from_uuid(Uuid::from_u128(identity_base)),
         compaction: ContextCompactionId::from_uuid(Uuid::from_u128(identity_base + 1)),
@@ -7713,6 +7714,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 Uuid::from_u128(3),
             )),
+            input_includes_cache_tokens: false,
             credential_reference: String::from("synthetic-compaction-credential"),
             call: prepared_call,
             compaction: ContextCompactionId::from_uuid(Uuid::from_u128(0xcc22)),
@@ -7759,6 +7761,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 Uuid::from_u128(3),
             )),
+            input_includes_cache_tokens: false,
             credential_reference: String::from("synthetic-compaction-credential"),
             call: in_flight_call,
             compaction: ContextCompactionId::from_uuid(Uuid::from_u128(0xcc27)),
@@ -8191,6 +8194,10 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
             (
                 signalbox_model_runtime::ConversationRole::User,
                 format!("Signalbox prior-conversation summary:\n{summary_text}"),
+            ),
+            (
+                signalbox_model_runtime::ConversationRole::Assistant,
+                first_assistant.clone(),
             ),
             (
                 signalbox_model_runtime::ConversationRole::User,

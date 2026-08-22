@@ -4,7 +4,21 @@ The durable automatic model-call reconciliation state, attempt history, and
 final-state authority were verified against this PR
 (`agent/turn-lifecycle-hardening`). Their generalization to exact model-call or
 tool-attempt operations is verified against this PR
-(`agent/daemon-live-tool-recovery-reconcile`).
+(`agent/daemon-live-tool-recovery-reconcile`). The server-enforced
+automatic-reconciliation transaction deadline is verified against this PR
+(`agent/daemon-live-server-bounded-reconciliation`). Recursive-frontier prefix
+validation is verified against this PR
+(`agent/daemon-live-frontier-validation-materialization`). Context-compaction
+evidence validation is verified against this PR
+(`agent/daemon-live-context-compaction-validation`). Compaction-leaf selection
+before recursive turn-start validation is verified against this PR
+(`agent/daemon-live-compaction-leaf-validation-scope`). Deferred immutable
+tool-round validation scope is verified against this PR
+(`agent/daemon-live-deferred-round-validation-scope`). Immutable frontier-header
+ancestry before exact prefix-member fallback is verified against this PR
+(`agent/daemon-live-frontier-ancestry-fast-path`). Successor compaction
+validation from its immutable predecessor and bounded current suffix is verified
+against this PR (`agent/daemon-live-current-compaction-validation-scope`).
 
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
@@ -24,7 +38,9 @@ Placement-relative lease-offer fencing was verified against the parent slice
 and ordered page read were verified against this PR
 (`agent/runner-loss-session-propagation`). The atomic per-session runner-loss
 propagation transaction and cursor completion were verified against this PR
-(`agent/runner-loss-session-transaction`).
+(`agent/runner-loss-session-transaction`). Daemon paging after terminal loss and
+startup resumption of every pending cursor were verified against this PR
+(`agent/runner-loss-daemon-propagation`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -379,8 +395,14 @@ Representation rules, all enforced in the schema:
   equal-content identities) without changing any frontier identity or resolved
   sequence. Deferred completeness checks reject missing prefixes, cycles,
   inherited duplicates, gaps, and a resolved count different from the header.
-  Why: append-derived histories store and load each immutable suffix once while
-  preserving the complete-snapshot contract.
+  High-frequency model-call, continuation, turn-start, and terminal-frontier
+  prefix-preservation checks first walk the checked frontier's immutable header
+  ancestry. Reaching the named prefix proves the common append-derived case
+  without expanding complete memberships; an independently constructed frontier
+  falls back to materializing each compared recursive membership once before
+  matching its ordered members. Why: append-derived histories store and load
+  each immutable suffix once while the fallback preserves the exact
+  complete-snapshot contract.
 - Closed variant sets are `text` discriminators under `CHECK` constraints, with
   variant payload columns constrained present exactly when the discriminator
   requires them (for example `turn_lifecycle_state_payload_shape`). The
@@ -458,10 +480,14 @@ Representation rules, all enforced in the schema:
   turn, the runner-state outbox, and the cursor. An offered lease records no
   execution; a claimed pure or idempotent lease remains retryable in flight; a
   claimed side-effecting lease becomes terminal ambiguous. A separate checked
-  operation completes an exhausted cursor. **Committed unimplemented
-  functionality.** No present daemon service pages the durable losses, invokes
-  these operations, or retires an unacknowledged workspace release; those
-  orchestration steps remain outside the persistence adapter.
+  operation completes an exhausted cursor. After an applied terminal connection
+  transition or an exact replay of its current lost state, the daemon pages
+  every pending loss, invokes the per-session transaction in page order, and
+  completes each exhausted cursor. Startup performs the same scan after marking
+  prior-process nonterminal connections lost, so a crash after the short loss
+  transaction cannot strand session projection. **Committed unimplemented
+  functionality.** No present daemon transaction retires an unacknowledged
+  workspace release.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -646,7 +672,10 @@ Representation rules, all enforced in the schema:
   `imported_session_seed` naming its exact seed frontier, and
   turn/attempt/semantic-entry writes re-assert the complete turn final state
   (origin entry, frontier prefix relationships, live-attempt cardinality,
-  failure-entry correlation). Every invalid-interrupt rejection additionally
+  failure-entry correlation). Tool-round construction and every correlated
+  evidence write queue that immutable round's own complete validator; later
+  turn-state checks validate the mutable lifecycle shape without rescanning
+  historical round frontiers. Every invalid-interrupt rejection additionally
   correlates the active phase its receipt claims: the stopping rejections
   through the prior applied interrupt's stopped attempt, and the parked-approval
   rejection directly against its named turn's recorded `awaiting_tool_approval`
@@ -917,16 +946,20 @@ Locks per transaction, in acquisition order:
   capacity-row or cursor-row lock; or take a capacity-row lock while holding a
   cursor-row lock.
 
-- **Automatic model-call reconciliation**: discovery and abandoned-attempt
+- **Automatic operation reconciliation**: discovery and abandoned-attempt
   normalization take no explicit lock. Claiming locks at most 64 due recovery
   rows `FOR UPDATE SKIP LOCKED`, increments their durable attempt ordinal, sets
   the exact backoff deadline, and inserts the attempt rows in the same
   transaction. Applying a claim then takes the session's `session_scheduler` row
   `FOR UPDATE`, reconstitutes the complete scheduling projection, and uses the
-  existing reconciliation-required write transaction. Operator reconciliation
-  takes the session row before this same scheduler row; it can therefore win
-  before the automatic lock is taken, while the automatic path itself never
-  acquires the session row and introduces no reversed pair.
+  existing reconciliation-required write transaction. Every daemon-owned claim,
+  application, and failure-record transaction installs the attempt's wall-clock
+  bound as PostgreSQL's local `transaction_timeout`; a bounded client
+  observation may therefore stop waiting only after PostgreSQL has already had
+  that full interval to terminate the transaction and release its locks.
+  Operator reconciliation takes the session row before this same scheduler row;
+  it can therefore win before the automatic lock is taken, while the automatic
+  path itself never acquires the session row and introduces no reversed pair.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
@@ -1495,7 +1528,16 @@ unchanged proposal-order and single-result checks admit it as the
 `await_session` result without admitting a second result for the same request.
 Tool-batch outbox decoding and context-compaction evidence count that foreground
 correlation as one tool result; a background result has no tool-result
-correlation and counts as neither one.
+correlation and counts as neither one. Each immutable compaction validates its
+summary's tool balance exactly when it commits. A root compaction replays
+summary structure so imported and independently rooted frontiers retain their
+exact model-visible order. A successor trusts its immutable predecessor's
+validated boundary, excludes the consumed local summary chain, and validates
+only the retained/current suffix through typed source-session and entry keys. A
+later turn first isolates the one immutable compaction leaf, rejects it from
+frontier header counts when it is shorter than the turn's terminal predecessor,
+and performs recursive prefix validation only for that one remaining candidate;
+historical compaction results are never expanded by a turn-start commit.
 
 An accepted background wait reserves one future recipient delivery position
 until its child result exists. Message and later-wait admission under the same

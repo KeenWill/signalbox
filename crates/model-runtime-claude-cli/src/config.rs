@@ -20,8 +20,8 @@ pub struct ClaudeCliConfig {
     pub working_directory: PathBuf,
     /// Non-secret durable reference naming the selected Claude credential.
     pub credential_reference: signalbox_model_runtime::CredentialReference,
-    /// Positive whole-process timeout representable by the runtime clock.
-    pub exchange_timeout: Duration,
+    /// Optional positive whole-process timeout representable by the runtime clock.
+    pub exchange_timeout: Option<Duration>,
     /// Grace after a cancellation interrupt before force-killing the process.
     pub interrupt_grace: Duration,
     /// Maximum post-kill wait, or unbounded when explicitly configured as
@@ -53,7 +53,7 @@ impl ClaudeCliConfig {
             mcp_bridge_executable: mcp_bridge_executable.into(),
             working_directory: working_directory.into(),
             credential_reference,
-            exchange_timeout: Duration::from_secs(10 * 60),
+            exchange_timeout: None,
             interrupt_grace: Duration::from_secs(2),
             post_kill_reap_bound,
             event_limit: 8 * 1024 * 1024,

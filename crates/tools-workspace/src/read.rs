@@ -42,9 +42,12 @@ pub const WORKSPACE_READ_TOOL_NAMES: [&str; 4] = [
     SEARCH_FILES_NAME,
 ];
 
-const DEFAULT_READ_MAX_BYTES: usize = 64 * 1024;
+const DEFAULT_READ_MAX_BYTES: usize = 32 * 1024;
 /// Maximum byte prefix accepted by `read_file`.
-pub const MAX_WORKSPACE_READ_BYTES: usize = 256 * 1024;
+///
+/// This leaves model-context room for the surrounding prompt and parallel
+/// tool results instead of allowing one read to consume an entire call.
+pub const MAX_WORKSPACE_READ_BYTES: usize = 32 * 1024;
 const DEFAULT_MAX_RESULTS: usize = 100;
 const MAX_RESULTS: usize = 256;
 const MAX_PATTERN_CHARACTERS: usize = 4096;
@@ -78,7 +81,7 @@ pub struct ReadFileArguments {
     /// Relative file path inside the injected root.
     #[schemars(length(min = 1, max = crate::path::MAX_WORKSPACE_PATH_CHARACTERS))]
     pub path: String,
-    /// Maximum UTF-8 content bytes retained, from 1 through 262144.
+    /// Maximum UTF-8 content bytes retained, from 1 through 32768.
     #[serde(default = "default_read_max_bytes")]
     #[schemars(range(min = 1, max = MAX_WORKSPACE_READ_BYTES))]
     pub max_bytes: usize,

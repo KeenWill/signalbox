@@ -292,7 +292,7 @@ async fn file_delivery_resolves_a_historical_operation_pin_from_the_complete_cat
         None,
         None,
     );
-    config.exchange_timeout = OFFLINE_TIMEOUT;
+    config.exchange_timeout = Some(OFFLINE_TIMEOUT);
     config.interrupt_grace = Duration::from_millis(100);
     let runtime = ClaudeCliRuntime::new_with_credential_catalog(
         config,
@@ -956,7 +956,7 @@ async fn a_line_rejected_by_the_event_bound_withholds_the_tool_fact() {
         None,
         None,
     );
-    config.exchange_timeout = OFFLINE_TIMEOUT;
+    config.exchange_timeout = Some(OFFLINE_TIMEOUT);
     config.interrupt_grace = Duration::from_millis(100);
     config.event_limit = 16;
     let runtime = ClaudeCliRuntime::new(config).expect("offline runtime configuration is valid");
@@ -1055,7 +1055,7 @@ async fn execute_hanging_scenario(scenario: &str) -> TerminalEvidence {
     // The deadline starts before environment setup and spawn, so it has to
     // cover both and still fire well inside the scenario's own 60s hang. A
     // tighter bound races process startup under load.
-    config.exchange_timeout = Duration::from_secs(3);
+    config.exchange_timeout = Some(Duration::from_secs(3));
     config.interrupt_grace = Duration::from_millis(100);
     let runtime = ClaudeCliRuntime::new(config).expect("offline runtime configuration is valid");
     let prepared = prepare(&runtime, operation(scenario, OperationShape::Text)).await;
@@ -1091,7 +1091,7 @@ fn runtime(working_directory: &Path, executable: &Path) -> ClaudeCliRuntime {
         None,
         None,
     );
-    config.exchange_timeout = OFFLINE_TIMEOUT;
+    config.exchange_timeout = Some(OFFLINE_TIMEOUT);
     config.interrupt_grace = Duration::from_millis(100);
     ClaudeCliRuntime::new(config).expect("offline runtime configuration is valid")
 }
@@ -1123,7 +1123,7 @@ fn file_delivery_runtime_bytes_result(
         None,
         None,
     );
-    config.exchange_timeout = OFFLINE_TIMEOUT;
+    config.exchange_timeout = Some(OFFLINE_TIMEOUT);
     config.interrupt_grace = Duration::from_millis(100);
     ClaudeCliRuntime::new_with_file_delivery(
         config,

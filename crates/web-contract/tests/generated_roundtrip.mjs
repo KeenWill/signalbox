@@ -37,12 +37,15 @@ test("generated bootstrap decoder rejects another contract version", () => {
         contract: { name: "signalbox.web-http", version: "2" },
         capabilities: {
           bounded_json: true,
+          bounded_session_timeline: true,
           same_origin_json_mutations: true,
           ndjson_streaming: true,
         },
         limits: {
           max_json_body_bytes: 65536,
           max_ndjson_item_bytes: 65536,
+          max_timeline_window_items: 256,
+          max_timeline_window_bytes: 65536,
         },
       }),
     /incompatible web contract/,

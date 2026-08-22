@@ -94,6 +94,16 @@ const ROTATION_CEILING_CAUSE: &str = "turn_liveness_rotation_ceiling_reached";
 /// candidates from it.
 // numeric-bound: guard - prevents a non-converging liveness inventory scan
 const QUIESCENT_ROTATION_PAGE_CEILING: usize = 4_096;
+/// Client-side observation bound after PostgreSQL has been told to terminate
+/// the recovery transaction at the supplied server bound.
+///
+/// The second interval is only transport grace. If it expires, PostgreSQL has
+/// already had a full transaction bound in which to terminate the backend, so
+/// dropping the client future cannot leave live database work accumulating
+/// behind the outbox allocator.
+fn recovery_client_observation_bound(server_bound: Option<Duration>) -> Option<Duration> {
+    server_bound.map(|bound| bound.saturating_add(bound))
+}
 
 /// Deployment policy for one turn-liveness scan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -469,7 +479,6 @@ async fn run_ambiguous_operation_watchdog(
                     &repository,
                     automatic_reconciliation_attempt_budget,
                     numeric_bounds,
-                    &mut shutdown,
                 )
                 .await;
             }
@@ -602,7 +611,6 @@ async fn reconcile_ambiguous_operations(
     repository: &PostgresAutomaticReconciliationRepository,
     automatic_reconciliation_attempt_budget: Option<u32>,
     numeric_bounds: TurnLivenessNumericBounds,
-    shutdown: &mut watch::Receiver<bool>,
 ) {
     let mut reconciliations = 0usize;
     while numeric_bounds
@@ -610,12 +618,13 @@ async fn reconcile_ambiguous_operations(
         .is_none_or(|limit| reconciliations < limit)
     {
         let claim = optional_timeout(
-            numeric_bounds.recovery_attempt_bound,
-            repository.claim_due(),
+            recovery_client_observation_bound(numeric_bounds.recovery_attempt_bound),
+            repository.claim_due(numeric_bounds.recovery_attempt_bound),
         );
-        let Some(claim_outcome) = complete_before_shutdown(shutdown, claim).await else {
-            return;
-        };
+        // Once PostgreSQL has begun a bounded transaction, shutdown lets that
+        // transaction reach its server-enforced outcome instead of dropping
+        // its client driver and leaving the backend running during the drain.
+        let claim_outcome = claim.await;
         let batch = match claim_outcome {
             Ok(Ok(batch)) => batch,
             Ok(Err(error)) => {
@@ -648,12 +657,10 @@ async fn reconcile_ambiguous_operations(
         };
         let (operation_kind, operation_id) = operation_log_fields(claimed.operation());
         let attempt = optional_timeout(
-            numeric_bounds.recovery_attempt_bound,
-            repository.reconcile(claimed),
+            recovery_client_observation_bound(numeric_bounds.recovery_attempt_bound),
+            repository.reconcile(claimed, numeric_bounds.recovery_attempt_bound),
         );
-        let Some(attempt_outcome) = complete_before_shutdown(shutdown, attempt).await else {
-            return;
-        };
+        let attempt_outcome = attempt.await;
         match attempt_outcome {
             Ok(Ok(AutomaticReconciliationOutcome::Reconciled)) => tracing::warn!(
                 cause_code = "model_call_automatically_reconciled",
@@ -682,14 +689,14 @@ async fn reconcile_ambiguous_operations(
                     }
                 ) {
                     let record_failure = optional_timeout(
-                        numeric_bounds.recovery_attempt_bound,
-                        repository.record_failure(claimed, error.failure_kind()),
+                        recovery_client_observation_bound(numeric_bounds.recovery_attempt_bound),
+                        repository.record_failure(
+                            claimed,
+                            error.failure_kind(),
+                            numeric_bounds.recovery_attempt_bound,
+                        ),
                     );
-                    let Some(record_outcome) =
-                        complete_before_shutdown(shutdown, record_failure).await
-                    else {
-                        return;
-                    };
+                    let record_outcome = record_failure.await;
                     match record_outcome {
                         Ok(Ok(())) => {}
                         Ok(Err(record_error)) => report_automatic_reconciliation_failure(
@@ -1091,6 +1098,7 @@ mod tests {
         StaleTurnTerminalizer, TERMINALIZATION_DEFERRED_CAUSE, TerminalizationWindow,
         TurnLivenessNumericBounds, TurnLivenessWake, complete_before_shutdown,
         drain_quiescent_rotation, next_turn_liveness_wake, reconcile_turn_liveness,
+        recovery_client_observation_bound,
     };
     use signalbox_application::{
         StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
@@ -1657,6 +1665,11 @@ mod tests {
     #[test]
     fn recovery_attempts_use_the_configured_bound() {
         assert!(example_numeric_bounds().recovery_attempt_bound.is_some());
+        assert_eq!(
+            recovery_client_observation_bound(Some(Duration::from_secs(60))),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(recovery_client_observation_bound(None), None);
     }
 
     #[test]

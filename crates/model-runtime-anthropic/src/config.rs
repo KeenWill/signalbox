@@ -23,10 +23,10 @@ pub struct AnthropicConfig {
     /// timeout fires before any request byte is written, so it classifies as
     /// proven-unsent.
     pub connect_timeout: Option<Duration>,
-    /// Positive whole-exchange timeout. It covers the full exchange
+    /// Optional positive whole-exchange timeout. It covers the full exchange
     /// including body or stream delivery; firing after send is boundary-loss
     /// evidence under the timeout rule in `docs/spec/runtime-substrate.md`.
-    pub exchange_timeout: Duration,
+    pub exchange_timeout: Option<Duration>,
     /// Positive upper bound on one SSE record's size; zero is rejected at
     /// construction and larger records are stream-protocol-violation
     /// evidence.
@@ -45,7 +45,7 @@ impl AnthropicConfig {
             base_url: "https://api.anthropic.com".to_string(),
             anthropic_version: "2023-06-01".to_string(),
             connect_timeout: None,
-            exchange_timeout: Duration::from_secs(10 * 60),
+            exchange_timeout: None,
             sse_record_limit: 8 * 1024 * 1024,
             native_message_limit,
         }

@@ -40,6 +40,8 @@ pub struct PrepareContextCompactionRequest {
     pub selection: DirectModelSelection,
     /// Exact resolved provider target.
     pub target: ResolvedProviderTarget,
+    /// Whether this call's provider input total includes both cache axes.
+    pub input_includes_cache_tokens: bool,
     /// Non-secret credential reference pinned for the call.
     pub credential_reference: String,
     /// Fresh physical call candidate.
@@ -1050,8 +1052,8 @@ async fn prepare_in_transaction(
         "INSERT INTO context_compaction_model_call
             (model_call_id, session_id, direct_model_selection_id,
              resolved_provider_model_identity_id, source_frontier_id,
-             credential_reference, state_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, 'prepared')",
+             credential_reference, usage_input_includes_cache_tokens, state_kind)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'prepared')",
     )
     .bind(request.call.into_uuid())
     .bind(session_id_to_uuid(request.session))
@@ -1059,6 +1061,7 @@ async fn prepare_in_transaction(
     .bind(request.target.identity().into_uuid())
     .bind(source_frontier.into_uuid())
     .bind(&request.credential_reference)
+    .bind(request.input_includes_cache_tokens)
     .execute(&mut **transaction)
     .await;
     if let Err(error) = insert_call {
@@ -1177,6 +1180,7 @@ struct ProjectedFrontierMember {
     position: u64,
     reference: SemanticTranscriptEntryRef,
     payload_kind: String,
+    content_bytes: u64,
     summary_range: Option<(SemanticTranscriptEntryRef, SemanticTranscriptEntryRef)>,
 }
 
@@ -1188,6 +1192,33 @@ async fn load_projected_frontier_members(
     let rows = sqlx::query(
         "SELECT member.member_position, member.source_session_id,
                 member.semantic_entry_id, entry.payload_kind,
+                CASE entry.payload_kind
+                    WHEN 'imported_entry' THEN
+                        COALESCE(octet_length(imported.content_encoding), 0)
+                    WHEN 'origin_accepted_input' THEN
+                        COALESCE(octet_length(input.content_text), 0)
+                    WHEN 'steering_accepted_input' THEN
+                        COALESCE(octet_length(input.content_text), 0)
+                    WHEN 'context_summary' THEN
+                        COALESCE(octet_length(entry.context_summary_value), 0)
+                    WHEN 'assistant_text' THEN
+                        COALESCE(octet_length(entry.assistant_text_value), 0)
+                    WHEN 'assistant_tool_use' THEN
+                        COALESCE(octet_length(request.tool_name), 0)
+                        + COALESCE(octet_length(request.arguments_text), 0)
+                    WHEN 'tool_execution_result' THEN
+                        COALESCE(octet_length(attempt.result_text), 0)
+                        + COALESCE(octet_length(attempt.error_detail), 0)
+                    WHEN 'tool_denied' THEN
+                        COALESCE(octet_length(decision.denial_reason), 0)
+                    WHEN 'delegated_task' THEN
+                        COALESCE(octet_length(task.task_content), 0)
+                    WHEN 'delegation_message' THEN
+                        COALESCE(octet_length(message.content_text), 0)
+                    WHEN 'delegation_result' THEN
+                        COALESCE(octet_length(child_result.content_text), 0)
+                    ELSE 0
+                END::numeric AS content_bytes,
                 entry.context_summary_first_source_session_id,
                 entry.context_summary_first_entry_id,
                 entry.context_summary_through_source_session_id,
@@ -1196,6 +1227,29 @@ async fn load_projected_frontier_members(
            JOIN semantic_transcript_entry AS entry
              ON entry.source_session_id = member.source_session_id
             AND entry.semantic_entry_id = member.semantic_entry_id
+           LEFT JOIN accepted_input AS input
+             ON input.accepted_input_id = entry.origin_accepted_input_id
+            AND input.session_id = entry.source_session_id
+           LEFT JOIN imported_transcript_entry AS imported
+             ON imported.imported_conversation_id = entry.imported_conversation_id
+            AND imported.imported_transcript_entry_id =
+                entry.imported_transcript_entry_id
+           LEFT JOIN tool_request AS request
+             ON request.request_id = entry.assistant_tool_request_id
+            AND request.session_id = entry.source_session_id
+           LEFT JOIN tool_attempt AS attempt
+             ON attempt.attempt_id = entry.tool_result_attempt_id
+            AND attempt.session_id = entry.source_session_id
+           LEFT JOIN tool_approval_decision AS decision
+             ON decision.request_id = entry.tool_result_request_id
+           LEFT JOIN session_delegation_initial_task AS task
+             ON task.child_session_id = entry.source_session_id
+            AND task.semantic_entry_id = entry.semantic_entry_id
+           LEFT JOIN session_message AS message
+             ON message.message_id = entry.delegation_message_id
+           LEFT JOIN session_child_result AS child_result
+             ON child_result.spawning_tool_request_id =
+                entry.delegation_result_spawning_tool_request_id
           WHERE member.owning_session_id = $1
             AND member.context_frontier_id = $2
           ORDER BY member.member_position",
@@ -1244,6 +1298,7 @@ async fn load_projected_frontier_members(
                 SemanticTranscriptEntryId::from_uuid(row.try_get("semantic_entry_id")?),
             ),
             payload_kind,
+            content_bytes: decode_u64(row.try_get("content_bytes")?, "entry content bytes")?,
             summary_range,
         });
     }
@@ -1341,12 +1396,26 @@ fn latest_safe_boundary(members: &[ProjectedFrontierMember]) -> Option<usize> {
 }
 
 fn bounded_safe_boundary(members: &[ProjectedFrontierMember]) -> Option<usize> {
-    let midpoint = members.len().div_ceil(2);
-    let preferred = latest_safe_boundary(&members[..midpoint]);
-    preferred.or_else(|| {
-        (midpoint..members.len())
-            .find(|boundary| range_closes_tool_exchanges(&members[..=*boundary]))
-    })
+    let total_weight = members.iter().fold(0_u64, |total, member| {
+        total.saturating_add(member.content_bytes.max(1))
+    });
+    let midpoint_weight = total_weight.div_ceil(2);
+    let mut through_weight = 0_u64;
+    let mut open_requests = 0_usize;
+    for (index, member) in members.iter().enumerate() {
+        through_weight = through_weight.saturating_add(member.content_bytes.max(1));
+        match member.payload_kind.as_str() {
+            "assistant_tool_use" => open_requests = open_requests.saturating_add(1),
+            "tool_execution_result" | "tool_denied" | "tool_closed_by_turn_end" => {
+                open_requests = open_requests.checked_sub(1)?;
+            }
+            _ => {}
+        }
+        if through_weight >= midpoint_weight && open_requests == 0 {
+            return Some(index);
+        }
+    }
+    None
 }
 
 fn required<T>(
@@ -1505,10 +1574,19 @@ mod tests {
     }
 
     fn ordinary(position: u64, reference: SemanticTranscriptEntryRef) -> ProjectedFrontierMember {
+        weighted_ordinary(position, reference, 1)
+    }
+
+    fn weighted_ordinary(
+        position: u64,
+        reference: SemanticTranscriptEntryRef,
+        content_bytes: u64,
+    ) -> ProjectedFrontierMember {
         ProjectedFrontierMember {
             position,
             reference,
             payload_kind: String::from("origin_accepted_input"),
+            content_bytes,
             summary_range: None,
         }
     }
@@ -1523,6 +1601,7 @@ mod tests {
             position,
             reference,
             payload_kind: String::from("context_summary"),
+            content_bytes: 1,
             summary_range: Some((first, through)),
         }
     }
@@ -1575,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_boundary_selects_the_latest_safe_member_in_the_first_half() {
+    fn automatic_boundary_selects_first_safe_member_at_half_weight() {
         let visible = vec![
             ordinary(1, entry(0x7021)),
             ordinary(2, entry(0x7022)),
@@ -1593,24 +1672,28 @@ mod tests {
                 position: 1,
                 reference: entry(0x7031),
                 payload_kind: "assistant_tool_use".to_owned(),
+                content_bytes: 1,
                 summary_range: None,
             },
             ProjectedFrontierMember {
                 position: 2,
                 reference: entry(0x7032),
                 payload_kind: "assistant_tool_use".to_owned(),
+                content_bytes: 1,
                 summary_range: None,
             },
             ProjectedFrontierMember {
                 position: 3,
                 reference: entry(0x7033),
                 payload_kind: "tool_execution_result".to_owned(),
+                content_bytes: 1,
                 summary_range: None,
             },
             ProjectedFrontierMember {
                 position: 4,
                 reference: entry(0x7034),
                 payload_kind: "tool_execution_result".to_owned(),
+                content_bytes: 1,
                 summary_range: None,
             },
             ordinary(5, entry(0x7035)),
@@ -1618,5 +1701,17 @@ mod tests {
         ];
 
         assert_eq!(bounded_safe_boundary(&visible), Some(3));
+    }
+
+    #[test]
+    fn automatic_boundary_consumes_half_of_a_byte_heavy_tail() {
+        let visible = vec![
+            weighted_ordinary(1, entry(0x7041), 1),
+            weighted_ordinary(2, entry(0x7042), 1),
+            weighted_ordinary(3, entry(0x7043), 100),
+            weighted_ordinary(4, entry(0x7044), 100),
+        ];
+
+        assert_eq!(bounded_safe_boundary(&visible), Some(2));
     }
 }

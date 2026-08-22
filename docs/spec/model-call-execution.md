@@ -6,14 +6,29 @@ verified against this PR (`agent/turn-lifecycle-hardening`).
 Post-response configured-usage treatment is verified against this PR
 (`agent/daemon-live-known-failed-cause`).
 
-Pre-activation reconciliation from durable completed-call usage is verified
-against this PR (`agent/daemon-live-reported-usage-compaction`).
+Pre-activation reconciliation from durable terminal-call usage is verified
+against this PR (`agent/daemon-live-ambiguous-usage-compaction`).
+
+Same-turn tool-continuation headroom closure is verified against this PR
+(`agent/daemon-live-tool-result-headroom`). Queued-turn post-usage transcript
+headroom is verified against this PR
+(`agent/daemon-live-post-usage-transcript-headroom`). Dedicated-compaction usage
+as the next queued-turn baseline is verified against this PR
+(`agent/daemon-live-compaction-source-headroom`). Automatic compaction's
+content-weighted boundary is verified against this PR
+(`agent/daemon-live-compaction-byte-boundary`). Codex advisory output
+reservation behavior is re-verified against this PR
+(`agent/daemon-live-codex-output-reservation`).
 
 Non-ambiguous execution-failure containment is verified against this PR
 (`agent/daemon-live-nonambiguous-execution-containment`).
 
 Credential-pool action and outbox allocator lock ordering is verified against
-this PR (`agent/daemon-live-outbox-credential-lock-order`).
+this PR (`agent/daemon-live-tool-continuation-order`). The tool-result
+continuation guard's narrowed write scope is verified against this PR
+(`agent/daemon-live-continuation-guard-scope`). Counted activation's pre-guard
+call preparation is verified against this PR
+(`agent/daemon-live-counted-activation-guard-scope`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -388,13 +403,16 @@ closed. The daemon retries database and ambiguous-commit outcomes at this seam;
 it does not start provider interaction until authorization is resolved. The
 automatic preparation path retries transient database failures while loading its
 selected transcript range, retaining the live `Prepared` call as provably unsent
-rather than consuming that queued turn's sole automatic attempt. It selects a
-safe prefix at or before the model-visible midpoint, or the first safe boundary
-after that midpoint when an open tool exchange crosses it, so the summary
-request does not repeat the complete oversized input. An integrity failure still
-terminalizes the unsent call. After a successful provider result, the daemon
-retains the summary and its usage in memory until the exact completion is
-durably applied or replayed.
+rather than consuming that queued turn's sole automatic attempt. It weights each
+model-visible entry by its durable content bytes, with unit weight for an empty
+entry, and selects the first safe boundary at or beyond half the total weight.
+An open tool exchange extends the prefix through its first safe closing
+boundary. This keeps a few large entries from remaining indefinitely in a
+count-light tail while still preventing the summary request from repeating the
+complete oversized input unless one indivisible entry or tool exchange itself
+spans the midpoint. An integrity failure still terminalizes the unsent call.
+After a successful provider result, the daemon retains the summary and its usage
+in memory until the exact completion is durably applied or replayed.
 
 The explicit `compact_session` request names a session and an optional semantic
 transcript position. Absence selects the latest safe terminal or pre-call
@@ -418,23 +436,48 @@ exceeds the context ceiling. Both are operator-declared per selection and never
 inferred from provider or model names. Adapters with a provider setting surface,
 including Anthropic, send the configured output ceiling in the provider request.
 Codex CLI instead renders the ceiling as model-visible advisory context because
-the CLI exposes no provider-side control. Before activating a queued turn, the
-daemon reads the newest completed call for the same resolved target since the
-latest compaction. If its provider-reported input, interpreted with the stored
-cache-inclusion semantics, plus its completed output and the next configured
-output reservation exceeds the context window, the daemon performs one bounded
-automatic compaction before activation. This is a conservative lower-bound
-trigger: later transcript entries can only increase the next input. A queued
-turn spends at most one automatic attempt; if durable evidence says that attempt
-was already spent, the scheduler reports exhaustion and permits activation
-rather than wedging the queue on a compaction it may not repeat. After a nominal
-completion, the daemon retains adapter-reported usage and the completed
-observation even when reported output exceeds `max_output_tokens` or the
-reported input-plus-output lower bound exceeds `context_window_tokens`; it emits
-a closed operator cause for the overage rather than discarding assistant
+the CLI exposes no provider-side control. The daemon still reserves that full
+operator-selected ceiling before each continuation, so a Codex deployment keeps
+the value aligned with its intended reply budget rather than the model's larger
+capability ceiling. Before activating a queued turn, the daemon reads the newest
+provider-reported input for the same resolved target from either a terminal
+ordinary call since the latest compaction or the latest completed dedicated
+compaction call itself. The terminal disposition does not erase usage from an
+ordinary provider round that may have been accepted: ambiguous and failed calls
+therefore protect a resumed session from re-sending a request whose reported
+size already exhausted headroom. If the reported input, interpreted with the
+stored cache-inclusion semantics, plus output only when completion retained it
+in the model-visible transcript, a conservative UTF-8 byte allowance for
+model-visible entries appended after that input, and the next configured output
+reservation exceeds the context window, the daemon performs one bounded
+automatic compaction before activation. The allowance counts durable content and
+excludes ordinary assistant content or the dedicated summary when reported
+output already accounts for it. Historical dedicated calls prepared before that
+semantics became durable retain an unknown value; the guard treats unknown as
+cache-exclusive so it may overcount but cannot omit reported cache axes. A
+queued turn spends at most one automatic attempt; if durable evidence says that
+attempt was already spent, the scheduler reports exhaustion and permits
+activation rather than wedging the queue on a compaction it may not repeat.
+After a nominal completion, the daemon retains adapter-reported usage and the
+completed observation even when reported output exceeds `max_output_tokens` or
+the reported input-plus-output lower bound exceeds `context_window_tokens`; it
+emits a closed operator cause for the overage rather than discarding assistant
 material after the provider has already accepted and served the request. Missing
 usage fields remain missing and are never invented. Adapters need no separate
 counting operation.
+
+The same guard runs inside the atomic tool-result continuation transaction
+against the exact completed tool-producing call. It combines reported usage, the
+UTF-8 byte length of newly projected result and denial content as a conservative
+token allowance, and the next configured output reservation. When that bound
+exceeds the context window, the daemon commits the tool results but prepares no
+continuation call. It ends the turn `Failed` with an append-only
+context-headroom record naming the producing call, reported usage semantics,
+projected-content allowance, and configured limits. Automatic goal resumption
+does not charge that daemon-owned boundary against the session's attempt budget;
+the successor queued-turn activation performs the existing bounded automatic
+compaction before calling the provider again. Missing usage does not trigger the
+boundary, and inconsistent producing-call evidence fails closed.
 
 The explicit trigger uses the same compaction transaction and provider-call
 lifecycle. An explicit command first resolves its user-global replay state; an
@@ -998,19 +1041,31 @@ the active turn) into the same SELECT, so lock-before-read is guaranteed at
 statement granularity, not within the statement. Why: one lock statement issued
 first in every transaction makes per-session serialization total and lock-order
 cycles on one session impossible. A model-call transaction that both appends an
-outbox event and locks shared credential-pool action heads explicitly takes the
-global outbox sequence allocator first. Tool-result continuation already takes
-the allocator when it projects results; initial-call preparation and terminal
-observation take it before credential selection or action persistence. Why: a
-credential action head is shared across sessions, so taking it before the
-allocator could deadlock against a different session already holding the
-allocator while selecting that same profile. Prospective preparation takes no
-allocator lock because it rolls back without appending or consuming actions. The
-in-process per-attempt dispatch gate is the only other ordering primitive; in
-this slice the execution service is its sole consumer. Interrupt application
-deliberately does not acquire it: once `InFlight` commits, the call is issued
-work, so a later interrupt durably requests cancellation and the runtime signal
-races any provider progress without claiming that acceptance was prevented.
+outbox event and locks shared credential-pool action heads first takes one
+global transaction-scoped ordering guard. Ordinary initial-call preparation,
+tool-result continuation, and terminal observation then finish credential action
+locking before taking the global outbox sequence allocator immediately ahead of
+their writes. Counted activation takes the same guard before its atomic
+activation append; that append necessarily allocates before the newly active
+turn can select a credential, but the guard excludes every reverse-order
+model-call writer until commit. Tool-result continuation first materializes its
+transaction-local result entries and reconstructs their exact frontier under the
+per-session lock. It then takes the guard before projecting the results outbox
+event and carries that proof into same-transaction call preparation. Why: long
+frontier reads do not serialize unrelated model-call writers, while the guard
+still prevents a credential/allocator cycle without making unrelated outbox
+writers wait through credential selection and validation. Prospective
+preparation derives the exact initial-call checkpoint before counted activation;
+the guarded commit revalidates the unchanged activation candidate and carries
+that preparation into the atomic activation-and-call write instead of
+reconstructing the session while holding the guard. Prospective preparation
+takes neither guard nor allocator lock because it rolls back without appending
+or consuming actions. The in-process per-attempt dispatch gate is the only other
+ordering primitive; in this slice the execution service is its sole consumer.
+Interrupt application deliberately does not acquire it: once `InFlight` commits,
+the call is issued work, so a later interrupt durably requests cancellation and
+the runtime signal races any provider progress without claiming that acceptance
+was prevented.
 
 ## Crash, restart, and supervision
 
@@ -1031,7 +1086,7 @@ pass raises the same signal whenever a durable stage it owns reports
 `Infrastructure { commit_ambiguous: true }` from the guarded counted activation
 commit, since only that next scan can decide what committed. After recovering
 any active call, the scheduled pass prepares bounded automatic compaction before
-activating queued work when durable completed-call usage proves the configured
+activating queued work when durable terminal-call usage proves the configured
 headroom is exhausted. The connection runtime raises the same signal through its
 recovery handle for an explicit compaction command reporting that class, and
 still answers the client `commit_ambiguous`: a connection handler holds no

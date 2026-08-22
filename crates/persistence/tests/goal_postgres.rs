@@ -4325,6 +4325,7 @@ async fn s18_inv015_inv032_logically_terminal_child_admits_compaction() -> Resul
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 Uuid::from_u128(0xfa41),
             )),
+            input_includes_cache_tokens: false,
             credential_reference: String::from("cascade-compaction-test-provider"),
             call: ModelCallId::from_uuid(Uuid::from_u128(0xfa42)),
             compaction: ContextCompactionId::from_uuid(Uuid::from_u128(0xfa43)),

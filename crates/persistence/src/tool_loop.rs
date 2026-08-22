@@ -211,6 +211,7 @@ pub struct PostgresToolLoopRepository {
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
     credential_pools: crate::model_execution::CredentialPoolRuntimeCatalog,
     cache_inclusive_input_targets: HashSet<signalbox_domain::ResolvedProviderTarget>,
+    continuation_usage_limits: crate::model_execution::ToolContinuationUsageLimitCatalog,
 }
 
 impl PostgresToolLoopRepository {
@@ -223,6 +224,7 @@ impl PostgresToolLoopRepository {
             credential_families: None,
             credential_pools: Default::default(),
             cache_inclusive_input_targets: HashSet::new(),
+            continuation_usage_limits: Default::default(),
         }
     }
 
@@ -240,6 +242,7 @@ impl PostgresToolLoopRepository {
             credential_families: None,
             credential_pools: Default::default(),
             cache_inclusive_input_targets: HashSet::new(),
+            continuation_usage_limits: Default::default(),
         }
     }
 
@@ -248,6 +251,14 @@ impl PostgresToolLoopRepository {
         targets: HashSet<signalbox_domain::ResolvedProviderTarget>,
     ) -> Self {
         self.cache_inclusive_input_targets = targets;
+        self
+    }
+
+    pub(crate) fn with_continuation_usage_limits(
+        mut self,
+        limits: crate::model_execution::ToolContinuationUsageLimitCatalog,
+    ) -> Self {
+        self.continuation_usage_limits = limits;
         self
     }
 
@@ -1131,6 +1142,21 @@ impl PostgresToolLoopRepository {
             insert_snapshot(&mut transaction, projection.snapshot())
                 .await
                 .map_err(|_| ToolLoopCorruption::Inconsistent("result frontier"))?;
+            // Full frontier reconstruction can scan a long-lived session. Keep
+            // that read outside the global writer guard while the session lock
+            // preserves the transaction-local result projection unchanged.
+            let execution = crate::model_execution::load_tool_continuation_execution(
+                &mut transaction,
+                session,
+                targets,
+                &projection,
+            )
+            .await
+            .map_err(map_model_call_error)?;
+            let outbox_order_guard =
+                crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
+                    .await
+                    .map_err(map_model_call_error)?;
             outbox::append(
                 &mut transaction,
                 OutboxEvent::ToolBatchTransition {
@@ -1145,6 +1171,8 @@ impl PostgresToolLoopRepository {
             .await?;
             let outcome = crate::model_execution::prepare_tool_continuation_call(
                 &mut transaction,
+                outbox_order_guard,
+                execution,
                 session,
                 turn,
                 targets,
@@ -1152,7 +1180,9 @@ impl PostgresToolLoopRepository {
                 self.credential_families.as_ref(),
                 &self.credential_pools,
                 &self.cache_inclusive_input_targets,
+                &self.continuation_usage_limits,
                 &projection,
+                producing_call,
                 identities.call(),
                 identities.target_failure().clone(),
                 identities.steering_frontier(),

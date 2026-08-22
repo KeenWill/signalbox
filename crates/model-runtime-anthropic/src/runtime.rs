@@ -187,10 +187,9 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
     ///   connect failure provably precede any request byte, which is what
     ///   lets [`UnsentCause::ConnectFailed`] claim proven-unsent.
     ///
-    /// The caller may leave the separate connect timeout unset, but every
-    /// exchange has a positive whole-exchange timeout that covers connection
-    /// establishment, response headers, and buffered or streamed body
-    /// delivery.
+    /// The caller may leave the connect or whole-exchange timeout unset. A
+    /// configured whole-exchange timeout covers connection establishment,
+    /// response headers, and buffered or streamed body delivery.
     pub fn new(
         config: AnthropicConfig,
         credentials: A,
@@ -198,7 +197,10 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         if config.sse_record_limit == 0 {
             return Err(AnthropicConstructionError::InvalidSseRecordLimit);
         }
-        if config.exchange_timeout.is_zero() {
+        if config
+            .exchange_timeout
+            .is_some_and(|timeout| timeout.is_zero())
+        {
             return Err(AnthropicConstructionError::InvalidExchangeTimeout);
         }
         // Parse and validate the caller's base independently. Appending first
@@ -278,8 +280,10 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             .no_proxy()
             .redirect(Policy::none())
             .retry(reqwest::retry::never())
-            .pool_max_idle_per_host(0)
-            .timeout(config.exchange_timeout);
+            .pool_max_idle_per_host(0);
+        if let Some(timeout) = config.exchange_timeout {
+            builder = builder.timeout(timeout);
+        }
         if let Some(timeout) = config.connect_timeout {
             builder = builder.connect_timeout(timeout);
         }

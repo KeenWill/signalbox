@@ -21,10 +21,10 @@ pub struct OpenAiConfig {
     /// timeout fires before any request byte is written, so it classifies as
     /// proven-unsent.
     pub connect_timeout: Option<Duration>,
-    /// Positive whole-exchange timeout. It covers the full exchange
+    /// Optional positive whole-exchange timeout. It covers the full exchange
     /// including body or stream delivery; firing after send is boundary-loss
     /// evidence under the timeout rule in `docs/spec/runtime-substrate.md`.
-    pub exchange_timeout: Duration,
+    pub exchange_timeout: Option<Duration>,
     /// Upper bound on one SSE record's size; larger records are
     /// stream-protocol-violation evidence. Must be greater than zero.
     pub sse_record_limit: usize,
@@ -41,7 +41,7 @@ impl OpenAiConfig {
             model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog::empty(),
             base_url: "https://api.openai.com".to_string(),
             connect_timeout: None,
-            exchange_timeout: Duration::from_secs(10 * 60),
+            exchange_timeout: None,
             sse_record_limit: 8 * 1024 * 1024,
             native_message_limit,
         }
