@@ -204,7 +204,13 @@ export function SearchSurface({
       !cursorMetadataIsValid
     ) {
       submittedRouteChangeRef.current = true
-      onStateChange({ q, session: submittedSession })
+      onStateChange({
+        q,
+        session: submittedSession,
+        afterAddress: undefined,
+        afterProjection: undefined,
+        cursorParametersAreValid: undefined,
+      })
     } else if (requestIsValid) {
       void results.refetch()
     }
