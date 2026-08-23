@@ -123,4 +123,23 @@ describe('command registry', () => {
 
     expect(relationships).toEqual([])
   })
+
+  it('runs available exact-retry recovery actions through stable command identities', () => {
+    const recoveryActions: string[] = []
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      canRetryImport: true,
+      retryImport: () => recoveryActions.push('retry'),
+      canAbandonImport: true,
+      abandonImport: () => recoveryActions.push('abandon'),
+    }
+
+    invokeCommand('imports.continue.retry', context)
+    invokeCommand('imports.continue.abandon', context)
+
+    expect(recoveryActions).toEqual(['retry', 'abandon'])
+  })
 })

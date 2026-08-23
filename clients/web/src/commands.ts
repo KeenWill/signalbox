@@ -17,6 +17,10 @@ export interface CommandContext {
   requestedPaneSizes?: RootState['app']['paneSizes']
   canContinueImport?: boolean
   continueImport?: (relationship: 'resume' | 'fork') => void
+  canRetryImport?: boolean
+  retryImport?: () => void
+  canAbandonImport?: boolean
+  abandonImport?: () => void
 }
 
 export interface CommandBinding {
@@ -320,6 +324,25 @@ export const commandRegistry = [
     available: (context) =>
       context.canContinueImport === true && context.continueImport !== undefined,
     run: (context) => context.continueImport?.('fork'),
+  },
+  {
+    id: 'imports.continue.retry',
+    title: 'Retry exact imported continuation',
+    description: 'Replay the retained imported-continuation command without changing its payload.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) => context.canRetryImport === true && context.retryImport !== undefined,
+    run: (context) => context.retryImport?.(),
+  },
+  {
+    id: 'imports.continue.abandon',
+    title: 'Abandon exact imported continuation',
+    description: 'Discard the retained imported-continuation command after explicit confirmation.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) =>
+      context.canAbandonImport === true && context.abandonImport !== undefined,
+    run: (context) => context.abandonImport?.(),
   },
   {
     id: 'layout.toggle',
