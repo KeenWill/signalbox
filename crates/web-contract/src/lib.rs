@@ -452,10 +452,27 @@ pub enum WebRepoWatchHeldSlotBlocker {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebRepoWatchSingletonScope {
+    PullRequest {
+        repository: String,
+        number: String,
+    },
+    Stack {
+        repository: String,
+        root_pull_request: String,
+    },
+    Rule {},
+    Repository {
+        repository: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebRepoWatchHeldSlot {
     pub dispatch_id: String,
-    pub pull_request: Option<String>,
+    pub scope: WebRepoWatchSingletonScope,
     pub rule: String,
     pub held_since_unix_milliseconds: String,
     pub session_ids: Vec<String>,
@@ -482,7 +499,7 @@ pub enum WebRepoWatchObligationReadiness {
 #[serde(deny_unknown_fields)]
 pub struct WebRepoWatchQueuedObligation {
     pub id: String,
-    pub pull_request: Option<String>,
+    pub scope: WebRepoWatchSingletonScope,
     pub rule: String,
     pub first_event_id: String,
     pub latest_event_id: String,

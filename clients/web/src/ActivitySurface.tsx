@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { createColumnHelper, tableFeatures, useTable } from '@tanstack/react-table'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { ArrowDown, ArrowRight, ExternalLink, RefreshCw } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { type RefObject, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type {
   WebRepoWatchActivityPage,
   WebRepoWatchPullRequestPage,
@@ -24,6 +24,7 @@ import { actions, useAppDispatch } from './state'
 type RepositoryStatus = WebRepoWatchRepositoryStatusPage['repositories'][number]
 type PullRequest = WebRepoWatchPullRequestPage['pull_requests'][number]
 type PullRequestSession = WebRepoWatchPullRequestSessionPage['sessions'][number]
+type SingletonScope = WebRepoWatchWorkPage['held_slots'][number]['scope']
 
 interface ActivityRow {
   id: string
@@ -65,6 +66,19 @@ const historyColumns = historyColumn.columns([
 ])
 
 const words = (value: string) => value.replaceAll('_', ' ')
+
+export const singletonScopeLabel = (scope: SingletonScope) => {
+  switch (scope.kind) {
+    case 'pull_request':
+      return `PR ${scope.repository}#${scope.number}`
+    case 'stack':
+      return `Stack ${scope.repository}#${scope.root_pull_request}`
+    case 'rule':
+      return 'Rule-wide'
+    case 'repository':
+      return `Repository ${scope.repository}`
+  }
+}
 
 const time = (unixMilliseconds: string | null | undefined) => {
   if (!unixMilliseconds) return '—'
@@ -239,18 +253,22 @@ function PullRequestTable({
   repository,
   selected,
   onSelect,
+  headingRef,
 }: {
   page: WebRepoWatchPullRequestPage
   repository: string
   selected: string | null
   onSelect: (pullRequest: string) => void
+  headingRef: RefObject<HTMLHeadingElement | null>
 }) {
   return (
     <section className="activity-table-panel" aria-labelledby="pull-requests-heading">
       <header>
         <div>
           <span className="eyebrow">Current provider and automation facts</span>
-          <h2 id="pull-requests-heading">Pull requests</h2>
+          <h2 id="pull-requests-heading" ref={headingRef} tabIndex={-1}>
+            Pull requests
+          </h2>
         </div>
         <span>{page.pull_requests.length} loaded</span>
       </header>
@@ -347,7 +365,7 @@ function WorkTables({ page }: { page: WebRepoWatchWorkPage }) {
             {page.held_slots.map((slot) => (
               <tr key={slot.dispatch_id}>
                 <td>
-                  #{slot.pull_request ?? 'repo'} · {slot.rule}
+                  {singletonScopeLabel(slot.scope)} · {slot.rule}
                 </td>
                 <td>{time(slot.held_since_unix_milliseconds)}</td>
                 <td>{slot.blockers.map(words).join(', ') || 'No blocker'}</td>
@@ -377,7 +395,7 @@ function WorkTables({ page }: { page: WebRepoWatchWorkPage }) {
             {page.queued_obligations.map((obligation) => (
               <tr key={obligation.id}>
                 <td>
-                  #{obligation.pull_request ?? 'repo'} · {obligation.rule}
+                  {singletonScopeLabel(obligation.scope)} · {obligation.rule}
                 </td>
                 <td>{time(obligation.owed_since_unix_milliseconds)}</td>
                 <td>{obligation.matched_event_count}</td>
@@ -450,6 +468,8 @@ export function ActivitySurface() {
   const [activityPages, setActivityPages] = useState<RetainedActivityPage[]>([])
   const [filter, setFilter] = useState('')
   const [sort, setSort] = useState<'newest' | 'oldest'>('newest')
+  const pullRequestHeadingFocus = useRef<HTMLHeadingElement>(null)
+  const pullRequestFocusPending = useRef<string | null | undefined>(undefined)
 
   const repositories = useQuery({
     queryKey: ['production', 'repository-watch', 'repositories', repositoryAfter],
@@ -550,6 +570,11 @@ export function ActivitySurface() {
   const selected = pullRequests.data?.pull_requests.find(
     (item) => item.number === selectedPullRequest,
   )
+  useLayoutEffect(() => {
+    if (pullRequestFocusPending.current !== pullRequestAfter || !pullRequests.data) return
+    pullRequestFocusPending.current = undefined
+    pullRequestHeadingFocus.current?.focus()
+  }, [pullRequestAfter, pullRequests.data])
   const rows = useMemo(() => {
     const unique = new Map<string, ActivityRow>()
     for (const retained of activityPages) {
@@ -608,6 +633,7 @@ export function ActivitySurface() {
   const changePullRequestPage = (after: string | null) => {
     setSelectedPullRequest(null)
     setSessionBefore(undefined)
+    pullRequestFocusPending.current = after
     setPullRequestAfter(after)
   }
   const nextActivityPage = () => {
@@ -675,6 +701,7 @@ export function ActivitySurface() {
               setSelectedPullRequest(number)
               setSessionBefore(undefined)
             }}
+            headingRef={pullRequestHeadingFocus}
           />
           <div className="activity-page-controls">
             {pullRequestAfter && (
@@ -697,6 +724,11 @@ export function ActivitySurface() {
       )}
 
       {selected && <SessionPanel pullRequest={selected} query={sessions} />}
+      {sessionBefore && (
+        <button type="button" onClick={() => setSessionBefore(undefined)}>
+          First session page
+        </button>
+      )}
       {sessions.data?.continuation_before && (
         <button
           type="button"

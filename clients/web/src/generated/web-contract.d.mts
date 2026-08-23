@@ -124,8 +124,8 @@ type WebRepoWatchHeldSlot = {
   readonly blockers: ReadonlyArray<WebRepoWatchHeldSlotBlocker>;
   readonly dispatch_id: string;
   readonly held_since_unix_milliseconds: string;
-  readonly pull_request?: string | null;
   readonly rule: string;
+  readonly scope: WebRepoWatchSingletonScope;
   readonly session_ids: ReadonlyArray<string>;
 };
 
@@ -201,9 +201,9 @@ type WebRepoWatchQueuedObligation = {
   readonly latest_match_at_unix_milliseconds: string;
   readonly matched_event_count: string;
   readonly owed_since_unix_milliseconds: string;
-  readonly pull_request?: string | null;
   readonly readiness: WebRepoWatchObligationReadiness;
   readonly rule: string;
+  readonly scope: WebRepoWatchSingletonScope;
 };
 
 type WebRepoWatchRepositoryStatus = {
@@ -247,6 +247,21 @@ type WebRepoWatchSettlement = {
   readonly dispatch_id: string;
   readonly event_id: string;
   readonly settled_at_unix_milliseconds: string;
+};
+
+type WebRepoWatchSingletonScope = {
+  readonly kind: "pull_request";
+  readonly number: string;
+  readonly repository: string;
+} | {
+  readonly kind: "stack";
+  readonly repository: string;
+  readonly root_pull_request: string;
+} | {
+  readonly kind: "rule";
+} | {
+  readonly kind: "repository";
+  readonly repository: string;
 };
 
 type WebRepoWatchWebhookActivity = {

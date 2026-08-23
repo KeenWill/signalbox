@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { retainActivityPage } from './ActivitySurface'
+import { retainActivityPage, singletonScopeLabel } from './ActivitySurface'
 import type { WebRepoWatchActivityPage } from './generated/web-contract.mjs'
 
 const page = (receiptSequence: string): WebRepoWatchActivityPage => ({
@@ -26,5 +26,20 @@ describe('retained activity pages', () => {
 
     expect(refreshed).toHaveLength(1)
     expect(refreshed[0]?.page.webhooks[0]?.receipt_sequence).toBe('2')
+  })
+})
+
+describe('work singleton labels', () => {
+  it('keeps pull-request, stack, rule, and repository scopes distinct', () => {
+    expect(
+      singletonScopeLabel({ kind: 'pull_request', repository: 'owner/repo', number: '17' }),
+    ).toBe('PR owner/repo#17')
+    expect(
+      singletonScopeLabel({ kind: 'stack', repository: 'owner/repo', root_pull_request: '11' }),
+    ).toBe('Stack owner/repo#11')
+    expect(singletonScopeLabel({ kind: 'rule' })).toBe('Rule-wide')
+    expect(singletonScopeLabel({ kind: 'repository', repository: 'owner/repo' })).toBe(
+      'Repository owner/repo',
+    )
   })
 })

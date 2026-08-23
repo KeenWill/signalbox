@@ -43,8 +43,9 @@ use signalbox_web_contract::{
     WebRepoWatchPullRequestPage, WebRepoWatchPullRequestSession,
     WebRepoWatchPullRequestSessionPage, WebRepoWatchQueuedObligation, WebRepoWatchRepositoryStatus,
     WebRepoWatchRepositoryStatusPage, WebRepoWatchReviewDecision, WebRepoWatchSessionCursor,
-    WebRepoWatchSessionPurpose, WebRepoWatchSettlement, WebRepoWatchWebhookActivity,
-    WebRepoWatchWebhookDisposition, WebRepoWatchWebhookWindow, WebRepoWatchWorkPage,
+    WebRepoWatchSessionPurpose, WebRepoWatchSettlement, WebRepoWatchSingletonScope,
+    WebRepoWatchWebhookActivity, WebRepoWatchWebhookDisposition, WebRepoWatchWebhookWindow,
+    WebRepoWatchWorkPage,
 };
 use sqlx::{
     PgPool,
@@ -711,20 +712,34 @@ fn pull_request_page_dto(
     })
 }
 
-fn singleton_pull_request(singleton: &RepoWatchSingletonKey) -> Option<String> {
+fn singleton_scope(singleton: RepoWatchSingletonKey) -> WebRepoWatchSingletonScope {
     match singleton {
-        RepoWatchSingletonKey::PullRequest { number, .. } => Some(number.get().to_string()),
+        RepoWatchSingletonKey::PullRequest { repository, number } => {
+            WebRepoWatchSingletonScope::PullRequest {
+                repository: repository.into_string(),
+                number: number.get().to_string(),
+            }
+        }
         RepoWatchSingletonKey::Stack {
-            root_pull_request, ..
-        } => Some(root_pull_request.get().to_string()),
-        RepoWatchSingletonKey::Rule | RepoWatchSingletonKey::Repository { .. } => None,
+            repository,
+            root_pull_request,
+        } => WebRepoWatchSingletonScope::Stack {
+            repository: repository.into_string(),
+            root_pull_request: root_pull_request.get().to_string(),
+        },
+        RepoWatchSingletonKey::Rule => WebRepoWatchSingletonScope::Rule {},
+        RepoWatchSingletonKey::Repository { repository } => {
+            WebRepoWatchSingletonScope::Repository {
+                repository: repository.into_string(),
+            }
+        }
     }
 }
 
 fn held_slot_dto(slot: RepoWatchHeldSlot) -> Result<WebRepoWatchHeldSlot, ()> {
     Ok(WebRepoWatchHeldSlot {
         dispatch_id: slot.dispatch.into_uuid().to_string(),
-        pull_request: singleton_pull_request(&slot.singleton),
+        scope: singleton_scope(slot.singleton),
         rule: slot.rule.into_string(),
         held_since_unix_milliseconds: unix_milliseconds(slot.held_since)?,
         session_ids: slot
@@ -783,7 +798,7 @@ fn obligation_dto(
 ) -> Result<WebRepoWatchQueuedObligation, ()> {
     Ok(WebRepoWatchQueuedObligation {
         id: obligation.id.into_uuid().to_string(),
-        pull_request: singleton_pull_request(&obligation.singleton),
+        scope: singleton_scope(obligation.singleton),
         rule: obligation.rule.into_string(),
         first_event_id: obligation.first_event.into_uuid().to_string(),
         latest_event_id: obligation.latest_event.into_uuid().to_string(),

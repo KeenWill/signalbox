@@ -1803,14 +1803,11 @@ const schemas = {
           "held_since_unix_milliseconds": {
             "type": "string"
           },
-          "pull_request": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "rule": {
             "type": "string"
+          },
+          "scope": {
+            "$ref": "#/$defs/WebRepoWatchSingletonScope"
           },
           "session_ids": {
             "items": {
@@ -1821,6 +1818,7 @@ const schemas = {
         },
         "required": [
           "dispatch_id",
+          "scope",
           "rule",
           "held_since_unix_milliseconds",
           "session_ids",
@@ -1954,21 +1952,19 @@ const schemas = {
           "owed_since_unix_milliseconds": {
             "type": "string"
           },
-          "pull_request": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "readiness": {
             "$ref": "#/$defs/WebRepoWatchObligationReadiness"
           },
           "rule": {
             "type": "string"
+          },
+          "scope": {
+            "$ref": "#/$defs/WebRepoWatchSingletonScope"
           }
         },
         "required": [
           "id",
+          "scope",
           "rule",
           "first_event_id",
           "latest_event_id",
@@ -1979,6 +1975,82 @@ const schemas = {
           "readiness"
         ],
         "type": "object"
+      },
+      "WebRepoWatchSingletonScope": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "pull_request",
+                "type": "string"
+              },
+              "number": {
+                "type": "string"
+              },
+              "repository": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "repository",
+              "number"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "stack",
+                "type": "string"
+              },
+              "repository": {
+                "type": "string"
+              },
+              "root_pull_request": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "repository",
+              "root_pull_request"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "rule",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "repository",
+                "type": "string"
+              },
+              "repository": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "repository"
+            ],
+            "type": "object"
+          }
+        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
