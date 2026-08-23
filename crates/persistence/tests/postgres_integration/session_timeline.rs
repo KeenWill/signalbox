@@ -441,6 +441,15 @@ async fn rejected_response_text_position_constraint(
             .bind(fixture.parent.into_uuid())
             .fetch_one(&pool)
             .await?;
+    // These synthetic entries intentionally contradict only the response-text
+    // position invariant. Keep the completed tool round's unrelated exact
+    // inventory check from masking the constraint under test.
+    sqlx::query(
+        "ALTER TABLE semantic_transcript_entry
+         DISABLE TRIGGER semantic_entry_requires_matching_turn_state",
+    )
+    .execute(&pool)
+    .await?;
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO semantic_transcript_entry
@@ -480,7 +489,8 @@ async fn assistant_response_text_positions_reject_gaps() -> Result<(), Box<dyn E
 
     assert_eq!(code.as_deref(), Some("23514"));
     assert!(
-        message.starts_with("assistant response text positions are not contiguous for model call ")
+        message.starts_with("assistant response text positions are not contiguous for model call "),
+        "unexpected database error: {message}"
     );
     Ok(())
 }
@@ -492,7 +502,8 @@ async fn assistant_response_text_positions_reject_overlaps() -> Result<(), Box<d
 
     assert_eq!(code.as_deref(), Some("23514"));
     assert!(
-        message.starts_with("assistant response text positions are not contiguous for model call ")
+        message.starts_with("assistant response text positions are not contiguous for model call "),
+        "unexpected database error: {message}"
     );
     Ok(())
 }
