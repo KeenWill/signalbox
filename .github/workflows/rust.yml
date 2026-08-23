@@ -374,9 +374,9 @@ jobs:
       - name: Delegate the file-media task controller
         run: |
           sudo mkdir /sys/fs/cgroup/signalbox-file-media-ci
-          sudo sh -c 'echo +pids > /sys/fs/cgroup/cgroup.subtree_control'
+          sudo sh -c 'echo +pids +memory > /sys/fs/cgroup/cgroup.subtree_control'
           sudo mkdir /sys/fs/cgroup/signalbox-file-media-ci/runner
-          sudo sh -c 'echo +pids > /sys/fs/cgroup/signalbox-file-media-ci/cgroup.subtree_control'
+          sudo sh -c 'echo +pids +memory > /sys/fs/cgroup/signalbox-file-media-ci/cgroup.subtree_control'
           sudo chown -R "$USER" /sys/fs/cgroup/signalbox-file-media-ci
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -391,12 +391,13 @@ jobs:
         run: |
           runner_uid="$(id -u)"
           runner_gid="$(id -g)"
+          runner_home="$HOME"
           sudo --preserve-env=PATH,CARGO_HOME,RUSTUP_HOME,RUSTFLAGS,CARGO_INCREMENTAL,CARGO_PROFILE_DEV_DEBUG,CARGO_PROFILE_TEST_DEBUG,SIGNALBOX_RUN_BWRAP_INTEGRATION,SIGNALBOX_FILE_MEDIA_CGROUP_ROOT \
             sh -c '
               echo $$ > "$SIGNALBOX_FILE_MEDIA_CGROUP_ROOT/runner/cgroup.procs"
               exec setpriv --reuid="$1" --regid="$2" --init-groups \
-                cargo test --no-fail-fast --workspace --all-targets --all-features
-            ' sh "$runner_uid" "$runner_gid"
+                env HOME="$3" cargo test --no-fail-fast --workspace --all-targets --all-features
+            ' sh "$runner_uid" "$runner_gid" "$runner_home"
       - name: Test generated browser contract runtime
         run: node --test crates/web-contract/tests/generated_roundtrip.mjs
       # `--all-targets` excludes doctests, so the domain's compile_fail

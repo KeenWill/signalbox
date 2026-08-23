@@ -22,9 +22,12 @@ use signalbox_file_media_linux_sandbox::{
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProcessCeilings, FileMediaProcessor, FileMediaProcessorFuture,
     FileMediaProviderDeclaration, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    MAX_VALIDATION_RANGES, MAX_VALIDATION_SOURCE_BYTES, MAX_WORKER_TASKS, ProcessorBoundaryFailure,
-    ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, ReaderDeclaration, ReaderIdentity, VerifiedBlobSource,
+    FileReadInput, MAX_PROBE_CUMULATIVE_BYTES, MAX_PROBE_PREFIX_BYTES, MAX_PROBE_RANGES,
+    MAX_PROBE_SUFFIX_BYTES, MAX_READ_OPTIONS_BYTES, MAX_READ_RANGES, MAX_READ_SOURCE_BYTES,
+    MAX_VALIDATION_RANGES, MAX_VALIDATION_SOURCE_BYTES, MAX_WORKER_TASKS, ProbeDeclaration,
+    ProcessorBoundaryFailure, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadViewDeclaration,
+    ReaderDeclaration, ReaderIdentity, VerifiedBlobSource,
 };
 use tokio::{
     io::AsyncReadExt as _,
@@ -156,6 +159,9 @@ impl SandboxedFileMediaProcessor {
                 return Err(SandboxedFileMediaProcessorConstructionError::DuplicateProvider);
             }
             for reader in binding.declaration.readers() {
+                if !direct_reader_envelopes_fit(reader) {
+                    return Err(SandboxedFileMediaProcessorConstructionError::Ceilings);
+                }
                 if readers
                     .insert(reader.identity().clone(), reader.clone())
                     .is_some()
@@ -360,8 +366,9 @@ impl SandboxedFileMediaProcessor {
         let seccomp = process_creation_filter().map_err(|_| ProcessorFailure::Unavailable)?;
         let (block_read, block_write) =
             startup_pipe().map_err(|_| ProcessorFailure::Unavailable)?;
-        let task_cgroup = InvocationTaskCgroup::create(&self.task_cgroup_root)
-            .map_err(|_| ProcessorFailure::Unavailable)?;
+        let task_cgroup =
+            InvocationTaskCgroup::create(&self.task_cgroup_root, self.ceilings.memory_bytes())
+                .map_err(|_| ProcessorFailure::Unavailable)?;
         let profile = sandbox_arguments(
             &worker.proc_path,
             seccomp.as_raw_fd(),
@@ -497,6 +504,9 @@ impl FileMediaProcessor for SandboxedFileMediaProcessor {
         Box::pin(async move {
             let declaration = self.reader(reader)?;
             require_file_use_source(&request.source, source)?;
+            if !direct_read_input_fits(&request.input) {
+                return Err(ProcessorFailure::Protocol.into());
+            }
             let view = declaration
                 .views()
                 .iter()
@@ -529,6 +539,71 @@ fn require_file_use_source(
         Ok(())
     } else {
         Err(ProcessorFailure::Protocol)
+    }
+}
+
+fn direct_reader_envelopes_fit(reader: &ReaderDeclaration) -> bool {
+    probe_envelope_fits(reader.probe()) && reader.views().iter().all(read_envelope_fits)
+}
+
+fn probe_envelope_fits(probe: ProbeDeclaration) -> bool {
+    probe.prefix_bytes() <= MAX_PROBE_PREFIX_BYTES
+        && probe.suffix_bytes() <= MAX_PROBE_SUFFIX_BYTES
+        && probe.range_count() <= MAX_PROBE_RANGES
+        && (probe.prefix_bytes() > 0 || probe.suffix_bytes() > 0 || probe.range_count() > 0)
+        && probe.cumulative_bytes() > 0
+        && probe.cumulative_bytes() <= MAX_PROBE_CUMULATIVE_BYTES
+        && probe
+            .prefix_bytes()
+            .checked_add(probe.suffix_bytes())
+            .is_some_and(|minimum| minimum <= probe.cumulative_bytes())
+}
+
+fn read_envelope_fits(view: &ReadViewDeclaration) -> bool {
+    let ranges = match view.access() {
+        ReadAccessPattern::Streaming { maximum_ranges }
+        | ReadAccessPattern::RandomAccess { maximum_ranges } => maximum_ranges,
+    };
+    ranges > 0
+        && ranges <= MAX_READ_RANGES
+        && view.bounds().source_bytes() > 0
+        && view.bounds().source_bytes() <= MAX_READ_SOURCE_BYTES
+}
+
+fn direct_read_input_fits(input: &FileReadInput) -> bool {
+    match input {
+        FileReadInput::Initial { options } => {
+            options.is_object()
+                && serde_json::to_writer(
+                    LimitedWriter {
+                        written: 0,
+                        maximum: MAX_READ_OPTIONS_BYTES,
+                    },
+                    options,
+                )
+                .is_ok()
+        }
+        FileReadInput::Continuation { .. } => true,
+    }
+}
+
+struct LimitedWriter {
+    written: usize,
+    maximum: usize,
+}
+
+impl std::io::Write for LimitedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.written = self
+            .written
+            .checked_add(bytes.len())
+            .filter(|total| *total <= self.maximum)
+            .ok_or_else(|| std::io::Error::other("serialized value exceeds its byte ceiling"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -696,7 +771,7 @@ struct InvocationTaskCgroup {
 }
 
 impl InvocationTaskCgroup {
-    fn create(root: &Path) -> Result<Self, std::io::Error> {
+    fn create(root: &Path, memory_bytes: u64) -> Result<Self, std::io::Error> {
         let sequence = NEXT_TASK_CGROUP.fetch_add(1, Ordering::Relaxed);
         let path = root.join(format!(
             "signalbox-file-media-{}-{sequence}",
@@ -705,6 +780,7 @@ impl InvocationTaskCgroup {
         fs::create_dir(&path)?;
         let configured = (|| {
             fs::write(path.join("pids.max"), MAX_WORKER_TASKS.to_string())?;
+            fs::write(path.join("memory.max"), memory_bytes.to_string())?;
             fs::OpenOptions::new()
                 .write(true)
                 .open(path.join("cgroup.procs"))
@@ -751,6 +827,9 @@ fn delegated_task_cgroup_root() -> Result<PathBuf, SandboxedFileMediaProcessorCo
         || !controllers
             .split_whitespace()
             .any(|controller| controller == "pids")
+        || !controllers
+            .split_whitespace()
+            .any(|controller| controller == "memory")
     {
         return Err(SandboxedFileMediaProcessorConstructionError::TaskController);
     }
@@ -762,6 +841,7 @@ fn delegated_task_cgroup_root() -> Result<PathBuf, SandboxedFileMediaProcessorCo
     ));
     let admitted = fs::create_dir(&probe)
         .and_then(|()| fs::write(probe.join("pids.max"), MAX_WORKER_TASKS.to_string()))
+        .and_then(|()| fs::write(probe.join("memory.max"), "1"))
         .and_then(|()| {
             fs::OpenOptions::new()
                 .write(true)
@@ -1301,15 +1381,19 @@ mod tests {
     use std::{ffi::OsStr, fs, os::unix::fs::PermissionsExt as _, path::Path};
 
     use signalbox_file_media_runtime::{
-        CancellationSignal, ProcessorBoundaryFailure, ProcessorFailure,
+        CancellationSignal, CanonicalJsonObjectSchema, FileReadInput, ProbeDeclaration,
+        ProcessorBoundaryFailure, ProcessorFailure, ReadAccessPattern, ReadViewBounds,
+        ReadViewDeclaration, ReadViewName,
     };
 
     use super::{
         CompletedOutput, ConstructionTarget, MAX_AGGREGATE_EXECUTABLE_SNAPSHOT_BYTES,
-        MAX_EXECUTABLE_SNAPSHOT_BYTES, MAX_WORKER_BINDINGS, admit_completed,
-        admit_executable_snapshot_bytes, admit_worker_binding_count, open_executable_snapshot,
-        open_worker_executable, sandbox_arguments, seccomp_instructions, startup_pipe,
-        worker_memory_budget,
+        MAX_EXECUTABLE_SNAPSHOT_BYTES, MAX_PROBE_CUMULATIVE_BYTES, MAX_PROBE_PREFIX_BYTES,
+        MAX_READ_OPTIONS_BYTES, MAX_READ_RANGES, MAX_READ_SOURCE_BYTES, MAX_WORKER_BINDINGS,
+        admit_completed, admit_executable_snapshot_bytes, admit_worker_binding_count,
+        direct_read_input_fits, open_executable_snapshot, open_worker_executable,
+        probe_envelope_fits, read_envelope_fits, sandbox_arguments, seccomp_instructions,
+        startup_pipe, worker_memory_budget,
     };
 
     struct Cancelled;
@@ -1338,6 +1422,50 @@ mod tests {
             admit_worker_binding_count(MAX_WORKER_BINDINGS + 1),
             Err(super::SandboxedFileMediaProcessorConstructionError::WorkerBindings)
         );
+    }
+
+    #[test]
+    fn direct_probe_envelope_rejects_compiled_ceiling_excess() {
+        assert!(probe_envelope_fits(ProbeDeclaration::new(
+            MAX_PROBE_PREFIX_BYTES,
+            0,
+            0,
+            MAX_PROBE_CUMULATIVE_BYTES,
+        )));
+        assert!(!probe_envelope_fits(ProbeDeclaration::new(
+            MAX_PROBE_PREFIX_BYTES + 1,
+            0,
+            0,
+            MAX_PROBE_CUMULATIVE_BYTES,
+        )));
+    }
+
+    #[test]
+    fn direct_read_envelope_rejects_compiled_ceiling_excess() {
+        let view = ReadViewDeclaration::try_new(
+            ReadViewName::try_new("fixture").expect("view name is valid"),
+            String::from("Fixture view."),
+            CanonicalJsonObjectSchema::try_new(r#"{"type":"object"}"#).expect("schema is valid"),
+            ReadAccessPattern::RandomAccess {
+                maximum_ranges: MAX_READ_RANGES + 1,
+            },
+            ReadViewBounds::Text {
+                source_bytes: MAX_READ_SOURCE_BYTES,
+                output_bytes: 1,
+            },
+        )
+        .expect("declaration construction defers compiled ceiling checks");
+        assert!(!read_envelope_fits(&view));
+    }
+
+    #[test]
+    fn direct_read_input_rejects_oversized_options_before_framing() {
+        let input = FileReadInput::Initial {
+            options: serde_json::json!({
+                "value": "x".repeat(MAX_READ_OPTIONS_BYTES),
+            }),
+        };
+        assert!(!direct_read_input_fits(&input));
     }
 
     #[test]

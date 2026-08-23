@@ -168,16 +168,19 @@ Before releasing a dedicated startup gate, the daemon applies hard
 address-space, CPU, core-dump, and descriptor limits to the sandbox process and
 all inherited worker threads. Each invocation first enters its own child of an
 explicitly configured writable delegated cgroup-v2 root, with `pids.max` set to
-the compiled task ceiling before bubblewrap can fork. Construction fails closed
-when that delegated controller cannot be validated. The configured memory
+the compiled task ceiling and `memory.max` set to the configured worker-memory
+ceiling before bubblewrap can fork. The memory controller accounts tmpfs data,
+inode slab, and other cgroup-charged kernel memory. Construction fails closed
+when either delegated controller cannot be validated. The configured memory
 ceiling is one combined budget: half is reserved for address space and half is
 split between the three writable tmpfs mounts, so their maxima cannot add to
-more than the configured value. The daemon independently owns one wall deadline
-per invocation, one inspection-wide deadline across all serial reader probes,
-and one verification-wide deadline across all configured worker probes. It kills
-the isolated process group on timeout or authoritative cancellation. Bounded
-stderr is drained and discarded; it is never parser evidence, telemetry content,
-or model-visible output.
+more than the configured value; `memory.max` independently bounds their charged
+memory and metadata. The daemon independently owns one wall deadline per
+invocation, one inspection-wide deadline across all serial reader probes, and
+one verification-wide deadline across all configured worker probes. It kills the
+isolated process group on timeout or authoritative cancellation. Bounded stderr
+is drained and discarded; it is never parser evidence, telemetry content, or
+model-visible output.
 
 The worker receives one digest and positive length, then requests exact byte
 ranges over length-delimited standard I/O. The daemon checks every request for
