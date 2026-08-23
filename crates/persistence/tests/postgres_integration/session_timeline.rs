@@ -241,6 +241,37 @@ async fn projection_count_larger_than_address_span_is_corruption() -> Result<(),
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn window_outside_projection_facts_is_corruption() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x997);
+    create_session(&pool, identity).await?;
+    commission_fixture_session_goal(&pool, identity, 0x0009_9700).await?;
+    sqlx::query(
+        "UPDATE session_timeline_fact SET item_count = 1, first_sequence = latest_sequence WHERE session_id = $1",
+    )
+    .bind(identity.into_uuid())
+    .execute(&pool)
+    .await?;
+    let limits = TimelineWindowLimits::new(256, 64 * 1024).expect("fixture limits are bounded");
+    let error = SessionTimelineRepository::new(pool.clone())
+        .read_window(identity, TimelineWindowAnchor::Latest, limits)
+        .await
+        .expect_err("a window outside stored projection bounds is durable corruption");
+
+    assert!(matches!(
+        error,
+        SessionTimelineRepositoryError::Corruption(SessionTimelineCorruption::InvalidOrdinal(
+            "window bounds"
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn retired_queued_goal_turn_is_removed_from_work_facts() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let identity = session(0x994);
