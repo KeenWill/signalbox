@@ -108,12 +108,9 @@ impl FileMediaProvider for SyntheticProvider {
 fn verify_sandbox_authority() -> Result<(), signalbox_file_media_runtime::FileMediaProviderFailure>
 {
     let failed = || signalbox_file_media_runtime::FileMediaProviderFailure::Failed;
-    if Path::new("/etc/passwd").exists() {
-        eprintln!("sandbox authority check failed: host passwd is visible");
-        return Err(failed());
-    }
-    if std::env::current_dir().map_err(|_| failed())? != Path::new("/tmp") {
-        eprintln!("sandbox authority check failed: working directory differs");
+    if Path::new("/etc/passwd").exists()
+        || std::env::current_dir().map_err(|_| failed())? != Path::new("/tmp")
+    {
         return Err(failed());
     }
     let mut environment = std::env::vars().collect::<Vec<_>>();
@@ -122,9 +119,9 @@ fn verify_sandbox_authority() -> Result<(), signalbox_file_media_runtime::FileMe
         != [
             (String::from("LANG"), String::from("C.UTF-8")),
             (String::from("LC_ALL"), String::from("C.UTF-8")),
+            (String::from("PWD"), String::from("/tmp")),
         ]
     {
-        eprintln!("sandbox authority check failed: environment differs: {environment:?}");
         return Err(failed());
     }
     let status = fs::read_to_string("/proc/self/status").map_err(|_| failed())?;
@@ -133,7 +130,6 @@ fn verify_sandbox_authority() -> Result<(), signalbox_file_media_runtime::FileMe
         .find_map(|line| line.strip_prefix("CapEff:"))
         .ok_or_else(failed)?;
     if u64::from_str_radix(capabilities.trim(), 16).map_err(|_| failed())? != 0 {
-        eprintln!("sandbox authority check failed: effective capabilities remain");
         return Err(failed());
     }
     let routes = fs::read_to_string("/proc/net/route").map_err(|_| failed())?;
@@ -143,7 +139,6 @@ fn verify_sandbox_authority() -> Result<(), signalbox_file_media_runtime::FileMe
         .filter_map(|line| line.split_whitespace().next())
         .any(|interface| interface != "lo")
     {
-        eprintln!("sandbox authority check failed: non-loopback route remains");
         return Err(failed());
     }
     Ok(())
