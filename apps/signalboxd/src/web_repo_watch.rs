@@ -53,7 +53,7 @@ use sqlx::{
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::web_http::{application_error, attention_summary_dto};
+use crate::web_http::{application_error, attention_summary_dto, transport_error};
 
 #[derive(Clone, Debug)]
 struct RepoWatchApiState {
@@ -132,7 +132,8 @@ struct ActivityQuery {
 
 fn typed_query<T>(query: Result<Query<T>, QueryRejection>) -> Result<T, Box<Response>> {
     query.map(|Query(query)| query).map_err(|_| {
-        Box::new(invalid_query(
+        Box::new(transport_error(
+            StatusCode::BAD_REQUEST,
             "invalid_query",
             "query parameters are invalid",
         ))
@@ -1104,6 +1105,10 @@ mod tests {
             .expect("the error body is bounded");
         let error: WebApiErrorResponse =
             serde_json::from_slice(&body).expect("the error follows the web API contract");
+        assert_eq!(
+            error.error.kind,
+            signalbox_web_contract::WebApiErrorKind::Transport
+        );
         assert_eq!(error.error.code, "invalid_query");
     }
 }

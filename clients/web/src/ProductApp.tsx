@@ -311,6 +311,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
       callback: (event) => {
+        const overlay = store.getState().app.overlay
+        if (overlay !== null && binding.commandId !== 'surface.escape') return
         if (binding.commandId === 'surface.escape' && isEditableTarget(event.target)) return
         invokeCommand(binding.commandId, context)
       },
@@ -319,7 +321,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   useHotkeySequences(
     globalHotkeySequenceBindings.map((binding) => ({
       sequence: binding.sequence,
-      callback: () => invokeCommand(binding.commandId, context),
+      callback: () => {
+        if (store.getState().app.overlay !== null) return
+        invokeCommand(binding.commandId, context)
+      },
     })),
   )
 

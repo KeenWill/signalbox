@@ -321,8 +321,8 @@ function PullRequestTable({
                   {pullRequest.head_branch} → {pullRequest.base_branch}
                 </td>
                 <td>
-                  {words(pullRequest.lifecycle)} · {words(pullRequest.mergeable)} ·{' '}
-                  {words(pullRequest.checks)}
+                  {words(pullRequest.lifecycle)} · {words(pullRequest.draft)} ·{' '}
+                  {words(pullRequest.mergeable)} · {words(pullRequest.checks)}
                 </td>
                 <td>
                   <a
@@ -351,14 +351,24 @@ function PullRequestTable({
   )
 }
 
-function WorkTables({ page }: { page: WebRepoWatchWorkPage }) {
+function WorkTables({
+  page,
+  heldHeadingRef,
+  queuedHeadingRef,
+}: {
+  page: WebRepoWatchWorkPage
+  heldHeadingRef: RefObject<HTMLHeadingElement | null>
+  queuedHeadingRef: RefObject<HTMLHeadingElement | null>
+}) {
   return (
     <div className="activity-work-grid">
       <section className="activity-table-panel" aria-labelledby="held-work-heading">
         <header>
           <div>
             <span className="eyebrow">Occupied dispatch slots</span>
-            <h2 id="held-work-heading">Held work</h2>
+            <h2 id="held-work-heading" ref={heldHeadingRef} tabIndex={-1}>
+              Held work
+            </h2>
           </div>
           <span>{page.held_slots.length}</span>
         </header>
@@ -387,7 +397,9 @@ function WorkTables({ page }: { page: WebRepoWatchWorkPage }) {
         <header>
           <div>
             <span className="eyebrow">Unsettled obligations</span>
-            <h2 id="queued-work-heading">Queued work</h2>
+            <h2 id="queued-work-heading" ref={queuedHeadingRef} tabIndex={-1}>
+              Queued work
+            </h2>
           </div>
           <span>{page.queued_obligations.length}</span>
         </header>
@@ -481,6 +493,9 @@ export function ActivitySurface() {
   const pullRequestFocusPending = useRef<string | null | undefined>(undefined)
   const repositorySelectFocus = useRef<HTMLSelectElement>(null)
   const repositoryFocusPending = useRef<string | null | undefined>(undefined)
+  const heldWorkHeadingFocus = useRef<HTMLHeadingElement>(null)
+  const queuedWorkHeadingFocus = useRef<HTMLHeadingElement>(null)
+  const workFocusPending = useRef<'held' | 'queued' | null>(null)
 
   const repositories = useQuery({
     queryKey: ['production', 'repository-watch', 'repositories', repositoryAfter],
@@ -530,6 +545,14 @@ export function ActivitySurface() {
       productTransport.readRepoWatchWork(repository ?? '', heldAfter, obligationAfter, signal),
     enabled: repository !== null,
   })
+  useLayoutEffect(() => {
+    if (!work.data || workFocusPending.current === null) return
+    const target = workFocusPending.current
+    workFocusPending.current = null
+    if (target === 'held') heldWorkHeadingFocus.current?.focus()
+    else queuedWorkHeadingFocus.current?.focus()
+  }, [work.data])
+
   const sessions = useQuery({
     queryKey: [
       'production',
@@ -658,6 +681,14 @@ export function ActivitySurface() {
     repositoryFocusPending.current = after
     setRepositoryAfter(after)
   }
+  const changeHeldPage = (after: RepoWatchHeldCursor | undefined) => {
+    workFocusPending.current = 'held'
+    setHeldAfter(after)
+  }
+  const changeQueuedPage = (after: RepoWatchObligationCursor | undefined) => {
+    workFocusPending.current = 'queued'
+    setObligationAfter(after)
+  }
   const nextActivityPage = () => {
     const page = activity.data
     if (!page) return
@@ -695,13 +726,17 @@ export function ActivitySurface() {
         <button
           type="button"
           onClick={() =>
-            void Promise.all([
-              repositories.refetch(),
-              pullRequests.refetch(),
-              work.refetch(),
-              selectedPullRequest === null ? Promise.resolve() : sessions.refetch(),
-              activity.refetch(),
-            ])
+            void Promise.all(
+              repository === null
+                ? [repositories.refetch()]
+                : [
+                    repositories.refetch(),
+                    pullRequests.refetch(),
+                    work.refetch(),
+                    selectedPullRequest === null ? Promise.resolve() : sessions.refetch(),
+                    activity.refetch(),
+                  ],
+            )
           }
         >
           <RefreshCw aria-hidden="true" /> Refresh bounded reads
@@ -771,12 +806,12 @@ export function ActivitySurface() {
       {(heldAfter || obligationAfter) && (
         <div className="activity-page-controls">
           {heldAfter && (
-            <button type="button" onClick={() => setHeldAfter(undefined)}>
+            <button type="button" onClick={() => changeHeldPage(undefined)}>
               First held page
             </button>
           )}
           {obligationAfter && (
-            <button type="button" onClick={() => setObligationAfter(undefined)}>
+            <button type="button" onClick={() => changeQueuedPage(undefined)}>
               First queued page
             </button>
           )}
@@ -784,13 +819,17 @@ export function ActivitySurface() {
       )}
       {work.data && (
         <>
-          <WorkTables page={work.data} />
+          <WorkTables
+            page={work.data}
+            heldHeadingRef={heldWorkHeadingFocus}
+            queuedHeadingRef={queuedWorkHeadingFocus}
+          />
           <div className="activity-page-controls">
             {work.data.held_continuation_after && (
               <button
                 type="button"
                 onClick={() =>
-                  setHeldAfter({
+                  changeHeldPage({
                     heldSinceUnixMilliseconds:
                       work.data?.held_continuation_after?.held_since_unix_milliseconds ?? '',
                     dispatchId: work.data?.held_continuation_after?.dispatch_id ?? '',
@@ -804,7 +843,7 @@ export function ActivitySurface() {
               <button
                 type="button"
                 onClick={() =>
-                  setObligationAfter({
+                  changeQueuedPage({
                     owedSinceUnixMilliseconds:
                       work.data?.obligation_continuation_after?.owed_since_unix_milliseconds ?? '',
                     obligationId: work.data?.obligation_continuation_after?.obligation_id ?? '',

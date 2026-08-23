@@ -584,10 +584,12 @@ fn attention_changes_require_resync(
     visible_sessions: &BTreeSet<SessionId>,
     live_page_has_capacity: bool,
 ) -> bool {
-    live_page_has_capacity
-        && summaries
-            .iter()
-            .any(|summary| !visible_sessions.contains(&summary.session))
+    let page_boundary = visible_sessions.last();
+    summaries.iter().any(|summary| {
+        !visible_sessions.contains(&summary.session)
+            && (live_page_has_capacity
+                || page_boundary.is_some_and(|boundary| summary.session < *boundary))
+    })
 }
 
 fn empty_ndjson_response() -> Response {
@@ -974,7 +976,11 @@ fn validate_supplied_origin(headers: &HeaderMap) -> Result<(), OriginValidationE
     }
 }
 
-fn transport_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
+pub(crate) fn transport_error(
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+) -> Response {
     let body = Json(WebApiErrorResponse {
         error: WebApiError {
             kind: WebApiErrorKind::Transport,
@@ -1484,6 +1490,43 @@ mod tests {
         ));
         assert!(!super::attention_changes_require_resync(
             &[summary],
+            &visible_sessions,
+            false,
+        ));
+    }
+
+    #[test]
+    fn attention_follow_resyncs_when_a_new_identity_enters_a_full_live_page() {
+        let first = SessionId::from_uuid(Uuid::from_u128(2));
+        let boundary = SessionId::from_uuid(Uuid::from_u128(3));
+        let entering = SessionId::from_uuid(Uuid::from_u128(1));
+        let off_page = SessionId::from_uuid(Uuid::from_u128(4));
+        let summary = |session| AttentionSummary {
+            session,
+            current_turn: None,
+            state: AttentionState::Idle,
+            action: None,
+            goal_block: None,
+            judge: AttentionJudgeFacts {
+                actionable: 0,
+                completed: 0,
+                escalated: 0,
+                failed: 0,
+            },
+            last_activity: AttentionActivity {
+                recorded_at: UNIX_EPOCH,
+                kind: AttentionActivityKind::Session,
+            },
+        };
+        let visible_sessions = BTreeSet::from([first, boundary]);
+
+        assert!(super::attention_changes_require_resync(
+            &[summary(entering)],
+            &visible_sessions,
+            false,
+        ));
+        assert!(!super::attention_changes_require_resync(
+            &[summary(off_page)],
             &visible_sessions,
             false,
         ));
