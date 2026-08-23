@@ -243,6 +243,33 @@ async fn projection_count_larger_than_address_span_is_corruption() -> Result<(),
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn impossible_projection_structured_bytes_are_corruption() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x99c);
+    create_session(&pool, identity).await?;
+    sqlx::query("UPDATE session_timeline_fact SET event_kind_bytes = 0 WHERE session_id = $1")
+        .bind(identity.into_uuid())
+        .execute(&pool)
+        .await?;
+    let error = SessionTimelineRepository::new(pool.clone())
+        .read_descriptor(identity)
+        .await
+        .expect_err("an impossible structured-byte total is durable corruption");
+
+    assert!(matches!(
+        error,
+        SessionTimelineRepositoryError::Corruption(SessionTimelineCorruption::InvalidOrdinal(
+            "projected structured bytes"
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn window_outside_projection_facts_is_corruption() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let identity = session(0x997);
