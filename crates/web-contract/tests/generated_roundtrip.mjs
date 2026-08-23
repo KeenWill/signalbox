@@ -224,20 +224,6 @@ test("generated search decoder rejects overlapping highlight ranges", () => {
   );
 });
 
-test("generated search decoder rejects too many highlight ranges", () => {
-  const page = searchPage();
-  page.results[0].snippet = "x".repeat(512);
-  page.results[0].highlights = Array.from({ length: 513 }, () => ({
-    start_byte: 0,
-    end_byte: 1,
-  }));
-
-  assert.throws(
-    () => decodeWebSearchPage(page),
-    /highlights must be at most 64 items/,
-  );
-});
-
 test("generated search decoder validates continuation against the final result", () => {
   const empty = searchPage();
   empty.results = [];

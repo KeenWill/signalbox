@@ -131,12 +131,13 @@ export function SearchSurface({
     enabled: bootstrap?.capabilities.bounded_lexical_search === true && requestIsValid,
     gcTime: 0,
   })
+  const searchData = requestIsValid ? results.data : undefined
   useEffect(() => {
-    if (restoreResultsFocusRef.current && results.data !== undefined) {
+    if (restoreResultsFocusRef.current && searchData !== undefined) {
       restoreResultsFocusRef.current = false
       resultsHeadingRef.current?.focus()
     }
-  }, [results.data])
+  }, [searchData])
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -146,6 +147,14 @@ export function SearchSurface({
     restoreResultsFocusRef.current = false
     setActiveAfter(undefined)
     onStateChange({ q: q || undefined, session: session || undefined })
+    if (
+      requestIsValid &&
+      activeAfter === undefined &&
+      q === queryText &&
+      (session || undefined) === state.session
+    ) {
+      void results.refetch()
+    }
   }
 
   return (
@@ -196,14 +205,16 @@ export function SearchSurface({
         </section>
       )}
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {results.isLoading
+        {requestIsValid && results.isLoading
           ? 'Searching the durable projection.'
-          : results.data
-            ? `${results.data.results.length} results loaded on this page.`
+          : searchData
+            ? `${searchData.results.length} results loaded on this page.`
             : ''}
       </p>
-      {results.isLoading && <p className="search-notice">Searching the durable projection…</p>}
-      {results.isError && (
+      {requestIsValid && results.isLoading && (
+        <p className="search-notice">Searching the durable projection…</p>
+      )}
+      {requestIsValid && results.isError && (
         <section className="surface-empty" role="alert">
           <AlertTriangle aria-hidden="true" />
           <div>
@@ -227,20 +238,20 @@ export function SearchSurface({
           </div>
         </section>
       )}
-      {results.data && (
+      {searchData && (
         <section className="search-results" aria-labelledby="search-results-heading">
           <header>
             <div>
               <span className="eyebrow">Newest logical address first</span>
               <h2 id="search-results-heading" ref={resultsHeadingRef} tabIndex={-1}>
-                {results.data.results.length} results on this page
+                {searchData.results.length} results on this page
               </h2>
             </div>
-            {results.data.continuation && (
+            {searchData.continuation && (
               <button
                 type="button"
                 onClick={() => {
-                  const continuation = results.data.continuation
+                  const continuation = searchData.continuation
                   if (continuation == null) return
                   const nextAfter = {
                     address: continuation.address.event_sequence,
@@ -260,13 +271,13 @@ export function SearchSurface({
               </button>
             )}
           </header>
-          {results.data.results.length === 0 ? (
+          {searchData.results.length === 0 ? (
             <p className="search-notice">No indexed durable text matched this query.</p>
           ) : (
             <>
               {/* biome-ignore lint/a11y/noRedundantRoles: Safari/VoiceOver needs an explicit role when CSS removes markers. */}
               <ol role="list">
-                {results.data.results.map((result) => (
+                {searchData.results.map((result) => (
                   <li
                     key={`${result.session_id}:${result.address.event_sequence}:${result.projection_id}`}
                   >

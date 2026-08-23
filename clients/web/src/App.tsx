@@ -1,6 +1,6 @@
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useMemo, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 import {
   type CommandContext,
   globalHotkeyBindings,
@@ -49,6 +49,7 @@ function useCommandHotkeys(context: CommandContext) {
 }
 
 export function Workspace({ scenarioId }: { scenarioId: string }) {
+  const primaryRef = useRef<HTMLElement>(null)
   const knownId = scenarios.some((scenario) => scenario.id === scenarioId)
     ? (scenarioId as ScenarioId)
     : 'streaming'
@@ -105,6 +106,10 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
     document.documentElement.dataset.theme = app.theme
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
+
+  useEffect(() => {
+    if (timeline !== undefined && fleet !== undefined) primaryRef.current?.focus()
+  }, [fleet, timeline])
 
   const snapshot = useMemo<DiagnosticSnapshot>(
     () => ({
@@ -167,7 +172,7 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
       <aside className="navigation-pane">
         <ScenarioNavigation activeId={knownId} />
       </aside>
-      <main className="workspace">
+      <main className="workspace" tabIndex={-1} ref={primaryRef}>
         <header className="workspace-header">
           <div className="scenario-title">
             <span className={`connection connection-${transport.scenario.connection}`}>

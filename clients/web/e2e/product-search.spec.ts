@@ -99,6 +99,15 @@ const useRecoveringSearchFixture = async (page: Page) => {
   })
 }
 
+const useRefreshingSearchFixture = async (page: Page) => {
+  let attempts = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/search?**', (route) => {
+    attempts += 1
+    return route.fulfill({ json: attempts === 1 ? firstPage : secondPage })
+  })
+}
+
 const submitSearch = async (page: Page) => {
   await page.getByRole('textbox', { name: 'Search text' }).fill('release evidence')
   await page.getByRole('textbox', { name: /Exact session/ }).fill(sessionId)
@@ -231,6 +240,17 @@ test('does not request an unpaired cursor URL field', async ({ page }) => {
 
   await expect(page.getByRole('alert')).toContainText('Search parameters are malformed')
   expect(searchRequests).toBe(0)
+})
+
+test('refetches when resubmitting the current first-page search', async ({ page }) => {
+  await useRefreshingSearchFixture(page)
+  await page.goto('/search?q=release')
+  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+
+  await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
+
+  await expect(page.getByRole('heading', { name: '1 results on this page' })).toBeVisible()
+  await expect(page.getByText('release planning')).toBeVisible()
 })
 
 test('preserves search focus and announces asynchronous results', async ({ page }) => {

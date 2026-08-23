@@ -192,18 +192,27 @@ describe('SameOriginProductTransport', () => {
   it('decodes a bounded search page and sends product vocabulary', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(searchPageFixture)))
     vi.stubGlobal('fetch', fetchMock)
-
-    const page = await new SameOriginProductTransport().search({
+    const request = {
       query: 'natural terms',
       sessionId: searchPageFixture.results[0].session_id,
       maxItems: 100,
       maxSnippetBytes: 512,
       after: { address: '500', projectionId: '42' },
+    }
+    const expectedSearch = new URLSearchParams({
+      strategy: 'lexical',
+      q: request.query,
+      max_items: String(request.maxItems),
+      session_id: request.sessionId,
+      after_address: request.after.address,
+      after_projection: request.after.projectionId,
     })
+
+    const page = await new SameOriginProductTransport().search(request)
 
     expect(page).toEqual(searchPageFixture)
     expect(fetchMock).toHaveBeenCalledWith(
-      `/api/search?strategy=lexical&q=natural+terms&max_items=100&session_id=${searchPageFixture.results[0].session_id}&after_address=500&after_projection=42`,
+      `/api/search?${expectedSearch.toString()}`,
       expect.objectContaining({ credentials: 'same-origin' }),
     )
   })
