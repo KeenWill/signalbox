@@ -3717,7 +3717,10 @@ dependencies = [
  "signalbox-domain",
  "signalbox-model-provider-runtime",
  "signalbox-model-runtime",
+ "signalbox-persistence",
  "signalboxd",
+ "sqlx",
+ "testcontainers-modules",
  "tokio",
  "uuid",
 ]
