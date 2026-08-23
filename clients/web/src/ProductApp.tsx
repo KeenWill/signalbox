@@ -452,6 +452,10 @@ export function ProductApp({
       <AttentionSurface />
     ) : surface === 'sessions' ? (
       <SessionsSurface />
+    ) : surface === 'search' && bootstrap.data === undefined ? (
+      <div className="surface-body">
+        <p className="search-notice">Checking whether bounded search is available…</p>
+      </div>
     ) : surface === 'search' &&
       (bootstrap.data?.capabilities.bounded_json === false ||
         bootstrap.data?.capabilities.bounded_lexical_search === false) ? (

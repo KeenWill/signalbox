@@ -257,6 +257,13 @@ test("generated search decoder validates continuation against the final result",
   );
 });
 
+test("generated search decoder accepts an omitted optional continuation", () => {
+  const page = searchPage();
+  delete page.continuation;
+
+  assert.deepEqual(decodeWebSearchPage(page), page);
+});
+
 test("generated search decoder rejects out-of-order result addresses", () => {
   const page = searchPage();
   const newer = structuredClone(page.results[0]);

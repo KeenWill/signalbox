@@ -30,6 +30,7 @@ pub const fn max_search_snippet_bytes() -> usize {
 }
 
 /// Maximum highlighted ranges retained for one bounded search result.
+// numeric-bound: ceiling - protects result memory and generated-contract validation work
 pub const MAX_SEARCH_HIGHLIGHTS_PER_RESULT: usize = 64;
 
 /// Returns the shared ceiling for highlighted ranges in one bounded search result.

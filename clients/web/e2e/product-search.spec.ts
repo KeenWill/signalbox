@@ -229,6 +229,22 @@ test('synchronizes pagination with browser history', async ({ page }) => {
   await expect(page).not.toHaveURL(/afterAddress=/)
 })
 
+test('restores results focus when browser history changes search scope', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.goto('/search?q=release')
+  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+
+  const search = page.getByRole('textbox', { name: 'Search text' })
+  await search.fill('different scope')
+  await search.press('Enter')
+  await expect(page).toHaveURL(/q=different(?:\+|%20)scope/)
+  await expect(search).toBeFocused()
+  await page.goBack()
+
+  await expect(page).toHaveURL(/q=release/)
+  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeFocused()
+})
+
 test('restores focus after a successful search retry', async ({ page }) => {
   await useRecoveringSearchFixture(page)
   await page.goto('/search?q=release')
@@ -251,6 +267,25 @@ test('does not request malformed session or cursor URL state', async ({ page }) 
     `/search?q=release&session=${'x'.repeat(128)}&afterAddress=${'9'.repeat(128)}&afterProjection=${'9'.repeat(128)}`,
   )
 
+  await expect(page.getByRole('alert')).toContainText('Search parameters are malformed')
+  expect(searchRequests).toBe(0)
+})
+
+test('does not write malformed search drafts into browser history', async ({ page }) => {
+  let searchRequests = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/search?**', (route) => {
+    searchRequests += 1
+    return route.fulfill({ json: firstPage })
+  })
+  await page.goto('/search')
+
+  const search = page.getByRole('textbox', { name: 'Search text' })
+  await search.fill('é'.repeat(257))
+  await page.getByRole('textbox', { name: /Exact session/ }).fill('not-a-session')
+  await search.press('Enter')
+
+  await expect(page).toHaveURL(/\/search$/)
   await expect(page.getByRole('alert')).toContainText('Search parameters are malformed')
   expect(searchRequests).toBe(0)
 })
@@ -317,6 +352,32 @@ test('does not search without the bounded JSON capability', async ({ page }) => 
     }),
   ).toBeVisible()
   expect(searchRequests).toBe(0)
+})
+
+test('does not expose focusable search fields before capabilities defer Search', async ({
+  page,
+}) => {
+  await page.route('**/api/bootstrap', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    await route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        capabilities: { ...bootstrapFixture.capabilities, bounded_lexical_search: false },
+      },
+    })
+  })
+  await page.goto('/search')
+
+  const main = page.getByRole('main')
+  await main.focus()
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toHaveCount(0)
+  await expect(
+    page.getByRole('heading', {
+      name: 'Operational data is not exposed by this daemon contract',
+    }),
+  ).toBeVisible()
+  await expect(main).toBeFocused()
+  await expect(page.getByRole('textbox', { name: 'Search text' })).toHaveCount(0)
 })
 
 test('refetches when resubmitting the current first-page search', async ({ page }) => {

@@ -1057,7 +1057,7 @@ export function decodeWebSearchPage(value) {
       previousEnd = highlight.end_byte;
     });
   });
-  if (value.continuation !== null) {
+  if (value.continuation != null) {
     const last = value.results.at(-1);
     if (
       last === undefined ||

@@ -5,6 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>Signalbox scenarios</title>
+    <script>
+      try {
+        const saved = JSON.parse(localStorage.getItem('signalbox.web.preferences.v1') ?? '{}')
+        document.documentElement.dataset.theme =
+          saved.theme === 'light' || saved.theme === 'dark' ? saved.theme : 'dark'
+        document.documentElement.dataset.density =
+          saved.density === 'comfortable' || saved.density === 'compact'
+            ? saved.density
+            : 'compact'
+      } catch {
+        document.documentElement.dataset.theme = 'dark'
+        document.documentElement.dataset.density = 'compact'
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

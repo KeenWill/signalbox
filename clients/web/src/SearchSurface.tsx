@@ -68,9 +68,11 @@ export function SearchSurface({
 }) {
   const [draftQuery, setDraftQuery] = useState(state.q ?? '')
   const [draftSession, setDraftSession] = useState(state.session ?? '')
+  const [draftIsInvalid, setDraftIsInvalid] = useState(false)
   const resultsHeadingRef = useRef<HTMLHeadingElement>(null)
   const errorHeadingRef = useRef<HTMLHeadingElement>(null)
   const restoreResultsFocusRef = useRef(false)
+  const submittedRouteChangeRef = useRef(false)
   const activeAfter =
     state.afterAddress && state.afterProjection
       ? { address: state.afterAddress, projectionId: state.afterProjection }
@@ -85,12 +87,14 @@ export function SearchSurface({
   useEffect(() => setDraftSession(state.session ?? ''), [state.session])
   useEffect(() => {
     const previous = routeStateRef.current
-    if (
-      previous.q === state.q &&
-      previous.session === state.session &&
-      (previous.afterAddress !== state.afterAddress ||
-        previous.afterProjection !== state.afterProjection)
-    ) {
+    const routeChanged =
+      previous.q !== state.q ||
+      previous.session !== state.session ||
+      previous.afterAddress !== state.afterAddress ||
+      previous.afterProjection !== state.afterProjection
+    if (routeChanged && submittedRouteChangeRef.current) {
+      submittedRouteChangeRef.current = false
+    } else if (routeChanged) {
       restoreResultsFocusRef.current = true
     }
     routeStateRef.current = {
@@ -160,13 +164,28 @@ export function SearchSurface({
     const form = new FormData(event.currentTarget)
     const q = String(form.get('q') ?? '').trim()
     const session = String(form.get('session') ?? '').trim()
+    const qBytes = new TextEncoder().encode(q).length
+    const submittedSession = session || undefined
+    const draftParametersAreValid =
+      qBytes > 0 &&
+      qBytes <= queryLimit &&
+      !q.includes('\0') &&
+      (submittedSession === undefined || validUuid(submittedSession))
+    if (!draftParametersAreValid) {
+      setDraftIsInvalid(true)
+      return
+    }
+    setDraftIsInvalid(false)
     restoreResultsFocusRef.current = false
-    onStateChange({ q: q || undefined, session: session || undefined })
+    if (q !== queryText || submittedSession !== state.session || activeAfter !== undefined) {
+      submittedRouteChangeRef.current = true
+    }
+    onStateChange({ q, session: submittedSession })
     if (
       requestIsValid &&
       activeAfter === undefined &&
       q === queryText &&
-      (session || undefined) === state.session
+      submittedSession === state.session
     ) {
       void results.refetch()
     }
@@ -182,7 +201,10 @@ export function SearchSurface({
             <input
               name="q"
               value={draftQuery}
-              onChange={(event) => setDraftQuery(event.currentTarget.value)}
+              onChange={(event) => {
+                setDraftQuery(event.currentTarget.value)
+                setDraftIsInvalid(false)
+              }}
               placeholder="Natural language terms"
               required
             />
@@ -195,7 +217,10 @@ export function SearchSurface({
           <input
             name="session"
             value={draftSession}
-            onChange={(event) => setDraftSession(event.currentTarget.value)}
+            onChange={(event) => {
+              setDraftSession(event.currentTarget.value)
+              setDraftIsInvalid(false)
+            }}
             placeholder="Session UUID"
           />
         </label>
@@ -203,6 +228,11 @@ export function SearchSurface({
           Search
         </button>
       </form>
+      {draftIsInvalid && (
+        <p className="search-notice" role="alert">
+          Search parameters are malformed or outside the contract bounds.
+        </p>
+      )}
       {bootstrap !== undefined && queryText && !requestIsValid && (
         <p className="search-notice" role="alert">
           Search parameters are malformed or outside the contract bounds. Search text uses{' '}
