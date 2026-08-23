@@ -70,8 +70,8 @@ const validateAttentionPage = (
   const continuationCursor = page.continuation_after_session_id
   if (continuationCursor != null) {
     const continuation = canonicalUuid(continuationCursor, 'attention continuation')
-    if (continuation <= requested || continuation < previous) {
-      throw new TypeError('attention continuation does not advance beyond the requested cursor')
+    if (continuation !== previous) {
+      throw new TypeError('attention continuation does not equal the returned page boundary')
     }
   }
   return page

@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  automationLabel,
   heldOwnershipLabel,
   readinessLabel,
   retainActivityPage,
+  sessionPurposeLabel,
   singletonScopeLabel,
 } from './ActivitySurface'
 import type { WebRepoWatchActivityPage } from './generated/web-contract.mjs'
@@ -27,10 +29,57 @@ const page = (receiptSequence: string): WebRepoWatchActivityPage => ({
 describe('retained activity pages', () => {
   it('replaces a refetched cursor page without appending a duplicate', () => {
     const first = retainActivityPage([], 'cursor-1', page('1'))
-    const refreshed = retainActivityPage(first, 'cursor-1', page('2'))
+    const refreshedFixture = page('2')
+    const refreshed = retainActivityPage(first, 'cursor-1', refreshedFixture)
 
     expect(refreshed).toHaveLength(1)
-    expect(refreshed[0]?.page.webhooks[0]?.receipt_sequence).toBe('2')
+    expect(refreshed[0]?.page.webhooks[0]?.receipt_sequence).toBe(
+      refreshedFixture.webhooks[0]?.receipt_sequence,
+    )
+  })
+})
+
+describe('automation convergence labels', () => {
+  it('preserves typed dispatch, event, and settlement evidence', () => {
+    expect(automationLabel({ kind: 'held', dispatch_id: 'dispatch-1' })).toBe(
+      'held · dispatch dispatch-1',
+    )
+    expect(
+      automationLabel({
+        kind: 'stale_seal',
+        dispatch_id: 'dispatch-2',
+        sealed_event_id: 'event-2',
+      }),
+    ).toBe('stale seal · dispatch dispatch-2 · event event-2')
+    expect(
+      automationLabel({
+        kind: 'current_head_sealed',
+        dispatch_id: 'dispatch-3',
+        sealed_event_id: 'event-3',
+        settled_at_unix_milliseconds: '9007199254740991',
+      }),
+    ).toBe('current head sealed · dispatch dispatch-3 · event event-3 · settled 9007199254740991')
+  })
+})
+
+describe('commissioned-session purpose labels', () => {
+  it('preserves rule and operator provenance', () => {
+    expect(
+      sessionPurposeLabel({
+        kind: 'rule_dispatch',
+        template: 'review',
+        rule: 'converge',
+        dispatch_id: 'dispatch-4',
+        event_id: 'event-4',
+      }),
+    ).toBe('rule dispatch · review · rule converge · dispatch dispatch-4 · event event-4')
+    expect(
+      sessionPurposeLabel({
+        kind: 'operator_commission',
+        template: 'inspect',
+        dispatch_id: 'dispatch-5',
+      }),
+    ).toBe('operator commission · inspect · dispatch dispatch-5')
   })
 })
 

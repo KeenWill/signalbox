@@ -161,6 +161,25 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('rejects an attention continuation beyond the returned page boundary', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...attentionFixture,
+              continuation_after_session_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6e',
+            }),
+          ),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention(previousSessionId)).rejects.toThrow(
+      'attention continuation does not equal the returned page boundary',
+    )
+  })
+
   it('preserves a typed attention projection failure', async () => {
     vi.stubGlobal(
       'fetch',

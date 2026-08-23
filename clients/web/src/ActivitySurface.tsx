@@ -25,6 +25,8 @@ import { displayUnixMicroseconds, displayUnixMilliseconds } from './time'
 type RepositoryStatus = WebRepoWatchRepositoryStatusPage['repositories'][number]
 type PullRequest = WebRepoWatchPullRequestPage['pull_requests'][number]
 type PullRequestSession = WebRepoWatchPullRequestSessionPage['sessions'][number]
+type AutomationStatus = PullRequest['automation']
+type SessionPurpose = PullRequestSession['purpose']
 type SingletonScope = WebRepoWatchWorkPage['held_slots'][number]['scope']
 type HeldSlot = WebRepoWatchWorkPage['held_slots'][number]
 type ObligationReadiness = WebRepoWatchWorkPage['queued_obligations'][number]['readiness']
@@ -127,6 +129,32 @@ export const readinessLabel = (readiness: ObligationReadiness) => {
 
 export const heldOwnershipLabel = (slot: HeldSlot) =>
   `dispatch ${slot.dispatch_id} · sessions ${slot.session_ids.join(', ') || 'none'}`
+
+export const automationLabel = (automation: AutomationStatus) => {
+  switch (automation.kind) {
+    case 'unattempted':
+      return 'unattempted'
+    case 'held':
+      return `held · dispatch ${automation.dispatch_id}`
+    case 'queued':
+      return `queued · event ${automation.latest_event_id}`
+    case 'non_converged':
+      return `non converged · dispatch ${automation.dispatch_id}`
+    case 'stale_seal':
+      return `stale seal · dispatch ${automation.dispatch_id} · event ${automation.sealed_event_id}`
+    case 'current_head_sealed':
+      return `current head sealed · dispatch ${automation.dispatch_id} · event ${automation.sealed_event_id} · settled ${time(automation.settled_at_unix_milliseconds)}`
+  }
+}
+
+export const sessionPurposeLabel = (purpose: SessionPurpose) => {
+  switch (purpose.kind) {
+    case 'rule_dispatch':
+      return `rule dispatch · ${purpose.template} · rule ${purpose.rule} · dispatch ${purpose.dispatch_id} · event ${purpose.event_id}`
+    case 'operator_commission':
+      return `operator commission · ${purpose.template} · dispatch ${purpose.dispatch_id}`
+  }
+}
 
 const errorMessage = (error: unknown) =>
   error instanceof ProductRequestError
@@ -371,7 +399,7 @@ function PullRequestTable({
                   </a>
                 </td>
                 <td>
-                  {words(pullRequest.automation.kind)} · {pullRequest.held_slot_count} held ·{' '}
+                  {automationLabel(pullRequest.automation)} · {pullRequest.held_slot_count} held ·{' '}
                   {pullRequest.queued_obligation_count} queued
                 </td>
                 <td>
@@ -501,9 +529,7 @@ function SessionPanel({
               <strong>{words(session.attention.state)}</strong>
               <code>{session.attention.session_id}</code>
             </div>
-            <span>
-              {words(session.purpose.kind)} · {session.purpose.template}
-            </span>
+            <span>{sessionPurposeLabel(session.purpose)}</span>
             <span>
               {session.attention.action ? words(session.attention.action) : 'Observe only'}
             </span>
