@@ -4,7 +4,8 @@ use std::{
     error::Error,
     fmt,
     fs::File as StandardFile,
-    io::{self, Read as _},
+    io::{self, Read as _, SeekFrom},
+    os::unix::fs::MetadataExt as _,
     path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
@@ -29,7 +30,7 @@ use signalbox_tools_exec::{
 };
 use sqlx::PgPool;
 use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _},
     sync::Semaphore,
     time::Instant,
 };
@@ -223,8 +224,8 @@ impl DeterministicBlobProducer for ImageProducer {
         }
         make_executable(&worker_path)?;
         run_isolated_worker(workspace.path(), &self.supervisor_program, edge_px).await?;
-        let expected = expected_output(&output_path).await?;
-        publish_output(&self.catalog, &self.registry, &output_path, expected).await?;
+        let (expected, output) = expected_output(&output_path).await?;
+        publish_output(&self.catalog, &self.registry, output, expected).await?;
         Ok(Box::new([expected.digest()]))
     }
 }
@@ -366,34 +367,52 @@ async fn run_isolated_worker(
     }
 }
 
-async fn expected_output(path: &Path) -> Result<ExpectedBlob, WebBlobRuntimeError> {
-    let metadata = tokio::fs::metadata(path)
-        .await
+async fn expected_output(
+    path: &Path,
+) -> Result<(ExpectedBlob, tokio::fs::File), WebBlobRuntimeError> {
+    let descriptor = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|_| WebBlobRuntimeError::ProducerFailed)?;
+    let standard = StandardFile::from(descriptor);
+    let metadata = standard
+        .metadata()
         .map_err(|_| WebBlobRuntimeError::ProducerFailed)?;
-    if metadata.len() == 0 || metadata.len() > MAX_DERIVATIVE_BYTES {
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.len() == 0
+        || metadata.len() > MAX_DERIVATIVE_BYTES
+    {
         return Err(WebBlobRuntimeError::ProducerFailed);
     }
-    let bytes = tokio::fs::read(path)
+    let mut file = tokio::fs::File::from_std(standard);
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len()).map_err(|_| WebBlobRuntimeError::Integrity)?,
+    );
+    file.read_to_end(&mut bytes)
         .await
         .map_err(|_| WebBlobRuntimeError::ProducerFailed)?;
     let byte_length = u64::try_from(bytes.len()).map_err(|_| WebBlobRuntimeError::Integrity)?;
     if byte_length != metadata.len() {
         return Err(WebBlobRuntimeError::ProducerFailed);
     }
-    ExpectedBlob::try_new(BlobDigest::digest(&bytes), byte_length)
-        .map_err(|_| WebBlobRuntimeError::ProducerFailed)
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(|_| WebBlobRuntimeError::ProducerFailed)?;
+    let expected = ExpectedBlob::try_new(BlobDigest::digest(&bytes), byte_length)
+        .map_err(|_| WebBlobRuntimeError::ProducerFailed)?;
+    Ok((expected, file))
 }
 
 async fn publish_output(
     catalog: &BlobCatalogRepository,
     registry: &BlobStoreRegistry,
-    path: &Path,
+    file: tokio::fs::File,
     expected: ExpectedBlob,
 ) -> Result<(), WebBlobRuntimeError> {
     let (store_name, store) = registry.routed_store(BlobStorageClass::GeneratedArtifact);
-    let file = tokio::fs::File::open(path)
-        .await
-        .map_err(|_| WebBlobRuntimeError::Unavailable)?;
     let publication = store
         .put(expected, Box::new(file))
         .await
@@ -542,7 +561,7 @@ mod tests {
         reason = "image fixtures use explicit expectations"
     )]
 
-    use std::{ffi::OsString, fs::File, io};
+    use std::{ffi::OsString, fs::File, io, os::unix::fs::symlink};
 
     use image::{GenericImageView as _, Rgba, RgbaImage};
     use tokio::io::{AsyncRead, ReadBuf};
@@ -614,6 +633,17 @@ mod tests {
         let result = expected_output(&output).await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn derivative_output_symlinks_are_rejected() {
+        let workspace = tempfile::tempdir().expect("fixture workspace exists");
+        let target = workspace.path().join("target.png");
+        let output = workspace.path().join("output.png");
+        std::fs::write(&target, b"not worker output").expect("fixture target exists");
+        symlink(&target, &output).expect("fixture output symlink exists");
+
+        assert!(expected_output(&output).await.is_err());
     }
 
     #[tokio::test]
