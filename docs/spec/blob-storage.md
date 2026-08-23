@@ -564,8 +564,12 @@ unsent call. The eligibility sweep includes an active turn whose current model
 call remains `Prepared`, so this retryable durable shape receives another pass;
 the per-session in-flight deduplication prevents concurrent execution.
 Authoritative cancellation aborts store I/O without relabeling cancellation as
-an attachment failure. Successful verification seeds the turn-scoped bounded
-verification inventory used by later blob reads.
+an attachment failure. Seeding attachment verification into the turn-scoped
+bounded verification inventory is committed unimplemented functionality: the
+inventory accepts only an immutable-generation token, and neither the
+filesystem adapter nor the current S3 adapter supplies one. Until an adapter
+can pin a generation and make later ranges conditional on that exact token,
+later blob reads reverify as required by the wire-vocabulary contract above.
 
 The model and serving-target modality grammar, defaults, effective selection,
 and client projection are owned by

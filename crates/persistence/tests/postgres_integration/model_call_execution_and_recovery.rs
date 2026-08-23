@@ -1284,8 +1284,7 @@ async fn s03_inv014_prepared_model_call_is_resumable_without_tool_round()
 
 /// S03 / S04 / S08 / INV-006 / INV-014 / INV-016 / INV-034: the production
 /// startup repository applies call-aware recovery under its session lock:
-/// Prepared is known-failed with exact terminal execution provenance while
-/// reclassifying newly observed steering, an issued call becomes an exact
+/// Prepared remains retryable with its steering unchanged, an issued call becomes an exact
 /// ambiguity wait, a stopped call terminalizes as reconciliation while
 /// reclassifying its steering, that successor remains a valid replay origin,
 /// and replay changes neither.
@@ -1404,25 +1403,29 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x5005)),
             ],
         )
-        .with_reclassified_turns([
-            prepared.turn,
-            TurnId::from_uuid(Uuid::from_u128(0x6201)),
-            TurnId::from_uuid(Uuid::from_u128(0x6202)),
-        ]),
+        .with_reclassified_turns([TurnId::from_uuid(Uuid::from_u128(0x6202))]),
         PostgresStartupScanRepository::new(restarted_pool.clone()),
     );
 
     let first = scan.execute().await?;
-    assert_eq!(first.recovered_turn_count(), 2);
+    assert_eq!(first.recovered_turn_count(), 1);
 
-    let prepared_state: (String, String, String, String, String, Uuid, Uuid) = sqlx::query_as(
+    let prepared_state: (
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        String,
+        Uuid,
+        Uuid,
+    ) = sqlx::query_as(
         "SELECT call.state_kind,
                 call.terminal_disposition_kind,
                 attempt.state_kind,
                 attempt.end_disposition,
                 turn.state_kind,
-                turn.terminal_attempt_id,
-                turn.terminal_model_call_id
+                turn.current_attempt_id,
+                call.model_call_id
            FROM model_call AS call
            JOIN turn_attempt AS attempt
              ON attempt.turn_attempt_id = call.turn_attempt_id
@@ -1436,11 +1439,11 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
     assert_eq!(
         prepared_state,
         (
-            "terminal".into(),
-            "known_failed".into(),
-            "ended".into(),
-            "lost".into(),
-            "terminal".into(),
+            "prepared".into(),
+            None,
+            "current".into(),
+            None,
+            "active".into(),
             prepared.attempt.into_uuid(),
             prepared.call.into_uuid(),
         )
@@ -1517,8 +1520,8 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
     assert_eq!(
         steering_state,
         (
-            "reclassified_as_turn_origin".into(),
-            Some(Uuid::from_u128(0x6201)),
+            "pending_steering".into(),
+            None,
             "pending_steering".into(),
             None,
         )
@@ -1569,7 +1572,9 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
                 &mut stale_recovery_ids,
             )
             .await?,
-        StartupScanSessionOutcome::NoActiveTurn
+        StartupScanSessionOutcome::ResumablePreparedModelCall {
+            turn: prepared.turn,
+        }
     );
 
     let replay = scan.execute().await?;
@@ -1593,7 +1598,7 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
     .bind(issued.turn.into_uuid())
     .fetch_one(&restarted_pool)
     .await?;
-    assert_eq!(unchanged, (2, 2, 1, 0));
+    assert_eq!(unchanged, (1, 1, 0, 0));
     assert_ne!(prepared.session, issued.session);
 
     let activated_interrupt = activate_earliest_queued_turn(

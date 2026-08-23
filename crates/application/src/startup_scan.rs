@@ -81,6 +81,11 @@ pub enum StartupScanSessionOutcome {
         /// Active turn whose result/next-attempt boundary is ready.
         turn: TurnId,
     },
+    /// A durable unsent model call remains prepared for ordinary scheduling.
+    ResumablePreparedModelCall {
+        /// Active turn whose exact prepared call remains retryable.
+        turn: TurnId,
+    },
     /// A prior process already ended this turn's tenure and parked it on an
     /// exact ambiguity set. The scan has nothing left to classify; only an
     /// user reconciliation decision can release the slot.
@@ -286,7 +291,10 @@ where
                         }
                         break;
                     }
-                    Ok(StartupScanSessionOutcome::ResumableToolBatch { .. }) => break,
+                    Ok(
+                        StartupScanSessionOutcome::ResumableToolBatch { .. }
+                        | StartupScanSessionOutcome::ResumablePreparedModelCall { .. },
+                    ) => break,
                     Ok(StartupScanSessionOutcome::AwaitingRecoveryDecision { .. }) => {
                         awaiting_recovery_decision_sessions.push(session);
                         break;
