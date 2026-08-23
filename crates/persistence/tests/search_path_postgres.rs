@@ -16,11 +16,12 @@
 //! schema, then `pg_catalog`, then `pg_temp` — because a pin that omits the
 //! working schema fails restore exactly like a missing pin. Body references
 //! close transitively to a fixed point: `pg_depend` has no body-level
-//! representation, so the closure follows `prosrc` name references until no
-//! new function appears, and a chain of unqualified calls is followed to its
-//! end rather than one hop deep. The test also fails when discovery returns
-//! nothing: the schema's check constraints do reach functions, so an empty
-//! set means the discovery query broke, not that nothing needs pinning.
+//! representation, so the closure follows call-shaped `prosrc` references
+//! until no new function appears, and a chain of unqualified calls is followed
+//! to its end rather than one hop deep. Bare names in comments, strings, and
+//! identifiers are not call edges. The test also fails when discovery returns
+//! nothing: the schema's check constraints do reach functions, so an empty set
+//! means the discovery query broke, not that nothing needs pinning.
 
 #![allow(
     clippy::expect_used,
@@ -93,7 +94,9 @@ const RESTORE_REACHABLE_FUNCTIONS: &str = "
           JOIN covered AS caller
             ON callee.pronamespace = caller.pronamespace
            AND callee.oid <> caller.oid
-           AND caller.prosrc ~ ('\\m' || callee.proname || '\\M')
+           AND caller.prosrc ~ (
+                   '\\m' || callee.proname || '\\M[[:space:]]*\\('
+               )
     )
     SELECT proname,
            EXISTS (
@@ -111,6 +114,7 @@ const RESTORE_REACHABLE_FUNCTIONS: &str = "
 const RESTORE_PROBE_HEAD: &str = "restore_probe_head";
 const RESTORE_PROBE_MIDDLE: &str = "restore_probe_middle";
 const RESTORE_PROBE_TAIL: &str = "restore_probe_tail";
+const RESTORE_PROBE_DECOY: &str = "restore_probe_decoy";
 
 /// DDL for a three-deep call chain behind a check constraint, rendered from
 /// the probe-name constants so the assertion can never drift from the fixture.
@@ -119,6 +123,7 @@ const RESTORE_PROBE_TAIL: &str = "restore_probe_tail";
 /// silently reorder them.
 struct SyntheticTransitiveChain {
     create_tail: String,
+    create_decoy: String,
     create_middle: String,
     create_head: String,
     create_probe_table: String,
@@ -130,9 +135,14 @@ fn synthetic_transitive_chain() -> SyntheticTransitiveChain {
             "CREATE FUNCTION {RESTORE_PROBE_TAIL}() RETURNS boolean
                 LANGUAGE sql IMMUTABLE AS 'SELECT true'"
         ),
+        create_decoy: format!(
+            "CREATE FUNCTION {RESTORE_PROBE_DECOY}() RETURNS boolean
+                LANGUAGE sql IMMUTABLE AS 'SELECT true'"
+        ),
         create_middle: format!(
             "CREATE FUNCTION {RESTORE_PROBE_MIDDLE}() RETURNS boolean
-                LANGUAGE sql IMMUTABLE AS 'SELECT {RESTORE_PROBE_TAIL}()'"
+                LANGUAGE sql IMMUTABLE AS
+                'SELECT {RESTORE_PROBE_TAIL}() AS {RESTORE_PROBE_DECOY}'"
         ),
         create_head: format!(
             "CREATE FUNCTION {RESTORE_PROBE_HEAD}(value text) RETURNS boolean
@@ -200,7 +210,8 @@ async fn every_restore_reachable_function_pins_its_search_path() -> Result<(), B
 
 /// INV-070: body-reference discovery closes transitively — a check constraint
 /// whose function calls through an intermediate body still surfaces the
-/// unpinned function at the end of the chain.
+/// unpinned function at the end of the chain, while a same-spelled bare alias
+/// does not become a reachability edge.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn transitive_body_references_close_to_a_fixed_point() -> Result<(), Box<dyn Error>> {
@@ -227,6 +238,9 @@ async fn transitive_body_references_close_to_a_fixed_point() -> Result<(), Box<d
     sqlx::query(sqlx::AssertSqlSafe(chain.create_tail.as_str()))
         .execute(&pool)
         .await?;
+    sqlx::query(sqlx::AssertSqlSafe(chain.create_decoy.as_str()))
+        .execute(&pool)
+        .await?;
     sqlx::query(sqlx::AssertSqlSafe(chain.create_middle.as_str()))
         .execute(&pool)
         .await?;
@@ -244,7 +258,8 @@ async fn transitive_body_references_close_to_a_fixed_point() -> Result<(), Box<d
         unpinned_names(&covered),
         [RESTORE_PROBE_HEAD, RESTORE_PROBE_MIDDLE, RESTORE_PROBE_TAIL],
         "the probe chain must surface: head directly, middle one body hop deep, \
-         and tail two hops deep, which only a transitive closure reaches"
+         and tail two hops deep, which only a transitive closure reaches; the \
+         decoy is only an output alias and must not surface as a call"
     );
     Ok(())
 }
