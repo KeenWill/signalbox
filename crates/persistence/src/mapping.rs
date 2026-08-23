@@ -45,6 +45,47 @@ pub(crate) const RUNNER_STATE_TRANSITION: &str = "runner_state_transition";
 pub(crate) const DELEGATION_UPDATE: &str = "delegation_update";
 pub(crate) const DELEGATION_WAKE: &str = "delegation_wake";
 
+const OUTBOX_EVENT_DISCRIMINATOR_SPELLINGS: [&str; 18] = [
+    SESSION_CREATED,
+    SESSION_MODEL_SETTINGS_CHANGED,
+    TURN_MODEL_SETTINGS_RESOLVED,
+    INPUT_ACCEPTED,
+    GOAL_TURN_RETIRED,
+    TURN_ACTIVATED,
+    TURN_FAILED,
+    MODEL_CALL_TRANSITION,
+    TOOL_BATCH_TRANSITION,
+    TOOL_APPROVAL_DECIDED,
+    CONTEXT_COMPACTED,
+    TURN_COMPLETED,
+    TURN_REFUSED,
+    TURN_CANCELLED,
+    TURN_RECONCILIATION_REQUIRED,
+    RUNNER_STATE_TRANSITION,
+    DELEGATION_UPDATE,
+    DELEGATION_WAKE,
+];
+
+const fn outbox_event_kind_utf8_byte_bounds() -> (u64, u64) {
+    let mut minimum = u64::MAX;
+    let mut maximum = 0_u64;
+    let mut index = 0;
+    while index < OUTBOX_EVENT_DISCRIMINATOR_SPELLINGS.len() {
+        let length = OUTBOX_EVENT_DISCRIMINATOR_SPELLINGS[index].len() as u64;
+        if length < minimum {
+            minimum = length;
+        }
+        if length > maximum {
+            maximum = length;
+        }
+        index += 1;
+    }
+    (minimum, maximum)
+}
+
+pub(crate) const OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS: (u64, u64) =
+    outbox_event_kind_utf8_byte_bounds();
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SearchProjectionSourceKind {
     SessionMetadata,
