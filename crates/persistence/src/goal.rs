@@ -43,6 +43,32 @@ use crate::{
 
 const STORAGE_VERSION: i16 = 1;
 
+/// Closed durable cause for an execution failure that requires an operator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GoalExecutionFailureRecoveryCause {
+    /// No safe context-compaction boundary fits the configured model window.
+    ContextCompactionInputDoesNotFit,
+}
+
+impl GoalExecutionFailureRecoveryCause {
+    /// Returns the closed durable spelling used by storage and telemetry.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ContextCompactionInputDoesNotFit => "context_compaction_input_does_not_fit",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, GoalCorruption> {
+        match value {
+            "context_compaction_input_does_not_fit" => Ok(Self::ContextCompactionInputDoesNotFit),
+            value => Err(GoalCorruption::Unsupported {
+                field: "goal_execution_failure_recovery cause_kind",
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
 /// Result of handling a user-global goal command identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GoalCommandHandlingOutcome {
@@ -223,6 +249,29 @@ impl GoalRepository {
     /// Uses the supplied pool for independent goal transactions.
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Loads the durable operator-required cause for one failed goal turn.
+    pub async fn execution_failure_recovery_cause(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> Result<Option<GoalExecutionFailureRecoveryCause>, GoalRepositoryError> {
+        let cause = sqlx::query_scalar::<_, String>(
+            "SELECT cause_kind
+               FROM goal_execution_failure_recovery
+              WHERE session_id = $1
+                AND turn_id = $2",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(turn_id_to_uuid(turn))
+        .fetch_optional(&self.pool)
+        .await?;
+        cause
+            .as_deref()
+            .map(GoalExecutionFailureRecoveryCause::parse)
+            .transpose()
+            .map_err(GoalRepositoryError::Corruption)
     }
 
     /// Claims and handles an unseen user command, atomically scheduling a turn
@@ -858,6 +907,27 @@ pub(crate) async fn block_execution_failure_locked(
     let event = latest_event(&transitioned)?;
     insert_event(connection, session, &event).await?;
     Ok(GoalTransitionOutcome::Applied(event))
+}
+
+/// Records an operator-required recovery cause inside the transaction that
+/// terminalizes the exact failed turn.
+pub(crate) async fn record_execution_failure_recovery_cause(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    cause: GoalExecutionFailureRecoveryCause,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO goal_execution_failure_recovery
+            (turn_id, session_id, cause_kind)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(turn_id_to_uuid(turn))
+    .bind(session_id_to_uuid(session))
+    .bind(cause.code())
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
 }
 
 fn recorded_scheduler_failure(goal: &Goal, turn: TurnId) -> Option<&GoalEvent> {

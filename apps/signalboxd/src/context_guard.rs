@@ -13,6 +13,7 @@ use signalbox_domain::{
 };
 use signalbox_model_provider_runtime::{ContextCompactionModel, RuntimeModelCatalog};
 use signalbox_persistence::{
+    goal::GoalExecutionFailureRecoveryCause,
     model_execution::{ModelCallRepositoryError, PostgresModelCallRepository},
     start_eligible_turn::{
         CommitActivationPreviewError, CommitActivationPreviewOutcome,
@@ -188,14 +189,16 @@ impl ReportedUsageCompaction {
         {
             Ok(applied) => applied,
             Err(crate::process_runtime::AutomaticContextCompactionError::AlreadyAttempted) => {
-                match close_failed_compaction_turn(&self.activation, &self.model_calls, preview)
-                    .await
-                    .map_err(
-                        |source| ReportedUsageCompactionError::CompactionFailureClosure {
-                            turn,
-                            source,
-                        },
-                    )? {
+                match close_failed_compaction_turn(
+                    &self.activation,
+                    &self.model_calls,
+                    preview,
+                    None,
+                )
+                .await
+                .map_err(|source| {
+                    ReportedUsageCompactionError::CompactionFailureClosure { turn, source }
+                })? {
                     CommitCompactionFailurePreviewOutcome::Failed(_) => {
                         tracing::warn!(
                             cause_code = "reported_usage_context_compaction_exhausted",
@@ -220,11 +223,16 @@ impl ReportedUsageCompaction {
                         commit_ambiguous: true,
                     })
                 {
-                    match close_failed_compaction_turn(&self.activation, &self.model_calls, preview)
-                        .await
-                        .map_err(|source| {
-                            ReportedUsageCompactionError::CompactionFailureClosure { turn, source }
-                        })? {
+                    match close_failed_compaction_turn(
+                        &self.activation,
+                        &self.model_calls,
+                        preview,
+                        compaction_recovery_cause(&error),
+                    )
+                    .await
+                    .map_err(|source| {
+                        ReportedUsageCompactionError::CompactionFailureClosure { turn, source }
+                    })? {
                         CommitCompactionFailurePreviewOutcome::Failed(_) => {}
                         CommitCompactionFailurePreviewOutcome::Stale => return Ok(()),
                     }
@@ -247,14 +255,19 @@ impl ReportedUsageCompaction {
             return Ok(());
         };
         let remaining_turn = remaining.turn;
-        match close_failed_compaction_turn(&self.activation, &self.model_calls, remaining.preview)
-            .await
-            .map_err(
-                |source| ReportedUsageCompactionError::CompactionFailureClosure {
-                    turn: remaining_turn,
-                    source,
-                },
-            )? {
+        match close_failed_compaction_turn(
+            &self.activation,
+            &self.model_calls,
+            remaining.preview,
+            None,
+        )
+        .await
+        .map_err(
+            |source| ReportedUsageCompactionError::CompactionFailureClosure {
+                turn: remaining_turn,
+                source,
+            },
+        )? {
             CommitCompactionFailurePreviewOutcome::Failed(_) => {
                 tracing::warn!(
                     cause_code = "reported_usage_context_still_exceeded",
@@ -669,6 +682,7 @@ where
                                 &activation,
                                 &model_calls,
                                 preview,
+                                None,
                             )
                             .await
                             .map_err(|source| {
@@ -697,6 +711,7 @@ where
                                     &activation,
                                     &model_calls,
                                     preview,
+                                    None,
                                 )
                                 .await
                                 .map_err(|source| {
@@ -722,6 +737,7 @@ where
                                         &activation,
                                         &model_calls,
                                         preview,
+                                        compaction_recovery_cause(&error),
                                     )
                                     .await
                                     .map_err(|source| {
@@ -881,6 +897,7 @@ async fn close_failed_compaction_turn(
     activation: &StartEligibleTurnRepository,
     model_calls: &PostgresModelCallRepository,
     preview: PreparedActivationPreview,
+    recovery_cause: Option<GoalExecutionFailureRecoveryCause>,
 ) -> Result<CommitCompactionFailurePreviewOutcome, CommitActivationPreviewError> {
     loop {
         let identities = FailedModelCallTurnIdentities::new(
@@ -888,13 +905,28 @@ async fn close_failed_compaction_turn(
             ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
         );
         match activation
-            .commit_compaction_failure_preview(preview.clone(), model_calls, identities)
+            .commit_compaction_failure_preview(
+                preview.clone(),
+                model_calls,
+                identities,
+                recovery_cause,
+            )
             .await
         {
             Err(error) if compaction_failure_closure_collision_is_retryable(&error) => {}
             outcome => return outcome,
         }
     }
+}
+
+fn compaction_recovery_cause(
+    error: &crate::process_runtime::AutomaticContextCompactionError,
+) -> Option<GoalExecutionFailureRecoveryCause> {
+    matches!(
+        error,
+        crate::process_runtime::AutomaticContextCompactionError::InputDoesNotFit
+    )
+    .then_some(GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit)
 }
 
 fn compaction_failure_closure_collision_is_retryable(error: &CommitActivationPreviewError) -> bool {
@@ -918,6 +950,7 @@ mod tests {
     };
     use signalbox_persistence::{
         context_compaction::ContextCompactionRepositoryError,
+        goal::GoalExecutionFailureRecoveryCause,
         model_execution::{ModelCallIdentityCollision, ModelCallRepositoryError},
         start_eligible_turn::{
             CommitActivationPreviewError, StartEligibleTurnIdentityCollision,
@@ -927,8 +960,25 @@ mod tests {
 
     use super::{
         ContextGuardedTurnPassError, compaction_failure_closure_collision_is_retryable,
-        guarded_failure_stage, persisted_preflight_prefix, report_guarded_ambiguity,
+        compaction_recovery_cause, guarded_failure_stage, persisted_preflight_prefix,
+        report_guarded_ambiguity,
     };
+
+    #[test]
+    fn no_fitting_compaction_input_requires_operator_recovery() {
+        assert_eq!(
+            compaction_recovery_cause(&AutomaticContextCompactionError::InputDoesNotFit),
+            Some(GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit)
+        );
+    }
+
+    #[test]
+    fn transient_compaction_failure_keeps_automatic_recovery() {
+        assert_eq!(
+            compaction_recovery_cause(&AutomaticContextCompactionError::Model),
+            None
+        );
+    }
     use crate::{
         ActivatedTurnExecution, FatalExecutionSignal, FatalExecutionSupervisor,
         TurnPassExecutionStage, process_runtime::AutomaticContextCompactionError,

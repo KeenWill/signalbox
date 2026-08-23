@@ -18,7 +18,8 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     goal::{
-        GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError, GoalTransitionOutcome,
+        GoalCommandHandlingOutcome, GoalExecutionFailureRecoveryCause, GoalRepository,
+        GoalRepositoryError, GoalTransitionOutcome,
     },
     goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
 };
@@ -63,6 +64,7 @@ const GOAL_DECLARE_REJECTED: &str =
 const GOAL_DECLARE_RESULT: &str = "{\"status\":\"applied\"}";
 const EXECUTION_FAILURE_NEED: &str =
     "Resolve the failed goal turn's execution condition, then resume the goal.";
+const CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED: &str = "No safe context-compaction boundary fits the configured model window. Start a fresh session or reduce the imported context before resuming this goal; no automatic resumption is scheduled.";
 /// Preamble for an execution-failure block automatic resumption still owes.
 ///
 /// The repair follows it rather than replacing it with a promise of automation,
@@ -569,15 +571,27 @@ impl PostgresGoalPassDisposition {
         blocked: GoalEventOrdinal,
         resumption: AutomaticResumption,
     ) {
-        let AutomaticResumption::Scheduled { delay } = resumption else {
-            tracing::warn!(
-                session = %session.into_uuid(),
-                event_ordinal = blocked.get(),
-                attempt_budget = ?self.numeric_bounds.attempt_budget,
-                cause_code = "goal_automatic_resume_exhausted",
-                "blocked goal exhausted automatic resumption and awaits an operator"
-            );
-            return;
+        let delay = match resumption {
+            AutomaticResumption::Scheduled { delay } => delay,
+            AutomaticResumption::Exhausted { .. } => {
+                tracing::warn!(
+                    session = %session.into_uuid(),
+                    event_ordinal = blocked.get(),
+                    attempt_budget = ?self.numeric_bounds.attempt_budget,
+                    cause_code = "goal_automatic_resume_exhausted",
+                    "blocked goal exhausted automatic resumption and awaits an operator"
+                );
+                return;
+            }
+            AutomaticResumption::OperatorRequired { cause } => {
+                tracing::warn!(
+                    session = %session.into_uuid(),
+                    event_ordinal = blocked.get(),
+                    cause_code = cause.code(),
+                    "blocked goal has a durable non-resumable execution failure and awaits an operator"
+                );
+                return;
+            }
         };
         let adapter = self.clone();
         drop(tokio::spawn(async move {
@@ -918,9 +932,18 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let adapter = self.clone();
         async move {
-            let resumption = adapter
-                .plan_automatic_resumption(session, Some(turn))
-                .await?;
+            let resumption = match adapter
+                .repository
+                .execution_failure_recovery_cause(session, turn)
+                .await?
+            {
+                Some(cause) => AutomaticResumption::OperatorRequired { cause },
+                None => {
+                    adapter
+                        .plan_automatic_resumption(session, Some(turn))
+                        .await?
+                }
+            };
             let outcome = match adapter
                 .repository
                 .block_execution_failure(
@@ -974,6 +997,11 @@ enum AutomaticResumption {
     },
     /// The consecutive-attempt budget is spent; only an operator can resume.
     Exhausted { attempt_budget: u32 },
+    /// Durable failure evidence proves unchanged automatic resumption cannot progress.
+    OperatorRequired {
+        /// Exact recorded reason the automatic path cannot make progress.
+        cause: GoalExecutionFailureRecoveryCause,
+    },
 }
 
 impl AutomaticResumption {
@@ -1002,6 +1030,9 @@ impl AutomaticResumption {
             Self::Exhausted { attempt_budget } => format!(
                 "Automatic resumption is exhausted after {attempt_budget} consecutive execution failures. {EXECUTION_FAILURE_NEED}"
             ),
+            Self::OperatorRequired {
+                cause: GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit,
+            } => String::from(CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED),
         };
         GoalNeed::try_new(text).map_err(|_| PostgresGoalPassDispositionError::InvalidStaticNeed)
     }
@@ -1412,9 +1443,18 @@ mod tests {
         }
         .need()
         .expect("the exhausted need is admitted");
+        let operator_required = AutomaticResumption::OperatorRequired {
+            cause: GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit,
+        }
+        .need()
+        .expect("the operator-required need is admitted");
 
         assert!(scheduled.as_str().ends_with(EXECUTION_FAILURE_NEED));
         assert!(exhausted.as_str().ends_with(EXECUTION_FAILURE_NEED));
+        assert_eq!(
+            operator_required.as_str(),
+            CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED
+        );
         assert_eq!(
             scheduled.as_str(),
             "The goal turn failed to execute and automatic resumption is scheduled. If the goal is still blocked here once resumption ends, it is waiting for an operator. Resolve the failed goal turn's execution condition, then resume the goal."

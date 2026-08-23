@@ -26,7 +26,9 @@ terminal closure is verified against this PR
 recovery is verified against this PR
 (`agent/daemon-live-request-too-large-compaction`). Successor compaction's
 no-progress closure is verified against this PR
-(`agent/daemon-live-compaction-no-progress`).
+(`agent/daemon-live-compaction-no-progress`). Durable parking when no safe
+compaction input can fit is verified against this PR
+(`agent/daemon-live-compaction-terminal-park`).
 
 Non-ambiguous execution-failure containment is verified against this PR
 (`agent/daemon-live-nonambiguous-execution-containment`).
@@ -422,12 +424,16 @@ safe boundary; no provider call is prepared when even the first safe prefix
 cannot fit. A successor likewise prepares no provider call when the only fitting
 boundary is its existing summary and the suffix through the next safe boundary
 would exceed the input-byte budget even if that summary were empty. Preparation
-records the selected exact position. A second rendering after the claim prevents
-a concurrent frontier change from sending a range outside the same bound: an
-oversized mismatch terminalizes the still-unsent dedicated call. An integrity
-failure does the same. After a successful provider result, the daemon retains
-the summary and its usage in memory until the exact completion is durably
-applied or replayed.
+records the selected exact position. When no safe prefix can fit, the same
+transaction that closes the call-free failed turn appends a typed
+`context_compaction_input_does_not_fit` recovery cause. Goal disposition reads
+that cause and parks without automatic resumption, because an unchanged
+successor cannot make progress. A second rendering after the claim prevents a
+concurrent frontier change from sending a range outside the same bound: an
+oversized mismatch terminalizes the still-unsent dedicated call and records the
+same cause. An integrity failure terminalizes without that cause. After a
+successful provider result, the daemon retains the summary and its usage in
+memory until the exact completion is durably applied or replayed.
 
 The explicit `compact_session` request names a session and an optional semantic
 transcript position. Absence selects the latest safe terminal or pre-call
@@ -481,7 +487,8 @@ failure reported no usage. A queued turn spends at most one automatic attempt.
 If the attempt fails, still cannot make the prospective request fit, or durable
 evidence says it was already spent, the scheduler atomically activates and fails
 the turn without preparing or dispatching an ordinary call. Goal disposition can
-then apply its bounded resumption policy to a fresh turn rather than either
+then apply its bounded resumption policy to a fresh turn, except when the
+durable no-fitting-input cause requires the operator instead, rather than either
 wedging the queue or sending the known-oversized request. After a nominal
 completion, the daemon retains adapter-reported usage and the completed
 observation even when reported output exceeds `max_output_tokens` or the

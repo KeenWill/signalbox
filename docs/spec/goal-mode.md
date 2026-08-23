@@ -14,12 +14,13 @@ that authority again when a consumer commits is verified against this PR
 (`agent/judge-completion-recheck`). Repository-watch-composed stops are verified
 against this PR (`agent/daemon-ops-overnight`). This bottom specification diff
 owns both stack slices. Bounded automatic resumption of execution-failure blocks
-is verified against this PR (`agent/goal-blocked-autoresume`), and its one
-exemption — the block an unattended repository-watch approval escalation appends
-— against this PR (`agent/headless-approval-escalation`). Operator-attended
-parking of an operator-commissioned escalation is verified against this PR
-(`agent/daemon-live-headless-approval-park`). Restart reconciliation of pending
-automatic resumptions is verified against this PR
+is verified against this PR (`agent/goal-blocked-autoresume`). The unattended
+repository-watch approval exemption is verified against this PR
+(`agent/headless-approval-escalation`), and durable non-resumable compaction
+failure parking against this PR (`agent/daemon-live-compaction-terminal-park`).
+Operator-attended parking of an operator-commissioned escalation is verified
+against this PR (`agent/daemon-live-headless-approval-park`). Restart
+reconciliation of pending automatic resumptions is verified against this PR
 (`agent/daemon-live-goal-resume-rearm`). Automatic-resume failure accounting and
 its twenty-attempt ceiling are verified against this PR
 (`agent/daemon-live-goal-resume-failure-budget`). Chargeable-failure resume
@@ -282,23 +283,27 @@ visible durable block; individual resume attempts use the ordinary bounded
 reconciliation and derived command identity, so concurrent or repeated startup
 attempts cannot append two resumptions for one block.
 
-**Implemented behavior.** One execution-failure block is exempt from automatic
-resumption: the block an unattended repository-watch approval escalation appends
-in the transaction that fails its turn, described by
-[repository watch](repo-watch.md). It arms no attempt, and its need text states
-that and names the operator repair directly instead. The work that block ended
-is already owed a different retry — repository watch redispatches it under a
-fresh dispatch while its rule and target remain eligible — so resuming this goal
-would re-run an escalating turn against a request no user is attending, beside
-that redispatch, until the budget ran out. Where that redispatch is withheld,
-because the rule was deactivated or the pull request closed or merged, the work
-is not wanted at all, and an automatic resumption would be the only thing still
-pursuing it. An operator-commissioned dispatch has an attending operator and no
-independent redispatch path, so its delegated approval escalation remains an
-active operator-visible approval wait rather than creating an execution-failure
-block. Every actual execution-failure block still owes the bounded resumption,
-including one appended for a session repository watch created or an operator
-commissioned.
+**Implemented behavior.** Two durable execution-failure classes require an
+operator instead of automatic resumption. The first is the block an unattended
+repository-watch approval escalation appends in the transaction that fails its
+turn, described by [repository watch](repo-watch.md). It arms no attempt, and
+its need text states that and names the operator repair directly instead. The
+work that block ended is already owed a different retry — repository watch
+redispatches it under a fresh dispatch while its rule and target remain eligible
+— so resuming this goal would re-run an escalating turn against a request no
+user is attending, beside that redispatch, until the budget ran out. Where that
+redispatch is withheld, because the rule was deactivated or the pull request
+closed or merged, the work is not wanted at all, and an automatic resumption
+would be the only thing still pursuing it. An operator-commissioned dispatch has
+an attending operator and no independent redispatch path, so its delegated
+approval escalation remains an active operator-visible approval wait rather than
+creating an execution-failure block. The second is a call-free failed turn
+carrying the append-only typed cause that no safe context-compaction boundary
+fits the configured model window. An unchanged successor would encounter the
+same proof, so its execution-failure block arms no attempt and tells the
+operator to start a fresh session or reduce the imported context. Every other
+actual execution-failure block still owes the bounded resumption, including one
+appended for a session repository watch created or an operator commissioned.
 
 **Implemented behavior.** A periodic durable sweep includes a pursuing goal
 whose current goal turn is terminal and still owed continuation or blocking. The

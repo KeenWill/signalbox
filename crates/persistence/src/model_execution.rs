@@ -1975,6 +1975,7 @@ impl PostgresModelCallRepository {
         session: SessionId,
         turn: TurnId,
         identities: FailedModelCallTurnIdentities,
+        recovery_cause: Option<crate::goal::GoalExecutionFailureRecoveryCause>,
     ) -> Result<FailedModelCallTurn, ModelCallRepositoryError> {
         let execution = require_live_execution(connection, session, &self.targets).await?;
         if execution.turn() != turn || execution.current_call().is_some() {
@@ -1996,6 +1997,10 @@ impl PostgresModelCallRepository {
             None,
         )
         .await?;
+        if let Some(cause) = recovery_cause {
+            crate::goal::record_execution_failure_recovery_cause(connection, session, turn, cause)
+                .await?;
+        }
         Ok(failed)
     }
 
