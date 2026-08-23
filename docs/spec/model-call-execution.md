@@ -24,7 +24,9 @@ reservation behavior is re-verified against this PR
 terminal closure is verified against this PR
 (`agent/daemon-live-terminalize-compaction-failure`). Request-size failure
 recovery is verified against this PR
-(`agent/daemon-live-request-too-large-compaction`).
+(`agent/daemon-live-request-too-large-compaction`). Successor compaction's
+no-progress closure is verified against this PR
+(`agent/daemon-live-compaction-no-progress`).
 
 Non-ambiguous execution-failure containment is verified against this PR
 (`agent/daemon-live-nonambiguous-execution-containment`).
@@ -417,12 +419,15 @@ that exact JSON prefix, the configured compaction prompt, and the configured
 output reservation fit the selected model's context window. If an open tool
 exchange would cross the budget, selection falls back to the latest preceding
 safe boundary; no provider call is prepared when even the first safe prefix
-cannot fit. Preparation records that exact position. A second rendering after
-the claim prevents a concurrent frontier change from sending a range outside the
-same bound: an oversized mismatch terminalizes the still-unsent dedicated call.
-An integrity failure does the same. After a successful provider result, the
-daemon retains the summary and its usage in memory until the exact completion is
-durably applied or replayed.
+cannot fit. A successor likewise prepares no provider call when the only fitting
+boundary is its existing summary and the suffix through the next safe boundary
+would exceed the input-byte budget even if that summary were empty. Preparation
+records the selected exact position. A second rendering after the claim prevents
+a concurrent frontier change from sending a range outside the same bound: an
+oversized mismatch terminalizes the still-unsent dedicated call. An integrity
+failure does the same. After a successful provider result, the daemon retains
+the summary and its usage in memory until the exact completion is durably
+applied or replayed.
 
 The explicit `compact_session` request names a session and an optional semantic
 transcript position. Absence selects the latest safe terminal or pre-call

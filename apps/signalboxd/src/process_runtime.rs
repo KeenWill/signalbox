@@ -7248,11 +7248,40 @@ fn automatic_context_compaction_boundary(
         );
         boundaries.push((member.position(), member.is_safe_boundary()));
     }
-    Ok(bounded_rendered_compaction_boundary(
-        &encoded_lengths,
-        &boundaries,
-        input_byte_budget,
-    ))
+    let selected =
+        bounded_rendered_compaction_boundary(&encoded_lengths, &boundaries, input_byte_budget);
+    let selected_only_current_summary = selected
+        == boundaries.first().map(|(position, _)| *position)
+        && matches!(
+            entries.first(),
+            Some(ProcessTranscriptEntry::ContextSummary { .. })
+        );
+    if selected_only_current_summary
+        && successor_compaction_cannot_advance(&encoded_lengths, &boundaries, input_byte_budget)
+    {
+        return Ok(None);
+    }
+    Ok(selected)
+}
+
+fn successor_compaction_cannot_advance(
+    encoded_lengths: &[u64],
+    boundaries: &[(u64, bool)],
+    input_byte_budget: u64,
+) -> bool {
+    if encoded_lengths.len() != boundaries.len() || encoded_lengths.len() < 2 {
+        return true;
+    }
+    let mut minimum_bytes = 2_u64;
+    for (encoded_length, (_, safe_boundary)) in encoded_lengths[1..].iter().zip(&boundaries[1..]) {
+        minimum_bytes = minimum_bytes
+            .saturating_add(1)
+            .saturating_add(*encoded_length);
+        if *safe_boundary {
+            return minimum_bytes > input_byte_budget;
+        }
+    }
+    true
 }
 
 fn bounded_rendered_compaction_boundary(
@@ -15997,6 +16026,20 @@ mod tests {
             ),
             Some(21)
         );
+    }
+
+    #[test]
+    fn successor_compaction_rejects_an_unreachable_later_safe_boundary() {
+        assert!(super::successor_compaction_cannot_advance(
+            &[10, 100, 100],
+            &[(31, true), (32, false), (33, true)],
+            203,
+        ));
+        assert!(!super::successor_compaction_cannot_advance(
+            &[10, 100, 100],
+            &[(31, true), (32, false), (33, true)],
+            204,
+        ));
     }
 
     #[test]
