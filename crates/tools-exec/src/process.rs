@@ -5786,7 +5786,7 @@ mod tests {
     fn linux_target_launch_budget_includes_the_path_resolved_executable_pathname() {
         let arguments = ExecArguments {
             program: String::from("p"),
-            arguments: vec!["a".repeat(MIN_LINUX_ARG_MAX_BYTES - 256)],
+            arguments: vec!["a".repeat(MIN_LINUX_ARG_MAX_BYTES - 512)],
             working_directory: String::from("."),
             timeout_seconds: 30,
         };
