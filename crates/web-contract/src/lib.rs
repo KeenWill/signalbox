@@ -182,6 +182,7 @@ pub struct WebAttentionGoalBlock {
     pub generation: String,
     pub reason: WebAttentionBlockedReason,
     /// At most 128 Unicode scalar values; exact text is in session detail.
+    #[schemars(length(max = 128))]
     pub need_summary: String,
 }
 
@@ -217,7 +218,7 @@ pub struct WebAttentionSummary {
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionSnapshot {
     pub cursor: String,
-    #[schemars(length(max = 64))]
+    #[schemars(length(max = 32))]
     pub summaries: Vec<WebAttentionSummary>,
     pub continuation_after_session_id: Option<String>,
 }
@@ -230,7 +231,7 @@ pub enum WebAttentionStreamEvent {
     },
     Update {
         cursor: String,
-        #[schemars(length(max = 64))]
+        #[schemars(length(max = 32))]
         summaries: Vec<WebAttentionSummary>,
     },
     ResyncRequired {
@@ -847,6 +848,15 @@ function assertSchema(root, schema, value, path) {{
     }}
     if (schema.maximum !== undefined && value > schema.maximum) {{
       fail(path, `at most ${{schema.maximum}}`);
+    }}
+    return;
+  }}
+  if (schema.type === "string") {{
+    if (typeof value !== "string") {{
+      fail(path, "string");
+    }}
+    if (schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) {{
+      fail(path, `at most ${{schema.maxLength}} Unicode scalar values`);
     }}
     return;
   }}

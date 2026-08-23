@@ -113,6 +113,7 @@ const schemas = {
           },
           "need_summary": {
             "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
             "type": "string"
           },
           "reason": {
@@ -231,7 +232,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebAttentionSummary"
         },
-        "maxItems": 64,
+        "maxItems": 32,
         "type": "array"
       }
     },
@@ -296,6 +297,7 @@ const schemas = {
           },
           "need_summary": {
             "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
             "type": "string"
           },
           "reason": {
@@ -349,7 +351,7 @@ const schemas = {
             "items": {
               "$ref": "#/$defs/WebAttentionSummary"
             },
-            "maxItems": 64,
+            "maxItems": 32,
             "type": "array"
           }
         },
@@ -457,7 +459,7 @@ const schemas = {
             "items": {
               "$ref": "#/$defs/WebAttentionSummary"
             },
-            "maxItems": 64,
+            "maxItems": 32,
             "type": "array"
           }
         },
@@ -1241,6 +1243,7 @@ const schemas = {
           },
           "need_summary": {
             "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
             "type": "string"
           },
           "reason": {
@@ -2150,6 +2153,15 @@ function assertSchema(root, schema, value, path) {
     }
     if (schema.maximum !== undefined && value > schema.maximum) {
       fail(path, `at most ${schema.maximum}`);
+    }
+    return;
+  }
+  if (schema.type === "string") {
+    if (typeof value !== "string") {
+      fail(path, "string");
+    }
+    if (schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) {
+      fail(path, `at most ${schema.maxLength} Unicode scalar values`);
     }
     return;
   }

@@ -6,7 +6,7 @@ use signalbox_application::{
 };
 use signalbox_persistence::attention::AttentionRepository;
 
-const FLEET_SIZE: u128 = 514;
+const FLEET_SIZE: u128 = 258;
 const FLEET_SEED: u128 = 0xa770_0000;
 
 async fn create_mixed_scale_fleet(pool: &PgPool) -> Result<(), Box<dyn Error>> {

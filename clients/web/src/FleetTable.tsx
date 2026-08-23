@@ -1,28 +1,32 @@
-import { createColumnHelper, tableFeatures, useTable } from '@tanstack/react-table'
+import { type ColumnDef, flexRender, tableFeatures, useTable } from '@tanstack/react-table'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import type { FleetRow } from './platform'
 import { actions, useAppDispatch } from './state'
 
 // Tunable effective ceiling: a small overscan keeps table DOM work near the viewport.
 const TABLE_OVERSCAN_ROWS = 8
-
-const fleetFeatures = tableFeatures({})
-const fleetColumn = createColumnHelper<typeof fleetFeatures, FleetRow>()
-const fleetColumns = fleetColumn.columns([
-  fleetColumn.accessor('repository', { header: 'Repository / worktree' }),
-  fleetColumn.accessor('state', {
-    header: 'State',
-    cell: ({ getValue }) => <span className={`status status-${getValue()}`}>{getValue()}</span>,
-  }),
-  fleetColumn.accessor('purpose', { header: 'Current purpose' }),
-  fleetColumn.accessor('age', { header: 'Age' }),
-])
+const FLEET_TABLE_FEATURES = tableFeatures({})
 
 export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount: number }) {
   'use no memo'
   const dispatch = useAppDispatch()
-  const table = useTable({ data: rows, columns: fleetColumns, features: fleetFeatures })
+  const columns = useMemo<ColumnDef<typeof FLEET_TABLE_FEATURES, FleetRow>[]>(
+    () => [
+      { accessorKey: 'repository', header: 'Repository / worktree' },
+      {
+        accessorKey: 'state',
+        header: 'State',
+        cell: ({ getValue }) => (
+          <span className={`status status-${String(getValue())}`}>{String(getValue())}</span>
+        ),
+      },
+      { accessorKey: 'purpose', header: 'Current purpose' },
+      { accessorKey: 'age', header: 'Age' },
+    ],
+    [],
+  )
+  const table = useTable({ data: rows, columns, features: FLEET_TABLE_FEATURES })
   const tableRows = table.getRowModel().rows
   const parentRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
@@ -63,7 +67,7 @@ export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount:
           {table.getHeaderGroups()[0]?.headers.map((header) => (
             // biome-ignore lint/a11y: Virtualized ARIA column headers do not receive independent focus.
             <div role="columnheader" key={header.id}>
-              <table.FlexRender header={header} />
+              {flexRender(header.column.columnDef.header, header.getContext())}
             </div>
           ))}
         </div>
@@ -99,7 +103,7 @@ export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount:
                   {row.getAllCells().map((cell) => (
                     // biome-ignore lint/a11y/useSemanticElements: Virtualized ARIA cells cannot be native table cells here.
                     <div role="cell" key={cell.id}>
-                      <table.FlexRender cell={cell} />
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </div>
                   ))}
                 </div>
