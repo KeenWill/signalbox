@@ -69,6 +69,7 @@ export function SearchSurface({
   const [draftQuery, setDraftQuery] = useState(state.q ?? '')
   const [draftSession, setDraftSession] = useState(state.session ?? '')
   const resultsHeadingRef = useRef<HTMLHeadingElement>(null)
+  const errorHeadingRef = useRef<HTMLHeadingElement>(null)
   const restoreResultsFocusRef = useRef(false)
   const [activeAfter, setActiveAfter] = useState(() =>
     state.afterAddress && state.afterProjection
@@ -133,11 +134,15 @@ export function SearchSurface({
   })
   const searchData = requestIsValid ? results.data : undefined
   useEffect(() => {
-    if (restoreResultsFocusRef.current && searchData !== undefined) {
+    if (!restoreResultsFocusRef.current) return
+    if (searchData !== undefined) {
       restoreResultsFocusRef.current = false
       resultsHeadingRef.current?.focus()
+    } else if (requestIsValid && results.isError) {
+      restoreResultsFocusRef.current = false
+      errorHeadingRef.current?.focus()
     }
-  }, [searchData])
+  }, [requestIsValid, results.isError, searchData])
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -218,7 +223,9 @@ export function SearchSurface({
         <section className="surface-empty" role="alert">
           <AlertTriangle aria-hidden="true" />
           <div>
-            <h2>Search could not be read</h2>
+            <h2 ref={errorHeadingRef} tabIndex={-1}>
+              Search could not be read
+            </h2>
             <p>
               {results.error instanceof ProductRequestError
                 ? `${results.error.code}: ${results.error.message}`

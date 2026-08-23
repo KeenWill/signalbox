@@ -99,6 +99,21 @@ const useRecoveringSearchFixture = async (page: Page) => {
   })
 }
 
+const useFailingPaginationFixture = async (page: Page) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/search?**', (route) => {
+    const request = new URL(route.request().url())
+    return request.searchParams.has('after_address')
+      ? route.fulfill({
+          status: 503,
+          json: {
+            error: { code: 'temporary', kind: 'transport', message: 'temporary failure' },
+          },
+        })
+      : route.fulfill({ json: firstPage })
+  })
+}
+
 const useRefreshingSearchFixture = async (page: Page) => {
   let attempts = 0
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
@@ -169,6 +184,16 @@ test('replaces the bounded result page through its typed cursor', async ({ page 
   await expect(page.getByRole('heading', { name: '1 results on this page' })).toBeFocused()
   await expect(page.getByText('release planning')).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('restores focus when pagination fails', async ({ page }) => {
+  await useFailingPaginationFixture(page)
+  await page.goto('/search?q=release')
+  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+
+  await page.getByRole('button', { name: 'Next page' }).click()
+
+  await expect(page.getByRole('heading', { name: 'Search could not be read' })).toBeFocused()
 })
 
 test('resets pagination when submitting a different search scope', async ({ page }) => {
