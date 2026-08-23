@@ -544,6 +544,47 @@ async fn a_new_target_censuses_an_existing_commissioned_dispatch() -> Result<(),
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn first_census_observation_becomes_the_external_dispatch_baseline()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
+    let sweep = PostgresConvergenceSweepStore::new(pool);
+    let repository = repository()?;
+    let observation = observation()?;
+    let (dispatch, session) = dispatched(
+        commissioned
+            .commission(prepared_commission(0x89_220)?, |_| None)
+            .await?,
+    );
+
+    sweep
+        .record_dispatch_decision(
+            Uuid::from_u128(0x89_221),
+            &repository,
+            pull_request(),
+            &observation,
+            (dispatch, session),
+            ConvergenceSweepDecision::LiveSession,
+        )
+        .await?;
+    let state = sweep
+        .load_target(&repository, pull_request())
+        .await?
+        .expect("the target remains enrolled");
+
+    assert_eq!(state.latest_dispatch_observation(), Some(&observation));
+    assert_eq!(
+        state
+            .latest_dispatch()
+            .expect("the external dispatch remains selected")
+            .session_id(),
+        session
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_committed_pending_dispatch_is_available_for_projection_repair()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;

@@ -441,12 +441,18 @@ impl PostgresConvergenceSweepStore {
                         THEN target.last_dispatch_head_sha
                       WHEN latest.dispatch_id = pending.dispatch_id
                         THEN target.pending_head_sha
+                      WHEN latest.dispatch_id = target.census_dispatch_id
+                       AND latest.session_id = target.census_session_id
+                        THEN target.census_dispatch_head_sha
                     END AS latest_dispatch_head_sha,
                     CASE
                       WHEN latest.dispatch_id = target.last_dispatch_id
                         THEN target.last_dispatch_unresolved_threads
                       WHEN latest.dispatch_id = pending.dispatch_id
                         THEN target.pending_unresolved_threads
+                      WHEN latest.dispatch_id = target.census_dispatch_id
+                       AND latest.session_id = target.census_session_id
+                        THEN target.census_dispatch_unresolved_threads
                     END AS latest_dispatch_unresolved_threads,
                     pending.dispatch_id AS pending_dispatch_id,
                     pending.session_id AS pending_session_id,
@@ -510,8 +516,8 @@ impl PostgresConvergenceSweepStore {
                               AND event.repository = target.repository
                               AND event.pull_request_number = target.pull_request_number
                       ) AS source
-                     ORDER BY live DESC, has_model_activity DESC,
-                              source.recorded_at DESC, source.dispatch_id DESC
+                     ORDER BY source.recorded_at DESC, source.dispatch_id DESC,
+                              live DESC, has_model_activity DESC, source.session_id DESC
                      LIMIT 1
                ) AS latest ON true
               WHERE target.repository = $1
@@ -713,6 +719,98 @@ impl PostgresConvergenceSweepStore {
         }
     }
 
+    /// Records a decision while associating its observation with one selected dispatch.
+    pub async fn record_dispatch_decision(
+        &self,
+        event_id: Uuid,
+        repository: &RepositorySlug,
+        pull_request: PullRequestNumber,
+        observation: &ConvergenceSweepObservation,
+        dispatch: (Uuid, SessionId),
+        decision: ConvergenceSweepDecision,
+    ) -> Result<(), ConvergenceSweepStoreError> {
+        let (dispatch_id, session_id) = dispatch;
+        let mut transaction = self.pool.begin().await?;
+        ensure_target(&mut transaction, repository, pull_request).await?;
+        let updated = sqlx::query(
+            "UPDATE convergence_sweep_target
+                SET state_kind = $7, failure_kind = NULL,
+                    consecutive_failures = 0, retry_not_before = NULL,
+                    parked_at = NULL, operator_need = NULL,
+                    last_head_sha = $3, last_unresolved_threads = $4,
+                    last_observed_at = clock_timestamp(),
+                    census_dispatch_id = $5, census_session_id = $6,
+                    census_dispatch_head_sha = $3,
+                    census_dispatch_unresolved_threads = $4
+              WHERE repository = $1 AND pull_request_number = $2
+                AND (
+                    EXISTS (
+                        SELECT 1 FROM commissioned_dispatch AS dispatch
+                         WHERE dispatch.dispatch_id = $5
+                           AND dispatch.session_id = $6
+                           AND dispatch.target_kind = 'pull_request'
+                           AND dispatch.repository = $1
+                           AND dispatch.pull_request_number = $2
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                          FROM repo_watch_dispatch_action AS action
+                          JOIN repo_watch_event AS event ON event.event_id = action.event_id
+                         WHERE action.dispatch_id = $5
+                           AND action.session_id = $6
+                           AND event.target_kind = 'pull_request'
+                           AND event.repository = $1
+                           AND event.pull_request_number = $2
+                    )
+                )",
+        )
+        .bind(repository.as_str())
+        .bind(Decimal::from(pull_request.get()))
+        .bind(observation.head_sha().as_str())
+        .bind(Decimal::from(observation.unresolved_threads()))
+        .bind(dispatch_id)
+        .bind(session_id.into_uuid())
+        .bind(convergence_sweep_state_to_str(
+            ConvergenceSweepStateStorageKind::Observed,
+        ))
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Err(ConvergenceSweepStoreError::Corruption(
+                "dispatch baseline does not belong to the convergence target",
+            ));
+        }
+        insert_event(
+            &mut transaction,
+            event_id,
+            repository,
+            pull_request,
+            convergence_sweep_outcome_to_str(convergence_sweep_decision_outcome(decision)),
+            None,
+            Some(observation),
+            None,
+            0,
+            None,
+        )
+        .await?;
+        match transaction.commit().await {
+            Ok(()) => Ok(()),
+            Err(error) if crate::commit_failure_is_ambiguous(&error) => {
+                let event_exists = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM convergence_sweep_event WHERE event_id = $1
+                    )",
+                )
+                .bind(event_id)
+                .fetch_one(&self.pool)
+                .await;
+                resolve_ambiguous_event_commit(error, event_exists)
+            }
+            Err(error) => Err(ConvergenceSweepStoreError::Database(error)),
+        }
+    }
+
     /// Advances one typed failure lineage, scheduling retry or parking atomically.
     pub async fn record_failure(
         &self,
@@ -830,8 +928,8 @@ impl PostgresConvergenceSweepStore {
                           AND event.repository = $1
                           AND event.pull_request_number = $2
                   ) AS target
-                 ORDER BY live DESC, has_model_activity DESC,
-                          target.recorded_at DESC, target.dispatch_id DESC
+                 ORDER BY target.recorded_at DESC, target.dispatch_id DESC,
+                          live DESC, has_model_activity DESC, target.session_id DESC
                  LIMIT 1
              )
              UPDATE convergence_sweep_target
@@ -933,12 +1031,26 @@ impl PostgresConvergenceSweepStore {
                 .then_some(convergence_sweep_operator_need_to_str(failure)),
         )
         .await?;
-        transaction.commit().await?;
-        Ok(if parking == FailureParking::Parked {
+        let disposition = if parking == FailureParking::Parked {
             ConvergenceSweepFailureDisposition::Parked
         } else {
             ConvergenceSweepFailureDisposition::RetryScheduled
-        })
+        };
+        match transaction.commit().await {
+            Ok(()) => Ok(disposition),
+            Err(error) if crate::commit_failure_is_ambiguous(&error) => {
+                let event_exists = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM convergence_sweep_event WHERE event_id = $1
+                    )",
+                )
+                .bind(event_id)
+                .fetch_one(&self.pool)
+                .await;
+                resolve_ambiguous_event_commit(error, event_exists).map(|()| disposition)
+            }
+            Err(error) => Err(ConvergenceSweepStoreError::Database(error)),
+        }
     }
 }
 

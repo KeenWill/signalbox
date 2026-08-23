@@ -395,6 +395,21 @@ impl ConvergenceSweepRuntime {
             let dispatch_observation = loaded
                 .as_ref()
                 .and_then(|state| state.latest_dispatch_observation());
+            if dispatch_observation.is_none() {
+                self.record_dispatch_decision(
+                    target,
+                    &observation,
+                    dispatch.dispatch_id(),
+                    dispatch.session_id(),
+                    if dispatch.is_live() {
+                        ConvergenceSweepDecision::LiveSession
+                    } else {
+                        ConvergenceSweepDecision::CoolingOff
+                    },
+                )
+                .await;
+                return;
+            }
             let unchanged = dispatch_observation == Some(&observation);
             let cool_off_elapsed = loaded
                 .as_ref()
@@ -436,13 +451,25 @@ impl ConvergenceSweepRuntime {
                 return;
             }
             if dispatch.is_live() {
-                self.record_decision(target, &observation, ConvergenceSweepDecision::LiveSession)
-                    .await;
+                self.record_dispatch_decision(
+                    target,
+                    &observation,
+                    dispatch.dispatch_id(),
+                    dispatch.session_id(),
+                    ConvergenceSweepDecision::LiveSession,
+                )
+                .await;
                 return;
             }
             if !cool_off_elapsed {
-                self.record_decision(target, &observation, ConvergenceSweepDecision::CoolingOff)
-                    .await;
+                self.record_dispatch_decision(
+                    target,
+                    &observation,
+                    dispatch.dispatch_id(),
+                    dispatch.session_id(),
+                    ConvergenceSweepDecision::CoolingOff,
+                )
+                .await;
                 return;
             }
         }
@@ -617,6 +644,45 @@ impl ConvergenceSweepRuntime {
         }
     }
 
+    async fn record_dispatch_decision(
+        &self,
+        target: &SweepTarget,
+        observation: &ConvergenceSweepObservation,
+        dispatch_id: uuid::Uuid,
+        session_id: signalbox_domain::SessionId,
+        decision: ConvergenceSweepDecision,
+    ) {
+        if let Err(error) = self
+            .state
+            .record_dispatch_decision(
+                uuid::Uuid::now_v7(),
+                &target.repository,
+                target.pull_request,
+                observation,
+                (dispatch_id, session_id),
+                decision,
+            )
+            .await
+        {
+            tracing::error!(
+                repository = %target.repository.as_str(),
+                pull_request = target.pull_request.get(),
+                cause = %error,
+                "convergence sweep dispatch decision could not be recorded"
+            );
+            if error.commit_ambiguous() {
+                return;
+            }
+            self.record_failure(
+                target,
+                Some(observation),
+                ConvergenceSweepFailureKind::StateAccess,
+                CensusError::State,
+            )
+            .await;
+        }
+    }
+
     async fn record_failure(
         &self,
         target: &SweepTarget,
@@ -686,6 +752,7 @@ impl ConvergenceSweepRuntime {
         let base_branch = branch_at(pull, "baseRefName")?;
         let base_sha = commit_at(pull, "baseRefOid")?;
         let checked_head_sha = checked_head_at(pull)?;
+        let mergeable_state = mergeable_state_at(pull)?;
         let mut thread_states = review_thread_states(
             pull.pointer("/reviewThreads/nodes")
                 .and_then(Value::as_array)
@@ -767,14 +834,8 @@ impl ConvergenceSweepRuntime {
             let mut next = variables.clone();
             next["after"] = Value::Null;
             let page = self.graphql(CHECKS_QUERY, next, &authorization).await?;
-            let connection = checks_page(&page, &head_sha, &head_branch, &base_branch, &base_sha)?;
-            let mut revalidated = decode_checks(
-                connection
-                    .get("nodes")
-                    .and_then(Value::as_array)
-                    .ok_or(CensusError::Shape)?,
-            )?;
-            let mut revalidation_page = page_info(connection.get("pageInfo"))?;
+            let (mut revalidated, mut revalidation_page) =
+                initial_checks_page(&page, &head_sha, &head_branch, &base_branch, &base_sha)?;
             let mut revalidation_pages = 1usize;
             while revalidation_page.has_next {
                 revalidation_pages += 1;
@@ -796,12 +857,24 @@ impl ConvergenceSweepRuntime {
             }
             ensure_checks_stable(&checks, &revalidated)?;
         }
-        let mergeable_state = match pull.get("mergeable").and_then(Value::as_str) {
-            Some("MERGEABLE") => MergeableState::Mergeable,
-            Some("CONFLICTING") => MergeableState::Conflicting,
-            Some("UNKNOWN") => MergeableState::Unknown,
-            _ => return Err(CensusError::Shape),
-        };
+        if thread_pages > 1 || check_pages > 1 {
+            let revalidated = self
+                .graphql(DETAILS_QUERY, variables.clone(), &authorization)
+                .await?;
+            let revalidated_pull = revalidated
+                .pointer("/data/repository/pullRequest")
+                .ok_or(CensusError::Shape)?;
+            validate_paginated_pull(
+                revalidated_pull,
+                &head_sha,
+                &head_branch,
+                &base_branch,
+                &base_sha,
+            )?;
+            if mergeable_state_at(revalidated_pull)? != mergeable_state {
+                return Err(CensusError::State);
+            }
+        }
         Ok(FetchedPullRequest {
             base_branch,
             head_branch,
@@ -989,6 +1062,32 @@ fn checks_page<'a>(
         .ok_or(CensusError::Shape)
 }
 
+fn initial_checks_page(
+    page: &Value,
+    expected_head: &CommitSha,
+    expected_head_branch: &BranchName,
+    expected_base: &BranchName,
+    expected_base_sha: &CommitSha,
+) -> Result<(Vec<PullRequestCheck>, PageInfo), CensusError> {
+    let pull = page
+        .pointer("/data/repository/pullRequest")
+        .ok_or(CensusError::Shape)?;
+    validate_paginated_pull(
+        pull,
+        expected_head,
+        expected_head_branch,
+        expected_base,
+        expected_base_sha,
+    )?;
+    let commit = pull
+        .pointer("/commits/nodes/0/commit")
+        .ok_or(CensusError::Shape)?;
+    if commit_at(commit, "oid")? != *expected_head {
+        return Err(CensusError::Shape);
+    }
+    initial_checks(pull)
+}
+
 fn threads_page<'a>(
     page: &'a Value,
     expected_head: &CommitSha,
@@ -1025,6 +1124,15 @@ fn validate_paginated_pull(
         return Err(CensusError::Shape);
     }
     Ok(())
+}
+
+fn mergeable_state_at(pull: &Value) -> Result<MergeableState, CensusError> {
+    match pull.get("mergeable").and_then(Value::as_str) {
+        Some("MERGEABLE") => Ok(MergeableState::Mergeable),
+        Some("CONFLICTING") => Ok(MergeableState::Conflicting),
+        Some("UNKNOWN") => Ok(MergeableState::Unknown),
+        _ => Err(CensusError::Shape),
+    }
 }
 
 fn decode_checks(values: &[Value]) -> Result<Vec<PullRequestCheck>, CensusError> {
@@ -1281,6 +1389,57 @@ mod tests {
         let (checks, page) = initial_checks(&pull).expect("a null rollup is a complete absence");
         assert!(checks.is_empty());
         assert!(!page.has_next);
+    }
+
+    #[test]
+    fn absent_status_rollup_remains_absent_during_revalidation() {
+        let expected_head = sha('a');
+        let expected_base_sha = sha('c');
+        let expected_head_branch = BranchName::try_new(String::from("agent/convergence"))
+            .expect("fixture head branch is valid");
+        let expected_base =
+            BranchName::try_new(String::from("main")).expect("fixture base branch is valid");
+        let page = json!({
+            "data": {"repository": {"pullRequest": {
+                "state": "OPEN",
+                "baseRefName": expected_base.as_str(),
+                "baseRefOid": expected_base_sha.as_str(),
+                "headRefName": expected_head_branch.as_str(),
+                "headRefOid": expected_head.as_str(),
+                "commits": {"nodes": [{"commit": {
+                    "oid": expected_head.as_str(),
+                    "statusCheckRollup": null
+                }}]}
+            }}}
+        });
+
+        let (checks, page_info) = initial_checks_page(
+            &page,
+            &expected_head,
+            &expected_head_branch,
+            &expected_base,
+            &expected_base_sha,
+        )
+        .expect("stable rollup absence revalidates");
+
+        assert!(checks.is_empty());
+        assert!(!page_info.has_next);
+    }
+
+    #[test]
+    fn mergeability_decoder_preserves_the_closed_provider_states() {
+        assert_eq!(
+            mergeable_state_at(&json!({"mergeable": "MERGEABLE"})),
+            Ok(MergeableState::Mergeable)
+        );
+        assert_eq!(
+            mergeable_state_at(&json!({"mergeable": "CONFLICTING"})),
+            Ok(MergeableState::Conflicting)
+        );
+        assert_eq!(
+            mergeable_state_at(&json!({"mergeable": "UNKNOWN"})),
+            Ok(MergeableState::Unknown)
+        );
     }
 
     #[test]

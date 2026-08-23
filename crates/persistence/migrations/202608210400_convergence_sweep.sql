@@ -47,6 +47,10 @@ CREATE TABLE convergence_sweep_target (
     last_dispatched_at timestamptz,
     last_dispatch_head_sha text,
     last_dispatch_unresolved_threads numeric(20, 0),
+    census_dispatch_id uuid,
+    census_session_id uuid,
+    census_dispatch_head_sha text,
+    census_dispatch_unresolved_threads numeric(20, 0),
 
     PRIMARY KEY (repository, pull_request_number),
     CHECK (repo_watch_repository_is_valid(repository)),
@@ -84,6 +88,14 @@ CREATE TABLE convergence_sweep_target (
     CHECK (
         last_dispatch_unresolved_threads IS NULL
         OR last_dispatch_unresolved_threads >= 0
+    ),
+    CHECK (
+        census_dispatch_head_sha IS NULL
+        OR census_dispatch_head_sha COLLATE "C" ~ '^[0-9a-f]{40}$'
+    ),
+    CHECK (
+        census_dispatch_unresolved_threads IS NULL
+        OR census_dispatch_unresolved_threads >= 0
     ),
     CHECK (
         (state_kind = 'observed'
@@ -135,6 +147,17 @@ CREATE TABLE convergence_sweep_target (
             AND last_dispatched_at IS NOT NULL
             AND last_dispatch_head_sha IS NOT NULL
             AND last_dispatch_unresolved_threads IS NOT NULL)
+    ),
+    CHECK (
+        (census_dispatch_id IS NULL
+            AND census_session_id IS NULL
+            AND census_dispatch_head_sha IS NULL
+            AND census_dispatch_unresolved_threads IS NULL)
+        OR
+        (census_dispatch_id IS NOT NULL
+            AND census_session_id IS NOT NULL
+            AND census_dispatch_head_sha IS NOT NULL
+            AND census_dispatch_unresolved_threads IS NOT NULL)
     ),
     FOREIGN KEY (last_dispatch_id, last_session_id)
         REFERENCES commissioned_dispatch (dispatch_id, session_id)

@@ -516,20 +516,23 @@ impl PostgresGoalPassDisposition {
     async fn resume_after_execution_failure(&self, session: SessionId, blocked: GoalEventOrdinal) {
         let mut remaining = AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES;
         loop {
-            if self.attempt_automatic_resume(session, blocked).await == ResumeAttempt::Settled {
-                return;
+            match self.attempt_automatic_resume(session, blocked).await {
+                ResumeAttempt::Settled => return,
+                ResumeAttempt::OwnershipDeferred => {}
+                ResumeAttempt::InfrastructureUnsettled => {
+                    if remaining == 0 {
+                        tracing::error!(
+                            session = %session.into_uuid(),
+                            event_ordinal = blocked.get(),
+                            retries = AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES,
+                            cause_code = "goal_automatic_resume_abandoned",
+                            "automatic goal resumption abandoned a blocked goal to the operator"
+                        );
+                        return;
+                    }
+                    remaining = remaining.saturating_sub(1);
+                }
             }
-            if remaining == 0 {
-                tracing::error!(
-                    session = %session.into_uuid(),
-                    event_ordinal = blocked.get(),
-                    retries = AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES,
-                    cause_code = "goal_automatic_resume_abandoned",
-                    "automatic goal resumption abandoned a blocked goal to the operator"
-                );
-                return;
-            }
-            remaining = remaining.saturating_sub(1);
             tokio::time::sleep(AUTOMATIC_RESUME_BASE_BACKOFF).await;
         }
     }
@@ -550,7 +553,7 @@ impl PostgresGoalPassDisposition {
                     cause = %error,
                     "automatic goal resumption cannot confirm the goal is still blocked"
                 );
-                return ResumeAttempt::Unsettled;
+                return ResumeAttempt::InfrastructureUnsettled;
             }
         };
         if !reread.is_some_and(|goal| awaits_automatic_resumption(&goal, blocked)) {
@@ -617,7 +620,7 @@ impl PostgresGoalPassDisposition {
                     event_ordinal = blocked.get(),
                     "automatic goal resumption deferred behind another commissioned session"
                 );
-                ResumeAttempt::Unsettled
+                ResumeAttempt::OwnershipDeferred
             }
             Ok(GoalCommandHandlingOutcome::ConflictingReuse { .. }) => {
                 tracing::error!(
@@ -636,7 +639,7 @@ impl PostgresGoalPassDisposition {
                     cause = %error,
                     "automatic goal resumption could not be recorded"
                 );
-                ResumeAttempt::Unsettled
+                ResumeAttempt::InfrastructureUnsettled
             }
         }
     }
@@ -732,8 +735,10 @@ fn commit_is_ambiguous(error: &PostgresGoalPassDispositionError) -> bool {
 enum ResumeAttempt {
     /// The attempt resumed, was refused, or found nothing left to answer.
     Settled,
-    /// The database prevented any answer, so the attempt is still owed.
-    Unsettled,
+    /// Another live target owner deferred the attempt without spending a retry.
+    OwnershipDeferred,
+    /// Infrastructure prevented any answer, so the bounded retry is still owed.
+    InfrastructureUnsettled,
 }
 
 impl GoalPassDisposition for PostgresGoalPassDisposition {
