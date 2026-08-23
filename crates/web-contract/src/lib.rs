@@ -457,6 +457,10 @@ pub enum WebTimelineToolFailureCause {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+// Keep the tagged wire representation direct: boxing a variant field would
+// alter the generated schema and TypeScript contract solely to optimize the
+// in-memory size of this boundary DTO.
+#[allow(clippy::large_enum_variant)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 pub enum WebTimelineToolAttemptEvidence {
     RequestOnly {},
