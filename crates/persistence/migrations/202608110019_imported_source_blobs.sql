@@ -304,6 +304,16 @@ BEGIN
            )
     ON CONFLICT DO NOTHING;
 
+    -- Pending orchestration commands have an intent but no replacement
+    -- receipt yet. Retire those durable claims with the affected attempt too.
+    INSERT INTO imported_reset_command (command_id)
+    SELECT command_id
+      FROM review_orchestration_command_intent
+     WHERE attempt_id IN (
+               SELECT attempt_id FROM imported_reset_review_attempt
+           )
+    ON CONFLICT DO NOTHING;
+
     DELETE FROM review_orchestration_attempt
      WHERE attempt_id IN (
                SELECT attempt_id FROM imported_reset_review_attempt
