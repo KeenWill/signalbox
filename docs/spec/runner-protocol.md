@@ -134,11 +134,12 @@ debug-redacted environment channel is verified against this PR
 (`agent/runner-restricted-command-environment`). Dispatch-scoped resolution of
 one exact configured runner credential into that restricted environment channel,
 together with raw and JSON-escaped text scrubbing, is verified against this PR
-(`agent/runner-credential-resolution`). Live claim and dispatch consumption of
-that exact granted authorization, including pre-claim availability refusal and
-captured-result scrubbing, is verified against this PR
-(`agent/runner-credential-dispatch-composition`). Runner consumption of the
-exact lease-only resume directive is re-verified through this PR
+(`agent/runner-credential-resolution`). Fail-closed live handling of
+credential-bearing authorization, including pre-claim refusal and an independent
+physical-dispatch rejection, is verified against this PR
+(`agent/runner-credential-dispatch-composition`). Safe scoped credential dispatch
+remains committed unimplemented functionality. Runner consumption of the exact
+lease-only resume directive is re-verified through this PR
 (`agent/runner-claimed-resume-client`). Runner ingestion of the daemon's
 canonical claim and dispatch replay is re-verified through this PR
 (`agent/runner-claimed-dispatch-replay`). Runner execution-phase journaling,
@@ -1916,22 +1917,14 @@ pair, stale grant, or posture whose decision provenance does not match fails
 closed. Profile policy cannot make an undeclared tool available and cannot alter
 its effect class or admissible loci.
 
-The runner provides a dispatch-scoped preparer that resolves one exact profile
-against checked configuration. It opens the configured credential path without
-following symlinks, validates and reads the bounded value, projects it only into
-the restricted execution environment, and scrubs the exact and
-JSON-string-escaped forms from complete captured text. It neither selects a
-profile nor retains a value between calls. Live lease admission invokes the
-preparer before claim and reports `credential_unavailable` without a claim when
-the advertised exact profile cannot be resolved. After the durable claim
-acknowledgement, execution resolves that same retained profile again immediately
-before the physical dispatch, injects it only through the cleared restricted
-environment, and scrubs complete captured result text before the bounded result
-frame is formed. A rotation or loss between admission and dispatch is therefore
-observed rather than replaced with another profile. The value stays absent from
-argv, wire state, manifests, and logs. Redaction limits accidental echo but is
-not a claim that arbitrary model-controlled execution cannot misuse a credential
-within its scope.
+Credential-bearing runner dispatch is committed unimplemented functionality.
+No present execution surface provides it: live lease admission reports
+`credential_unavailable` without a claim for every credential-bearing offer,
+and physical dispatch independently rejects every non-profileless authorization.
+A future implementation must provide a scoped execution surface that keeps the
+credential absent from generic model-controlled execution, argv, wire state,
+manifests, and logs; exact-token output redaction alone does not satisfy that
+constraint.
 
 Session creation records the requested profile as a placement axis, and that
 choice is always explicit and never inferred. A session may be created with no
