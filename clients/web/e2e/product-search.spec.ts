@@ -305,13 +305,11 @@ test('bounds search drafts while they are being edited', async ({ page }) => {
 
 test('restores focus to validation after malformed browser history', async ({ page }) => {
   await useSearchFixture(page)
-  await page.goto('/search?q=release')
+  await page.goto('/search?q=release&afterAddress=750')
+  await expect(page.getByRole('alert')).toBeVisible()
+  await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
   await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
-
-  await page.evaluate(() => {
-    history.pushState({}, '', '/search?q=release&afterAddress=750')
-    dispatchEvent(new PopStateEvent('popstate'))
-  })
+  await page.goBack()
 
   await expect(page.getByRole('alert')).toBeFocused()
 })
