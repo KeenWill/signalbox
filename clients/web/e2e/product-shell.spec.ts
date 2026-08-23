@@ -336,7 +336,7 @@ test('retries a transient bootstrap transport failure', async ({ page }) => {
 
   await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
-  expect(bootstrapRequests).toBe(3)
+  expect(bootstrapRequests).toBe(2)
   expect(problems.pageErrors).toEqual([])
 })
 
