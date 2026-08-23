@@ -22,7 +22,7 @@ CREATE TABLE imported_conversation_size_totals (
             AND normalized_source_record_bytes BETWEEN 0 AND 18446744073709551615
             AND normalized_entry_bytes BETWEEN 0 AND 18446744073709551615
         ),
-    CONSTRAINT imported_conversation_size_totals_owner_fk
+    CONSTRAINT imported_conversation_size_totals_import_fk
         FOREIGN KEY (imported_conversation_id)
         REFERENCES imported_conversation (imported_conversation_id)
         ON UPDATE RESTRICT
