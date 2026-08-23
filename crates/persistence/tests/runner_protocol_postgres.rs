@@ -9185,7 +9185,10 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_created_placement()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = unmigrated_postgres().await?;
     MIGRATOR.run_to(PRE_PLACEMENT_LOSS_MIGRATION, &pool).await?;
-    insert_legacy_session(&pool).await?;
+    MIGRATOR
+        .run_to(PRE_RUNNER_LOSS_CURSOR_MIGRATION, &pool)
+        .await?;
+    insert_session(&pool).await?;
     let runner = RunnerId::from_uuid(uuid(RUNNER));
     let expected = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -9220,9 +9223,7 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_created_placement()
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
-    MIGRATOR
-        .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
-        .await?;
+    migrate(&pool).await?;
     let loaded = RunnerProtocolStore::new(pool.clone(), catalog())
         .load_placement(expected.session())
         .await?
@@ -9241,13 +9242,19 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_pinned_placement()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = unmigrated_postgres().await?;
     MIGRATOR.run_to(PRE_PLACEMENT_LOSS_MIGRATION, &pool).await?;
-    insert_legacy_session(&pool).await?;
+    MIGRATOR
+        .run_to(PRE_RUNNER_LOSS_CURSOR_MIGRATION, &pool)
+        .await?;
+    insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
     store.insert_enrollment(&expected_enrollment).await?;
     let registration = store
         .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
         .await?;
     let placement = SessionRunnerPlacement::new(
         SessionId::from_uuid(uuid(SESSION)),
@@ -9338,6 +9345,11 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_pinned_placement()
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation\n         ADD COLUMN offer_registration_revision numeric(20, 0)",
+    )
+    .execute(&pool)
+    .await?;
     store.store_lease(&pin.lease).await?;
     let mut lease_completion = pool.begin().await?;
     sqlx::query(
@@ -9379,9 +9391,12 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_pinned_placement()
     )
     .execute(&pool)
     .await?;
-    MIGRATOR
-        .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
-        .await?;
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation\n         DROP COLUMN offer_registration_revision",
+    )
+    .execute(&pool)
+    .await?;
+    migrate(&pool).await?;
     let loaded = RunnerProtocolStore::new(pool.clone(), catalog())
         .load_placement(pin.placement.session())
         .await?
@@ -12343,12 +12358,15 @@ async fn s32_inv044_inv045_pinned_affinity_and_grant_round_trip() -> Result<(), 
             },
         )
         .expect("the separate profileless aggregate can construct its own lease");
-    let missing_current_grant = store
+    let cross_wired_placement = store
         .store_lease(&profileless_pin.lease)
         .await
-        .expect_err("canonical profile selection requires its exact grant on every lease");
+        .expect_err("a lease from a separate placement aggregate is cross-wired");
 
-    assert_store_check_violation(missing_current_grant);
+    assert_store_corruption(
+        cross_wired_placement,
+        RunnerProtocolCorruption::CrossWiredReference,
+    );
     let profile_replacement =
         duplicate_placement(&pin.placement, Some(registration.registration()))
             .replace_credential_profile(
