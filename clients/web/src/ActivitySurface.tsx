@@ -547,6 +547,7 @@ export function ActivitySurface() {
     queryKey: ['production', 'repository-watch', 'repositories', repositoryAfter],
     queryFn: ({ signal }) =>
       productTransport.readRepoWatchRepositories(repositoryAfter ?? undefined, signal),
+    gcTime: 0,
   })
   useEffect(() => {
     const first = repositories.data?.repositories[0]?.repository
@@ -585,12 +586,14 @@ export function ActivitySurface() {
         signal,
       ),
     enabled: repository !== null,
+    gcTime: 0,
   })
   const work = useQuery({
     queryKey: ['production', 'repository-watch', 'work', repository, heldAfter, obligationAfter],
     queryFn: ({ signal }) =>
       productTransport.readRepoWatchWork(repository ?? '', heldAfter, obligationAfter, signal),
     enabled: repository !== null,
+    gcTime: 0,
   })
   useLayoutEffect(() => {
     if (!work.data || workFocusPending.current === null) return
@@ -617,6 +620,7 @@ export function ActivitySurface() {
         signal,
       ),
     enabled: repository !== null && selectedPullRequest !== null,
+    gcTime: 0,
   })
   useLayoutEffect(() => {
     if (!sessions.data || !sessionFocusPending.current) return

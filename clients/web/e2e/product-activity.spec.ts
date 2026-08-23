@@ -309,9 +309,10 @@ test('pages a 101-delivery burst and preserves semantic session evidence', async
   await expect(page.getByText('delivery 2', { exact: true })).toBeVisible()
 
   await page.getByRole('button', { name: /#103 Non-converged checks/ }).click()
-  await expect(page.getByText(sessionOne)).toBeVisible()
-  await expect(page.getByText(sessionTwo)).toBeVisible()
-  const sessionEvidence = page.getByText(sessionOne, { exact: true })
+  const sessionPanel = page.getByRole('region', { name: 'Commissioned sessions' })
+  await expect(sessionPanel.getByText(sessionOne, { exact: true })).toBeVisible()
+  await expect(sessionPanel.getByText(sessionTwo, { exact: true })).toBeVisible()
+  const sessionEvidence = sessionPanel.getByText(sessionOne, { exact: true })
   await expect(sessionEvidence).toBeVisible()
   await expect(sessionEvidence).not.toHaveAttribute('href')
   await page.getByRole('button', { name: /#103 Non-converged checks/ }).click()
@@ -341,7 +342,11 @@ test('captures the bounded repository operations workstation', async ({ page }, 
   await installActivityScenario(page)
   await page.goto('/activity')
   await page.getByRole('button', { name: /#103 Non-converged checks/ }).click()
-  await expect(page.getByText(sessionOne)).toBeVisible()
+  await expect(
+    page
+      .getByRole('region', { name: 'Commissioned sessions' })
+      .getByText(sessionOne, { exact: true }),
+  ).toBeVisible()
   await expect(page).toHaveScreenshot('activity-dark.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

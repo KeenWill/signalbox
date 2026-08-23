@@ -682,8 +682,8 @@ const REPOSITORY_STATUS_SQL: &str = r#"
 WITH selected_repositories AS (
     SELECT repository
       FROM repo_watch_repository_key
-     WHERE ($1::text IS NULL OR repository > $1)
-     ORDER BY repository
+     WHERE ($1::text IS NULL OR repository COLLATE "C" > $1 COLLATE "C")
+     ORDER BY repository COLLATE "C"
      LIMIT $2
 ), selected AS (
     SELECT selected_repository.repository, latest.generation, latest.recorded_at
