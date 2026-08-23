@@ -306,10 +306,14 @@ async fn window_exceeding_projection_totals_is_corruption() -> Result<(), Box<dy
     let identity = session(0x999);
     create_session(&pool, identity).await?;
     commission_fixture_session_goal(&pool, identity, 0x0009_9900).await?;
-    sqlx::query("UPDATE session_timeline_fact SET item_count = 1 WHERE session_id = $1")
-        .bind(identity.into_uuid())
-        .execute(&pool)
-        .await?;
+    sqlx::query(
+        "UPDATE session_timeline_fact \
+         SET item_count = 1, event_kind_bytes = octet_length('session_created') \
+         WHERE session_id = $1",
+    )
+    .bind(identity.into_uuid())
+    .execute(&pool)
+    .await?;
     let limits = TimelineWindowLimits::new(256, 64 * 1024).expect("fixture limits are bounded");
     let error = SessionTimelineRepository::new(pool.clone())
         .read_window(identity, TimelineWindowAnchor::First, limits)
