@@ -23,6 +23,7 @@ export type ProductRouteId = (typeof productRoutes)[number]['id']
 export interface ProductSearchState {
   q?: string
   session?: string
+  sessionParameterIsValid?: false
   afterAddress?: string
   afterProjection?: string
   around?: string
@@ -244,6 +245,7 @@ export const readProductSearchState = (value: Record<string, unknown>): ProductS
   return {
     q,
     session: text('session'),
+    ...(Array.isArray(value.session) ? { sessionParameterIsValid: false as const } : {}),
     afterAddress: cursorText('afterAddress'),
     afterProjection: cursorText('afterProjection'),
     around: text('around'),

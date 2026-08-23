@@ -268,6 +268,39 @@ test('does not request an unpaired cursor URL field', async ({ page }) => {
   expect(searchRequests).toBe(0)
 })
 
+test('does not widen repeated exact-session parameters to global search', async ({ page }) => {
+  let searchRequests = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/search?**', (route) => {
+    searchRequests += 1
+    return route.fulfill({ json: firstPage })
+  })
+  await page.goto(`/search?q=release&session=${sessionId}&session=${sessionId}`)
+
+  await expect(page.getByRole('alert')).toContainText('Search parameters are malformed')
+  expect(searchRequests).toBe(0)
+})
+
+test('does not search without the bounded JSON capability', async ({ page }) => {
+  let searchRequests = 0
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        capabilities: { ...bootstrapFixture.capabilities, bounded_json: false },
+      },
+    }),
+  )
+  await page.route('**/api/search?**', (route) => {
+    searchRequests += 1
+    return route.fulfill({ json: firstPage })
+  })
+  await page.goto('/search?q=release')
+
+  await expect(page.getByText('This surface is intentionally deferred')).toBeVisible()
+  expect(searchRequests).toBe(0)
+})
+
 test('refetches when resubmitting the current first-page search', async ({ page }) => {
   await useRefreshingSearchFixture(page)
   await page.goto('/search?q=release')

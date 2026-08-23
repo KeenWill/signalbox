@@ -100,7 +100,9 @@ export function SearchSurface({
   const queryText = state.q?.trim() ?? ''
   const queryBytes = new TextEncoder().encode(queryText).length
   const queryLimit = bootstrap?.limits.max_search_query_bytes ?? 0
-  const sessionIsValid = state.session === undefined || validUuid(state.session)
+  const sessionIsValid =
+    state.sessionParameterIsValid !== false &&
+    (state.session === undefined || validUuid(state.session))
   const routeSearch = new URLSearchParams(window.location.search)
   const routeAfterAddress = routeSearch.get('afterAddress') ?? undefined
   const routeAfterProjection = routeSearch.get('afterProjection') ?? undefined
@@ -129,7 +131,10 @@ export function SearchSurface({
         },
         signal,
       ),
-    enabled: bootstrap?.capabilities.bounded_lexical_search === true && requestIsValid,
+    enabled:
+      bootstrap?.capabilities.bounded_json === true &&
+      bootstrap.capabilities.bounded_lexical_search === true &&
+      requestIsValid,
     gcTime: 0,
   })
   const searchData = requestIsValid ? results.data : undefined

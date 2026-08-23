@@ -773,4 +773,15 @@ describe('readProductSearchState', () => {
       around: undefined,
     })
   })
+
+  it('preserves repeated exact-session parameters as invalid state', () => {
+    expect(readProductSearchState({ q: 'term', session: ['first', 'second'] })).toEqual({
+      q: 'term',
+      session: undefined,
+      sessionParameterIsValid: false,
+      afterAddress: undefined,
+      afterProjection: undefined,
+      around: undefined,
+    })
+  })
 })

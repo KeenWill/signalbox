@@ -446,7 +446,9 @@ export function ProductApp({
       <AttentionSurface />
     ) : surface === 'sessions' ? (
       <SessionsSurface />
-    ) : surface === 'search' && bootstrap.data?.capabilities.bounded_lexical_search === false ? (
+    ) : surface === 'search' &&
+      (bootstrap.data?.capabilities.bounded_json === false ||
+        bootstrap.data?.capabilities.bounded_lexical_search === false) ? (
       <DeferredSurface surface="search" />
     ) : surface === 'search' ? (
       <SearchSurface bootstrap={bootstrap.data} state={search} onStateChange={updateSearch} />

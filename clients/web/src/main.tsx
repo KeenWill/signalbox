@@ -81,6 +81,10 @@ declare module '@tanstack/react-router' {
 const root = document.getElementById('root')
 if (!root) throw new Error('Missing web application root')
 
+const initialAppState = store.getState().app
+document.documentElement.dataset.theme = initialAppState.theme
+document.documentElement.dataset.density = initialAppState.density
+
 createRoot(root).render(
   <StrictMode>
     <Provider store={store}>

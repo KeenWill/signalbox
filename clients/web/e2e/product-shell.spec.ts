@@ -47,6 +47,33 @@ const platformModifier = (page: Page) =>
 
 const expectedContractStatus = `${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`
 
+test('applies saved visual preferences before the first rendered frame', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem(
+      'signalbox.web.preferences.v1',
+      JSON.stringify({ theme: 'light', density: 'comfortable' }),
+    )
+    const observed: string[] = []
+    Object.defineProperty(window, '__visualPreferenceMutations', { value: observed })
+    new MutationObserver(() => {
+      observed.push(
+        `${document.documentElement.dataset.theme}:${document.documentElement.dataset.density}`,
+      )
+    }).observe(document.documentElement, { attributes: true })
+  })
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
+  await expect(page.locator('html')).toHaveAttribute('data-density', 'comfortable')
+  const firstAppliedPreferences = await page.evaluate(() =>
+    (
+      window as typeof window & { __visualPreferenceMutations: string[] }
+    ).__visualPreferenceMutations.find((value) => value !== 'undefined:undefined'),
+  )
+  expect(firstAppliedPreferences).toBe('light:comfortable')
+})
+
 test('opens the product at Attention with generated-contract transport status', async ({
   page,
 }) => {
