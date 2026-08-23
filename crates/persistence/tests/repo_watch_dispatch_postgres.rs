@@ -6020,6 +6020,12 @@ async fn resume_started_before_release_retains_target_ownership() -> Result<(), 
         .await?,
     );
     mark_queued_turn_failed(&fixture.pool, session, turn, 0x60_150).await?;
+    sqlx::query(
+        "ALTER TABLE goal_event
+         DISABLE TRIGGER repo_watch_dispatch_release_on_terminal_goal",
+    )
+    .execute(&fixture.pool)
+    .await?;
     let blocked = GoalRepository::new(fixture.pool.clone())
         .block_execution_failure(
             session,
@@ -6028,6 +6034,12 @@ async fn resume_started_before_release_retains_target_ownership() -> Result<(), 
             GoalSchedulerProvenance::new(turn),
         )
         .await?;
+    sqlx::query(
+        "ALTER TABLE goal_event
+         ENABLE TRIGGER repo_watch_dispatch_release_on_terminal_goal",
+    )
+    .execute(&fixture.pool)
+    .await?;
     let mut target_lock = fixture.pool.begin().await?;
     let target_key = format!(
         "commissioned-dispatch:{}:{}",
