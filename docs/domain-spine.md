@@ -3235,6 +3235,10 @@ impl AcceptedInputSchedulingReconstitutionInput {
         self,
         frontier: ContextFrontierId,
     ) -> Self;
+    pub fn with_runner_placement_frontiers(
+        self,
+        frontiers: Vec<ContextFrontierId>,
+    ) -> Self;
     pub fn with_context_compaction_facts(
         self,
         calls: Vec<ContextCompactionModelCallReconstitutionInput>,
@@ -3378,6 +3382,7 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     },
     RunnerPlacementSnapshotMissing { snapshot: ContextFrontierId },
     RunnerPlacementSnapshotMismatch { snapshot: ContextFrontierId },
+    RunnerPlacementEntryMismatch { entry: SemanticTranscriptEntryId },
     StartingSnapshotMissing { turn: TurnId },
     TerminalSnapshotMissing { turn: TurnId },
     InvalidLifecycleOrder { turn: TurnId },

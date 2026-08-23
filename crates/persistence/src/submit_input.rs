@@ -4221,7 +4221,7 @@ pub(crate) async fn load_scheduling_projection(
         return Err(SubmitInputCorruption::Missing("delegated turn scheduling fact").into());
     }
 
-    let runner_placement_frontier = sqlx::query_scalar::<_, Uuid>(
+    let runner_placement_frontiers = sqlx::query_scalar::<_, Uuid>(
         "SELECT pointer.context_frontier_id
            FROM runner_current_session_placement AS head
            JOIN runner_session_placement_record AS placement
@@ -4229,13 +4229,14 @@ pub(crate) async fn load_scheduling_projection(
             AND placement.event_ordinal = head.event_ordinal
            JOIN session_runner_placement_frontier AS pointer
              ON pointer.session_id = placement.session_id
-            AND pointer.placement_revision = placement.placement_revision
-          WHERE head.session_id = $1",
+            AND pointer.placement_revision <= placement.placement_revision
+          WHERE head.session_id = $1
+          ORDER BY pointer.placement_revision",
     )
     .bind(session_id_to_uuid(session_id))
-    .fetch_optional(&mut *connection)
+    .fetch_all(&mut *connection)
     .await?;
-    required_frontiers.extend(runner_placement_frontier);
+    required_frontiers.extend(runner_placement_frontiers.iter().copied());
 
     let required_frontier_ids = required_frontiers.iter().copied().collect::<Vec<_>>();
     let frontier_rows = sqlx::query(
@@ -5276,8 +5277,13 @@ pub(crate) async fn load_scheduling_projection(
     if let Some(imported_session) = imported_session {
         input = input.with_imported_session(imported_session);
     }
-    if let Some(frontier) = runner_placement_frontier {
-        input = input.with_runner_placement_frontier(ContextFrontierId::from_uuid(frontier));
+    if !runner_placement_frontiers.is_empty() {
+        input = input.with_runner_placement_frontiers(
+            runner_placement_frontiers
+                .into_iter()
+                .map(ContextFrontierId::from_uuid)
+                .collect(),
+        );
     }
     for preceding in preceding_non_accepted_terminals {
         input = input.with_preceding_non_accepted_terminal(

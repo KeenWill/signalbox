@@ -771,10 +771,13 @@ For model input only, summaries are applied in physical append order to the
 current model-visible sequence. Each summary replaces the visible prefix through
 its exact boundary with itself; entries after that boundary in the already
 projected sequence remain in order, even when a retained suffix physically
-precedes an earlier summary. The final sequence is therefore the latest summary
-plus its visible suffix. With no summary, projection is the complete frontier
-order. This rule deliberately separates the frontier a call durably records from
-the ordered subset the selected model sees.
+precedes an earlier summary. One exception preserves execution authority: when
+the replaced prefix contains runner-placement notices, projection re-injects the
+exact latest `RunnerPlacementChanged` entry immediately after the summary. The
+final sequence is therefore the latest summary, that retained placement notice
+when present, and the remaining visible suffix. With no summary, projection is
+the complete frontier order. This rule deliberately separates the frontier a
+call durably records from the ordered subset the selected model sees.
 
 Explicit compaction chooses an optional through position, defaulting to the
 latest safe boundary. The daemon also compacts before an ordinary model send

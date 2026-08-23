@@ -1440,6 +1440,7 @@ pub struct AcceptedInputSchedulingReconstitutionInput {
     session: Session,
     imported_session: Option<ReconstitutedImportedSession>,
     runner_placement_frontier: Option<ContextFrontierId>,
+    runner_placement_frontiers: Vec<ContextFrontierId>,
     turns: Vec<AcceptedInputTurnSchedulingRecord>,
     semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
     snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
@@ -1475,6 +1476,7 @@ impl AcceptedInputSchedulingReconstitutionInput {
             session,
             imported_session: None,
             runner_placement_frontier: None,
+            runner_placement_frontiers: Vec::new(),
             turns,
             semantic_entries,
             snapshots,
@@ -1496,6 +1498,15 @@ impl AcceptedInputSchedulingReconstitutionInput {
     /// boundary that a newly activated queued turn must extend.
     pub fn with_runner_placement_frontier(mut self, frontier: ContextFrontierId) -> Self {
         self.runner_placement_frontier = Some(frontier);
+        self.runner_placement_frontiers.push(frontier);
+        self
+    }
+
+    /// Supplies the complete placement-boundary chain in increasing revision
+    /// order. The final boundary is the current placement frontier.
+    pub fn with_runner_placement_frontiers(mut self, frontiers: Vec<ContextFrontierId>) -> Self {
+        self.runner_placement_frontier = frontiers.last().copied();
+        self.runner_placement_frontiers = frontiers;
         self
     }
 
@@ -2052,6 +2063,12 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     RunnerPlacementSnapshotMismatch {
         /// The malformed placement-boundary snapshot.
         snapshot: ContextFrontierId,
+    },
+    /// A runner-placement semantic payload has no exact authenticated
+    /// one-entry boundary in the supplied placement chain.
+    RunnerPlacementEntryMismatch {
+        /// The unauthenticated placement entry.
+        entry: SemanticTranscriptEntryId,
     },
     /// A started turn names a snapshot absent from the complete snapshot set.
     StartingSnapshotMissing {
@@ -4442,11 +4459,21 @@ fn reconstitute_inner(
         }
     }
 
-    let runner_placement_frontier = input.runner_placement_frontier;
-    if let Some(frontier) = runner_placement_frontier {
-        let snapshot = snapshots.get(&frontier).ok_or(
+    let runner_placement_frontiers = if input.runner_placement_frontiers.is_empty() {
+        input
+            .runner_placement_frontier
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        input.runner_placement_frontiers.clone()
+    };
+    let mut authenticated_placements = BTreeMap::new();
+    let mut preceding_placement = None;
+    let mut preceding_revision = None;
+    for frontier in &runner_placement_frontiers {
+        let snapshot = snapshots.get(frontier).ok_or(
             AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMissing {
-                snapshot: frontier,
+                snapshot: *frontier,
             },
         )?;
         let mut appended_entries = snapshot.appended_entries();
@@ -4468,10 +4495,75 @@ fn reconstitute_inner(
         {
             return Err(
                 AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMismatch {
-                    snapshot: frontier,
+                    snapshot: *frontier,
                 },
             );
         }
+        let Some(SemanticTranscriptEntryPayload::RunnerPlacementChanged { placement_revision }) =
+            final_payload
+        else {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMismatch {
+                    snapshot: *frontier,
+                },
+            );
+        };
+        let Some(appended_entry) = appended_entry else {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMismatch {
+                    snapshot: *frontier,
+                },
+            );
+        };
+        if preceding_revision.is_some_and(|revision| revision >= *placement_revision)
+            || preceding_placement
+                .is_some_and(|preceding| !snapshots[&preceding].is_semantic_prefix_of(snapshot))
+            || authenticated_placements
+                .insert(*placement_revision, appended_entry)
+                .is_some()
+        {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMismatch {
+                    snapshot: *frontier,
+                },
+            );
+        }
+        preceding_revision = Some(*placement_revision);
+        preceding_placement = Some(*frontier);
+    }
+    if let Some((_, entry)) = runner_placement_by_revision
+        .iter()
+        .find(|((_, revision), entry)| authenticated_placements.get(revision) != Some(entry))
+    {
+        return Err(
+            AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementEntryMismatch {
+                entry: entry.entry(),
+            },
+        );
+    }
+    if let Some(entry) = authenticated_placements
+        .iter()
+        .find_map(|(revision, entry)| {
+            (!runner_placement_by_revision.contains_key(&(session, *revision))).then_some(*entry)
+        })
+    {
+        return Err(
+            AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementEntryMismatch {
+                entry: entry.entry(),
+            },
+        );
+    }
+    let runner_placement_frontier = runner_placement_frontiers.last().copied();
+    if input.runner_placement_frontier != runner_placement_frontier {
+        let snapshot = input
+            .runner_placement_frontier
+            .or(runner_placement_frontier)
+            .expect("a mismatched placement head names a frontier");
+        return Err(
+            AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMismatch {
+                snapshot,
+            },
+        );
     }
 
     let mut preceding_non_accepted_terminals = BTreeMap::new();
@@ -5283,7 +5375,7 @@ fn reconstitute_inner(
     let mut queued_seen = false;
     let mut referenced_snapshots = consumed_snapshots;
     referenced_snapshots.extend(initial_seed_frontier);
-    referenced_snapshots.extend(runner_placement_frontier);
+    referenced_snapshots.extend(runner_placement_frontiers.iter().copied());
     referenced_snapshots.extend(
         preceding_non_accepted_terminals
             .values()
@@ -16472,6 +16564,123 @@ mod tests {
                 entry: second_entry.id(),
             }
         );
+    }
+
+    /// S32 / INV-015 / INV-044: every placement payload requires its exact
+    /// authenticated one-entry boundary, even when no current pointer exists.
+    #[test]
+    fn s32_inv015_inv044_reconstitution_rejects_orphan_runner_placement_entry() {
+        let session = current_session();
+        let queued = accepted_origin(1);
+        let placement_entry = semantic_entry(31);
+        let mut input = queued_input(&session, queued);
+        input
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                placement_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: RunnerGeneration::try_from_u64(2)
+                        .expect("the fixture placement revision is positive"),
+                },
+            ));
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementEntryMismatch {
+                entry: placement_entry.id(),
+            }
+        );
+    }
+
+    /// S32 / INV-015 / INV-044: a current placement boundary cannot
+    /// authenticate another placement payload omitted from its boundary chain.
+    #[test]
+    fn s32_inv015_inv044_reconstitution_rejects_extra_runner_placement_entry() {
+        let session = current_session();
+        let queued = accepted_origin(1);
+        let authenticated_entry = semantic_entry(31);
+        let extra_entry = semantic_entry(32);
+        let placement_frontier = frontier(33);
+        let mut input = queued_input(&session, queued);
+        input
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                authenticated_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: RunnerGeneration::try_from_u64(2)
+                        .expect("the authenticated fixture revision is positive"),
+                },
+            ));
+        input
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                extra_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: RunnerGeneration::try_from_u64(3)
+                        .expect("the extra fixture revision is positive"),
+                },
+            ));
+        input
+            .snapshots
+            .push(placement_frontier.snapshot(&session, &[authenticated_entry]));
+        input = input.with_runner_placement_frontier(placement_frontier.id());
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementEntryMismatch {
+                entry: extra_entry.id(),
+            }
+        );
+    }
+
+    /// S32 / INV-015 / INV-044: a complete ordered chain authenticates each
+    /// placement payload and retains its final boundary as the current one.
+    #[test]
+    fn s32_inv015_inv044_reconstitution_accepts_runner_placement_boundary_chain() {
+        let session = current_session();
+        let queued = accepted_origin(1);
+        let first_entry = semantic_entry(31);
+        let second_entry = semantic_entry(32);
+        let first_frontier = frontier(33);
+        let second_frontier = frontier(34);
+        let mut input = queued_input(&session, queued);
+        input
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                first_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: RunnerGeneration::try_from_u64(2)
+                        .expect("the first fixture revision is positive"),
+                },
+            ));
+        input
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                second_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: RunnerGeneration::try_from_u64(3)
+                        .expect("the second fixture revision is positive"),
+                },
+            ));
+        let first_snapshot = first_frontier.snapshot(&session, &[first_entry]);
+        let second_snapshot = first_snapshot
+            .derive_appending(second_frontier.id(), vec![second_entry.reference(&session)]);
+        input.snapshots.extend([first_snapshot, second_snapshot]);
+        input =
+            input.with_runner_placement_frontiers(vec![first_frontier.id(), second_frontier.id()]);
+
+        input
+            .reconstitute()
+            .expect("the complete placement-boundary chain is authenticated");
     }
 
     /// S32 / INV-015 / INV-044: queued activation extends the latest durable
