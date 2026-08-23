@@ -1560,6 +1560,10 @@ const fn bound_child_action_dto(action: TimelineBoundChildAction) -> WebTimeline
     }
 }
 
+// The persistence projection validates the closed failure-cause vocabulary and
+// all-or-none physical-attempt fields before constructing this application DTO.
+// Keep the invariant assertions here so future projection drift fails closed.
+#[allow(clippy::unreachable)]
 fn tool_attempt_dto(attempt: TimelineToolAttempt) -> WebTimelineToolAttempt {
     let evidence = match (
         attempt.attempt_id,
