@@ -2193,6 +2193,26 @@ impl RepositoryWatchTask {
             {
                 Ok(true) => {}
                 Ok(false) => break,
+                Err(RepoWatchDispatchRepositoryError::GoalCutoff(
+                    error @ signalbox_persistence::goal::GoalRepositoryError::Corruption(_),
+                )) => {
+                    tracing::error!(
+                        repository = %self.repository.as_str(),
+                        cause_code = "repository_watch_expired_start_lease_corruption",
+                        error = %error,
+                        "repository-watch expired start lease quarantined a corrupt goal; cutoff processing continues"
+                    );
+                    continue;
+                }
+                Err(error @ RepoWatchDispatchRepositoryError::Corruption(_)) => {
+                    tracing::error!(
+                        repository = %self.repository.as_str(),
+                        cause_code = "repository_watch_expired_start_lease_corruption",
+                        error = %error,
+                        "repository-watch expired start lease quarantined corrupt storage; cutoff processing continues"
+                    );
+                    continue;
+                }
                 Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
             }
         }

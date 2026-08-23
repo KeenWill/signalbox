@@ -397,12 +397,11 @@ impl PostgresRepoWatchDispatchStore {
             crate::goal::insert_repo_watch_composed_stop(&mut transaction, command.clone())
                 .await
                 .map_err(RepoWatchDispatchRepositoryError::GoalCutoff)?;
-        if !stopped {
-            transaction.rollback().await?;
-            return Err(RepoWatchDispatchRepositoryError::Corruption(
-                "expired dispatch start lease remained attached to a non-stoppable goal",
-            ));
-        }
+        // A successor generation legitimately makes the repository-watch
+        // generation-one stop inapplicable. The lease still needs a durable
+        // retirement record so authoritative activation is no longer barred;
+        // only a stop that actually applied has a command receipt to retain.
+        let goal_command_id = stopped.then(|| *command.command_id().as_uuid());
         sqlx::query(
             "INSERT INTO repo_watch_dispatch_start_lease_expiration
                 (dispatch_id, action_ordinal, session_id, goal_command_id)
@@ -411,7 +410,7 @@ impl PostgresRepoWatchDispatchStore {
         .bind(dispatch_id)
         .bind(action_ordinal)
         .bind(session_id)
-        .bind(command.command_id().as_uuid())
+        .bind(goal_command_id)
         .execute(&mut *transaction)
         .await?;
         commit(transaction).await?;
@@ -620,7 +619,7 @@ impl PostgresRepoWatchDispatchStore {
         Ok(())
     }
 
-    /// Processes a bounded batch of expired start leases before repository-specific tasks start.
+    /// Exhausts expired start leases before repository-specific tasks start.
     pub async fn process_pending_expired_start_leases<NextCommandId>(
         &self,
         mut next_command_id: NextCommandId,
@@ -628,8 +627,7 @@ impl PostgresRepoWatchDispatchStore {
     where
         NextCommandId: FnMut() -> DurableCommandId,
     {
-        const MAX_PENDING_EXPIRED_START_LEASES: usize = 16;
-        for _ in 0..MAX_PENDING_EXPIRED_START_LEASES {
+        loop {
             let repository: Option<String> = sqlx::query_scalar(
                 "SELECT origin.repository
                    FROM repo_watch_dispatch_start_lease AS lease
@@ -686,10 +684,9 @@ impl PostgresRepoWatchDispatchStore {
                 ));
             }
         }
-        Ok(())
     }
 
-    /// Processes a bounded batch of lifecycle cutoffs before repository-specific tasks start.
+    /// Exhausts lifecycle cutoffs before repository-specific tasks start.
     pub async fn process_pending_lifecycle_cutoffs<NextCommandId>(
         &self,
         mut next_command_id: NextCommandId,
@@ -697,8 +694,7 @@ impl PostgresRepoWatchDispatchStore {
     where
         NextCommandId: FnMut() -> DurableCommandId,
     {
-        const MAX_PENDING_LIFECYCLE_CUTOFFS: usize = 16;
-        for _ in 0..MAX_PENDING_LIFECYCLE_CUTOFFS {
+        loop {
             let repository: Option<String> = sqlx::query_scalar(
                 "SELECT event.repository
                    FROM repo_watch_event AS event
@@ -737,7 +733,6 @@ impl PostgresRepoWatchDispatchStore {
                 Err(error) => return Err(error),
             }
         }
-        Ok(())
     }
 
     /// Deactivates rules belonging to repositories absent from configuration.

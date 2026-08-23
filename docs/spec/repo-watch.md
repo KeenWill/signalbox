@@ -744,9 +744,12 @@ instead of discarding it.
 
 **Implemented behavior.** An expired lease without model-call evidence is
 retired under the repository and session locks. The transaction rechecks call
-evidence after taking the session lock, then applies the ordinary parent-only
-stop to the commissioned generation and appends an immutable lease-expiration
-record. The existing deferred goal-termination authority creates or joins the
+evidence after taking the session and scheduler locks, then applies the ordinary
+parent-only stop when the commissioned generation-one goal is still current and
+appends an immutable lease-expiration record. A successor generation is never
+stopped for its predecessor's lease; its expiration record carries no goal
+command identity, recording that retirement occurred without a stop. The
+existing deferred goal-termination authority creates or joins the
 latest-state dispatch obligation before releasing every now-releasable singleton
 batch; sibling actions retain a multi-action batch until its ordinary release
 predicate holds. The obligation therefore survives capacity loss and becomes

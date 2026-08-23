@@ -477,6 +477,16 @@ fn one_action_rule(cooldown: Duration) -> Result<RepoWatchRule, Box<dyn Error>> 
     )
 }
 
+fn rule_with_dispatch_action_count(action_count: usize) -> Result<RepoWatchRule, Box<dyn Error>> {
+    let template = SessionTemplateName::try_new(TEMPLATE.to_owned())?;
+    let actions = (0..action_count)
+        .map(|_| RepoWatchRuleActionV1::DispatchSession {
+            template: template.clone(),
+        })
+        .collect();
+    rule_with_actions_and_cooldown(RepoWatchRuleVersion::V1, actions, Duration::ZERO)
+}
+
 fn eager_merge_forward_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(EAGER_RULE.to_owned())?,
@@ -4826,6 +4836,71 @@ async fn inv069_expiry_retires_releases_and_rearms_the_dispatch() -> Result<(), 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn inv069_expiry_retires_a_lease_without_stopping_its_successor_goal()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for_with_lease(
+        one_action_rule(Duration::ZERO)?,
+        Some(Duration::from_millis(1)),
+    )
+    .await?;
+    let session = fixture.session(0);
+    let successor_turn = TurnId::from_uuid(Uuid::from_u128(0x5d_f02));
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0x5d_f00)),
+                    session,
+                    GoalUserAction::Supersede(GoalStatement::try_new(String::from(
+                        "a successor goal that must outlive its predecessor's lease",
+                    ))?),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0x5d_f01)),
+                    successor_turn,
+                )),
+                |_| None,
+            )
+            .await?,
+    );
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    assert!(
+        fixture
+            .store
+            .process_next_expired_start_lease(&fixture.repository, || {
+                DurableCommandId::from_uuid(Uuid::from_u128(0x5d_f03))
+            })
+            .await?
+    );
+
+    let goal = GoalRepository::new(fixture.pool.clone())
+        .load_goal(session)
+        .await?
+        .expect("the successor goal remains readable");
+    let expiration_command: Option<Uuid> = sqlx::query_scalar(
+        "SELECT goal_command_id
+           FROM repo_watch_dispatch_start_lease_expiration
+          WHERE session_id = $1",
+    )
+    .bind(session.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(fixture.pool.clone()),
+    );
+    let activation = activation.execute(session).await?;
+
+    assert_eq!(goal.current().generation().get(), 2);
+    assert_eq!(goal.current().state(), &GoalState::Pursuing);
+    assert_eq!(expiration_command, None);
+    assert!(matches!(activation, StartEligibleTurnOutcome::Activated(_)));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn startup_drain_expires_a_lease_after_repository_removal() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for_with_lease(
         one_action_rule(Duration::ZERO)?,
@@ -4857,6 +4932,34 @@ async fn startup_drain_expires_a_lease_after_repository_removal() -> Result<(), 
     assert_eq!(goal.current().state(), &GoalState::UserStopped);
     assert_eq!(expiration_count, 1);
     assert_eq!(release_count(&fixture).await?, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_drain_exhausts_more_than_sixteen_removed_repository_leases()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for_with_lease(
+        rule_with_dispatch_action_count(17)?,
+        Some(Duration::from_millis(1)),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    fixture
+        .store
+        .deactivate_unconfigured_repositories(&[])
+        .await?;
+
+    fixture
+        .store
+        .process_pending_expired_start_leases(|| DurableCommandId::from_uuid(Uuid::now_v7()))
+        .await?;
+
+    let expiration_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_start_lease_expiration")
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(expiration_count, 17);
     Ok(())
 }
 

@@ -34,7 +34,7 @@ CREATE TABLE repo_watch_dispatch_start_lease_expiration (
     dispatch_id uuid NOT NULL,
     action_ordinal integer NOT NULL,
     session_id uuid NOT NULL,
-    goal_command_id uuid NOT NULL UNIQUE,
+    goal_command_id uuid UNIQUE,
     expired_at timestamptz NOT NULL DEFAULT clock_timestamp(),
 
     PRIMARY KEY (dispatch_id, action_ordinal),

@@ -1398,7 +1398,8 @@ mod tests {
         EligibilityWorkSource, GoalAwareEligibilityPass, GoalAwareEligibilityPassError,
         GoalPassDisposition, InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
         PendingHintQueues, ReconciliationSweepInterval, SCHEDULER_PASS_ADMISSION_CAP,
-        SchedulerLoop, SchedulerLoopExit, enqueue_pending_hint, take_admissible_hint,
+        SchedulerLoop, SchedulerLoopExit, enqueue_pending_hint, ordinary_pass_limit,
+        take_admissible_hint,
     };
     use crate::{
         OperatorFailureClass, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
@@ -2181,6 +2182,48 @@ mod tests {
             Some((dispatch_start, EligibilityHintPriority::DispatchStart))
         );
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn inv069_ordinary_admission_cannot_consume_reserved_capacity() {
+        let ordinary = session(50);
+        let in_flight = HashSet::from_iter(
+            (0..ordinary_pass_limit(SCHEDULER_PASS_ADMISSION_CAP))
+                .map(|offset| session(200 + offset as u128)),
+        );
+        let mut reruns = HashMap::new();
+        let mut pending = HashMap::new();
+        let mut dispatch_starts = VecDeque::new();
+        let mut ordinary_hints = VecDeque::new();
+        enqueue_pending_hint(
+            ordinary,
+            EligibilityHintPriority::Ordinary,
+            &in_flight,
+            &mut reruns,
+            &mut pending,
+            &mut dispatch_starts,
+            &mut ordinary_hints,
+        );
+
+        assert_eq!(
+            take_admissible_hint(
+                PendingHintQueues {
+                    dispatch_starts: &mut dispatch_starts,
+                    ordinary: &mut ordinary_hints,
+                    priorities: &mut pending,
+                },
+                AdmissionState {
+                    total_in_flight: in_flight.len(),
+                    ordinary_in_flight: in_flight.len(),
+                    max_in_flight_passes: SCHEDULER_PASS_ADMISSION_CAP,
+                },
+            ),
+            None
+        );
+        assert_eq!(
+            pending.get(&ordinary),
+            Some(&EligibilityHintPriority::Ordinary)
+        );
     }
 
     #[test]
