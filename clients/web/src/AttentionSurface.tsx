@@ -162,6 +162,10 @@ export function AttentionSurface() {
                     <button
                       type="button"
                       aria-pressed={selectedId === summary.session_id}
+                      aria-expanded={selectedId === summary.session_id}
+                      aria-controls={
+                        selectedId === summary.session_id ? 'attention-inspector' : undefined
+                      }
                       onClick={(event) => open(summary, event.currentTarget)}
                     >
                       <span className="attention-rail" aria-hidden="true" />
@@ -191,6 +195,7 @@ export function AttentionSurface() {
 
           {selected && (
             <aside
+              id="attention-inspector"
               className="attention-inspector"
               aria-labelledby="attention-inspector-heading"
               onKeyDown={(event) => {

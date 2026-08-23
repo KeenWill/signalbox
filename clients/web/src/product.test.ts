@@ -12,6 +12,7 @@ const bootstrapFixture = {
 } as const
 
 const sessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
+const previousSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6c'
 const attentionFixture = {
   continuation_after_session_id: sessionId,
   cursor: '17',
@@ -121,12 +122,23 @@ describe('SameOriginProductTransport', () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(attentionFixture)))
     vi.stubGlobal('fetch', fetchMock)
 
-    const snapshot = await new SameOriginProductTransport().readAttention(sessionId)
+    const snapshot = await new SameOriginProductTransport().readAttention(previousSessionId)
 
     expect(snapshot).toEqual(attentionFixture)
     expect(fetchMock).toHaveBeenCalledWith(
-      `/api/attention?after_session_id=${sessionId}`,
+      `/api/attention?after_session_id=${previousSessionId}`,
       expect.objectContaining({ credentials: 'same-origin' }),
+    )
+  })
+
+  it('rejects a non-advancing attention page', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(attentionFixture))),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention(sessionId)).rejects.toThrow(
+      'attention page does not advance beyond the requested cursor',
     )
   })
 
@@ -230,6 +242,25 @@ describe('SameOriginProductTransport', () => {
     await expect(
       new SameOriginProductTransport().readRepoWatchPullRequests('example/repository'),
     ).rejects.toThrow('does not match the requested repository')
+  })
+
+  it('rejects a non-advancing repository continuation', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              continuation_after_repository: 'example/repository',
+              repositories: [],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readRepoWatchRepositories('example/repository'),
+    ).rejects.toThrow('repository continuation does not advance beyond the requested cursor')
   })
 
   it('rejects a non-advancing pull-request continuation', async () => {

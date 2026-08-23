@@ -23,6 +23,55 @@ const MAX_JSON_BODY_BYTES = 65_536
 const MAX_ATTENTION_EVENT_BYTES = 65_536
 const MAX_POSTGRES_BIGINT = 9_223_372_036_854_775_807n
 const MAX_POSTGRES_INTEGER = 2_147_483_647
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+const canonicalUuid = (value: string, field: string): string => {
+  if (!CANONICAL_UUID.test(value)) throw new TypeError(`${field} is not canonical`)
+  return value
+}
+
+const validateAttentionPage = (
+  afterSessionId: string | undefined,
+  page: WebAttentionSnapshot,
+): WebAttentionSnapshot => {
+  if (!afterSessionId) return page
+  const requested = canonicalUuid(afterSessionId, 'requested attention cursor')
+  let previous = requested
+  for (const summary of page.summaries) {
+    const session = canonicalUuid(summary.session_id, 'attention page session')
+    if (session <= previous) {
+      throw new TypeError('attention page does not advance beyond the requested cursor')
+    }
+    previous = session
+  }
+  const continuationCursor = page.continuation_after_session_id
+  if (continuationCursor != null) {
+    const continuation = canonicalUuid(continuationCursor, 'attention continuation')
+    if (continuation <= requested || continuation < previous) {
+      throw new TypeError('attention continuation does not advance beyond the requested cursor')
+    }
+  }
+  return page
+}
+
+const validateRepositoryPage = (
+  afterRepository: string | undefined,
+  page: WebRepoWatchRepositoryStatusPage,
+): WebRepoWatchRepositoryStatusPage => {
+  if (!afterRepository) return page
+  let previous = afterRepository
+  for (const status of page.repositories) {
+    if (status.repository <= previous) {
+      throw new TypeError('repository page does not advance beyond the requested cursor')
+    }
+    previous = status.repository
+  }
+  const continuation = page.continuation_after_repository
+  if (continuation != null && (continuation <= afterRepository || continuation < previous)) {
+    throw new TypeError('repository continuation does not advance beyond the requested cursor')
+  }
+  return page
+}
 
 const canonicalPositiveBigInt = (value: string, field: string): bigint => {
   if (!/^[1-9][0-9]*$/.test(value)) throw new TypeError(`${field} is not canonical`)
@@ -261,7 +310,10 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
       signal,
     })
     if (!response.ok) throw await this.requestError(response)
-    return decodeWebAttentionSnapshot(await readBoundedJson(response))
+    return validateAttentionPage(
+      afterSessionId,
+      decodeWebAttentionSnapshot(await readBoundedJson(response)),
+    )
   }
 
   async *followAttention(signal?: AbortSignal): AsyncGenerator<WebAttentionStreamEvent> {
@@ -281,11 +333,12 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
   ): Promise<WebRepoWatchRepositoryStatusPage> {
     const query = new URLSearchParams()
     if (afterRepository) query.set('after_repository', afterRepository)
-    return this.readJson(
+    const page = await this.readJson(
       this.queryPath('/api/repository-watch/repositories', query),
       decodeWebRepoWatchRepositoryStatusPage,
       signal,
     )
+    return validateRepositoryPage(afterRepository, page)
   }
 
   async readRepoWatchPullRequests(

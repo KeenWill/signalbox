@@ -32,7 +32,7 @@ interface ActivityRow {
   source: 'repository event' | 'webhook delivery'
   kind: string
   subject: string
-  outcome: string
+  cursorOrOutcome: string
 }
 
 interface RetainedActivityPage {
@@ -62,7 +62,7 @@ const historyColumns = historyColumn.columns([
   historyColumn.accessor('source', { header: 'Source' }),
   historyColumn.accessor('kind', { header: 'Kind' }),
   historyColumn.accessor('subject', { header: 'Subject' }),
-  historyColumn.accessor('outcome', { header: 'Outcome' }),
+  historyColumn.accessor('cursorOrOutcome', { header: 'Cursor / outcome' }),
 ])
 
 const words = (value: string) => value.replaceAll('_', ' ')
@@ -587,7 +587,7 @@ export function ActivitySurface() {
           source: 'repository event',
           kind: words(event.kind),
           subject: event.pull_request ? `PR #${event.pull_request}` : (repository ?? 'repository'),
-          outcome: `${event.cursor_generation}.${event.event_ordinal}`,
+          cursorOrOutcome: `${event.cursor_generation}.${event.event_ordinal}`,
         })
       }
       for (const webhook of page.webhooks) {
@@ -599,7 +599,7 @@ export function ActivitySurface() {
             ? `${webhook.event_name}.${webhook.action_name}`
             : webhook.event_name,
           subject: `delivery ${webhook.receipt_sequence}`,
-          outcome: webhook.disposition ? words(webhook.disposition) : 'pending',
+          cursorOrOutcome: webhook.disposition ? words(webhook.disposition) : 'pending',
         })
       }
     }
