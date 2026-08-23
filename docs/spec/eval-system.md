@@ -4,9 +4,10 @@
 [program substrate](program-substrate.md): what an evaluation is, how its
 corpus, expectations, trials, and stages are recorded, and how evaluation
 traffic stays unmistakably separate from production traffic. The entire surface
-below other than the explicitly implemented standalone approval-judge harness is
-committed ahead of code as Stage 0. Stage 0 was verified through PR #580
-(`agent/program-substrate-spec`). Execution, registration, journaling, and
+below other than the explicitly implemented standalone approval-judge surfaces
+is committed ahead of code as Stage 0. Stage 0 and those temporary surfaces were
+verified through PR #577 (`agent/eval-db-recording`). Execution, registration,
+journaling, and
 replay are owned by the substrate page and not restated here; model scoring is
 ordinary session traffic owned by
 [model-call execution](model-call-execution.md); the sandboxed process boundary
@@ -168,11 +169,13 @@ stage's declared schema host-side; executor failure is a recorded stage status,
 never a run fault. The isolate never runs subject code, and executors never
 touch the database or hold credentials.
 
-**Committed unimplemented functionality.** No present surface records
-judge-evaluation runs in the database; the standalone judge-evaluation harness
-emits scorecard output only, and an in-flight change proposes judge-specific
-recording tables ahead of this system. Whatever judge-specific recording surface
-exists when the substrate's rows land is superseded by them: once judge
+The live-provider `signalboxd` approval-judge runner optionally records its
+printed scorecard and successful-call evidence in judge-specific PostgreSQL
+tables when the operator supplies a database URL. The scorecard remains the
+primary artifact, recording is append-only and transactionally sealed, and a
+run without the recording option writes nothing. This temporary surface carries
+synthetic evaluation provenance rather than claiming linkage to a live delegated
+request. It is superseded when the substrate's rows land: once judge
 evaluations run on the substrate, any such tables and their recorded data are
 dropped without migration — those recorded runs are reproducible measurements,
 not history that binds. Per the pre-alpha rule in `AGENTS.md`, this destruction

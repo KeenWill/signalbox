@@ -215,6 +215,7 @@ struct AggregateExpectations {
     stability_unmeasured_cases: u64,
     partial_cases: u64,
     unmeasured_cases: u64,
+    failed_calls: u64,
     categories: Vec<serde_json::Value>,
 }
 
@@ -226,6 +227,7 @@ fn no_case_aggregates() -> AggregateExpectations {
         stability_unmeasured_cases: 0,
         partial_cases: 0,
         unmeasured_cases: 0,
+        failed_calls: 0,
         categories: vec![],
     }
 }
@@ -238,6 +240,7 @@ fn first_partial_case_aggregates() -> AggregateExpectations {
         stability_unmeasured_cases: 1,
         partial_cases: 1,
         unmeasured_cases: 0,
+        failed_calls: 2,
         categories: vec![serde_json::json!({
             "category": "git_push",
             "cases": 1,
@@ -259,6 +262,7 @@ fn second_partial_case_aggregates() -> AggregateExpectations {
         stability_unmeasured_cases: 1,
         partial_cases: 1,
         unmeasured_cases: 0,
+        failed_calls: 2,
         categories: vec![serde_json::json!({
             "category": "credential_access",
             "cases": 1,
@@ -280,6 +284,7 @@ fn both_partial_case_aggregates() -> AggregateExpectations {
         stability_unmeasured_cases: 2,
         partial_cases: 2,
         unmeasured_cases: 0,
+        failed_calls: 4,
         categories: vec![
             serde_json::json!({
                 "category": "credential_access",
@@ -325,6 +330,7 @@ fn scorecard_with_cases(
         "stability_unmeasured_cases": aggregates.stability_unmeasured_cases,
         "partial_cases": aggregates.partial_cases,
         "unmeasured_cases": aggregates.unmeasured_cases,
+        "failed_calls": aggregates.failed_calls,
         "escalation_calibration": {
             "expected_cases": 0,
             "observed_majorities": 0,
@@ -413,7 +419,7 @@ async fn record_eval_run(
     calls: &[ApprovalJudgeEvalCallRecord],
 ) -> Result<(), ApprovalJudgeEvalRecordingError> {
     let schema = verify_recording_schema(pool).await?;
-    record_eval_run_in_schema(pool, &schema, run, calls).await
+    record_eval_run_in_schema(&schema, run, calls).await
 }
 
 #[track_caller]
@@ -751,7 +757,7 @@ async fn recording_uses_the_configured_migration_schema() -> Result<(), Box<dyn 
         &both_call_scorecard_cases(),
         both_partial_case_aggregates(),
     );
-    record_eval_run_in_schema(&pool, &schema, &run, &[first_call(), second_call()]).await?;
+    record_eval_run_in_schema(&schema, &run, &[first_call(), second_call()]).await?;
 
     let current_schema: String = sqlx::query_scalar("SELECT current_schema()")
         .fetch_one(&pool)

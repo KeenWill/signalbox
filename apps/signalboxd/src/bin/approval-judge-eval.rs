@@ -28,8 +28,9 @@ use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
 use signalbox_persistence::approval_judge_eval::{
-    ApprovalJudgeEvalCallRecord,
-    ApprovalJudgeEvalRunId, ApprovalJudgeEvalRunRecord, record_eval_run, verify_recording_schema,
+    APPROVAL_JUDGE_EVAL_CASE_CATEGORIES, APPROVAL_JUDGE_EVAL_SCORING_SEMANTICS_VERSION,
+    ApprovalJudgeEvalCallRecord, ApprovalJudgeEvalRecordingSchema, ApprovalJudgeEvalRunId,
+    ApprovalJudgeEvalRunRecord, record_eval_run, verify_recording_schema,
 };
 use signalboxd::{
     CredentialDelivery, DaemonToolCatalog, DaemonToolComposition, FileCredentialAccess,
@@ -94,8 +95,8 @@ enum CaseCategory {
 }
 
 impl CaseCategory {
-    const fn as_str(self) -> &'static str {
-        match self {
+    fn as_str(self) -> &'static str {
+        let category = match self {
             Self::GitPush => "git_push",
             Self::ThreadOps => "thread_ops",
             Self::NetworkEgress => "network_egress",
@@ -105,7 +106,9 @@ impl CaseCategory {
             Self::InjectionResistance => "injection_resistance",
             Self::ContextAbsent => "context_absent",
             Self::UndecodableArguments => "undecodable_arguments",
-        }
+        };
+        debug_assert!(APPROVAL_JUDGE_EVAL_CASE_CATEGORIES.contains(&category));
+        category
     }
 }
 
@@ -177,8 +180,7 @@ enum ParsedArguments {
 }
 
 struct EvalRecording {
-    pool: sqlx::PgPool,
-    schema: signalbox_persistence::approval_judge_eval::ApprovalJudgeEvalRecordingSchema,
+    schema: ApprovalJudgeEvalRecordingSchema,
     repeats: u32,
     usage_input_includes_cache_tokens: bool,
 }
@@ -362,7 +364,7 @@ fn render_scorecard(
             .sum::<usize>(),
         "failed_calls": scores.values().map(|score| score.failed_calls).sum::<usize>(),
         "escalation_calibration": escalation,
-        "scoring_semantics_version": SCORING_SEMANTICS_VERSION,
+        "scoring_semantics_version": APPROVAL_JUDGE_EVAL_SCORING_SEMANTICS_VERSION,
         "categories": categories,
         "cases": case_reports,
     });
@@ -549,7 +551,6 @@ async fn run(options: RunOptions) -> Result<(), String> {
                 .await
                 .map_err(|error| format!("database recording is unavailable: {error}"))?;
             Some(EvalRecording {
-                pool,
                 schema,
                 repeats,
                 usage_input_includes_cache_tokens: configuration
@@ -860,7 +861,11 @@ async fn run(options: RunOptions) -> Result<(), String> {
             "repeats": verdicts.iter().map(|verdict| serde_json::json!({
                 "recommendation": recommendation_label(verdict.recommendation),
                 "rationale": verdict.rationale,
-                "provider_reported_model": verdict.provider_reported_model,
+                "provider_reported_model": if recording.is_some() {
+                    storable_provider_reported_model(verdict.provider_reported_model.as_deref())
+                } else {
+                    verdict.provider_reported_model.clone()
+                },
             })).collect::<Vec<_>>(),
             "notes": case.notes,
         }));
@@ -905,7 +910,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
             "recording eval run {run_identity} holding {} calls",
             recorded_calls.len()
         );
-        record_eval_run(&recording.pool, &recording.schema, &run, &recorded_calls)
+        record_eval_run(&recording.schema, &run, &recorded_calls)
             .await
             .map_err(|error| {
                 format!("database recording failed for eval run {run_identity}: {error}")
@@ -915,9 +920,27 @@ async fn run(options: RunOptions) -> Result<(), String> {
     Ok(())
 }
 
+/// PostgreSQL JSONB cannot represent U+0000. Provider-controlled model text
+/// containing it is encoded as a versioned UTF-8 hex string; ordinary model
+/// text remains unchanged, and the prefix makes decoding unambiguous.
+fn storable_provider_reported_model(model: Option<&str>) -> Option<String> {
+    const ENCODED_PREFIX: &str = "signalbox:utf8-hex-v1:";
+    let model = model?;
+    if !model.contains('\u{0}') && !model.starts_with(ENCODED_PREFIX) {
+        return Some(String::from(model));
+    }
+    let mut encoded = String::with_capacity(ENCODED_PREFIX.len() + model.len() * 2);
+    encoded.push_str(ENCODED_PREFIX);
+    for byte in model.as_bytes() {
+        use std::fmt::Write as _;
+        write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Some(encoded)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PAID_CALLS, paid_call_count};
+    use super::{MAX_PAID_CALLS, paid_call_count, storable_provider_reported_model};
 
     #[test]
     fn paid_call_count_accepts_the_safety_ceiling() {
@@ -932,5 +955,33 @@ mod tests {
     #[test]
     fn paid_call_count_rejects_arithmetic_overflow() {
         assert!(paid_call_count(usize::MAX, 2).is_err());
+    }
+
+    #[test]
+    fn provider_reported_model_with_nul_is_reversibly_encoded() {
+        assert_eq!(
+            storable_provider_reported_model(Some("model\u{0}revision")),
+            Some(String::from(
+                "signalbox:utf8-hex-v1:6d6f64656c007265766973696f6e"
+            ))
+        );
+    }
+
+    #[test]
+    fn ordinary_provider_reported_model_is_unchanged() {
+        assert_eq!(
+            storable_provider_reported_model(Some("provider/model\\revision")),
+            Some(String::from("provider/model\\revision"))
+        );
+    }
+
+    #[test]
+    fn provider_reported_model_using_encoding_prefix_is_escaped() {
+        assert_eq!(
+            storable_provider_reported_model(Some("signalbox:utf8-hex-v1:literal")),
+            Some(String::from(
+                "signalbox:utf8-hex-v1:7369676e616c626f783a757466382d6865782d76313a6c69746572616c"
+            ))
+        );
     }
 }
