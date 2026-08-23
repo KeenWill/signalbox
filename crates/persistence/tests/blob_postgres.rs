@@ -622,6 +622,78 @@ async fn inv071_canonical_parameter_boundary_round_trips() -> Result<(), Box<dyn
     Ok(())
 }
 
+/// INV-071: canonical JSON strings containing NUL round-trip without a jsonb cast.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv071_canonical_nul_string_round_trips() -> Result<(), Box<dyn Error>> {
+    let (container, pool, repository, input, output) = derivation_repository_fixture().await?;
+    let transformation = BlobTransformation::try_new(
+        BlobTransformationName::try_new("image.nul").expect("the NUL transformation name is valid"),
+        1,
+        &serde_json::json!({"value": "\u{0}"}),
+    )
+    .expect("the canonical NUL parameters are valid");
+    let derivation = BlobDerivation::try_new(
+        BlobDerivationId::from_uuid(Uuid::from_u128(0x5a10_0713)),
+        [input.digest()],
+        transformation,
+        BlobDerivationProducer::Deterministic {
+            implementation: BlobDigest::digest(b"nul-worker-v1"),
+        },
+        [output.digest()],
+    )
+    .expect("the NUL derivation is valid");
+    let key = derivation
+        .deterministic_key()
+        .expect("the NUL producer is deterministic");
+
+    repository.record(derivation.clone()).await?;
+    let loaded = repository.find_deterministic(key).await?;
+
+    assert_eq!(loaded, Some(derivation));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-071: arbitrary-precision canonical numbers round-trip without a jsonb cast.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv071_arbitrary_precision_parameter_round_trips() -> Result<(), Box<dyn Error>> {
+    let (container, pool, repository, input, output) = derivation_repository_fixture().await?;
+    let parameters: serde_json::Value = serde_json::from_str("{\"value\":1e+999}")?;
+    let transformation = BlobTransformation::try_new(
+        BlobTransformationName::try_new("image.precision")
+            .expect("the precision transformation name is valid"),
+        1,
+        &parameters,
+    )
+    .expect("the arbitrary-precision parameters are valid");
+    let derivation = BlobDerivation::try_new(
+        BlobDerivationId::from_uuid(Uuid::from_u128(0x5a10_0714)),
+        [input.digest()],
+        transformation,
+        BlobDerivationProducer::Deterministic {
+            implementation: BlobDigest::digest(b"precision-worker-v1"),
+        },
+        [output.digest()],
+    )
+    .expect("the arbitrary-precision derivation is valid");
+    let key = derivation
+        .deterministic_key()
+        .expect("the arbitrary-precision producer is deterministic");
+
+    repository.record(derivation.clone()).await?;
+    let loaded = repository.find_deterministic(key).await?;
+
+    assert_eq!(loaded, Some(derivation));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-071: an immutable derivation row rejects updates.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -711,9 +783,9 @@ async fn inv071_deterministic_provenance_rejects_a_null_implementation()
     let error = sqlx::query(
         "INSERT INTO blob_derivation (
              derivation_id, deterministic_key, transformation_name, transformation_version,
-             parameters_json, parameters_canonical, producer_class, implementation_digest,
+             parameters_canonical, producer_class, implementation_digest,
              execution_id, model_call_id, input_count, output_count
-         ) VALUES ($1, $2, 'image.thumbnail', 1, '{}'::jsonb, '{}',
+         ) VALUES ($1, $2, 'image.thumbnail', 1, '{}',
                    'deterministic', NULL, NULL, NULL, 1, 1)",
     )
     .bind(Uuid::from_u128(0x5a10_0711))
@@ -744,9 +816,9 @@ async fn inv071_derivation_satellites_reject_noncontiguous_ordinals() -> Result<
     sqlx::query(
         "INSERT INTO blob_derivation (
              derivation_id, deterministic_key, transformation_name, transformation_version,
-             parameters_json, parameters_canonical, producer_class, implementation_digest,
+             parameters_canonical, producer_class, implementation_digest,
              execution_id, model_call_id, input_count, output_count
-         ) VALUES ($1, $2, 'image.thumbnail', 1, '{}'::jsonb, '{}',
+         ) VALUES ($1, $2, 'image.thumbnail', 1, '{}',
                    'deterministic', $3, NULL, NULL, 1, 1)",
     )
     .bind(derivation_id)

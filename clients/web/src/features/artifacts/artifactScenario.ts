@@ -14,6 +14,38 @@ const audioDigest = `sha256:${'7a'.repeat(32)}`
 const videoDigest = `sha256:${'8c'.repeat(32)}`
 type BlobView = WebBlobDescriptor['available_views'][number]
 
+// Hard inline-original byte ceiling. A qualifying preview/thumbnail derivation additionally proves
+// that the exact source digest passed the owning service's bounded image decoder (16,384 px per
+// axis, 67,108,864 total pixels, and 320 MiB decoder allocation). Until the descriptor carries an
+// aggregate animation-decode bound, only inherently single-frame JPEG originals can use that proof;
+// animation-capable formats and originals without every proof remain ordinary-download only.
+export const INLINE_ORIGINAL_MAX_BYTES = 16n * 1024n * 1024n
+const BOUNDED_IMAGE_TRANSFORMATIONS = new Set(['image.preview', 'image.thumbnail'])
+const SINGLE_FRAME_ORIGINAL_MEDIA_TYPES = new Set(['image/jpeg'])
+
+export const selectBoundedOriginalView = (descriptor: WebBlobDescriptor): BlobView | undefined => {
+  const original = descriptor.available_views.find((view) => view.kind === 'browser_native')
+  if (
+    original === undefined ||
+    BigInt(original.byte_length) > INLINE_ORIGINAL_MAX_BYTES ||
+    !SINGLE_FRAME_ORIGINAL_MEDIA_TYPES.has(original.media_type.toLowerCase())
+  ) {
+    return undefined
+  }
+
+  const boundedDecodeProven = descriptor.available_views
+    .filter((view) => view.kind === 'preview' || view.kind === 'thumbnail')
+    .some((view) =>
+      view.derivations.some(
+        (derivation) =>
+          BOUNDED_IMAGE_TRANSFORMATIONS.has(derivation.transformation_name) &&
+          derivation.input_digests.includes(descriptor.digest),
+      ),
+    )
+
+  return boundedDecodeProven ? original : undefined
+}
+
 export const imageDownloadView: BlobView = {
   kind: 'download',
   media_type: 'image/png',
@@ -232,7 +264,7 @@ export const artifactPreviewIds = artifactScenario
 export const artifactOriginalIds = artifactScenario.flatMap((artifact) =>
   artifact.kind === 'image' &&
   artifact.source.kind === 'signalbox_blob' &&
-  artifact.source.descriptor.available_views.some((view) => view.kind === 'browser_native')
+  selectBoundedOriginalView(artifact.source.descriptor) !== undefined
     ? [artifact.id]
     : [],
 )

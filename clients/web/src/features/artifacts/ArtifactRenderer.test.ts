@@ -12,10 +12,12 @@ import {
   artifactOriginalIds,
   artifactPreviewIds,
   documentAttachment,
+  INLINE_ORIGINAL_MAX_BYTES,
   imageArtifact,
   imageDownloadView,
   imageOriginalView,
   imagePreviewView,
+  selectBoundedOriginalView,
 } from './artifactScenario'
 import {
   ARTIFACT_EXPANDED_CHARACTERS,
@@ -39,9 +41,66 @@ describe('artifact renderer compatibility', () => {
     expect(artifactPreviewIds).toEqual(['incident-notes', 'renderer-source'])
   })
 
-  it('derives original-capable artifact IDs from admitted descriptor views', () => {
-    expect(artifactOriginalIds).toEqual(['orbital-map'])
+  it('derives no original-capable ID for an animation-capable PNG representation', () => {
+    expect(artifactOriginalIds).toEqual([])
+    expect(selectBoundedOriginalView(imageArtifact)).toBeUndefined()
   })
+
+  it('admits a byte-bounded, decode-proven, inherently single-frame JPEG original', () => {
+    const jpegOriginal = { ...imageOriginalView, media_type: 'image/jpeg' }
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      declared_media_type: 'image/jpeg',
+      available_views: [imageDownloadView, jpegOriginal, imagePreviewView],
+    }
+
+    expect(selectBoundedOriginalView(descriptor)).toBe(jpegOriginal)
+  })
+
+  it('keeps oversized originals download-only', () => {
+    const oversizedLength = (INLINE_ORIGINAL_MAX_BYTES + 1n).toString()
+    const oversizedOriginal = {
+      ...imageOriginalView,
+      media_type: 'image/jpeg',
+      byte_length: oversizedLength,
+    }
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      declared_media_type: 'image/jpeg',
+      byte_length: oversizedLength,
+      available_views: [imageDownloadView, oversizedOriginal, imagePreviewView],
+    }
+
+    expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
+  })
+
+  it('keeps originals without bounded decode provenance download-only', () => {
+    const jpegOriginal = { ...imageOriginalView, media_type: 'image/jpeg' }
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      declared_media_type: 'image/jpeg',
+      available_views: [imageDownloadView, jpegOriginal],
+    }
+
+    expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
+  })
+
+  it.each(['image/gif', 'image/png', 'image/webp'])(
+    'keeps animation-capable %s originals download-only without aggregate decode evidence',
+    (mediaType) => {
+      const descriptor: WebBlobDescriptor = {
+        ...imageArtifact,
+        declared_media_type: mediaType,
+        available_views: [
+          imageDownloadView,
+          { ...imageOriginalView, media_type: mediaType },
+          imagePreviewView,
+        ],
+      }
+
+      expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
+    },
+  )
 
   it('registers the closed artifact renderer set', () => {
     expect(registeredArtifactKinds).toEqual([

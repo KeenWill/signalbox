@@ -18,8 +18,8 @@ import {
 import { type ComponentType, type KeyboardEvent, type ReactNode, useState } from 'react'
 import { type CommandContext, invokeCommand } from '../../commands'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import { actions, selectApp, useAppDispatch, useAppSelector } from '../../state'
-import { artifactScenario } from './artifactScenario'
+import { actions, useAppDispatch, useAppSelector } from '../../state'
+import { artifactScenario, selectBoundedOriginalView } from './artifactScenario'
 import {
   ARTIFACT_PREVIEW_CHARACTERS,
   type ArtifactItem,
@@ -220,7 +220,8 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
   const originalState = useAppSelector((state) => state.app.originalArtifacts[artifact.id])
   const { descriptor } = artifact.source
   const automatic = selectImageView(descriptor, failedAutomaticUrls)
-  const original = selectBlobView(descriptor, 'browser_native')
+  const advertisedOriginal = selectBlobView(descriptor, 'browser_native')
+  const original = selectBoundedOriginalView(descriptor)
   const download = selectBlobView(descriptor, 'download')
   const originalRequested = originalState === 'loading' || originalState === 'loaded'
   const candidate = originalRequested && original ? original : automatic
@@ -286,6 +287,9 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
                   ? 'Retry original'
                   : 'Load original'}
           </button>
+        )}
+        {advertisedOriginal && !original && (
+          <p>Original exceeds inline admission bounds. Download remains available.</p>
         )}
         {originalState === 'failed' && (
           <p role="status">
@@ -402,11 +406,12 @@ function DocumentBody({ artifact }: RendererProps<DocumentArtifact>) {
 }
 
 function DerivativeBody({ artifact }: RendererProps<DerivativeArtifact>) {
-  const [loadFailed, setLoadFailed] = useState(false)
+  const [failedContentUrl, setFailedContentUrl] = useState<string | null>(null)
   const rendered = selectBlobView(artifact.source.descriptor, artifact.viewKind)
   const derivation = rendered
     ? selectViewDerivation(artifact.source.descriptor, rendered)
     : undefined
+  const loadFailed = rendered?.content_url === failedContentUrl
 
   if (!rendered || !derivation || loadFailed) {
     return (
@@ -427,7 +432,7 @@ function DerivativeBody({ artifact }: RendererProps<DerivativeArtifact>) {
           src={rendered.content_url}
           alt={`Derived ${artifact.viewKind} of ${artifact.displayName}`}
           loading="lazy"
-          onError={() => setLoadFailed(true)}
+          onError={() => setFailedContentUrl(rendered.content_url)}
         />
       </div>
       <ArtifactMetadata
@@ -597,8 +602,6 @@ export function ArtifactRenderer({
 }
 
 export function ArtifactWorkbench({ commandContext }: { commandContext: CommandContext }) {
-  const remoteMedia = useAppSelector(selectApp).remoteMedia
-  const dispatch = useAppDispatch()
   return (
     <section
       className="artifact-panel"
@@ -611,20 +614,6 @@ export function ArtifactWorkbench({ commandContext }: { commandContext: CommandC
           <span className="eyebrow">Typed capability projection</span>
           <h1 id="artifact-heading">Artifact renderers</h1>
         </div>
-        <label>
-          Remote media
-          <select
-            value={remoteMedia}
-            onChange={(event) => {
-              const policy = event.target.value as typeof remoteMedia
-              dispatch(actions.remoteMediaSet(policy))
-            }}
-          >
-            <option value="ask">Ask</option>
-            <option value="block">Block</option>
-            <option value="allow">Allow</option>
-          </select>
-        </label>
       </header>
       <p className="artifact-bound-summary">
         {artifactScenario.length} typed records · {ARTIFACT_PREVIEW_CHARACTERS.toLocaleString()}

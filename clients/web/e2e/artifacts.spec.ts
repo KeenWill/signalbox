@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import { fallbackDescriptor } from '../src/features/artifacts/artifactScenario'
 
 interface BrowserProblems {
   consoleErrors: string[]
@@ -39,6 +40,26 @@ const watchBrowser = (page: Page): BrowserProblems => {
   return problems
 }
 
+const expectOnlyExpectedFailedResourceError = (
+  problems: BrowserProblems,
+  failedResponsePaths: readonly string[],
+  expectedPath: string,
+) => {
+  expect(problems.pageErrors).toEqual([])
+  expect(failedResponsePaths).toEqual([expectedPath])
+  expect(
+    problems.consoleErrors.filter(
+      (message) =>
+        !/^Failed to load resource: the server responded with a status of 500(?: |$)/u.test(
+          message,
+        ),
+    ),
+  ).toEqual([])
+  // Chromium emits one generic failed-resource diagnostic; Firefox emits none. The exact failed
+  // response assertion above correlates either behavior with only the intentional preview request.
+  expect(problems.consoleErrors.length).toBeLessThanOrEqual(1)
+}
+
 const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
   test.skip(
     testInfo.project.name !== 'chromium' || process.platform !== 'linux',
@@ -64,7 +85,9 @@ test.afterEach(async ({ page }, testInfo) => {
   })
 })
 
-test('selects admitted image views without prefetching original bytes', async ({ page }) => {
+test('selects a bounded image view and keeps an animation-capable original download-only', async ({
+  page,
+}) => {
   const problems = watchBrowser(page)
 
   const previewResponse = page.waitForResponse(
@@ -81,27 +104,24 @@ test('selects admitted image views without prefetching original bytes', async ({
     ),
   ).toBe(0)
 
-  const originalResponse = page.waitForResponse(
-    (response) => new URL(response.url()).pathname === originalPath,
-  )
-  const loadOriginal = page.getByRole('button', { name: 'Load original' })
-  await loadOriginal.focus()
-  await page.keyboard.press('Enter')
-  await expect(page.getByRole('button', { name: 'Original loaded' })).toBeFocused()
-  const original = page.getByRole('img', { name: 'Original of orbital-map.png' })
-  await expect(original).toBeVisible()
-  await expect(original).toHaveAttribute('src', originalPath)
-  await expect
-    .poll(() => original.evaluate((element) => (element as HTMLImageElement).naturalWidth))
-    .toBeGreaterThan(0)
-  expect((await originalResponse).headers()['content-type']).toContain('image/png')
-  await page.keyboard.press('Escape')
-  await expect(page.getByRole('button', { name: /orbital-map\.png/ })).toBeFocused()
+  const artifact = page.getByRole('article', { name: 'Artifact orbital-map.png' })
+  await expect(artifact.getByRole('button', { name: 'Load original' })).toHaveCount(0)
+  expect(
+    await page.evaluate(
+      (path) => performance.getEntriesByName(new URL(path, location.href).href).length,
+      originalPath,
+    ),
+  ).toBe(0)
+  await expect(artifact.getByRole('link', { name: 'Download' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
 test('falls back to metadata when automatic image views fail', async ({ page }) => {
   const problems = watchBrowser(page)
+  const failedResponsePaths: string[] = []
+  page.on('response', (response) => {
+    if (response.status() >= 400) failedResponsePaths.push(new URL(response.url()).pathname)
+  })
   await page.unroute('**/api/blobs/**/content/image-png')
   await page.route(`**${previewPath}`, async (route) => {
     await route.fulfill({ status: 500, body: 'unavailable' })
@@ -115,37 +135,7 @@ test('falls back to metadata when automatic image views fail', async ({ page }) 
     'No admitted inline image view could be loaded. Metadata and download remain available.',
   )
   await expect(artifact.getByRole('link', { name: 'Download' })).toBeVisible()
-  expect(problems.pageErrors).toEqual([])
-})
-
-test('reports original image failures and permits retry', async ({ page }) => {
-  const problems = watchBrowser(page)
-  await page.unroute('**/api/blobs/**/content/image-png')
-  await page.route(`**${previewPath}`, async (route) => {
-    await route.fulfill({ body: previewFixture, contentType: 'image/png' })
-  })
-  await page.route(`**${originalPath}`, async (route) => {
-    await route.fulfill({ status: 500, body: 'unavailable' })
-  })
-  await page.goto('/scenario/blobs')
-
-  const artifact = page.getByRole('article', { name: 'Artifact orbital-map.png' })
-  await artifact.getByRole('button', { name: 'Load original' }).click()
-  await expect(artifact.getByRole('status')).toHaveText(
-    'Original image failed to load. The preview remains available.',
-  )
-  await expect(artifact.getByRole('img', { name: 'Preview of orbital-map.png' })).toBeVisible()
-
-  await page.unroute(`**${originalPath}`)
-  await page.route(`**${originalPath}`, async (route) => {
-    await route.fulfill({ body: originalFixture, contentType: 'image/png' })
-  })
-  await artifact.getByRole('button', { name: 'Retry original' }).click()
-  const loadedOriginal = artifact.getByRole('button', { name: 'Original loaded' })
-  await expect(loadedOriginal).toBeVisible()
-  await expect(loadedOriginal).toHaveAttribute('aria-disabled', 'true')
-  await expect(artifact.getByRole('img', { name: 'Original of orbital-map.png' })).toBeVisible()
-  expect(problems.pageErrors).toEqual([])
+  expectOnlyExpectedFailedResourceError(problems, failedResponsePaths, previewPath)
 })
 
 test('expands text through a bounded keyboard action', async ({ page }) => {
@@ -229,7 +219,9 @@ test('keeps a generic descriptor available as metadata and download', async ({ p
   await expect(artifact.getByLabel('No compatible inline renderer')).toBeVisible()
   await expect(artifact.getByText('metadata fallback')).toBeVisible()
   await expect(artifact.getByText('application/octet-stream')).toBeVisible()
-  await expect(artifact.getByText('4,096 bytes')).toBeVisible()
+  await expect(
+    artifact.getByText(`${BigInt(fallbackDescriptor.byte_length).toLocaleString()} bytes`),
+  ).toBeVisible()
   await expect(artifact.getByRole('link', { name: 'Download' })).toHaveAttribute(
     'href',
     /display_filename=trace\.bin/,

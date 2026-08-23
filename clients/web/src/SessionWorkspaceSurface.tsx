@@ -82,6 +82,7 @@ export function SessionWorkspaceSurface({
     },
     enabled: sessionId !== null,
     gcTime: 0,
+    placeholderData: (previousData) => previousData,
   })
   const items = useMemo(
     () => visibleSessionItems(session.data?.window.items ?? [], app.detail),
@@ -158,7 +159,6 @@ export function SessionWorkspaceSurface({
             placeholder="00000000-0000-0000-0000-000000000000"
             value={draftId}
             onChange={(event) => setDraftId(event.target.value)}
-            pattern={SESSION_ID_PATTERN.source}
             required
           />
         </label>

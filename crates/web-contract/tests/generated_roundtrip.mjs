@@ -11,6 +11,50 @@ import {
 
 const fixtureUrl = new URL("./fixtures/example.json", import.meta.url);
 
+function assertCanonicalNumberSpelling(parameters_json) {
+  const digest = `sha256:${"a1".repeat(32)}`;
+
+  assert.throws(
+    () => decodeWebBlobDescriptor({
+      digest,
+      byte_length: "1",
+      declared_media_type: "image/png",
+      display_filename: [],
+      available_views: [
+        {
+          kind: "download",
+          content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
+          media_type: "image/png",
+          byte_length: "1",
+          derivations: [],
+        },
+        {
+          kind: "preview",
+          content_url: `/api/blobs/${digest}/content/image-png`,
+          media_type: "image/png",
+          byte_length: "1",
+          derivations: [
+            {
+              derivation_id: "01990f5f-55c0-7000-8000-000000000001",
+              input_digests: [digest],
+              output_digests: [digest],
+              transformation_name: "image.preview",
+              transformation_version: 1,
+              parameters_json,
+              producer: {
+                class: "executed",
+                execution_id: "01990f5f-55c0-7000-8000-000000000002",
+                implementation_digest: digest,
+              },
+            },
+          ],
+        },
+      ],
+    }),
+    /derivations must be the exact deterministic image transformation/,
+  );
+}
+
 test("generated example decoder round trips the Rust fixture", async () => {
   const source = JSON.parse(await readFile(fixtureUrl, "utf8"));
   const decoded = decodeWebContractExample(source);
@@ -57,8 +101,8 @@ test("generated bootstrap decoder rejects another contract version", () => {
 });
 
 test("generated blob decoder accepts capability-projected views", () => {
-  const digest = `sha256:${"a1".repeat(32)}`;
-  const outputDigest = `sha256:${"b2".repeat(32)}`;
+  const digest = "sha256:3729b2319da081a0710ba27da7af330c1236325cf8ed0a619cf132375bb0fc1e";
+  const outputDigest = "sha256:071d25f582ba9e6a8725e198dab884d70a3d7ce3ea84a74c66e65a1443c41a8e";
   const descriptor = decodeWebBlobDescriptor({
     digest,
     byte_length: "94371840",
@@ -67,13 +111,13 @@ test("generated blob decoder accepts capability-projected views", () => {
     available_views: [
       {
         kind: "download",
-        content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
+        content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng&display_filename=capture.png`,
         media_type: "image/png",
         byte_length: "94371840",
         derivations: [],
       },
       {
-        kind: "thumbnail",
+        kind: "preview",
         content_url: `/api/blobs/${outputDigest}/content/image-png`,
         media_type: "image/png",
         byte_length: "2048",
@@ -82,13 +126,13 @@ test("generated blob decoder accepts capability-projected views", () => {
             derivation_id: "01990f5f-55c0-7000-8000-000000000001",
             input_digests: [digest],
             output_digests: [outputDigest],
-            transformation_name: "signalbox.image.thumbnail",
+            transformation_name: "image.preview",
             transformation_version: 1,
-            parameters_json: '{"max_edge":256}',
+            parameters_json: '{"edge_px":1600,"format":"image/png"}',
             producer: {
               class: "deterministic",
-              implementation_digest: `sha256:${"c3".repeat(32)}`,
-              cache_key: "sha256:a19f72fb3f56c8462d4d2b861111592c325e0f9329c3e204d5bb4d0dddf21357",
+              implementation_digest: `sha256:${"4d".repeat(32)}`,
+              cache_key: "sha256:07257dcebadabd8928bfae61ebcf7c45ead3d35cf94cfdacf572f40695668816",
             },
           },
         ],
@@ -96,7 +140,7 @@ test("generated blob decoder accepts capability-projected views", () => {
     ],
   });
 
-  assert.equal(descriptor.available_views[1].kind, "thumbnail");
+  assert.equal(descriptor.available_views[1].kind, "preview");
   assert.equal(descriptor.byte_length, "94371840");
 });
 
@@ -139,6 +183,40 @@ test("generated blob decoder rejects invalid download media metadata", () => {
             media_type: "application/octet-stream",
             byte_length: "1",
             derivations: [],
+          },
+        ],
+      }),
+    /MIME value/,
+  );
+});
+
+test("generated blob decoder rejects daemon-invalid quoted MIME values", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const descriptor = {
+    digest,
+    byte_length: "1",
+    declared_media_type: "application/octet-stream",
+    display_filename: [],
+    available_views: [
+      {
+        kind: "download",
+        content_url: `/api/blobs/${digest}/download?media_type=text%2Fplain%3Bfoo%3D%22%00%22`,
+        media_type: "application/octet-stream",
+        byte_length: "1",
+        derivations: [],
+      },
+    ],
+  };
+
+  assert.throws(() => decodeWebBlobDescriptor(descriptor), /MIME value/);
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        ...descriptor,
+        available_views: [
+          {
+            ...descriptor.available_views[0],
+            content_url: `/api/blobs/${digest}/download?media_type=text%2Fplain%3Bfoo%3D%22a%5C%22b%22`,
           },
         ],
       }),
@@ -419,49 +497,8 @@ test("generated blob decoder rejects lone surrogates in canonical parameters", (
   );
 });
 
-test("generated blob decoder preserves exact large JSON integers", () => {
-  const digest = `sha256:${"a1".repeat(32)}`;
-  const descriptor = {
-    digest,
-    byte_length: "1",
-    declared_media_type: "image/png",
-    display_filename: [],
-    available_views: [
-      {
-        kind: "download",
-        content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
-        media_type: "image/png",
-        byte_length: "1",
-        derivations: [],
-      },
-      {
-        kind: "preview",
-        content_url: `/api/blobs/${digest}/content/image-png`,
-        media_type: "image/png",
-        byte_length: "1",
-        derivations: [
-          {
-            derivation_id: "01990f5f-55c0-7000-8000-000000000001",
-            input_digests: [digest],
-            output_digests: [digest],
-            transformation_name: "image.preview",
-            transformation_version: 1,
-            parameters_json: '{"n":9007199254740993}',
-            producer: {
-              class: "deterministic",
-              implementation_digest: digest,
-              cache_key: "sha256:82d6a29a685b22337ef640db7ff1ebe8eea86bdf541e5e356b6adb2803c7fc73",
-            },
-          },
-        ],
-      },
-    ],
-  };
-
-  assert.equal(
-    decodeWebBlobDescriptor(descriptor).available_views[1].derivations[0].parameters_json,
-    '{"n":9007199254740993}',
-  );
+test("generated blob decoder accepts exact large JSON integers", () => {
+  assertCanonicalNumberSpelling('{"n":9007199254740993}');
 });
 
 test("generated blob decoder rejects invalid display filenames", () => {
@@ -725,25 +762,171 @@ test("generated blob decoder bounds nested view collections", () => {
   );
 });
 
-test("generated blob decoder accepts Rust-compatible floating-point spellings", () => {
-  const digest = `sha256:${"a1".repeat(32)}`;
-  const cases = [
-    [
-      '{"n":1e+20}',
-      "sha256:086cdb3b3cec1aae2ced395220c6b5c5d5190fc1220a4d3b8d38c9bf20b662b6",
-    ],
-    [
-      '{"n":1e-6}',
-      "sha256:5c124e0dafa4dfba43e7b9b68d356ddfdfe22155fafdee5e59d5b44236c1e596",
-    ],
-    [
-      '{"n":-0.0}',
-      "sha256:fcf3b35e58c2865942ffa068ce9d78ab58211cc3c7684f1c586ff117b34f7ff5",
-    ],
-  ];
+test("generated blob decoder accepts Rust large-exponent spelling", () => {
+  assertCanonicalNumberSpelling('{"n":1e+20}');
+});
 
-  for (const [parameters_json, cache_key] of cases) {
-    assert.doesNotThrow(() =>
+test("generated blob decoder accepts Rust small-exponent spelling", () => {
+  assertCanonicalNumberSpelling('{"n":1e-6}');
+});
+
+test("generated blob decoder accepts Rust negative-zero spelling", () => {
+  assertCanonicalNumberSpelling('{"n":-0.0}');
+});
+
+test("generated blob decoder accepts arbitrary-precision decimal spelling", () => {
+  assertCanonicalNumberSpelling('{"n":1.00}');
+});
+
+test("generated blob decoder accepts arbitrary-precision integer spelling", () => {
+  assertCanonicalNumberSpelling('{"n":18446744073709551616}');
+});
+
+test("generated blob decoder accepts arbitrary-precision exponent spelling", () => {
+  assertCanonicalNumberSpelling('{"n":1e+999}');
+});
+
+test("generated blob decoder binds original metadata to the descriptor", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const download = {
+    kind: "download",
+    content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
+    media_type: "image/png",
+    byte_length: "999",
+    derivations: [],
+  };
+  const descriptor = {
+    digest,
+    byte_length: "10",
+    declared_media_type: "image/png",
+    display_filename: [],
+    available_views: [download],
+  };
+
+  assert.throws(
+    () => decodeWebBlobDescriptor(descriptor),
+    /byte_length must be the descriptor byte length for an original representation/,
+  );
+  assert.throws(
+    () => decodeWebBlobDescriptor({
+      ...descriptor,
+      declared_media_type: "text/plain",
+      available_views: [{ ...download, byte_length: "10" }],
+    }),
+    /media_type must be the descriptor declared media type for the download representation/,
+  );
+});
+
+test("generated blob decoder binds browser-native routes to the declared image type", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+
+  assert.throws(
+    () => decodeWebBlobDescriptor({
+      digest,
+      byte_length: "1",
+      declared_media_type: "image/jpeg",
+      display_filename: [],
+      available_views: [
+        {
+          kind: "download",
+          content_url: `/api/blobs/${digest}/download?media_type=image%2Fjpeg`,
+          media_type: "image/jpeg",
+          byte_length: "1",
+          derivations: [],
+        },
+        {
+          kind: "browser_native",
+          content_url: `/api/blobs/${digest}/content/image-png`,
+          media_type: "image/png",
+          byte_length: "1",
+          derivations: [],
+        },
+      ],
+    }),
+    /content_url must be an original-image route matching the descriptor declared media type/,
+  );
+});
+
+test("generated blob decoder rejects duplicate representation kinds", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const browserNative = {
+    kind: "browser_native",
+    content_url: `/api/blobs/${digest}/content/image-png`,
+    media_type: "image/png",
+    byte_length: "1",
+    derivations: [],
+  };
+
+  assert.throws(
+    () => decodeWebBlobDescriptor({
+      digest,
+      byte_length: "1",
+      declared_media_type: "image/png",
+      display_filename: [],
+      available_views: [
+        {
+          kind: "download",
+          content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
+          media_type: "image/png",
+          byte_length: "1",
+          derivations: [],
+        },
+        browserNative,
+        { ...browserNative },
+      ],
+    }),
+    /available_views must be at most one view of each representation kind/,
+  );
+});
+
+test("generated blob decoder binds view kinds to exact image transformations", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const outputDigest = `sha256:${"b2".repeat(32)}`;
+
+  assert.throws(
+    () => decodeWebBlobDescriptor({
+      digest,
+      byte_length: "1",
+      declared_media_type: "image/png",
+      display_filename: [],
+      available_views: [
+        {
+          kind: "download",
+          content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
+          media_type: "image/png",
+          byte_length: "1",
+          derivations: [],
+        },
+        {
+          kind: "preview",
+          content_url: `/api/blobs/${outputDigest}/content/image-png`,
+          media_type: "image/png",
+          byte_length: "1",
+          derivations: [{
+            derivation_id: "01990f5f-55c0-7000-8000-000000000001",
+            input_digests: [digest],
+            output_digests: [outputDigest],
+            transformation_name: "totally.unrelated",
+            transformation_version: 99,
+            parameters_json: "{}",
+            producer: {
+              class: "executed",
+              execution_id: "01990f5f-55c0-7000-8000-000000000002",
+              implementation_digest: digest,
+            },
+          }],
+        },
+      ],
+    }),
+    /derivations must be the exact deterministic image transformation/,
+  );
+});
+
+test("generated blob decoder rejects download routes for derivative views", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+
+  assert.throws(
+    () =>
       decodeWebBlobDescriptor({
         digest,
         byte_length: "1",
@@ -759,7 +942,7 @@ test("generated blob decoder accepts Rust-compatible floating-point spellings", 
           },
           {
             kind: "preview",
-            content_url: `/api/blobs/${digest}/content/image-png`,
+            content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
             media_type: "image/png",
             byte_length: "1",
             derivations: [
@@ -769,19 +952,19 @@ test("generated blob decoder accepts Rust-compatible floating-point spellings", 
                 output_digests: [digest],
                 transformation_name: "image.preview",
                 transformation_version: 1,
-                parameters_json,
+                parameters_json: "{}",
                 producer: {
-                  class: "deterministic",
+                  class: "executed",
+                  execution_id: "01990f5f-55c0-7000-8000-000000000002",
                   implementation_digest: digest,
-                  cache_key,
                 },
               },
             ],
           },
         ],
       }),
-    );
-  }
+    /content_url must be an image-content route for a derivative view/,
+  );
 });
 
 test("generated blob decoder rejects unsupported routes and incomplete download metadata", () => {
@@ -819,6 +1002,50 @@ test("generated blob decoder rejects unsupported routes and incomplete download 
         ],
       }),
     /canonical blob API route/,
+  );
+});
+
+test("generated blob decoder binds download filenames to descriptor metadata", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+
+  assert.throws(
+    () => decodeWebBlobDescriptor({
+      digest,
+      byte_length: "1",
+      declared_media_type: "application/pdf",
+      display_filename: ["report.pdf"],
+      available_views: [{
+        kind: "download",
+        content_url: `/api/blobs/${digest}/download?media_type=application%2Fpdf&display_filename=payload.exe`,
+        media_type: "application/pdf",
+        byte_length: "1",
+        derivations: [],
+      }],
+    }),
+    /content_url must be download filename metadata matching the descriptor/,
+  );
+});
+
+test("generated blob decoder cross-checks view and route media types", () => {
+  const routeDigest = `sha256:${"a1".repeat(32)}`;
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        digest: routeDigest,
+        byte_length: "1",
+        declared_media_type: "image/png",
+        display_filename: [],
+        available_views: [
+          {
+            kind: "download",
+            content_url: `/api/blobs/${routeDigest}/download?media_type=image%2Fpng`,
+            media_type: "text/plain",
+            byte_length: "1",
+            derivations: [],
+          },
+        ],
+      }),
+    /media_type must be the content route media type/,
   );
 });
 
