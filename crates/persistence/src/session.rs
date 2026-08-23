@@ -584,6 +584,9 @@ fn map_imported_error(error: ImportedSessionRepositoryError) -> SessionRepositor
                 "imported load reported an impossible identity collision",
             ))
         }
+        ImportedSessionRepositoryError::ImportedConversation(
+            crate::conversation_import::ImportedConversationRepositoryError::Database(error),
+        ) => SessionRepositoryError::Database(error),
         ImportedSessionRepositoryError::ImportedConversation(_) => {
             SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(
                 "imported conversation load failed",
@@ -745,9 +748,13 @@ mod tests {
 
     use super::{
         NO_ANCESTRY, SessionCorruption, SessionRepositoryError, decode_provenance,
-        validate_imported_creation_provenance,
+        map_imported_error, validate_imported_creation_provenance,
     };
-    use crate::mapping::session_creation_cause_to_str;
+    use crate::{
+        conversation_import::ImportedConversationRepositoryError,
+        create_session_from_imported_frontier::ImportedSessionRepositoryError,
+        mapping::session_creation_cause_to_str,
+    };
 
     const NON_NONE_ANCESTRY: &str = "single_source";
 
@@ -760,6 +767,18 @@ mod tests {
             panic!("the mapping failure is durable corruption")
         };
         corruption
+    }
+
+    #[test]
+    fn imported_conversation_database_failure_remains_retryable() {
+        let error = map_imported_error(ImportedSessionRepositoryError::ImportedConversation(
+            ImportedConversationRepositoryError::Database(sqlx::Error::PoolClosed),
+        ));
+
+        assert!(matches!(
+            error,
+            SessionRepositoryError::Database(sqlx::Error::PoolClosed)
+        ));
     }
 
     /// S18 / INV-003: the durable delegated spelling retains its exact request.

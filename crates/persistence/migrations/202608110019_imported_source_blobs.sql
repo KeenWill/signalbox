@@ -31,6 +31,9 @@ BEGIN
     CREATE TEMPORARY TABLE imported_reset_review_attempt (
         attempt_id uuid PRIMARY KEY
     ) ON COMMIT DROP;
+    CREATE TEMPORARY TABLE imported_reset_review_run (
+        run_id uuid PRIMARY KEY
+    ) ON COMMIT DROP;
 
     -- Capture every session in the imported-rooted delegation graph before
     -- temporary cascades remove the relationship rows used to discover it.
@@ -47,6 +50,27 @@ BEGIN
     )
     SELECT session_id FROM imported_rooted;
 
+    -- Reset complete review runs when an imported-rooted pass participates in
+    -- them. Follow references in the opposite direction too: deleting a
+    -- referenced finding would otherwise cascade an event out of an unrelated
+    -- subject run and leave that run as a partial aggregate.
+    INSERT INTO imported_reset_review_run (run_id)
+    WITH RECURSIVE affected_run(run_id) AS (
+        SELECT pass.run_id
+          FROM review_pass AS pass
+         WHERE pass.session_id IN (
+                   SELECT session_id FROM imported_reset_session
+               )
+        UNION
+        SELECT event.finding_run_id
+          FROM affected_run AS affected
+          JOIN review_finding AS referenced
+            ON referenced.run_id = affected.run_id
+          JOIN review_finding_event AS event
+            ON event.referenced_finding_id = referenced.finding_id
+    )
+    SELECT run_id FROM affected_run;
+
     -- Follow only foreign keys whose referenced rows can be reached from an
     -- imported root. This includes all durable effects of imported sessions,
     -- without changing or deleting an unrelated root row.
@@ -56,6 +80,7 @@ BEGIN
           FROM unnest(ARRAY[
               'session'::regclass::oid,
               'durable_command'::regclass::oid,
+              'review_run'::regclass::oid,
               'review_orchestration_attempt'::regclass::oid,
               'imported_conversation'::regclass::oid,
               'imported_raw_source_record'::regclass::oid
@@ -173,31 +198,40 @@ BEGIN
            )
     ON CONFLICT DO NOTHING;
 
-    -- Review-workflow commands are session-owned indirectly through the pass
-    -- named by their durable result. Capture their registry identities before
-    -- deleting the imported-rooted review graph and its passes.
+    -- Review-workflow commands are owned indirectly through their durable
+    -- result. Capture every pass and finding receipt in the complete affected
+    -- run closure before deleting that review graph.
     INSERT INTO imported_reset_command (command_id)
     SELECT command.command_id
       FROM review_workflow_command AS command
       JOIN review_pass AS pass
         ON pass.pass_id = command.result_pass_id
-     WHERE pass.session_id IN (
-               SELECT session_id FROM imported_reset_session
+     WHERE pass.run_id IN (
+               SELECT run_id FROM imported_reset_review_run
            )
     ON CONFLICT DO NOTHING;
 
-    -- Finding-event receipts name only the affected finding, not its pass.
-    -- Follow the finding back to its imported-rooted producing pass before the
-    -- review graph disappears.
+    -- Finding-event receipts name only their finding.
     INSERT INTO imported_reset_command (command_id)
     SELECT command.command_id
       FROM review_workflow_command AS command
       JOIN review_finding AS finding
         ON finding.finding_id = command.result_finding_id
-      JOIN review_pass AS pass
-        ON pass.pass_id = finding.producing_pass_id
-     WHERE pass.session_id IN (
-               SELECT session_id FROM imported_reset_session
+     WHERE finding.run_id IN (
+               SELECT run_id FROM imported_reset_review_run
+           )
+    ON CONFLICT DO NOTHING;
+
+    -- External-link receipts name only their link. Run- and finding-associated
+    -- links disappear with an affected review run, so retire their typed
+    -- receipts and registry claims with them.
+    INSERT INTO imported_reset_command (command_id)
+    SELECT command.command_id
+      FROM review_workflow_command AS command
+      JOIN review_external_link AS link
+        ON link.external_link_id = command.result_external_link_id
+     WHERE link.run_id IN (
+               SELECT run_id FROM imported_reset_review_run
            )
     ON CONFLICT DO NOTHING;
 
@@ -208,17 +242,27 @@ BEGIN
     WITH affected_pass AS (
         SELECT pass_id
           FROM review_pass
-         WHERE session_id IN (
-                   SELECT session_id FROM imported_reset_session
+         WHERE run_id IN (
+                   SELECT run_id FROM imported_reset_review_run
                )
     ),
     affected_finding AS (
         SELECT finding_id
           FROM review_finding
          WHERE producing_pass_id IN (SELECT pass_id FROM affected_pass)
+    ),
+    affected_external_link AS (
+        SELECT external_link_id
+          FROM review_external_link
+         WHERE run_id IN (
+                   SELECT run_id FROM imported_reset_review_run
+               )
     )
     SELECT attempt_id FROM review_orchestration_import
      WHERE pass_id IN (SELECT pass_id FROM affected_pass)
+        OR external_link_id IN (
+               SELECT external_link_id FROM affected_external_link
+           )
     UNION
     SELECT attempt_id FROM review_orchestration_concern_claim
      WHERE pass_id IN (SELECT pass_id FROM affected_pass)
@@ -247,7 +291,10 @@ BEGIN
         OR finding_id IN (SELECT finding_id FROM affected_finding)
     UNION
     SELECT attempt_id FROM review_orchestration_publication_outcome
-     WHERE finding_id IN (SELECT finding_id FROM affected_finding);
+     WHERE finding_id IN (SELECT finding_id FROM affected_finding)
+        OR external_link_id IN (
+               SELECT external_link_id FROM affected_external_link
+           );
 
     INSERT INTO imported_reset_command (command_id)
     SELECT command_id
@@ -261,6 +308,8 @@ BEGIN
      WHERE attempt_id IN (
                SELECT attempt_id FROM imported_reset_review_attempt
            );
+    DELETE FROM review_run
+     WHERE run_id IN (SELECT run_id FROM imported_reset_review_run);
 
     DELETE FROM session
      WHERE session_id IN (SELECT session_id FROM imported_reset_session);
