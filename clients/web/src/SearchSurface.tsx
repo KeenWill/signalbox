@@ -197,16 +197,15 @@ export function SearchSurface({
     }
     setDraftIsInvalid(false)
     restoreResultsFocusRef.current = false
-    if (q !== queryText || submittedSession !== state.session || activeAfter !== undefined) {
-      submittedRouteChangeRef.current = true
-    }
-    onStateChange({ q, session: submittedSession })
     if (
-      requestIsValid &&
-      activeAfter === undefined &&
-      q === queryText &&
-      submittedSession === state.session
+      q !== queryText ||
+      submittedSession !== state.session ||
+      activeAfter !== undefined ||
+      !cursorMetadataIsValid
     ) {
+      submittedRouteChangeRef.current = true
+      onStateChange({ q, session: submittedSession })
+    } else if (requestIsValid) {
       void results.refetch()
     }
   }
