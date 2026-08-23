@@ -39,7 +39,7 @@ fn session(value: u128) -> SessionId {
 
 async fn create_session(pool: &PgPool, identity: SessionId) -> Result<(), Box<dyn Error>> {
     let prepared = CreateSession::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0x0009_9101)),
+        DurableCommandId::from_uuid(identity.into_uuid()),
         SessionCreationProvenance::new(
             SessionCreationCause::UserInitiated,
             TranscriptAncestry::None,
