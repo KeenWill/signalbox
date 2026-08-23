@@ -931,9 +931,16 @@ fn storable_provider_reported_model(model: Option<&str>) -> Option<String> {
     }
     let mut encoded = String::with_capacity(ENCODED_PREFIX.len() + model.len() * 2);
     encoded.push_str(ENCODED_PREFIX);
+    let hex_digit = |nibble: u8| {
+        char::from(if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + (nibble - 10)
+        })
+    };
     for byte in model.as_bytes() {
-        use std::fmt::Write as _;
-        write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+        encoded.push(hex_digit(byte >> 4));
+        encoded.push(hex_digit(byte & 0x0f));
     }
     Some(encoded)
 }
