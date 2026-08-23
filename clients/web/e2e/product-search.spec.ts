@@ -225,7 +225,7 @@ test('synchronizes pagination with browser history', async ({ page }) => {
   )
   await page.goBack()
 
-  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeFocused()
   await expect(page).not.toHaveURL(/afterAddress=/)
 })
 

@@ -10,8 +10,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Value, json};
 use signalbox_application::{
-    max_search_page_items, max_search_query_bytes, max_search_snippet_bytes,
-    max_timeline_window_bytes, max_timeline_window_items,
+    MAX_SEARCH_HIGHLIGHTS_PER_RESULT, max_search_page_items, max_search_query_bytes,
+    max_search_snippet_bytes, max_timeline_window_bytes, max_timeline_window_items,
 };
 
 /// Exact browser HTTP contract version served by this daemon build.
@@ -501,7 +501,7 @@ pub struct WebSearchResult {
     pub content_class: WebSearchContentClass,
     #[schemars(length(max = 512))]
     pub snippet: String,
-    #[schemars(length(max = 64))]
+    #[schemars(length(max = MAX_SEARCH_HIGHLIGHTS_PER_RESULT))]
     pub highlights: Vec<WebSearchHighlight>,
 }
 

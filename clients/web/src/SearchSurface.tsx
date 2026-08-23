@@ -71,32 +71,35 @@ export function SearchSurface({
   const resultsHeadingRef = useRef<HTMLHeadingElement>(null)
   const errorHeadingRef = useRef<HTMLHeadingElement>(null)
   const restoreResultsFocusRef = useRef(false)
-  const [activeAfter, setActiveAfter] = useState(() =>
+  const activeAfter =
     state.afterAddress && state.afterProjection
       ? { address: state.afterAddress, projectionId: state.afterProjection }
-      : undefined,
-  )
+      : undefined
+  const routeStateRef = useRef({
+    q: state.q,
+    session: state.session,
+    afterAddress: state.afterAddress,
+    afterProjection: state.afterProjection,
+  })
   useEffect(() => setDraftQuery(state.q ?? ''), [state.q])
   useEffect(() => setDraftSession(state.session ?? ''), [state.session])
-  useEffect(
-    () =>
-      setActiveAfter(
-        state.afterAddress && state.afterProjection
-          ? { address: state.afterAddress, projectionId: state.afterProjection }
-          : undefined,
-      ),
-    [state.afterAddress, state.afterProjection],
-  )
   useEffect(() => {
-    const synchronizeWithHistory = () => {
-      const search = new URLSearchParams(window.location.search)
-      const address = search.get('afterAddress')
-      const projectionId = search.get('afterProjection')
-      setActiveAfter(address && projectionId ? { address, projectionId } : undefined)
+    const previous = routeStateRef.current
+    if (
+      previous.q === state.q &&
+      previous.session === state.session &&
+      (previous.afterAddress !== state.afterAddress ||
+        previous.afterProjection !== state.afterProjection)
+    ) {
+      restoreResultsFocusRef.current = true
     }
-    window.addEventListener('popstate', synchronizeWithHistory)
-    return () => window.removeEventListener('popstate', synchronizeWithHistory)
-  }, [])
+    routeStateRef.current = {
+      q: state.q,
+      session: state.session,
+      afterAddress: state.afterAddress,
+      afterProjection: state.afterProjection,
+    }
+  }, [state.afterAddress, state.afterProjection, state.q, state.session])
   const queryText = state.q?.trim() ?? ''
   const queryBytes = new TextEncoder().encode(queryText).length
   const queryLimit = bootstrap?.limits.max_search_query_bytes ?? 0
@@ -157,7 +160,6 @@ export function SearchSurface({
     const q = String(form.get('q') ?? '').trim()
     const session = String(form.get('session') ?? '').trim()
     restoreResultsFocusRef.current = false
-    setActiveAfter(undefined)
     onStateChange({ q: q || undefined, session: session || undefined })
     if (
       requestIsValid &&
@@ -278,7 +280,6 @@ export function SearchSurface({
                     projectionId: continuation.projection_id,
                   }
                   restoreResultsFocusRef.current = true
-                  setActiveAfter(nextAfter)
                   onStateChange({
                     q: queryText,
                     session: state.session,

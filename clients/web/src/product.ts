@@ -246,7 +246,9 @@ export const readProductSearchState = (value: Record<string, unknown>): ProductS
   return {
     q,
     session: text('session'),
-    ...(Array.isArray(value.session) ? { sessionParameterIsValid: false as const } : {}),
+    ...(value.session !== undefined && typeof value.session !== 'string'
+      ? { sessionParameterIsValid: false as const }
+      : {}),
     afterAddress: cursorText('afterAddress'),
     afterProjection: cursorText('afterProjection'),
     ...(Array.isArray(value.afterAddress) || Array.isArray(value.afterProjection)

@@ -410,8 +410,10 @@ export function ProductApp({
       sequence: binding.sequence,
       callback: (event) => {
         if (isEditableTarget(event.target) || app.overlay !== null) return
+        const command = commandRegistry.find((candidate) => candidate.id === binding.commandId)
+        if (command?.available(context) !== true) return
         invokeCommand(binding.commandId, context)
-        primaryRef.current?.focus()
+        if (binding.commandId.startsWith('navigate.')) primaryRef.current?.focus()
       },
     })),
   )

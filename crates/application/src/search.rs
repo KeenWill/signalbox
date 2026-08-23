@@ -30,9 +30,12 @@ pub const fn max_search_snippet_bytes() -> usize {
 }
 
 /// Maximum highlighted ranges retained for one bounded search result.
+pub const MAX_SEARCH_HIGHLIGHTS_PER_RESULT: usize = 64;
+
+/// Returns the shared ceiling for highlighted ranges in one bounded search result.
 #[must_use]
 pub const fn max_search_highlights_per_result() -> usize {
-    64
+    MAX_SEARCH_HIGHLIGHTS_PER_RESULT
 }
 
 /// Maximum UTF-8 bytes accepted in one explicit artifact projection.

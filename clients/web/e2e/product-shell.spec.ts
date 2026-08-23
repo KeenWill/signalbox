@@ -254,6 +254,19 @@ test('suppresses product navigation sequences while an overlay owns input', asyn
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
 })
 
+test('leaves unavailable scenario sequences inert on product routes', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const paletteButton = page.getByRole('button', { name: 'Open command palette' })
+  await paletteButton.focus()
+  await page.keyboard.press('g')
+  await page.keyboard.press('g')
+
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(paletteButton).toBeFocused()
+})
+
 test('suppresses ordinary view hotkeys while an overlay owns input', async ({ page }) => {
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
