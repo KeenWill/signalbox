@@ -112,17 +112,35 @@ pub(crate) const STARTUP_RECOVERY: &str = "SELECT
             )";
 
 pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY: &str = "WITH discovery AS (
-            SELECT after_turn_id
+            SELECT after_turn_id, high_turn_id
               FROM automatic_model_call_reconciliation_discovery_state
              WHERE singleton
              FOR UPDATE
+         ), bounds AS MATERIALIZED (
+            SELECT after_turn_id,
+                   CASE
+                       WHEN after_turn_id IS NULL THEN (
+                           SELECT turn_id
+                             FROM turn_lifecycle
+                            WHERE state_kind = 'active'
+                              AND active_phase_kind = 'awaiting_model_call_recovery'
+                              AND NOT delegation_runtime_terminal
+                              AND recovery_model_call_id IS NOT NULL
+                            ORDER BY turn_id DESC
+                            LIMIT 1
+                       )
+                       ELSE high_turn_id
+                   END AS high_turn_id
+              FROM discovery
          ), page AS (
             SELECT turn_id, session_id, recovery_model_call_id
-              FROM turn_lifecycle, discovery
+              FROM turn_lifecycle, bounds
              WHERE state_kind = 'active'
                AND active_phase_kind = 'awaiting_model_call_recovery'
+               AND NOT delegation_runtime_terminal
                AND recovery_model_call_id IS NOT NULL
-               AND (after_turn_id IS NULL OR turn_id > after_turn_id)
+               AND (bounds.after_turn_id IS NULL OR turn_id > bounds.after_turn_id)
+               AND turn_id <= bounds.high_turn_id
              ORDER BY turn_id
              LIMIT $1
          ), inserted AS (
@@ -133,12 +151,18 @@ pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY: &str = "WITH dis
             RETURNING turn_id
          )
          UPDATE automatic_model_call_reconciliation_discovery_state
-            SET after_turn_id = (
-                SELECT turn_id
-                  FROM page
-                 ORDER BY turn_id DESC
-                 LIMIT 1
-            )
+            SET after_turn_id = CASE
+                    WHEN (SELECT count(*) FROM page) = $1 THEN (
+                        SELECT turn_id FROM page ORDER BY turn_id DESC LIMIT 1
+                    )
+                    ELSE NULL
+                END,
+                high_turn_id = CASE
+                    WHEN (SELECT count(*) FROM page) = $1 THEN (
+                        SELECT high_turn_id FROM bounds
+                    )
+                    ELSE NULL
+                END
           WHERE singleton";
 
 pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION: &str = "WITH cursor AS (
@@ -163,6 +187,7 @@ pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION: &str = "WITH 
                    AND lifecycle.session_id = page.session_id
                    AND lifecycle.state_kind = 'active'
                    AND lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
+                   AND NOT lifecycle.delegation_runtime_terminal
                    AND lifecycle.recovery_model_call_id = page.model_call_id
             )
          ), attempts AS (

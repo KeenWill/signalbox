@@ -170,7 +170,7 @@ impl PostgresModelCallReconciliationRepository {
     ) -> Result<ModelCallReconciliationBatch, ModelCallReconciliationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         discover_recoveries(&mut transaction, CLAIM_WINDOW).await?;
-        settle_abandoned_attempts(&mut transaction).await?;
+        settle_abandoned_attempts(&mut transaction, CLAIM_WINDOW).await?;
         mark_superseded_recoveries(&mut transaction, CLAIM_WINDOW).await?;
         let exhausted_rows = mark_exhausted_recoveries(&mut transaction).await?;
         let rows = sqlx::query(crate::lock_inventory::AUTOMATIC_MODEL_CALL_RECONCILIATION_CLAIM)
@@ -408,7 +408,10 @@ mod tests {
     #[test]
     fn discovery_is_a_bounded_keyset_page() {
         assert!(CLAIM_WINDOW > 0);
-        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("turn_id > after_turn_id"));
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY
+                .contains("turn_id > bounds.after_turn_id")
+        );
         assert!(
             !AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY
                 .contains("origin_kind = 'accepted_input'")
@@ -417,7 +420,15 @@ mod tests {
         assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("LIMIT $1"));
         assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("SET after_turn_id"));
         assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("ORDER BY turn_id DESC"));
-        assert!(!AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("max(turn_id)"));
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY
+                .contains("turn_id <= bounds.high_turn_id")
+        );
+        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("high_turn_id = CASE"));
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY
+                .contains("NOT delegation_runtime_terminal")
+        );
     }
 
     #[test]
@@ -435,32 +446,42 @@ mod tests {
                 .contains("origin_kind = 'accepted_input'")
         );
         assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION.contains("SET after_turn_id"));
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION
+                .contains("NOT lifecycle.delegation_runtime_terminal")
+        );
     }
 }
 
 async fn settle_abandoned_attempts(
     connection: &mut PgConnection,
+    window: i64,
 ) -> Result<(), ModelCallReconciliationRepositoryError> {
     sqlx::query(
-        "UPDATE automatic_model_call_reconciliation_attempt AS attempt
-            SET outcome_kind = 'infrastructure_failure',
-                finished_at = statement_timestamp()
-           FROM automatic_model_call_reconciliation AS recovery
-          WHERE recovery.turn_id = attempt.turn_id
-            AND recovery.state_kind = 'attempting'
-            AND recovery.next_attempt_at <= statement_timestamp()
-            AND attempt.attempt_ordinal = recovery.attempt_count
-            AND attempt.outcome_kind = 'attempting'",
-    )
-    .execute(&mut *connection)
-    .await?;
-    sqlx::query(
-        "UPDATE automatic_model_call_reconciliation
+        "WITH abandoned AS MATERIALIZED (
+            SELECT turn_id, attempt_count
+              FROM automatic_model_call_reconciliation
+             WHERE state_kind = 'attempting'
+               AND next_attempt_at <= statement_timestamp()
+             ORDER BY next_attempt_at, turn_id
+             LIMIT $1
+         ), attempts AS (
+            UPDATE automatic_model_call_reconciliation_attempt AS attempt
+               SET outcome_kind = 'infrastructure_failure',
+                   finished_at = statement_timestamp()
+              FROM abandoned
+             WHERE attempt.turn_id = abandoned.turn_id
+               AND attempt.attempt_ordinal = abandoned.attempt_count
+               AND attempt.outcome_kind = 'attempting'
+         )
+         UPDATE automatic_model_call_reconciliation AS recovery
             SET state_kind = 'scheduled'
-          WHERE state_kind = 'attempting'
-            AND attempt_count < 5
-            AND next_attempt_at <= statement_timestamp()",
+           FROM abandoned
+          WHERE recovery.turn_id = abandoned.turn_id
+            AND recovery.state_kind = 'attempting'
+            AND recovery.attempt_count = abandoned.attempt_count",
     )
+    .bind(window)
     .execute(connection)
     .await?;
     Ok(())

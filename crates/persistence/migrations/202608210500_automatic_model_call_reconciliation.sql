@@ -26,7 +26,8 @@ CREATE INDEX automatic_model_call_reconciliation_due
 
 CREATE TABLE automatic_model_call_reconciliation_discovery_state (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-    after_turn_id uuid
+    after_turn_id uuid,
+    high_turn_id uuid
 );
 
 INSERT INTO automatic_model_call_reconciliation_discovery_state (singleton)
@@ -45,6 +46,7 @@ CREATE INDEX turn_lifecycle_automatic_model_call_recovery_discovery
     INCLUDE (session_id, recovery_model_call_id)
     WHERE state_kind = 'active'
       AND active_phase_kind = 'awaiting_model_call_recovery'
+      AND NOT delegation_runtime_terminal
       AND recovery_model_call_id IS NOT NULL;
 
 CREATE INDEX automatic_model_call_reconciliation_supersession

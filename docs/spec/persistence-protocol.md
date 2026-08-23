@@ -908,22 +908,27 @@ Locks per transaction, in acquisition order:
 - **Automatic model-call reconciliation**: `claim_due` first locks the singleton
   discovery-cursor row `FOR UPDATE` and retains it through discovery,
   normalization, supersession maintenance, and claiming. Discovery may insert
-  recovery rows after that cursor lock. Supersession maintenance later locks its
-  own singleton cursor row `FOR UPDATE`, then examines and updates at most 64
-  recovery rows from one materialized keyset page. Claiming finally locks at
-  most 64 due recovery rows `FOR UPDATE SKIP LOCKED`, increments their durable
-  attempt ordinal, sets the exact backoff deadline, and inserts the attempt rows
-  in the same transaction. No reconciliation path may acquire either cursor row
-  while holding a recovery-row lock in the reverse of this order. Applying a
-  claim first performs the immutable delegated-parent lookup. When the claimed
-  session is a delegated child, it locks the parent/child endpoint session rows
-  `FOR NO KEY UPDATE` in ascending session-identity order; it then takes the
-  child's `session_scheduler` row `FOR UPDATE`, reconstitutes the complete
-  scheduling projection, and uses the existing reconciliation-required write
-  transaction. A nondelegated claim takes only the scheduler lock. Operator
-  reconciliation uses the same endpoint-before-scheduler prefix, so automatic
-  reconciliation never introduces the reverse child-scheduler-to-parent-session
-  order.
+  recovery rows after that cursor lock. Each discovery lap fixes its highest
+  eligible turn identity before paging, then wraps after reaching that bound, so
+  a turn that becomes eligible behind the cursor is reached on the next lap.
+  Runtime-terminal delegated turns are excluded and superseded.
+  Abandoned-attempt settlement examines and updates at most 64 due
+  recovery/attempt pairs from one materialized page. Supersession maintenance
+  later locks its own singleton cursor row `FOR UPDATE`, then examines and
+  updates at most 64 recovery rows from one materialized keyset page. Claiming
+  finally locks at most 64 due recovery rows `FOR UPDATE SKIP LOCKED`,
+  increments their durable attempt ordinal, sets the exact backoff deadline, and
+  inserts the attempt rows in the same transaction. No reconciliation path may
+  acquire either cursor row while holding a recovery-row lock in the reverse of
+  this order. Applying a claim first performs the immutable delegated-parent
+  lookup. When the claimed session is a delegated child, it locks the
+  parent/child endpoint session rows `FOR NO KEY UPDATE` in ascending
+  session-identity order; it then takes the child's `session_scheduler` row
+  `FOR UPDATE`, reconstitutes the complete scheduling projection, and uses the
+  existing reconciliation-required write transaction. A nondelegated claim takes
+  only the scheduler lock. Operator reconciliation uses the same
+  endpoint-before-scheduler prefix, so automatic reconciliation never introduces
+  the reverse child-scheduler-to-parent-session order.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result

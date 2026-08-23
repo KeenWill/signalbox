@@ -366,7 +366,7 @@ impl TurnLivenessRuntime {
         let slot_held = run_slot_held_watchdog(
             self.repository,
             self.startup_recovery,
-            self.staleness_bound,
+            StaleActiveTurnBound::hard_ceiling(),
             self.scan_interval,
             slot_held_shutdown,
         );

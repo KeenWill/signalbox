@@ -3831,7 +3831,8 @@ impl CurrentTurnAttempt {
 }
 
 pub struct EndedTurnAttempt { /* private */ }
-// sealed: crate-private consuming end transitions on CurrentTurnAttempt;
+// sealed: crate-private consuming end transitions on CurrentTurnAttempt or
+// PreparedDelegatedTurnActivation::with_reconstituted_model_call_recovery;
 // exposes no transition back to a current attempt
 impl EndedTurnAttempt {
     // accessors: id(), end()
@@ -3886,8 +3887,9 @@ impl CurrentModelCall {
 }
 
 pub struct EndedModelCall { /* private */ }
-// sealed: crate-private end transitions on CurrentModelCall; terminal —
-// no transition back to a current call
+// sealed: crate-private end transitions on CurrentModelCall or
+// PreparedDelegatedTurnActivation::with_reconstituted_model_call_recovery;
+// terminal — no transition back to a current call
 impl EndedModelCall {
     // accessors: id(), attempt(), selection(), pinned(), turn(), target(), frontier(), disposition()
 }
@@ -4434,6 +4436,9 @@ impl RefusedModelCallTurn {
     // terminal_snapshot(), reclassified_pending_steering()
 }
 pub struct ReconciliationRequiredModelCallTurn { /* private */ }
+// sealed: AcceptedInputSchedulingProjection::apply_interrupt_to_model_call_recovery,
+// AcceptedInputSchedulingProjection::apply_automatic_model_call_reconciliation,
+// or ActivatedTurn::apply_automatic_model_call_reconciliation
 // accessors: session(), turn(), call(), attempt(), disposition(),
 // terminal_snapshot(), reclassified_pending_steering()
 pub struct ReconciliationRequiredToolTurn { /* private */ }
