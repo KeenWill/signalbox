@@ -2996,7 +2996,8 @@ async fn multipart_replay_fixture() -> Result<MultipartReplayFixture, Box<dyn Er
         .handle(prepared(0x324, 0x724, direct(0x824)))
         .await?;
 
-    let digest = BlobDigest::digest(b"multipart attachment");
+    let attachment_payload = b"multipart attachment";
+    let digest = BlobDigest::digest(attachment_payload);
     let mut catalog = pool.begin().await?;
     sqlx::query(
         "INSERT INTO blob_store_binding (store_name, namespace_id)
@@ -3007,7 +3008,7 @@ async fn multipart_replay_fixture() -> Result<MultipartReplayFixture, Box<dyn Er
     .await?;
     sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, $2)")
         .bind(digest.as_bytes().as_slice())
-        .bind(Decimal::from(20_u8))
+        .bind(Decimal::from(attachment_payload.len()))
         .execute(&mut *catalog)
         .await?;
     sqlx::query(

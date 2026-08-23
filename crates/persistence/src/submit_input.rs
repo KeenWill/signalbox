@@ -1691,7 +1691,9 @@ where
         None => {}
     }
     if let Some(maximum_bytes) = maximum_attachment_bytes {
-        if let Some(observed_bytes) = if matches!(recorded, SubmitInputResult::Applied(_)) {
+        if let Some(observed_bytes) = if matches!(recorded, SubmitInputResult::Applied(_))
+            && session_has_attachment_parts(connection, frontier_command.session()).await?
+        {
             Box::pin(prospective_attachment_frontier_exceeds_bound(
                 connection,
                 frontier_command.session(),
@@ -1975,6 +1977,9 @@ async fn prospective_attachment_frontier_exceeds_bound(
         .chain(queued_reset_origins.values().flatten())
         .map(|accepted_input| accepted_input.into_uuid())
         .collect::<Vec<_>>();
+    if !accepted_inputs_have_attachment_parts(connection, &all_origins).await? {
+        return Ok(None);
+    }
     let rows = sqlx::query(
         "SELECT part.accepted_input_id, part.blob_digest, blob.byte_length
            FROM accepted_input_content_part AS part
@@ -2048,6 +2053,42 @@ async fn prospective_attachment_frontier_exceeds_bound(
         }
     }
     Ok(None)
+}
+
+async fn session_has_attachment_parts(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, SubmitInputRepositoryError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM accepted_input AS accepted
+               JOIN accepted_input_content_part AS part
+                 ON part.accepted_input_id = accepted.accepted_input_id
+              WHERE accepted.session_id = $1
+                AND part.part_kind = 'attachment'
+         )",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_one(&mut *connection)
+    .await?)
+}
+
+async fn accepted_inputs_have_attachment_parts(
+    connection: &mut PgConnection,
+    accepted_inputs: &[Uuid],
+) -> Result<bool, SubmitInputRepositoryError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM accepted_input_content_part
+              WHERE accepted_input_id = ANY($1)
+                AND part_kind = 'attachment'
+         )",
+    )
+    .bind(accepted_inputs)
+    .fetch_one(&mut *connection)
+    .await?)
 }
 
 struct DelegatedParkedAttachmentFrontier {
