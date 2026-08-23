@@ -611,9 +611,10 @@ impl PreparedModelOperation {
             tool_entries
                 .iter()
                 .filter(|entry| projected_references.contains(&entry.source())),
-            runner_placement_entries
-                .iter()
-                .filter(|entry| projected_references.contains(&entry.source())),
+            runner_placement_entries.iter().filter(|entry| {
+                entry.source().source_session() == receiving_session
+                    && projected_references.contains(&entry.source())
+            }),
         )?;
         Ok(Self {
             request,
@@ -3013,6 +3014,17 @@ mod tests {
         Box<[ResolvedToolConversationEntry]>,
         FailedModelCallTurn,
     ) {
+        tool_round_fixture(rounds, None)
+    }
+
+    fn tool_round_fixture(
+        rounds: usize,
+        inherited_runner_placement: Option<(SemanticTranscriptEntryRef, RunnerGeneration)>,
+    ) -> (
+        PreparedModelCallRequest,
+        Box<[ResolvedToolConversationEntry]>,
+        FailedModelCallTurn,
+    ) {
         let session_id = identity(200, SessionId::from_uuid);
         let direct = identity(201, DirectModelSelection::from_uuid);
         let accepted_input = identity(202, AcceptedInputId::from_uuid);
@@ -3266,9 +3278,60 @@ mod tests {
             .resolved_snapshot(starting_frontier)
             .cloned()
             .expect("the starting snapshot is projected");
+        let inherited_runner_placement_entry =
+            inherited_runner_placement.map(|(source, placement_revision)| {
+                let foreign_session = SessionReconstitutionInput::new(
+                    source.source_session(),
+                    source.source_session(),
+                    SessionCreationProvenance::new(
+                        SessionCreationCause::UserInitiated,
+                        TranscriptAncestry::None,
+                    ),
+                    source.source_session(),
+                    version,
+                    source.source_session(),
+                    version,
+                    defaults.clone(),
+                    signalbox_domain::SessionPlacementReconstitutionFacts {
+                        current_pointer_session: source.source_session(),
+                        current_pointer_version: signalbox_domain::SessionPlacementVersion::INITIAL,
+                        selected_event_session: source.source_session(),
+                        selected_event: signalbox_domain::VersionedSessionPlacement::initial(
+                            signalbox_domain::SessionPlacement::pathless(),
+                        ),
+                    },
+                )
+                .reconstitute()
+                .expect("foreign placement session facts are correlated");
+                let placement_frontier = identity(216, ContextFrontierId::from_uuid);
+                let foreign_projection = AcceptedInputSchedulingReconstitutionInput::new(
+                    foreign_session,
+                    Vec::new(),
+                    vec![SemanticTranscriptEntryReconstitutionInput::new(
+                        source.entry(),
+                        source.source_session(),
+                        SemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                            placement_revision,
+                        },
+                    )],
+                    vec![ResolvedContextFrontierReconstitutionInput::new(
+                        source.source_session(),
+                        placement_frontier,
+                        vec![source],
+                    )],
+                    None,
+                )
+                .with_runner_placement_frontier(placement_frontier)
+                .reconstitute()
+                .expect("foreign placement boundary is independently complete");
+                foreign_projection
+                    .semantic_entry(source)
+                    .cloned()
+                    .expect("foreign placement entry is projected")
+            });
         // Proposal-ordered: each round's proposal is immediately followed by
         // its own result, which is how the renderer pairs them.
-        let frontier_references = [origin_entry]
+        let native_frontier_references = [origin_entry]
             .into_iter()
             .chain(
                 tool_use_entries
@@ -3277,14 +3340,21 @@ mod tests {
                     .flat_map(|(proposal, result)| [*proposal, *result]),
             )
             .collect::<Vec<_>>();
-        let frontier_entries = frontier_references
+        let mut frontier_entries = native_frontier_references
             .iter()
             .map(|reference| {
                 projection
                     .semantic_entry(*reference)
                     .cloned()
-                    .expect("every frontier member is projected")
+                    .expect("every native frontier member is projected")
             })
+            .collect::<Vec<_>>();
+        if let Some(entry) = inherited_runner_placement_entry {
+            frontier_entries.push(entry);
+        }
+        let frontier_references = native_frontier_references
+            .into_iter()
+            .chain(inherited_runner_placement.map(|(source, _)| source))
             .collect::<Vec<_>>();
         let execution = ModelCallExecutionReconstitutionInput::new(
             active_turn,
@@ -3893,6 +3963,42 @@ mod tests {
         assert_eq!(source.source_session(), identity(1, SessionId::from_uuid));
         assert_eq!(*accepted_input, identity(3, AcceptedInputId::from_uuid));
         assert_eq!(content.text().as_str(), "exact user request");
+    }
+
+    /// S32 / INV-015 / INV-044: complete parent placement authority may be
+    /// supplied with a continued child's prepared call, but it does not
+    /// describe the receiving session and must not render.
+    #[test]
+    fn s32_inv015_inv044_render_ignores_inherited_runner_placement_and_evidence() {
+        let inherited_source = SemanticTranscriptEntryRef::from_source(
+            identity(214, SessionId::from_uuid),
+            identity(215, SemanticTranscriptEntryId::from_uuid),
+        );
+        let placement_revision = RunnerGeneration::try_from_u64(2)
+            .expect("the inherited placement revision is positive");
+        let (request, tool_entries, _) =
+            tool_round_fixture(1, Some((inherited_source, placement_revision)));
+        let evidence = ResolvedRunnerPlacementConversationEntry::new(
+            inherited_source,
+            placement_revision,
+            RunnerSandboxProfile::WorkspaceRestricted,
+        );
+
+        let operation = PreparedModelOperation::render(
+            request,
+            credential_reference(),
+            None,
+            Box::new([]),
+            &tool_entries,
+            &[evidence],
+        )
+        .expect("inherited placement payload and evidence are both ignored");
+
+        assert_eq!(operation.messages().len(), 3);
+        assert!(operation.messages().iter().all(|message| !matches!(
+            message,
+            ModelConversationMessage::RunnerPlacementChanged { .. }
+        )));
     }
 
     /// S34 / INV-046: rendering binds the exact optional frozen-epoch system

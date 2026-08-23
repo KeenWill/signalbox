@@ -7207,9 +7207,9 @@ async fn s32_inv009_inv045_placement_projection_locks_scheduler_before_placement
         let replacement_store = tokio::spawn(async move {
             tokio::time::timeout(
                 LOCK_COMPLETION_TIMEOUT,
-                store.store_placement(
+                store.store_runner_replacement_projection_for_test(
                     &replacement.placement,
-                    Some(&registration),
+                    &registration,
                     Some(&replacement_grant),
                 ),
             )
@@ -7812,9 +7812,9 @@ async fn s32_inv045_profile_replacement_survives_equivalent_reregistration()
         .expect("the advanced current registration permits profile replacement");
     let replacement_grant = duplicate_grant(&replacement.grant.grant, current.registration());
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &replacement.placement,
-            Some(&current),
+            &current,
             Some(&replacement_grant),
         )
         .await?;
@@ -7894,9 +7894,9 @@ async fn s32_inv009_inv044_lease_offer_locks_enrollment_before_placement()
     let replacement_task = tokio::spawn(async move {
         tokio::time::timeout(
             LOCK_COMPLETION_TIMEOUT,
-            replacement_store.store_placement(
+            replacement_store.store_runner_replacement_projection_for_test(
                 &replacement.placement,
-                Some(&registration),
+                &registration,
                 Some(&replacement_grant),
             ),
         )
@@ -8222,9 +8222,9 @@ async fn s32_inv045_replaced_grant_is_not_a_current_revocation_target() -> Resul
         )
         .expect("the active predecessor permits profile replacement");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &replacement.placement,
-            Some(&registration),
+            &registration,
             Some(&replacement.grant.grant),
         )
         .await?;
@@ -8315,6 +8315,39 @@ async fn s32_inv044_generic_store_rejects_runner_replacement_without_command_aut
         )
         .await
         .expect_err("the generic writer cannot invent replacement-command authority");
+
+    assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_generic_store_rejects_profile_replacement_without_boundary_authority()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _, registration, pin) = stored_pin_fixture(&pool).await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries a credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+
+    let rejected = store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement.grant.grant),
+        )
+        .await
+        .expect_err("the generic writer cannot install a replacement without its boundary");
 
     assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
     drop(pool);
@@ -14431,9 +14464,9 @@ async fn s32_inv002_inv044_historical_runner_replacement_rejects_loss_metadata()
     )
     .expect("the successor may replace its credential profile");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &profile_replacement.placement,
-            Some(&successor_registration),
+            &successor_registration,
             Some(&profile_replacement.grant.grant),
         )
         .await?;
@@ -15090,9 +15123,9 @@ async fn s32_inv044_profile_replacement_preserves_workspace_origin_revision()
         )
         .expect("profile replacement retains the provisioned private root");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &replacement.placement,
-            Some(&registration),
+            &registration,
             Some(&replacement.grant.grant),
         )
         .await?;
@@ -15144,9 +15177,9 @@ async fn s32_inv002_inv045_profile_replacement_authenticates_durable_grant_prede
         )
         .expect("the active predecessor permits profile replacement");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &replacement.placement,
-            Some(&registration),
+            &registration,
             Some(&replacement.grant.grant),
         )
         .await?;
@@ -15197,9 +15230,9 @@ async fn s32_inv002_inv045_profile_replacement_authenticates_grant_placement_eve
         )
         .expect("the active predecessor permits profile replacement");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &replacement.placement,
-            Some(&registration),
+            &registration,
             Some(&replacement.grant.grant),
         )
         .await?;
@@ -15253,9 +15286,9 @@ async fn s32_inv002_inv045_base_grant_authenticates_policy_placement_identity()
         )
         .expect("the active predecessor permits profile replacement");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &replacement.placement,
-            Some(&registration),
+            &registration,
             Some(&replacement.grant.grant),
         )
         .await?;
@@ -15313,9 +15346,9 @@ async fn s32_inv044_runner_placement_boundary_round_trips_exact_successor_facts(
         )
         .expect("the active predecessor permits profile replacement");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &replacement.placement,
-            Some(&registration),
+            &registration,
             Some(&replacement.grant.grant),
         )
         .await?;
@@ -15500,9 +15533,9 @@ async fn s01_s32_inv015_inv044_queued_activation_extends_runner_placement_bounda
         )
         .expect("the active predecessor permits profile replacement");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &replacement.placement,
-            Some(&registration),
+            &registration,
             Some(&replacement.grant.grant),
         )
         .await?;
@@ -15617,9 +15650,9 @@ async fn s32_inv015_inv044_runner_placement_boundary_rejects_historical_revision
         )
         .expect("the active predecessor permits profile replacement");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &replacement.placement,
-            Some(&registration),
+            &registration,
             Some(&replacement.grant.grant),
         )
         .await?;
@@ -15642,9 +15675,9 @@ async fn s32_inv015_inv044_runner_placement_boundary_rejects_historical_revision
         )
         .expect("the current replacement permits a later profile revision");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &successor.placement,
-            Some(&registration),
+            &registration,
             Some(&successor.grant.grant),
         )
         .await?;
@@ -15787,9 +15820,9 @@ async fn s28_s32_inv015_inv044_runner_placement_boundary_rejects_inherited_non_p
         )
         .expect("the active predecessor permits profile replacement");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &replacement.placement,
-            Some(&registration),
+            &registration,
             Some(&replacement.grant.grant),
         )
         .await?;
@@ -15880,9 +15913,9 @@ async fn s32_inv015_inv044_runner_placement_boundary_rejects_stale_frontier_tip(
         )
         .expect("the active predecessor permits profile replacement");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &replacement.placement,
-            Some(&registration),
+            &registration,
             Some(&replacement.grant.grant),
         )
         .await?;
@@ -15996,9 +16029,9 @@ async fn s32_inv044_runner_placement_boundary_requires_its_exact_frontier_pointe
         )
         .expect("the active predecessor permits profile replacement");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &replacement.placement,
-            Some(&registration),
+            &registration,
             Some(&replacement.grant.grant),
         )
         .await?;
@@ -16055,9 +16088,9 @@ async fn s32_inv044_runner_placement_readback_rejects_a_missing_frontier_pointer
         )
         .expect("the active predecessor permits profile replacement");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &replacement.placement,
-            Some(&registration),
+            &registration,
             Some(&replacement.grant.grant),
         )
         .await?;
@@ -16131,9 +16164,9 @@ async fn s32_inv002_inv045_profile_replacement_rejects_revoked_predecessor_grant
         )
         .expect("the active predecessor permits profile replacement");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &replacement.placement,
-            Some(&registration),
+            &registration,
             Some(&replacement.grant.grant),
         )
         .await?;
@@ -16192,9 +16225,9 @@ async fn s32_inv002_inv045_profile_replacement_requires_predecessor_issuance()
         )
         .expect("the active predecessor permits profile replacement");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &replacement.placement,
-            Some(&registration),
+            &registration,
             Some(&replacement.grant.grant),
         )
         .await?;
@@ -16250,7 +16283,11 @@ async fn s32_inv045_new_revoked_grant_round_trips_terminal_audit() -> Result<(),
         .revoke()
         .expect("the new grant can be revoked before persistence");
     store
-        .store_placement(&replacement.placement, Some(&registration), Some(&revoked))
+        .store_runner_replacement_projection_for_test(
+            &replacement.placement,
+            &registration,
+            Some(&revoked),
+        )
         .await?;
     let loaded = store
         .load_placement(SessionId::from_uuid(uuid(SESSION)))
@@ -16280,9 +16317,9 @@ async fn s32_inv045_grant_audit_kind_is_revision_bound() -> Result<(), Box<dyn E
         )
         .expect("the active predecessor permits profile replacement");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &replacement.placement,
-            Some(&registration),
+            &registration,
             Some(&replacement.grant.grant),
         )
         .await?;
@@ -17379,9 +17416,9 @@ async fn s32_inv045_profile_free_replacement_preserves_grant_lineage() -> Result
         )
         .expect("the independent grant lineage may advance");
     store
-        .store_placement(
+        .store_runner_replacement_projection_for_test(
             &successor.placement,
-            Some(&later_registration),
+            &later_registration,
             Some(&successor.grant.grant),
         )
         .await?;

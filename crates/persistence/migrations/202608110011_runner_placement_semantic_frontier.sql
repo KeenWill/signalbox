@@ -772,12 +772,50 @@ BEGIN
        AND pointer.placement_revision = placement.placement_revision
      WHERE head.session_id = checked_session_id;
 
+    IF placement_base_frontier_id IS NOT NULL THEN
+        SELECT member_count
+          INTO placement_member_count
+          FROM context_frontier
+         WHERE owning_session_id = checked_session_id
+           AND context_frontier_id = placement_base_frontier_id;
+    END IF;
+
     IF ordinary_base_frontier_id IS NULL
        AND placement_base_frontier_id IS NULL
     THEN
         RETURN starting_member_count = 1;
     END IF;
-    IF ordinary_base_frontier_id IS NULL THEN
+    -- A relocation may commit after this turn has already started. In that
+    -- case the immutable starting frontier is a prefix of the current
+    -- placement boundary, so validate the original start against its ordinary
+    -- base instead of requiring it to follow the later boundary.
+    IF placement_base_frontier_id IS NOT NULL
+       AND placement_member_count IS NOT NULL
+       AND starting_member_count <= placement_member_count
+       AND NOT EXISTS (
+            SELECT 1
+              FROM context_frontier_member AS starting_member
+              LEFT JOIN context_frontier_member AS placement_member
+                ON placement_member.owning_session_id = checked_session_id
+               AND placement_member.context_frontier_id =
+                       placement_base_frontier_id
+               AND placement_member.member_position =
+                       starting_member.member_position
+               AND placement_member.source_session_id =
+                       starting_member.source_session_id
+               AND placement_member.semantic_entry_id =
+                       starting_member.semantic_entry_id
+             WHERE starting_member.owning_session_id = checked_session_id
+               AND starting_member.context_frontier_id =
+                       checked_starting_frontier_id
+               AND placement_member.member_position IS NULL
+       )
+    THEN
+        IF ordinary_base_frontier_id IS NULL THEN
+            RETURN starting_member_count = 1;
+        END IF;
+        effective_base_frontier_id := ordinary_base_frontier_id;
+    ELSIF ordinary_base_frontier_id IS NULL THEN
         effective_base_frontier_id := placement_base_frontier_id;
     ELSIF placement_base_frontier_id IS NULL THEN
         effective_base_frontier_id := ordinary_base_frontier_id;
@@ -787,11 +825,6 @@ BEGIN
           FROM context_frontier
          WHERE owning_session_id = checked_session_id
            AND context_frontier_id = ordinary_base_frontier_id;
-        SELECT member_count
-          INTO placement_member_count
-          FROM context_frontier
-         WHERE owning_session_id = checked_session_id
-           AND context_frontier_id = placement_base_frontier_id;
         IF ordinary_member_count IS NULL OR placement_member_count IS NULL THEN
             RETURN false;
         END IF;
@@ -1133,3 +1166,99 @@ CREATE CONSTRAINT TRIGGER runner_placement_semantic_frontier_is_required
 AFTER INSERT ON semantic_transcript_entry
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION require_runner_placement_semantic_frontier();
+
+-- Delegation cascade terminals preserve the latest compatible placement
+-- boundary instead of branching from the child's earlier starting frontier.
+DO $migration$
+DECLARE
+    definition text;
+    updated_definition text;
+    old_declaration CONSTANT text :=
+        '    child_starting_frontier uuid;';
+    new_declaration CONSTANT text :=
+        '    child_starting_frontier uuid;' || chr(10) ||
+        '    child_placement_frontier uuid;';
+    old_terminal_base CONSTANT text := $old$
+            child_terminal_frontier := (
+$old$;
+    new_terminal_base CONSTANT text := $new$
+            SELECT pointer.context_frontier_id
+              INTO child_placement_frontier
+              FROM runner_current_session_placement AS head
+              JOIN runner_session_placement_record AS placement
+                ON placement.session_id = head.session_id
+               AND placement.event_ordinal = head.event_ordinal
+              JOIN session_runner_placement_frontier AS pointer
+                ON pointer.session_id = placement.session_id
+               AND pointer.placement_revision = placement.placement_revision
+             WHERE head.session_id = frontier.child_session_id;
+
+            IF child_placement_frontier IS NOT NULL THEN
+                IF child_starting_frontier IS NULL THEN
+                    child_starting_frontier := child_placement_frontier;
+                ELSIF NOT EXISTS (
+                    SELECT 1
+                      FROM context_frontier_member AS starting_member
+                      LEFT JOIN context_frontier_member AS placement_member
+                        ON placement_member.owning_session_id =
+                               starting_member.owning_session_id
+                       AND placement_member.context_frontier_id =
+                               child_placement_frontier
+                       AND placement_member.member_position =
+                               starting_member.member_position
+                       AND placement_member.source_session_id =
+                               starting_member.source_session_id
+                       AND placement_member.semantic_entry_id =
+                               starting_member.semantic_entry_id
+                     WHERE starting_member.owning_session_id =
+                               frontier.child_session_id
+                       AND starting_member.context_frontier_id =
+                               child_starting_frontier
+                       AND placement_member.member_position IS NULL
+                ) THEN
+                    child_starting_frontier := child_placement_frontier;
+                ELSIF EXISTS (
+                    SELECT 1
+                      FROM context_frontier_member AS placement_member
+                      LEFT JOIN context_frontier_member AS starting_member
+                        ON starting_member.owning_session_id =
+                               placement_member.owning_session_id
+                       AND starting_member.context_frontier_id =
+                               child_starting_frontier
+                       AND starting_member.member_position =
+                               placement_member.member_position
+                       AND starting_member.source_session_id =
+                               placement_member.source_session_id
+                       AND starting_member.semantic_entry_id =
+                               placement_member.semantic_entry_id
+                     WHERE placement_member.owning_session_id =
+                               frontier.child_session_id
+                       AND placement_member.context_frontier_id =
+                               child_placement_frontier
+                       AND starting_member.member_position IS NULL
+                ) THEN
+                    RAISE EXCEPTION
+                        'delegation terminal frontier diverges from runner placement boundary'
+                        USING ERRCODE = '23514';
+                END IF;
+            END IF;
+            child_terminal_frontier := (
+$new$;
+BEGIN
+    SELECT pg_get_functiondef(
+        'materialize_session_delegation_termination_cascade(uuid)'::regprocedure
+    ) INTO definition;
+    IF strpos(definition, old_declaration) = 0
+       OR strpos(definition, old_terminal_base) = 0
+    THEN
+        RAISE EXCEPTION 'unexpected delegation cascade terminal builder';
+    END IF;
+    updated_definition := replace(
+        definition, old_declaration, new_declaration
+    );
+    updated_definition := replace(
+        updated_definition, old_terminal_base, new_terminal_base
+    );
+    EXECUTE updated_definition;
+END;
+$migration$;

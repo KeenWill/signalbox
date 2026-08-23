@@ -6869,6 +6869,10 @@ fn reconstitute_inner(
 
     if let Some(frontier) = runner_placement_frontier {
         let placement = &snapshots[&frontier];
+        let active_tool_projection_bases_include_placement =
+            active_executing_tool_batch.iter().all(|batch| {
+                placement.is_semantic_prefix_of(&snapshots[&batch.projection_base_frontier])
+            });
         let authoritative_lineage_matches = initial_seed_frontier
             .into_iter()
             .chain(latest_compaction_result)
@@ -6885,7 +6889,7 @@ fn reconstitute_inner(
             .chain(
                 active_executing_tool_batch
                     .iter()
-                    .flat_map(|batch| [batch.yielded_frontier, batch.projection_base_frontier]),
+                    .map(|batch| batch.yielded_frontier),
             )
             .map(|candidate| &snapshots[&candidate])
             .chain(
@@ -6897,7 +6901,7 @@ fn reconstitute_inner(
                 candidate.is_semantic_prefix_of(placement)
                     || placement.is_semantic_prefix_of(candidate)
             });
-        if !authoritative_lineage_matches {
+        if !active_tool_projection_bases_include_placement || !authoritative_lineage_matches {
             return Err(
                 AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMismatch {
                     snapshot: frontier,
@@ -10210,6 +10214,121 @@ mod tests {
         };
         assert_eq!(current_attempt.id(), continuation_attempt);
         assert_eq!(current_attempt.state(), &CurrentTurnAttemptState::Prepared);
+    }
+
+    /// S07 / S32 / INV-006 / INV-015 / INV-044: an active tool batch cannot
+    /// retain a projection base that predates the current placement boundary.
+    #[test]
+    fn s07_s32_inv006_inv015_inv044_rejects_stale_tool_projection_base() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let origin_entry = ActiveReconstitutionFacts::matching_origin_entry();
+        let starting_frontier = ActiveReconstitutionFacts::matching_starting_frontier();
+        let producing_call = model_call_id(50);
+        let continuation_attempt = turn_attempt_id(60);
+        let request_id = tool_request_id(70);
+        let assistant_tool_entry = semantic_entry(31);
+        let yielded_frontier = frontier(41);
+        let placement_entry = semantic_entry(42);
+        let placement_frontier = frontier(43);
+        let request = ToolRequestReconstitutionInput::new(
+            request_id,
+            session.id(),
+            active.turn(),
+            producing_call,
+            ToolRequestOrdinal::from_u32(0),
+            ToolName::try_new(String::from("current_time")).expect("fixture name is canonical"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("fixture arguments are canonical"),
+        )
+        .into_request();
+        let approval = ToolApprovalResolutionReconstitutionInput::user_fixture(
+            request_id,
+            ToolApprovalDecision::Approve,
+        )
+        .reconstitute()
+        .expect("user approval is implemented");
+        let yielded = ResolvedContextFrontierSnapshot::try_from_candidate(
+            session.id(),
+            yielded_frontier.id(),
+            vec![
+                origin_entry.reference(&session),
+                assistant_tool_entry.reference(&session),
+            ],
+        )
+        .expect("the tool response extends the starting frontier");
+        let batch = ToolBatchReconstitutionInput::new(
+            session.id(),
+            active.turn(),
+            producing_call,
+            yielded,
+            vec![request],
+            vec![approval],
+            vec![],
+            ToolBatchPhaseReconstitutionInput::Executing {
+                turn_attempt: continuation_attempt,
+            },
+        )
+        .reconstitute()
+        .expect("the complete approved batch is executing");
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        facts.replace_active_phase(
+            ActiveTurnSchedulingReconstitutionInput::prepared(active.turn(), continuation_attempt)
+                .with_executing_tool_batch(&batch),
+        );
+        facts.semantic_entries.extend([
+            SemanticTranscriptEntryReconstitutionInput::new(
+                assistant_tool_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::AssistantToolUse {
+                    producing_call,
+                    request: request_id,
+                },
+            ),
+            SemanticTranscriptEntryReconstitutionInput::new(
+                placement_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: RunnerGeneration::try_from_u64(2)
+                        .expect("the fixture placement revision is positive"),
+                },
+            ),
+        ]);
+        facts
+            .snapshots
+            .push(yielded_frontier.snapshot(&session, &[origin_entry, assistant_tool_entry]));
+        facts.snapshots.push(placement_frontier.snapshot(
+            &session,
+            &[origin_entry, assistant_tool_entry, placement_entry],
+        ));
+        let model_call = ModelCallReconstitutionInput::new(
+            producing_call,
+            active.turn(),
+            turn_attempt_id(59),
+            FrozenModelSelection::Direct(direct(1)),
+            ResolvedProviderTarget::naming(provider_model_identity(51)),
+            starting_frontier.id(),
+            ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
+        );
+        let input = facts
+            .input()
+            .with_model_call_facts(
+                vec![crate::PinnedProviderTargetReconstitutionInput::new(
+                    active.turn(),
+                    model_call.target(),
+                )],
+                vec![model_call],
+            )
+            .with_runner_placement_frontier(placement_frontier.id());
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMismatch {
+                snapshot: placement_frontier.id(),
+            }
+        );
     }
 
     /// S03 / INV-034: startup recovery consumes the complete active

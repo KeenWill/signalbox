@@ -1335,7 +1335,13 @@ fn project_frontier_members(
                 ContextCompactionCorruption::Inconsistent("context frontier projection").into(),
             );
         }
+        let retained_placement = visible[..=through_index]
+            .iter()
+            .rev()
+            .find(|member| member.payload_kind == "runner_placement_changed")
+            .cloned();
         visible = std::iter::once(summary.clone())
+            .chain(retained_placement)
             .chain(
                 visible[through_index + 1..]
                     .iter()
@@ -1367,13 +1373,7 @@ fn range_closes_tool_exchanges(members: &[ProjectedFrontierMember]) -> bool {
 fn latest_safe_boundary(members: &[ProjectedFrontierMember]) -> Option<usize> {
     let mut latest = None;
     let mut open_requests = 0usize;
-    let active_placement = members
-        .iter()
-        .rposition(|member| member.payload_kind == "runner_placement_changed");
     for (index, member) in members.iter().enumerate() {
-        if active_placement.is_some_and(|placement| index >= placement) {
-            break;
-        }
         match member.payload_kind.as_str() {
             "assistant_tool_use" => open_requests = open_requests.saturating_add(1),
             "tool_execution_result" | "tool_denied" | "tool_closed_by_turn_end" => {
@@ -1389,10 +1389,7 @@ fn latest_safe_boundary(members: &[ProjectedFrontierMember]) -> Option<usize> {
 }
 
 fn placement_preserving_boundary(members: &[ProjectedFrontierMember], through: usize) -> bool {
-    members
-        .iter()
-        .rposition(|member| member.payload_kind == "runner_placement_changed")
-        .is_none_or(|placement| through < placement)
+    through < members.len()
 }
 
 fn required<T>(
@@ -1605,8 +1602,8 @@ mod tests {
         assert_eq!(latest_safe_boundary(&visible), Some(1));
     }
 
-    /// INV-015 / INV-044: the latest exact placement notice remains visible
-    /// outside both automatic and explicitly requested compaction ranges.
+    /// INV-015 / INV-044: compaction may summarize later closed history while
+    /// re-injecting the latest exact placement notice after the summary.
     #[test]
     fn inv015_inv044_compaction_preserves_latest_runner_placement() {
         let visible = vec![
@@ -1615,10 +1612,26 @@ mod tests {
             ordinary(3, entry(0x7023)),
         ];
 
-        assert_eq!(latest_safe_boundary(&visible), Some(0));
+        assert_eq!(latest_safe_boundary(&visible), Some(2));
         assert!(placement_preserving_boundary(&visible, 0));
-        assert!(!placement_preserving_boundary(&visible, 1));
-        assert!(!placement_preserving_boundary(&visible, 2));
+        assert!(placement_preserving_boundary(&visible, 1));
+        assert!(placement_preserving_boundary(&visible, 2));
+
+        let summary_entry = entry(0x7024);
+        let projected = project_frontier_members(vec![
+            ordinary(1, entry(0x7021)),
+            placement(2, entry(0x7022)),
+            ordinary(3, entry(0x7023)),
+            summary(4, summary_entry, entry(0x7021), entry(0x7023)),
+        ])
+        .expect("the placement-aware summary projection is valid");
+        assert_eq!(
+            projected
+                .iter()
+                .map(|member| member.reference)
+                .collect::<Vec<_>>(),
+            vec![summary_entry, entry(0x7022)]
+        );
     }
 
     /// INV-015: a successor summary can replace a boundary whose physical

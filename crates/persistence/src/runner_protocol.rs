@@ -78,6 +78,14 @@ impl PlacementProjectionAuthority {
             Self::RunnerReplacementTestProjection => true,
         }
     }
+
+    const fn admits_profile_replacement(self) -> bool {
+        match self {
+            Self::Generic => false,
+            #[cfg(feature = "postgres-integration")]
+            Self::RunnerReplacementTestProjection => true,
+        }
+    }
 }
 
 /// Adapter-owned positive revision of one validated registration.
@@ -2458,8 +2466,10 @@ impl RunnerProtocolStore {
                 | "pre_pin_replaced"
                 | "runner_lost"
                 | "runner_replaced"
+                | "profile_replaced"
                 | "abandoned"
-        ) && !(authority.admits_runner_replacement() && event_kind == "runner_replaced")
+        ) && !((authority.admits_runner_replacement() && event_kind == "runner_replaced")
+            || (authority.admits_profile_replacement() && event_kind == "profile_replaced"))
         {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,

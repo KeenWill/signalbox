@@ -1531,6 +1531,7 @@ async fn advance_through_latest_runner_placement(
     match lineage {
         (true, false) => Ok(Some(latest)),
         (false, true) => Ok(Some(current)),
+        (true, true) => Ok(Some(current)),
         _ => Err(
             ProcessReadCorruption::Inconsistent("turn and runner placement frontier lineage")
                 .into(),
