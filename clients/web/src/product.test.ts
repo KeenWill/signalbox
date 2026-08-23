@@ -120,6 +120,21 @@ describe('SameOriginProductTransport', () => {
     expect(cancel).toHaveBeenCalledOnce()
   })
 
+  it('keeps an interrupted bootstrap stream classified as a retryable transport failure', async () => {
+    const interruption = new TypeError('connection interrupted')
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(interruption)
+      },
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body)),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toBe(interruption)
+  })
+
   it('reports an unsuccessful HTTP response without decoding its body', async () => {
     vi.stubGlobal(
       'fetch',

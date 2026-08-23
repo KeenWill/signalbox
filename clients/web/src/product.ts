@@ -84,12 +84,17 @@ export interface ProductTransport {
   readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap>
 }
 
-const readBoundedJson = async (response: Response, maximumBytes: number): Promise<unknown> => {
+const readBoundedBootstrapBytes = async (
+  response: Response,
+  maximumBytes: number,
+): Promise<Uint8Array> => {
   const contentLength = response.headers.get('Content-Length')
   if (contentLength !== null) {
     const declaredLength = Number(contentLength)
     if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
-      throw new Error('bootstrap response exceeds its byte ceiling')
+      throw new ProductContractAdmissionError(
+        new Error('bootstrap response exceeds its byte ceiling'),
+      )
     }
   }
   if (!response.body) throw new TypeError('bootstrap response has no body')
@@ -103,7 +108,9 @@ const readBoundedJson = async (response: Response, maximumBytes: number): Promis
       receivedBytes += value.byteLength
       if (receivedBytes > maximumBytes) {
         await reader.cancel()
-        throw new Error('bootstrap response exceeds its byte ceiling')
+        throw new ProductContractAdmissionError(
+          new Error('bootstrap response exceeds its byte ceiling'),
+        )
       }
       chunks.push(value)
     }
@@ -116,7 +123,25 @@ const readBoundedJson = async (response: Response, maximumBytes: number): Promis
     bytes.set(chunk, offset)
     offset += chunk.byteLength
   }
-  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+  return bytes
+}
+
+export const admitWebContractBootstrap = (value: unknown): WebContractBootstrap => {
+  try {
+    const bootstrap = decodeWebContractBootstrap(value)
+    if (Object.values(bootstrap.capabilities).some((enabled) => !enabled)) {
+      throw new Error('incompatible web contract capabilities')
+    }
+    if (
+      bootstrap.limits.max_json_body_bytes !== EXPECTED_BOOTSTRAP_LIMITS.max_json_body_bytes ||
+      bootstrap.limits.max_ndjson_item_bytes !== EXPECTED_BOOTSTRAP_LIMITS.max_ndjson_item_bytes
+    ) {
+      throw new Error('incompatible web contract limits')
+    }
+    return bootstrap
+  } catch (error) {
+    throw new ProductContractAdmissionError(error)
+  }
 }
 
 export class SameOriginProductTransport implements ProductTransport {
@@ -127,21 +152,13 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
+    const bytes = await readBoundedBootstrapBytes(response, BOOTSTRAP_RESPONSE_BYTES)
     try {
-      const bootstrap = decodeWebContractBootstrap(
-        await readBoundedJson(response, BOOTSTRAP_RESPONSE_BYTES),
+      return admitWebContractBootstrap(
+        JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)),
       )
-      if (Object.values(bootstrap.capabilities).some((enabled) => !enabled)) {
-        throw new Error('incompatible web contract capabilities')
-      }
-      if (
-        bootstrap.limits.max_json_body_bytes !== EXPECTED_BOOTSTRAP_LIMITS.max_json_body_bytes ||
-        bootstrap.limits.max_ndjson_item_bytes !== EXPECTED_BOOTSTRAP_LIMITS.max_ndjson_item_bytes
-      ) {
-        throw new Error('incompatible web contract limits')
-      }
-      return bootstrap
     } catch (error) {
+      if (error instanceof ProductContractAdmissionError) throw error
       throw new ProductContractAdmissionError(error)
     }
   }

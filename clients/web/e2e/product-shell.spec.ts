@@ -321,7 +321,7 @@ test('honors the configured navigation width below the inspector breakpoint', as
   await page.setViewportSize({ width: 1000, height: 844 })
   await page.goto('/settings')
 
-  await page.getByRole('slider', { name: /^Navigation width/ }).fill('360')
+  await page.getByRole('group', { name: 'Workbench panes' }).getByRole('slider').first().fill('360')
 
   await expect
     .poll(() =>

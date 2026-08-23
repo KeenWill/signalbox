@@ -488,7 +488,7 @@ test('standalone Imports exposes keyboard help from its binding and palette', as
   const problems = watchBrowser(page)
   await page.goto('/scenario/imports')
 
-  await page.keyboard.press('?')
+  await page.keyboard.press('Shift+/')
   await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
   await page.keyboard.press('Escape')
   const modifier = await platformModifier(page)

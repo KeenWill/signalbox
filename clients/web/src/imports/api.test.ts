@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ProductContractAdmissionError } from '../product'
 import {
   HttpImportApi,
   ImportDescriptorCorrelationError,
@@ -137,6 +138,62 @@ describe('HttpImportApi correlation', () => {
     await api.list({ limit: 1 })
 
     expect(bootstrapValidation).toHaveBeenCalledTimes(1)
+  })
+
+  it('reapplies full product admission when an admitted bootstrap expires', async () => {
+    let now = 1_000
+    let catalogRequests = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request) => {
+        const url = String(input)
+        if (url.includes('/api/bootstrap')) {
+          return new Response(
+            JSON.stringify({
+              contract: { name: 'signalbox.web-http', version: '2' },
+              capabilities: {
+                bounded_json: true,
+                import_discovery: false,
+                imported_continuations: true,
+                same_origin_json_mutations: true,
+                ndjson_streaming: true,
+              },
+              limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 65_536 },
+            }),
+          )
+        }
+        catalogRequests += 1
+        return new Response(
+          JSON.stringify({
+            items: [],
+            next_cursor: null,
+            search_correlation: null,
+            exact_source_session_id_sha256: null,
+          }),
+        )
+      }),
+    )
+    const api = HttpImportApi.withAdmittedBootstrap(
+      {
+        contract: { name: 'signalbox.web-http', version: '2' },
+        capabilities: {
+          bounded_json: true,
+          import_discovery: true,
+          imported_continuations: true,
+          same_origin_json_mutations: true,
+          ndjson_streaming: true,
+        },
+        limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 65_536 },
+      },
+      undefined,
+      () => now,
+    )
+
+    await api.list({ limit: 1 })
+    now += 30_000
+
+    await expect(api.list({ limit: 1 })).rejects.toBeInstanceOf(ProductContractAdmissionError)
+    expect(catalogRequests).toBe(1)
   })
 
   it('rejects a declared oversized catalog response before parsing it', async () => {

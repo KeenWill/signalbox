@@ -1,6 +1,5 @@
 import {
   decodeWebApiErrorResponse,
-  decodeWebContractBootstrap,
   decodeWebImportContinuationResponse,
   decodeWebImportDescriptor,
   decodeWebImportEntryWindow,
@@ -15,6 +14,7 @@ import {
   type WebImportListPage,
   type WebImportListRequest,
 } from '../generated/web-contract.mjs'
+import { SameOriginProductTransport } from '../product'
 
 export interface ImportApi {
   list(request: WebImportListRequest, signal?: AbortSignal): Promise<WebImportListPage>
@@ -143,7 +143,6 @@ const sha256 = async (value: string): Promise<string> => {
 
 const DEFAULT_IMPORT_LIST_ITEMS = 50
 const DEFAULT_IMPORT_WINDOW_RADIUS = 25
-const BOOTSTRAP_RESPONSE_BYTES = 64 * 1024
 const LIST_RESPONSE_BYTES = 1024 * 1024
 const DESCRIPTOR_RESPONSE_BYTES = 128 * 1024
 const ENTRY_WINDOW_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -239,8 +238,7 @@ const decodeResponse = async <Value>(
 }
 
 export const validateWebContractBootstrap = async (): Promise<void> => {
-  const response = await fetch('/api/bootstrap')
-  await decodeResponse(response, decodeWebContractBootstrap, BOOTSTRAP_RESPONSE_BYTES)
+  await new SameOriginProductTransport().readBootstrap()
 }
 
 const queryString = (request: WebImportListRequest | WebImportEntryWindowRequest): string => {
