@@ -714,6 +714,7 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         "repository_reconciliation_quantum",
         NumericBoundKind::Integer,
     ),
+    ("webhook_drain_work_budget", NumericBoundKind::Duration),
     ("max_concurrent_snapshot_readers", NumericBoundKind::Integer),
     ("max_blob_replica_count", NumericBoundKind::Integer),
     ("max_session_metadata_tags", NumericBoundKind::Integer),
@@ -4403,6 +4404,7 @@ version = 1
 
 [numeric_bounds]
 repository_reconciliation_quantum = 16
+webhook_drain_work_budget = "45s"
 max_concurrent_snapshot_readers = 8
 max_blob_replica_count = 32
 max_session_metadata_tags = 256

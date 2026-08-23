@@ -65,10 +65,11 @@ use signalboxd::{
     HubModelConfigurationError, LocalProcessListener, LocalSocketError,
     MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
-    ReportedUsageCompaction, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
-    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
-    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics, TurnLivenessNumericBounds, TurnLivenessRuntime,
+    ReportedUsageCompaction, RepositoryWatchNumericBounds, RepositoryWatchRuntime,
+    RepositoryWatchRuntimeError, SessionTemplateConfiguration, SessionTemplateConfigurationError,
+    SingleHubGuardError, SystemCurrentTimeClock, TelemetryConfiguration,
+    TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    TurnLivenessNumericBounds, TurnLivenessRuntime,
     model_adapter::ConfiguredModelRuntime,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
@@ -1285,7 +1286,10 @@ async fn run_hub(
         configured_duration("expired_pass_recovery_lock_retry_delay"),
         configured_duration("expired_pass_recovery_conservative_retry_delay"),
     );
-    let repository_reconciliation_quantum = configured_usize("repository_reconciliation_quantum")?;
+    let repository_watch_numeric_bounds = RepositoryWatchNumericBounds::new(
+        configured_usize("repository_reconciliation_quantum")?,
+        configured_duration("webhook_drain_work_budget"),
+    );
     let convergence_sweep_numeric_bounds = ConvergenceSweepNumericBounds::new(
         configured_duration("convergence_sweep_request_timeout"),
         configured_usize("max_convergence_sweep_connection_pages")?,
@@ -1849,7 +1853,7 @@ async fn run_hub(
             model_configuration.clone(),
             model_configuration.session_credential_pin(),
             eligibility_nudge.clone(),
-            repository_reconciliation_quantum,
+            repository_watch_numeric_bounds,
         ) {
             Ok(runtime) => Some(runtime),
             Err(_) => {

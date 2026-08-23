@@ -110,7 +110,8 @@ pub use goal_mode::{
 pub use local_socket::{LocalProcessListener, LocalSocketError};
 pub use process_runtime::{ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError};
 pub use repo_watch_runtime::{
-    RepositoryWatchRuntime, RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError,
+    RepositoryWatchNumericBounds, RepositoryWatchRuntime, RepositoryWatchRuntimeConstructionError,
+    RepositoryWatchRuntimeError,
 };
 pub use session_delegation::{PostgresSessionDelegationPort, PostgresSessionDelegationPortError};
 pub use session_template_configuration::{

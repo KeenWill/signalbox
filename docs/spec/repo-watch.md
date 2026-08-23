@@ -54,13 +54,15 @@ Webhook preemption of slow complete reconciliation is verified against PR #926
 reconciliation quanta ahead of and after a webhook drain are verified against
 this PR (`agent/daemon-live-bounded-repo-reconciliation`). Repeatable preemption
 while durable drain pages remain is verified against this PR
-(`agent/daemon-live-repeatable-webhook-preemption`). The approval-judge dispatch
-fence and unattended escalation release described below are verified against
-this PR (`agent/headless-approval-escalation`). The operator-commissioned
-dispatch fence is verified against this PR
-(`agent/commissioned-dispatch-fence`); its attended escalation park is verified
-against this PR (`agent/daemon-live-headless-approval-park`). Bounded cleanup of
-cancelled complete-poll fetches is verified against this PR
+(`agent/daemon-live-repeatable-webhook-preemption`). The progressing-drain work
+budget and continuation wake are verified against this PR
+(`agent/daemon-live-webhook-progress-budget`). The approval-judge dispatch fence
+and unattended escalation release described below are verified against this PR
+(`agent/headless-approval-escalation`). The operator-commissioned dispatch fence
+is verified against this PR (`agent/commissioned-dispatch-fence`); its attended
+escalation park is verified against this PR
+(`agent/daemon-live-headless-approval-park`). Bounded cleanup of cancelled
+complete-poll fetches is verified against this PR
 (`agent/daemon-live-webhook-cancelled-fetch-bound`).
 
 ## Configuration and credential boundary
@@ -1127,7 +1129,12 @@ at the admission ceiling still drains, and every later body is discarded rather
 than allowed to overshoot, so a page retains no more than that ceiling. One
 drain visits a bounded number of pending pages and then re-arms that same wake,
 so a sustained stream is accelerated without holding the worker past an overdue
-full poll. Every drain call also has a sixty-second outer deadline spanning its
+full poll. A progressing drain also yields after the deployment-owned
+`numeric_bounds.webhook_drain_work_budget` and re-arms that same wake after its
+last terminal delivery, so a slow but productive page returns before consuming
+the outer deadline and does not enter failure backoff. Configuring that policy
+as `"none"` disables the progress yield; the outer deadline still bounds a stuck
+operation. Every drain call also has a sixty-second outer deadline spanning its
 provider and database work. Expiry cancels that attempt, leaves unfinished
 deliveries pending, invalidates partial provider freshness, emits the closed
 `webhook_projection_drain_timed_out` cause, and enters the same bounded

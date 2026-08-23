@@ -226,6 +226,26 @@ pub struct RepositoryWatchRuntime {
     webhook: Option<RepoWatchWebhookRuntime>,
 }
 
+/// Deployment-owned work policies for the repository-watch scheduler.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepositoryWatchNumericBounds {
+    reconciliation_quantum: Option<usize>,
+    webhook_drain_work_budget: Option<Duration>,
+}
+
+impl RepositoryWatchNumericBounds {
+    /// Groups the repository-watch policies loaded from required configuration.
+    pub const fn new(
+        reconciliation_quantum: Option<usize>,
+        webhook_drain_work_budget: Option<Duration>,
+    ) -> Self {
+        Self {
+            reconciliation_quantum,
+            webhook_drain_work_budget,
+        }
+    }
+}
+
 impl RepositoryWatchRuntime {
     /// Constructs all repository-specific clients without reading credentials.
     pub fn try_new(
@@ -235,8 +255,12 @@ impl RepositoryWatchRuntime {
         models: HubModelConfiguration,
         credential_pin: signalbox_persistence::SessionCredentialPin,
         eligibility_nudge: InProcessEligibilityNudge,
-        reconciliation_quantum: Option<usize>,
+        numeric_bounds: RepositoryWatchNumericBounds,
     ) -> Result<Self, RepositoryWatchRuntimeConstructionError> {
+        let RepositoryWatchNumericBounds {
+            reconciliation_quantum,
+            webhook_drain_work_budget,
+        } = numeric_bounds;
         let mut tasks = Vec::with_capacity(configuration.repositories().len());
         let mut webhook_workers = HashMap::new();
         let payload_purge = WebhookPayloadPurgeSchedule::starting_now();
@@ -267,6 +291,7 @@ impl RepositoryWatchRuntime {
                     webhook_nudge,
                     payload_purge: payload_purge.clone(),
                     reconciliation_quantum,
+                    webhook_drain_work_budget,
                 },
             )?);
         }
@@ -1006,6 +1031,7 @@ struct RepositoryWatchTask {
     payload_purge: WebhookPayloadPurgeSchedule,
     rules_activated: bool,
     reconciliation_quantum: Option<usize>,
+    webhook_drain_work_budget: Option<Duration>,
 }
 
 /// One process-wide schedule for the expired-payload purge.
@@ -1038,6 +1064,7 @@ struct RepositoryWatchTaskContext {
     webhook_nudge: Option<Arc<watch::Sender<()>>>,
     payload_purge: WebhookPayloadPurgeSchedule,
     reconciliation_quantum: Option<usize>,
+    webhook_drain_work_budget: Option<Duration>,
 }
 
 impl RepositoryWatchTask {
@@ -1057,6 +1084,7 @@ impl RepositoryWatchTask {
             webhook_nudge,
             payload_purge,
             reconciliation_quantum,
+            webhook_drain_work_budget,
         } = context;
         let credential_reference = configuration.credential_reference();
         let credentials = FileCredentialAccess::new_bounded(
@@ -1088,6 +1116,7 @@ impl RepositoryWatchTask {
             payload_purge,
             rules_activated: false,
             reconciliation_quantum,
+            webhook_drain_work_budget,
         })
     }
 
@@ -1743,10 +1772,19 @@ impl RepositoryWatchTask {
     }
 
     async fn process_webhook_deliveries(&mut self) -> WebhookDrainOutcome {
+        self.process_webhook_deliveries_with_budget(self.webhook_drain_work_budget)
+            .await
+    }
+
+    async fn process_webhook_deliveries_with_budget(
+        &mut self,
+        work_budget: Option<Duration>,
+    ) -> WebhookDrainOutcome {
         let Ok(page_size) = RepoWatchWebhookPendingPageSize::try_new(WEBHOOK_PENDING_PAGE_SIZE)
         else {
             return WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::Persistence);
         };
+        let started_at = Instant::now();
         let mut deferred: HashSet<RepoWatchWebhookDeliveryKey> = HashSet::new();
         let mut first_failure: Option<RepositoryWatchAttemptError> = None;
         let mut dispatch_failure: Option<RepositoryWatchAttemptError> = None;
@@ -1802,11 +1840,11 @@ impl RepositoryWatchTask {
                 if deferred.contains(&delivery.key()) {
                     continue;
                 }
-                match self
+                let terminalized = match self
                     .process_webhook_delivery(delivery, &mut page, &mut dispatch_failure)
                     .await
                 {
-                    Ok(()) => {}
+                    Ok(()) => true,
                     Err(error) => {
                         if error.stops_webhook_page() {
                             tracing::warn!(
@@ -1837,10 +1875,22 @@ impl RepositoryWatchTask {
                         if first_failure.is_none() {
                             first_failure = Some(error);
                         }
+                        false
                     }
-                }
+                };
                 if chronological_first.is_none() {
                     chronological_first = first_failure.or(dispatch_failure);
+                }
+                if terminalized && work_budget.is_some_and(|budget| started_at.elapsed() >= budget)
+                {
+                    self.request_webhook_drain_continuation();
+                    tracing::info!(
+                        repository = %self.repository.as_str(),
+                        work_budget_seconds = work_budget.map_or(0, |budget| budget.as_secs()),
+                        cause_code = "webhook_projection_drain_work_budget_exhausted",
+                        "progressing repository-watch webhook drain yielded before its deadline"
+                    );
+                    break 'drain;
                 }
             }
             pages += 1;
@@ -5765,6 +5815,7 @@ mod tests {
                 webhook_store: PostgresRepoWatchWebhookStore::new(pool.clone()),
                 webhook_work: None,
                 reconciliation_quantum: None,
+                webhook_drain_work_budget: None,
                 payload_purge: WebhookPayloadPurgeSchedule::starting_now(),
                 rules_activated: true,
             },
@@ -7899,6 +7950,32 @@ mod tests {
 
         assert_eq!(retried, WebhookDrainOutcome::Drained);
         assert!(webhook_disposition_exists(&webhook_store, retained.key()).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_progressing_drain_yields_before_its_outer_deadline_and_rearms()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let first = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        let second = submitted_review_admission(SECOND_WEBHOOK_DELIVERY, SECOND_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&first).await?;
+        webhook_store.admit(&second).await?;
+        let (sender, receiver) = watch::channel(());
+        let mut fixture = webhook_task(&pool).await?;
+        fixture.task.webhook_nudge = Some(Arc::new(sender));
+
+        let outcome = fixture
+            .task
+            .process_webhook_deliveries_with_budget(Some(Duration::ZERO))
+            .await;
+
+        assert_eq!(outcome, WebhookDrainOutcome::Drained);
+        assert!(webhook_disposition_exists(&webhook_store, first.key()).await?);
+        assert!(!webhook_disposition_exists(&webhook_store, second.key()).await?);
+        assert!(receiver.has_changed()?);
         Ok(())
     }
 

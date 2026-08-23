@@ -22,6 +22,8 @@ version = 1
 [numeric_bounds]
 # Reconciliation work performed before observing another repository wake.
 repository_reconciliation_quantum = 16
+# Time a progressing webhook drain works before yielding and rearming itself.
+webhook_drain_work_budget = "45s"
 # Concurrent process-protocol snapshot readers.
 max_concurrent_snapshot_readers = 8
 # Replicas retained for one immutable blob.
