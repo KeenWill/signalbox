@@ -353,13 +353,14 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         )
         .expect("fixture runtime definition is valid")])
         .expect("one fixture runtime target is unique");
+    let assistant_reply = String::from("offline assistant reply");
     let runtime = ScriptedModel::single(Script::delivering(TerminalEvidence::Completed(
         CompletionEvidence {
             exchange: ExchangeFacts::default(),
             message_id: None,
             reported_model: Some(ProviderReportedModel::new(SERVED_PROVIDER_MODEL)),
             finish: CompletionFinish::EndTurn,
-            content: vec![AssistantPart::Text(String::from("offline assistant reply"))],
+            content: vec![AssistantPart::Text(assistant_reply.clone())],
             usage: TokenUsage::unreported(),
         },
     )));
@@ -409,20 +410,30 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
     let [user_entry, assistant_entry, completed_entry] = transcript.entries() else {
         panic!("the completed fixture transcript has exactly three entries");
     };
-    assert!(matches!(
-        user_entry,
-        ProcessTranscriptEntry::User { content, .. } if content == &submitted_content
-    ));
-    assert!(matches!(
-        assistant_entry,
-        ProcessTranscriptEntry::Assistant { content, .. }
-            if content == "offline assistant reply"
-    ));
-    assert!(matches!(
-        completed_entry,
-        ProcessTranscriptEntry::TurnCompleted { turn: completed_turn, .. }
-            if *completed_turn == turn
-    ));
+    let ProcessTranscriptEntry::User {
+        content: persisted_content,
+        ..
+    } = user_entry
+    else {
+        panic!("the first transcript entry must be user content: {user_entry:?}");
+    };
+    assert_eq!(persisted_content, &submitted_content);
+    let ProcessTranscriptEntry::Assistant {
+        content: persisted_reply,
+        ..
+    } = assistant_entry
+    else {
+        panic!("the second transcript entry must be assistant content: {assistant_entry:?}");
+    };
+    assert_eq!(persisted_reply, &assistant_reply);
+    let ProcessTranscriptEntry::TurnCompleted {
+        turn: completed_turn,
+        ..
+    } = completed_entry
+    else {
+        panic!("the third transcript entry must complete the turn: {completed_entry:?}");
+    };
+    assert_eq!(*completed_turn, turn);
 
     let terminal_shape: (i64, i64, i64) = sqlx::query_as(
         "SELECT

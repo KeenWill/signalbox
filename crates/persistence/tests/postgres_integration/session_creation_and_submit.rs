@@ -2973,6 +2973,7 @@ const MULTIPART_REORDERED_TURN_ID: u128 = 0xa27;
 const MULTIPART_METADATA_ACCEPTED_INPUT_ID: u128 = 0x928;
 const MULTIPART_METADATA_TURN_ID: u128 = 0xa28;
 const MULTIPART_ATTACHMENT_PAYLOAD: &[u8] = b"multipart attachment";
+const MULTIPART_ATTACHMENT_MAXIMUM_BYTES: u64 = 1_024;
 const MULTIPART_BLOB_STORE_NAME: &str = "multipart_test";
 const MULTIPART_BLOB_OBJECT_KEY: &str = "multipart/object";
 
@@ -3035,7 +3036,8 @@ async fn multipart_replay_fixture(
     .await?;
     catalog.commit().await?;
 
-    let repository = SubmitInputRepository::new(pool.clone());
+    let repository = SubmitInputRepository::new(pool.clone())
+        .with_attachment_maximum_bytes(MULTIPART_ATTACHMENT_MAXIMUM_BYTES);
     let first = repository
         .handle(
             command.clone(),
