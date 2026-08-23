@@ -949,34 +949,32 @@ Locks per transaction, in acquisition order:
   capacity-row or cursor-row lock; or take a capacity-row lock while holding a
   cursor-row lock.
 
-- **Automatic operation reconciliation**: discovery and abandoned-attempt
-  normalization begin by locking the singleton
+- **Automatic operation reconciliation**: discovery locks the singleton
   discovery-cursor row `FOR UPDATE` and retains it through discovery,
-  normalization, supersession maintenance, and claiming. Discovery may insert
-  recovery rows after that cursor lock. Each discovery lap fixes its highest
-  eligible turn identity before paging, then wraps after reaching that bound, so
-  a turn that becomes eligible behind the cursor is reached on the next lap.
-  Runtime-terminal delegated turns are excluded and superseded.
-  Abandoned-attempt settlement examines and updates one bounded due
-  recovery/attempt pairs from one materialized page. Supersession maintenance
+  abandoned-attempt normalization, supersession maintenance, and claiming.
+  Discovery may insert recovery rows after that cursor lock. Each discovery lap
+  fixes its highest eligible turn identity before paging, then wraps after
+  reaching that bound, so a turn that becomes eligible behind the cursor is
+  reached on the next lap. Runtime-terminal delegated turns are excluded and
+  superseded. Abandoned-attempt settlement examines and updates one bounded due
+  recovery/attempt pair from one materialized page. Supersession maintenance
   later locks its own singleton cursor row `FOR UPDATE`, then examines and
   updates one bounded recovery row from one materialized keyset page. Claiming
-  finally locks one due recovery row `FOR UPDATE SKIP LOCKED`,
-  increments their durable attempt ordinal, sets the exact backoff deadline, and
-  inserts the attempt rows in the same transaction. No reconciliation path may
-  acquire either cursor row while holding a recovery-row lock in the reverse of
-  this order. Applying a claim first performs the immutable delegated-parent
-  lookup. When the claimed session is a delegated child, it locks the
-  parent/child endpoint session rows `FOR NO KEY UPDATE` in ascending
-  session-identity order; it then takes the child's `session_scheduler` row
-  `FOR UPDATE`, reconstitutes the complete scheduling projection, and uses the
-  existing reconciliation-required write transaction. A nondelegated claim takes
-  only the scheduler lock. Every daemon-owned claim, application, and
-  failure-record transaction installs the attempt's wall-clock bound as
-  PostgreSQL's local `transaction_timeout`; a bounded client observation may
-  therefore stop waiting only after PostgreSQL has already had that full
-  interval to terminate the transaction and release its locks. Operator
-  reconciliation uses the same
+  finally locks one due recovery row `FOR UPDATE SKIP LOCKED`, increments its
+  durable attempt ordinal, sets the exact backoff deadline, and inserts the
+  attempt rows in the same transaction. No reconciliation path may acquire
+  either cursor row while holding a recovery-row lock in the reverse of this
+  order. Applying a claim first performs the immutable delegated-parent lookup.
+  When the claimed session is a delegated child, it locks the parent/child
+  endpoint session rows `FOR NO KEY UPDATE` in ascending session-identity order;
+  it then takes the child's `session_scheduler` row `FOR UPDATE`, reconstitutes
+  the complete scheduling projection, and uses the existing
+  reconciliation-required write transaction. A nondelegated claim takes only the
+  scheduler lock. Every daemon-owned claim, application, and failure-record
+  transaction installs the attempt's wall-clock bound as PostgreSQL's local
+  `transaction_timeout`; a bounded client observation may therefore stop waiting
+  only after PostgreSQL has already had that full interval to terminate the
+  transaction and release its locks. Operator reconciliation uses the same
   endpoint-before-scheduler prefix, so automatic reconciliation never introduces
   the reverse child-scheduler-to-parent-session order.
 
