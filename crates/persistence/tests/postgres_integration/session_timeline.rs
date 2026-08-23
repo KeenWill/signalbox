@@ -276,7 +276,10 @@ async fn window_outside_projection_facts_is_corruption() -> Result<(), Box<dyn E
     create_session(&pool, identity).await?;
     commission_fixture_session_goal(&pool, identity, 0x0009_9700).await?;
     sqlx::query(
-        "UPDATE session_timeline_fact SET item_count = 1, first_sequence = latest_sequence WHERE session_id = $1",
+        "UPDATE session_timeline_fact \
+         SET item_count = 1, first_sequence = latest_sequence, \
+             event_kind_bytes = octet_length('session_created') \
+         WHERE session_id = $1",
     )
     .bind(identity.into_uuid())
     .execute(&pool)

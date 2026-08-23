@@ -97,6 +97,26 @@ test("generated timeline decoder rejects an address beyond u64", () => {
   );
 });
 
+test("generated timeline decoder rejects an overlong decimal before BigInt", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionTimelineWindow({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        items: [
+          {
+            address: { event_sequence: "1".repeat(1000) },
+            kind: "session_created",
+            projected_structured_bytes: 79,
+          },
+        ],
+        projected_structured_bytes: 79,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    /unsigned 64-bit integer/,
+  );
+});
+
 test("generated descriptor decoder rejects a fact beyond u64", () => {
   assert.throws(
     () =>
