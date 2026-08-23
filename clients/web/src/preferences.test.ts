@@ -105,14 +105,6 @@ describe('browser preferences', () => {
     expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
   })
 
-  it('builds the oversized logical-position fixture at its declared bounds', () => {
-    const positions = oversizedLogicalPositionsFixture()
-
-    expect(Object.keys(positions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
-    expect(positions['session-0']).toBe('\0'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES))
-    expect(positions[`session-${MAX_SAVED_LOGICAL_POSITIONS - 1}`]).toBeDefined()
-  })
-
   it('does not persist preferences above the serialized byte ceiling', () => {
     const setItem = vi.fn()
     vi.stubGlobal('localStorage', { setItem })
@@ -193,6 +185,22 @@ describe('browser preferences', () => {
       decodeBrowserPreferences({
         ...defaultBrowserPreferences,
         keyOverrides: { command: 'é'.repeat(MAX_KEY_OVERRIDE_VALUE_BYTES) },
+      }),
+    ).toThrow('preferences.keyOverrides keys or values exceed their byte limits')
+  })
+
+  it('rejects key-override IDs with unordered plain-object key semantics', () => {
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        keyOverrides: { 1: 'Shift+K' },
+      }),
+    ).toThrow('preferences.keyOverrides keys or values exceed their byte limits')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        keyOverrides: JSON.parse('{"__proto__":"Shift+K"}'),
       }),
     ).toThrow('preferences.keyOverrides keys or values exceed their byte limits')
   })

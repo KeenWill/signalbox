@@ -1,4 +1,5 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import { webContractBootstrapFixture } from '../src/product.fixture'
 
 interface BrowserProblems {
   consoleErrors: string[]
@@ -474,6 +475,21 @@ test('the command palette opens keyboard help without closing it', async ({ page
   await expect(help.getByText('Go to Attention', { exact: true })).toHaveCount(0)
   await expect(help.getByText('Go to Sessions', { exact: true })).toHaveCount(0)
   await expect(help.getByText('Go to Settings', { exact: true })).toHaveCount(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('returns from the scenario studio through the command palette', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
+  await page.goto('/scenario/streaming')
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /Go to Attention/ }).click()
+
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
