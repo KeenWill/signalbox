@@ -161,6 +161,25 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  /// INV-012: native multipart decoding stops at the retained-parts bound
+  /// without decoding an unbounded remainder.
+  func testUserInputContentDecodingStopsAtThePartLimit() throws {
+    let retained = Array(
+      repeating: #"{"type":"text","text":"x"}"#,
+      count: SignalboxProcessProtocol.maximumUserInputParts
+    )
+    let encoded = Data(("[" + (retained + ["false"]).joined(separator: ",") + "]").utf8)
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(SignalboxUserInputContent.self, from: encoded)
+    ) { error in
+      guard case DecodingError.dataCorrupted(let context) = error else {
+        return XCTFail("Expected the multipart count error, got \(error).")
+      }
+      XCTAssertEqual(context.debugDescription, "User input part count is invalid.")
+    }
+  }
+
   func testUserInputContentDisplayTextEscapesFilenameLineBreaks() throws {
     let content = try SignalboxUserInputContent(validating: [
       .attachment(
