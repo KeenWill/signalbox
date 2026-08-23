@@ -391,6 +391,12 @@ export function ProductApp({
       target instanceof HTMLSelectElement
     )
   }
+  const paletteReturnTarget = () => {
+    const active = document.activeElement
+    return active instanceof HTMLElement && active.isConnected && active !== document.body
+      ? active
+      : primaryRef.current
+  }
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
@@ -399,7 +405,7 @@ export function ProductApp({
         if (app.overlay !== null && binding.commandId !== 'surface.escape') return
         if (binding.commandId === 'palette.open' && isEditableTarget(event.target)) return
         if (binding.commandId === 'palette.open') {
-          paletteReturnFocusRef.current = primaryRef.current
+          paletteReturnFocusRef.current = paletteReturnTarget()
         }
         if (binding.commandId === 'layout.toggle' && app.layout === 'workbench') {
           primaryRef.current?.focus()
@@ -427,6 +433,10 @@ export function ProductApp({
   }, [app.density, app.theme])
 
   useEffect(() => {
+    if (store.getState().app.overlay === 'help') dispatch(actions.overlaySet(null))
+  }, [dispatch])
+
+  useEffect(() => {
     document.title = `${surfaceCopy[surface].title} · Signalbox`
   }, [surface])
 
@@ -452,6 +462,20 @@ export function ProductApp({
       <AttentionSurface />
     ) : surface === 'sessions' ? (
       <SessionsSurface />
+    ) : surface === 'search' && bootstrap.isError ? (
+      <div className="surface-body">
+        <section className="surface-empty" role="alert">
+          <AlertTriangle aria-hidden="true" />
+          <div>
+            <h2>Search availability could not be checked</h2>
+            <p>
+              {bootstrap.error instanceof ProductTransportError
+                ? 'Signalbox could not be reached. Retry the contract check when transport is available.'
+                : 'The daemon response is incompatible with the generated web contract.'}
+            </p>
+          </div>
+        </section>
+      </div>
     ) : surface === 'search' && bootstrap.data === undefined ? (
       <div className="surface-body">
         <p className="search-notice">Checking whether bounded search is available…</p>

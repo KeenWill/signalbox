@@ -38,15 +38,20 @@ export interface ProductSearchRequest {
   after?: { address: string; projectionId: string }
 }
 
+// Hard safety ceiling: bounds search-response allocation and parse work in the browser.
 const MAX_SEARCH_RESPONSE_BYTES = 1_048_576
+// Hard safety ceiling: bounds bootstrap-response allocation and parse work before decoding.
 const MAX_BOOTSTRAP_RESPONSE_BYTES = 65_536
+// Hard safety ceiling: rejects advertised query limits above the browser's bounded input budget.
 const MAX_SEARCH_QUERY_BYTES = 512
+// Hard safety ceiling: rejects advertised page sizes above the browser's bounded render budget.
 const MAX_SEARCH_PAGE_ITEMS = 100
+// Hard safety ceiling: rejects advertised snippets above the browser's bounded render budget.
 const MAX_SEARCH_SNIPPET_BYTES = 512
+// Hard safety ceiling: bounds error-response allocation and parse work before classification.
 const ERROR_RESPONSE_BYTES = 16_384
+// Representation fact: projection identities are positive signed 64-bit database integers.
 const MAX_I64 = 9_223_372_036_854_775_807n
-const WEB_CONTRACT_NAME = 'signalbox.web-http'
-const WEB_CONTRACT_VERSION = '1'
 const isUtf8ContinuationByte = (byte: number | undefined) =>
   byte !== undefined && (byte & 0xc0) === 0x80
 
@@ -259,12 +264,6 @@ export const readProductSearchState = (value: Record<string, unknown>): ProductS
 }
 
 const validateBootstrapSearchLimits = (bootstrap: WebContractBootstrap): WebContractBootstrap => {
-  if (
-    bootstrap.contract.name !== WEB_CONTRACT_NAME ||
-    bootstrap.contract.version !== WEB_CONTRACT_VERSION
-  ) {
-    throw new TypeError('bootstrap carries an incompatible contract identity')
-  }
   const { limits } = bootstrap
   if (limits.max_search_query_bytes < 1 || limits.max_search_query_bytes > MAX_SEARCH_QUERY_BYTES) {
     throw new TypeError('bootstrap carries an invalid search query limit')
