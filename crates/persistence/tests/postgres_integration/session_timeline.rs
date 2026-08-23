@@ -465,28 +465,34 @@ async fn rejected_response_text_position_constraint(
     let database_error = error
         .as_database_error()
         .expect("the deferred trigger reports a database error");
-    let code = database_error.code().map(|code| code.into_owned());
+    let constraint = database_error.constraint().map(str::to_owned);
 
     pool.close().await;
     drop(container);
-    Ok(code)
+    Ok(constraint)
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn assistant_response_text_positions_reject_gaps() -> Result<(), Box<dyn Error>> {
-    let code = rejected_response_text_position_constraint(0x9980, 0x9981, 4).await?;
+    let constraint = rejected_response_text_position_constraint(0x9980, 0x9981, 4).await?;
 
-    assert_eq!(code.as_deref(), Some("23514"));
+    assert_eq!(
+        constraint.as_deref(),
+        Some("semantic_transcript_response_text_positions_contiguous")
+    );
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn assistant_response_text_positions_reject_overlaps() -> Result<(), Box<dyn Error>> {
-    let code = rejected_response_text_position_constraint(0x9990, 0x9991, 2).await?;
+    let constraint = rejected_response_text_position_constraint(0x9990, 0x9991, 2).await?;
 
-    assert_eq!(code.as_deref(), Some("23514"));
+    assert_eq!(
+        constraint.as_deref(),
+        Some("semantic_transcript_response_text_positions_contiguous")
+    );
     Ok(())
 }
 

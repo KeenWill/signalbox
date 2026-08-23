@@ -7,9 +7,12 @@
 use std::{fmt, future::Future, num::NonZeroU64};
 
 use signalbox_domain::{
-    BlobDigest, ContextCompactionId, ContextFrontierId, DelegationMessageId, DirectModelSelection,
-    DurableCommandId, ImportedTranscriptEntryId, ModelCallId, ProviderModelIdentity, RunnerId,
-    SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnId,
+    AcceptedInputId, BlobDigest, ContextCompactionId, ContextFrontierId, DelegationMessageId,
+    DirectModelSelection, DurableCommandId, FrozenModelSelection, ImportedTranscriptEntryId,
+    ModelCallId, ModelChangeAdjustment, ModelSelectionRequest, ModelSettingsOverlay,
+    ProviderModelIdentity, RunnerId, SemanticTranscriptEntryId,
+    SessionConfigurationDefaultsVersion, SessionId, ToolAttemptId, ToolRequestId, TurnId,
+    ValidatedModelSettings,
 };
 
 /// Returns the hard ceiling on records in one historical window.
@@ -500,17 +503,9 @@ pub enum TimelineToolSandboxPosture {
 /// Closed tool-batch projection state exposed by timeline detail.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimelineToolBatchState {
-    Proposed,
-    ResultsProjected,
-    RecoveryRequired,
-}
-
-/// Typed provenance of an approval decision.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TimelineApprovalSource {
-    Policy,
-    Delegate,
-    User,
+    Proposed { frontier_id: ContextFrontierId },
+    ResultsProjected { frontier_id: ContextFrontierId },
+    RecoveryRequired { attempt_id: ToolAttemptId },
 }
 
 /// Closed outcome of one explicit approval decision.
@@ -520,9 +515,10 @@ pub enum TimelineApprovalDecision {
     Deny,
 }
 
-/// Exact durable actor that decided an explicit approval request.
+/// Approval source coupled to the only provenance shape it can carry.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TimelineApprovalDecider {
+pub enum TimelineApprovalActor {
+    Policy,
     User {
         command_id: DurableCommandId,
     },
@@ -552,17 +548,6 @@ pub enum TimelineRunnerState {
     Abandoned,
 }
 
-/// Closed goal-event kind exposed by timeline detail.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TimelineGoalEventKind {
-    Commissioned,
-    Blocked,
-    Resumed,
-    Achieved,
-    UserStopped,
-    Superseded,
-}
-
 /// Closed reason carried by blocked goal events.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimelineGoalBlockedReason {
@@ -574,11 +559,57 @@ pub enum TimelineGoalBlockedReason {
 
 /// Typed goal-lineage event attached to the timeline fact that caused it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TimelineGoalEvent {
-    pub generation: u64,
-    pub event_kind: TimelineGoalEventKind,
-    pub reason: Option<TimelineGoalBlockedReason>,
-    pub text: Option<TimelineTextExcerpt>,
+pub enum TimelineGoalEvent {
+    Commissioned {
+        generation: u64,
+        text: TimelineTextExcerpt,
+    },
+    Blocked {
+        generation: u64,
+        reason: TimelineGoalBlockedReason,
+        text: TimelineTextExcerpt,
+    },
+    Resumed {
+        generation: u64,
+        text: Option<TimelineTextExcerpt>,
+    },
+    Achieved {
+        generation: u64,
+        text: TimelineTextExcerpt,
+    },
+    UserStopped {
+        generation: u64,
+    },
+    Superseded {
+        generation: u64,
+        text: TimelineTextExcerpt,
+    },
+}
+
+/// Complete durable payload of a model-settings timeline event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TimelineModelSettingsDetail {
+    SessionDefaultsChanged {
+        command_id: DurableCommandId,
+        prior_defaults_version: SessionConfigurationDefaultsVersion,
+        installed_defaults_version: SessionConfigurationDefaultsVersion,
+        prior_model: ModelSelectionRequest,
+        installed_model: ModelSelectionRequest,
+        prior_settings: ValidatedModelSettings,
+        installed_settings: ValidatedModelSettings,
+        caller_override: ModelSettingsOverlay,
+        adjustments: Vec<ModelChangeAdjustment>,
+    },
+    TurnResolved {
+        accepted_input_id: AcceptedInputId,
+        turn_id: TurnId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        selection: FrozenModelSelection,
+        per_call_override: ModelSettingsOverlay,
+        settings: ValidatedModelSettings,
+        adjusted_from_selection_id: Option<DirectModelSelection>,
+        adjustments: Vec<ModelChangeAdjustment>,
+    },
 }
 
 /// Closed action applied to a bound child after a parent terminal transition.
@@ -711,10 +742,7 @@ pub enum SessionTimelineDetailBody {
         imported_evidence: Option<TimelineImportedEvidence>,
     },
     /// A model-settings projection changed at session or turn scope.
-    ModelSettings {
-        turn_id: Option<TurnId>,
-        cause_code: String,
-    },
+    ModelSettings { detail: TimelineModelSettingsDetail },
     /// Exact accepted user input and reference-only attachments.
     UserInput {
         turn_id: TurnId,
@@ -746,8 +774,7 @@ pub enum SessionTimelineDetailBody {
         request_id: ToolRequestId,
         tool_name: String,
         decision: TimelineApprovalDecision,
-        source: TimelineApprovalSource,
-        decider: TimelineApprovalDecider,
+        actor: TimelineApprovalActor,
         rationale: Option<TimelineTextExcerpt>,
         approval_judge_escalated: bool,
     },

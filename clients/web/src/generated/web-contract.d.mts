@@ -44,8 +44,7 @@ type WebSessionTimelineDetailBody = {
   readonly imported_evidence?: WebTimelineImportedEvidence | null;
   readonly type: "session_created";
 } | {
-  readonly cause_code: string;
-  readonly turn_id?: string | null;
+  readonly detail: WebTimelineModelSettingsDetail;
   readonly type: "model_settings";
 } | {
   readonly attachments: ReadonlyArray<WebTimelineBlobReference>;
@@ -70,12 +69,11 @@ type WebSessionTimelineDetailBody = {
   readonly turn_id: string;
   readonly type: "tool_batch";
 } | {
+  readonly actor: WebTimelineApprovalActor;
   readonly approval_judge_escalated: boolean;
-  readonly decider: WebTimelineApprovalDecider;
   readonly decision: WebTimelineApprovalDecision;
   readonly rationale?: WebTimelineTextExcerpt | null;
   readonly request_id: string;
-  readonly source: WebTimelineApprovalSource;
   readonly tool_name: string;
   readonly turn_id: string;
   readonly type: "tool_approval_decision";
@@ -141,7 +139,11 @@ type WebTimelineAddress = {
   readonly event_sequence: WebTimelineEventSequence;
 };
 
-type WebTimelineApprovalDecider = {
+type WebTimelineAnthropicServiceTier = "auto" | "standard_only";
+
+type WebTimelineApprovalActor = {
+  readonly type: "policy";
+} | {
   readonly command_id: string;
   readonly type: "user";
 } | {
@@ -151,8 +153,6 @@ type WebTimelineApprovalDecider = {
 };
 
 type WebTimelineApprovalDecision = "approve" | "deny";
-
-type WebTimelineApprovalSource = "policy" | "delegate" | "user";
 
 type WebTimelineBlobReference = {
   readonly blob_id: string;
@@ -170,6 +170,8 @@ type WebTimelineBodyContinuation = {
 type WebTimelineBodyField = "input_text" | "model_response" | "tool_arguments" | "tool_result" | "tool_failure" | "approval_rationale" | "goal_text" | "compaction_summary" | "delegation_content";
 
 type WebTimelineBoundChildAction = "keep_running" | "stop" | "cancel";
+
+type WebTimelineCodexCliServiceTier = "default" | "priority" | "flex";
 
 type WebTimelineDelegationDetail = {
   readonly child_session_id: string;
@@ -255,18 +257,50 @@ type WebTimelineDetailContinuation = {
   readonly type: "more_body";
 };
 
+type WebTimelineEffectiveModelSettings = {
+  readonly fast_mode: WebTimelineFastMode;
+  readonly reasoning_level?: WebTimelineReasoningLevel | null;
+  readonly service_tier?: WebTimelineServiceTier | null;
+};
+
 type WebTimelineEventSequence = string;
+
+type WebTimelineFastMode = "disabled" | "enabled";
+
+type WebTimelineFastModeOverlay = {
+  readonly kind: "inherit";
+} | {
+  readonly kind: "value";
+  readonly value: WebTimelineFastMode;
+};
 
 type WebTimelineGoalBlockedReason = "user_input_required" | "external_change_required" | "authorization_required" | "execution_failure";
 
 type WebTimelineGoalEvent = {
-  readonly event_kind: WebTimelineGoalEventKind;
   readonly generation: WebU64;
-  readonly reason?: WebTimelineGoalBlockedReason | null;
+  readonly text: WebTimelineTextExcerpt;
+  readonly type: "commissioned";
+} | {
+  readonly generation: WebU64;
+  readonly reason: WebTimelineGoalBlockedReason;
+  readonly text: WebTimelineTextExcerpt;
+  readonly type: "blocked";
+} | {
+  readonly generation: WebU64;
   readonly text?: WebTimelineTextExcerpt | null;
+  readonly type: "resumed";
+} | {
+  readonly generation: WebU64;
+  readonly text: WebTimelineTextExcerpt;
+  readonly type: "achieved";
+} | {
+  readonly generation: WebU64;
+  readonly type: "user_stopped";
+} | {
+  readonly generation: WebU64;
+  readonly text: WebTimelineTextExcerpt;
+  readonly type: "superseded";
 };
-
-type WebTimelineGoalEventKind = "commissioned" | "blocked" | "resumed" | "achieved" | "user_stopped" | "superseded";
 
 type WebTimelineImportedEvidence = {
   readonly imported_entry_id: string;
@@ -286,12 +320,86 @@ type WebTimelineModelCallState = {
   readonly type: "terminal";
 };
 
+type WebTimelineModelChangeAdjustment = {
+  readonly from: WebTimelineReasoningLevel;
+  readonly to: WebTimelineReasoningLevel;
+  readonly type: "reasoning_level_clamped";
+} | {
+  readonly from: WebTimelineReasoningLevel;
+  readonly type: "reasoning_level_cleared";
+} | {
+  readonly type: "fast_mode_disabled";
+} | {
+  readonly from: WebTimelineServiceTier;
+  readonly type: "service_tier_cleared";
+};
+
+type WebTimelineModelSelection = {
+  readonly kind: "direct";
+  readonly selection_id: string;
+} | {
+  readonly alias_id: string;
+  readonly kind: "alias";
+};
+
+type WebTimelineModelSettingSource = "per_call" | "session" | "profile" | "global_default";
+
+type WebTimelineModelSettingsDetail = {
+  readonly adjustments: ReadonlyArray<WebTimelineModelChangeAdjustment>;
+  readonly caller_override: WebTimelineModelSettingsOverlay;
+  readonly command_id: string;
+  readonly installed_defaults_version: WebU64;
+  readonly installed_model: WebTimelineModelSelection;
+  readonly installed_settings: WebTimelineModelSettingsSnapshot;
+  readonly prior_defaults_version: WebU64;
+  readonly prior_model: WebTimelineModelSelection;
+  readonly prior_settings: WebTimelineModelSettingsSnapshot;
+  readonly type: "session_defaults_changed";
+} | {
+  readonly accepted_input_id: string;
+  readonly adjusted_from_selection_id?: string | null;
+  readonly adjustments: ReadonlyArray<WebTimelineModelChangeAdjustment>;
+  readonly defaults_version: WebU64;
+  readonly per_call_override: WebTimelineModelSettingsOverlay;
+  readonly requested_model: WebTimelineModelSelection;
+  readonly selected_direct_id: string;
+  readonly settings: WebTimelineModelSettingsSnapshot;
+  readonly turn_id: string;
+  readonly type: "turn_resolved";
+};
+
+type WebTimelineModelSettingsOverlay = {
+  readonly fast_mode: WebTimelineFastModeOverlay;
+  readonly reasoning_level: WebTimelineSettingOverlay;
+  readonly service_tier: WebTimelineSettingOverlay2;
+};
+
+type WebTimelineModelSettingsPrecedence = {
+  readonly global_default: WebTimelineModelSettingsOverlay;
+  readonly per_call: WebTimelineModelSettingsOverlay;
+  readonly profile: WebTimelineModelSettingsOverlay;
+  readonly session: WebTimelineModelSettingsOverlay;
+};
+
+type WebTimelineModelSettingsSnapshot = {
+  readonly effective: WebTimelineEffectiveModelSettings;
+  readonly fast_mode_source?: WebTimelineModelSettingSource | null;
+  readonly precedence: WebTimelineModelSettingsPrecedence;
+  readonly reasoning_source?: WebTimelineModelSettingSource | null;
+  readonly service_tier_source?: WebTimelineModelSettingSource | null;
+  readonly validated_for_selection_id?: string | null;
+};
+
 type WebTimelineModelUsage = {
   readonly cache_creation_input_tokens?: WebU64 | null;
   readonly cache_read_input_tokens?: WebU64 | null;
   readonly input_tokens?: WebU64 | null;
   readonly output_tokens?: WebU64 | null;
 };
+
+type WebTimelineOpenAiServiceTier = "auto" | "default" | "flex" | "scale" | "priority" | "fast";
+
+type WebTimelineReasoningLevel = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 type WebTimelineReconciliationOperation = {
   readonly model_call_id: string;
@@ -304,6 +412,35 @@ type WebTimelineReconciliationOperation = {
 type WebTimelineRunnerSandboxPosture = "unsandboxed" | "sandboxed";
 
 type WebTimelineRunnerState = "pinned" | "suspect" | "connected" | "runner_lost_before_pin" | "runner_lost" | "replaced" | "working_directory_changed" | "abandoned";
+
+type WebTimelineServiceTier = {
+  readonly provider: "anthropic";
+  readonly value: WebTimelineAnthropicServiceTier;
+} | {
+  readonly provider: "open_ai";
+  readonly value: WebTimelineOpenAiServiceTier;
+} | {
+  readonly provider: "codex_cli";
+  readonly value: WebTimelineCodexCliServiceTier;
+};
+
+type WebTimelineSettingOverlay = {
+  readonly kind: "inherit";
+} | {
+  readonly kind: "provider_default";
+} | {
+  readonly kind: "value";
+  readonly value: WebTimelineReasoningLevel;
+};
+
+type WebTimelineSettingOverlay2 = {
+  readonly kind: "inherit";
+} | {
+  readonly kind: "provider_default";
+} | {
+  readonly kind: "value";
+  readonly value: WebTimelineServiceTier;
+};
 
 type WebTimelineTextExcerpt = {
   readonly continuation?: WebTimelineBodyContinuation | null;
@@ -330,7 +467,16 @@ type WebTimelineToolAttempt = {
   readonly tool_name: string;
 };
 
-type WebTimelineToolBatchState = "proposed" | "results_projected" | "recovery_required";
+type WebTimelineToolBatchState = {
+  readonly frontier_id: string;
+  readonly type: "proposed";
+} | {
+  readonly frontier_id: string;
+  readonly type: "results_projected";
+} | {
+  readonly tool_attempt_id: string;
+  readonly type: "recovery_required";
+};
 
 type WebTimelineToolEffectPosture = "effect_free" | "external_effect";
 

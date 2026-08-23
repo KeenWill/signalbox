@@ -382,14 +382,8 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
-              "cause_code": {
-                "type": "string"
-              },
-              "turn_id": {
-                "type": [
-                  "string",
-                  "null"
-                ]
+              "detail": {
+                "$ref": "#/$defs/WebTimelineModelSettingsDetail"
               },
               "type": {
                 "const": "model_settings",
@@ -398,7 +392,7 @@ const schemas = {
             },
             "required": [
               "type",
-              "cause_code"
+              "detail"
             ],
             "type": "object"
           },
@@ -527,11 +521,11 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
+              "actor": {
+                "$ref": "#/$defs/WebTimelineApprovalActor"
+              },
               "approval_judge_escalated": {
                 "type": "boolean"
-              },
-              "decider": {
-                "$ref": "#/$defs/WebTimelineApprovalDecider"
               },
               "decision": {
                 "$ref": "#/$defs/WebTimelineApprovalDecision"
@@ -548,9 +542,6 @@ const schemas = {
               },
               "request_id": {
                 "type": "string"
-              },
-              "source": {
-                "$ref": "#/$defs/WebTimelineApprovalSource"
               },
               "tool_name": {
                 "type": "string"
@@ -569,8 +560,7 @@ const schemas = {
               "request_id",
               "tool_name",
               "decision",
-              "source",
-              "decider",
+              "actor",
               "approval_judge_escalated"
             ],
             "type": "object"
@@ -787,8 +777,28 @@ const schemas = {
         ],
         "type": "object"
       },
-      "WebTimelineApprovalDecider": {
+      "WebTimelineAnthropicServiceTier": {
+        "enum": [
+          "auto",
+          "standard_only"
+        ],
+        "type": "string"
+      },
+      "WebTimelineApprovalActor": {
         "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
           {
             "additionalProperties": false,
             "properties": {
@@ -833,14 +843,6 @@ const schemas = {
         "enum": [
           "approve",
           "deny"
-        ],
-        "type": "string"
-      },
-      "WebTimelineApprovalSource": {
-        "enum": [
-          "policy",
-          "delegate",
-          "user"
         ],
         "type": "string"
       },
@@ -914,6 +916,14 @@ const schemas = {
           "keep_running",
           "stop",
           "cancel"
+        ],
+        "type": "string"
+      },
+      "WebTimelineCodexCliServiceTier": {
+        "enum": [
+          "default",
+          "priority",
+          "flex"
         ],
         "type": "string"
       },
@@ -1321,10 +1331,83 @@ const schemas = {
           }
         ]
       },
+      "WebTimelineEffectiveModelSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "fast_mode": {
+            "$ref": "#/$defs/WebTimelineFastMode"
+          },
+          "reasoning_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineReasoningLevel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "service_tier": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineServiceTier"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "fast_mode"
+        ],
+        "type": "object"
+      },
       "WebTimelineEventSequence": {
         "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
         "pattern": "^[1-9][0-9]*$",
         "type": "string"
+      },
+      "WebTimelineFastMode": {
+        "enum": [
+          "disabled",
+          "enabled"
+        ],
+        "type": "string"
+      },
+      "WebTimelineFastModeOverlay": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "value",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WebTimelineFastMode"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WebTimelineGoalBlockedReason": {
         "enum": [
@@ -1336,51 +1419,140 @@ const schemas = {
         "type": "string"
       },
       "WebTimelineGoalEvent": {
-        "additionalProperties": false,
-        "properties": {
-          "event_kind": {
-            "$ref": "#/$defs/WebTimelineGoalEventKind"
-          },
-          "generation": {
-            "$ref": "#/$defs/WebU64"
-          },
-          "reason": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebTimelineGoalBlockedReason"
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "generation": {
+                "$ref": "#/$defs/WebU64"
               },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "text": {
-            "anyOf": [
-              {
+              "text": {
                 "$ref": "#/$defs/WebTimelineTextExcerpt"
               },
-              {
-                "type": "null"
+              "type": {
+                "const": "commissioned",
+                "type": "string"
               }
-            ]
+            },
+            "required": [
+              "type",
+              "generation",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "generation": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "reason": {
+                "$ref": "#/$defs/WebTimelineGoalBlockedReason"
+              },
+              "text": {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              "type": {
+                "const": "blocked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "generation",
+              "reason",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "generation": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "text": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineTextExcerpt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "const": "resumed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "generation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "generation": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "text": {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              "type": {
+                "const": "achieved",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "generation",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "generation": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "type": {
+                "const": "user_stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "generation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "generation": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "text": {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              "type": {
+                "const": "superseded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "generation",
+              "text"
+            ],
+            "type": "object"
           }
-        },
-        "required": [
-          "generation",
-          "event_kind"
-        ],
-        "type": "object"
-      },
-      "WebTimelineGoalEventKind": {
-        "enum": [
-          "commissioned",
-          "blocked",
-          "resumed",
-          "achieved",
-          "user_stopped",
-          "superseded"
-        ],
-        "type": "string"
+        ]
       },
       "WebTimelineImportedEvidence": {
         "additionalProperties": false,
@@ -1470,6 +1642,331 @@ const schemas = {
           }
         ]
       },
+      "WebTimelineModelChangeAdjustment": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "$ref": "#/$defs/WebTimelineReasoningLevel"
+              },
+              "to": {
+                "$ref": "#/$defs/WebTimelineReasoningLevel"
+              },
+              "type": {
+                "const": "reasoning_level_clamped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "from",
+              "to"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "$ref": "#/$defs/WebTimelineReasoningLevel"
+              },
+              "type": {
+                "const": "reasoning_level_cleared",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "from"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "fast_mode_disabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "$ref": "#/$defs/WebTimelineServiceTier"
+              },
+              "type": {
+                "const": "service_tier_cleared",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "from"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineModelSelection": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "direct",
+                "type": "string"
+              },
+              "selection_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "selection_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "alias_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "alias_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineModelSettingSource": {
+        "enum": [
+          "per_call",
+          "session",
+          "profile",
+          "global_default"
+        ],
+        "type": "string"
+      },
+      "WebTimelineModelSettingsDetail": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "adjustments": {
+                "items": {
+                  "$ref": "#/$defs/WebTimelineModelChangeAdjustment"
+                },
+                "type": "array"
+              },
+              "caller_override": {
+                "$ref": "#/$defs/WebTimelineModelSettingsOverlay"
+              },
+              "command_id": {
+                "type": "string"
+              },
+              "installed_defaults_version": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "installed_model": {
+                "$ref": "#/$defs/WebTimelineModelSelection"
+              },
+              "installed_settings": {
+                "$ref": "#/$defs/WebTimelineModelSettingsSnapshot"
+              },
+              "prior_defaults_version": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "prior_model": {
+                "$ref": "#/$defs/WebTimelineModelSelection"
+              },
+              "prior_settings": {
+                "$ref": "#/$defs/WebTimelineModelSettingsSnapshot"
+              },
+              "type": {
+                "const": "session_defaults_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "command_id",
+              "prior_defaults_version",
+              "installed_defaults_version",
+              "prior_model",
+              "installed_model",
+              "prior_settings",
+              "installed_settings",
+              "caller_override",
+              "adjustments"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "accepted_input_id": {
+                "type": "string"
+              },
+              "adjusted_from_selection_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "adjustments": {
+                "items": {
+                  "$ref": "#/$defs/WebTimelineModelChangeAdjustment"
+                },
+                "type": "array"
+              },
+              "defaults_version": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "per_call_override": {
+                "$ref": "#/$defs/WebTimelineModelSettingsOverlay"
+              },
+              "requested_model": {
+                "$ref": "#/$defs/WebTimelineModelSelection"
+              },
+              "selected_direct_id": {
+                "type": "string"
+              },
+              "settings": {
+                "$ref": "#/$defs/WebTimelineModelSettingsSnapshot"
+              },
+              "turn_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "turn_resolved",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "accepted_input_id",
+              "turn_id",
+              "defaults_version",
+              "requested_model",
+              "selected_direct_id",
+              "per_call_override",
+              "settings",
+              "adjustments"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineModelSettingsOverlay": {
+        "additionalProperties": false,
+        "properties": {
+          "fast_mode": {
+            "$ref": "#/$defs/WebTimelineFastModeOverlay"
+          },
+          "reasoning_level": {
+            "$ref": "#/$defs/WebTimelineSettingOverlay"
+          },
+          "service_tier": {
+            "$ref": "#/$defs/WebTimelineSettingOverlay2"
+          }
+        },
+        "required": [
+          "reasoning_level",
+          "fast_mode",
+          "service_tier"
+        ],
+        "type": "object"
+      },
+      "WebTimelineModelSettingsPrecedence": {
+        "additionalProperties": false,
+        "properties": {
+          "global_default": {
+            "$ref": "#/$defs/WebTimelineModelSettingsOverlay"
+          },
+          "per_call": {
+            "$ref": "#/$defs/WebTimelineModelSettingsOverlay"
+          },
+          "profile": {
+            "$ref": "#/$defs/WebTimelineModelSettingsOverlay"
+          },
+          "session": {
+            "$ref": "#/$defs/WebTimelineModelSettingsOverlay"
+          }
+        },
+        "required": [
+          "per_call",
+          "session",
+          "profile",
+          "global_default"
+        ],
+        "type": "object"
+      },
+      "WebTimelineModelSettingsSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "effective": {
+            "$ref": "#/$defs/WebTimelineEffectiveModelSettings"
+          },
+          "fast_mode_source": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineModelSettingSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "precedence": {
+            "$ref": "#/$defs/WebTimelineModelSettingsPrecedence"
+          },
+          "reasoning_source": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineModelSettingSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "service_tier_source": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineModelSettingSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "validated_for_selection_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "precedence",
+          "effective"
+        ],
+        "type": "object"
+      },
       "WebTimelineModelUsage": {
         "additionalProperties": false,
         "description": "Independently optional provider-reported usage counts.",
@@ -1516,6 +2013,30 @@ const schemas = {
           }
         },
         "type": "object"
+      },
+      "WebTimelineOpenAiServiceTier": {
+        "enum": [
+          "auto",
+          "default",
+          "flex",
+          "scale",
+          "priority",
+          "fast"
+        ],
+        "type": "string"
+      },
+      "WebTimelineReasoningLevel": {
+        "enum": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+          "ultra"
+        ],
+        "type": "string"
       },
       "WebTimelineReconciliationOperation": {
         "oneOf": [
@@ -1574,6 +2095,155 @@ const schemas = {
           "abandoned"
         ],
         "type": "string"
+      },
+      "WebTimelineServiceTier": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WebTimelineAnthropicServiceTier"
+              }
+            },
+            "required": [
+              "provider",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WebTimelineOpenAiServiceTier"
+              }
+            },
+            "required": [
+              "provider",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "provider": {
+                "const": "codex_cli",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WebTimelineCodexCliServiceTier"
+              }
+            },
+            "required": [
+              "provider",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineSettingOverlay": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "provider_default",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "value",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WebTimelineReasoningLevel"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineSettingOverlay2": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "provider_default",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "value",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WebTimelineServiceTier"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WebTimelineTextExcerpt": {
         "additionalProperties": false,
@@ -1715,12 +2385,59 @@ const schemas = {
         "type": "object"
       },
       "WebTimelineToolBatchState": {
-        "enum": [
-          "proposed",
-          "results_projected",
-          "recovery_required"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "frontier_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "proposed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "frontier_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "frontier_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "results_projected",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "frontier_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "tool_attempt_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "recovery_required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "tool_attempt_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WebTimelineToolEffectPosture": {
         "enum": [
@@ -2110,6 +2827,31 @@ function assertTimelineExcerpt(excerpt, address, field, path) {
   return continuation;
 }
 
+function pageToolContinuation(value, address, field) {
+  if (
+    value.continuation === undefined ||
+    value.continuation === null ||
+    value.continuation.type !== "more_body"
+  ) {
+    return null;
+  }
+  const continuation = value.continuation.body;
+  if (
+    !sameTimelineAddress(continuation.address, address) ||
+    BigInt(continuation.offset_bytes) !== 0n
+  ) {
+    return null;
+  }
+  const allowed = field === "tool_arguments"
+    ? new Set(["tool_arguments", "tool_result", "tool_failure", "goal_text"])
+    : field === "tool_result" || field === "tool_failure"
+      ? new Set(["tool_arguments", "goal_text"])
+      : field === "goal_text"
+        ? new Set(["goal_text"])
+        : new Set();
+  return allowed.has(continuation.field) ? continuation : null;
+}
+
 function assertTimelineDetailPage(value) {
   const maxProjectedBodyBytes = 65536;
   const detailEnvelopeBytes = 128;
@@ -2193,6 +2935,9 @@ function assertTimelineDetailPage(value) {
           if (excerpts.length === 1) {
             const [excerpt, field, excerptPath] = excerpts[0];
             continuation = assertTimelineExcerpt(excerpt, item.address, field, excerptPath);
+            if (continuation === null) {
+              continuation = pageToolContinuation(value, item.address, field);
+            }
             textBytes = new TextEncoder().encode(excerpt.text).byteLength;
           }
         }
@@ -2206,6 +2951,9 @@ function assertTimelineDetailPage(value) {
             "goal_text",
             `${path}.body.goal_events[0].text`,
           );
+          if (continuation === null) {
+            continuation = pageToolContinuation(value, item.address, "goal_text");
+          }
           textBytes = new TextEncoder().encode(goal.text.text).byteLength;
         }
         break;

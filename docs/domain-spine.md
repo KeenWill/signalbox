@@ -6532,11 +6532,16 @@ pub enum TimelineToolState {
 }
 pub enum TimelineToolApprovalPosture { Auto, Delegated, Human }
 pub enum TimelineToolEffectPosture { EffectFree, ExternalEffect }
-pub enum TimelineToolBatchState { Proposed, ResultsProjected, RecoveryRequired }
+pub enum TimelineToolSandboxPosture { Unsandboxed, Sandboxed }
+pub enum TimelineToolBatchState {
+    Proposed { frontier_id: ContextFrontierId },
+    ResultsProjected { frontier_id: ContextFrontierId },
+    RecoveryRequired { attempt_id: ToolAttemptId },
+}
 pub struct TimelineToolAttempt { /* fields */ }
 pub enum TimelineApprovalDecision { Approve, Deny }
-pub enum TimelineApprovalSource { Policy, Delegate, User }
-pub enum TimelineApprovalDecider {
+pub enum TimelineApprovalActor {
+    Policy,
     User { command_id: DurableCommandId },
     Delegate {
         model_selection_id: DirectModelSelection,
@@ -6548,14 +6553,22 @@ pub enum TimelineRunnerState {
     Pinned, Suspect, Connected, RunnerLostBeforePin, RunnerLost, Replaced,
     WorkingDirectoryChanged, Abandoned,
 }
-pub enum TimelineGoalEventKind {
-    Commissioned, Blocked, Resumed, Achieved, UserStopped, Superseded,
-}
 pub enum TimelineGoalBlockedReason {
     UserInputRequired, ExternalChangeRequired, AuthorizationRequired,
     ExecutionFailure,
 }
-pub struct TimelineGoalEvent { /* fields */ }
+pub enum TimelineGoalEvent {
+    Commissioned { /* fields */ },
+    Blocked { /* fields */ },
+    Resumed { /* fields */ },
+    Achieved { /* fields */ },
+    UserStopped { /* fields */ },
+    Superseded { /* fields */ },
+}
+pub enum TimelineModelSettingsDetail {
+    SessionDefaultsChanged { /* complete prior and installed settings evidence */ },
+    TurnResolved { /* complete frozen turn settings evidence */ },
+}
 pub enum TimelineBoundChildAction { KeepRunning, Stop, Cancel }
 pub enum TimelineDelegationPolicy {
     Background,

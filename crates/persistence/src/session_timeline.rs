@@ -7,13 +7,13 @@ use signalbox_application::{
     SessionTimelineBounds, SessionTimelineDescriptor, SessionTimelineDetail,
     SessionTimelineDetailBody, SessionTimelineDetailPage, SessionTimelineEventKind,
     SessionTimelineItem, SessionTimelineReader, SessionTimelineSizeFacts, SessionTimelineWindow,
-    SessionWorkFacts, TimelineAddress, TimelineApprovalDecider, TimelineApprovalDecision,
-    TimelineApprovalSource, TimelineBodyContinuation, TimelineBodyField, TimelineBoundChildAction,
-    TimelineContinuation, TimelineDelegationDetail, TimelineDelegationOutcome,
-    TimelineDelegationPolicy, TimelineDelegationProvenance, TimelineDelegationReason,
-    TimelineDelegationWaitMode, TimelineDetailContinuation, TimelineDetailCursor,
-    TimelineDetailLimits, TimelineGoalBlockedReason, TimelineGoalEvent, TimelineGoalEventKind,
-    TimelineImportedEvidence, TimelineModelCallDisposition, TimelineModelCallState,
+    SessionWorkFacts, TimelineAddress, TimelineApprovalActor, TimelineApprovalDecision,
+    TimelineBodyContinuation, TimelineBodyField, TimelineBoundChildAction, TimelineContinuation,
+    TimelineDelegationDetail, TimelineDelegationOutcome, TimelineDelegationPolicy,
+    TimelineDelegationProvenance, TimelineDelegationReason, TimelineDelegationWaitMode,
+    TimelineDetailContinuation, TimelineDetailCursor, TimelineDetailLimits,
+    TimelineGoalBlockedReason, TimelineGoalEvent, TimelineImportedEvidence,
+    TimelineModelCallDisposition, TimelineModelCallState, TimelineModelSettingsDetail,
     TimelineModelUsage, TimelineReconciliationOperation, TimelineRunnerSandboxPosture,
     TimelineRunnerState, TimelineTextExcerpt, TimelineToolApprovalPosture, TimelineToolAttempt,
     TimelineToolBatchState, TimelineToolEffectPosture, TimelineToolSandboxPosture,
@@ -835,12 +835,21 @@ async fn project_detail_event(
                         None,
                     )
                 }
-                DispatchedOutboxEventKind::SessionModelSettingsChanged(_) => {
+                DispatchedOutboxEventKind::SessionModelSettingsChanged(settings) => {
                     require_no_body_cursor(cursor)?;
                     (
                         SessionTimelineDetailBody::ModelSettings {
-                            turn_id: None,
-                            cause_code: String::from("session_defaults_changed"),
+                            detail: TimelineModelSettingsDetail::SessionDefaultsChanged {
+                                command_id: settings.command_id(),
+                                prior_defaults_version: settings.prior_defaults_version(),
+                                installed_defaults_version: settings.installed_defaults_version(),
+                                prior_model: settings.prior_model(),
+                                installed_model: settings.installed_model(),
+                                prior_settings: settings.prior_settings(),
+                                installed_settings: settings.installed_settings(),
+                                caller_override: settings.caller_override(),
+                                adjustments: settings.adjustments().to_vec(),
+                            },
                         },
                         None,
                     )
@@ -849,8 +858,16 @@ async fn project_detail_event(
                     require_no_body_cursor(cursor)?;
                     (
                         SessionTimelineDetailBody::ModelSettings {
-                            turn_id: Some(settings.turn()),
-                            cause_code: String::from("turn_settings_resolved"),
+                            detail: TimelineModelSettingsDetail::TurnResolved {
+                                accepted_input_id: settings.accepted_input(),
+                                turn_id: settings.turn(),
+                                defaults_version: settings.defaults_version(),
+                                selection: *settings.selection(),
+                                per_call_override: settings.per_call_override(),
+                                settings: settings.settings(),
+                                adjusted_from_selection_id: settings.adjusted_from_selection(),
+                                adjustments: settings.adjustments().to_vec(),
+                            },
                         },
                         None,
                     )
@@ -899,11 +916,8 @@ async fn project_detail_event(
                     let event =
                         load_goal_turn_event(transaction, *turn, address, cursor, &mut remaining)
                             .await?;
-                    let continuation = event
-                        .text
-                        .as_ref()
-                        .and_then(|text| text.continuation)
-                        .map(TimelineDetailContinuation::MoreBody);
+                    let continuation =
+                        goal_event_continuation(&event).map(TimelineDetailContinuation::MoreBody);
                     (
                         SessionTimelineDetailBody::GoalEvent {
                             turn_id: *turn,
@@ -952,19 +966,44 @@ async fn project_detail_event(
                     result_frontier,
                 } => {
                     require_cursor_field(cursor, TimelineBodyField::CompactionSummary, 0)?;
-                    let summary_text: String = sqlx::query_scalar(
-                        "SELECT context_summary_value FROM semantic_transcript_entry
-                          WHERE semantic_entry_id = $1 AND payload_kind = 'context_summary'",
+                    let offset_bytes = cursor.map_or(0, |cursor| cursor.offset_bytes);
+                    let requested_bytes = u64::from(remaining).saturating_add(3);
+                    let requested_bytes = i64::try_from(requested_bytes)
+                        .map_err(|_| SessionTimelineCorruption::DetailProjectionOverflow)?;
+                    let row = sqlx::query(
+                        r#"
+SELECT octet_length(context_summary_value)::numeric AS total_bytes,
+       substring(
+           convert_to(context_summary_value, 'UTF8')
+           FROM (least(
+               $2::numeric,
+               octet_length(context_summary_value)::numeric
+           ) + 1)::integer
+           FOR $3::integer
+       ) AS content_bytes
+  FROM semantic_transcript_entry
+ WHERE semantic_entry_id = $1
+   AND payload_kind = 'context_summary'
+"#,
                     )
                     .bind(summary_entry.into_uuid())
+                    .bind(Decimal::from(offset_bytes))
+                    .bind(requested_bytes)
                     .fetch_one(&mut **transaction)
                     .await?;
-                    let summary = excerpt_text(
-                        &summary_text,
+                    let total_bytes =
+                        nonnegative(row.try_get("total_bytes")?, "context summary byte length")?;
+                    if offset_bytes > total_bytes {
+                        return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
+                    }
+                    let summary = bounded_text_excerpt(
+                        &ModelResponseSlice {
+                            bytes: row.try_get("content_bytes")?,
+                            offset_bytes,
+                            total_bytes,
+                        },
                         address,
                         TimelineBodyField::CompactionSummary,
-                        0,
-                        cursor.map_or(0, |cursor| cursor.offset_bytes),
                         &mut remaining,
                     )?;
                     let continuation = summary
@@ -1152,16 +1191,73 @@ async fn load_goal_turn_event(
     if text.is_none() && cursor.is_some_and(|cursor| !is_item_start_cursor(cursor)) {
         return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
     }
-    Ok(TimelineGoalEvent {
-        generation: nonnegative(row.try_get("generation")?, "goal generation")?,
-        event_kind: goal_event_kind(&row.try_get::<String, _>("event_kind")?)?,
-        reason: row
-            .try_get::<Option<String>, _>("blocked_reason")?
-            .as_deref()
-            .map(goal_blocked_reason)
-            .transpose()?,
-        text,
-    })
+    let generation = nonnegative(row.try_get("generation")?, "goal generation")?;
+    let event_kind: String = row.try_get("event_kind")?;
+    let reason: Option<String> = row.try_get("blocked_reason")?;
+    timeline_goal_event(generation, &event_kind, reason.as_deref(), text).map_err(Into::into)
+}
+
+fn timeline_goal_event(
+    generation: u64,
+    event_kind: &str,
+    reason: Option<&str>,
+    text: Option<TimelineTextExcerpt>,
+) -> Result<TimelineGoalEvent, SessionTimelineCorruption> {
+    match goal_event_kind(event_kind)? {
+        StoredGoalEventKind::Commissioned => Ok(TimelineGoalEvent::Commissioned {
+            generation,
+            text: text.ok_or(SessionTimelineCorruption::InvalidStoredValue(
+                "commissioned goal text",
+            ))?,
+        }),
+        StoredGoalEventKind::Blocked => Ok(TimelineGoalEvent::Blocked {
+            generation,
+            reason: reason.map(goal_blocked_reason).transpose()?.ok_or(
+                SessionTimelineCorruption::InvalidStoredValue("blocked goal reason"),
+            )?,
+            text: text.ok_or(SessionTimelineCorruption::InvalidStoredValue(
+                "blocked goal text",
+            ))?,
+        }),
+        StoredGoalEventKind::Resumed if reason.is_none() => {
+            Ok(TimelineGoalEvent::Resumed { generation, text })
+        }
+        StoredGoalEventKind::Achieved if reason.is_none() => Ok(TimelineGoalEvent::Achieved {
+            generation,
+            text: text.ok_or(SessionTimelineCorruption::InvalidStoredValue(
+                "achieved goal text",
+            ))?,
+        }),
+        StoredGoalEventKind::UserStopped if reason.is_none() && text.is_none() => {
+            Ok(TimelineGoalEvent::UserStopped { generation })
+        }
+        StoredGoalEventKind::Superseded if reason.is_none() => Ok(TimelineGoalEvent::Superseded {
+            generation,
+            text: text.ok_or(SessionTimelineCorruption::InvalidStoredValue(
+                "superseded goal text",
+            ))?,
+        }),
+        StoredGoalEventKind::Resumed
+        | StoredGoalEventKind::Achieved
+        | StoredGoalEventKind::UserStopped
+        | StoredGoalEventKind::Superseded => Err(SessionTimelineCorruption::InvalidStoredValue(
+            "goal event shape",
+        )),
+    }
+}
+
+const fn goal_event_continuation(event: &TimelineGoalEvent) -> Option<TimelineBodyContinuation> {
+    match event {
+        TimelineGoalEvent::Commissioned { text, .. }
+        | TimelineGoalEvent::Blocked { text, .. }
+        | TimelineGoalEvent::Achieved { text, .. }
+        | TimelineGoalEvent::Superseded { text, .. } => text.continuation,
+        TimelineGoalEvent::Resumed { text, .. } => match text {
+            Some(text) => text.continuation,
+            None => None,
+        },
+        TimelineGoalEvent::UserStopped { .. } => None,
+    }
 }
 
 async fn project_tool_batch(
@@ -1450,12 +1546,18 @@ fn tool_state(
 
 const fn tool_batch_state(state: DispatchedToolBatchState) -> TimelineToolBatchState {
     match state {
-        DispatchedToolBatchState::Proposed { .. } => TimelineToolBatchState::Proposed,
-        DispatchedToolBatchState::ResultsProjected { .. } => {
-            TimelineToolBatchState::ResultsProjected
+        DispatchedToolBatchState::Proposed { frontier } => TimelineToolBatchState::Proposed {
+            frontier_id: frontier,
+        },
+        DispatchedToolBatchState::ResultsProjected { frontier } => {
+            TimelineToolBatchState::ResultsProjected {
+                frontier_id: frontier,
+            }
         }
-        DispatchedToolBatchState::RecoveryRequired { .. } => {
-            TimelineToolBatchState::RecoveryRequired
+        DispatchedToolBatchState::RecoveryRequired { attempt } => {
+            TimelineToolBatchState::RecoveryRequired {
+                attempt_id: attempt,
+            }
         }
     }
 }
@@ -1559,12 +1661,12 @@ fn project_tool_goal(
             producing_model_call_id: producing_call,
             state: tool_batch_state(state),
             tools: Vec::new(),
-            goal_events: vec![TimelineGoalEvent {
-                generation: row.generation,
-                event_kind: goal_event_kind(&row.event_kind)?,
-                reason: row.reason.as_deref().map(goal_blocked_reason).transpose()?,
-                text: Some(text),
-            }],
+            goal_events: vec![timeline_goal_event(
+                row.generation,
+                &row.event_kind,
+                row.reason.as_deref(),
+                Some(text),
+            )?],
         },
         continuation,
     ))
@@ -1632,21 +1734,27 @@ async fn project_tool_approval(
         ToolApprovalDecision::Approve => TimelineApprovalDecision::Approve,
         ToolApprovalDecision::Deny { .. } => TimelineApprovalDecision::Deny,
     };
-    let source = match approval.source() {
-        ToolDecisionSource::PolicyAuto
-        | ToolDecisionSource::SessionBlanket
-        | ToolDecisionSource::SessionOverride => TimelineApprovalSource::Policy,
-        ToolDecisionSource::Delegate => TimelineApprovalSource::Delegate,
-        ToolDecisionSource::UserCommand => TimelineApprovalSource::User,
-    };
-    let decider = match decider {
-        ToolApprovalDecider::User { command } => TimelineApprovalDecider::User {
-            command_id: *command,
-        },
-        ToolApprovalDecider::Delegate { model, call } => TimelineApprovalDecider::Delegate {
-            model_selection_id: *model,
-            model_call_id: *call,
-        },
+    let actor = match (approval.source(), decider) {
+        (ToolDecisionSource::UserCommand, ToolApprovalDecider::User { command }) => {
+            TimelineApprovalActor::User {
+                command_id: *command,
+            }
+        }
+        (ToolDecisionSource::Delegate, ToolApprovalDecider::Delegate { model, call }) => {
+            TimelineApprovalActor::Delegate {
+                model_selection_id: *model,
+                model_call_id: *call,
+            }
+        }
+        (ToolDecisionSource::PolicyAuto, _)
+        | (ToolDecisionSource::SessionBlanket, _)
+        | (ToolDecisionSource::SessionOverride, _) => TimelineApprovalActor::Policy,
+        (ToolDecisionSource::UserCommand, ToolApprovalDecider::Delegate { .. })
+        | (ToolDecisionSource::Delegate, ToolApprovalDecider::User { .. }) => {
+            return Err(
+                SessionTimelineCorruption::InvalidStoredValue("tool approval actor").into(),
+            );
+        }
     };
     Ok((
         SessionTimelineDetailBody::ToolApprovalDecision {
@@ -1654,8 +1762,7 @@ async fn project_tool_approval(
             request_id: approval.request(),
             tool_name,
             decision,
-            source,
-            decider,
+            actor,
             rationale,
             approval_judge_escalated,
         },
@@ -1912,14 +2019,24 @@ fn delegation_wake_body(wake: DispatchedDelegationWake) -> SessionTimelineDetail
     SessionTimelineDetailBody::Delegation(detail)
 }
 
-fn goal_event_kind(value: &str) -> Result<TimelineGoalEventKind, SessionTimelineCorruption> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StoredGoalEventKind {
+    Commissioned,
+    Blocked,
+    Resumed,
+    Achieved,
+    UserStopped,
+    Superseded,
+}
+
+fn goal_event_kind(value: &str) -> Result<StoredGoalEventKind, SessionTimelineCorruption> {
     match value {
-        "commissioned" => Ok(TimelineGoalEventKind::Commissioned),
-        "blocked" => Ok(TimelineGoalEventKind::Blocked),
-        "resumed" => Ok(TimelineGoalEventKind::Resumed),
-        "achieved" => Ok(TimelineGoalEventKind::Achieved),
-        "user_stopped" => Ok(TimelineGoalEventKind::UserStopped),
-        "superseded" => Ok(TimelineGoalEventKind::Superseded),
+        "commissioned" => Ok(StoredGoalEventKind::Commissioned),
+        "blocked" => Ok(StoredGoalEventKind::Blocked),
+        "resumed" => Ok(StoredGoalEventKind::Resumed),
+        "achieved" => Ok(StoredGoalEventKind::Achieved),
+        "user_stopped" => Ok(StoredGoalEventKind::UserStopped),
+        "superseded" => Ok(StoredGoalEventKind::Superseded),
         _ => Err(SessionTimelineCorruption::InvalidStoredValue(
             "goal event kind",
         )),
@@ -2800,11 +2917,11 @@ mod tests {
     fn goal_vocabulary_maps_known_values_and_rejects_unknown_values() {
         assert_eq!(
             goal_event_kind("commissioned"),
-            Ok(TimelineGoalEventKind::Commissioned)
+            Ok(StoredGoalEventKind::Commissioned)
         );
         assert_eq!(
             goal_event_kind("superseded"),
-            Ok(TimelineGoalEventKind::Superseded)
+            Ok(StoredGoalEventKind::Superseded)
         );
         assert_eq!(
             goal_blocked_reason("user_input_required"),
