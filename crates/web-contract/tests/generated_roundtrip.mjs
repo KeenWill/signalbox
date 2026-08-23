@@ -70,6 +70,27 @@ function modelCallDetailPage() {
   };
 }
 
+function turnLifecycleDetailPage() {
+  return {
+    session_id: "00000000-0000-0000-0000-000000000991",
+    items: [
+      {
+        address: { event_sequence: "9" },
+        kind: "turn_completed",
+        body: {
+          type: "turn_lifecycle",
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          lifecycle: "terminalized",
+          cause_code: "completed",
+        },
+        projected_body_bytes: 128,
+      },
+    ],
+    projected_body_bytes: 128,
+    continuation: null,
+  };
+}
+
 test("generated example decoder round trips the Rust fixture", async () => {
   const source = JSON.parse(await readFile(fixtureUrl, "utf8"));
   const decoded = decodeWebContractExample(source);
@@ -206,16 +227,37 @@ test("generated detail decoder rejects oversized arrays before their members", (
   );
 });
 
-test("generated detail decoder rejects invalid nested UUID identities", () => {
-  for (const field of ["turn_id", "model_call_id", "model_identity_id"]) {
-    const page = modelCallDetailPage();
-    page.items[0].body[field] = "not-a-uuid";
-    assert.throws(
-      () => decodeWebSessionTimelineDetailPage(page),
-      /one recognized variant/,
-      field,
-    );
-  }
+test("generated detail decoder rejects an invalid turn identity", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.turn_id = "not-a-uuid";
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder rejects an invalid model-call identity", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.model_call_id = "not-a-uuid";
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder rejects an invalid model identity", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.model_identity_id = "not-a-uuid";
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder rejects an invalid page session identity", () => {
+  const page = userInputDetailPage();
+  page.session_id = "not-a-uuid";
+  assert.throws(() => decodeWebSessionTimelineDetailPage(page), /matching/);
 });
 
 test("generated detail decoder rejects invalid blob identities", () => {
@@ -269,6 +311,95 @@ test("generated detail decoder rejects failure causes on nonterminal calls", () 
   assert.throws(
     () => decodeWebSessionTimelineDetailPage(page),
     /terminal evidence only/,
+  );
+});
+
+test("generated detail decoder rejects an unknown provider failure cause", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.state = {
+    type: "terminal",
+    disposition: "known_failed",
+  };
+  page.items[0].body.provider_failure_cause = "invented";
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder requires a cause for known failures", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.state = {
+    type: "terminal",
+    disposition: "known_failed",
+  };
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /present exactly for a known_failed/,
+  );
+});
+
+test("generated detail decoder rejects a failure cause on another disposition", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.state = { type: "terminal", disposition: "completed" };
+  page.items[0].body.provider_failure_cause = "rate_limited";
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /present exactly for a known_failed/,
+  );
+});
+
+test("generated detail decoder correlates lifecycle causes with event kinds", () => {
+  const page = turnLifecycleDetailPage();
+  page.items[0].body.cause_code = "failed";
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /the cause for turn_completed/,
+  );
+});
+
+test("generated detail decoder rejects a nonzero input member index", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.text.total_bytes = "6";
+  page.items[0].body.text.continuation = {
+    address: { event_sequence: "7" },
+    field: "input_text",
+    member_index: 1,
+    offset_bytes: "3",
+  };
+  page.continuation = {
+    type: "more_body",
+    body: page.items[0].body.text.continuation,
+  };
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /zero for a singular body field/,
+  );
+});
+
+test("generated detail decoder rejects a nonzero response member index", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.state = { type: "terminal", disposition: "completed" };
+  page.items[0].body.response = {
+    text: "abc",
+    offset_bytes: "0",
+    total_bytes: "6",
+    continuation: {
+      address: { event_sequence: "8" },
+      field: "model_response",
+      member_index: 1,
+      offset_bytes: "3",
+    },
+  };
+  page.items[0].projected_body_bytes = 131;
+  page.projected_body_bytes = 131;
+  page.continuation = {
+    type: "more_body",
+    body: page.items[0].body.response.continuation,
+  };
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /zero for a singular body field/,
   );
 });
 

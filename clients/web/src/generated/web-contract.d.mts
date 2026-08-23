@@ -33,6 +33,8 @@ type WebContractLimits = {
   readonly max_timeline_window_items: number;
 };
 
+type WebProviderModelCallFailureCause = "credential_rejected" | "permission_denied" | "invalid_request" | "target_not_found" | "request_too_large" | "rate_limited" | "quota_exhausted" | "overloaded" | "provider_internal" | "unrecognized";
+
 type WebSessionId = string;
 
 type WebSessionTimelineDetail = {
@@ -50,7 +52,7 @@ type WebSessionTimelineDetailBody = {
 } | {
   readonly model_call_id: WebSessionId;
   readonly model_identity_id: WebSessionId;
-  readonly provider_failure_cause?: string | null;
+  readonly provider_failure_cause?: WebProviderModelCallFailureCause | null;
   readonly request_context_items: WebU64;
   readonly response?: WebTimelineTextExcerpt | null;
   readonly state: WebTimelineModelCallState;
@@ -183,7 +185,7 @@ export type WebSessionTimelineDetailPage = {
   readonly continuation?: WebTimelineDetailContinuation | null;
   readonly items: ReadonlyArray<WebSessionTimelineDetail>;
   readonly projected_body_bytes: number;
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
 };
 
 export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;

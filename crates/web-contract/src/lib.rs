@@ -485,7 +485,7 @@ pub enum WebSessionTimelineDetailBody {
         request_context_items: WebU64,
         response: Option<WebTimelineTextExcerpt>,
         usage: WebTimelineModelUsage,
-        provider_failure_cause: Option<String>,
+        provider_failure_cause: Option<WebProviderModelCallFailureCause>,
     },
     TurnLifecycle {
         turn_id: WebSessionId,
@@ -519,7 +519,7 @@ pub enum WebTimelineDetailContinuation {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineDetailPage {
-    pub session_id: String,
+    pub session_id: WebSessionId,
     #[schemars(length(max = 128))]
     pub items: Vec<WebSessionTimelineDetail>,
     pub projected_body_bytes: u32,
@@ -865,6 +865,9 @@ function assertTimelineExcerpt(excerpt, address, field, path) {{
     return null;
   }}
   const continuation = excerpt.continuation;
+  if (continuation.member_index !== 0) {{
+    fail(`${{path}}.continuation.member_index`, "zero for a singular body field");
+  }}
   if (end >= total) {{
     fail(`${{path}}.continuation`, "present only before the declared body end");
   }}
@@ -946,6 +949,16 @@ function assertTimelineDetailPage(value) {{
               "terminal evidence only at a terminal model-call state",
             );
           }}
+        }} else {{
+          const hasFailureCause =
+            item.body.provider_failure_cause !== undefined &&
+            item.body.provider_failure_cause !== null;
+          if ((item.body.state.disposition === "known_failed") !== hasFailureCause) {{
+            fail(
+              `${{path}}.body.provider_failure_cause`,
+              "present exactly for a known_failed terminal model call",
+            );
+          }}
         }}
         break;
       case "turn_lifecycle":
@@ -954,6 +967,17 @@ function assertTimelineDetailPage(value) {{
         }}
         if (item.body.lifecycle === "terminalized" && !terminalKinds.has(item.kind)) {{
           fail(`${{path}}.kind`, "a terminal turn event for a terminalized lifecycle");
+        }}
+        const lifecycleCauseByKind = {{
+          turn_activated: "activated",
+          turn_failed: "failed",
+          turn_completed: "completed",
+          turn_refused: "refused",
+          turn_cancelled: "cancelled",
+          turn_reconciliation_required: "reconciliation_required",
+        }};
+        if (item.body.cause_code !== lifecycleCauseByKind[item.kind]) {{
+          fail(`${{path}}.body.cause_code`, `the cause for ${{item.kind}}`);
         }}
         break;
       case "event_fact":

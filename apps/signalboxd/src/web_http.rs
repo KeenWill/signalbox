@@ -41,14 +41,14 @@ use signalbox_persistence::session_timeline::{
 };
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
-    WebBlobId, WebContractBootstrap, WebContractExample, WebSessionId,
-    WebSessionTimelineDescriptor, WebSessionTimelineDetail, WebSessionTimelineDetailBody,
-    WebSessionTimelineDetailPage, WebSessionTimelineEventKind, WebSessionTimelineItem,
-    WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
-    WebTimelineBlobReference, WebTimelineBodyContinuation, WebTimelineBodyField,
-    WebTimelineDetailContinuation, WebTimelineEventSequence, WebTimelineModelCallDisposition,
-    WebTimelineModelCallState, WebTimelineModelUsage, WebTimelineTextExcerpt,
-    WebTimelineTurnLifecycleKind, WebU64,
+    WebBlobId, WebContractBootstrap, WebContractExample, WebProviderModelCallFailureCause,
+    WebSessionId, WebSessionTimelineDescriptor, WebSessionTimelineDetail,
+    WebSessionTimelineDetailBody, WebSessionTimelineDetailPage, WebSessionTimelineEventKind,
+    WebSessionTimelineItem, WebSessionTimelineSizeFacts, WebSessionTimelineWindow,
+    WebSessionWorkFacts, WebTimelineAddress, WebTimelineBlobReference, WebTimelineBodyContinuation,
+    WebTimelineBodyField, WebTimelineDetailContinuation, WebTimelineEventSequence,
+    WebTimelineModelCallDisposition, WebTimelineModelCallState, WebTimelineModelUsage,
+    WebTimelineTextExcerpt, WebTimelineTurnLifecycleKind, WebU64,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -824,7 +824,7 @@ fn detail_page_dto(
     page: SessionTimelineDetailPage,
 ) -> Result<WebSessionTimelineDetailPage, SessionTimelineRequestError> {
     Ok(WebSessionTimelineDetailPage {
-        session_id: page.session.into_uuid().to_string(),
+        session_id: WebSessionId::from_uuid_bytes(*page.session.into_uuid().as_bytes()),
         items: page
             .items
             .into_iter()
@@ -902,9 +902,7 @@ fn detail_body_dto(
                     .map(WebU64::from_u64),
                 cache_read_input_tokens: usage.cache_read_input_tokens.map(WebU64::from_u64),
             },
-            provider_failure_cause: provider_failure_cause
-                .map(provider_failure_cause_code)
-                .map(str::to_owned),
+            provider_failure_cause: provider_failure_cause.map(provider_failure_cause_dto),
         },
         SessionTimelineDetailBody::TurnLifecycle {
             turn_id,
@@ -954,18 +952,34 @@ fn model_call_state_dto(state: TimelineModelCallState) -> WebTimelineModelCallSt
     }
 }
 
-fn provider_failure_cause_code(cause: ProviderModelCallFailureCause) -> &'static str {
+fn provider_failure_cause_dto(
+    cause: ProviderModelCallFailureCause,
+) -> WebProviderModelCallFailureCause {
     match cause {
-        ProviderModelCallFailureCause::PermissionDenied => "permission_denied",
-        ProviderModelCallFailureCause::InvalidRequest => "invalid_request",
-        ProviderModelCallFailureCause::TargetNotFound => "target_not_found",
-        ProviderModelCallFailureCause::RequestTooLarge => "request_too_large",
-        ProviderModelCallFailureCause::RateLimited => "rate_limited",
-        ProviderModelCallFailureCause::QuotaExhausted => "quota_exhausted",
-        ProviderModelCallFailureCause::Overloaded => "overloaded",
-        ProviderModelCallFailureCause::ProviderInternal => "provider_internal",
-        ProviderModelCallFailureCause::Unrecognized => "unrecognized",
-        _ => concat!("creden", "tial_rejected"),
+        ProviderModelCallFailureCause::PermissionDenied => {
+            WebProviderModelCallFailureCause::PermissionDenied
+        }
+        ProviderModelCallFailureCause::InvalidRequest => {
+            WebProviderModelCallFailureCause::InvalidRequest
+        }
+        ProviderModelCallFailureCause::TargetNotFound => {
+            WebProviderModelCallFailureCause::TargetNotFound
+        }
+        ProviderModelCallFailureCause::RequestTooLarge => {
+            WebProviderModelCallFailureCause::RequestTooLarge
+        }
+        ProviderModelCallFailureCause::RateLimited => WebProviderModelCallFailureCause::RateLimited,
+        ProviderModelCallFailureCause::QuotaExhausted => {
+            WebProviderModelCallFailureCause::QuotaExhausted
+        }
+        ProviderModelCallFailureCause::Overloaded => WebProviderModelCallFailureCause::Overloaded,
+        ProviderModelCallFailureCause::ProviderInternal => {
+            WebProviderModelCallFailureCause::ProviderInternal
+        }
+        ProviderModelCallFailureCause::Unrecognized => {
+            WebProviderModelCallFailureCause::Unrecognized
+        }
+        _ => WebProviderModelCallFailureCause::CredentialRejected,
     }
 }
 

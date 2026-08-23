@@ -331,6 +331,22 @@ const schemas = {
         "pattern": "^sha256:[0-9a-f]{64}$",
         "type": "string"
       },
+      "WebProviderModelCallFailureCause": {
+        "description": "Closed provider-neutral failure cause exposed at the browser boundary.",
+        "enum": [
+          "credential_rejected",
+          "permission_denied",
+          "invalid_request",
+          "target_not_found",
+          "request_too_large",
+          "rate_limited",
+          "quota_exhausted",
+          "overloaded",
+          "provider_internal",
+          "unrecognized"
+        ],
+        "type": "string"
+      },
       "WebSessionId": {
         "description": "Checked canonical UUID used for browser-visible session identities.",
         "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -405,9 +421,13 @@ const schemas = {
                 "$ref": "#/$defs/WebSessionId"
               },
               "provider_failure_cause": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebProviderModelCallFailureCause"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "request_context_items": {
@@ -823,7 +843,7 @@ const schemas = {
         "type": "integer"
       },
       "session_id": {
-        "type": "string"
+        "$ref": "#/$defs/WebSessionId"
       }
     },
     "required": [
@@ -1140,6 +1160,9 @@ function assertTimelineExcerpt(excerpt, address, field, path) {
     return null;
   }
   const continuation = excerpt.continuation;
+  if (continuation.member_index !== 0) {
+    fail(`${path}.continuation.member_index`, "zero for a singular body field");
+  }
   if (end >= total) {
     fail(`${path}.continuation`, "present only before the declared body end");
   }
@@ -1221,6 +1244,16 @@ function assertTimelineDetailPage(value) {
               "terminal evidence only at a terminal model-call state",
             );
           }
+        } else {
+          const hasFailureCause =
+            item.body.provider_failure_cause !== undefined &&
+            item.body.provider_failure_cause !== null;
+          if ((item.body.state.disposition === "known_failed") !== hasFailureCause) {
+            fail(
+              `${path}.body.provider_failure_cause`,
+              "present exactly for a known_failed terminal model call",
+            );
+          }
         }
         break;
       case "turn_lifecycle":
@@ -1229,6 +1262,17 @@ function assertTimelineDetailPage(value) {
         }
         if (item.body.lifecycle === "terminalized" && !terminalKinds.has(item.kind)) {
           fail(`${path}.kind`, "a terminal turn event for a terminalized lifecycle");
+        }
+        const lifecycleCauseByKind = {
+          turn_activated: "activated",
+          turn_failed: "failed",
+          turn_completed: "completed",
+          turn_refused: "refused",
+          turn_cancelled: "cancelled",
+          turn_reconciliation_required: "reconciliation_required",
+        };
+        if (item.body.cause_code !== lifecycleCauseByKind[item.kind]) {
+          fail(`${path}.body.cause_code`, `the cause for ${item.kind}`);
         }
         break;
       case "event_fact":
