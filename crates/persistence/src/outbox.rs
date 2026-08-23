@@ -3286,13 +3286,18 @@ async fn append_tool_batch_transition(
     sqlx::query(
         "INSERT INTO tool_batch_transition_detail_member
             (event_sequence, session_id, member_kind, member_index,
-             request_id, attempt_id)
+             request_id, attempt_id, approval_judge_escalated)
          SELECT $1, $2, 'tool', row_number() OVER (
                     ORDER BY request.request_ordinal,
                              generation.generation NULLS FIRST,
                              attempt.attempt_id NULLS FIRST
                 ) - 1,
-                request.request_id, attempt.attempt_id
+                request.request_id, attempt.attempt_id, EXISTS (
+                    SELECT 1
+                      FROM tool_approval_judge_model_call AS judge
+                     WHERE judge.request_id = request.request_id
+                       AND judge.recommendation_kind = 'escalate_to_human'
+                )
            FROM tool_request AS request
            LEFT JOIN tool_attempt AS attempt
              ON attempt.request_id = request.request_id

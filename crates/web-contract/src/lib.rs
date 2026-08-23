@@ -237,6 +237,40 @@ impl<'de> Deserialize<'de> for WebU64 {
     }
 }
 
+/// Checked browser-visible tool name using the domain's exact spelling rules.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebToolName(
+    #[schemars(length(min = 1, max = 64), regex(pattern = r"^[A-Za-z0-9_-]+$"))] String,
+);
+
+impl WebToolName {
+    /// Converts an already checked application-boundary tool name.
+    #[must_use]
+    pub fn from_checked(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebToolName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let valid = !value.is_empty()
+            && value.len() <= 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+        valid.then_some(Self(value)).ok_or_else(|| {
+            de::Error::custom(
+                "tool name must be 1-64 ASCII alphanumeric, underscore, or hyphen bytes",
+            )
+        })
+    }
+}
+
 /// Stable browser-visible location of one durable session event.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -475,7 +509,7 @@ pub enum WebTimelineToolAttemptEvidence {
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineToolAttempt {
     pub request_id: String,
-    pub tool_name: String,
+    pub tool_name: WebToolName,
     pub arguments: Option<WebTimelineTextExcerpt>,
     pub approval_posture: WebTimelineToolApprovalPosture,
     pub approval_judge_escalated: bool,
@@ -710,8 +744,17 @@ pub enum WebTimelineDelegationDetail {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineImportedEvidence {
+    pub imported_conversation_id: String,
     pub imported_entry_id: String,
     pub imported_position: WebU64,
+    pub relationship: WebTimelineImportedRelationship,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineImportedRelationship {
+    Resume,
+    Fork,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -931,6 +974,7 @@ pub enum WebSessionTimelineDetailBody {
         turn_id: String,
         producing_model_call_id: String,
         state: WebTimelineToolBatchState,
+        projected_member_index: Option<u32>,
         #[schemars(length(max = 1))]
         tools: Vec<WebTimelineToolAttempt>,
         #[schemars(length(max = 1))]
@@ -939,7 +983,7 @@ pub enum WebSessionTimelineDetailBody {
     ToolApprovalDecision {
         turn_id: String,
         request_id: String,
-        tool_name: String,
+        tool_name: WebToolName,
         decision: WebTimelineApprovalDecision,
         actor: WebTimelineApprovalActor,
         rationale: Option<WebTimelineTextExcerpt>,
@@ -965,6 +1009,7 @@ pub enum WebSessionTimelineDetailBody {
     Reconciliation {
         turn_id: String,
         operation: WebTimelineReconciliationOperation,
+        terminal_frontier_id: String,
         attempt_count: WebU64,
         exhausted: bool,
         operator_required: bool,
@@ -1355,7 +1400,7 @@ function assertTimelineExcerpt(excerpt, address, field, path) {{
   return continuation;
 }}
 
-function pageToolContinuation(value, address, field) {{
+function pageToolContinuation(value, address, field, memberIndex) {{
   if (
     value.continuation === undefined ||
     value.continuation === null ||
@@ -1370,14 +1415,69 @@ function pageToolContinuation(value, address, field) {{
   ) {{
     return null;
   }}
-  const allowed = field === "tool_arguments"
-    ? new Set(["tool_arguments", "tool_result", "tool_failure", "goal_text"])
+  const sameMember = continuation.member_index === memberIndex;
+  const nextMember = continuation.member_index === memberIndex + 1;
+  const valid = field === "tool_arguments"
+    ? (
+        ((continuation.field === "tool_result" || continuation.field === "tool_failure") && sameMember) ||
+        (continuation.field === "tool_arguments" && nextMember) ||
+        (continuation.field === "goal_text" && continuation.member_index === 0)
+      )
     : field === "tool_result" || field === "tool_failure"
-      ? new Set(["tool_arguments", "goal_text"])
+      ? (
+          (continuation.field === "tool_arguments" && nextMember) ||
+          (continuation.field === "goal_text" && continuation.member_index === 0)
+        )
       : field === "goal_text"
-        ? new Set(["goal_text"])
-        : new Set();
-  return allowed.has(continuation.field) ? continuation : null;
+        ? continuation.field === "goal_text" && nextMember
+        : false;
+  return valid ? continuation : null;
+}}
+
+function sameSettingValue(left, right) {{
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}}
+
+function resolveModelSetting(layers, field, providerDefault) {{
+  for (const [source, layer] of layers) {{
+    const overlay = layer[field];
+    if (overlay.kind === "inherit") continue;
+    if (overlay.kind === "provider_default") return [providerDefault, source];
+    return [overlay.value, source];
+  }}
+  return [providerDefault, null];
+}}
+
+function assertModelSettingsSnapshot(snapshot, path) {{
+  const layers = [
+    ["per_call", snapshot.precedence.per_call],
+    ["session", snapshot.precedence.session],
+    ["profile", snapshot.precedence.profile],
+    ["global_default", snapshot.precedence.global_default],
+  ];
+  const [reasoning, reasoningSource] = resolveModelSetting(layers, "reasoning_level", null);
+  const [fastMode, fastModeSource] = resolveModelSetting(layers, "fast_mode", "disabled");
+  const [serviceTier, serviceTierSource] = resolveModelSetting(layers, "service_tier", null);
+  const valid =
+    sameSettingValue(snapshot.effective.reasoning_level, reasoning) &&
+    snapshot.effective.fast_mode === fastMode &&
+    sameSettingValue(snapshot.effective.service_tier, serviceTier) &&
+    (snapshot.reasoning_source ?? null) === reasoningSource &&
+    (snapshot.fast_mode_source ?? null) === fastModeSource &&
+    (snapshot.service_tier_source ?? null) === serviceTierSource;
+  if (!valid) {{
+    fail(path, "a precedence-resolved model-settings snapshot");
+  }}
+  const providerDefaults =
+    reasoning === null && reasoningSource === null &&
+    fastMode === "disabled" && fastModeSource === null &&
+    serviceTier === null && serviceTierSource === null;
+  const validationAbsent =
+    snapshot.validated_for_selection_id === undefined ||
+    snapshot.validated_for_selection_id === null;
+  if (validationAbsent !== providerDefaults) {{
+    fail(`${{path}}.validated_for_selection_id`, "absent exactly for provider defaults");
+  }}
 }}
 
 function assertTimelineDetailPage(value) {{
@@ -1451,7 +1551,22 @@ function assertTimelineDetailPage(value) {{
         }}
         const tool = item.body.tools[0];
         const goal = item.body.goal_events[0];
+        const memberIndex = item.body.projected_member_index;
+        if ((tool !== undefined || goal !== undefined) && (memberIndex === undefined || memberIndex === null)) {{
+          fail(
+            `${{path}}.body.projected_member_index`,
+            "present for a projected tool-batch member",
+          );
+        }}
         if (tool !== undefined) {{
+          const operatorRequired =
+            tool.approval_judge_escalated || tool.approval_posture === "human";
+          if (tool.operator_required !== operatorRequired) {{
+            fail(
+              `${{path}}.body.tools[0].operator_required`,
+              "equal to approval_judge_escalated || approval_posture === human",
+            );
+          }}
           const physical = tool.evidence.type === "physical_attempt" ? tool.evidence : null;
           if (physical !== null) {{
             const terminalFailure = physical.state === "known_failed";
@@ -1500,7 +1615,12 @@ function assertTimelineDetailPage(value) {{
             const [excerpt, field, excerptPath] = excerpts[0];
             continuation = assertTimelineExcerpt(excerpt, item.address, field, excerptPath);
             if (continuation === null) {{
-              continuation = pageToolContinuation(value, item.address, field);
+              continuation = pageToolContinuation(
+                value,
+                item.address,
+                field,
+                item.body.projected_member_index,
+              );
             }}
             textBytes = new TextEncoder().encode(excerpt.text).byteLength;
           }}
@@ -1516,7 +1636,12 @@ function assertTimelineDetailPage(value) {{
             `${{path}}.body.goal_events[0].text`,
           );
           if (continuation === null) {{
-            continuation = pageToolContinuation(value, item.address, "goal_text");
+            continuation = pageToolContinuation(
+              value,
+              item.address,
+              "goal_text",
+              item.body.projected_member_index,
+            );
           }}
           textBytes = new TextEncoder().encode(goal.text.text).byteLength;
         }}
@@ -1631,6 +1756,21 @@ function assertTimelineDetailPage(value) {{
           fail(
             `${{path}}.kind`,
             "turn_model_settings_resolved for resolved turn detail",
+          );
+        }}
+        if (item.body.detail.type === "session_defaults_changed") {{
+          assertModelSettingsSnapshot(
+            item.body.detail.prior_settings,
+            `${{path}}.body.detail.prior_settings`,
+          );
+          assertModelSettingsSnapshot(
+            item.body.detail.installed_settings,
+            `${{path}}.body.detail.installed_settings`,
+          );
+        }} else {{
+          assertModelSettingsSnapshot(
+            item.body.detail.settings,
+            `${{path}}.body.detail.settings`,
           );
         }}
         break;

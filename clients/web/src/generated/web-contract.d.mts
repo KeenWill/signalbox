@@ -64,6 +64,7 @@ type WebSessionTimelineDetailBody = {
 } | {
   readonly goal_events: ReadonlyArray<WebTimelineGoalEvent>;
   readonly producing_model_call_id: string;
+  readonly projected_member_index?: number | null;
   readonly state: WebTimelineToolBatchState;
   readonly tools: ReadonlyArray<WebTimelineToolAttempt>;
   readonly turn_id: string;
@@ -74,7 +75,7 @@ type WebSessionTimelineDetailBody = {
   readonly decision: WebTimelineApprovalDecision;
   readonly rationale?: WebTimelineTextExcerpt | null;
   readonly request_id: string;
-  readonly tool_name: string;
+  readonly tool_name: WebToolName;
   readonly turn_id: string;
   readonly type: "tool_approval_decision";
 } | {
@@ -100,6 +101,7 @@ type WebSessionTimelineDetailBody = {
   readonly exhausted: boolean;
   readonly operation: WebTimelineReconciliationOperation;
   readonly operator_required: boolean;
+  readonly terminal_frontier_id: string;
   readonly turn_id: string;
   readonly type: "reconciliation";
 } | {
@@ -303,9 +305,13 @@ type WebTimelineGoalEvent = {
 };
 
 type WebTimelineImportedEvidence = {
+  readonly imported_conversation_id: string;
   readonly imported_entry_id: string;
   readonly imported_position: WebU64;
+  readonly relationship: WebTimelineImportedRelationship;
 };
+
+type WebTimelineImportedRelationship = "resume" | "fork";
 
 type WebTimelineModelCallDisposition = "completed" | "known_failed" | "refused" | "cancelled" | "ambiguous";
 
@@ -458,7 +464,7 @@ type WebTimelineToolAttempt = {
   readonly evidence: WebTimelineToolAttemptEvidence;
   readonly operator_required: boolean;
   readonly request_id: string;
-  readonly tool_name: string;
+  readonly tool_name: WebToolName;
 };
 
 type WebTimelineToolAttemptEvidence = {
@@ -494,6 +500,8 @@ type WebTimelineToolSandboxPosture = "unsandboxed" | "sandboxed";
 type WebTimelineToolState = "prepared" | "in_flight" | "awaiting_child" | "completed" | "known_failed" | "ambiguous";
 
 type WebTimelineTurnLifecycleKind = "activated" | "terminalized";
+
+type WebToolName = string;
 
 type WebU64 = string;
 

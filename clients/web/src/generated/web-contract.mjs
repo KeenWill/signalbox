@@ -490,6 +490,14 @@ const schemas = {
               "producing_model_call_id": {
                 "type": "string"
               },
+              "projected_member_index": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
               "state": {
                 "$ref": "#/$defs/WebTimelineToolBatchState"
               },
@@ -544,7 +552,7 @@ const schemas = {
                 "type": "string"
               },
               "tool_name": {
-                "type": "string"
+                "$ref": "#/$defs/WebToolName"
               },
               "turn_id": {
                 "type": "string"
@@ -666,6 +674,9 @@ const schemas = {
               "operator_required": {
                 "type": "boolean"
               },
+              "terminal_frontier_id": {
+                "type": "string"
+              },
               "turn_id": {
                 "type": "string"
               },
@@ -678,6 +689,7 @@ const schemas = {
               "type",
               "turn_id",
               "operation",
+              "terminal_frontier_id",
               "attempt_count",
               "exhausted",
               "operator_required",
@@ -1557,18 +1569,33 @@ const schemas = {
       "WebTimelineImportedEvidence": {
         "additionalProperties": false,
         "properties": {
+          "imported_conversation_id": {
+            "type": "string"
+          },
           "imported_entry_id": {
             "type": "string"
           },
           "imported_position": {
             "$ref": "#/$defs/WebU64"
+          },
+          "relationship": {
+            "$ref": "#/$defs/WebTimelineImportedRelationship"
           }
         },
         "required": [
+          "imported_conversation_id",
           "imported_entry_id",
-          "imported_position"
+          "imported_position",
+          "relationship"
         ],
         "type": "object"
+      },
+      "WebTimelineImportedRelationship": {
+        "enum": [
+          "resume",
+          "fork"
+        ],
+        "type": "string"
       },
       "WebTimelineModelCallDisposition": {
         "description": "Closed terminal model-call disposition.",
@@ -2315,7 +2342,7 @@ const schemas = {
             "type": "string"
           },
           "tool_name": {
-            "type": "string"
+            "$ref": "#/$defs/WebToolName"
           }
         },
         "required": [
@@ -2506,6 +2533,13 @@ const schemas = {
           "activated",
           "terminalized"
         ],
+        "type": "string"
+      },
+      "WebToolName": {
+        "description": "Checked browser-visible tool name using the domain's exact spelling rules.",
+        "maxLength": 64,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9_-]+$",
         "type": "string"
       },
       "WebU64": {
@@ -2863,7 +2897,7 @@ function assertTimelineExcerpt(excerpt, address, field, path) {
   return continuation;
 }
 
-function pageToolContinuation(value, address, field) {
+function pageToolContinuation(value, address, field, memberIndex) {
   if (
     value.continuation === undefined ||
     value.continuation === null ||
@@ -2878,14 +2912,69 @@ function pageToolContinuation(value, address, field) {
   ) {
     return null;
   }
-  const allowed = field === "tool_arguments"
-    ? new Set(["tool_arguments", "tool_result", "tool_failure", "goal_text"])
+  const sameMember = continuation.member_index === memberIndex;
+  const nextMember = continuation.member_index === memberIndex + 1;
+  const valid = field === "tool_arguments"
+    ? (
+        ((continuation.field === "tool_result" || continuation.field === "tool_failure") && sameMember) ||
+        (continuation.field === "tool_arguments" && nextMember) ||
+        (continuation.field === "goal_text" && continuation.member_index === 0)
+      )
     : field === "tool_result" || field === "tool_failure"
-      ? new Set(["tool_arguments", "goal_text"])
+      ? (
+          (continuation.field === "tool_arguments" && nextMember) ||
+          (continuation.field === "goal_text" && continuation.member_index === 0)
+        )
       : field === "goal_text"
-        ? new Set(["goal_text"])
-        : new Set();
-  return allowed.has(continuation.field) ? continuation : null;
+        ? continuation.field === "goal_text" && nextMember
+        : false;
+  return valid ? continuation : null;
+}
+
+function sameSettingValue(left, right) {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
+function resolveModelSetting(layers, field, providerDefault) {
+  for (const [source, layer] of layers) {
+    const overlay = layer[field];
+    if (overlay.kind === "inherit") continue;
+    if (overlay.kind === "provider_default") return [providerDefault, source];
+    return [overlay.value, source];
+  }
+  return [providerDefault, null];
+}
+
+function assertModelSettingsSnapshot(snapshot, path) {
+  const layers = [
+    ["per_call", snapshot.precedence.per_call],
+    ["session", snapshot.precedence.session],
+    ["profile", snapshot.precedence.profile],
+    ["global_default", snapshot.precedence.global_default],
+  ];
+  const [reasoning, reasoningSource] = resolveModelSetting(layers, "reasoning_level", null);
+  const [fastMode, fastModeSource] = resolveModelSetting(layers, "fast_mode", "disabled");
+  const [serviceTier, serviceTierSource] = resolveModelSetting(layers, "service_tier", null);
+  const valid =
+    sameSettingValue(snapshot.effective.reasoning_level, reasoning) &&
+    snapshot.effective.fast_mode === fastMode &&
+    sameSettingValue(snapshot.effective.service_tier, serviceTier) &&
+    (snapshot.reasoning_source ?? null) === reasoningSource &&
+    (snapshot.fast_mode_source ?? null) === fastModeSource &&
+    (snapshot.service_tier_source ?? null) === serviceTierSource;
+  if (!valid) {
+    fail(path, "a precedence-resolved model-settings snapshot");
+  }
+  const providerDefaults =
+    reasoning === null && reasoningSource === null &&
+    fastMode === "disabled" && fastModeSource === null &&
+    serviceTier === null && serviceTierSource === null;
+  const validationAbsent =
+    snapshot.validated_for_selection_id === undefined ||
+    snapshot.validated_for_selection_id === null;
+  if (validationAbsent !== providerDefaults) {
+    fail(`${path}.validated_for_selection_id`, "absent exactly for provider defaults");
+  }
 }
 
 function assertTimelineDetailPage(value) {
@@ -2959,7 +3048,22 @@ function assertTimelineDetailPage(value) {
         }
         const tool = item.body.tools[0];
         const goal = item.body.goal_events[0];
+        const memberIndex = item.body.projected_member_index;
+        if ((tool !== undefined || goal !== undefined) && (memberIndex === undefined || memberIndex === null)) {
+          fail(
+            `${path}.body.projected_member_index`,
+            "present for a projected tool-batch member",
+          );
+        }
         if (tool !== undefined) {
+          const operatorRequired =
+            tool.approval_judge_escalated || tool.approval_posture === "human";
+          if (tool.operator_required !== operatorRequired) {
+            fail(
+              `${path}.body.tools[0].operator_required`,
+              "equal to approval_judge_escalated || approval_posture === human",
+            );
+          }
           const physical = tool.evidence.type === "physical_attempt" ? tool.evidence : null;
           if (physical !== null) {
             const terminalFailure = physical.state === "known_failed";
@@ -3008,7 +3112,12 @@ function assertTimelineDetailPage(value) {
             const [excerpt, field, excerptPath] = excerpts[0];
             continuation = assertTimelineExcerpt(excerpt, item.address, field, excerptPath);
             if (continuation === null) {
-              continuation = pageToolContinuation(value, item.address, field);
+              continuation = pageToolContinuation(
+                value,
+                item.address,
+                field,
+                item.body.projected_member_index,
+              );
             }
             textBytes = new TextEncoder().encode(excerpt.text).byteLength;
           }
@@ -3024,7 +3133,12 @@ function assertTimelineDetailPage(value) {
             `${path}.body.goal_events[0].text`,
           );
           if (continuation === null) {
-            continuation = pageToolContinuation(value, item.address, "goal_text");
+            continuation = pageToolContinuation(
+              value,
+              item.address,
+              "goal_text",
+              item.body.projected_member_index,
+            );
           }
           textBytes = new TextEncoder().encode(goal.text.text).byteLength;
         }
@@ -3139,6 +3253,21 @@ function assertTimelineDetailPage(value) {
           fail(
             `${path}.kind`,
             "turn_model_settings_resolved for resolved turn detail",
+          );
+        }
+        if (item.body.detail.type === "session_defaults_changed") {
+          assertModelSettingsSnapshot(
+            item.body.detail.prior_settings,
+            `${path}.body.detail.prior_settings`,
+          );
+          assertModelSettingsSnapshot(
+            item.body.detail.installed_settings,
+            `${path}.body.detail.installed_settings`,
+          );
+        } else {
+          assertModelSettingsSnapshot(
+            item.body.detail.settings,
+            `${path}.body.detail.settings`,
           );
         }
         break;

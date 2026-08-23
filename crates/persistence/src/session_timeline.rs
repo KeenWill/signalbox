@@ -20,9 +20,10 @@ use signalbox_application::{
     TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::{
-    ImportedTranscriptEntryId, ModelCallId, ProviderModelIdentity, RunnerSandboxProfile, SessionId,
-    ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution, ToolAttemptId,
-    ToolDecisionSource, ToolRequestId, TurnId,
+    ImportedConversationId, ImportedSessionRelationship, ImportedTranscriptEntryId, ModelCallId,
+    ProviderModelIdentity, RunnerSandboxProfile, SessionId, ToolApprovalDecider,
+    ToolApprovalDecision, ToolApprovalResolution, ToolAttemptId, ToolDecisionSource, ToolName,
+    ToolRequestId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
@@ -1054,7 +1055,9 @@ SELECT octet_length(context_summary_value)::numeric AS total_bytes,
                     terminal_turn_body(*turn, "cancelled", cursor)?
                 }
                 DispatchedOutboxEventKind::TurnReconciliationRequired {
-                    turn, operation, ..
+                    turn,
+                    operation,
+                    terminal_frontier,
                 } => {
                     require_no_body_cursor(cursor)?;
                     let operation = reconciliation_operation(*operation);
@@ -1063,6 +1066,7 @@ SELECT octet_length(context_summary_value)::numeric AS total_bytes,
                         SessionTimelineDetailBody::Reconciliation {
                             turn_id: *turn,
                             operation,
+                            terminal_frontier_id: *terminal_frontier,
                             attempt_count,
                             exhausted: true,
                             operator_required: true,
@@ -1144,20 +1148,37 @@ async fn load_imported_evidence(
     session: SessionId,
 ) -> Result<Option<TimelineImportedEvidence>, SessionTimelineRepositoryError> {
     let row = sqlx::query(
-        "SELECT imported_frontier_entry_id, imported_frontier_position
+        "SELECT imported_conversation_id, imported_frontier_entry_id,
+                imported_frontier_position, imported_relationship_kind
            FROM session WHERE session_id = $1",
     )
     .bind(session.into_uuid())
     .fetch_one(&mut **transaction)
     .await?;
+    let conversation = row.try_get::<Option<uuid::Uuid>, _>("imported_conversation_id")?;
     let entry = row.try_get::<Option<uuid::Uuid>, _>("imported_frontier_entry_id")?;
     let position = row.try_get::<Option<Decimal>, _>("imported_frontier_position")?;
-    match (entry, position) {
-        (None, None) => Ok(None),
-        (Some(entry), Some(position)) => Ok(Some(TimelineImportedEvidence {
-            imported_entry_id: ImportedTranscriptEntryId::from_uuid(entry),
-            imported_position: nonnegative(position, "imported frontier position")?,
-        })),
+    let relationship = row.try_get::<Option<String>, _>("imported_relationship_kind")?;
+    match (conversation, entry, position, relationship.as_deref()) {
+        (None, None, None, None) => Ok(None),
+        (Some(conversation), Some(entry), Some(position), Some(relationship)) => {
+            let relationship = match relationship {
+                "resume" => ImportedSessionRelationship::Resume,
+                "fork" => ImportedSessionRelationship::Fork,
+                _ => {
+                    return Err(SessionTimelineCorruption::InvalidStoredValue(
+                        "imported relationship",
+                    )
+                    .into());
+                }
+            };
+            Ok(Some(TimelineImportedEvidence {
+                imported_conversation_id: ImportedConversationId::from_uuid(conversation),
+                imported_entry_id: ImportedTranscriptEntryId::from_uuid(entry),
+                imported_position: nonnegative(position, "imported frontier position")?,
+                relationship,
+            }))
+        }
         _ => Err(SessionTimelineCorruption::Missing("imported frontier evidence").into()),
     }
 }
@@ -1327,7 +1348,7 @@ async fn project_tool_batch(
     };
     let row = sqlx::query(
         "WITH selected_member AS (
-            SELECT request_id, attempt_id
+            SELECT request_id, attempt_id, approval_judge_escalated
               FROM tool_batch_transition_detail_member
              WHERE event_sequence = $1
                AND member_kind = 'tool'
@@ -1372,11 +1393,7 @@ async fn project_tool_batch(
                      ORDER BY lease.generation DESC
                      LIMIT 1
                 ) AS sandbox_posture,
-                EXISTS (
-                    SELECT 1 FROM tool_approval_judge_model_call AS judge
-                     WHERE judge.request_id = request.request_id
-                       AND judge.recommendation_kind = 'escalate_to_human'
-                ) AS judge_escalated
+                selected.approval_judge_escalated AS judge_escalated
            FROM selected_member AS selected
            JOIN tool_request AS request
              ON request.request_id = selected.request_id
@@ -1394,7 +1411,7 @@ async fn project_tool_batch(
         let selected_body: Option<String> = row.try_get("selected_body")?;
         let selected = selected_body
             .as_deref()
-            .ok_or(SessionTimelineCorruption::InvalidDetailCursor)?;
+            .ok_or(SessionTimelineRepositoryError::InvalidDetailQuery)?;
         let excerpt = excerpt_text(
             selected,
             address,
@@ -1439,7 +1456,8 @@ async fn project_tool_batch(
         tools.push(TimelineToolAttempt {
             request_id: ToolRequestId::from_uuid(row.try_get("request_id")?),
             attempt_id: attempt_id.map(ToolAttemptId::from_uuid),
-            tool_name: row.try_get("tool_name")?,
+            tool_name: ToolName::try_new(row.try_get("tool_name")?)
+                .map_err(|_| SessionTimelineCorruption::InvalidStoredValue("tool name"))?,
             arguments: (requested_field == TimelineBodyField::ToolArguments)
                 .then_some(excerpt.clone()),
             result: (requested_field == TimelineBodyField::ToolResult).then_some(excerpt.clone()),
@@ -1473,6 +1491,7 @@ async fn project_tool_batch(
             turn_id: turn,
             producing_model_call_id: producing_call,
             state: tool_batch_state(state),
+            projected_member_index: (!tools.is_empty()).then_some(member_index),
             tools,
             goal_events: Vec::new(),
         },
@@ -1646,6 +1665,7 @@ fn project_tool_goal(
             turn_id: turn,
             producing_model_call_id: producing_call,
             state: tool_batch_state(state),
+            projected_member_index: Some(cursor.member_index),
             tools: Vec::new(),
             goal_events: vec![timeline_goal_event(
                 row.generation,
@@ -1685,7 +1705,8 @@ async fn project_tool_approval(
     .bind(approval.request().into_uuid())
     .fetch_one(&mut **transaction)
     .await?;
-    let tool_name: String = row.try_get("tool_name")?;
+    let tool_name = ToolName::try_new(row.try_get("tool_name")?)
+        .map_err(|_| SessionTimelineCorruption::InvalidStoredValue("tool name"))?;
     let approval_judge_escalated: bool = row.try_get("judge_escalated")?;
     let rationale = approval
         .rationale()

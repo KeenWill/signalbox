@@ -41,7 +41,7 @@ use signalbox_application::{
     TimelineToolEffectPosture, TimelineToolSandboxPosture, TimelineToolState,
     TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
 };
-use signalbox_domain::{SessionId, TurnId};
+use signalbox_domain::{ImportedSessionRelationship, SessionId, TurnId};
 use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::session_timeline::{
     SessionTimelineRepository, SessionTimelineRepositoryError,
@@ -58,16 +58,16 @@ use signalbox_web_contract::{
     WebTimelineDelegationReason, WebTimelineDelegationWaitMode, WebTimelineDetailContinuation,
     WebTimelineEffectiveModelSettings, WebTimelineEventSequence, WebTimelineFastMode,
     WebTimelineFastModeOverlay, WebTimelineGoalBlockedReason, WebTimelineGoalEvent,
-    WebTimelineImportedEvidence, WebTimelineModelCallDisposition, WebTimelineModelCallState,
-    WebTimelineModelChangeAdjustment, WebTimelineModelSelection, WebTimelineModelSettingSource,
-    WebTimelineModelSettingsDetail, WebTimelineModelSettingsOverlay,
+    WebTimelineImportedEvidence, WebTimelineImportedRelationship, WebTimelineModelCallDisposition,
+    WebTimelineModelCallState, WebTimelineModelChangeAdjustment, WebTimelineModelSelection,
+    WebTimelineModelSettingSource, WebTimelineModelSettingsDetail, WebTimelineModelSettingsOverlay,
     WebTimelineModelSettingsPrecedence, WebTimelineModelSettingsSnapshot, WebTimelineModelUsage,
     WebTimelineReasoningLevel, WebTimelineReconciliationOperation, WebTimelineRunnerSandboxPosture,
     WebTimelineRunnerState, WebTimelineServiceTier, WebTimelineSettingOverlay,
     WebTimelineTextExcerpt, WebTimelineToolApprovalPosture, WebTimelineToolAttempt,
     WebTimelineToolAttemptEvidence, WebTimelineToolBatchState, WebTimelineToolEffectPosture,
     WebTimelineToolFailureCause, WebTimelineToolSandboxPosture, WebTimelineToolState,
-    WebTimelineTurnLifecycleKind, WebU64,
+    WebTimelineTurnLifecycleKind, WebToolName, WebU64,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -869,8 +869,18 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
         SessionTimelineDetailBody::SessionCreated { imported_evidence } => {
             WebSessionTimelineDetailBody::SessionCreated {
                 imported_evidence: imported_evidence.map(|evidence| WebTimelineImportedEvidence {
+                    imported_conversation_id: evidence
+                        .imported_conversation_id
+                        .into_uuid()
+                        .to_string(),
                     imported_entry_id: evidence.imported_entry_id.into_uuid().to_string(),
                     imported_position: WebU64::from_u64(evidence.imported_position),
+                    relationship: match evidence.relationship {
+                        ImportedSessionRelationship::Resume => {
+                            WebTimelineImportedRelationship::Resume
+                        }
+                        ImportedSessionRelationship::Fork => WebTimelineImportedRelationship::Fork,
+                    },
                 }),
             }
         }
@@ -925,6 +935,7 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             turn_id,
             producing_model_call_id,
             state,
+            projected_member_index,
             tools,
             goal_events,
         } => WebSessionTimelineDetailBody::ToolBatch {
@@ -947,6 +958,7 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
                     }
                 }
             },
+            projected_member_index,
             tools: tools.into_iter().map(tool_attempt_dto).collect(),
             goal_events: goal_events.into_iter().map(goal_event_dto).collect(),
         },
@@ -961,7 +973,7 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
         } => WebSessionTimelineDetailBody::ToolApprovalDecision {
             turn_id: turn_id.into_uuid().to_string(),
             request_id: request_id.into_uuid().to_string(),
-            tool_name,
+            tool_name: WebToolName::from_checked(tool_name.into_string()),
             decision: match decision {
                 TimelineApprovalDecision::Approve => WebTimelineApprovalDecision::Approve,
                 TimelineApprovalDecision::Deny => WebTimelineApprovalDecision::Deny,
@@ -1020,6 +1032,7 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
         SessionTimelineDetailBody::Reconciliation {
             turn_id,
             operation,
+            terminal_frontier_id,
             attempt_count,
             exhausted,
             operator_required,
@@ -1040,6 +1053,7 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             WebSessionTimelineDetailBody::Reconciliation {
                 turn_id: turn_id.into_uuid().to_string(),
                 operation,
+                terminal_frontier_id: terminal_frontier_id.into_uuid().to_string(),
                 attempt_count: WebU64::from_u64(attempt_count),
                 exhausted,
                 operator_required,
@@ -1611,7 +1625,7 @@ fn tool_attempt_dto(attempt: TimelineToolAttempt) -> WebTimelineToolAttempt {
     };
     WebTimelineToolAttempt {
         request_id: attempt.request_id.into_uuid().to_string(),
-        tool_name: attempt.tool_name,
+        tool_name: WebToolName::from_checked(attempt.tool_name.into_string()),
         arguments: attempt.arguments.map(text_excerpt_dto),
         approval_posture: match attempt.approval_posture {
             TimelineToolApprovalPosture::Auto => WebTimelineToolApprovalPosture::Auto,
