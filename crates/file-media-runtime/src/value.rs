@@ -138,7 +138,8 @@ impl DisplayFilename {
             || value.as_ref() == ".."
             || value.contains('/')
             || value.contains('\\')
-            || value.contains('\0');
+            || value.contains('\0')
+            || value.chars().any(char::is_control);
         if invalid {
             Err(RegistryValueError::DisplayFilename)
         } else {
@@ -810,6 +811,18 @@ mod tests {
         assert!(CanonicalMediaType::from_str("text/!plain").is_err());
         assert!(CanonicalMediaType::from_str(&format!("{}/b", "a".repeat(128))).is_err());
         assert!(CanonicalMediaType::from_str(&format!("a/{}", "b".repeat(128))).is_err());
+    }
+
+    #[test]
+    fn display_filenames_reject_control_characters() {
+        assert_eq!(
+            DisplayFilename::try_new("line\nbreak.txt"),
+            Err(RegistryValueError::DisplayFilename)
+        );
+        assert_eq!(
+            DisplayFilename::try_new("escape\u{1b}.txt"),
+            Err(RegistryValueError::DisplayFilename)
+        );
     }
 
     #[test]
