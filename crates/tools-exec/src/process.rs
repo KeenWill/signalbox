@@ -2032,6 +2032,7 @@ fn sandbox_environment_fits_linux_arg_max(
     .saturating_mul(std::mem::size_of::<usize>());
 
     argument_strings
+        .saturating_add(string_bytes(arguments.program.as_bytes()))
         .saturating_add(environment_strings)
         .saturating_add(pointer_bytes)
         < MIN_LINUX_ARG_MAX_BYTES
@@ -2074,6 +2075,7 @@ fn process_request_fits_linux_arg_max(supervisor_program: &Path, request: &Proce
     .saturating_mul(std::mem::size_of::<usize>());
 
     argument_strings
+        .saturating_add(string_bytes(supervisor_program.as_os_str()))
         .saturating_add(environment_strings)
         .saturating_add(pointer_bytes)
         < MIN_LINUX_ARG_MAX_BYTES
@@ -5731,9 +5733,9 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_launch_budget_includes_the_supervisor_wrapper() {
+    fn linux_launch_budget_includes_the_supervisor_executable_pathname() {
         let request = ProcessRequest {
-            program: OsString::from("p".repeat(MIN_LINUX_ARG_MAX_BYTES - 66)),
+            program: OsString::from("p".repeat(MIN_LINUX_ARG_MAX_BYTES - 68)),
             arguments: Vec::new(),
             working_directory: PathBuf::from("/workspace"),
             timeout: Duration::from_secs(30),
@@ -5749,6 +5751,31 @@ mod tests {
         assert!(!process_request_fits_linux_arg_max(
             &long_supervisor,
             &request
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_target_launch_budget_includes_the_executable_pathname() {
+        let arguments = ExecArguments {
+            program: "p".repeat(MAX_PROGRAM_CHARACTERS),
+            arguments: vec![
+                "a".repeat(MIN_LINUX_ARG_MAX_BYTES - (2 * (MAX_PROGRAM_CHARACTERS + 1)) - 128),
+            ],
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+        let environment = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        )
+        .expect("the synthetic environment fixture is valid");
+
+        assert!(!sandbox_environment_fits_linux_arg_max(
+            &arguments,
+            &environment,
+            std::ffi::OsStr::new("/bin"),
+            false,
         ));
     }
 

@@ -84,7 +84,8 @@ Placement-scoped native conversation reads are verified through PR #400
 (`agent/scoped-visibility-wiring`). Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration parser, filesystem admission, exact availability advertisement,
-and checked-in example are verified through PR #376 (`agent/runner-daemon`).
+and checked-in example are re-verified against this PR
+(`agent/runner-restricted-command-environment`).
 Runner credential use during provisioning or execution remains committed
 unimplemented functionality as labeled below. The credential-profile and
 credential-pool grammar, its fail-closed admission, the deliveries this build
