@@ -393,9 +393,10 @@ jobs:
     # observed against a 7.4m median), so the cap sat within noise of exactly
     # the runs whose results matter most — and a job the cap kills is reported
     # as `cancelled`, which reads as an infrastructure problem and hides the
-    # test failure underneath it. Fifteen minutes is about twice the median,
-    # leaves the p90 at half the cap, and still bounds a genuinely hung job.
-    timeout-minutes: 15
+    # test failure underneath it. The runner suite has now twice reached the
+    # fifteen-minute cap while its tests were still passing, so twenty-five
+    # minutes leaves that larger suite headroom while still bounding a hung job.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.postgres-integration-build.outputs.matrix) }}
