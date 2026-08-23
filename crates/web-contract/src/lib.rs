@@ -348,11 +348,40 @@ pub struct WebTimelineTextExcerpt {
     pub continuation: Option<WebTimelineBodyContinuation>,
 }
 
+/// Checked canonical SHA-256 identity used for browser-visible blob references.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebBlobId(#[schemars(regex(pattern = r"^sha256:[0-9a-f]{64}$"))] String);
+
+impl WebBlobId {
+    /// Constructs a blob identity from its canonical external spelling.
+    #[must_use]
+    pub fn from_canonical(value: String) -> Option<Self> {
+        let digest = value.strip_prefix("sha256:")?;
+        (digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        .then_some(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for WebBlobId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_canonical(value)
+            .ok_or_else(|| de::Error::custom("blob ID must be a canonical SHA-256 identity"))
+    }
+}
+
 /// Reference-only blob fact carried without blob bytes.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineBlobReference {
-    pub blob_id: String,
+    pub blob_id: WebBlobId,
     pub length_bytes: WebU64,
     pub media_type: Option<String>,
 }
@@ -380,6 +409,22 @@ pub enum WebTimelineModelCallDisposition {
     Ambiguous,
 }
 
+/// Closed provider-neutral failure cause exposed at the browser boundary.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebProviderModelCallFailureCause {
+    CredentialRejected,
+    PermissionDenied,
+    InvalidRequest,
+    TargetNotFound,
+    RequestTooLarge,
+    RateLimited,
+    QuotaExhausted,
+    Overloaded,
+    ProviderInternal,
+    Unrecognized,
+}
+
 /// Independently optional provider-reported usage counts.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -403,22 +448,23 @@ pub enum WebTimelineTurnLifecycleKind {
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 pub enum WebSessionTimelineDetailBody {
     UserInput {
-        turn_id: String,
+        turn_id: WebSessionId,
         text: WebTimelineTextExcerpt,
+        #[schemars(length(max = 256))]
         attachments: Vec<WebTimelineBlobReference>,
     },
     ModelCall {
-        turn_id: String,
-        model_call_id: String,
+        turn_id: WebSessionId,
+        model_call_id: WebSessionId,
         state: WebTimelineModelCallState,
-        model_identity_id: String,
+        model_identity_id: WebSessionId,
         request_context_items: WebU64,
         response: Option<WebTimelineTextExcerpt>,
         usage: WebTimelineModelUsage,
-        cause_code: Option<String>,
+        provider_failure_cause: Option<String>,
     },
     TurnLifecycle {
-        turn_id: String,
+        turn_id: WebSessionId,
         lifecycle: WebTimelineTurnLifecycleKind,
         cause_code: String,
     },
@@ -853,6 +899,22 @@ function assertTimelineDetailPage(value) {{
             `${{path}}.body.response`,
           );
           textBytes = new TextEncoder().encode(item.body.response.text).byteLength;
+        }}
+        if (item.body.state.type !== "terminal") {{
+          const hasUsage = Object.values(item.body.usage).some(
+            (count) => count !== undefined && count !== null,
+          );
+          if (
+            (item.body.response !== undefined && item.body.response !== null) ||
+            hasUsage ||
+            (item.body.provider_failure_cause !== undefined &&
+              item.body.provider_failure_cause !== null)
+          ) {{
+            fail(
+              `${{path}}.body`,
+              "terminal evidence only at a terminal model-call state",
+            );
+          }}
         }}
         break;
       case "turn_lifecycle":

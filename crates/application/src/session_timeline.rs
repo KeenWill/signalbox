@@ -6,7 +6,10 @@
 
 use std::{fmt, future::Future, num::NonZeroU64};
 
-use signalbox_domain::{BlobDigest, ModelCallId, ProviderModelIdentity, SessionId, TurnId};
+use signalbox_domain::{
+    BlobDigest, ModelCallId, ProviderModelCallFailureCause, ProviderModelIdentity, SessionId,
+    TurnId,
+};
 
 /// Returns the hard ceiling on records in one historical window.
 #[must_use]
@@ -446,7 +449,7 @@ pub enum SessionTimelineDetailBody {
         request_context_items: u64,
         response: Option<TimelineTextExcerpt>,
         usage: TimelineModelUsage,
-        cause_code: Option<String>,
+        provider_failure_cause: Option<ProviderModelCallFailureCause>,
     },
     /// Activated or terminalized turn boundary with a stable cause code.
     TurnLifecycle {

@@ -12,11 +12,13 @@ use signalbox_application::{
     TimelineModelCallDisposition, TimelineModelCallState, TimelineModelUsage, TimelineTextExcerpt,
     TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
 };
-use signalbox_domain::{ProviderModelIdentity, SessionId, TurnId};
+use signalbox_domain::{ProviderModelCallFailureCause, ProviderModelIdentity, SessionId, TurnId};
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
 use crate::{
-    mapping::{OutboxEventDiscriminator, outbox_event_discriminator_from_str},
+    mapping::{
+        OutboxEventDiscriminator, input_position_from_numeric, outbox_event_discriminator_from_str,
+    },
     outbox::{
         DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEvent,
         DispatchedOutboxEventKind, OutboxDispatchError,
@@ -670,6 +672,7 @@ async fn load_detail_event(
         let row = sqlx::query(
             r#"
 SELECT event.turn_id,
+       accepted.acceptance_position,
        octet_length(accepted.content_text)::numeric AS total_bytes,
        substring(
            convert_to(accepted.content_text, 'UTF8')
@@ -735,6 +738,8 @@ SELECT event.turn_id,
         .fetch_optional(&mut **transaction)
         .await?
         .ok_or(SessionTimelineCorruption::MissingDetailRecord)?;
+        input_position_from_numeric(row.try_get("acceptance_position")?)
+            .map_err(|_| SessionTimelineCorruption::InvalidOrdinal("input acceptance position"))?;
         let total_bytes = nonnegative(row.try_get("total_bytes")?, "input byte length")?;
         if offset > total_bytes {
             return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
@@ -854,7 +859,7 @@ async fn project_detail_event(
                             request_context_items: row.request_context_items,
                             response,
                             usage: row.usage,
-                            cause_code: row.cause_code,
+                            provider_failure_cause: row.provider_failure_cause,
                         },
                         continuation,
                     )
@@ -1005,7 +1010,7 @@ struct ModelDetailRow {
     request_context_items: u64,
     response: Option<ModelResponseSlice>,
     usage: TimelineModelUsage,
-    cause_code: Option<String>,
+    provider_failure_cause: Option<ProviderModelCallFailureCause>,
 }
 
 struct ModelResponseSlice {
@@ -1142,12 +1147,34 @@ SELECT substring(
                 None
             },
         },
-        cause_code: if include_terminal_evidence {
-            row.try_get("terminal_provider_failure_cause")?
+        provider_failure_cause: if include_terminal_evidence {
+            row.try_get::<Option<String>, _>("terminal_provider_failure_cause")?
+                .map(|value| provider_failure_cause_from_str(&value))
+                .transpose()?
         } else {
             None
         },
     })
+}
+
+fn provider_failure_cause_from_str(
+    value: &str,
+) -> Result<ProviderModelCallFailureCause, SessionTimelineRepositoryError> {
+    if value == "credential_rejected" {
+        return Ok(ProviderModelCallFailureCause::CredentialRejected);
+    }
+    match value {
+        "permission_denied" => Ok(ProviderModelCallFailureCause::PermissionDenied),
+        "invalid_request" => Ok(ProviderModelCallFailureCause::InvalidRequest),
+        "target_not_found" => Ok(ProviderModelCallFailureCause::TargetNotFound),
+        "request_too_large" => Ok(ProviderModelCallFailureCause::RequestTooLarge),
+        "rate_limited" => Ok(ProviderModelCallFailureCause::RateLimited),
+        "quota_exhausted" => Ok(ProviderModelCallFailureCause::QuotaExhausted),
+        "overloaded" => Ok(ProviderModelCallFailureCause::Overloaded),
+        "provider_internal" => Ok(ProviderModelCallFailureCause::ProviderInternal),
+        "unrecognized" => Ok(ProviderModelCallFailureCause::Unrecognized),
+        value => Err(SessionTimelineCorruption::UnsupportedEventKind(value.to_owned()).into()),
+    }
 }
 
 fn call_session_uuid(row: &sqlx::postgres::PgRow) -> Result<uuid::Uuid, sqlx::Error> {

@@ -326,6 +326,16 @@ const schemas = {
   },
   "WebSessionTimelineDetailPage": {
     "$defs": {
+      "WebBlobId": {
+        "description": "Checked canonical SHA-256 identity used for browser-visible blob references.",
+        "pattern": "^sha256:[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
       "WebSessionTimelineDetail": {
         "additionalProperties": false,
         "description": "One typed body at a stable timeline address.",
@@ -363,13 +373,14 @@ const schemas = {
                 "items": {
                   "$ref": "#/$defs/WebTimelineBlobReference"
                 },
+                "maxItems": 256,
                 "type": "array"
               },
               "text": {
                 "$ref": "#/$defs/WebTimelineTextExcerpt"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "user_input",
@@ -387,17 +398,17 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
-              "cause_code": {
+              "model_call_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "model_identity_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "provider_failure_cause": {
                 "type": [
                   "string",
                   "null"
                 ]
-              },
-              "model_call_id": {
-                "type": "string"
-              },
-              "model_identity_id": {
-                "type": "string"
               },
               "request_context_items": {
                 "$ref": "#/$defs/WebU64"
@@ -416,7 +427,7 @@ const schemas = {
                 "$ref": "#/$defs/WebTimelineModelCallState"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "model_call",
@@ -447,7 +458,7 @@ const schemas = {
                 "$ref": "#/$defs/WebTimelineTurnLifecycleKind"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "turn_lifecycle",
@@ -524,7 +535,7 @@ const schemas = {
         "description": "Reference-only blob fact carried without blob bytes.",
         "properties": {
           "blob_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebBlobId"
           },
           "length_bytes": {
             "$ref": "#/$defs/WebU64"
@@ -1187,6 +1198,22 @@ function assertTimelineDetailPage(value) {
             `${path}.body.response`,
           );
           textBytes = new TextEncoder().encode(item.body.response.text).byteLength;
+        }
+        if (item.body.state.type !== "terminal") {
+          const hasUsage = Object.values(item.body.usage).some(
+            (count) => count !== undefined && count !== null,
+          );
+          if (
+            (item.body.response !== undefined && item.body.response !== null) ||
+            hasUsage ||
+            (item.body.provider_failure_cause !== undefined &&
+              item.body.provider_failure_cause !== null)
+          ) {
+            fail(
+              `${path}.body`,
+              "terminal evidence only at a terminal model-call state",
+            );
+          }
         }
         break;
       case "turn_lifecycle":

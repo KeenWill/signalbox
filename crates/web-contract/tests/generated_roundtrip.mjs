@@ -39,6 +39,37 @@ function userInputDetailPage() {
   };
 }
 
+function modelCallDetailPage() {
+  return {
+    session_id: "00000000-0000-0000-0000-000000000991",
+    items: [
+      {
+        address: { event_sequence: "8" },
+        kind: "model_call_transition",
+        body: {
+          type: "model_call",
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          model_call_id: "00000000-0000-0000-0000-000000000993",
+          state: { type: "prepared" },
+          model_identity_id: "00000000-0000-0000-0000-000000000994",
+          request_context_items: "0",
+          response: null,
+          usage: {
+            input_tokens: null,
+            output_tokens: null,
+            cache_creation_input_tokens: null,
+            cache_read_input_tokens: null,
+          },
+          provider_failure_cause: null,
+        },
+        projected_body_bytes: 128,
+      },
+    ],
+    projected_body_bytes: 128,
+    continuation: null,
+  };
+}
+
 test("generated example decoder round trips the Rust fixture", async () => {
   const source = JSON.parse(await readFile(fixtureUrl, "utf8"));
   const decoded = decodeWebContractExample(source);
@@ -172,6 +203,72 @@ test("generated detail decoder rejects oversized arrays before their members", (
   assert.throws(
     () => decodeWebSessionTimelineDetailPage(page),
     /at most 128 items/,
+  );
+});
+
+test("generated detail decoder rejects invalid nested UUID identities", () => {
+  for (const field of ["turn_id", "model_call_id", "model_identity_id"]) {
+    const page = modelCallDetailPage();
+    page.items[0].body[field] = "not-a-uuid";
+    assert.throws(
+      () => decodeWebSessionTimelineDetailPage(page),
+      /one recognized variant/,
+      field,
+    );
+  }
+});
+
+test("generated detail decoder rejects invalid blob identities", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.attachments = [
+    { blob_id: "not-a-digest", length_bytes: "1", media_type: null },
+  ];
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder bounds attachments before decoding members", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.attachments = Array.from({ length: 257 }, () => null);
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder rejects responses on nonterminal calls", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.response = {
+    text: "x",
+    offset_bytes: "0",
+    total_bytes: "1",
+    continuation: null,
+  };
+  page.items[0].projected_body_bytes = 129;
+  page.projected_body_bytes = 129;
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /terminal evidence only/,
+  );
+});
+
+test("generated detail decoder rejects usage on nonterminal calls", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.usage.input_tokens = "1";
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /terminal evidence only/,
+  );
+});
+
+test("generated detail decoder rejects failure causes on nonterminal calls", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.provider_failure_cause = "rate_limited";
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /terminal evidence only/,
   );
 });
 

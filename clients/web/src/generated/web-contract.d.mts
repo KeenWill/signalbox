@@ -9,6 +9,8 @@ type WebApiError = {
 
 type WebApiErrorKind = "transport" | "application";
 
+type WebBlobId = string;
+
 type WebContractCapabilities = {
   readonly bounded_json: boolean;
   readonly bounded_session_timeline: boolean;
@@ -43,22 +45,22 @@ type WebSessionTimelineDetail = {
 type WebSessionTimelineDetailBody = {
   readonly attachments: ReadonlyArray<WebTimelineBlobReference>;
   readonly text: WebTimelineTextExcerpt;
-  readonly turn_id: string;
+  readonly turn_id: WebSessionId;
   readonly type: "user_input";
 } | {
-  readonly cause_code?: string | null;
-  readonly model_call_id: string;
-  readonly model_identity_id: string;
+  readonly model_call_id: WebSessionId;
+  readonly model_identity_id: WebSessionId;
+  readonly provider_failure_cause?: string | null;
   readonly request_context_items: WebU64;
   readonly response?: WebTimelineTextExcerpt | null;
   readonly state: WebTimelineModelCallState;
-  readonly turn_id: string;
+  readonly turn_id: WebSessionId;
   readonly type: "model_call";
   readonly usage: WebTimelineModelUsage;
 } | {
   readonly cause_code: string;
   readonly lifecycle: WebTimelineTurnLifecycleKind;
-  readonly turn_id: string;
+  readonly turn_id: WebSessionId;
   readonly type: "turn_lifecycle";
 } | {
   readonly kind: WebSessionTimelineEventKind;
@@ -91,7 +93,7 @@ type WebTimelineAddress = {
 };
 
 type WebTimelineBlobReference = {
-  readonly blob_id: string;
+  readonly blob_id: WebBlobId;
   readonly length_bytes: WebU64;
   readonly media_type?: string | null;
 };

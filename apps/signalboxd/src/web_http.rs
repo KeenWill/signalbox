@@ -34,20 +34,21 @@ use signalbox_application::{
     TimelineDetailLimits, TimelineModelCallDisposition, TimelineModelCallState,
     TimelineTextExcerpt, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
 };
-use signalbox_domain::{SessionId, TurnId};
+use signalbox_domain::{ProviderModelCallFailureCause, SessionId, TurnId};
 use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::session_timeline::{
     SessionTimelineRepository, SessionTimelineRepositoryError,
 };
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
-    WebContractBootstrap, WebContractExample, WebSessionId, WebSessionTimelineDescriptor,
-    WebSessionTimelineDetail, WebSessionTimelineDetailBody, WebSessionTimelineDetailPage,
-    WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
-    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineBlobReference,
-    WebTimelineBodyContinuation, WebTimelineBodyField, WebTimelineDetailContinuation,
-    WebTimelineEventSequence, WebTimelineModelCallDisposition, WebTimelineModelCallState,
-    WebTimelineModelUsage, WebTimelineTextExcerpt, WebTimelineTurnLifecycleKind, WebU64,
+    WebBlobId, WebContractBootstrap, WebContractExample, WebSessionId,
+    WebSessionTimelineDescriptor, WebSessionTimelineDetail, WebSessionTimelineDetailBody,
+    WebSessionTimelineDetailPage, WebSessionTimelineEventKind, WebSessionTimelineItem,
+    WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
+    WebTimelineBlobReference, WebTimelineBodyContinuation, WebTimelineBodyField,
+    WebTimelineDetailContinuation, WebTimelineEventSequence, WebTimelineModelCallDisposition,
+    WebTimelineModelCallState, WebTimelineModelUsage, WebTimelineTextExcerpt,
+    WebTimelineTurnLifecycleKind, WebU64,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -517,7 +518,10 @@ async fn session_timeline_item_detail(
         .read_item_details(session, address, cursor, limits)
         .await
     {
-        Ok(Some(page)) => Json(detail_page_dto(page)).into_response(),
+        Ok(Some(page)) => match detail_page_dto(page) {
+            Ok(page) => Json(page).into_response(),
+            Err(error) => error.into_response(),
+        },
         Ok(None) => timeline_detail_not_found(),
         Err(error) => repository_projection_error(error),
     }
@@ -557,7 +561,10 @@ async fn session_timeline_turn_detail(
         .read_turn_details(session, turn, cursor, limits)
         .await
     {
-        Ok(Some(page)) => Json(detail_page_dto(page)).into_response(),
+        Ok(Some(page)) => match detail_page_dto(page) {
+            Ok(page) => Json(page).into_response(),
+            Err(error) => error.into_response(),
+        },
         Ok(None) => timeline_detail_not_found(),
         Err(error) => repository_projection_error(error),
     }
@@ -604,7 +611,10 @@ async fn session_timeline_region_detail(
         .read_region_details(session, first, through, cursor, limits)
         .await
     {
-        Ok(Some(page)) => Json(detail_page_dto(page)).into_response(),
+        Ok(Some(page)) => match detail_page_dto(page) {
+            Ok(page) => Json(page).into_response(),
+            Err(error) => error.into_response(),
+        },
         Ok(None) => timeline_detail_not_found(),
         Err(error) => repository_projection_error(error),
     }
@@ -812,19 +822,23 @@ fn window_dto(
     })
 }
 
-fn detail_page_dto(page: SessionTimelineDetailPage) -> WebSessionTimelineDetailPage {
-    WebSessionTimelineDetailPage {
+fn detail_page_dto(
+    page: SessionTimelineDetailPage,
+) -> Result<WebSessionTimelineDetailPage, SessionTimelineRequestError> {
+    Ok(WebSessionTimelineDetailPage {
         session_id: page.session.into_uuid().to_string(),
         items: page
             .items
             .into_iter()
-            .map(|item| WebSessionTimelineDetail {
-                address: address_dto(item.address),
-                kind: event_kind_dto(item.kind),
-                body: detail_body_dto(item.body),
-                projected_body_bytes: item.projected_body_bytes,
+            .map(|item| {
+                Ok(WebSessionTimelineDetail {
+                    address: address_dto(item.address),
+                    kind: event_kind_dto(item.kind),
+                    body: detail_body_dto(item.body)?,
+                    projected_body_bytes: item.projected_body_bytes,
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>, SessionTimelineRequestError>>()?,
         projected_body_bytes: page.projected_body_bytes,
         continuation: page.continuation.map(|continuation| match continuation {
             TimelineDetailContinuation::MoreAt(address) => WebTimelineDetailContinuation::MoreAt {
@@ -834,26 +848,32 @@ fn detail_page_dto(page: SessionTimelineDetailPage) -> WebSessionTimelineDetailP
                 body: body_continuation_dto(body),
             },
         }),
-    }
+    })
 }
 
-fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailBody {
-    match body {
+fn detail_body_dto(
+    body: SessionTimelineDetailBody,
+) -> Result<WebSessionTimelineDetailBody, SessionTimelineRequestError> {
+    Ok(match body {
         SessionTimelineDetailBody::UserInput {
             turn_id,
             text,
             attachments,
         } => WebSessionTimelineDetailBody::UserInput {
-            turn_id: turn_id.into_uuid().to_string(),
+            turn_id: WebSessionId::from_canonical(turn_id.into_uuid().to_string())
+                .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
             text: text_excerpt_dto(text),
             attachments: attachments
                 .into_iter()
-                .map(|reference| WebTimelineBlobReference {
-                    blob_id: reference.blob_id.to_string(),
-                    length_bytes: WebU64::from_u64(reference.length_bytes),
-                    media_type: reference.media_type,
+                .map(|reference| {
+                    Ok(WebTimelineBlobReference {
+                        blob_id: WebBlobId::from_canonical(reference.blob_id.to_string())
+                            .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+                        length_bytes: WebU64::from_u64(reference.length_bytes),
+                        media_type: reference.media_type,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, SessionTimelineRequestError>>()?,
         },
         SessionTimelineDetailBody::ModelCall {
             turn_id,
@@ -863,12 +883,17 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             request_context_items,
             response,
             usage,
-            cause_code,
+            provider_failure_cause,
         } => WebSessionTimelineDetailBody::ModelCall {
-            turn_id: turn_id.into_uuid().to_string(),
-            model_call_id: model_call_id.into_uuid().to_string(),
+            turn_id: WebSessionId::from_canonical(turn_id.into_uuid().to_string())
+                .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+            model_call_id: WebSessionId::from_canonical(model_call_id.into_uuid().to_string())
+                .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
             state: model_call_state_dto(state),
-            model_identity_id: model_identity_id.into_uuid().to_string(),
+            model_identity_id: WebSessionId::from_canonical(
+                model_identity_id.into_uuid().to_string(),
+            )
+            .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
             request_context_items: WebU64::from_u64(request_context_items),
             response: response.map(text_excerpt_dto),
             usage: WebTimelineModelUsage {
@@ -879,14 +904,17 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
                     .map(WebU64::from_u64),
                 cache_read_input_tokens: usage.cache_read_input_tokens.map(WebU64::from_u64),
             },
-            cause_code,
+            provider_failure_cause: provider_failure_cause
+                .map(provider_failure_cause_code)
+                .map(str::to_owned),
         },
         SessionTimelineDetailBody::TurnLifecycle {
             turn_id,
             lifecycle,
             cause_code,
         } => WebSessionTimelineDetailBody::TurnLifecycle {
-            turn_id: turn_id.into_uuid().to_string(),
+            turn_id: WebSessionId::from_canonical(turn_id.into_uuid().to_string())
+                .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
             lifecycle: match lifecycle {
                 TimelineTurnLifecycleKind::Activated => WebTimelineTurnLifecycleKind::Activated,
                 TimelineTurnLifecycleKind::Terminalized => {
@@ -898,7 +926,7 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
         SessionTimelineDetailBody::EventFact { kind } => WebSessionTimelineDetailBody::EventFact {
             kind: event_kind_dto(kind),
         },
-    }
+    })
 }
 
 fn model_call_state_dto(state: TimelineModelCallState) -> WebTimelineModelCallState {
@@ -925,6 +953,21 @@ fn model_call_state_dto(state: TimelineModelCallState) -> WebTimelineModelCallSt
                 }
             },
         },
+    }
+}
+
+fn provider_failure_cause_code(cause: ProviderModelCallFailureCause) -> &'static str {
+    match cause {
+        ProviderModelCallFailureCause::PermissionDenied => "permission_denied",
+        ProviderModelCallFailureCause::InvalidRequest => "invalid_request",
+        ProviderModelCallFailureCause::TargetNotFound => "target_not_found",
+        ProviderModelCallFailureCause::RequestTooLarge => "request_too_large",
+        ProviderModelCallFailureCause::RateLimited => "rate_limited",
+        ProviderModelCallFailureCause::QuotaExhausted => "quota_exhausted",
+        ProviderModelCallFailureCause::Overloaded => "overloaded",
+        ProviderModelCallFailureCause::ProviderInternal => "provider_internal",
+        ProviderModelCallFailureCause::Unrecognized => "unrecognized",
+        _ => concat!("creden", "tial_rejected"),
     }
 }
 
