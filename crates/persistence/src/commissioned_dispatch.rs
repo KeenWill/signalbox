@@ -404,9 +404,12 @@ async fn recent_pull_request_session(
                    AND dispatch.repository = $1
                    AND dispatch.pull_request_number = $2
                 UNION ALL
-                SELECT action.session_id, action.recorded_at, action.dispatch_id
+                SELECT action.session_id, batch.admitted_at AS recorded_at,
+                       action.dispatch_id
                   FROM repo_watch_dispatch_action AS action
                   JOIN repo_watch_event AS event ON event.event_id = action.event_id
+                  JOIN repo_watch_dispatch_batch AS batch
+                    ON batch.dispatch_id = action.dispatch_id
                  WHERE event.target_kind = 'pull_request'
                    AND event.repository = $1
                    AND event.pull_request_number = $2

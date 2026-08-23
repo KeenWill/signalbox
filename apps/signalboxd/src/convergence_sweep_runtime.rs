@@ -520,6 +520,9 @@ impl ConvergenceSweepRuntime {
                 tracing::error!(repository = %target.repository.as_str(),
                     pull_request = target.pull_request.get(), cause = %error,
                     "convergence sweep commission fence could not be recorded");
+                if error.commit_ambiguous() {
+                    return;
+                }
                 self.record_failure(
                     target,
                     Some(&observation),

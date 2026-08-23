@@ -6158,6 +6158,64 @@ async fn operator_commission_observes_repository_watch_dispatch_cool_off()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_commission_uses_repository_watch_batch_admission_for_cool_off()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let session = fixture.session(0);
+    let stopped = GoalRepository::new(fixture.pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x60_150)),
+                session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    sqlx::query(
+        "ALTER TABLE repo_watch_dispatch_action
+             DISABLE TRIGGER repo_watch_dispatch_action_is_append_only",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_action
+            SET recorded_at = clock_timestamp() - interval '2 hours'
+          WHERE dispatch_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE repo_watch_dispatch_action
+             ENABLE TRIGGER repo_watch_dispatch_action_is_append_only",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let store = PostgresCommissionedDispatchStore::new(fixture.pool.clone(), credential_pin());
+    let (provenance, defaults) = commissioned_template();
+    let prepared = commission_request_with_fence(0x60_151, commissioned_fence()?)?.prepare(
+        &mut UuidV7CommissionedDispatchIdGenerator,
+        provenance,
+        defaults,
+    )?;
+    let outcome = store
+        .commission_after_cool_off(prepared, Duration::from_secs(60), |_| None)
+        .await?;
+
+    assert_applied_goal_command(stopped);
+    assert_eq!(
+        outcome,
+        CommissionDispatchOutcome::TargetCoolingOff { session }
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn repository_watch_session_prevents_inactivity_parking() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
     let watch_session = fixture.session(0);

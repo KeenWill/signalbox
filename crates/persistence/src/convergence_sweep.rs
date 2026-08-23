@@ -916,14 +916,53 @@ impl PostgresConvergenceSweepStore {
         } = record;
         let mut transaction = self.pool.begin().await?;
         ensure_target(&mut transaction, repository, pull_request).await?;
-        if let Some(session) = expected_inactive_session {
+        if expected_inactive_session.is_some() {
             crate::commissioned_dispatch::lock_pull_request_target(
                 &mut transaction,
                 repository.as_str(),
                 &Decimal::from(pull_request.get()),
             )
             .await?;
-            lock_model_activity_fence(&mut transaction, session).await?;
+            let cohort_sessions: Vec<Uuid> = sqlx::query_scalar(
+                "WITH target_dispatch AS (
+                    SELECT dispatch.dispatch_id, dispatch.session_id,
+                           dispatch.recorded_at
+                      FROM commissioned_dispatch AS dispatch
+                     WHERE dispatch.target_kind = 'pull_request'
+                       AND dispatch.repository = $1
+                       AND dispatch.pull_request_number = $2
+                    UNION ALL
+                    SELECT action.dispatch_id, action.session_id,
+                           batch.admitted_at AS recorded_at
+                      FROM repo_watch_dispatch_action AS action
+                      JOIN repo_watch_event AS event
+                        ON event.event_id = action.event_id
+                      JOIN repo_watch_dispatch_batch AS batch
+                        ON batch.dispatch_id = action.dispatch_id
+                     WHERE event.target_kind = 'pull_request'
+                       AND event.repository = $1
+                       AND event.pull_request_number = $2
+                ), latest_dispatch AS (
+                    SELECT dispatch_id, recorded_at
+                      FROM target_dispatch
+                     ORDER BY recorded_at DESC, dispatch_id DESC
+                     LIMIT 1
+                )
+                SELECT target.session_id
+                  FROM target_dispatch AS target
+                  JOIN latest_dispatch AS latest
+                    ON latest.dispatch_id = target.dispatch_id
+                   AND latest.recorded_at = target.recorded_at
+                 ORDER BY target.session_id",
+            )
+            .bind(repository.as_str())
+            .bind(Decimal::from(pull_request.get()))
+            .fetch_all(&mut *transaction)
+            .await?;
+            for cohort_session in cohort_sessions {
+                lock_model_activity_fence(&mut transaction, SessionId::from_uuid(cohort_session))
+                    .await?;
+            }
         }
         let budget: i16 = sqlx::query_scalar("SELECT convergence_sweep_retry_budget()")
             .fetch_one(&mut *transaction)
