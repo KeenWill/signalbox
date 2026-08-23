@@ -739,36 +739,45 @@ impl PostgresModelCallRepository {
                     usage_input_tokens, usage_output_tokens,
                     usage_cache_creation_input_tokens,
                     usage_cache_read_input_tokens,
-                    GREATEST(
-                        COALESCE(latest_call.proven_unreported_content_bytes, 0),
-                        (
+                    COALESCE(latest_call.proven_unreported_content_bytes, 0)
+                    + (
                         SELECT COALESCE(SUM(
-                            CASE entry.payload_kind
-                                WHEN 'imported_entry' THEN
-                                    COALESCE(octet_length(imported.content_encoding), 0)
-                                WHEN 'origin_accepted_input' THEN
-                                    COALESCE(octet_length(input.content_text), 0)
-                                WHEN 'steering_accepted_input' THEN
-                                    COALESCE(octet_length(input.content_text), 0)
-                                WHEN 'context_summary' THEN
-                                    COALESCE(octet_length(entry.context_summary_value), 0)
-                                WHEN 'assistant_text' THEN
-                                    COALESCE(octet_length(entry.assistant_text_value), 0)
-                                WHEN 'assistant_tool_use' THEN
-                                    COALESCE(octet_length(request.tool_name), 0)
-                                    + COALESCE(octet_length(request.arguments_text), 0)
-                                WHEN 'tool_execution_result' THEN
-                                    COALESCE(octet_length(attempt.result_text), 0)
-                                    + COALESCE(octet_length(attempt.error_detail), 0)
-                                WHEN 'tool_denied' THEN
-                                    COALESCE(octet_length(decision.denial_reason), 0)
-                                WHEN 'delegated_task' THEN
-                                    COALESCE(octet_length(task.task_content), 0)
-                                WHEN 'delegation_message' THEN
-                                    COALESCE(octet_length(message.content_text), 0)
-                                WHEN 'delegation_result' THEN
-                                    COALESCE(octet_length(child_result.content_text), 0)
-                                ELSE 0
+                            CASE
+                                WHEN latest_call.proven_unreported_content_bytes IS NOT NULL
+                                     AND entry.payload_kind IN (
+                                         'tool_execution_result',
+                                         'tool_denied'
+                                     )
+                                     AND result_request.producing_model_call_id =
+                                         latest_call.model_call_id
+                                THEN 0
+                                ELSE CASE entry.payload_kind
+                                    WHEN 'imported_entry' THEN
+                                        COALESCE(octet_length(imported.content_encoding), 0)
+                                    WHEN 'origin_accepted_input' THEN
+                                        COALESCE(octet_length(input.content_text), 0)
+                                    WHEN 'steering_accepted_input' THEN
+                                        COALESCE(octet_length(input.content_text), 0)
+                                    WHEN 'context_summary' THEN
+                                        COALESCE(octet_length(entry.context_summary_value), 0)
+                                    WHEN 'assistant_text' THEN
+                                        COALESCE(octet_length(entry.assistant_text_value), 0)
+                                    WHEN 'assistant_tool_use' THEN
+                                        COALESCE(octet_length(request.tool_name), 0)
+                                        + COALESCE(octet_length(request.arguments_text), 0)
+                                    WHEN 'tool_execution_result' THEN
+                                        COALESCE(octet_length(attempt.result_text), 0)
+                                        + COALESCE(octet_length(attempt.error_detail), 0)
+                                    WHEN 'tool_denied' THEN
+                                        COALESCE(octet_length(decision.denial_reason), 0)
+                                    WHEN 'delegated_task' THEN
+                                        COALESCE(octet_length(task.task_content), 0)
+                                    WHEN 'delegation_message' THEN
+                                        COALESCE(octet_length(message.content_text), 0)
+                                    WHEN 'delegation_result' THEN
+                                        COALESCE(octet_length(child_result.content_text), 0)
+                                    ELSE 0
+                                END
                             END
                         ), 0)::numeric
                           FROM unreported_member AS prospective
@@ -788,6 +797,12 @@ impl PostgresModelCallRepository {
                           LEFT JOIN tool_attempt AS attempt
                             ON attempt.attempt_id = entry.tool_result_attempt_id
                            AND attempt.session_id = entry.source_session_id
+                          LEFT JOIN tool_request AS result_request
+                            ON result_request.request_id = COALESCE(
+                                   attempt.request_id,
+                                   entry.tool_result_request_id
+                               )
+                           AND result_request.session_id = entry.source_session_id
                           LEFT JOIN tool_approval_decision AS decision
                             ON decision.request_id = entry.tool_result_request_id
                           LEFT JOIN session_delegation_initial_task AS task
@@ -818,7 +833,6 @@ impl PostgresModelCallRepository {
                                       )
                                )
                            )
-                        )
                     ) AS projected_unreported_content_bytes
                FROM latest_call",
         )

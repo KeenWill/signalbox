@@ -14,7 +14,7 @@ Same-turn tool-continuation headroom closure is verified against this PR
 headroom is verified against this PR
 (`agent/daemon-live-post-usage-transcript-headroom`), and its durable proof on a
 successor frontier is verified against this PR
-(`agent/daemon-live-headroom-proof-activation`). Dedicated-compaction usage as
+(`agent/daemon-live-headroom-disjoint-suffix`). Dedicated-compaction usage as
 the next queued-turn baseline is verified against this PR
 (`agent/daemon-live-compaction-source-headroom`). Automatic compaction's
 content-weighted boundary is verified against this PR
@@ -455,20 +455,22 @@ reservation exceeds the context window, the daemon performs one bounded
 automatic compaction before activation. The allowance counts durable content and
 excludes ordinary assistant content or the dedicated summary when reported
 output already accounts for it. A typed same-turn headroom-exhaustion record
-preserves its exact projected tool-result byte count as the allowance's minimum,
-even when a successor turn's prospective frontier omits those result entries.
-Historical dedicated calls prepared before that semantics became durable retain
-an unknown value; the guard treats unknown as cache-exclusive so it may
-overcount but cannot omit reported cache axes. A queued turn spends at most one
-automatic attempt; if durable evidence says that attempt was already spent, the
-scheduler reports exhaustion and permits activation rather than wedging the
-queue on a compaction it may not repeat. After a nominal completion, the daemon
-retains adapter-reported usage and the completed observation even when reported
-output exceeds `max_output_tokens` or the reported input-plus-output lower bound
-exceeds `context_window_tokens`; it emits a closed operator cause for the
-overage rather than discarding assistant material after the provider has already
-accepted and served the request. Missing usage fields remain missing and are
-never invented. Adapters need no separate counting operation.
+preserves its exact projected tool-result byte count even when a successor
+turn's prospective frontier omits those result entries. The allowance adds other
+unreported successor content and counts any proved result entry present in that
+frontier exactly once. Historical dedicated calls prepared before that semantics
+became durable retain an unknown value; the guard treats unknown as
+cache-exclusive so it may overcount but cannot omit reported cache axes. A
+queued turn spends at most one automatic attempt; if durable evidence says that
+attempt was already spent, the scheduler reports exhaustion and permits
+activation rather than wedging the queue on a compaction it may not repeat.
+After a nominal completion, the daemon retains adapter-reported usage and the
+completed observation even when reported output exceeds `max_output_tokens` or
+the reported input-plus-output lower bound exceeds `context_window_tokens`; it
+emits a closed operator cause for the overage rather than discarding assistant
+material after the provider has already accepted and served the request. Missing
+usage fields remain missing and are never invented. Adapters need no separate
+counting operation.
 
 The same guard runs inside the atomic tool-result continuation transaction
 against the exact completed tool-producing call. It combines reported usage, the

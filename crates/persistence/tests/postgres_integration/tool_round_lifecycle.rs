@@ -335,6 +335,80 @@ async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Resul
         successor_reported.projected_unreported_content_bytes(),
         result_content_bytes
     );
+    let disjoint_content = "successor content outside the proved tool-result batch";
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 0x200,
+                seed + 1,
+                disjoint_content,
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x201)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 0x202))),
+        )
+        .await?;
+    let disjoint_entry = Uuid::from_u128(seed + 0x203);
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: fixture.session.into_uuid(),
+            origin_entry: disjoint_entry,
+            starting_frontier: Uuid::from_u128(seed + 0x204),
+            initial_attempt: Uuid::from_u128(seed + 0x205),
+        },
+    )
+    .await?;
+    let producing_member_count: i64 = sqlx::query_scalar(
+        "SELECT member_count::bigint
+           FROM context_frontier
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(producing_frontier)
+    .fetch_one(&pool)
+    .await?;
+    let disjoint_frontier = Uuid::from_u128(seed + 0x206);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+             (owning_session_id, context_frontier_id, member_count,
+              prefix_context_frontier_id)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(disjoint_frontier)
+    .bind(producing_member_count + 1)
+    .bind(producing_frontier)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+             (owning_session_id, context_frontier_id, member_position,
+              source_session_id, semantic_entry_id)
+         VALUES ($1, $2, $3, $1, $4)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(disjoint_frontier)
+    .bind(producing_member_count + 1)
+    .bind(disjoint_entry)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    let disjoint_reported = model_repository
+        .latest_reported_usage(
+            fixture.session,
+            target,
+            ContextFrontierId::from_uuid(disjoint_frontier),
+        )
+        .await?
+        .expect("durable proof and a disjoint successor suffix are both retained");
+    assert_eq!(
+        disjoint_reported.projected_unreported_content_bytes(),
+        result_content_bytes + u64::try_from(disjoint_content.len())?
+    );
 
     let stored: (String, Option<Uuid>, Uuid, Decimal, Decimal, Decimal, i64) = sqlx::query_as(
         "SELECT lifecycle.terminal_disposition_kind,
