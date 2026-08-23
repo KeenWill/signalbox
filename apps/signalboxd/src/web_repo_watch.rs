@@ -395,10 +395,6 @@ fn pull_request_number(value: String) -> Result<PullRequestNumber, ()> {
     Ok(PullRequestNumber::new(value))
 }
 
-fn timestamp(value: String) -> Result<SystemTime, ()> {
-    timestamp_from_units(value, 1_000_000)
-}
-
 fn cursor_timestamp(value: String) -> Result<SystemTime, ()> {
     timestamp_from_units(value, 1_000)
 }
@@ -1150,7 +1146,7 @@ mod tests {
 
     use super::{
         bounded_projection_response, cursor_timestamp, event_cursor, held_cursor, postgres_bigint,
-        session_cursor, timestamp, unix_microseconds, validate_activity_window,
+        session_cursor, timestamp_from_units, unix_microseconds, validate_activity_window,
     };
 
     #[tokio::test]
@@ -1195,7 +1191,7 @@ mod tests {
 
     #[test]
     fn timestamp_rejects_values_outside_the_database_time_range() {
-        assert!(timestamp(u64::MAX.to_string()).is_err());
+        assert!(timestamp_from_units(u64::MAX.to_string(), 1_000_000).is_err());
     }
 
     #[test]
