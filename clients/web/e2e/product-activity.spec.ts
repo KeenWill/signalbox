@@ -141,7 +141,7 @@ const workFixture = {
     {
       blockers: ['undelivered_action', 'pursuing_goal'],
       dispatch_id: 'dispatch-5',
-      held_since_unix_milliseconds: '9999999999999',
+      held_since_unix_microseconds: '9999999999999000',
       scope: { kind: 'stack', repository, root_pull_request: '101' },
       rule: 'review-convergence',
       session_ids: [sessionOne],
@@ -156,7 +156,7 @@ const workFixture = {
       latest_event_id: 'event-5',
       latest_match_at_unix_milliseconds: '1787342400000',
       matched_event_count: '3',
-      owed_since_unix_milliseconds: '9999999999999',
+      owed_since_unix_microseconds: '9999999999999000',
       scope: { kind: 'pull_request', repository, number: '101' },
       readiness: { eligible_at_unix_milliseconds: '1787342460000', kind: 'cooldown' },
       rule: 'review-convergence',
@@ -181,7 +181,7 @@ const sessionsFixture = {
         session_id: sessionOne,
         state: 'blocked',
       },
-      commissioned_at_unix_milliseconds: '1787342200000',
+      commissioned_at_unix_microseconds: '1787342200000000',
       purpose: {
         dispatch_id: 'dispatch-7',
         event_id: 'event-5',
@@ -200,7 +200,7 @@ const sessionsFixture = {
         session_id: sessionTwo,
         state: 'idle',
       },
-      commissioned_at_unix_milliseconds: '1787342100000',
+      commissioned_at_unix_microseconds: '1787342100000000',
       purpose: {
         dispatch_id: 'dispatch-8',
         kind: 'operator_commission',

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { retainActivityPage, singletonScopeLabel } from './ActivitySurface'
+import { readinessLabel, retainActivityPage, singletonScopeLabel } from './ActivitySurface'
 import type { WebRepoWatchActivityPage } from './generated/web-contract.mjs'
 
 const page = (receiptSequence: string): WebRepoWatchActivityPage => ({
@@ -49,5 +49,24 @@ describe('work singleton labels', () => {
     expect(singletonScopeLabel({ kind: 'repository', repository: 'example/repository' })).toBe(
       'Repository example/repository',
     )
+  })
+})
+
+describe('queued-work readiness labels', () => {
+  it('preserves variant-specific readiness evidence', () => {
+    expect(readinessLabel({ kind: 'ready' })).toBe('ready')
+    expect(
+      readinessLabel({
+        dispatch_id: 'dispatch-1',
+        kind: 'occupied',
+        session_ids: ['session-1', 'session-2'],
+      }),
+    ).toBe('occupied · dispatch dispatch-1 · sessions session-1, session-2')
+    expect(readinessLabel({ eligible_at_unix_milliseconds: null, kind: 'cooldown' })).toBe(
+      'cooldown · eligibility not scheduled',
+    )
+    expect(
+      readinessLabel({ kind: 'parked', parked_at_unix_milliseconds: '9007199254740991' }),
+    ).toBe('parked · since 9007199254740991')
   })
 })

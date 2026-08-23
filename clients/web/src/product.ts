@@ -102,12 +102,12 @@ const validateWorkPage = (
   page: WebRepoWatchWorkPage,
 ): WebRepoWatchWorkPage => {
   if (heldAfter) {
-    let previousTime = heldAfter.heldSinceUnixMilliseconds
+    let previousTime = heldAfter.heldSinceUnixMicroseconds
     let previousId = heldAfter.dispatchId
     for (const slot of page.held_slots) {
       if (
         compareCursorPair(
-          slot.held_since_unix_milliseconds,
+          slot.held_since_unix_microseconds,
           slot.dispatch_id,
           previousTime,
           previousId,
@@ -116,21 +116,21 @@ const validateWorkPage = (
       ) {
         throw new TypeError('held-work page does not advance beyond the requested cursor')
       }
-      previousTime = slot.held_since_unix_milliseconds
+      previousTime = slot.held_since_unix_microseconds
       previousId = slot.dispatch_id
     }
     const continuation = page.held_continuation_after
     if (
       continuation &&
       (compareCursorPair(
-        continuation.held_since_unix_milliseconds,
+        continuation.held_since_unix_microseconds,
         continuation.dispatch_id,
-        heldAfter.heldSinceUnixMilliseconds,
+        heldAfter.heldSinceUnixMicroseconds,
         heldAfter.dispatchId,
         'held-work continuation',
       ) <= 0 ||
         compareCursorPair(
-          continuation.held_since_unix_milliseconds,
+          continuation.held_since_unix_microseconds,
           continuation.dispatch_id,
           previousTime,
           previousId,
@@ -142,12 +142,12 @@ const validateWorkPage = (
   }
 
   if (obligationAfter) {
-    let previousTime = obligationAfter.owedSinceUnixMilliseconds
+    let previousTime = obligationAfter.owedSinceUnixMicroseconds
     let previousId = obligationAfter.obligationId
     for (const obligation of page.queued_obligations) {
       if (
         compareCursorPair(
-          obligation.owed_since_unix_milliseconds,
+          obligation.owed_since_unix_microseconds,
           obligation.id,
           previousTime,
           previousId,
@@ -156,21 +156,21 @@ const validateWorkPage = (
       ) {
         throw new TypeError('queued-work page does not advance beyond the requested cursor')
       }
-      previousTime = obligation.owed_since_unix_milliseconds
+      previousTime = obligation.owed_since_unix_microseconds
       previousId = obligation.id
     }
     const continuation = page.obligation_continuation_after
     if (
       continuation &&
       (compareCursorPair(
-        continuation.owed_since_unix_milliseconds,
+        continuation.owed_since_unix_microseconds,
         continuation.obligation_id,
-        obligationAfter.owedSinceUnixMilliseconds,
+        obligationAfter.owedSinceUnixMicroseconds,
         obligationAfter.obligationId,
         'queued-work continuation',
       ) <= 0 ||
         compareCursorPair(
-          continuation.owed_since_unix_milliseconds,
+          continuation.owed_since_unix_microseconds,
           continuation.obligation_id,
           previousTime,
           previousId,
@@ -188,13 +188,13 @@ const validateSessionPage = (
   page: WebRepoWatchPullRequestSessionPage,
 ): WebRepoWatchPullRequestSessionPage => {
   if (!before) return page
-  let previousTime = before.commissionedAtUnixMilliseconds
+  let previousTime = before.commissionedAtUnixMicroseconds
   let previousId = before.sessionId
   for (const session of page.sessions) {
     const sessionId = session.attention.session_id
     if (
       compareCursorPair(
-        session.commissioned_at_unix_milliseconds,
+        session.commissioned_at_unix_microseconds,
         sessionId,
         previousTime,
         previousId,
@@ -203,21 +203,21 @@ const validateSessionPage = (
     ) {
       throw new TypeError('session page does not advance to older history')
     }
-    previousTime = session.commissioned_at_unix_milliseconds
+    previousTime = session.commissioned_at_unix_microseconds
     previousId = sessionId
   }
   const continuation = page.continuation_before
   if (
     continuation &&
     (compareCursorPair(
-      continuation.commissioned_at_unix_milliseconds,
+      continuation.commissioned_at_unix_microseconds,
       continuation.session_id,
-      before.commissionedAtUnixMilliseconds,
+      before.commissionedAtUnixMicroseconds,
       before.sessionId,
       'session continuation',
     ) >= 0 ||
       compareCursorPair(
-        continuation.commissioned_at_unix_milliseconds,
+        continuation.commissioned_at_unix_microseconds,
         continuation.session_id,
         previousTime,
         previousId,
@@ -240,6 +240,19 @@ const validateActivityContinuations = (
   window: RepoWatchActivityWindow | undefined,
   page: WebRepoWatchActivityPage,
 ): WebRepoWatchActivityPage => {
+  const eventIdentities = new Set<string>()
+  for (const row of page.events) {
+    if (eventIdentities.has(row.id)) throw new TypeError('activity page repeats an event identity')
+    eventIdentities.add(row.id)
+  }
+  const webhookIdentities = new Set<string>()
+  for (const row of page.webhooks) {
+    if (webhookIdentities.has(row.receipt_sequence)) {
+      throw new TypeError('activity page repeats a webhook identity')
+    }
+    webhookIdentities.add(row.receipt_sequence)
+  }
+
   const requestedEvent = window?.eventBefore
   if (requestedEvent) {
     let previousGeneration = canonicalPositiveBigInt(
@@ -425,17 +438,17 @@ export const productRoutes = [
 export type ProductRouteId = (typeof productRoutes)[number]['id']
 
 export interface RepoWatchHeldCursor {
-  heldSinceUnixMilliseconds: string
+  heldSinceUnixMicroseconds: string
   dispatchId: string
 }
 
 export interface RepoWatchObligationCursor {
-  owedSinceUnixMilliseconds: string
+  owedSinceUnixMicroseconds: string
   obligationId: string
 }
 
 export interface RepoWatchSessionCursor {
-  commissionedAtUnixMilliseconds: string
+  commissionedAtUnixMicroseconds: string
   sessionId: string
 }
 
@@ -601,11 +614,11 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
   ): Promise<WebRepoWatchWorkPage> {
     const query = new URLSearchParams({ repository })
     if (heldAfter) {
-      query.set('held_after_unix_milliseconds', heldAfter.heldSinceUnixMilliseconds)
+      query.set('held_after_unix_microseconds', heldAfter.heldSinceUnixMicroseconds)
       query.set('held_after_dispatch_id', heldAfter.dispatchId)
     }
     if (obligationAfter) {
-      query.set('obligation_after_unix_milliseconds', obligationAfter.owedSinceUnixMilliseconds)
+      query.set('obligation_after_unix_microseconds', obligationAfter.owedSinceUnixMicroseconds)
       query.set('obligation_after_id', obligationAfter.obligationId)
     }
     const page = await this.readJson(
@@ -624,7 +637,7 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
   ): Promise<WebRepoWatchPullRequestSessionPage> {
     const query = new URLSearchParams({ repository, pull_request: pullRequest })
     if (before) {
-      query.set('before_unix_milliseconds', before.commissionedAtUnixMilliseconds)
+      query.set('before_unix_microseconds', before.commissionedAtUnixMicroseconds)
       query.set('before_session_id', before.sessionId)
     }
     const page = await this.readJson(

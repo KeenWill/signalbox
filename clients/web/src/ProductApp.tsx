@@ -303,13 +303,18 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       getState: store.getState,
       timelineIds: [],
       focusTimeline: () => primaryRef.current?.focus(),
-      navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      navigate: (path) => {
+        void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() =>
+          primaryRef.current?.focus(),
+        )
+      },
     }),
     [dispatch, navigate],
   )
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
+      options: { ignoreInputs: true },
       callback: (event) => {
         const overlay = store.getState().app.overlay
         if (overlay !== null && binding.commandId !== 'surface.escape') return
@@ -321,6 +326,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   useHotkeySequences(
     globalHotkeySequenceBindings.map((binding) => ({
       sequence: binding.sequence,
+      options: { ignoreInputs: true },
       callback: () => {
         if (store.getState().app.overlay !== null) return
         invokeCommand(binding.commandId, context)

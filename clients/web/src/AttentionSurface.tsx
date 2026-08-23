@@ -5,6 +5,7 @@ import { type AttentionSyncPhase, synchronizeAttention } from './attention'
 import type { WebAttentionSnapshot } from './generated/web-contract.mjs'
 import { ProductRequestError, productTransport } from './product'
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
+import { displayUnixMilliseconds } from './time'
 
 type AttentionSummary = WebAttentionSnapshot['summaries'][number]
 
@@ -20,13 +21,13 @@ const phaseCopy: Record<AttentionSyncPhase, string> = {
 const label = (value: string) => value.replaceAll('_', ' ')
 
 const activityTime = (unixMilliseconds: string) => {
-  const value = Number(unixMilliseconds)
-  if (!Number.isSafeInteger(value)) return unixMilliseconds
+  const value = displayUnixMilliseconds(unixMilliseconds)
+  if (typeof value === 'string') return value
   return new Intl.DateTimeFormat('en-US', {
     dateStyle: 'medium',
     timeStyle: 'short',
     timeZone: 'UTC',
-  }).format(new Date(value))
+  }).format(value)
 }
 
 const queryKey = (after: string | null) => ['production', 'attention', after] as const

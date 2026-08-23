@@ -87,6 +87,28 @@ describe('attention projection recovery', () => {
     expect(reduction).toEqual({ kind: 'resync' })
   })
 
+  it('requests resynchronization when a snapshot continuation skips beyond its page', () => {
+    const reduction = reduceAttentionEvent(undefined, {
+      kind: 'snapshot',
+      snapshot: { ...snapshot, continuation_after_session_id: anotherSessionId },
+    })
+
+    expect(reduction).toEqual({ kind: 'resync' })
+  })
+
+  it('requests resynchronization when snapshot sessions are not strictly ordered', () => {
+    const reduction = reduceAttentionEvent(undefined, {
+      kind: 'snapshot',
+      snapshot: {
+        ...snapshot,
+        continuation_after_session_id: sessionId,
+        summaries: [{ ...summary, session_id: anotherSessionId }, summary],
+      },
+    })
+
+    expect(reduction).toEqual({ kind: 'resync' })
+  })
+
   it('requests resynchronization when an update moves the cursor backward', () => {
     const reduction = reduceAttentionEvent(snapshot, {
       kind: 'update',

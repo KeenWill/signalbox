@@ -1351,7 +1351,7 @@ const schemas = {
           "attention": {
             "$ref": "#/$defs/WebAttentionSummary"
           },
-          "commissioned_at_unix_milliseconds": {
+          "commissioned_at_unix_microseconds": {
             "type": "string"
           },
           "purpose": {
@@ -1359,7 +1359,7 @@ const schemas = {
           }
         },
         "required": [
-          "commissioned_at_unix_milliseconds",
+          "commissioned_at_unix_microseconds",
           "purpose",
           "attention"
         ],
@@ -1368,7 +1368,7 @@ const schemas = {
       "WebRepoWatchSessionCursor": {
         "additionalProperties": false,
         "properties": {
-          "commissioned_at_unix_milliseconds": {
+          "commissioned_at_unix_microseconds": {
             "type": "string"
           },
           "session_id": {
@@ -1376,7 +1376,7 @@ const schemas = {
           }
         },
         "required": [
-          "commissioned_at_unix_milliseconds",
+          "commissioned_at_unix_microseconds",
           "session_id"
         ],
         "type": "object"
@@ -1778,12 +1778,12 @@ const schemas = {
           "dispatch_id": {
             "type": "string"
           },
-          "held_since_unix_milliseconds": {
+          "held_since_unix_microseconds": {
             "type": "string"
           }
         },
         "required": [
-          "held_since_unix_milliseconds",
+          "held_since_unix_microseconds",
           "dispatch_id"
         ],
         "type": "object"
@@ -1800,7 +1800,7 @@ const schemas = {
           "dispatch_id": {
             "type": "string"
           },
-          "held_since_unix_milliseconds": {
+          "held_since_unix_microseconds": {
             "type": "string"
           },
           "rule": {
@@ -1820,7 +1820,7 @@ const schemas = {
           "dispatch_id",
           "scope",
           "rule",
-          "held_since_unix_milliseconds",
+          "held_since_unix_microseconds",
           "session_ids",
           "blockers"
         ],
@@ -1841,12 +1841,12 @@ const schemas = {
           "obligation_id": {
             "type": "string"
           },
-          "owed_since_unix_milliseconds": {
+          "owed_since_unix_microseconds": {
             "type": "string"
           }
         },
         "required": [
-          "owed_since_unix_milliseconds",
+          "owed_since_unix_microseconds",
           "obligation_id"
         ],
         "type": "object"
@@ -1949,7 +1949,7 @@ const schemas = {
           "matched_event_count": {
             "type": "string"
           },
-          "owed_since_unix_milliseconds": {
+          "owed_since_unix_microseconds": {
             "type": "string"
           },
           "readiness": {
@@ -1969,7 +1969,7 @@ const schemas = {
           "first_event_id",
           "latest_event_id",
           "matched_event_count",
-          "owed_since_unix_milliseconds",
+          "owed_since_unix_microseconds",
           "latest_match_at_unix_milliseconds",
           "failed_attempts",
           "readiness"

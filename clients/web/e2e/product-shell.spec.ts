@@ -78,7 +78,24 @@ test('completes route switching from the command palette without a mouse', async
   await page.getByRole('button', { name: /Go to Sessions/ }).focus()
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page.locator('main.product-main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('yields global shortcuts while a text control owns focus', async ({ page }) => {
+  await useDeterministicProductTransport(page)
+  await page.goto('/sessions')
+
+  const input = page.getByRole('textbox', { name: 'Filter loaded sessions' })
+  await input.evaluate((element: HTMLInputElement) => {
+    element.disabled = false
+  })
+  await input.focus()
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+
+  await expect(input).toBeFocused()
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeHidden()
 })
 
 test('uses a navigation sheet on a phone viewport and unwinds it with Escape', async ({ page }) => {

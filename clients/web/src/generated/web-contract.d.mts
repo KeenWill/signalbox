@@ -117,13 +117,13 @@ type WebRepoWatchEventKindCount = {
 
 type WebRepoWatchHeldCursor = {
   readonly dispatch_id: string;
-  readonly held_since_unix_milliseconds: string;
+  readonly held_since_unix_microseconds: string;
 };
 
 type WebRepoWatchHeldSlot = {
   readonly blockers: ReadonlyArray<WebRepoWatchHeldSlotBlocker>;
   readonly dispatch_id: string;
-  readonly held_since_unix_milliseconds: string;
+  readonly held_since_unix_microseconds: string;
   readonly rule: string;
   readonly scope: WebRepoWatchSingletonScope;
   readonly session_ids: ReadonlyArray<string>;
@@ -144,7 +144,7 @@ type WebRepoWatchMergeable = "mergeable" | "conflicting" | "unknown";
 
 type WebRepoWatchObligationCursor = {
   readonly obligation_id: string;
-  readonly owed_since_unix_milliseconds: string;
+  readonly owed_since_unix_microseconds: string;
 };
 
 type WebRepoWatchObligationReadiness = {
@@ -189,7 +189,7 @@ type WebRepoWatchPullRequest = {
 
 type WebRepoWatchPullRequestSession = {
   readonly attention: WebAttentionSummary;
-  readonly commissioned_at_unix_milliseconds: string;
+  readonly commissioned_at_unix_microseconds: string;
   readonly purpose: WebRepoWatchSessionPurpose;
 };
 
@@ -200,7 +200,7 @@ type WebRepoWatchQueuedObligation = {
   readonly latest_event_id: string;
   readonly latest_match_at_unix_milliseconds: string;
   readonly matched_event_count: string;
-  readonly owed_since_unix_milliseconds: string;
+  readonly owed_since_unix_microseconds: string;
   readonly readiness: WebRepoWatchObligationReadiness;
   readonly rule: string;
   readonly scope: WebRepoWatchSingletonScope;
@@ -227,7 +227,7 @@ type WebRepoWatchRepositoryStatus = {
 type WebRepoWatchReviewDecision = "none" | "commented" | "approved" | "changes_requested";
 
 type WebRepoWatchSessionCursor = {
-  readonly commissioned_at_unix_milliseconds: string;
+  readonly commissioned_at_unix_microseconds: string;
   readonly session_id: string;
 };
 

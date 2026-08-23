@@ -104,9 +104,9 @@ struct PullRequestsQuery {
 #[serde(deny_unknown_fields)]
 struct WorkQuery {
     repository: String,
-    held_after_unix_milliseconds: Option<String>,
+    held_after_unix_microseconds: Option<String>,
     held_after_dispatch_id: Option<String>,
-    obligation_after_unix_milliseconds: Option<String>,
+    obligation_after_unix_microseconds: Option<String>,
     obligation_after_id: Option<String>,
 }
 
@@ -115,7 +115,7 @@ struct WorkQuery {
 struct PullRequestSessionsQuery {
     repository: String,
     pull_request: String,
-    before_unix_milliseconds: Option<String>,
+    before_unix_microseconds: Option<String>,
     before_session_id: Option<String>,
 }
 
@@ -220,14 +220,14 @@ async fn work(
         Err(()) => return invalid_query("invalid_repository", "repository is not canonical"),
     };
     let held_after = match held_cursor(
-        query.held_after_unix_milliseconds,
+        query.held_after_unix_microseconds,
         query.held_after_dispatch_id,
     ) {
         Ok(cursor) => cursor,
         Err(()) => return invalid_query("invalid_cursor", "held cursor is incomplete or invalid"),
     };
     let obligation_after = match obligation_cursor(
-        query.obligation_after_unix_milliseconds,
+        query.obligation_after_unix_microseconds,
         query.obligation_after_id,
     ) {
         Ok(cursor) => cursor,
@@ -276,7 +276,7 @@ async fn pull_request_sessions(
         Ok(pull_request) => pull_request,
         Err(()) => return invalid_query("invalid_pull_request", "pull request is not positive"),
     };
-    let before = match session_cursor(query.before_unix_milliseconds, query.before_session_id) {
+    let before = match session_cursor(query.before_unix_microseconds, query.before_session_id) {
         Ok(cursor) => cursor,
         Err(()) => {
             return invalid_query("invalid_cursor", "session cursor is incomplete or invalid");
@@ -396,8 +396,18 @@ fn pull_request_number(value: String) -> Result<PullRequestNumber, ()> {
 }
 
 fn timestamp(value: String) -> Result<SystemTime, ()> {
-    let milliseconds = value.parse::<u64>().map_err(|_| ())?;
-    let nanoseconds = i128::from(milliseconds).checked_mul(1_000_000).ok_or(())?;
+    timestamp_from_units(value, 1_000_000)
+}
+
+fn cursor_timestamp(value: String) -> Result<SystemTime, ()> {
+    timestamp_from_units(value, 1_000)
+}
+
+fn timestamp_from_units(value: String, nanoseconds_per_unit: i128) -> Result<SystemTime, ()> {
+    let value = value.parse::<u64>().map_err(|_| ())?;
+    let nanoseconds = i128::from(value)
+        .checked_mul(nanoseconds_per_unit)
+        .ok_or(())?;
     let database_time = OffsetDateTime::from_unix_timestamp_nanos(nanoseconds).map_err(|_| ())?;
     Ok(SystemTime::from(database_time))
 }
@@ -407,13 +417,13 @@ fn uuid(value: String) -> Result<Uuid, ()> {
 }
 
 fn held_cursor(
-    milliseconds: Option<String>,
+    microseconds: Option<String>,
     dispatch: Option<String>,
 ) -> Result<Option<RepoWatchHeldCursor>, ()> {
-    match (milliseconds, dispatch) {
+    match (microseconds, dispatch) {
         (None, None) => Ok(None),
-        (Some(milliseconds), Some(dispatch)) => Ok(Some(RepoWatchHeldCursor {
-            held_since: timestamp(milliseconds)?,
+        (Some(microseconds), Some(dispatch)) => Ok(Some(RepoWatchHeldCursor {
+            held_since: cursor_timestamp(microseconds)?,
             dispatch: RepoWatchDispatchId::from_uuid(uuid(dispatch)?),
         })),
         _ => Err(()),
@@ -421,13 +431,13 @@ fn held_cursor(
 }
 
 fn obligation_cursor(
-    milliseconds: Option<String>,
+    microseconds: Option<String>,
     obligation: Option<String>,
 ) -> Result<Option<RepoWatchObligationCursor>, ()> {
-    match (milliseconds, obligation) {
+    match (microseconds, obligation) {
         (None, None) => Ok(None),
-        (Some(milliseconds), Some(obligation)) => Ok(Some(RepoWatchObligationCursor {
-            owed_since: timestamp(milliseconds)?,
+        (Some(microseconds), Some(obligation)) => Ok(Some(RepoWatchObligationCursor {
+            owed_since: cursor_timestamp(microseconds)?,
             obligation: signalbox_application::RepoWatchObligationId::from_uuid(uuid(obligation)?),
         })),
         _ => Err(()),
@@ -435,13 +445,13 @@ fn obligation_cursor(
 }
 
 fn session_cursor(
-    milliseconds: Option<String>,
+    microseconds: Option<String>,
     session: Option<String>,
 ) -> Result<Option<RepoWatchSessionCursor>, ()> {
-    match (milliseconds, session) {
+    match (microseconds, session) {
         (None, None) => Ok(None),
-        (Some(milliseconds), Some(session)) => Ok(Some(RepoWatchSessionCursor {
-            commissioned_at: timestamp(milliseconds)?,
+        (Some(microseconds), Some(session)) => Ok(Some(RepoWatchSessionCursor {
+            commissioned_at: cursor_timestamp(microseconds)?,
             session: SessionId::from_uuid(uuid(session)?),
         })),
         _ => Err(()),
@@ -475,6 +485,14 @@ fn unix_milliseconds(value: SystemTime) -> Result<String, ()> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ())?
         .as_millis()
+        .to_string())
+}
+
+fn unix_microseconds(value: SystemTime) -> Result<String, ()> {
+    Ok(value
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ())?
+        .as_micros()
         .to_string())
 }
 
@@ -790,7 +808,7 @@ fn held_slot_dto(slot: RepoWatchHeldSlot) -> Result<WebRepoWatchHeldSlot, ()> {
         dispatch_id: slot.dispatch.into_uuid().to_string(),
         scope: singleton_scope(slot.singleton),
         rule: slot.rule.into_string(),
-        held_since_unix_milliseconds: unix_milliseconds(slot.held_since)?,
+        held_since_unix_microseconds: unix_microseconds(slot.held_since)?,
         session_ids: slot
             .sessions
             .into_iter()
@@ -852,7 +870,7 @@ fn obligation_dto(
         first_event_id: obligation.first_event.into_uuid().to_string(),
         latest_event_id: obligation.latest_event.into_uuid().to_string(),
         matched_event_count: obligation.matched_event_count.to_string(),
-        owed_since_unix_milliseconds: unix_milliseconds(obligation.owed_since)?,
+        owed_since_unix_microseconds: unix_microseconds(obligation.owed_since)?,
         latest_match_at_unix_milliseconds: unix_milliseconds(obligation.latest_match_at)?,
         failed_attempts: obligation.failed_attempts.to_string(),
         readiness: readiness_dto(obligation.readiness)?,
@@ -874,14 +892,14 @@ fn work_page_dto(page: RepoWatchWorkPage) -> Result<WebRepoWatchWorkPage, ()> {
     let complete_obligation_len = queued_obligations.len();
     let held_continuation_after = match page.held_continuation_after {
         RepoWatchPagePosition::After(cursor) => Some(WebRepoWatchHeldCursor {
-            held_since_unix_milliseconds: unix_milliseconds(cursor.held_since)?,
+            held_since_unix_microseconds: unix_microseconds(cursor.held_since)?,
             dispatch_id: cursor.dispatch.into_uuid().to_string(),
         }),
         RepoWatchPagePosition::Start | RepoWatchPagePosition::Exhausted => None,
     };
     let obligation_continuation_after = match page.obligation_continuation_after {
         RepoWatchPagePosition::After(cursor) => Some(WebRepoWatchObligationCursor {
-            owed_since_unix_milliseconds: unix_milliseconds(cursor.owed_since)?,
+            owed_since_unix_microseconds: unix_microseconds(cursor.owed_since)?,
             obligation_id: cursor.obligation.into_uuid().to_string(),
         }),
         RepoWatchPagePosition::Start | RepoWatchPagePosition::Exhausted => None,
@@ -890,7 +908,7 @@ fn work_page_dto(page: RepoWatchWorkPage) -> Result<WebRepoWatchWorkPage, ()> {
     loop {
         let held_continuation = if held_slots.len() < complete_held_len {
             held_slots.last().map(|slot| WebRepoWatchHeldCursor {
-                held_since_unix_milliseconds: slot.held_since_unix_milliseconds.clone(),
+                held_since_unix_microseconds: slot.held_since_unix_microseconds.clone(),
                 dispatch_id: slot.dispatch_id.clone(),
             })
         } else {
@@ -900,7 +918,7 @@ fn work_page_dto(page: RepoWatchWorkPage) -> Result<WebRepoWatchWorkPage, ()> {
             queued_obligations
                 .last()
                 .map(|obligation| WebRepoWatchObligationCursor {
-                    owed_since_unix_milliseconds: obligation.owed_since_unix_milliseconds.clone(),
+                    owed_since_unix_microseconds: obligation.owed_since_unix_microseconds.clone(),
                     obligation_id: obligation.id.clone(),
                 })
         } else {
@@ -938,7 +956,7 @@ fn pull_request_session_dto(
     session: RepoWatchPullRequestSession,
 ) -> Result<WebRepoWatchPullRequestSession, ()> {
     Ok(WebRepoWatchPullRequestSession {
-        commissioned_at_unix_milliseconds: unix_milliseconds(session.commissioned_at)?,
+        commissioned_at_unix_microseconds: unix_microseconds(session.commissioned_at)?,
         purpose: match session.purpose {
             RepoWatchSessionPurpose::RuleDispatch {
                 dispatch,
@@ -975,7 +993,7 @@ fn pull_request_session_page_dto(
         .continuation_before
         .map(|cursor| {
             Ok(WebRepoWatchSessionCursor {
-                commissioned_at_unix_milliseconds: unix_milliseconds(cursor.commissioned_at)?,
+                commissioned_at_unix_microseconds: unix_microseconds(cursor.commissioned_at)?,
                 session_id: cursor.session.into_uuid().to_string(),
             })
         })
@@ -984,8 +1002,8 @@ fn pull_request_session_page_dto(
     loop {
         let continuation = if sessions.len() < complete_page_len {
             sessions.last().map(|session| WebRepoWatchSessionCursor {
-                commissioned_at_unix_milliseconds: session
-                    .commissioned_at_unix_milliseconds
+                commissioned_at_unix_microseconds: session
+                    .commissioned_at_unix_microseconds
                     .clone(),
                 session_id: session.attention.session_id.clone(),
             })
@@ -1131,8 +1149,8 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        bounded_projection_response, event_cursor, held_cursor, postgres_bigint, session_cursor,
-        timestamp, validate_activity_window,
+        bounded_projection_response, cursor_timestamp, event_cursor, held_cursor, postgres_bigint,
+        session_cursor, timestamp, unix_microseconds, validate_activity_window,
     };
 
     #[tokio::test]
@@ -1178,6 +1196,14 @@ mod tests {
     #[test]
     fn timestamp_rejects_values_outside_the_database_time_range() {
         assert!(timestamp(u64::MAX.to_string()).is_err());
+    }
+
+    #[test]
+    fn cursor_timestamps_round_trip_database_microseconds() {
+        let cursor = "1724200000000123".to_owned();
+        let parsed = cursor_timestamp(cursor.clone()).expect("the cursor timestamp is valid");
+
+        assert_eq!(unix_microseconds(parsed), Ok(cursor));
     }
 
     #[test]

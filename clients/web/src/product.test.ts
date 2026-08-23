@@ -254,6 +254,34 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('event rows do not advance to older history')
   })
 
+  it('rejects duplicate event identities in one activity page', async () => {
+    const event = {
+      cursor_generation: '9',
+      event_ordinal: 42,
+      id: 'event-42',
+      kind: 'head_changed',
+      observed_at_unix_milliseconds: '1724200000000',
+      pull_request: null,
+    } as const
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...activityFixture,
+              event_continuation_before: null,
+              events: [event, { ...event, cursor_generation: '8', event_ordinal: 41 }],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readRepoWatchActivity('example/repository'),
+    ).rejects.toThrow('activity page repeats an event identity')
+  })
+
   it('fails closed when a repository-watch response carries an unknown field', async () => {
     vi.stubGlobal(
       'fetch',
@@ -325,7 +353,7 @@ describe('SameOriginProductTransport', () => {
             JSON.stringify({
               held_continuation_after: {
                 dispatch_id: dispatchId,
-                held_since_unix_milliseconds: '1724200000000',
+                held_since_unix_microseconds: '1724200000000000',
               },
               held_slots: [],
               obligation_continuation_after: null,
@@ -338,7 +366,7 @@ describe('SameOriginProductTransport', () => {
     await expect(
       new SameOriginProductTransport().readRepoWatchWork('example/repository', {
         dispatchId,
-        heldSinceUnixMilliseconds: '1724200000000',
+        heldSinceUnixMicroseconds: '1724200000000000',
       }),
     ).rejects.toThrow('held-work continuation does not advance')
   })
@@ -354,7 +382,7 @@ describe('SameOriginProductTransport', () => {
               sessions: [
                 {
                   attention: attentionFixture.summaries[0],
-                  commissioned_at_unix_milliseconds: '1724200000000',
+                  commissioned_at_unix_microseconds: '1724200000000000',
                   purpose: {
                     dispatch_id: 'dispatch-1',
                     kind: 'operator_commission',
@@ -371,7 +399,7 @@ describe('SameOriginProductTransport', () => {
       new SameOriginProductTransport().readRepoWatchPullRequestSessions(
         'example/repository',
         '17',
-        { commissionedAtUnixMilliseconds: '1724200000000', sessionId: previousSessionId },
+        { commissionedAtUnixMicroseconds: '1724200000000000', sessionId: previousSessionId },
       ),
     ).rejects.toThrow('session page does not advance to older history')
   })

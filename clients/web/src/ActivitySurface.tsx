@@ -20,11 +20,13 @@ import {
   type RepoWatchSessionCursor,
 } from './product'
 import { actions, useAppDispatch } from './state'
+import { displayUnixMicroseconds, displayUnixMilliseconds } from './time'
 
 type RepositoryStatus = WebRepoWatchRepositoryStatusPage['repositories'][number]
 type PullRequest = WebRepoWatchPullRequestPage['pull_requests'][number]
 type PullRequestSession = WebRepoWatchPullRequestSessionPage['sessions'][number]
 type SingletonScope = WebRepoWatchWorkPage['held_slots'][number]['scope']
+type ObligationReadiness = WebRepoWatchWorkPage['queued_obligations'][number]['readiness']
 
 interface ActivityRow {
   id: string
@@ -82,19 +84,44 @@ export const singletonScopeLabel = (scope: SingletonScope) => {
 
 const time = (unixMilliseconds: string | null | undefined) => {
   if (!unixMilliseconds) return '—'
-  const value = Number(unixMilliseconds)
-  if (!Number.isSafeInteger(value)) return unixMilliseconds
+  const value = displayUnixMilliseconds(unixMilliseconds)
+  if (typeof value === 'string') return value
   return new Intl.DateTimeFormat('en-US', {
     dateStyle: 'medium',
     timeStyle: 'medium',
     timeZone: 'UTC',
-  }).format(new Date(value))
+  }).format(value)
+}
+
+const cursorTime = (unixMicroseconds: string) => {
+  const value = displayUnixMicroseconds(unixMicroseconds)
+  if (typeof value === 'string') return value
+  return new Intl.DateTimeFormat('en-US', {
+    dateStyle: 'medium',
+    timeStyle: 'medium',
+    timeZone: 'UTC',
+  }).format(value)
 }
 
 const durationLabel = (seconds: number) => {
   if (seconds % 3_600 === 0) return `${seconds / 3_600}h`
   if (seconds % 60 === 0) return `${seconds / 60}m`
   return `${seconds}s`
+}
+
+export const readinessLabel = (readiness: ObligationReadiness) => {
+  switch (readiness.kind) {
+    case 'ready':
+      return 'ready'
+    case 'occupied':
+      return `occupied · dispatch ${readiness.dispatch_id} · sessions ${readiness.session_ids.join(', ') || 'none'}`
+    case 'cooldown':
+      return readiness.eligible_at_unix_milliseconds
+        ? `cooldown · eligible ${time(readiness.eligible_at_unix_milliseconds)}`
+        : 'cooldown · eligibility not scheduled'
+    case 'parked':
+      return `parked · since ${time(readiness.parked_at_unix_milliseconds)}`
+  }
 }
 
 const errorMessage = (error: unknown) =>
@@ -391,7 +418,7 @@ function WorkTables({
                 <td>
                   {singletonScopeLabel(slot.scope)} · {slot.rule}
                 </td>
-                <td>{time(slot.held_since_unix_milliseconds)}</td>
+                <td>{cursorTime(slot.held_since_unix_microseconds)}</td>
                 <td>{slot.blockers.map(words).join(', ') || 'No blocker'}</td>
               </tr>
             ))}
@@ -423,9 +450,9 @@ function WorkTables({
                 <td>
                   {singletonScopeLabel(obligation.scope)} · {obligation.rule}
                 </td>
-                <td>{time(obligation.owed_since_unix_milliseconds)}</td>
+                <td>{cursorTime(obligation.owed_since_unix_microseconds)}</td>
                 <td>{obligation.matched_event_count}</td>
-                <td>{words(obligation.readiness.kind)}</td>
+                <td>{readinessLabel(obligation.readiness)}</td>
               </tr>
             ))}
           </tbody>
@@ -832,8 +859,8 @@ export function ActivitySurface() {
           type="button"
           onClick={() =>
             changeSessionPage({
-              commissionedAtUnixMilliseconds:
-                sessions.data?.continuation_before?.commissioned_at_unix_milliseconds ?? '',
+              commissionedAtUnixMicroseconds:
+                sessions.data?.continuation_before?.commissioned_at_unix_microseconds ?? '',
               sessionId: sessions.data?.continuation_before?.session_id ?? '',
             })
           }
@@ -870,8 +897,8 @@ export function ActivitySurface() {
                 type="button"
                 onClick={() =>
                   changeHeldPage({
-                    heldSinceUnixMilliseconds:
-                      work.data?.held_continuation_after?.held_since_unix_milliseconds ?? '',
+                    heldSinceUnixMicroseconds:
+                      work.data?.held_continuation_after?.held_since_unix_microseconds ?? '',
                     dispatchId: work.data?.held_continuation_after?.dispatch_id ?? '',
                   })
                 }
@@ -884,8 +911,8 @@ export function ActivitySurface() {
                 type="button"
                 onClick={() =>
                   changeQueuedPage({
-                    owedSinceUnixMilliseconds:
-                      work.data?.obligation_continuation_after?.owed_since_unix_milliseconds ?? '',
+                    owedSinceUnixMicroseconds:
+                      work.data?.obligation_continuation_after?.owed_since_unix_microseconds ?? '',
                     obligationId: work.data?.obligation_continuation_after?.obligation_id ?? '',
                   })
                 }

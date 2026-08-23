@@ -15,9 +15,20 @@ const cursorValue = (cursor: string): bigint | null => {
   return value <= MAX_CURSOR ? value : null
 }
 
-const hasUniqueSessionIds = (snapshot: WebAttentionSnapshot) =>
-  new Set(snapshot.summaries.map((summary) => summary.session_id)).size ===
-  snapshot.summaries.length
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+const hasValidPageBoundary = (snapshot: WebAttentionSnapshot) => {
+  const identities = snapshot.summaries.map((summary) => summary.session_id)
+  if (new Set(identities).size !== identities.length) return false
+  let previous: string | null = null
+  for (const identity of identities) {
+    if (!CANONICAL_UUID.test(identity) || (previous !== null && identity <= previous)) return false
+    previous = identity
+  }
+  const continuation = snapshot.continuation_after_session_id
+  if (continuation == null) return true
+  return CANONICAL_UUID.test(continuation) && previous !== null && continuation === previous
+}
 
 export const reduceAttentionEvent = (
   current: WebAttentionSnapshot | undefined,
@@ -25,7 +36,7 @@ export const reduceAttentionEvent = (
 ): AttentionReduction => {
   if (event.kind === 'snapshot') {
     const snapshotCursor = cursorValue(event.snapshot.cursor)
-    if (snapshotCursor === null || !hasUniqueSessionIds(event.snapshot)) return { kind: 'resync' }
+    if (snapshotCursor === null || !hasValidPageBoundary(event.snapshot)) return { kind: 'resync' }
     if (current) {
       const currentCursor = cursorValue(current.cursor)
       if (currentCursor === null || snapshotCursor < currentCursor) return { kind: 'resync' }

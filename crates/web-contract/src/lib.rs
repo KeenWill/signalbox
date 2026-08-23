@@ -474,7 +474,7 @@ pub struct WebRepoWatchHeldSlot {
     pub dispatch_id: String,
     pub scope: WebRepoWatchSingletonScope,
     pub rule: String,
-    pub held_since_unix_milliseconds: String,
+    pub held_since_unix_microseconds: String,
     pub session_ids: Vec<String>,
     pub blockers: Vec<WebRepoWatchHeldSlotBlocker>,
 }
@@ -504,7 +504,7 @@ pub struct WebRepoWatchQueuedObligation {
     pub first_event_id: String,
     pub latest_event_id: String,
     pub matched_event_count: String,
-    pub owed_since_unix_milliseconds: String,
+    pub owed_since_unix_microseconds: String,
     pub latest_match_at_unix_milliseconds: String,
     pub failed_attempts: String,
     pub readiness: WebRepoWatchObligationReadiness,
@@ -513,14 +513,14 @@ pub struct WebRepoWatchQueuedObligation {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebRepoWatchHeldCursor {
-    pub held_since_unix_milliseconds: String,
+    pub held_since_unix_microseconds: String,
     pub dispatch_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebRepoWatchObligationCursor {
-    pub owed_since_unix_milliseconds: String,
+    pub owed_since_unix_microseconds: String,
     pub obligation_id: String,
 }
 
@@ -553,7 +553,7 @@ pub enum WebRepoWatchSessionPurpose {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebRepoWatchPullRequestSession {
-    pub commissioned_at_unix_milliseconds: String,
+    pub commissioned_at_unix_microseconds: String,
     pub purpose: WebRepoWatchSessionPurpose,
     pub attention: WebAttentionSummary,
 }
@@ -561,7 +561,7 @@ pub struct WebRepoWatchPullRequestSession {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebRepoWatchSessionCursor {
-    pub commissioned_at_unix_milliseconds: String,
+    pub commissioned_at_unix_microseconds: String,
     pub session_id: String,
 }
 
