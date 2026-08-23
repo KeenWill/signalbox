@@ -250,7 +250,7 @@ const useDeterministicSession = (page: Page) =>
         sizes: {
           item_count: sessionEvidenceFixture.itemCount,
           projected_text_bytes: '48000000',
-          projected_structured_bytes: '96000000',
+          projected_structured_bytes: '80000000',
           referenced_blob_count: '24000',
           referenced_blob_bytes: '96000000000',
         },

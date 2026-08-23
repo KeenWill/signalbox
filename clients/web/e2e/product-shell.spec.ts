@@ -322,7 +322,7 @@ const useDeterministicSession = async (page: Page) => {
         sizes: {
           item_count: sessionWorkspaceFixture.itemCount,
           projected_text_bytes: '0',
-          projected_structured_bytes: '96000000',
+          projected_structured_bytes: String(sessionWorkspaceFixture.projectedBytes),
           referenced_blob_count: '0',
           referenced_blob_bytes: '0',
         },
