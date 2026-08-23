@@ -13,9 +13,15 @@ const previewPath =
   '/api/blobs/sha256:071d25f582ba9e6a8725e198dab884d70a3d7ce3ea84a74c66e65a1443c41a8e/content/image-png'
 const originalPath =
   '/api/blobs/sha256:3729b2319da081a0710ba27da7af330c1236325cf8ed0a619cf132375bb0fc1e/content/image-png'
+const thumbnailPath =
+  '/api/blobs/sha256:e3f49e726a8b33752609b0f159cac0e185d6f02f6f72e872652e5df849ee5490/content/image-png'
+const jpegOriginalPath =
+  '/api/blobs/sha256:11ce39dce155c991152fad639d7ba25efab3f14e9eb921f20d1dbde5b67cb29e/content/image-jpeg'
 const remotePath = 'https://media.example.test/remote-status-diagram.png'
 const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.meta.url))
 const originalFixture = readFileSync(new URL('./fixtures/original.png', import.meta.url))
+const thumbnailFixture = readFileSync(new URL('./fixtures/thumbnail.png', import.meta.url))
+const jpegOriginalFixture = readFileSync(new URL('./fixtures/original.jpg', import.meta.url))
 // The owned 390 px crop is almost entirely text, so CI font rasterization accounts for 7% of its
 // pixels even when geometry is identical. Keep that measured host allowance local to this fixture.
 const MOBILE_ARTIFACT_RASTERIZATION_TOLERANCE = 0.08
@@ -29,6 +35,14 @@ test('fixture bytes match their advertised immutable identities', () => {
     '071d25f582ba9e6a8725e198dab884d70a3d7ce3ea84a74c66e65a1443c41a8e',
   )
   expect(previewFixture.byteLength).toBe(215370)
+  expect(createHash('sha256').update(thumbnailFixture).digest('hex')).toBe(
+    'e3f49e726a8b33752609b0f159cac0e185d6f02f6f72e872652e5df849ee5490',
+  )
+  expect(thumbnailFixture.byteLength).toBe(93)
+  expect(createHash('sha256').update(jpegOriginalFixture).digest('hex')).toBe(
+    '11ce39dce155c991152fad639d7ba25efab3f14e9eb921f20d1dbde5b67cb29e',
+  )
+  expect(jpegOriginalFixture.byteLength).toBe(761)
 })
 
 const watchBrowser = (page: Page): BrowserProblems => {
@@ -43,10 +57,10 @@ const watchBrowser = (page: Page): BrowserProblems => {
 const expectOnlyExpectedFailedResourceError = (
   problems: BrowserProblems,
   failedResponsePaths: readonly string[],
-  expectedPath: string,
+  expectedPaths: readonly string[],
 ) => {
   expect(problems.pageErrors).toEqual([])
-  expect(failedResponsePaths).toEqual([expectedPath])
+  expect(failedResponsePaths).toEqual(expectedPaths)
   expect(
     problems.consoleErrors.filter(
       (message) =>
@@ -57,7 +71,20 @@ const expectOnlyExpectedFailedResourceError = (
   ).toEqual([])
   // Chromium emits one generic failed-resource diagnostic; Firefox emits none. The exact failed
   // response assertion above correlates either behavior with only the intentional preview request.
-  expect(problems.consoleErrors.length).toBeLessThanOrEqual(1)
+  expect(problems.consoleErrors.length).toBeLessThanOrEqual(expectedPaths.length)
+}
+
+const failRouteAndRecordPath = async (page: Page, path: string): Promise<string[]> => {
+  const failedResponsePaths: string[] = []
+  await page.route(
+    `**${path}`,
+    async (route) => {
+      failedResponsePaths.push(path)
+      await route.fulfill({ status: 500, body: 'unavailable' })
+    },
+    { times: 1 },
+  )
+  return failedResponsePaths
 }
 
 const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
@@ -70,8 +97,16 @@ const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/blobs/**/content/image-png', async (route) => {
     const path = new URL(route.request().url()).pathname
-    const body = path === originalPath ? originalFixture : previewFixture
+    const body =
+      path === originalPath
+        ? originalFixture
+        : path === thumbnailPath
+          ? thumbnailFixture
+          : previewFixture
     await route.fulfill({ body, contentType: 'image/png' })
+  })
+  await page.route('**/api/blobs/**/content/image-jpeg', async (route) => {
+    await route.fulfill({ body: jpegOriginalFixture, contentType: 'image/jpeg' })
   })
 })
 
@@ -116,26 +151,47 @@ test('selects a bounded image view and keeps an animation-capable original downl
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('falls back to metadata when automatic image views fail', async ({ page }) => {
+test('advances from a failed preview to its admitted thumbnail', async ({ page }) => {
   const problems = watchBrowser(page)
-  const failedResponsePaths: string[] = []
-  page.on('response', (response) => {
-    if (response.status() >= 400) failedResponsePaths.push(new URL(response.url()).pathname)
-  })
-  await page.unroute('**/api/blobs/**/content/image-png')
-  await page.route(`**${previewPath}`, async (route) => {
-    await route.fulfill({ status: 500, body: 'unavailable' })
-  })
+  const failedResponsePaths = await failRouteAndRecordPath(page, previewPath)
   await page.goto('/scenario/blobs')
 
   const artifact = page.getByRole('article', { name: 'Artifact orbital-map.png' })
-  await expect(artifact.getByLabel('No compatible inline renderer')).toBeVisible()
-  await expect(artifact.getByText('metadata fallback')).toBeVisible()
-  await expect(artifact.getByRole('status')).toHaveText(
-    'No admitted inline image view could be loaded. Metadata and download remain available.',
-  )
+  await expect(artifact.getByRole('img', { name: 'Thumbnail of orbital-map.png' })).toBeVisible()
+  await expect(artifact.getByText('thumbnail', { exact: true })).toBeVisible()
   await expect(artifact.getByRole('link', { name: 'Download' })).toBeVisible()
-  expectOnlyExpectedFailedResourceError(problems, failedResponsePaths, previewPath)
+  expectOnlyExpectedFailedResourceError(problems, failedResponsePaths, [previewPath])
+})
+
+test('retries a bounded JPEG original and hides obsolete automatic failure status', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  const failedPreviewPaths = await failRouteAndRecordPath(page, thumbnailPath)
+  const failedOriginalPaths = await failRouteAndRecordPath(page, jpegOriginalPath)
+  await page.goto('/scenario/blobs')
+
+  const artifact = page.getByRole('article', { name: 'Artifact bounded-photo.jpg' })
+  await artifact.scrollIntoViewIfNeeded()
+  await expect(artifact.getByRole('status')).toContainText(
+    'No admitted inline image view could be loaded',
+  )
+  await artifact.getByRole('button', { name: 'Load original' }).click()
+  await expect(artifact.getByRole('button', { name: 'Retry original' })).toBeVisible()
+  await expect(artifact.getByRole('status')).toContainText('Original image failed to load')
+
+  await artifact.getByRole('button', { name: 'Retry original' }).click()
+  await expect(artifact.getByRole('img', { name: 'Original of bounded-photo.jpg' })).toBeVisible()
+  await expect(artifact.getByRole('button', { name: 'Original loaded' })).toHaveAttribute(
+    'aria-disabled',
+    'true',
+  )
+  await expect(artifact.getByText('No admitted inline image view could be loaded')).toHaveCount(0)
+  expectOnlyExpectedFailedResourceError(
+    problems,
+    [...failedPreviewPaths, ...failedOriginalPaths],
+    [thumbnailPath, jpegOriginalPath],
+  )
 })
 
 test('expands text through a bounded keyboard action', async ({ page }) => {

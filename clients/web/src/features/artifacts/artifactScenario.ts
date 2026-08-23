@@ -12,6 +12,8 @@ const previewDigest = 'sha256:071d25f582ba9e6a8725e198dab884d70a3d7ce3ea84a74c66
 const documentDigest = `sha256:${'6f'.repeat(32)}`
 const audioDigest = `sha256:${'7a'.repeat(32)}`
 const videoDigest = `sha256:${'8c'.repeat(32)}`
+const thumbnailDigest = 'sha256:e3f49e726a8b33752609b0f159cac0e185d6f02f6f72e872652e5df849ee5490'
+const jpegDigest = 'sha256:11ce39dce155c991152fad639d7ba25efab3f14e9eb921f20d1dbde5b67cb29e'
 type BlobView = WebBlobDescriptor['available_views'][number]
 
 // Hard inline-original byte ceiling. A qualifying preview/thumbnail derivation additionally proves
@@ -22,6 +24,17 @@ type BlobView = WebBlobDescriptor['available_views'][number]
 export const INLINE_ORIGINAL_MAX_BYTES = 16n * 1024n * 1024n
 const BOUNDED_IMAGE_TRANSFORMATIONS = new Set(['image.preview', 'image.thumbnail'])
 const SINGLE_FRAME_ORIGINAL_MEDIA_TYPES = new Set(['image/jpeg'])
+
+const expectedTransformation = (kind: 'preview' | 'thumbnail') => ({
+  name: kind === 'preview' ? 'image.preview' : 'image.thumbnail',
+  parameters:
+    kind === 'preview'
+      ? '{"edge_px":1600,"format":"image/png"}'
+      : '{"edge_px":256,"format":"image/png"}',
+})
+
+const viewOutputDigest = (view: BlobView): string | undefined =>
+  /^\/api\/blobs\/(sha256:[0-9a-f]{64})\/content\//u.exec(view.content_url)?.[1]
 
 export const selectBoundedOriginalView = (descriptor: WebBlobDescriptor): BlobView | undefined => {
   const original = descriptor.available_views.find((view) => view.kind === 'browser_native')
@@ -35,13 +48,22 @@ export const selectBoundedOriginalView = (descriptor: WebBlobDescriptor): BlobVi
 
   const boundedDecodeProven = descriptor.available_views
     .filter((view) => view.kind === 'preview' || view.kind === 'thumbnail')
-    .some((view) =>
-      view.derivations.some(
-        (derivation) =>
-          BOUNDED_IMAGE_TRANSFORMATIONS.has(derivation.transformation_name) &&
-          derivation.input_digests.includes(descriptor.digest),
-      ),
-    )
+    .some((view) => {
+      const derivation = view.derivations[0]
+      const expected = expectedTransformation(view.kind as 'preview' | 'thumbnail')
+      const outputDigest = viewOutputDigest(view)
+      return (
+        derivation !== undefined &&
+        BOUNDED_IMAGE_TRANSFORMATIONS.has(derivation.transformation_name) &&
+        derivation.transformation_name === expected.name &&
+        derivation.transformation_version === 1 &&
+        derivation.parameters_json === expected.parameters &&
+        derivation.producer.class === 'deterministic' &&
+        derivation.input_digests.includes(descriptor.digest) &&
+        outputDigest !== undefined &&
+        derivation.output_digests.includes(outputDigest)
+      )
+    })
 
   return boundedDecodeProven ? original : undefined
 }
@@ -84,12 +106,80 @@ export const imagePreviewView: BlobView = {
   ],
 }
 
+export const imageThumbnailView: BlobView = {
+  kind: 'thumbnail',
+  media_type: 'image/png',
+  byte_length: '93',
+  content_url: `/api/blobs/${thumbnailDigest}/content/image-png`,
+  derivations: [
+    {
+      derivation_id: '0198f321-2300-7000-8000-000000000002',
+      input_digests: [sourceDigest],
+      transformation_name: 'image.thumbnail',
+      transformation_version: 1,
+      parameters_json: '{"edge_px":256,"format":"image/png"}',
+      producer: {
+        class: 'deterministic',
+        implementation_digest: `sha256:${'4d'.repeat(32)}`,
+        cache_key: 'sha256:62f6a23fafa777415ccee97b62957f0b08a0c1209545781e481b734e2aab9937',
+      },
+      output_digests: [thumbnailDigest],
+    },
+  ],
+}
+
 export const imageDescriptor = decodeWebBlobDescriptor({
   digest: sourceDigest,
   byte_length: '33749',
   declared_media_type: 'image/png',
   display_filename: ['orbital-map.png'],
-  available_views: [imageDownloadView, imageOriginalView, imagePreviewView],
+  available_views: [imageDownloadView, imageOriginalView, imagePreviewView, imageThumbnailView],
+})
+
+export const jpegDownloadView: BlobView = {
+  kind: 'download',
+  media_type: 'image/jpeg',
+  byte_length: '761',
+  content_url: `/api/blobs/${jpegDigest}/download?media_type=image%2Fjpeg&display_filename=bounded-photo.jpg`,
+  derivations: [],
+}
+
+export const jpegOriginalView: BlobView = {
+  kind: 'browser_native',
+  media_type: 'image/jpeg',
+  byte_length: '761',
+  content_url: `/api/blobs/${jpegDigest}/content/image-jpeg`,
+  derivations: [],
+}
+
+export const jpegPreviewView: BlobView = {
+  kind: 'preview',
+  media_type: 'image/png',
+  byte_length: '93',
+  content_url: `/api/blobs/${thumbnailDigest}/content/image-png`,
+  derivations: [
+    {
+      derivation_id: '0198f321-2300-7000-8000-000000000003',
+      input_digests: [jpegDigest],
+      transformation_name: 'image.preview',
+      transformation_version: 1,
+      parameters_json: '{"edge_px":1600,"format":"image/png"}',
+      producer: {
+        class: 'deterministic',
+        implementation_digest: `sha256:${'4d'.repeat(32)}`,
+        cache_key: 'sha256:6923cfb7e3a32e2c07915af6e91a8905e5e684abba9fed1d97750789aa5517cb',
+      },
+      output_digests: [thumbnailDigest],
+    },
+  ],
+}
+
+export const jpegDescriptor = decodeWebBlobDescriptor({
+  digest: jpegDigest,
+  byte_length: '761',
+  declared_media_type: 'image/jpeg',
+  display_filename: ['bounded-photo.jpg'],
+  available_views: [jpegDownloadView, jpegOriginalView, jpegPreviewView],
 })
 
 const documentDescriptor = decodeWebBlobDescriptor({
@@ -187,6 +277,12 @@ export const artifactScenario: ReadonlyArray<ArtifactItem> = [
     kind: 'image',
     displayName: 'orbital-map.png',
     source: { kind: 'signalbox_blob', descriptor: imageDescriptor },
+  },
+  {
+    id: 'bounded-photo',
+    kind: 'image',
+    displayName: 'bounded-photo.jpg',
+    source: { kind: 'signalbox_blob', descriptor: jpegDescriptor },
   },
   {
     id: 'descriptor-fallback',

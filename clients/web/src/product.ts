@@ -1,4 +1,5 @@
 import { decodeWebContractBootstrap, type WebContractBootstrap } from './generated/web-contract.mjs'
+import { MAX_BOOTSTRAP_RESPONSE_BYTES, readBoundedJson } from './session-timeline/model'
 
 export const productRoutes = [
   { id: 'attention', label: 'Attention', description: 'Actionable work and fleet state' },
@@ -79,7 +80,7 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    return decodeWebContractBootstrap(await response.json())
+    return decodeWebContractBootstrap(await readBoundedJson(response, MAX_BOOTSTRAP_RESPONSE_BYTES))
   }
 }
 

@@ -38,6 +38,11 @@ export const reconcileTimelineSelection = (
 ): string | null =>
   selected !== null && !visibleIds.includes(selected) ? (visibleIds[0] ?? null) : selected
 
+export const retainSameSessionPlaceholder = <T extends { sessionId: string }>(
+  previousData: T | undefined,
+  sessionId: string | null,
+): T | undefined => (previousData?.sessionId === sessionId ? previousData : undefined)
+
 export function SessionWorkspaceSurface({
   onFirstWindowAction,
   onLatestWindowAction,
@@ -77,12 +82,13 @@ export function SessionWorkspaceSurface({
         anchor,
         descriptor,
         restoredRememberedPosition: manualAnchor === null && !active && remembered !== undefined,
+        sessionId: sessionId ?? '',
         window: timelineWindow,
       }
     },
     enabled: sessionId !== null,
     gcTime: 0,
-    placeholderData: (previousData) => previousData,
+    placeholderData: (previousData) => retainSameSessionPlaceholder(previousData, sessionId),
   })
   const items = useMemo(
     () => visibleSessionItems(session.data?.window.items ?? [], app.detail),

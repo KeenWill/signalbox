@@ -40,9 +40,13 @@ export interface SessionTimelineSource {
 
 const MAX_U64 = (1n << 64n) - 1n
 const MAX_TIMELINE_RESPONSE_BYTES = 1024 * 1024
-const MAX_ERROR_RESPONSE_BYTES = 64 * 1024
+export const MAX_BOOTSTRAP_RESPONSE_BYTES = 64 * 1024
+const MAX_ERROR_RESPONSE_BYTES = MAX_BOOTSTRAP_RESPONSE_BYTES
 
-const readBoundedJson = async (response: Response, maximumBytes: number): Promise<unknown> => {
+export const readBoundedJson = async (
+  response: Response,
+  maximumBytes: number,
+): Promise<unknown> => {
   const declaredLength = response.headers.get('content-length')
   if (declaredLength !== null) {
     const parsedLength = Number(declaredLength)
@@ -252,10 +256,16 @@ export class BoundedSessionHistory {
     }
     const incoming = new Map<string, (typeof window.items)[number]>()
     const requestedAddress = 'eventSequence' in anchor ? decimalAddress(anchor.eventSequence) : null
+    const knownFirstAddress = this.descriptorValue
+      ? decimalAddress(this.descriptorValue.first_address.event_sequence)
+      : null
     let previousAddress: bigint | undefined
     for (const item of window.items) {
       const address = item.address.event_sequence
       const parsedAddress = decimalAddress(address)
+      if (knownFirstAddress !== null && parsedAddress < knownFirstAddress) {
+        throw new TypeError('timeline window contains an item below the immutable first address')
+      }
       if (previousAddress !== undefined && parsedAddress <= previousAddress) {
         throw new TypeError('timeline window items are not strictly ordered')
       }

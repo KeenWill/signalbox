@@ -244,6 +244,25 @@ describe('BoundedSessionHistory', () => {
     ).rejects.toThrow('not strictly ordered')
   })
 
+  it('rejects timeline items below the immutable first address', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        first_address: { event_sequence: '100' },
+      }),
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(history.load({ kind: 'first' }, { maxItems: 4, maxBytes: 1024 })).rejects.toThrow(
+      'below the immutable first address',
+    )
+  })
+
   it('rejects bootstrap connections without timeline capability', async () => {
     const request = async () =>
       new Response(

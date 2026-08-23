@@ -153,6 +153,7 @@ test('opens visible keyboard help and follows product navigation sequences', asy
   await page.keyboard.press('g')
   await page.keyboard.press('s')
   await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page.locator('main.product-main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

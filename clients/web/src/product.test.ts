@@ -54,6 +54,17 @@ describe('SameOriginProductTransport', () => {
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow('status 503')
   })
+
+  it('rejects an oversized bootstrap before JSON materialization', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{}', { headers: { 'content-length': '65537' } })),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'exceeds the browser byte ceiling',
+    )
+  })
 })
 
 describe('product surface availability', () => {

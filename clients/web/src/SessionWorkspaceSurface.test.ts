@@ -3,6 +3,7 @@ import { decodeWebSessionTimelineWindow } from './generated/web-contract.mjs'
 import {
   isCanonicalSessionId,
   reconcileTimelineSelection,
+  retainSameSessionPlaceholder,
   visibleSessionItems,
 } from './SessionWorkspaceSurface'
 
@@ -52,5 +53,14 @@ describe('Session Workspace projection', () => {
     expect(reconcileTimelineSelection('42', ['41', '43'])).toBe('41')
     expect(reconcileTimelineSelection('43', ['41', '43'])).toBe('43')
     expect(reconcileTimelineSelection('42', [])).toBeNull()
+  })
+
+  it('retains placeholder data only while navigating within the same session', () => {
+    const previous = { sessionId: fixture.session_id, window: fixture }
+
+    expect(retainSameSessionPlaceholder(previous, fixture.session_id)).toBe(previous)
+    expect(
+      retainSameSessionPlaceholder(previous, '00000000-0000-0000-0000-000000000992'),
+    ).toBeUndefined()
   })
 })

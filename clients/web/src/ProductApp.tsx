@@ -351,7 +351,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           )
         }
       },
-      navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      navigate: (path) => {
+        void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() => {
+          primaryRef.current?.focus()
+        })
+      },
     }),
     [dispatch, firstTimelineWindow, latestTimelineWindow, navigate, timelineIds, timelineSessionId],
   )
