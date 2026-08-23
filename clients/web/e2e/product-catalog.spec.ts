@@ -3,6 +3,7 @@ import bootstrapFixture from '../src/generated/web-contract-bootstrap.json' with
 
 const firstSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
 const secondSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e'
+const currentTurnId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5d80'
 const continuationSummaries = Array.from({ length: 30 }, (_, index) => ({
   action: null,
   active_turn_count: '0',
@@ -34,7 +35,7 @@ const firstPage = {
       action: null,
       active_turn_count: '1',
       archived: false,
-      current_turn_id: 'turn-31',
+      current_turn_id: currentTurnId,
       goal_block: null,
       judge: { actionable: '0', completed: '3', escalated: '0', failed: '0' },
       last_activity: { kind: 'turn', unix_milliseconds: '1724200000000' },
@@ -195,6 +196,40 @@ test('restores focus after filters replace the bounded catalog page', async ({ p
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('restores focus after a failed bounded catalog replacement', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/sessions?**', (route) => {
+    const request = new URL(route.request().url())
+    return request.searchParams.has('search')
+      ? route.fulfill({
+          json: { invented: true },
+        })
+      : route.fulfill({ json: firstPage })
+  })
+  await page.goto('/sessions')
+
+  await page.getByRole('textbox', { name: 'Search titles' }).fill('Release')
+  await page.getByRole('button', { name: 'Apply' }).click()
+
+  await expect(page.getByRole('heading', { name: 'Sessions could not be read' })).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('keeps visible search synchronized when history distinguishes absent from undefined', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+  await page.getByRole('textbox', { name: 'Search titles' }).fill('undefined')
+  await page.getByRole('button', { name: 'Apply' }).click()
+  await expect(page.getByRole('textbox', { name: 'Search titles' })).toHaveValue('undefined')
+  await page.goBack()
+  await expect(page.getByRole('textbox', { name: 'Search titles' })).toHaveValue('')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('keeps Escape and browser history aligned with the desktop inspector', async ({ page }) => {
   const problems = watchBrowser(page)
   await useCatalogFixture(page)
@@ -281,6 +316,7 @@ test('recovers after retrying a transient bootstrap failure', async ({ page }) =
   await page.goto('/sessions')
   await page.getByRole('button', { name: 'Retry contract handshake' }).click()
   await expect(page.getByRole('heading', { name: `${firstPage.total} sessions` })).toBeVisible()
+  await expect(page.getByRole('main')).toBeFocused()
   expect(bootstrapReads).toBe(2)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -328,6 +364,7 @@ test('exposes the server-owned blocked-goal reason in the inspector', async ({ p
   await page.goto('/sessions')
   await page.getByRole('button', { name: firstPage.summaries[1].title_summary }).click()
   await expect(page.getByText('Reason: user input required')).toBeVisible()
+  await expect(page.getByText('provide goal need', { exact: true })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

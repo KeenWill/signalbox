@@ -42,6 +42,7 @@ export function SessionCatalogSurface({
   const sessionButtons = useRef(new Map<string, HTMLButtonElement>())
   const closeFocus = useRef<HTMLButtonElement>(null)
   const pageHeading = useRef<HTMLHeadingElement>(null)
+  const errorHeading = useRef<HTMLHeadingElement>(null)
   const restorePageFocus = useRef(false)
   const [narrowInspector, setNarrowInspector] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
@@ -111,6 +112,13 @@ export function SessionCatalogSurface({
     return () => cancelAnimationFrame(frame)
   }, [sessions.data])
 
+  useEffect(() => {
+    if (!sessions.isError || !restorePageFocus.current) return
+    restorePageFocus.current = false
+    const frame = requestAnimationFrame(() => errorHeading.current?.focus())
+    return () => cancelAnimationFrame(frame)
+  }, [sessions.isError])
+
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     restorePageFocus.current = true
@@ -150,7 +158,7 @@ export function SessionCatalogSurface({
       <form
         className="catalog-toolbar"
         onSubmit={submit}
-        key={`${state.q}:${state.sort}:${state.archived}`}
+        key={JSON.stringify([state.q ?? null, state.sort ?? null, state.archived ?? null])}
       >
         <label className="catalog-search">
           <span>Search titles</span>
@@ -182,13 +190,21 @@ export function SessionCatalogSurface({
       {sessions.isError && (
         <section className="surface-empty" role="alert">
           <div>
-            <h2>Sessions could not be read</h2>
+            <h2 ref={errorHeading} tabIndex={-1}>
+              Sessions could not be read
+            </h2>
             <p>
               {sessions.error instanceof ProductRequestError
                 ? `${sessions.error.code}: ${sessions.error.message}`
                 : 'The response did not match the generated web contract.'}
             </p>
-            <button type="button" onClick={() => void sessions.refetch()}>
+            <button
+              type="button"
+              onClick={() => {
+                restorePageFocus.current = true
+                void sessions.refetch()
+              }}
+            >
               Retry
             </button>
           </div>
@@ -288,6 +304,12 @@ export function SessionCatalogSurface({
                   <dt>State</dt>
                   <dd>{label(selected.state)}</dd>
                 </div>
+                {selected.action && (
+                  <div>
+                    <dt>Operator action</dt>
+                    <dd>{label(selected.action)}</dd>
+                  </div>
+                )}
                 <div>
                   <dt>Activity source</dt>
                   <dd>{label(selected.last_activity.kind)}</dd>

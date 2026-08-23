@@ -770,6 +770,29 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('non-canonical session identity')
   })
 
+  it('rejects non-canonical current-turn identities before exposing a page', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+              summaries: [{ ...sessionPageFixture.summaries[0], current_turn_id: 'turn-31' }],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('non-canonical current-turn identity')
+  })
+
   it('rejects a continuation that does not match the returned page boundary', async () => {
     vi.stubGlobal(
       'fetch',

@@ -154,6 +154,9 @@ const validateSessionPage = (
     if (!CANONICAL_UUID.test(summary.session_id)) {
       throw new Error('session catalog response contains a non-canonical session identity')
     }
+    if (summary.current_turn_id != null && !CANONICAL_UUID.test(summary.current_turn_id)) {
+      throw new Error('session catalog response contains a non-canonical current-turn identity')
+    }
     if (sessionIdentities.has(summary.session_id)) {
       throw new Error('session catalog response contains a duplicate session identity')
     }

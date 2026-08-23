@@ -282,6 +282,7 @@ export function ProductApp({
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
   const sessionOpenedHere = useRef(false)
+  const focusAfterBootstrapRetry = useRef(false)
   const currentSession = useRef(search.session)
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
@@ -344,6 +345,12 @@ export function ProductApp({
           target instanceof Element &&
           target.closest('.product-palette, .mobile-navigation') !== null
         if (store.getState().app.overlay !== null || escapeHandledByOverlay) return
+        if (
+          binding.commandId === 'layout.toggle' &&
+          document.activeElement?.closest('.product-navigation-pane')
+        ) {
+          primaryRef.current?.focus()
+        }
         invokeCommand(binding.commandId, context)
       },
     })),
@@ -370,6 +377,13 @@ export function ProductApp({
     if (app.overlay === 'help') dispatch(actions.overlaySet(null))
   }, [app.overlay, dispatch])
 
+  useEffect(() => {
+    if (!bootstrap.isSuccess || !focusAfterBootstrapRetry.current) return
+    focusAfterBootstrapRetry.current = false
+    const frame = requestAnimationFrame(() => primaryRef.current?.focus())
+    return () => cancelAnimationFrame(frame)
+  }, [bootstrap.isSuccess])
+
   const copy = surfaceCopy[surface]
   const content =
     surface === 'attention' ? (
@@ -380,7 +394,13 @@ export function ProductApp({
       <div className="catalog-notice">
         <p>Sessions are unavailable until the browser contract handshake succeeds.</p>
         {bootstrap.isError && (
-          <button type="button" onClick={() => void bootstrap.refetch()}>
+          <button
+            type="button"
+            onClick={() => {
+              focusAfterBootstrapRetry.current = true
+              void bootstrap.refetch()
+            }}
+          >
             Retry contract handshake
           </button>
         )}
