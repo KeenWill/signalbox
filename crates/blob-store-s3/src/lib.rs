@@ -959,6 +959,8 @@ impl LifecycleRule {
             (Some(filter), _) => {
                 filter.tag.is_none()
                     && filter.and.is_none()
+                    && filter.object_size_greater_than.is_none()
+                    && filter.object_size_less_than.is_none()
                     && matches!(filter.prefix.as_deref(), None | Some("") | Some("sha256/"))
             }
             (None, Some(prefix)) => matches!(prefix, "" | "sha256/"),
@@ -979,6 +981,10 @@ struct LifecycleFilter {
     tag: Option<LifecycleTag>,
     #[xml(rename = "And")]
     and: Option<LifecycleAnd>,
+    #[xml(rename = "ObjectSizeGreaterThan")]
+    object_size_greater_than: Option<u64>,
+    #[xml(rename = "ObjectSizeLessThan")]
+    object_size_less_than: Option<u64>,
 }
 
 #[derive(Debug, FromXml)]
@@ -1305,6 +1311,9 @@ mod tests {
         let tagged = parsed_lifecycle(
             r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Filter><Tag><Key>kind</Key><Value>blob</Value></Tag></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
         )?;
+        let size_filtered = parsed_lifecycle(
+            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Filter><ObjectSizeGreaterThan>1024</ObjectSizeGreaterThan></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
+        )?;
         let late_rule = late.rules.first().ok_or("late fixture rule is absent")?;
         let narrow_rule = narrow
             .rules
@@ -1314,10 +1323,15 @@ mod tests {
             .rules
             .first()
             .ok_or("tagged fixture rule is absent")?;
+        let size_filtered_rule = size_filtered
+            .rules
+            .first()
+            .ok_or("size-filtered fixture rule is absent")?;
 
         assert!(!LifecycleRule::covers_blobs(late_rule));
         assert!(!LifecycleRule::covers_blobs(narrow_rule));
         assert!(!LifecycleRule::covers_blobs(tagged_rule));
+        assert!(!LifecycleRule::covers_blobs(size_filtered_rule));
         Ok(())
     }
 
