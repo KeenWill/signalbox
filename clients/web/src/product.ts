@@ -97,6 +97,14 @@ const expectedActionByState: Record<
   idle: null,
 }
 
+const statesDerivedFromCurrentTurn = new Set<WebAttentionSnapshot['summaries'][number]['state']>([
+  'active',
+  'queued',
+  'awaiting_approval',
+  'ambiguous',
+  'awaiting_reconciliation',
+])
+
 export const admittedSessionSearch = (value: unknown) => {
   if (typeof value === 'string' && value.indexOf(String.fromCharCode(0)) !== -1) {
     return undefined
@@ -161,6 +169,9 @@ const validateSessionPage = (
     }
     if (summary.current_turn_id != null && !CANONICAL_UUID.test(summary.current_turn_id)) {
       throw new Error('session catalog response contains a non-canonical current-turn identity')
+    }
+    if (statesDerivedFromCurrentTurn.has(summary.state) && summary.current_turn_id == null) {
+      throw new Error('session catalog turn-derived state is missing its current-turn identity')
     }
     if (sessionIdentities.has(summary.session_id)) {
       throw new Error('session catalog response contains a duplicate session identity')
@@ -245,6 +256,17 @@ const validateSessionPage = (
     BigInt(first.last_activity.unix_milliseconds) > BigInt(request.afterActivity) / 1000n
   ) {
     throw new Error('session catalog response precedes its activity continuation')
+  }
+  if (
+    request.sort === 'activity' &&
+    request.afterActivity !== undefined &&
+    request.afterSession !== undefined &&
+    BigInt(request.afterActivity) % 1000n === 0n &&
+    first !== undefined &&
+    BigInt(first.last_activity.unix_milliseconds) === BigInt(request.afterActivity) / 1000n &&
+    first.session_id <= request.afterSession
+  ) {
+    throw new Error('session catalog response repeats its exact activity continuation boundary')
   }
   for (let index = 1; index < page.summaries.length; index += 1) {
     const previous = page.summaries[index - 1]

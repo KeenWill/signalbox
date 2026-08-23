@@ -10,6 +10,8 @@ import {
 } from './product'
 
 const sessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
+const previousSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6c'
+const currentTurnId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5d80'
 const sessionPageFixture = {
   continuation: {
     kind: 'last_activity',
@@ -23,7 +25,7 @@ const sessionPageFixture = {
       action: null,
       active_turn_count: '1',
       archived: false,
-      current_turn_id: null,
+      current_turn_id: currentTurnId,
       goal_block: null,
       judge: { actionable: '0', completed: '3', escalated: '0', failed: '0' },
       last_activity: { kind: 'turn', unix_milliseconds: '1724200000000' },
@@ -68,7 +70,7 @@ const activityPageBoundary = (page: ReturnType<typeof fullActivityPageFixture>) 
   return boundary
 }
 
-const sessionRequestPath = `/api/sessions?sort=last_activity_desc&include_archived=true&search=release&after_session_id=${sessionId}&after_activity_unix_microseconds=1724200000000000`
+const sessionRequestPath = `/api/sessions?sort=last_activity_desc&include_archived=true&search=release&after_session_id=${previousSessionId}&after_activity_unix_microseconds=1724200000000000`
 const errorFixture = {
   error: {
     code: 'session_catalog_unavailable',
@@ -177,7 +179,7 @@ describe('SameOriginProductTransport', () => {
       search: 'release',
       sort: 'activity',
       includeArchived: true,
-      afterSession: sessionId,
+      afterSession: previousSessionId,
       afterActivity: '1724200000000000',
     })
 
@@ -361,6 +363,30 @@ describe('SameOriginProductTransport', () => {
         afterActivity: '1724200000000999',
       }),
     ).rejects.toThrow('precedes its activity continuation')
+  })
+
+  it('rejects exact-millisecond activity pages that repeat the request boundary identity', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+        afterSession: sessionId,
+        afterActivity: '1724200000000000',
+      }),
+    ).rejects.toThrow('repeats its exact activity continuation boundary')
   })
 
   it('rejects rows that contradict an exact active search', async () => {
@@ -894,6 +920,29 @@ describe('SameOriginProductTransport', () => {
         includeArchived: false,
       }),
     ).rejects.toThrow('non-canonical current-turn identity')
+  })
+
+  it('rejects turn-derived states without a current-turn identity', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+              summaries: [{ ...sessionPageFixture.summaries[0], current_turn_id: null }],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('turn-derived state is missing its current-turn identity')
   })
 
   it('rejects a continuation that does not match the returned page boundary', async () => {

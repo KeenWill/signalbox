@@ -173,6 +173,25 @@ test('preserves meaningful whitespace in exact catalog searches', async ({ page 
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('shows a visible focus indicator on catalog search', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+
+  const search = page.getByRole('textbox', { name: 'Search titles' })
+  await search.focus()
+
+  await expect(search).toBeFocused()
+  await expect
+    .poll(() =>
+      search.evaluate(
+        (element) => getComputedStyle(element.parentElement as HTMLElement).outlineStyle,
+      ),
+    )
+    .toBe('solid')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('rejects an over-bound search before changing URL state', async ({ page }) => {
   const problems = watchBrowser(page)
   await useCatalogFixture(page)

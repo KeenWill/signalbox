@@ -173,3 +173,19 @@ test('uses a navigation sheet on a phone viewport and unwinds it with Escape', a
   await expect(openNavigation).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
+
+test('restores visible focus after desktop navigation closes', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await page.getByRole('button', { name: /Open navigation/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeHidden()
+  await expect(page.getByRole('main')).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})

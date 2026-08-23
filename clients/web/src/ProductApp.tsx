@@ -501,7 +501,9 @@ export function ProductApp({
             aria-describedby="mobile-navigation-description"
             onCloseAutoFocus={(event) => {
               event.preventDefault()
-              document.querySelector<HTMLElement>('[aria-label="Open navigation"]')?.focus()
+              const trigger = document.querySelector<HTMLElement>('[aria-label="Open navigation"]')
+              if (trigger && trigger.getClientRects().length > 0) trigger.focus()
+              else primaryRef.current?.focus()
             }}
           >
             <Dialog.Title className="sr-only">Product navigation</Dialog.Title>

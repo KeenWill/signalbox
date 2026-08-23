@@ -1031,6 +1031,10 @@ kbd {
   border-radius: 3px;
   background: var(--surface-1);
 }
+.catalog-search > span:last-child:focus-within {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
 .catalog-search svg {
   width: 14px;
   justify-self: center;
