@@ -48,6 +48,7 @@ LANGUAGE sql
 IMMUTABLE
 STRICT
 PARALLEL SAFE
+SET search_path TO public, pg_catalog, pg_temp
 AS $$
     SELECT COALESCE(array_ndims(candidate), 1) = 1
        AND COALESCE(array_lower(candidate, 1), 1) = 1
@@ -69,6 +70,7 @@ LANGUAGE sql
 IMMUTABLE
 STRICT
 PARALLEL SAFE
+SET search_path TO public, pg_catalog, pg_temp
 AS $$
     SELECT COALESCE(array_ndims(candidate), 1) = 1
        AND COALESCE(array_lower(candidate, 1), 1) = 1
