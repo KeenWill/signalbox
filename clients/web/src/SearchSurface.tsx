@@ -126,15 +126,12 @@ export function SearchSurface({
   const sessionIsValid =
     state.sessionParameterIsValid !== false &&
     (state.session === undefined || validUuid(state.session))
-  const routeSearch = new URLSearchParams(window.location.search)
-  const routeAfterAddress = routeSearch.get('afterAddress') ?? undefined
-  const routeAfterProjection = routeSearch.get('afterProjection') ?? undefined
   const cursorMetadataIsValid =
     state.cursorParametersAreValid !== false &&
-    (routeAfterAddress === undefined && routeAfterProjection === undefined
+    (state.afterAddress === undefined && state.afterProjection === undefined
       ? true
-      : routeAfterAddress !== undefined && routeAfterProjection !== undefined
-        ? validCursor({ address: routeAfterAddress, projectionId: routeAfterProjection })
+      : state.afterAddress !== undefined && state.afterProjection !== undefined
+        ? validCursor({ address: state.afterAddress, projectionId: state.afterProjection })
         : false)
   const requestIsValid =
     queryBytes > 0 &&
