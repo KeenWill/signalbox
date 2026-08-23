@@ -135,6 +135,11 @@ BEGIN
             OR (
                 OLD.effect_class = 'external_effect'
                 AND NEW.error_kind = 'crash_lost'
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM runner_lease_no_execution_proof AS proof
+                     WHERE proof.attempt_id = NEW.attempt_id
+                )
             )
        )
     THEN
