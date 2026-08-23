@@ -499,6 +499,20 @@ class GitHubGraphQLTests(unittest.TestCase):
 
         self.assertTrue(comment_only_patch(changed_file))
 
+    def test_python_string_contents_are_not_comment_only(self) -> None:
+        changed_file = {
+            "filename": "tool.py",
+            "patch": (
+                "@@ -1,3 +1,3 @@\n"
+                " text = \"\"\"\n"
+                "-# old string content\n"
+                "+# new string content\n"
+                " \"\"\""
+            ),
+        }
+
+        self.assertFalse(comment_only_patch(changed_file))
+
     def test_edited_rename_is_not_review_exempt(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         comparison = {
@@ -553,6 +567,7 @@ class GitHubGraphQLTests(unittest.TestCase):
             "patch": "@@ -1 +1 @@\n-old\n+new",
         }
         comparison = {
+            "total_commits": 1,
             "commits": [
                 {
                     "sha": "head",
@@ -562,7 +577,11 @@ class GitHubGraphQLTests(unittest.TestCase):
             "files": [base_delta],
         }
         reviewed_to_base = {"merge_base_commit": {"sha": "common-base"}}
-        base_comparison = {"files": [base_delta]}
+        base_comparison = {
+            "total_commits": 1,
+            "commits": [{"sha": "base"}],
+            "files": [base_delta],
+        }
         with mock.patch.object(
             client,
             "execute_rest",
@@ -575,6 +594,7 @@ class GitHubGraphQLTests(unittest.TestCase):
     def test_merge_forward_with_conflict_edit_is_not_review_exempt(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         comparison = {
+            "total_commits": 1,
             "commits": [
                 {
                     "sha": "head",
@@ -595,6 +615,8 @@ class GitHubGraphQLTests(unittest.TestCase):
         }
         reviewed_to_base = {"merge_base_commit": {"sha": "common-base"}}
         base_comparison = {
+            "total_commits": 1,
+            "commits": [{"sha": "base"}],
             "files": [
                 {
                     "filename": "workflow.yml",
@@ -653,6 +675,38 @@ class GitHubGraphQLTests(unittest.TestCase):
         client._finalize_review_evidence([pull_request])
 
         self.assertEqual(pull_request["quiet_review_head_oids"], [head])
+
+    def test_dismissed_review_is_not_quiet_review_evidence(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        head = "a" * 40
+        pull_request = {
+            "head_oid": head,
+            "check_rollup_state": "SUCCESS",
+            "checks": [],
+            "review_threads": [],
+            "_review_comments": [
+                {
+                    "authorAssociation": "OWNER",
+                    "body": f"@codex review\nExact head {head}",
+                    "createdAt": "2026-08-16T10:00:00Z",
+                }
+            ],
+            "_reviews": [
+                {
+                    "id": "dismissed-review",
+                    "author": {"login": "chatgpt-codex-connector"},
+                    "state": "DISMISSED",
+                    "submittedAt": "2026-08-16T10:01:00Z",
+                    "commit": {"oid": head},
+                    "comments": {"totalCount": 0},
+                }
+            ],
+        }
+
+        client._finalize_review_evidence([pull_request])
+
+        self.assertEqual(pull_request["quiet_review_head_oids"], [])
+        self.assertEqual(pull_request["persistable_review_head_oids"], [])
 
     def test_review_requests_and_reviews_are_paginated(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
@@ -876,7 +930,11 @@ class GitHubGraphQLTests(unittest.TestCase):
                     "isResolved": True,
                     "isDispositioned": False,
                     "isEscalated": False,
+                    "isInformational": False,
+                    "latestReviewerAt": None,
+                    "dispositionAt": None,
                     "dispositionKind": None,
+                    "fixingCommit": None,
                     "reviewIds": [],
                 }
             ],
@@ -907,7 +965,11 @@ class GitHubGraphQLTests(unittest.TestCase):
                     "isResolved": True,
                     "isDispositioned": True,
                     "isEscalated": False,
+                    "isInformational": False,
+                    "latestReviewerAt": None,
+                    "dispositionAt": None,
                     "dispositionKind": "fixed",
+                    "fixingCommit": "abcdef123",
                     "reviewIds": [],
                 }
             ],
@@ -938,7 +1000,11 @@ class GitHubGraphQLTests(unittest.TestCase):
                     "isResolved": False,
                     "isDispositioned": True,
                     "isEscalated": True,
+                    "isInformational": False,
+                    "latestReviewerAt": None,
+                    "dispositionAt": None,
                     "dispositionKind": "escalated",
+                    "fixingCommit": None,
                     "reviewIds": [],
                 }
             ],

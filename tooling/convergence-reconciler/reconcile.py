@@ -7,6 +7,7 @@ import argparse
 import dataclasses
 import datetime as dt
 import fnmatch
+import io
 import json
 import math
 import os
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tokenize
 from typing import Any, Iterable, Sequence
 
 
@@ -70,20 +72,21 @@ query($ids: [ID!]!) {
           isResolved
           comments(first: 100) {
             totalCount
-            nodes { author { login } body pullRequestReview { id } }
+            nodes { author { login } body createdAt pullRequestReview { id } }
             pageInfo { hasNextPage endCursor }
           }
         }
         pageInfo { hasNextPage endCursor }
       }
       comments(first: 100) {
-        nodes { author { login } authorAssociation body createdAt }
+        nodes { author { login } authorAssociation body createdAt lastEditedAt }
         pageInfo { hasNextPage endCursor }
       }
       reviews(first: 100) {
         nodes {
           id
           author { login }
+          state
           submittedAt
           commit { oid }
           comments(first: 1) { totalCount }
@@ -91,7 +94,7 @@ query($ids: [ID!]!) {
         pageInfo { hasNextPage endCursor }
       }
       files(first: 100) {
-        nodes { path changeType }
+        nodes { path changeType additions deletions }
         pageInfo { hasNextPage endCursor }
       }
       commits(last: 1) {
@@ -135,15 +138,16 @@ PLANNING_ONLY_BANNER = (
     "> **Non-authoritative planning scratchpad — do not review for consistency.**"
 )
 FIX_DISPOSITION = re.compile(
-    r"^fixed in commits?\s+`?[0-9a-f]{7,40}`?", re.IGNORECASE
+    r"^fixed in commits?\s+`?([0-9a-f]{7,40})`?", re.IGNORECASE
 )
 ESCALATION_DISPOSITION = "escalated without disposition"
 INFORMATIONAL_REVIEW_COMMENT = re.compile(
     r"^(?:question|informational|note)\b|\?\s*$", re.IGNORECASE
 )
 MEANINGFUL_LINES = re.compile(
-    r"(?im)^meaningfully changed lines:\s*[0-9][0-9,]*\s*(?:\([^\n]*\))?\s*$"
+    r"(?im)^meaningfully changed lines:\s*([0-9][0-9,]*)\s*(?:\([^\n]*\))?\s*$"
 )
+COMPARE_FILE_LIMIT = 300
 NON_GATING_CHECK_NAMES = frozenset(
     {
         "coderabbit",
@@ -304,6 +308,7 @@ class GitHubGraphQL:
                 pull_requests.append(normalize_pull_request(node))
         self._finish_paginated_connections(pull_requests)
         self._finish_thread_comments(pull_requests)
+        self._validate_fixing_commits(pull_requests)
         self._finish_review_evidence_connections(pull_requests)
         self._finalize_review_evidence(pull_requests)
         for pull_request in pull_requests:
@@ -312,16 +317,20 @@ class GitHubGraphQL:
             )
             if (
                 persisted_head == pull_request["head_oid"]
+                and persisted_head in pull_request["persistable_review_head_oids"]
                 and persisted_head not in pull_request["quiet_review_head_oids"]
             ):
                 pull_request["quiet_review_head_oids"].append(persisted_head)
                 pull_request["authenticated_quiet_review_oids"].append(
                     persisted_head
                 )
+            pull_request.pop("persistable_review_head_oids", None)
         self._load_review_exempt_status(pull_requests)
         self._load_renamed_paths(pull_requests)
         self._load_planning_only_status(pull_requests)
         self._load_base_ancestry(pull_requests)
+        self._revalidate_checks(pull_requests)
+        self._verify_snapshot_oids(pull_requests)
         return pull_requests, tracked
 
     def _finish_review_evidence_connections(
@@ -332,13 +341,14 @@ query($id: ID!, $commentsAfter: String, $reviewsAfter: String) {
   node(id: $id) {
     ... on PullRequest {
       comments(first: 100, after: $commentsAfter) {
-        nodes { author { login } authorAssociation body createdAt }
+        nodes { author { login } authorAssociation body createdAt lastEditedAt }
         pageInfo { hasNextPage endCursor }
       }
       reviews(first: 100, after: $reviewsAfter) {
         nodes {
           id
           author { login }
+          state
           submittedAt
           commit { oid }
           comments(first: 1) { totalCount }
@@ -389,7 +399,7 @@ query($id: ID!, $after: String!) {
   node(id: $id) {
     ... on PullRequestReviewThread {
       comments(first: 100, after: $after) {
-        nodes { author { login } body pullRequestReview { id } }
+        nodes { author { login } body createdAt pullRequestReview { id } }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -414,6 +424,44 @@ query($id: ID!, $after: String!) {
                     normalize_review_threads([thread], pull_request["author_login"])
                 )
 
+    def _validate_fixing_commits(
+        self, pull_requests: list[dict[str, Any]]
+    ) -> None:
+        for pull_request in pull_requests:
+            validity: dict[str, bool] = {}
+            for thread in pull_request["review_threads"]:
+                fixing_commit = thread.get("fixingCommit")
+                if thread.get("dispositionKind") != "fixed":
+                    continue
+                if not isinstance(fixing_commit, str):
+                    thread["isDispositioned"] = False
+                    thread["dispositionKind"] = None
+                    continue
+                if fixing_commit not in validity:
+                    try:
+                        comparison = self.execute_rest(
+                            f"repos/{self.owner}/{self.name}/compare/"
+                            f"{fixing_commit}...{pull_request['head_oid']}"
+                        )
+                    except RuntimeError:
+                        validity[fixing_commit] = False
+                    else:
+                        base_commit = comparison.get("base_commit")
+                        head_commit = comparison.get("head_commit")
+                        merge_base = comparison.get("merge_base_commit")
+                        validity[fixing_commit] = (
+                            comparison.get("status") in {"ahead", "identical"}
+                            and isinstance(base_commit, dict)
+                            and isinstance(head_commit, dict)
+                            and isinstance(merge_base, dict)
+                            and base_commit.get("sha") == merge_base.get("sha")
+                            and head_commit.get("sha") == pull_request["head_oid"]
+                        )
+                if not validity[fixing_commit]:
+                    thread["isDispositioned"] = False
+                    thread["dispositionKind"] = None
+                    thread["fixingCommit"] = None
+
     def _finalize_review_evidence(
         self, pull_requests: list[dict[str, Any]]
     ) -> None:
@@ -421,25 +469,41 @@ query($id: ID!, $after: String!) {
             comments = pull_request.pop("_review_comments")
             reviews = pull_request.pop("_reviews")
             quiet_oids: list[str] = []
+            persistable_oids: list[str] = []
             for review in reviews:
                 commit = review.get("commit")
                 reviewed_oid = commit.get("oid") if isinstance(commit, dict) else None
                 submitted_at = review.get("submittedAt")
-                if reviewed_oid is None or submitted_at is None:
+                if (
+                    reviewed_oid is None
+                    or submitted_at is None
+                    or review.get("state") == "DISMISSED"
+                ):
                     continue
                 request_times = [
-                    comment["createdAt"]
+                    effective_at
                     for comment in comments
+                    for effective_at in [comment_effective_at(comment)]
                     if is_codex_review_request(comment, reviewed_oid)
-                    and comment.get("createdAt") is not None
-                    and comment["createdAt"] <= submitted_at
+                    and effective_at is not None
+                    and effective_at <= submitted_at
                     and checks_green_before_request(
                         pull_request["checks"],
                         pull_request["check_rollup_state"],
-                        comment["createdAt"],
+                        effective_at,
+                    )
+                    and prior_threads_dispositioned_before(
+                        pull_request.get("review_threads", []), effective_at
                     )
                 ]
                 review_id = review.get("id")
+                if (
+                    request_times
+                    and author_login(review) is not None
+                    and author_login(review).casefold()
+                    == CODEX_REVIEWER_LOGIN.casefold()
+                ):
+                    persistable_oids.append(reviewed_oid)
                 review_threads = [
                     thread
                     for thread in pull_request.get("review_threads", [])
@@ -450,6 +514,12 @@ query($id: ID!, $after: String!) {
                     and thread.get("dispositionKind") == "declined"
                     for thread in review_threads
                 )
+                informational_wave = bool(review_threads) and all(
+                    thread["isResolved"]
+                    and thread["isDispositioned"]
+                    and thread.get("isInformational", False)
+                    for thread in review_threads
+                )
                 if (
                     request_times
                     and author_login(review) is not None
@@ -458,13 +528,52 @@ query($id: ID!, $after: String!) {
                     and (
                         review["comments"]["totalCount"] == 0
                         or all_findings_declined
+                        or informational_wave
                     )
                 ):
                     quiet_oids.append(reviewed_oid)
+            self._validate_escalation_dispositions(pull_request, reviews)
             pull_request["authenticated_quiet_review_oids"] = quiet_oids
+            pull_request["persistable_review_head_oids"] = persistable_oids
             pull_request["quiet_review_head_oids"] = [
                 oid for oid in quiet_oids if oid == pull_request["head_oid"]
             ]
+
+    def _validate_escalation_dispositions(
+        self, pull_request: dict[str, Any], reviews: Sequence[dict[str, Any]]
+    ) -> None:
+        codex_reviews = sorted(
+            (
+                review
+                for review in reviews
+                if author_login(review) is not None
+                and author_login(review).casefold()
+                == CODEX_REVIEWER_LOGIN.casefold()
+                and review.get("state") != "DISMISSED"
+                and isinstance(review.get("submittedAt"), str)
+            ),
+            key=lambda review: review["submittedAt"],
+        )
+        wave_by_review_id = {
+            review["id"]: wave
+            for wave, review in enumerate(codex_reviews, start=1)
+            if isinstance(review.get("id"), str)
+        }
+        total_waves = len(codex_reviews)
+        for thread in pull_request.get("review_threads", []):
+            if thread.get("dispositionKind") != "escalated":
+                continue
+            waves = [
+                wave_by_review_id[review_id]
+                for review_id in thread.get("reviewIds", [])
+                if review_id in wave_by_review_id
+            ]
+            wave = max(waves, default=0)
+            eligible = wave >= 8 or (wave == 5 and total_waves == 5)
+            if not eligible:
+                thread["isDispositioned"] = False
+                thread["isEscalated"] = False
+                thread["dispositionKind"] = None
 
     def _load_review_exempt_status(
         self, pull_requests: list[dict[str, Any]]
@@ -491,7 +600,7 @@ query($id: ID!, $after: String!) {
         )
         commits = comparison.get("commits") if isinstance(comparison, dict) else None
         files = comparison.get("files") if isinstance(comparison, dict) else None
-        if not isinstance(commits, list) or not isinstance(files, list) or not commits:
+        if not comparison_is_complete(comparison) or not commits:
             return False
         if files and all(
             file.get("status") == "renamed"
@@ -546,6 +655,8 @@ query($id: ID!, $after: String!) {
         base_comparison = self.execute_rest(
             f"repos/{self.owner}/{self.name}/compare/{merge_base_oid}...{base_oid}"
         )
+        if not comparison_is_complete(base_comparison):
+            return False
         base_files = (
             base_comparison.get("files")
             if isinstance(base_comparison, dict)
@@ -650,6 +761,107 @@ query($id: ID!, $after: String!) {
                     behind_by if snapshot_still_current else None
                 )
 
+    def _revalidate_checks(
+        self, pull_requests: list[dict[str, Any]]
+    ) -> None:
+        query = """
+query($id: ID!) {
+  node(id: $id) {
+    ... on PullRequest {
+      baseRefOid
+      headRefOid
+      commits(last: 1) {
+        nodes {
+          commit {
+            oid
+            statusCheckRollup {
+              state
+              contexts(first: 100) {
+                nodes {
+                  __typename
+                  ... on CheckRun { name status conclusion completedAt }
+                  ... on StatusContext { context state createdAt }
+                }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+        for pull_request in pull_requests:
+            data = self.execute(query, {"id": pull_request["node_id"]})
+            node = data.get("node")
+            if node is None:
+                raise RuntimeError("pull request became unavailable during check revalidation")
+            if (
+                node["baseRefOid"] != pull_request["base_oid"]
+                or node["headRefOid"] != pull_request["head_oid"]
+            ):
+                pull_request["checked_head_oid"] = None
+                pull_request["base_commits_not_in_head"] = None
+                continue
+            commit_nodes = node["commits"]["nodes"]
+            commit = commit_nodes[0]["commit"] if commit_nodes else None
+            rollup = commit.get("statusCheckRollup") if commit else None
+            contexts = (
+                rollup["contexts"]
+                if rollup
+                else {"nodes": [], "pageInfo": empty_page_info()}
+            )
+            pull_request["checked_head_oid"] = commit.get("oid") if commit else None
+            pull_request["check_rollup_state"] = (
+                rollup.get("state") if rollup else None
+            )
+            pull_request["checks"] = list(contexts["nodes"])
+            page = contexts["pageInfo"]
+            while page["hasNextPage"]:
+                task = PaginationTask("checks", pull_request, page["endCursor"])
+                page_query, variables = pagination_query([task])
+                page_data = self.execute(page_query, variables)
+                page_node = page_data.get("item0")
+                if page_node is None:
+                    raise RuntimeError(
+                        "pull request became unavailable during check revalidation"
+                    )
+                next_page = pagination_page(page_node, "checks")
+                pull_request["checks"].extend(next_page["nodes"])
+                page = next_page["pageInfo"]
+
+    def _verify_snapshot_oids(
+        self, pull_requests: list[dict[str, Any]]
+    ) -> None:
+        for offset in range(0, len(pull_requests), DETAIL_BATCH_SIZE):
+            batch = pull_requests[offset : offset + DETAIL_BATCH_SIZE]
+            declarations: list[str] = []
+            selections: list[str] = []
+            variables: dict[str, Any] = {}
+            for index, pull_request in enumerate(batch):
+                variable = f"node{index}"
+                declarations.append(f"${variable}: ID!")
+                variables[variable] = pull_request["node_id"]
+                selections.append(
+                    f"item{index}: node(id: ${variable}) {{ ... on PullRequest "
+                    "{ baseRefOid headRefOid } }"
+                )
+            data = self.execute(
+                f"query({', '.join(declarations)}) {{ {' '.join(selections)} }}",
+                variables,
+            )
+            for index, pull_request in enumerate(batch):
+                node = data.get(f"item{index}")
+                if node is None:
+                    raise RuntimeError("pull request became unavailable during revalidation")
+                if (
+                    node["baseRefOid"] != pull_request["base_oid"]
+                    or node["headRefOid"] != pull_request["head_oid"]
+                ):
+                    pull_request["checked_head_oid"] = None
+                    pull_request["base_commits_not_in_head"] = None
+
     def _load_planning_only_status(
         self, pull_requests: list[dict[str, Any]]
     ) -> None:
@@ -724,7 +936,12 @@ query($id: ID!, $after: String!) {
             query, variables = pagination_query(batch)
             data = self.execute(query, variables)
             for index, task in enumerate(batch):
-                page = pagination_page(data[f"item{index}"], task.kind)
+                node = data.get(f"item{index}")
+                if node is None:
+                    raise RuntimeError(
+                        "pull request became unavailable during pagination"
+                    )
+                page = pagination_page(node, task.kind)
                 if task.kind == "threads":
                     task.pull_request["_review_thread_nodes"].extend(page["nodes"])
                 elif task.kind == "checks":
@@ -769,15 +986,29 @@ def blob_has_planning_banner(blob: dict[str, Any] | None) -> bool:
     return PLANNING_ONLY_BANNER in blob["text"].splitlines()[:10]
 
 
+def fixing_commit(body: str) -> str | None:
+    match = FIX_DISPOSITION.match(body.strip())
+    return match.group(1) if match else None
+
+
 def disposition_kind(body: str) -> str | None:
     stripped = body.strip()
-    if FIX_DISPOSITION.match(stripped):
+    if fixing_commit(stripped) is not None:
         return "fixed"
     if stripped.casefold().startswith("declined:") and stripped[9:].strip():
         return "declined"
     if stripped.casefold() == ESCALATION_DISPOSITION:
         return "escalated"
     return None
+
+
+def comment_effective_at(comment: dict[str, Any]) -> str | None:
+    created_at = comment.get("createdAt")
+    edited_at = comment.get("lastEditedAt")
+    timestamps = [
+        value for value in (created_at, edited_at) if isinstance(value, str)
+    ]
+    return max(timestamps) if timestamps else None
 
 
 def is_codex_review_request(comment: dict[str, Any], head_oid: str) -> bool:
@@ -792,6 +1023,24 @@ def is_codex_review_request(comment: dict[str, Any], head_oid: str) -> bool:
         and requests_review
         and head_oid.casefold() in body.casefold()
     )
+
+
+def prior_threads_dispositioned_before(
+    threads: Sequence[dict[str, Any]], requested_at: str
+) -> bool:
+    for thread in threads:
+        reviewer_at = thread.get("latestReviewerAt")
+        if not isinstance(reviewer_at, str) or reviewer_at >= requested_at:
+            continue
+        disposition_at = thread.get("dispositionAt")
+        if (
+            not thread["isResolved"]
+            or not thread["isDispositioned"]
+            or not isinstance(disposition_at, str)
+            or disposition_at > requested_at
+        ):
+            return False
+    return True
 
 
 def checks_green_before_request(
@@ -822,25 +1071,43 @@ def comment_only_patch(file: dict[str, Any]) -> bool:
     patch = file.get("patch")
     if not isinstance(filename, str) or not isinstance(patch, str):
         return False
-    suffix = Path(filename).suffix.casefold()
-    if suffix in {".py", ".sh"}:
-        comment_prefix = "#"
-    elif suffix in {
-        ".c", ".cc", ".cpp", ".go", ".h", ".hpp", ".js",
-        ".jsx", ".rs", ".ts", ".tsx",
-    }:
-        comment_prefix = "//"
-    else:
+    if Path(filename).suffix.casefold() != ".py":
         return False
-    changed = [
-        line[1:].strip()
-        for line in patch.splitlines()
-        if (line.startswith("+") and not line.startswith("+++"))
-        or (line.startswith("-") and not line.startswith("---"))
-    ]
-    return bool(changed) and all(
-        not line or line.startswith(comment_prefix) for line in changed
-    )
+
+    def side_is_comment_only(prefix: str) -> tuple[bool, bool]:
+        source: list[str] = []
+        changed_rows: set[int] = set()
+        saw_change = False
+        for line in patch.splitlines():
+            if line.startswith("@@"):
+                source.append("\n")
+                continue
+            if line.startswith(("+++", "---")) or not line:
+                continue
+            marker = line[0]
+            if marker == " ":
+                source.append(line[1:] + "\n")
+            elif marker == prefix:
+                source.append(line[1:] + "\n")
+                changed_rows.add(len(source))
+                saw_change = True
+        if not saw_change:
+            return True, False
+        try:
+            tokens = tokenize.generate_tokens(io.StringIO("".join(source)).readline)
+            comment_rows = {
+                token.start[0] for token in tokens if token.type == tokenize.COMMENT
+            }
+        except (IndentationError, SyntaxError, tokenize.TokenError):
+            return False, True
+        meaningful_rows = {
+            row for row in changed_rows if source[row - 1].strip()
+        }
+        return meaningful_rows <= comment_rows, True
+
+    added_ok, added = side_is_comment_only("+")
+    removed_ok, removed = side_is_comment_only("-")
+    return (added or removed) and added_ok and removed_ok
 
 
 def comparison_file_delta(files: Any) -> tuple[tuple[Any, ...], ...] | None:
@@ -880,6 +1147,54 @@ def comparison_file_delta(files: Any) -> tuple[tuple[Any, ...], ...] | None:
     return tuple(sorted(normalized))
 
 
+def comparison_is_complete(comparison: Any) -> bool:
+    if not isinstance(comparison, dict):
+        return False
+    commits = comparison.get("commits")
+    files = comparison.get("files")
+    total_commits = comparison.get("total_commits")
+    return (
+        isinstance(commits, list)
+        and isinstance(files, list)
+        and isinstance(total_commits, int)
+        and total_commits == len(commits)
+        and len(files) < COMPARE_FILE_LIMIT
+    )
+
+
+def is_lockfile(path: str) -> bool:
+    name = Path(path).name.casefold()
+    return name in {
+        "cargo.lock",
+        "composer.lock",
+        "gemfile.lock",
+        "package-lock.json",
+        "packages.lock.json",
+        "pipfile.lock",
+        "pnpm-lock.yaml",
+        "poetry.lock",
+        "pubspec.lock",
+        "uv.lock",
+        "yarn.lock",
+    } or name.endswith(".resolved")
+
+
+def meaningful_line_count(changed_files: Sequence[dict[str, Any]]) -> int | None:
+    total = 0
+    for changed_file in changed_files:
+        path = changed_file.get("path")
+        additions = changed_file.get("additions")
+        deletions = changed_file.get("deletions")
+        if not isinstance(path, str):
+            return None
+        if is_lockfile(path):
+            continue
+        if not isinstance(additions, int) or not isinstance(deletions, int):
+            return None
+        total += additions + deletions
+    return total
+
+
 def normalize_review_threads(
     threads: Sequence[dict[str, Any]], pull_request_author: str | None
 ) -> list[dict[str, Any]]:
@@ -907,6 +1222,26 @@ def normalize_review_threads(
             disposition_kind(comment.get("body") or "")
             for comment in author_replies
         ]
+        fixing_commits = [
+            fixing_commit(comment.get("body") or "")
+            for comment in author_replies
+        ]
+        latest_reviewer_at = max(
+            (
+                comment["createdAt"]
+                for comment in comments[: latest_reviewer_index + 1]
+                if isinstance(comment.get("createdAt"), str)
+            ),
+            default=None,
+        )
+        disposition_at = max(
+            (
+                comment["createdAt"]
+                for comment, kind in zip(author_replies, dispositions)
+                if kind is not None and isinstance(comment.get("createdAt"), str)
+            ),
+            default=None,
+        )
         review_ids = sorted(
             {
                 review["id"]
@@ -927,8 +1262,15 @@ def normalize_review_threads(
                 "isResolved": thread["isResolved"],
                 "isDispositioned": dispositioned,
                 "isEscalated": "escalated" in dispositions,
+                "isInformational": informational,
+                "latestReviewerAt": latest_reviewer_at,
+                "dispositionAt": disposition_at,
                 "dispositionKind": next(
                     (kind for kind in reversed(dispositions) if kind is not None),
+                    None,
+                ),
+                "fixingCommit": next(
+                    (commit for commit in reversed(fixing_commits) if commit is not None),
                     None,
                 ),
                 "reviewIds": review_ids,
@@ -999,7 +1341,7 @@ def pagination_query(tasks: Sequence[PaginationTask]) -> tuple[str, dict[str, An
             connection = (
                 f"reviewThreads(first: 100, after: $after{index}) {{ "
                 "nodes { id isResolved comments(first: 100) { totalCount "
-                "nodes { author { login } body pullRequestReview { id } } "
+                "nodes { author { login } body createdAt pullRequestReview { id } } "
                 "pageInfo { hasNextPage endCursor } } } "
                 "pageInfo { hasNextPage endCursor } }"
             )
@@ -1014,7 +1356,7 @@ def pagination_query(tasks: Sequence[PaginationTask]) -> tuple[str, dict[str, An
         else:
             connection = (
                 f"files(first: 100, after: $after{index}) {{ "
-                "nodes { path changeType } pageInfo { hasNextPage endCursor } }"
+                "nodes { path changeType additions deletions } pageInfo { hasNextPage endCursor } }"
             )
         selections.append(
             f"item{index}: node(id: $id{index}) {{ ... on PullRequest {{ {connection} }} }}"
@@ -1026,6 +1368,8 @@ def pagination_query(tasks: Sequence[PaginationTask]) -> tuple[str, dict[str, An
 
 
 def pagination_page(node: dict[str, Any], kind: str) -> dict[str, Any]:
+    if not isinstance(node, dict):
+        raise RuntimeError("pull request became unavailable during pagination")
     if kind == "threads":
         return node["reviewThreads"]
     if kind == "files":
@@ -1080,6 +1424,8 @@ def evaluate_convergence(pull_request: dict[str, Any]) -> dict[str, Any]:
     gating_checks = [check for check in pull_request["checks"] if not is_non_gating_check(check)]
     non_gating_checks = [check for check in pull_request["checks"] if is_non_gating_check(check)]
     reasons: list[str] = []
+    if pull_request.get("is_draft", False):
+        reasons.append("pull-request-is-draft")
     if unresolved_threads:
         reasons.append(f"unresolved-review-threads:{unresolved_threads}")
     if undispositioned_threads:
@@ -1096,8 +1442,18 @@ def evaluate_convergence(pull_request: dict[str, Any]) -> dict[str, Any]:
         description = pull_request["body"]
         if len(re.findall(r"\b[\w'-]+\b", description)) > 350:
             reasons.append("description-exceeds-350-words")
-        if MEANINGFUL_LINES.search(description) is None:
+        meaningful_match = MEANINGFUL_LINES.search(description)
+        if meaningful_match is None:
             reasons.append("description-missing-meaningfully-changed-lines")
+        elif "changed_files" in pull_request:
+            observed_count = meaningful_line_count(pull_request["changed_files"])
+            stated_count = int(meaningful_match.group(1).replace(",", ""))
+            if observed_count is None:
+                reasons.append("meaningfully-changed-lines-unavailable")
+            elif stated_count != observed_count:
+                reasons.append(
+                    f"meaningfully-changed-lines-mismatch:{stated_count}:{observed_count}"
+                )
     if pull_request["checked_head_oid"] != pull_request["head_oid"]:
         reasons.append("checks-not-for-current-head")
     if pull_request["check_rollup_state"] is None:
@@ -1308,6 +1664,7 @@ def load_state(path: Path, repository: str) -> dict[str, Any]:
             "terminal_state",
             "terminal_at",
             "authenticated_review_head",
+            "last_dispatched_head",
         ):
             value = record.get(field)
             if value is not None and not isinstance(value, str):
@@ -1453,6 +1810,14 @@ def process_pull_request(
     if pull_request["head_oid"] in pull_request["quiet_review_head_oids"]:
         record["authenticated_review_head"] = pull_request["head_oid"]
     computed = evaluate_convergence(pull_request)
+    if computed["converged"]:
+        record["last_dispatched_at"] = None
+        record["last_dispatched_head"] = None
+    applicable_dispatch = (
+        record.get("last_dispatched_at")
+        if record.get("last_dispatched_head") == pull_request["head_oid"]
+        else None
+    )
     if not computed["converged"] and record.get("unconverged_since") is None:
         record["unconverged_since"] = now
     clear_unconverged_after_log = computed["converged"]
@@ -1461,7 +1826,7 @@ def process_pull_request(
     decision = choose_decision(
         converged=computed["converged"],
         now=now,
-        last_dispatched_at=record.get("last_dispatched_at"),
+        last_dispatched_at=applicable_dispatch,
         cool_off_seconds=config.cool_off_seconds,
         active_work=None,
         dry_run=config.dry_run,
@@ -1496,7 +1861,7 @@ def process_pull_request(
                 decision = choose_decision(
                     converged=False,
                     now=now,
-                    last_dispatched_at=record.get("last_dispatched_at"),
+                    last_dispatched_at=applicable_dispatch,
                     cool_off_seconds=config.cool_off_seconds,
                     active_work=active_work,
                     dry_run=config.dry_run,
@@ -1504,8 +1869,10 @@ def process_pull_request(
                 )
     if decision.name == "dispatch":
         previous_dispatch = record.get("last_dispatched_at")
+        previous_dispatch_head = record.get("last_dispatched_head")
         now = time.time()
         record["last_dispatched_at"] = now
+        record["last_dispatched_head"] = pull_request["head_oid"]
         command_state = computed_command_state(pull_request, computed, record, now)
         save_state(config.state_file, state)
         try:
@@ -1521,6 +1888,7 @@ def process_pull_request(
             )
         except OSError as error:
             record["last_dispatched_at"] = previous_dispatch
+            record["last_dispatched_head"] = previous_dispatch_head
             save_state(config.state_file, state)
             decision = Decision(
                 "skipped", f"dispatch-command-start-failed:{error.errno}"
