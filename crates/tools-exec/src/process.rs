@@ -1997,6 +1997,23 @@ fn sandbox_environment_fits_linux_arg_max(
             .saturating_add(1)
     }
 
+    fn executable_pathname_bytes(program: &[u8], executable_path: &std::ffi::OsStr) -> usize {
+        if program.contains(&b'/') {
+            return string_bytes(program);
+        }
+        std::env::split_paths(executable_path)
+            .map(|directory| {
+                let directory = directory.as_os_str().as_bytes();
+                directory
+                    .len()
+                    .saturating_add(usize::from(!directory.is_empty()))
+                    .saturating_add(program.len())
+                    .saturating_add(1)
+            })
+            .max()
+            .unwrap_or_else(|| string_bytes(program))
+    }
+
     let argument_strings = string_bytes(arguments.program.as_bytes()).saturating_add(
         arguments
             .arguments
@@ -2032,7 +2049,10 @@ fn sandbox_environment_fits_linux_arg_max(
     .saturating_mul(std::mem::size_of::<usize>());
 
     argument_strings
-        .saturating_add(string_bytes(arguments.program.as_bytes()))
+        .saturating_add(executable_pathname_bytes(
+            arguments.program.as_bytes(),
+            executable_path,
+        ))
         .saturating_add(environment_strings)
         .saturating_add(pointer_bytes)
         < MIN_LINUX_ARG_MAX_BYTES
@@ -5756,12 +5776,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_target_launch_budget_includes_the_executable_pathname() {
+    fn linux_target_launch_budget_includes_the_path_resolved_executable_pathname() {
         let arguments = ExecArguments {
-            program: "p".repeat(MAX_PROGRAM_CHARACTERS),
-            arguments: vec![
-                "a".repeat(MIN_LINUX_ARG_MAX_BYTES - (2 * (MAX_PROGRAM_CHARACTERS + 1)) - 128),
-            ],
+            program: String::from("p"),
+            arguments: vec!["a".repeat(MIN_LINUX_ARG_MAX_BYTES - 256)],
             working_directory: String::from("."),
             timeout_seconds: 30,
         };
@@ -5771,10 +5789,18 @@ mod tests {
         )
         .expect("the synthetic environment fixture is valid");
 
-        assert!(!sandbox_environment_fits_linux_arg_max(
+        let long_path = std::ffi::OsString::from("d".repeat(512));
+
+        assert!(sandbox_environment_fits_linux_arg_max(
             &arguments,
             &environment,
             std::ffi::OsStr::new("/bin"),
+            false,
+        ));
+        assert!(!sandbox_environment_fits_linux_arg_max(
+            &arguments,
+            &environment,
+            &long_path,
             false,
         ));
     }
