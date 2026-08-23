@@ -560,6 +560,8 @@ test('discovers imported navigation bindings through the command palette', async
   const problems = watchBrowser(page)
   await page.goto(importsFixture.path)
 
+  const entries = page.locator('[aria-label="Imported source entries"]')
+  await expect(entries).toHaveAttribute('aria-activedescendant', importsFixture.firstEntryId)
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   const palette = page.getByRole('dialog', { name: 'Command palette' })
@@ -572,7 +574,7 @@ test('suspends imported navigation while the command palette owns focus', async 
   const problems = watchBrowser(page)
   await page.goto(importsFixture.path)
 
-  const entries = page.getByRole('listbox', { name: 'Imported source entries' })
+  const entries = page.locator('[aria-label="Imported source entries"]')
   await expect(entries).toHaveAttribute('aria-activedescendant', importsFixture.firstEntryId)
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
