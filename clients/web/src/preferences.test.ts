@@ -7,6 +7,14 @@ import {
   saveBrowserPreferences,
 } from './preferences'
 
+const restoreGlobalProperty = (property: string, descriptor: PropertyDescriptor | undefined) => {
+  if (descriptor) {
+    Object.defineProperty(globalThis, property, descriptor)
+  } else {
+    Reflect.deleteProperty(globalThis, property)
+  }
+}
+
 describe('browser preferences', () => {
   it('fails closed to defaults for an unrelated stored value', () => {
     expect(decodeBrowserPreferences('not-an-object')).toEqual(defaultBrowserPreferences)
@@ -57,11 +65,7 @@ describe('browser preferences', () => {
       expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
       expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
     } finally {
-      if (originalDescriptor) {
-        Object.defineProperty(globalThis, 'localStorage', originalDescriptor)
-      } else {
-        Reflect.deleteProperty(globalThis, 'localStorage')
-      }
+      restoreGlobalProperty('localStorage', originalDescriptor)
     }
   })
 })
