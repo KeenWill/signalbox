@@ -1067,8 +1067,11 @@ kbd {
 }
 .catalog-workbench {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(270px, 32%);
+  grid-template-columns: minmax(0, 1fr);
   min-height: 0;
+}
+.catalog-workbench-selected {
+  grid-template-columns: minmax(0, 1fr) minmax(270px, 32%);
 }
 .catalog-list {
   min-width: 0;

@@ -215,6 +215,26 @@ test('restores focus after filters replace the bounded catalog page', async ({ p
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('does not defer focus restoration for unchanged filters', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let sessionReads = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/sessions?**', (route) => {
+    sessionReads += 1
+    return route.fulfill({ json: firstPage })
+  })
+  await page.goto('/sessions')
+
+  const apply = page.getByRole('button', { name: 'Apply' })
+  await apply.click()
+  await page.context().setOffline(true)
+  await page.context().setOffline(false)
+
+  await expect.poll(() => sessionReads).toBeGreaterThan(1)
+  await expect(apply).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('restores focus after a failed bounded catalog replacement', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
@@ -265,6 +285,19 @@ test('keeps Escape and browser history aligned with the desktop inspector', asyn
   await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeHidden()
   await page.goBack()
   await expect(page).toHaveURL(/attention/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('uses the full catalog width until an inspector is selected', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+
+  const workbench = page.locator('.catalog-workbench')
+  await expect(workbench).not.toHaveClass(/catalog-workbench-selected/)
+  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
+
+  await expect(workbench).toHaveClass(/catalog-workbench-selected/)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

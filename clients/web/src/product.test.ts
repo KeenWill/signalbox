@@ -210,6 +210,26 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('preserves a session catalog transport failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Promise.reject(new TypeError('Failed to fetch'))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'identity',
+        includeArchived: false,
+      }),
+    ).rejects.toEqual(
+      new ProductRequestError(
+        'session_catalog_transport_unavailable',
+        'transport',
+        'The session catalog transport is unavailable.',
+      ),
+    )
+  })
+
   it('rejects a response whose sort contradicts the request', async () => {
     vi.stubGlobal(
       'fetch',
@@ -462,6 +482,23 @@ describe('SameOriginProductTransport', () => {
               cursor: 'not-a-number',
             }),
           ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('contradictory numeric page field')
+  })
+
+  it('rejects a zero cursor on a nonempty catalog page', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ ...sessionPageFixture, continuation: null, cursor: '0' })),
       ),
     )
 

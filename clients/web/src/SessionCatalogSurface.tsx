@@ -121,17 +121,17 @@ export function SessionCatalogSurface({
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    restorePageFocus.current = true
     const form = new FormData(event.currentTarget)
     const q = String(form.get('q') ?? '')
     if (q.length > 0 && admittedSessionSearch(q) === undefined) {
-      restorePageFocus.current = false
       setSearchError('Search must be NUL-free and no more than 1,024 UTF-8 bytes.')
       return
     }
     setSearchError(null)
     const sort = form.get('sort') === 'identity' ? 'identity' : undefined
     const archived = form.get('archived') === 'on' ? true : undefined
+    if (q === (state.q ?? '') && sort === state.sort && archived === state.archived) return
+    restorePageFocus.current = true
     onStateChange({ q: q || undefined, sort, archived })
   }
   const openSession = (summary: SessionSummary, button: HTMLButtonElement) => {
@@ -212,7 +212,11 @@ export function SessionCatalogSurface({
       )}
 
       {sessions.data && (
-        <div className="catalog-workbench">
+        <div
+          className={
+            selected ? 'catalog-workbench catalog-workbench-selected' : 'catalog-workbench'
+          }
+        >
           <section className="catalog-list" aria-labelledby="catalog-heading">
             <header>
               <div>

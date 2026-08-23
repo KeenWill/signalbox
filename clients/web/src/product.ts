@@ -158,7 +158,8 @@ const validateSessionPage = (
   if (
     !isCanonicalUnsigned64(page.cursor) ||
     !isCanonicalUnsigned64(page.total) ||
-    BigInt(page.total) < BigInt(page.summaries.length)
+    BigInt(page.total) < BigInt(page.summaries.length) ||
+    (page.summaries.length > 0 && BigInt(page.cursor) === 0n)
   ) {
     throw new Error('session catalog response contains a contradictory numeric page field')
   }
@@ -365,11 +366,21 @@ export class SameOriginProductTransport implements ProductTransport {
     if (request.afterActivity) {
       query.set('after_activity_unix_microseconds', request.afterActivity)
     }
-    const response = await fetch(`/api/sessions?${query}`, {
-      headers: { accept: 'application/json' },
-      credentials: 'same-origin',
-      signal,
-    })
+    let response: Response
+    try {
+      response = await fetch(`/api/sessions?${query}`, {
+        headers: { accept: 'application/json' },
+        credentials: 'same-origin',
+        signal,
+      })
+    } catch (error) {
+      if (signal?.aborted) throw error
+      throw new ProductRequestError(
+        'session_catalog_transport_unavailable',
+        'transport',
+        'The session catalog transport is unavailable.',
+      )
+    }
     if (!response.ok) {
       const failure = decodeWebApiErrorResponse(await readBoundedJson(response))
       throw new ProductRequestError(failure.error.code, failure.error.kind, failure.error.message)
