@@ -72,7 +72,7 @@ query($ids: [ID!]!) {
           isResolved
           comments(first: 100) {
             totalCount
-            nodes { author { login } body createdAt pullRequestReview { id } }
+            nodes { author { login } authorAssociation body createdAt pullRequestReview { id } }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -142,7 +142,10 @@ FIX_DISPOSITION = re.compile(
 )
 ESCALATION_DISPOSITION = "escalated without disposition"
 INFORMATIONAL_REVIEW_COMMENT = re.compile(
-    r"^(?:question|informational|note)\b|\?\s*$", re.IGNORECASE
+    r"^(?:question|informational|note)\b", re.IGNORECASE
+)
+TRIVIAL_INFORMATIONAL_REPLIES = frozenset(
+    {"ack", "acknowledged", "done", "noted", "ok", "okay", "thanks", "thank you"}
 )
 MEANINGFUL_LINES = re.compile(
     r"(?im)^meaningfully changed lines:\s*([0-9][0-9,]*)\s*(?:\([^\n]*\))?\s*$"
@@ -150,7 +153,6 @@ MEANINGFUL_LINES = re.compile(
 COMPARE_FILE_LIMIT = 300
 NON_GATING_CHECK_NAMES = frozenset(
     {
-        "coderabbit",
         "codecov/patch",
         "codecov/project",
         "comment the coverage report",
@@ -316,15 +318,20 @@ class GitHubGraphQL:
                 pull_request["number"]
             )
             if (
-                persisted_head == pull_request["head_oid"]
-                and persisted_head in pull_request["persistable_review_head_oids"]
-                and persisted_head not in pull_request["quiet_review_head_oids"]
+                persisted_head in pull_request["observed_codex_review_oids"]
+                and persisted_head
+                not in pull_request["authenticated_quiet_review_oids"]
             ):
-                pull_request["quiet_review_head_oids"].append(persisted_head)
                 pull_request["authenticated_quiet_review_oids"].append(
                     persisted_head
                 )
-            pull_request.pop("persistable_review_head_oids", None)
+            if (
+                persisted_head == pull_request["head_oid"]
+                and persisted_head in pull_request["observed_codex_review_oids"]
+                and persisted_head not in pull_request["quiet_review_head_oids"]
+            ):
+                pull_request["quiet_review_head_oids"].append(persisted_head)
+            pull_request.pop("observed_codex_review_oids", None)
         self._load_review_exempt_status(pull_requests)
         self._load_renamed_paths(pull_requests)
         self._load_planning_only_status(pull_requests)
@@ -399,7 +406,7 @@ query($id: ID!, $after: String!) {
   node(id: $id) {
     ... on PullRequestReviewThread {
       comments(first: 100, after: $after) {
-        nodes { author { login } body createdAt pullRequestReview { id } }
+        nodes { author { login } authorAssociation body createdAt pullRequestReview { id } }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -469,7 +476,7 @@ query($id: ID!, $after: String!) {
             comments = pull_request.pop("_review_comments")
             reviews = pull_request.pop("_reviews")
             quiet_oids: list[str] = []
-            persistable_oids: list[str] = []
+            observed_codex_review_oids: list[str] = []
             for review in reviews:
                 commit = review.get("commit")
                 reviewed_oid = commit.get("oid") if isinstance(commit, dict) else None
@@ -498,12 +505,11 @@ query($id: ID!, $after: String!) {
                 ]
                 review_id = review.get("id")
                 if (
-                    request_times
-                    and author_login(review) is not None
+                    author_login(review) is not None
                     and author_login(review).casefold()
                     == CODEX_REVIEWER_LOGIN.casefold()
                 ):
-                    persistable_oids.append(reviewed_oid)
+                    observed_codex_review_oids.append(reviewed_oid)
                 review_threads = [
                     thread
                     for thread in pull_request.get("review_threads", [])
@@ -534,7 +540,7 @@ query($id: ID!, $after: String!) {
                     quiet_oids.append(reviewed_oid)
             self._validate_escalation_dispositions(pull_request, reviews)
             pull_request["authenticated_quiet_review_oids"] = quiet_oids
-            pull_request["persistable_review_head_oids"] = persistable_oids
+            pull_request["observed_codex_review_oids"] = observed_codex_review_oids
             pull_request["quiet_review_head_oids"] = [
                 oid for oid in quiet_oids if oid == pull_request["head_oid"]
             ]
@@ -569,6 +575,8 @@ query($id: ID!, $after: String!) {
                 if review_id in wave_by_review_id
             ]
             wave = max(waves, default=0)
+            # AGENTS.md permits this marker at the ordinary wave-five stop
+            # only when no extension was taken, or at the wave-eight hard stop.
             eligible = wave >= 8 or (wave == 5 and total_waves == 5)
             if not eligible:
                 thread["isDispositioned"] = False
@@ -870,46 +878,30 @@ query($id: ID!) {
             if not changed_files:
                 pull_request["planning_only"] = False
                 continue
-            declarations = ["$owner: String!", "$name: String!"]
-            selections: list[str] = []
-            variables: dict[str, Any] = {
-                "owner": self.owner,
-                "name": self.name,
-            }
-            for index, changed_file in enumerate(changed_files):
-                head_variable = f"head{index}"
-                base_variable = f"base{index}"
-                declarations.extend(
-                    (f"${head_variable}: String!", f"${base_variable}: String!")
-                )
-                variables[head_variable] = (
-                    f"{pull_request['head_oid']}:{changed_file['path']}"
-                )
-                base_path = changed_file.get("previous_path") or changed_file["path"]
-                variables[base_variable] = f"{pull_request['base_oid']}:{base_path}"
-                selections.extend(
-                    (
-                        f"head{index}: object(expression: ${head_variable}) "
-                        "{ ... on Blob { text } }",
-                        f"base{index}: object(expression: ${base_variable}) "
-                        "{ ... on Blob { text } }",
-                    )
-                )
-            query = (
-                f"query({', '.join(declarations)}) {{ repository("
-                f"owner: $owner, name: $name) {{ {' '.join(selections)} }} }}"
-            )
-            repository = self.execute(query, variables).get("repository")
-            if repository is None:
-                raise RuntimeError("configured GitHub repository is unavailable")
             planning_only = True
-            for index, changed_file in enumerate(changed_files):
-                head_has_banner = blob_has_planning_banner(
-                    repository[f"head{index}"]
+            for changed_file in changed_files:
+                base_path = changed_file.get("previous_path") or changed_file["path"]
+                data = self.execute(
+                    """
+query($owner: String!, $name: String!, $head: String!, $base: String!) {
+  repository(owner: $owner, name: $name) {
+    head: object(expression: $head) { ... on Blob { text } }
+    base: object(expression: $base) { ... on Blob { text } }
+  }
+}
+""",
+                    {
+                        "owner": self.owner,
+                        "name": self.name,
+                        "head": f"{pull_request['head_oid']}:{changed_file['path']}",
+                        "base": f"{pull_request['base_oid']}:{base_path}",
+                    },
                 )
-                base_has_banner = blob_has_planning_banner(
-                    repository[f"base{index}"]
-                )
+                repository = data.get("repository")
+                if repository is None:
+                    raise RuntimeError("configured GitHub repository is unavailable")
+                head_has_banner = blob_has_planning_banner(repository["head"])
+                base_has_banner = blob_has_planning_banner(repository["base"])
                 eligible = head_has_banner and (
                     changed_file["changeType"] == "ADDED" or base_has_banner
                 )
@@ -1205,18 +1197,18 @@ def normalize_review_threads(
             (
                 index
                 for index, comment in enumerate(comments)
-                if pull_request_author is None
-                or author_login(comment) is None
-                or author_login(comment).casefold() != pull_request_author.casefold()
+                if index == 0
+                or isinstance(comment.get("pullRequestReview"), dict)
+                or comment.get("authorAssociation")
+                not in TRUSTED_REVIEW_REQUEST_ASSOCIATIONS
             ),
             default=0,
         )
         author_replies = [
             comment
             for comment in comments[latest_reviewer_index + 1 :]
-            if pull_request_author is not None
-            and author_login(comment) is not None
-            and author_login(comment).casefold() == pull_request_author.casefold()
+            if comment.get("authorAssociation")
+            in TRUSTED_REVIEW_REQUEST_ASSOCIATIONS
         ]
         dispositions = [
             disposition_kind(comment.get("body") or "")
@@ -1252,11 +1244,27 @@ def normalize_review_threads(
         )
         first_body = (comments[0].get("body") or "") if comments else ""
         informational = INFORMATIONAL_REVIEW_COMMENT.search(first_body.strip()) is not None
+        informational_answers = [
+            comment
+            for comment in author_replies
+            if (comment.get("body") or "").strip()
+            and (comment.get("body") or "").strip().casefold()
+            not in TRIVIAL_INFORMATIONAL_REPLIES
+        ]
         dispositioned = (
-            bool(author_replies)
+            bool(informational_answers)
             if informational
             else any(kind is not None for kind in dispositions)
         )
+        if informational and informational_answers:
+            disposition_at = max(
+                (
+                    comment["createdAt"]
+                    for comment in informational_answers
+                    if isinstance(comment.get("createdAt"), str)
+                ),
+                default=None,
+            )
         normalized.append(
             {
                 "isResolved": thread["isResolved"],
@@ -1341,7 +1349,7 @@ def pagination_query(tasks: Sequence[PaginationTask]) -> tuple[str, dict[str, An
             connection = (
                 f"reviewThreads(first: 100, after: $after{index}) {{ "
                 "nodes { id isResolved comments(first: 100) { totalCount "
-                "nodes { author { login } body createdAt pullRequestReview { id } } "
+                "nodes { author { login } authorAssociation body createdAt pullRequestReview { id } } "
                 "pageInfo { hasNextPage endCursor } } } "
                 "pageInfo { hasNextPage endCursor } }"
             )

@@ -42,13 +42,14 @@ directory before a dispatch child can start.
 
 ## Convergence predicate
 
-An open, watched pull request is converged exactly when all six facts hold on
+An open, watched pull request is converged exactly when all seven facts hold on
 one current GitHub snapshot:
 
 1. Every ordinary review thread is resolved and has a recognized in-thread fix
-   or decline disposition from the pull request author. A thread carrying the
-   exact terminal marker `Escalated without disposition` remains open and is
-   reported separately without causing another dispatch.
+   or decline disposition from a repository owner, member, or collaborator.
+   Question, informational, and note threads require a substantive answer. A
+   thread carrying the exact terminal marker `Escalated without disposition`
+   remains open and is reported separately without causing another dispatch.
 2. Unless every changed file is planning-only under the repository banner rule,
    a trusted repository member explicitly requested Codex review naming the
    current head OID, and `chatgpt-codex-connector` subsequently completed either
@@ -61,6 +62,11 @@ one current GitHub snapshot:
 5. The current head contains every commit in the current base branch.
 6. The description contains at most 350 words and includes a
    `Meaningfully changed lines:` count.
+7. The pull request is not a draft.
+
+The escalation marker is valid at wave five only when no extension was taken,
+and at the wave-eight hard stop. It is not accepted during extension waves six
+or seven.
 
 A completed check run is green when its conclusion is `SUCCESS`, `NEUTRAL`, or
 `SKIPPED`; a commit status is green only when it is `SUCCESS`. Queued, pending,
@@ -72,14 +78,13 @@ A mismatched commit OID blocks convergence even when every returned check is
 successful.
 
 Check names ending with the exact, case-sensitive suffix `(report only)` are
-non-gating. The case-insensitive names `CodeRabbit`, `codecov/project`,
-`codecov/patch`, and `Comment the coverage report` are also non-gating, matching
+non-gating. The case-insensitive names `codecov/project`, `codecov/patch`, and
+`Comment the coverage report` are also non-gating, matching
 the repository's declared informational coverage posture. These results are
 still included in the computed state passed to operator commands.
 
-`CONFLICTING` and `UNKNOWN` mergeability both block convergence. Draft status is
-reported but is not an extra convergence condition: the commissioned predicate
-names only threads, checks, and conflicts.
+`CONFLICTING` and `UNKNOWN` mergeability both block convergence. Draft pull
+requests also remain unconverged.
 
 The initial lightweight query retrieves 100 open pull-request identities and
 their head repositories at a time. It requires the head repository to equal the
@@ -88,8 +93,9 @@ case-sensitive shell-pattern matching. Matching and previously tracked open pull
 requests are then fetched in batches of 20, including their first 100 review
 threads, changed files, and check contexts. Each current base/head OID pair is
 compared and then re-read in a separate request so a racing base advance cannot
-converge from stale evidence. Planning-only status requires every changed file
-to carry the banner at the head and, unless newly added, at the base. Additional
+converge from stale evidence. Planning-only status checks changed files one at
+a time and stops at the first ineligible file; every file must carry the banner
+at the head and, unless newly added, at the base. Additional
 thread or check pages use dynamically aliased GraphQL fields, up to 20
 continuations in one request. Review-thread comments, top-level comments, and
 reviews are also paginated. REST compare requests conservatively classify

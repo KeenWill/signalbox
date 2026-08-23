@@ -325,6 +325,23 @@ class ConvergencePredicateTests(unittest.TestCase):
         self.assertTrue(computed["converged"])
         self.assertEqual(computed["reasons"], [])
 
+    def test_draft_pull_request_blocks_convergence(self) -> None:
+        pull_request = {
+            "base_commits_not_in_head": 0,
+            "checked_head_oid": "head-draft",
+            "check_rollup_state": "SUCCESS",
+            "checks": [],
+            "head_oid": "head-draft",
+            "is_draft": True,
+            "mergeable": "MERGEABLE",
+            "quiet_review_head_oids": ["head-draft"],
+            "review_threads": [],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertEqual(computed["reasons"], ["pull-request-is-draft"])
+
     def test_open_escalation_marker_does_not_block_convergence(self) -> None:
         pull_request = {
             "base_commits_not_in_head": 0,
@@ -475,7 +492,7 @@ class InputValidationTests(unittest.TestCase):
 
 
 class GitHubGraphQLTests(unittest.TestCase):
-    def test_c_preprocessor_change_is_not_comment_only(self) -> None:
+    def test_non_python_c_header_is_not_comment_only(self) -> None:
         changed_file = {
             "filename": "include/config.h",
             "patch": "@@ -1 +1 @@\n-#define LIMIT 4\n+#define LIMIT 8",
@@ -483,7 +500,7 @@ class GitHubGraphQLTests(unittest.TestCase):
 
         self.assertFalse(comment_only_patch(changed_file))
 
-    def test_rust_dereference_change_is_not_comment_only(self) -> None:
+    def test_non_python_rust_file_is_not_comment_only(self) -> None:
         changed_file = {
             "filename": "src/value.rs",
             "patch": "@@ -1 +1 @@\n-*value = 4;\n+*value = 8;",
@@ -513,9 +530,18 @@ class GitHubGraphQLTests(unittest.TestCase):
 
         self.assertFalse(comment_only_patch(changed_file))
 
+    def test_python_executable_change_is_not_comment_only(self) -> None:
+        changed_file = {
+            "filename": "tool.py",
+            "patch": "@@ -1,2 +1,2 @@\n # explanation\n-old = 1\n+new = 2",
+        }
+
+        self.assertFalse(comment_only_patch(changed_file))
+
     def test_edited_rename_is_not_review_exempt(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         comparison = {
+            "total_commits": 1,
             "commits": [{"sha": "head"}],
             "files": [
                 {
@@ -536,6 +562,7 @@ class GitHubGraphQLTests(unittest.TestCase):
     def test_unverified_merge_commit_is_not_review_exempt(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         comparison = {
+            "total_commits": 1,
             "commits": [
                 {
                     "sha": "head",
@@ -706,7 +733,7 @@ class GitHubGraphQLTests(unittest.TestCase):
         client._finalize_review_evidence([pull_request])
 
         self.assertEqual(pull_request["quiet_review_head_oids"], [])
-        self.assertEqual(pull_request["persistable_review_head_oids"], [])
+        self.assertEqual(pull_request["observed_codex_review_oids"], [])
 
     def test_review_requests_and_reviews_are_paginated(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
@@ -755,6 +782,7 @@ class GitHubGraphQLTests(unittest.TestCase):
                         },
                         {
                             "author": {"login": "owner"},
+                            "authorAssociation": "OWNER",
                             "body": "Operators need different polling budgets.",
                         },
                     ]
@@ -766,6 +794,56 @@ class GitHubGraphQLTests(unittest.TestCase):
 
         self.assertTrue(normalized[0]["isDispositioned"])
 
+    def test_question_phrased_finding_is_not_informational(self) -> None:
+        threads = [
+            {
+                "isResolved": True,
+                "comments": {
+                    "nodes": [
+                        {
+                            "author": {"login": "reviewer"},
+                            "body": "This double-dispatches drafts forever, can you confirm?",
+                        },
+                        {
+                            "author": {"login": "owner"},
+                            "authorAssociation": "OWNER",
+                            "body": "ack",
+                        },
+                    ]
+                },
+            }
+        ]
+
+        normalized = normalize_review_threads(threads, "owner")
+
+        self.assertFalse(normalized[0]["isInformational"])
+        self.assertFalse(normalized[0]["isDispositioned"])
+
+    def test_trivial_informational_reply_is_not_an_answer(self) -> None:
+        threads = [
+            {
+                "isResolved": True,
+                "comments": {
+                    "nodes": [
+                        {
+                            "author": {"login": "reviewer"},
+                            "body": "Question: why is this interval configurable?",
+                        },
+                        {
+                            "author": {"login": "owner"},
+                            "authorAssociation": "OWNER",
+                            "body": "ack",
+                        },
+                    ]
+                },
+            }
+        ]
+
+        normalized = normalize_review_threads(threads, "owner")
+
+        self.assertTrue(normalized[0]["isInformational"])
+        self.assertFalse(normalized[0]["isDispositioned"])
+
     def test_reply_must_follow_latest_reviewer_comment(self) -> None:
         threads = [
             {
@@ -775,6 +853,7 @@ class GitHubGraphQLTests(unittest.TestCase):
                         {"author": {"login": "reviewer"}, "body": "Finding"},
                         {
                             "author": {"login": "owner"},
+                            "authorAssociation": "OWNER",
                             "body": "Fixed in commit `abcdef123`.",
                         },
                         {
@@ -820,6 +899,7 @@ class GitHubGraphQLTests(unittest.TestCase):
                     "nodes": [
                         {
                             "author": {"login": "owner"},
+                            "authorAssociation": "OWNER",
                             "body": "Fixed in commit `abcdef123`.",
                         }
                     ],
@@ -855,15 +935,15 @@ class GitHubGraphQLTests(unittest.TestCase):
         )
         response = {
             "repository": {
-                "head0": {"text": banner},
-                "base0": {"text": banner},
+                "head": {"text": banner},
+                "base": {"text": banner},
             }
         }
         with mock.patch.object(client, "execute", return_value=response) as execute:
             client._load_planning_only_status([pull_request])
 
         variables = execute.call_args.args[1]
-        self.assertEqual(variables["base0"], "base:docs/agents/old-name.md")
+        self.assertEqual(variables["base"], "base:docs/agents/old-name.md")
         self.assertTrue(pull_request["planning_only"])
 
     def test_review_request_before_green_ci_is_not_accepted(self) -> None:
@@ -949,6 +1029,7 @@ class GitHubGraphQLTests(unittest.TestCase):
                         {"author": {"login": "reviewer"}, "body": "Finding"},
                         {
                             "author": {"login": "owner"},
+                            "authorAssociation": "OWNER",
                             "body": "Fixed in commit `abcdef123`.",
                         },
                     ]
@@ -984,6 +1065,7 @@ class GitHubGraphQLTests(unittest.TestCase):
                         {"author": {"login": "reviewer"}, "body": "Finding"},
                         {
                             "author": {"login": "owner"},
+                            "authorAssociation": "OWNER",
                             "body": "Escalated without disposition",
                         },
                     ]
@@ -1044,8 +1126,8 @@ class GitHubGraphQLTests(unittest.TestCase):
         )
         response = {
             "repository": {
-                "head0": {"text": banner},
-                "base0": {"text": banner},
+                "head": {"text": banner},
+                "base": {"text": banner},
             }
         }
         with mock.patch.object(client, "execute", return_value=response):
