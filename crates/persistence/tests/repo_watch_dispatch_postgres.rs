@@ -4795,12 +4795,56 @@ async fn occupied_operations_fixture()
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn operator_repository_status_counts_held_and_queued_work() -> Result<(), Box<dyn Error>> {
-    let (_fixture, reader) = occupied_operations_fixture().await?;
+    let (fixture, reader) = occupied_operations_fixture().await?;
     let statuses = reader.repository_statuses(None).await?;
+    let projected_held_count: i64 = sqlx::query_scalar(
+        "SELECT held_count
+           FROM repo_watch_current_repository_held_count
+          WHERE repository = $1",
+    )
+    .bind(fixture.repository.as_str())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let projected_count: i64 = sqlx::query_scalar(
+        "SELECT obligation_count
+           FROM repo_watch_current_repository_obligation_count
+          WHERE repository = $1",
+    )
+    .bind(fixture.repository.as_str())
+    .fetch_one(&fixture.pool)
+    .await?;
 
     assert_eq!(statuses.repositories.len(), 1);
     assert_eq!(statuses.repositories[0].held_slot_count, 1);
     assert_eq!(statuses.repositories[0].queued_obligation_count, 1);
+    assert_eq!(projected_held_count, 1);
+    assert_eq!(projected_count, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn releasing_a_dispatch_removes_its_projected_repository_held_count()
+-> Result<(), Box<dyn Error>> {
+    let (fixture, reader) = occupied_operations_fixture().await?;
+    sqlx::query("INSERT INTO repo_watch_dispatch_release (dispatch_id) VALUES ($1)")
+        .bind(fixture.dispatch_id.as_uuid())
+        .execute(&fixture.pool)
+        .await?;
+    let projected: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM repo_watch_current_repository_held_count
+             WHERE repository = $1
+        )",
+    )
+    .bind(fixture.repository.as_str())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let statuses = reader.repository_statuses(None).await?;
+
+    assert!(!projected);
+    assert_eq!(statuses.repositories[0].held_slot_count, 0);
     Ok(())
 }
 
@@ -6037,9 +6081,20 @@ async fn rule_deactivation_settles_its_outstanding_dispatch_obligation()
     )
     .fetch_one(&fixture.pool)
     .await?;
+    let projected: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM repo_watch_current_repository_obligation_count
+             WHERE repository = $1
+        )",
+    )
+    .bind(fixture.repository.as_str())
+    .fetch_one(&fixture.pool)
+    .await?;
 
     assert_eq!(outstanding, 0);
     assert_eq!(settlement, "deactivated");
+    assert!(!projected);
     Ok(())
 }
 

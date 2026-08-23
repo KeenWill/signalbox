@@ -591,7 +591,9 @@ SELECT * FROM (
            'operator_commission'::text AS purpose_kind, commissioned.dispatch_id,
            NULL::uuid AS event_id, NULL::text AS rule_id, commissioned.template_name
       FROM commissioned_dispatch AS commissioned
-     WHERE commissioned.repository = $1 AND commissioned.pull_request_number = $2
+     WHERE commissioned.repository = $1
+       AND commissioned.pull_request_number = $2
+       AND commissioned.target_kind = 'pull_request'
 ) AS correlated
  WHERE ($3::timestamptz IS NULL OR (commissioned_at, session_id) < ($3, $4))
  ORDER BY commissioned_at DESC, session_id DESC
@@ -711,8 +713,8 @@ SELECT selected.repository, selected.generation, selected.recorded_at,
        settlement.dispatch_id AS settlement_dispatch_id,
        settlement.event_id AS settlement_event_id,
        settlement.released_at AS settlement_at,
-       COALESCE(held.count, 0) AS held_count,
-       COALESCE(queued.count, 0) AS queued_count
+       COALESCE(held.held_count, 0) AS held_count,
+       COALESCE(queued.obligation_count, 0) AS queued_count
   FROM selected
   LEFT JOIN LATERAL (
         SELECT receipt_sequence, event_name, action_name, received_at
@@ -790,14 +792,10 @@ SELECT selected.repository, selected.generation, selected.recorded_at,
          ORDER BY released_at DESC, dispatch_id DESC
          LIMIT 1
   ) AS settlement ON true
-  LEFT JOIN LATERAL (
-        SELECT count(*) FROM repo_watch_current_held_dispatch
-         WHERE repository = selected.repository
-  ) AS held ON true
-  LEFT JOIN LATERAL (
-        SELECT count(*) FROM repo_watch_outstanding_dispatch_obligation
-         WHERE repository = selected.repository
-  ) AS queued ON true
+  LEFT JOIN repo_watch_current_repository_held_count AS held
+    ON held.repository = selected.repository
+  LEFT JOIN repo_watch_current_repository_obligation_count AS queued
+    ON queued.repository = selected.repository
  ORDER BY selected.repository
 "#;
 
