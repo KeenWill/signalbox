@@ -28,6 +28,7 @@ describe('command registry', () => {
       focusTimeline: () => undefined,
       importEntryIds,
       selectedImportEntry,
+      canSelectImportEntry: true,
       selectImportEntry: (id) => {
         selectedImportEntry = id as (typeof importEntryIds)[number]
       },
@@ -47,6 +48,23 @@ describe('command registry', () => {
 
     expect(selectApp(store.getState()).overlay).toBe('help')
     store.dispatch(actions.overlaySet(null))
+  })
+
+  it('does not run imported-entry navigation while exact recovery freezes selection', () => {
+    const selected: string[] = []
+
+    invokeCommand('imports.entry.next', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      importEntryIds: ['import-entry-1', 'import-entry-2'],
+      selectedImportEntry: 'import-entry-1',
+      canSelectImportEntry: false,
+      selectImportEntry: (id) => selected.push(id),
+    })
+
+    expect(selected).toEqual([])
   })
 
   it('sets transcript detail through the registry in Settings without a timeline', () => {
