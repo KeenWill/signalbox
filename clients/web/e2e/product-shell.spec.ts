@@ -36,16 +36,18 @@ const useDeterministicBootstrap = (page: Page) =>
 
 const useDeterministicSession = async (
   page: Page,
-  shouldFailTimeline: () => boolean = () => false,
+  shouldFailTimeline: (sessionId: string) => boolean = () => false,
 ) => {
   await page.route('**/api/sessions/**', (route) => {
-    if (new URL(route.request().url()).pathname.endsWith('/timeline')) {
-      if (shouldFailTimeline()) {
+    const pathname = new URL(route.request().url()).pathname
+    const requestedSessionId = decodeURIComponent(pathname.split('/')[3] ?? '')
+    if (pathname.endsWith('/timeline')) {
+      if (shouldFailTimeline(requestedSessionId)) {
         return route.fulfill({ status: 503, body: 'temporarily unavailable' })
       }
       return route.fulfill({
         json: {
-          session_id: sessionWorkspaceFixture.id,
+          session_id: requestedSessionId,
           items: [
             {
               address: { event_sequence: '41' },
@@ -71,11 +73,11 @@ const useDeterministicSession = async (
     }
     return route.fulfill({
       json: {
-        session_id: sessionWorkspaceFixture.id,
+        session_id: requestedSessionId,
         sizes: {
           item_count: sessionWorkspaceFixture.itemCount,
           projected_text_bytes: '0',
-          projected_structured_bytes: '96000000',
+          projected_structured_bytes: String(sessionWorkspaceFixture.projectedBytes),
           referenced_blob_count: '0',
           referenced_blob_bytes: '0',
         },
@@ -388,6 +390,49 @@ test('preserves the saved row when reopening the current Session fails', async (
   await page.getByRole('option', { name: /43 turn completed/ }).click()
 
   failTimeline = true
+  await sessionId.press('Enter')
+  await expect(page.getByRole('alert')).toBeVisible()
+
+  const savedPosition = await page.evaluate(
+    ({ key, id }) => {
+      const stored = JSON.parse(localStorage.getItem(key) ?? '{}') as {
+        lastLogicalPositions?: Record<string, string>
+      }
+      return stored.lastLogicalPositions?.[id]
+    },
+    { key: 'signalbox.web.preferences.v1', id: sessionWorkspaceFixture.id },
+  )
+  expect(savedPosition).toBe('43')
+  expect(problems.pageErrors).toEqual([])
+  expect(
+    problems.consoleErrors.every((message) =>
+      message.includes('Failed to load resource: the server responded with a status of 503'),
+    ),
+  ).toBe(true)
+})
+
+test('preserves the saved row when revisiting a cached Session fails', async ({ page }) => {
+  const problems = watchBrowser(page)
+  const otherSessionId = '00000000-0000-0000-0000-000000000992'
+  let failRevisitedSession = false
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(
+    page,
+    (sessionId) => failRevisitedSession && sessionId === sessionWorkspaceFixture.id,
+  )
+  await page.goto('/sessions')
+
+  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  await sessionId.fill(sessionWorkspaceFixture.id)
+  await sessionId.press('Enter')
+  await page.getByRole('option', { name: /43 turn completed/ }).click()
+
+  await sessionId.fill(otherSessionId)
+  await sessionId.press('Enter')
+  await expect(page.getByRole('heading', { name: otherSessionId })).toBeVisible()
+
+  failRevisitedSession = true
+  await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')
   await expect(page.getByRole('alert')).toBeVisible()
 

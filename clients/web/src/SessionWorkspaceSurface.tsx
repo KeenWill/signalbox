@@ -107,6 +107,7 @@ export function SessionWorkspaceSurface({
   const app = useAppSelector(selectApp)
   const [draftId, setDraftId] = useState('')
   const [sessionId, setSessionId] = useState<string | null>(null)
+  const [awaitingSessionId, setAwaitingSessionId] = useState<string | null>(null)
   const [openingPosition, setOpeningPosition] = useState<string | undefined>()
   const [refetchRequest, setRefetchRequest] = useState(0)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
@@ -139,7 +140,8 @@ export function SessionWorkspaceSurface({
     enabled: sessionId !== null && timelineCapability === 'available',
   })
   const refetchSession = session.refetch
-  const displayedSession = session.isSuccess ? session.data : undefined
+  const displayedSession =
+    session.isSuccess && awaitingSessionId !== sessionId ? session.data : undefined
   const items = useMemo(
     () => visibleSessionItems(displayedSession?.window.items ?? [], app.detail),
     [app.detail, displayedSession?.window.items],
@@ -213,6 +215,15 @@ export function SessionWorkspaceSurface({
   }, [loadWindow, onWindowRequestConsumed, sessionId, windowRequest])
   useEffect(() => {
     if (
+      awaitingSessionId === sessionId &&
+      !session.isFetching &&
+      (session.isSuccess || session.isError)
+    ) {
+      setAwaitingSessionId(null)
+    }
+  }, [awaitingSessionId, session.isError, session.isFetching, session.isSuccess, sessionId])
+  useEffect(() => {
+    if (
       refetchRequest === handledRefetchRequest.current ||
       sessionId === null ||
       timelineCapability !== 'available'
@@ -223,7 +234,13 @@ export function SessionWorkspaceSurface({
     void refetchSession()
   }, [refetchRequest, refetchSession, sessionId, timelineCapability])
   useEffect(() => {
-    if (sessionId !== null && app.selectedTimeline !== null) {
+    if (
+      sessionId !== null &&
+      app.selectedTimeline !== null &&
+      displayedSession?.window.items.some(
+        (item) => item.address.event_sequence === app.selectedTimeline,
+      )
+    ) {
       dispatch(
         actions.logicalPositionRecorded({
           sessionId,
@@ -231,7 +248,7 @@ export function SessionWorkspaceSurface({
         }),
       )
     }
-  }, [app.selectedTimeline, dispatch, sessionId])
+  }, [app.selectedTimeline, dispatch, displayedSession?.window.items, sessionId])
   useEffect(() => {
     if (app.selectedTimeline !== null) {
       rowRefs.current.get(app.selectedTimeline)?.scrollIntoView({ block: 'nearest' })
@@ -246,7 +263,10 @@ export function SessionWorkspaceSurface({
     setOpeningPosition(app.lastLogicalPositions[candidate])
     manualAnchorRef.current = null
     setExpanded(new Set())
-    if (!reopeningCurrentSession) dispatch(actions.timelineSelected(null))
+    if (!reopeningCurrentSession) {
+      setAwaitingSessionId(candidate)
+      dispatch(actions.timelineSelected(null))
+    }
     setSessionId(candidate)
     if (reopeningCurrentSession) {
       boundaryRequest.current += 1
