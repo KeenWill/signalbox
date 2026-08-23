@@ -53,25 +53,25 @@ SELECT projection.projection_id, projection.session_id,
        ) AS source_group_valid,
        CASE projection.source_kind
            WHEN 'accepted_input' THEN EXISTS (
-               SELECT 1 FROM accepted_input AS owner
-                WHERE owner.accepted_input_id = projection.source_id
-                  AND owner.session_id = projection.session_id
-                  AND owner.origin_turn_id = projection.turn_id
+               SELECT 1 FROM accepted_input AS canonical_source
+                WHERE canonical_source.accepted_input_id = projection.source_id
+                  AND canonical_source.session_id = projection.session_id
+                  AND canonical_source.origin_turn_id = projection.turn_id
            )
            WHEN 'steering_input' THEN EXISTS (
-               SELECT 1 FROM semantic_transcript_entry AS owner
-                WHERE owner.origin_accepted_input_id = projection.source_id
-                  AND owner.source_session_id = projection.session_id
-                  AND owner.steering_source_turn_id = projection.turn_id
-                  AND owner.payload_kind = 'steering_accepted_input'
+               SELECT 1 FROM semantic_transcript_entry AS canonical_source
+                WHERE canonical_source.origin_accepted_input_id = projection.source_id
+                  AND canonical_source.source_session_id = projection.session_id
+                  AND canonical_source.steering_source_turn_id = projection.turn_id
+                  AND canonical_source.payload_kind = 'steering_accepted_input'
            )
            WHEN 'semantic_entry' THEN EXISTS (
                SELECT 1
-                 FROM semantic_transcript_entry AS owner
+                 FROM semantic_transcript_entry AS canonical_source
                  LEFT JOIN model_call AS call
-                   ON call.model_call_id = owner.producing_model_call_id
-                WHERE owner.semantic_entry_id = projection.source_id
-                  AND owner.source_session_id = projection.session_id
+                   ON call.model_call_id = canonical_source.producing_model_call_id
+                WHERE canonical_source.semantic_entry_id = projection.source_id
+                  AND canonical_source.source_session_id = projection.session_id
                   AND (
                       projection.turn_id IS NULL
                       OR (call.turn_id = projection.turn_id
@@ -79,21 +79,21 @@ SELECT projection.projection_id, projection.session_id,
                   )
            )
            WHEN 'tool_request' THEN EXISTS (
-               SELECT 1 FROM tool_request AS owner
-                WHERE owner.request_id = projection.source_id
-                  AND owner.session_id = projection.session_id
-                  AND owner.turn_id = projection.turn_id
+               SELECT 1 FROM tool_request AS canonical_source
+                WHERE canonical_source.request_id = projection.source_id
+                  AND canonical_source.session_id = projection.session_id
+                  AND canonical_source.turn_id = projection.turn_id
            )
            WHEN 'tool_attempt' THEN EXISTS (
-               SELECT 1 FROM tool_attempt AS owner
-                WHERE owner.attempt_id = projection.source_id
-                  AND owner.session_id = projection.session_id
-                  AND owner.turn_id = projection.turn_id
+               SELECT 1 FROM tool_attempt AS canonical_source
+                WHERE canonical_source.attempt_id = projection.source_id
+                  AND canonical_source.session_id = projection.session_id
+                  AND canonical_source.turn_id = projection.turn_id
            )
            WHEN 'session_metadata' THEN
                projection.source_id = projection.session_id
            ELSE true
-       END AS source_owner_valid,
+       END AS source_correlation_valid,
        '<sb-search-start>' AS start_marker,
        '<sb-search-stop>' AS stop_marker,
        ts_headline(
@@ -451,7 +451,7 @@ fn decode_page(rows: Vec<PgRow>, limit: usize) -> Result<SearchPage, SearchRepos
 
 fn decode_row(row: PgRow) -> Result<(SearchCursor, SearchResult), SearchRepositoryError> {
     if !row.try_get::<bool, _>("source_group_valid")?
-        || !row.try_get::<bool, _>("source_owner_valid")?
+        || !row.try_get::<bool, _>("source_correlation_valid")?
     {
         return Err(SearchProjectionCorruption::SourceShape.into());
     }
