@@ -38,4 +38,31 @@ describe('command registry', () => {
 
     expect(navigated).toEqual(['first', 'latest'])
   })
+
+  it('applies explicit settings through registered commands', () => {
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      navigate: () => undefined,
+      navigateTimelineWindow: () => undefined,
+      openNavigation: () => undefined,
+      openPalette: () => undefined,
+      prepareFocusLayout: () => undefined,
+      timelineWindowAvailable: false,
+    }
+
+    invokeProductCommand('layout.focus', context)
+    invokeProductCommand('density.comfortable', context)
+    invokeProductCommand('detail.results', context)
+    invokeProductCommand('theme.light', context)
+
+    expect(selectApp(store.getState())).toMatchObject({
+      layout: 'focus',
+      density: 'comfortable',
+      detail: 'results',
+      theme: 'light',
+    })
+  })
 })

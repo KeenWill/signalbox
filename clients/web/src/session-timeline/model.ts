@@ -122,6 +122,16 @@ const projectedDetailBodyBytes = (item: TimelineDetailItem): number => {
     for (const attachment of body.attachments) decimalU64(attachment.length_bytes)
   } else if (body.type === 'model_call') {
     decimalU64(body.request_context_items)
+    const hasTerminalEvidence =
+      body.response != null ||
+      body.cause_code != null ||
+      body.usage.input_tokens != null ||
+      body.usage.output_tokens != null ||
+      body.usage.cache_creation_input_tokens != null ||
+      body.usage.cache_read_input_tokens != null
+    if (body.state.type !== 'terminal' && hasTerminalEvidence) {
+      throw new TypeError('nonterminal model call cannot carry terminal evidence')
+    }
     for (const value of [
       body.usage.input_tokens,
       body.usage.output_tokens,
@@ -634,6 +644,20 @@ export class BoundedSessionHistory {
         decimalAddress(this.descriptorValue.first_address.event_sequence)
       if (hasEarlierItems !== (window.continuation_before !== null)) {
         throw new TypeError('latest timeline window continuation contradicts the descriptor')
+      }
+    }
+    if (anchorKind === 'around' && this.descriptorValue && firstItemAddress && lastItemAddress) {
+      const startsAfterDescriptor =
+        decimalAddress(firstItemAddress) >
+        decimalAddress(this.descriptorValue.first_address.event_sequence)
+      const endsBeforeDescriptor =
+        decimalAddress(lastItemAddress) <
+        decimalAddress(this.descriptorValue.latest_address.event_sequence)
+      if (startsAfterDescriptor && window.continuation_before === null) {
+        throw new TypeError('around timeline window continuation contradicts the descriptor')
+      }
+      if (endsBeforeDescriptor && window.continuation_after === null) {
+        throw new TypeError('around timeline window continuation contradicts the descriptor')
       }
     }
     if (anchorKind === 'first' && window.continuation_before) {

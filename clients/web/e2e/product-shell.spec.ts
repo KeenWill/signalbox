@@ -246,6 +246,20 @@ test('restores focus after opening keyboard help from the command palette', asyn
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('restores focus after opening keyboard help with the direct hotkey', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const openPalette = page.getByRole('button', { name: 'Open command palette' })
+  await openPalette.focus()
+  await page.keyboard.press('Shift+/')
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(openPalette).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('uses a navigation sheet on a phone viewport and unwinds it with Escape', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -310,6 +324,46 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(
     page.getByText(sessionWorkspaceFixture.detail.items[0].body.cause_code, { exact: true }),
   ).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('keeps the window control focused while a different window loads', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto('/sessions')
+  await page.getByRole('textbox', { name: 'Exact session ID' }).fill(sessionWorkspaceFixture.id)
+  await page.getByRole('textbox', { name: 'Exact session ID' }).press('Enter')
+  await expect(page.getByText('Active · opened near latest')).toBeVisible()
+
+  let releaseFirstWindow!: () => void
+  const firstWindowPending = new Promise<void>((resolve) => {
+    releaseFirstWindow = resolve
+  })
+  await page.route('**/api/sessions/*/timeline?anchor=first*', async (route) => {
+    await firstWindowPending
+    await route.fulfill({
+      json: {
+        session_id: sessionWorkspaceFixture.id,
+        items: [
+          {
+            address: { event_sequence: sessionWorkspaceFixture.descriptorFirstAddress },
+            kind: 'session_created',
+            projected_structured_bytes: 79,
+          },
+        ],
+        projected_structured_bytes: 79,
+        continuation_before: null,
+        continuation_after: { event_sequence: sessionWorkspaceFixture.descriptorFirstAddress },
+      },
+    })
+  })
+  const first = page.getByRole('button', { name: /First/ })
+  await first.focus()
+  await first.press('Enter')
+  await expect(first).toBeFocused()
+  releaseFirstWindow()
+  await expect(page.getByText('Active · opened at first')).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

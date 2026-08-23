@@ -63,6 +63,9 @@ export function SessionWorkspaceSurface({
   const [manualAnchor, setManualAnchor] = useState<SessionWindowAnchor | null>(null)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const retryRef = useRef<HTMLButtonElement>(null)
+  const firstWindowRef = useRef<HTMLButtonElement>(null)
+  const latestWindowRef = useRef<HTMLButtonElement>(null)
+  const pendingWindowFocusRef = useRef<'first' | 'latest' | null>(null)
   const session = useQuery({
     queryKey: ['production', 'session-workspace', sessionId, manualAnchor, restoreAnchor],
     queryFn: async ({ signal }) => {
@@ -82,6 +85,7 @@ export function SessionWorkspaceSurface({
     },
     enabled: sessionId !== null && bootstrap?.capabilities.bounded_session_timeline === true,
     gcTime: 0,
+    placeholderData: (previous) => previous,
   })
   const items = useMemo(
     () => visibleSessionItems(session.data?.window.items ?? [], app.detail),
@@ -112,12 +116,21 @@ export function SessionWorkspaceSurface({
   const refetchSession = session.refetch
   const navigateTimelineWindow = useCallback(
     (anchor: 'first' | 'latest') => {
-      dispatch(actions.timelineSelected(null))
       if (activeAnchorKind === anchor) void refetchSession()
       else setManualAnchor({ kind: anchor })
     },
-    [activeAnchorKind, dispatch, refetchSession],
+    [activeAnchorKind, refetchSession],
   )
+  useEffect(() => {
+    const pending = pendingWindowFocusRef.current
+    if (!pending) return
+    const frame = window.requestAnimationFrame(() => {
+      const control = pending === 'first' ? firstWindowRef.current : latestWindowRef.current
+      control?.focus()
+      if (!session.isFetching) pendingWindowFocusRef.current = null
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [session.isFetching])
   useEffect(() => {
     onTimelineWindowNavigation(navigateTimelineWindow)
     return () => onTimelineWindowNavigation(() => {})
@@ -249,10 +262,24 @@ export function SessionWorkspaceSurface({
             </dl>
           </header>
           <div className="session-window-controls" role="toolbar" aria-label="Timeline window">
-            <button type="button" onClick={() => onTimelineWindowCommand('selection.first')}>
+            <button
+              ref={firstWindowRef}
+              type="button"
+              onClick={() => {
+                pendingWindowFocusRef.current = 'first'
+                onTimelineWindowCommand('selection.first')
+              }}
+            >
               <SkipBack aria-hidden="true" /> First <kbd>gg</kbd>
             </button>
-            <button type="button" onClick={() => onTimelineWindowCommand('selection.last')}>
+            <button
+              ref={latestWindowRef}
+              type="button"
+              onClick={() => {
+                pendingWindowFocusRef.current = 'latest'
+                onTimelineWindowCommand('selection.last')
+              }}
+            >
               <SkipForward aria-hidden="true" /> Latest <kbd>G</kbd>
             </button>
             <span>

@@ -1290,6 +1290,7 @@ kbd {
   background: var(--border);
 }
 .session-telemetry div {
+  min-width: 0;
   padding: 7px 9px;
   background: var(--surface-1);
 }
@@ -1303,6 +1304,7 @@ kbd {
 .session-telemetry dd,
 .session-item-detail dd {
   margin: 2px 0 0;
+  overflow-wrap: anywhere;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.68rem;
   font-weight: 700;

@@ -1011,6 +1011,34 @@ describe('BoundedSessionHistory', () => {
     ).rejects.toThrow('does not contain its requested anchor')
   })
 
+  it('requires descriptor-backed continuations around a bounded interior window', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => descriptor,
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '41' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 78,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(
+      history.load({ kind: 'around', eventSequence: '41' }, { maxItems: 1, maxBytes: 256 }),
+    ).rejects.toThrow('around timeline window continuation contradicts the descriptor')
+  })
+
   it('bounds an HTTP timeline response before JSON decoding', async () => {
     const request = vi
       .fn<typeof fetch>()
@@ -1420,6 +1448,60 @@ describe('BoundedSessionHistory', () => {
     await expect(
       source.readItemDetail(sessionId, detailAddress, { maxItems: 1, maxBytes: 1024 }),
     ).rejects.toThrow('must start at byte zero')
+  })
+
+  it('rejects terminal evidence on a nonterminal model-call checkpoint', async () => {
+    const detailAddress = '41'
+    const bootstrap = decodeWebContractBootstrap({
+      contract: { name: 'signalbox.web-http', version: '1' },
+      capabilities: {
+        bounded_json: true,
+        same_origin_json_mutations: true,
+        ndjson_streaming: true,
+        bounded_session_timeline: true,
+        bounded_session_timeline_detail: true,
+      },
+      limits: {
+        max_json_body_bytes: 1024,
+        max_ndjson_item_bytes: 1024,
+        max_timeline_window_items: 256,
+        max_timeline_window_bytes: 64 * 1024,
+        max_timeline_detail_items: 128,
+        max_timeline_detail_bytes: 64 * 1024,
+      },
+    })
+    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          session_id: sessionId,
+          items: [
+            {
+              address: { event_sequence: detailAddress },
+              kind: 'model_call_transition',
+              body: {
+                type: 'model_call',
+                turn_id: '00000000-0000-0000-0000-000000000041',
+                model_call_id: '00000000-0000-0000-0000-000000000042',
+                model_identity_id: '00000000-0000-0000-0000-000000000043',
+                state: { type: 'in_flight' },
+                request_context_items: '1',
+                usage: { output_tokens: '1' },
+                cause_code: null,
+                response: null,
+              },
+              projected_body_bytes: 128,
+            },
+          ],
+          projected_body_bytes: 128,
+          continuation: null,
+        }),
+      ),
+    )
+    const source = HttpSessionTimelineSource.fromBootstrap(bootstrap, request)
+
+    await expect(
+      source.readItemDetail(sessionId, detailAddress, { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('nonterminal model call cannot carry terminal evidence')
   })
 
   it('fails closed when item detail capability is unavailable', async () => {

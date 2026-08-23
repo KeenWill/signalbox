@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { defaultBrowserPreferences } from './preferences'
+import { invokeProductCommand, type ProductCommandContext } from './productCommands'
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
 
 function PreferenceGroup({ legend, children }: { legend: string; children: ReactNode }) {
@@ -11,7 +12,7 @@ function PreferenceGroup({ legend, children }: { legend: string; children: React
   )
 }
 
-export function SettingsSurface() {
+export function SettingsSurface({ context }: { context: ProductCommandContext }) {
   const app = useAppSelector(selectApp)
   const dispatch = useAppDispatch()
   return (
@@ -32,7 +33,7 @@ export function SettingsSurface() {
               type="radio"
               name="layout"
               checked={app.layout === 'workbench'}
-              onChange={() => dispatch(actions.layoutSet('workbench'))}
+              onChange={() => invokeProductCommand('layout.workbench', context)}
             />
             <span>Workbench</span>
             <small>Navigation, primary surface, and contextual inspector.</small>
@@ -42,7 +43,7 @@ export function SettingsSurface() {
               type="radio"
               name="layout"
               checked={app.layout === 'focus'}
-              onChange={() => dispatch(actions.layoutSet('focus'))}
+              onChange={() => invokeProductCommand('layout.focus', context)}
             />
             <span>Focus</span>
             <small>A quiet primary surface with secondary panes removed.</small>
@@ -55,7 +56,7 @@ export function SettingsSurface() {
               type="radio"
               name="density"
               checked={app.density === 'compact'}
-              onChange={() => dispatch(actions.densitySet('compact'))}
+              onChange={() => invokeProductCommand('density.compact', context)}
             />
             <span>Compact</span>
             <small>Dense rows for high-volume operator work.</small>
@@ -65,7 +66,7 @@ export function SettingsSurface() {
               type="radio"
               name="density"
               checked={app.density === 'comfortable'}
-              onChange={() => dispatch(actions.densitySet('comfortable'))}
+              onChange={() => invokeProductCommand('density.comfortable', context)}
             />
             <span>Comfortable</span>
             <small>More separation without changing information detail.</small>
@@ -78,7 +79,7 @@ export function SettingsSurface() {
               type="radio"
               name="detail"
               checked={app.detail === 'full'}
-              onChange={() => dispatch(actions.detailSet('full'))}
+              onChange={() => invokeProductCommand('detail.full', context)}
             />
             <span>Full</span>
           </label>
@@ -87,7 +88,7 @@ export function SettingsSurface() {
               type="radio"
               name="detail"
               checked={app.detail === 'condensed'}
-              onChange={() => dispatch(actions.detailSet('condensed'))}
+              onChange={() => invokeProductCommand('detail.condensed', context)}
             />
             <span>Condensed</span>
           </label>
@@ -96,7 +97,7 @@ export function SettingsSurface() {
               type="radio"
               name="detail"
               checked={app.detail === 'results'}
-              onChange={() => dispatch(actions.detailSet('results'))}
+              onChange={() => invokeProductCommand('detail.results', context)}
             />
             <span>Results</span>
           </label>
@@ -108,7 +109,7 @@ export function SettingsSurface() {
               type="radio"
               name="theme"
               checked={app.theme === 'dark'}
-              onChange={() => dispatch(actions.themeSet('dark'))}
+              onChange={() => invokeProductCommand('theme.dark', context)}
             />
             <span>Dark</span>
           </label>
@@ -117,7 +118,7 @@ export function SettingsSurface() {
               type="radio"
               name="theme"
               checked={app.theme === 'light'}
-              onChange={() => dispatch(actions.themeSet('light'))}
+              onChange={() => invokeProductCommand('theme.light', context)}
             />
             <span>Light</span>
           </label>

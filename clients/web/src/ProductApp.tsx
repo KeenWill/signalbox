@@ -450,6 +450,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       hotkey: binding.hotkey,
       callback: () => {
         if (binding.commandId === 'surface.escape' || store.getState().app.overlay === null) {
+          if (binding.commandId === 'help.open') {
+            const active = document.activeElement
+            helpOpenerRef.current =
+              active instanceof HTMLElement && active !== document.body ? active : null
+          }
           invokeProductCommand(binding.commandId, context)
         }
       },
@@ -493,7 +498,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         onEmptyTimelineFocus={focusPrimarySurface}
       />
     ) : surface === 'settings' ? (
-      <SettingsSurface />
+      <SettingsSurface context={context} />
     ) : (
       <DeferredSurface surface={surface} />
     )
