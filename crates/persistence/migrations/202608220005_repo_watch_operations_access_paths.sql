@@ -141,10 +141,17 @@ CREATE TABLE repo_watch_current_held_dispatch (
     dispatch_id uuid PRIMARY KEY,
     repository text NOT NULL,
     pull_request_number numeric(20, 0),
+    rule_id text NOT NULL,
+    rule_version bigint NOT NULL,
+    singleton_scope text NOT NULL,
+    singleton_repository text,
+    singleton_pull_request_number numeric(20, 0),
+    singleton_stack_root_pull_request_number numeric(20, 0),
     held_since timestamptz NOT NULL,
     FOREIGN KEY (dispatch_id) REFERENCES repo_watch_dispatch_batch(dispatch_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     CHECK (repo_watch_repository_is_valid(repository)),
+    CHECK (repo_watch_rule_id_is_valid(rule_id)),
     CHECK (
         pull_request_number IS NULL
         OR (pull_request_number > 0 AND pull_request_number <= 18446744073709551615)
@@ -152,9 +159,14 @@ CREATE TABLE repo_watch_current_held_dispatch (
 );
 
 INSERT INTO repo_watch_current_held_dispatch (
-    dispatch_id, repository, pull_request_number, held_since
+    dispatch_id, repository, pull_request_number, rule_id, rule_version,
+    singleton_scope, singleton_repository, singleton_pull_request_number,
+    singleton_stack_root_pull_request_number, held_since
 )
-SELECT batch.dispatch_id, batch.repository, batch.pull_request_number, batch.admitted_at
+SELECT batch.dispatch_id, batch.repository, batch.pull_request_number,
+       batch.rule_id, batch.rule_version, batch.singleton_scope,
+       batch.singleton_repository, batch.singleton_pull_request_number,
+       batch.singleton_stack_root_pull_request_number, batch.admitted_at
   FROM repo_watch_dispatch_batch AS batch
  WHERE NOT EXISTS (
        SELECT 1 FROM repo_watch_dispatch_release AS release
@@ -170,6 +182,12 @@ CREATE INDEX repo_watch_current_held_dispatch_pull_request
     )
     WHERE pull_request_number IS NOT NULL;
 
+CREATE UNIQUE INDEX repo_watch_current_held_dispatch_singleton
+    ON repo_watch_current_held_dispatch (
+        rule_id, rule_version, singleton_scope, singleton_repository,
+        singleton_pull_request_number, singleton_stack_root_pull_request_number
+    ) NULLS NOT DISTINCT;
+
 CREATE FUNCTION project_repo_watch_current_held_dispatch()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -177,9 +195,14 @@ SET search_path FROM CURRENT
 AS $$
 BEGIN
     INSERT INTO repo_watch_current_held_dispatch (
-        dispatch_id, repository, pull_request_number, held_since
+        dispatch_id, repository, pull_request_number, rule_id, rule_version,
+        singleton_scope, singleton_repository, singleton_pull_request_number,
+        singleton_stack_root_pull_request_number, held_since
     ) VALUES (
-        NEW.dispatch_id, NEW.repository, NEW.pull_request_number, NEW.admitted_at
+        NEW.dispatch_id, NEW.repository, NEW.pull_request_number,
+        NEW.rule_id, NEW.rule_version, NEW.singleton_scope,
+        NEW.singleton_repository, NEW.singleton_pull_request_number,
+        NEW.singleton_stack_root_pull_request_number, NEW.admitted_at
     );
     RETURN NULL;
 END;

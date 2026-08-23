@@ -530,9 +530,10 @@ impl RepoWatchOperationsReader for PostgresRepoWatchOperations {
 }
 
 const HELD_SLOTS_SQL: &str = r#"
-SELECT slot.dispatch_id, singleton_scope, singleton_repository,
-       singleton_pull_request_number, singleton_stack_root_pull_request_number,
-       rule_id, current.held_since, session_ids, blockers
+SELECT slot.dispatch_id, slot.singleton_scope, slot.singleton_repository,
+       slot.singleton_pull_request_number,
+       slot.singleton_stack_root_pull_request_number,
+       slot.rule_id, current.held_since, slot.session_ids, slot.blockers
   FROM repo_watch_current_held_dispatch AS current
   JOIN repo_watch_held_dispatch_slot AS slot USING (dispatch_id)
  WHERE current.repository = $1
@@ -632,15 +633,35 @@ SELECT delivery.receipt_sequence, delivery.event_name, delivery.action_name,
 "#;
 
 const CURRENT_PULL_REQUEST_PAGE_SQL: &str = r#"
+WITH selected_subjects AS (
+    SELECT *
+      FROM repo_watch_current_pull_request
+     WHERE repository = $1
+       AND ($2::numeric IS NULL OR pull_request_number > $2)
+     ORDER BY pull_request_number
+     LIMIT $3
+), child_counts AS (
+    SELECT subject.pull_request_number,
+           count(candidate.pull_request_number) AS open_child_count
+      FROM selected_subjects AS subject
+      LEFT JOIN repo_watch_current_pull_request AS candidate
+        ON candidate.repository = subject.repository
+       AND candidate.lifecycle = 'open'
+       AND candidate.pull_request_number <> subject.pull_request_number
+       AND candidate.base_branch = subject.head_branch
+     WHERE subject.lifecycle = 'open'
+       AND subject.head_repository = $1
+     GROUP BY subject.pull_request_number
+)
 SELECT subject.state_payload,
        CASE WHEN subject.lifecycle = 'open' THEN parent.pull_request_number END
            AS open_parent,
        CASE
            WHEN subject.lifecycle = 'open' AND subject.head_repository = $1
-               THEN COALESCE(children.open_child_count, 0)
+               THEN COALESCE(child_counts.open_child_count, 0)
            ELSE 0
        END AS open_child_count
-  FROM repo_watch_current_pull_request AS subject
+  FROM selected_subjects AS subject
   LEFT JOIN LATERAL (
         SELECT candidate.pull_request_number
           FROM repo_watch_current_pull_request AS candidate
@@ -652,18 +673,9 @@ SELECT subject.state_payload,
          ORDER BY candidate.pull_request_number
          LIMIT 1
   ) AS parent ON true
-  LEFT JOIN LATERAL (
-        SELECT count(*) AS open_child_count
-          FROM repo_watch_current_pull_request AS candidate
-         WHERE candidate.repository = subject.repository
-           AND candidate.lifecycle = 'open'
-           AND candidate.pull_request_number <> subject.pull_request_number
-           AND candidate.base_branch = subject.head_branch
-  ) AS children ON true
- WHERE subject.repository = $1
-   AND ($2::numeric IS NULL OR subject.pull_request_number > $2)
+  LEFT JOIN child_counts
+    ON child_counts.pull_request_number = subject.pull_request_number
  ORDER BY subject.pull_request_number
- LIMIT $3
 "#;
 
 const REPOSITORY_STATUS_SQL: &str = r#"
