@@ -11,11 +11,6 @@ ALTER TABLE runner_lease_generation
 UPDATE runner_lease_generation
    SET offer_registration_revision = registration_revision;
 
--- Updating populated legacy rows queues deferred foreign-key checks. Flush
--- those checks before the following ALTER TABLE, which PostgreSQL rejects
--- while trigger events for this relation remain pending.
-SET CONSTRAINTS ALL IMMEDIATE;
-
 ALTER TABLE runner_lease_generation
     ALTER COLUMN offer_registration_revision SET NOT NULL,
     ADD CONSTRAINT runner_lease_offer_registration_positive_u64
