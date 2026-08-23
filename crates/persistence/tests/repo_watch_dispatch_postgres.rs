@@ -4876,6 +4876,14 @@ async fn operator_repository_status_reads_the_latest_actionable_event_projection
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn operator_pull_request_counts_held_and_queued_work() -> Result<(), Box<dyn Error>> {
     let (fixture, reader) = occupied_operations_fixture().await?;
+    let projected: (i64, i64) = sqlx::query_as(
+        "SELECT held_count, obligation_count
+           FROM repo_watch_current_pull_request_work_count
+          WHERE repository = $1",
+    )
+    .bind(fixture.repository.as_str())
+    .fetch_one(&fixture.pool)
+    .await?;
     let pull_requests = reader
         .pull_requests(fixture.repository.clone(), None)
         .await?;
@@ -4883,6 +4891,7 @@ async fn operator_pull_request_counts_held_and_queued_work() -> Result<(), Box<d
     assert_eq!(pull_requests.pull_requests.len(), 1);
     assert_eq!(pull_requests.pull_requests[0].held_slot_count, 1);
     assert_eq!(pull_requests.pull_requests[0].queued_obligation_count, 1);
+    assert_eq!(projected, (1, 1));
     Ok(())
 }
 
@@ -6053,10 +6062,17 @@ async fn dispatch_obligation_waits_visibly_through_configured_cooldown()
     )
     .fetch_one(&fixture.pool)
     .await?;
+    let projected_eligible_at_is_future: bool = sqlx::query_scalar(
+        "SELECT eligible_at > clock_timestamp()
+           FROM repo_watch_current_singleton_cooldown",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
 
     assert!(obligation.is_none());
     assert_eq!(visible.matched_event_count, 1);
     assert!(visible.eligible_at_is_future);
+    assert!(projected_eligible_at_is_future);
     assert!(!visible.ready);
     Ok(())
 }
