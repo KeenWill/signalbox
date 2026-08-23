@@ -68,6 +68,13 @@ BEGIN
             ON referenced.run_id = affected.run_id
           JOIN review_finding_event AS event
             ON event.referenced_finding_id = referenced.finding_id
+        UNION
+        SELECT event.event_pass_run_id
+          FROM affected_run AS affected
+          JOIN review_finding AS finding
+            ON finding.run_id = affected.run_id
+          JOIN review_finding_event AS event
+            ON event.finding_id = finding.finding_id
     )
     SELECT run_id FROM affected_run;
 

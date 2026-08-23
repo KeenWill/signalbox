@@ -1010,9 +1010,22 @@ async fn load_normalized_entries_from_connection(
     through_position: Option<u64>,
 ) -> Result<Option<Vec<ImportedTranscriptEntryInput>>, ImportedConversationRepositoryError> {
     let header = sqlx::query(
-        "SELECT storage_version, declared_entry_count
-           FROM imported_conversation
-          WHERE imported_conversation_id = $1",
+        "SELECT conversation.storage_version,
+                conversation.declared_entry_count,
+                inventory.actual_entry_count,
+                inventory.inventory_is_complete
+           FROM imported_conversation AS conversation
+           CROSS JOIN LATERAL (
+               SELECT COUNT(*)::numeric AS actual_entry_count,
+                      COUNT(*)::numeric = conversation.declared_entry_count
+                      AND MAX(imported_entry_position) =
+                          conversation.declared_entry_count
+                          AS inventory_is_complete
+                 FROM imported_transcript_entry
+                WHERE imported_conversation_id =
+                      conversation.imported_conversation_id
+           ) AS inventory
+          WHERE conversation.imported_conversation_id = $1",
     )
     .bind(conversation.into_uuid())
     .fetch_optional(&mut *connection)
@@ -1023,6 +1036,19 @@ async fn load_normalized_entries_from_connection(
     require_i16(&header, "storage_version", STORAGE_VERSION)?;
     let declared_entry_count = positive_u64(header.try_get("declared_entry_count")?)
         .map_err(|reason| invalid_ordinal_with_reason("declared entry count", reason))?;
+    let actual_entry_count: Decimal = header.try_get("actual_entry_count")?;
+    let actual_entry_count =
+        u64::try_from(actual_entry_count).map_err(|_| invalid_ordinal("actual entry count"))?;
+    if !header.try_get::<bool, _>("inventory_is_complete")? {
+        return Err(ImportedConversationCorruption::Domain(
+            ImportedConversationReconstitutionFailure::DeclaredEntryCountMismatch {
+                declared: declared_entry_count,
+                actual: usize::try_from(actual_entry_count)
+                    .map_err(|_| invalid_ordinal("actual entry count"))?,
+            },
+        )
+        .into());
+    }
     let rows = sqlx::query(
         "SELECT imported_entry_position, imported_transcript_entry_id,
                 raw_record_position, record_entry_position,
@@ -1083,16 +1109,6 @@ async fn load_normalized_entries_from_connection(
             content,
             source,
         ));
-    }
-    let actual_entry_count = usize_to_u64(entries.len(), "normalized entry count")?;
-    if through_position.is_none() && actual_entry_count != declared_entry_count {
-        return Err(ImportedConversationCorruption::Domain(
-            ImportedConversationReconstitutionFailure::DeclaredEntryCountMismatch {
-                declared: declared_entry_count,
-                actual: entries.len(),
-            },
-        )
-        .into());
     }
     Ok(Some(entries))
 }
