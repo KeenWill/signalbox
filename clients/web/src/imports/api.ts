@@ -73,11 +73,15 @@ const correlateListPage = (
   request: WebImportListRequest,
   page: WebImportListPage,
   searchCorrelation?: string,
+  exactSourceSessionDigest?: string,
 ): WebImportListPage => {
   if ((page.search_correlation ?? undefined) !== searchCorrelation) {
     throw new ImportListCorrelationError()
   }
-  if (searchCorrelation !== undefined && !page.exact_source_session_id_sha256) {
+  if (
+    searchCorrelation !== undefined &&
+    page.exact_source_session_id_sha256 !== exactSourceSessionDigest
+  ) {
     throw new ImportListCorrelationError()
   }
   let previous = request.after ?? undefined
@@ -113,6 +117,11 @@ const correlateListPage = (
     throw new ImportListCorrelationError()
   }
   return page
+}
+
+const sha256 = async (value: string): Promise<string> => {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
 const DEFAULT_IMPORT_WINDOW_RADIUS = 25
@@ -202,6 +211,7 @@ export class HttpImportApi implements ImportApi {
     if (request.source_session_id !== undefined && request.source_session_id !== null) {
       const { source_session_id: sourceSessionId, ...catalogRequest } = request
       const searchCorrelation = crypto.randomUUID()
+      const exactSourceSessionDigest = await sha256(sourceSessionId)
       const response = await fetch(
         `/api/imports/searches${queryString({
           ...catalogRequest,
@@ -218,6 +228,7 @@ export class HttpImportApi implements ImportApi {
         request,
         await decodeResponse(response, decodeWebImportListPage),
         searchCorrelation,
+        exactSourceSessionDigest,
       )
     }
     const response = await fetch(`/api/imports/${queryString(request)}`, { signal })
