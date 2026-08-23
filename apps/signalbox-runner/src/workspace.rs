@@ -878,7 +878,7 @@ struct DirectoryIdentity {
 }
 
 struct UnpublishedDirectory {
-    parent: File,
+    parent: Option<File>,
     name: OsString,
     directory: Option<File>,
     cleanup_directories: Vec<File>,
@@ -887,7 +887,7 @@ struct UnpublishedDirectory {
 impl UnpublishedDirectory {
     fn new(parent: File, name: OsString, directory: File) -> Self {
         Self {
-            parent,
+            parent: Some(parent),
             name,
             directory: Some(directory),
             cleanup_directories: Vec::new(),
@@ -918,12 +918,16 @@ impl UnpublishedDirectory {
     }
 
     fn take_cleanup(&mut self) -> Result<UnpublishedDirectoryCleanup, RunnerWorkspaceError> {
+        let parent = self
+            .parent
+            .take()
+            .ok_or(RunnerWorkspaceError::ManifestConflict)?;
         let directory = self
             .directory
             .take()
             .ok_or(RunnerWorkspaceError::ManifestConflict)?;
         Ok(UnpublishedDirectoryCleanup {
-            parent: self.parent.try_clone().map_err(RunnerWorkspaceError::Io)?,
+            parent,
             name: self.name.clone(),
             directory,
             cleanup_directories: std::mem::take(&mut self.cleanup_directories),
@@ -934,8 +938,11 @@ impl UnpublishedDirectory {
 impl Drop for UnpublishedDirectory {
     fn drop(&mut self) {
         if let Ok(cleanup) = self.take_cleanup() {
-            let _ =
-                std::thread::scope(|scope| scope.spawn(move || cleanup.remove_and_sync()).join());
+            let _ = std::thread::Builder::new()
+                .name("repository-staging-cleanup".to_owned())
+                .spawn(move || {
+                    let _ = cleanup.remove_and_sync();
+                });
         }
     }
 }
@@ -1302,7 +1309,9 @@ mod tests {
         ffi::OsString,
         fs, future,
         os::unix::{ffi::OsStringExt as _, fs::PermissionsExt as _},
+        path::Path,
         sync::Arc,
+        time::Duration,
     };
 
     use signalbox_runner_wire::{
@@ -1343,6 +1352,23 @@ mod tests {
         let root = RunnerStateRoot::open(&parent.path().join("runner-state"))
             .expect("the owner-private runner root opens");
         (parent, root)
+    }
+
+    async fn wait_for_empty_directory(directory: &Path) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if fs::read_dir(directory)
+                    .expect("the directory remains readable while cleanup completes")
+                    .next()
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("detached cleanup completes within the fixture deadline");
     }
 
     fn enrolled_fixture_root() -> (TempDir, RunnerStateRoot) {
@@ -1599,6 +1625,7 @@ mod tests {
         let cancellation = preparation
             .await
             .expect_err("the repository preparation task is cancelled");
+        wait_for_empty_directory(&session).await;
 
         assert!(cancellation.is_cancelled());
         assert_eq!(
@@ -1701,6 +1728,7 @@ mod tests {
         let session = placement
             .parent()
             .expect("the placement fixture has a session parent");
+        wait_for_empty_directory(session).await;
 
         assert!(matches!(
             failure,
