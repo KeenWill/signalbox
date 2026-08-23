@@ -435,7 +435,7 @@ async fn rejected_response_text_position_constraint(
     fixture_seed: u128,
     entry_seed: u128,
     second_start: i64,
-) -> Result<(Option<String>, String), Box<dyn Error>> {
+) -> Result<Option<String>, Box<dyn Error>> {
     let (container, pool, fixture) = prepared_complete_delegation_outbox(fixture_seed).await?;
     let call: Uuid =
         sqlx::query_scalar("SELECT model_call_id FROM model_call WHERE session_id = $1 LIMIT 1")
@@ -459,29 +459,31 @@ async fn rejected_response_text_position_constraint(
     .bind(second_start)
     .execute(&mut *transaction)
     .await?;
-    let error = transaction
-        .commit()
-        .await
-        .expect_err("non-contiguous response text positions must not commit");
-    let database_error = error
+    let error = sqlx::query(
+        "SET CONSTRAINTS semantic_transcript_response_text_positions_contiguous IMMEDIATE",
+    )
+    .execute(&mut *transaction)
+    .await
+    .expect_err("non-contiguous response text positions must be rejected");
+    let constraint = error
         .as_database_error()
-        .expect("the deferred trigger reports a database error");
-    let code = database_error.code().map(|code| code.into_owned());
-    let message = database_error.message().to_owned();
+        .and_then(sqlx::error::DatabaseError::constraint)
+        .map(str::to_owned);
+    transaction.rollback().await?;
 
     pool.close().await;
     drop(container);
-    Ok((code, message))
+    Ok(constraint)
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn assistant_response_text_positions_reject_gaps() -> Result<(), Box<dyn Error>> {
-    let (code, message) = rejected_response_text_position_constraint(0x9980, 0x9981, 4).await?;
+    let constraint = rejected_response_text_position_constraint(0x9980, 0x9981, 4).await?;
 
-    assert_eq!(code.as_deref(), Some("23514"));
-    assert!(
-        message.starts_with("assistant response text positions are not contiguous for model call ")
+    assert_eq!(
+        constraint.as_deref(),
+        Some("semantic_transcript_response_text_positions_contiguous")
     );
     Ok(())
 }
@@ -489,11 +491,11 @@ async fn assistant_response_text_positions_reject_gaps() -> Result<(), Box<dyn E
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn assistant_response_text_positions_reject_overlaps() -> Result<(), Box<dyn Error>> {
-    let (code, message) = rejected_response_text_position_constraint(0x9990, 0x9991, 2).await?;
+    let constraint = rejected_response_text_position_constraint(0x9990, 0x9991, 2).await?;
 
-    assert_eq!(code.as_deref(), Some("23514"));
-    assert!(
-        message.starts_with("assistant response text positions are not contiguous for model call ")
+    assert_eq!(
+        constraint.as_deref(),
+        Some("semantic_transcript_response_text_positions_contiguous")
     );
     Ok(())
 }
