@@ -597,7 +597,7 @@ pub fn deterministic_test_router() -> Router {
         .route("/mutate", post(deterministic_mutation))
         .route_layer(middleware::from_fn(validate_json_mutation));
     let api = Router::new()
-        .route("/bootstrap", get(contract_bootstrap))
+        .route("/bootstrap", get(deterministic_contract_bootstrap))
         .route("/test/read", get(deterministic_read))
         .route("/test/stream", get(deterministic_stream))
         .nest("/test", mutation)
@@ -610,6 +610,12 @@ pub fn deterministic_test_router() -> Router {
 
 async fn contract_bootstrap() -> Json<WebContractBootstrap> {
     Json(WebContractBootstrap::current())
+}
+
+async fn deterministic_contract_bootstrap() -> Json<WebContractBootstrap> {
+    let mut bootstrap = WebContractBootstrap::current();
+    bootstrap.capabilities.bounded_session_timeline = false;
+    Json(bootstrap)
 }
 
 fn deterministic_example() -> WebContractExample {

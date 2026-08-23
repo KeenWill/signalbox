@@ -83,8 +83,12 @@ export type WebSessionTimelineDescriptor = {
 };
 
 export type WebSessionTimelineWindow = {
-  readonly continuation_after?: WebTimelineAddress | null;
-  readonly continuation_before?: WebTimelineAddress | null;
+  readonly continuation_after: {
+  readonly event_sequence: WebTimelineEventSequence;
+} | null;
+  readonly continuation_before: {
+  readonly event_sequence: WebTimelineEventSequence;
+} | null;
   readonly items: ReadonlyArray<WebSessionTimelineItem>;
   readonly projected_structured_bytes: number;
   readonly session_id: WebSessionId;
