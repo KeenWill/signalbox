@@ -808,7 +808,7 @@ SELECT selected.repository, selected.generation, selected.recorded_at,
     ON held.repository = selected.repository
   LEFT JOIN repo_watch_current_repository_obligation_count AS queued
     ON queued.repository = selected.repository
- ORDER BY selected.repository
+ ORDER BY selected.repository COLLATE "C"
 "#;
 
 async fn load_event_kind_counts(

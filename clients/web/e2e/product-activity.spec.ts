@@ -296,7 +296,9 @@ test('pages a 101-delivery burst and preserves semantic session evidence', async
   await expect(page.getByRole('heading', { name: repository })).toBeVisible()
   await expect(page.getByText('37 / 83 ms')).toBeVisible()
   await expect(page.getByText('current head sealed', { exact: false })).toBeVisible()
-  await expect(page.getByText('held · 1 held', { exact: false })).toBeVisible()
+  await expect(
+    page.getByText('held · dispatch dispatch-5 · 1 held', { exact: false }),
+  ).toBeVisible()
   await expect(page.getByText('stale seal', { exact: false })).toBeVisible()
   await expect(page.getByText('non converged', { exact: false })).toBeVisible()
   await expect(page.getByText('105 loaded in browser window')).toBeVisible()
