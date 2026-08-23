@@ -274,11 +274,8 @@ export class BoundedSessionHistory {
     const bounded = boundedLimits(limits, this.source.limits)
     const maxItems = bounded.maxItems
     const maxBytes = bounded.maxBytes
-    const window = await this.source.readWindow(
-      this.sessionId,
-      sourceAnchor,
-      { maxItems, maxBytes },
-      signal,
+    const window = decodeWebSessionTimelineWindow(
+      await this.source.readWindow(this.sessionId, sourceAnchor, { maxItems, maxBytes }, signal),
     )
     if (canonicalSessionId(window.session_id) !== this.sessionId)
       throw new TypeError('timeline window session mismatch')
@@ -292,6 +289,9 @@ export class BoundedSessionHistory {
       throw new TypeError('timeline anchor requires a nonempty window')
     }
     const incoming = new Map<string, (typeof window.items)[number]>()
+    const retainedByAddress = new Map(
+      this.retainedValue.map((item) => [item.address.event_sequence, item]),
+    )
     let previousAddress: bigint | undefined
     let projectedStructuredBytes = 0
     for (const item of window.items) {
@@ -313,6 +313,14 @@ export class BoundedSessionHistory {
       if (incoming.has(address)) throw new TypeError('timeline window repeats an address')
       if (item.projected_structured_bytes !== projectedItemBytes(item.kind)) {
         throw new TypeError('timeline item byte charge does not match its event kind')
+      }
+      const retained = retainedByAddress.get(address)
+      if (
+        retained &&
+        (retained.kind !== item.kind ||
+          retained.projected_structured_bytes !== item.projected_structured_bytes)
+      ) {
+        throw new TypeError('timeline source returned conflicting data for a retained address')
       }
       incoming.set(address, cloneTimelineItem(item))
       previousAddress = parsedAddress
