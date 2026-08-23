@@ -75,6 +75,33 @@ CREATE INDEX web_search_projection_session_page
         session_id, event_sequence DESC, projection_id DESC
     );
 
+CREATE FUNCTION web_search_projection_requires_session_address()
+RETURNS trigger LANGUAGE plpgsql
+SET search_path FROM CURRENT AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM outbox_event
+         WHERE session_id = NEW.session_id
+           AND event_sequence = NEW.event_sequence
+        UNION ALL
+        SELECT 1
+          FROM delegation_outbox_event
+         WHERE session_id = NEW.session_id
+           AND event_sequence = NEW.event_sequence
+    ) THEN
+        RAISE EXCEPTION
+            'web search projection address does not belong to its session';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE CONSTRAINT TRIGGER web_search_projection_requires_session_address
+AFTER INSERT OR UPDATE OF session_id, event_sequence ON web_search_projection
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION web_search_projection_requires_session_address();
+
 CREATE FUNCTION project_web_search_accepted_input()
 RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$

@@ -438,6 +438,12 @@ async fn search_fails_closed_when_a_matching_chunk_has_contradictory_correlation
     let source = Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x2c1);
     let address = session_created_address(&pool, session).await?;
     let sequence = rust_decimal::Decimal::from(address.sequence().get());
+    let other_sequence = rust_decimal::Decimal::from(
+        session_created_address(&pool, other_session)
+            .await?
+            .sequence()
+            .get(),
+    );
 
     sqlx::query(
         "INSERT INTO web_search_projection (
@@ -446,13 +452,14 @@ async fn search_fails_closed_when_a_matching_chunk_has_contradictory_correlation
          ) VALUES
              ('derived_artifact', $1, $2, $3, 'derived_artifact', $1,
               NULL, 'derived_text_artifact', 0, 'correlated alpha'),
-             ('derived_artifact', $1, $4, $3, 'derived_artifact', $1,
+             ('derived_artifact', $1, $4, $5, 'derived_artifact', $1,
               NULL, 'derived_text_artifact', 1, 'contradictory omega')",
     )
     .bind(source)
     .bind(session.into_uuid())
     .bind(sequence)
     .bind(other_session.into_uuid())
+    .bind(other_sequence)
     .execute(&pool)
     .await?;
 
@@ -470,6 +477,42 @@ async fn search_fails_closed_when_a_matching_chunk_has_contradictory_correlation
         error,
         SearchRepositoryError::Corruption(SearchProjectionCorruption::SourceShape)
     ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn projection_address_must_belong_to_its_stored_session() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x2d8).await?;
+    let other_session = create_search_session(&pool, 0x2d9).await?;
+    let source = Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x2da);
+    let other_address = session_created_address(&pool, other_session).await?;
+
+    let error = sqlx::query(
+        "INSERT INTO web_search_projection (
+             source_kind, source_id, session_id, event_sequence, item_kind, item_id,
+             turn_id, content_class, projection_ordinal, content_text
+         ) VALUES (
+             'derived_artifact', $1, $2, $3, 'derived_artifact', $1,
+             NULL, 'derived_text_artifact', 0, 'mismatched address'
+         )",
+    )
+    .bind(source)
+    .bind(session.into_uuid())
+    .bind(rust_decimal::Decimal::from(other_address.sequence().get()))
+    .execute(&pool)
+    .await
+    .expect_err("cross-session projection address must be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("web search projection address does not belong to its session")
+    );
 
     pool.close().await;
     drop(container);
