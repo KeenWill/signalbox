@@ -124,7 +124,7 @@ fn verify_sandbox_authority() -> Result<(), signalbox_file_media_runtime::FileMe
             (String::from("LC_ALL"), String::from("C.UTF-8")),
         ]
     {
-        eprintln!("sandbox authority check failed: environment differs");
+        eprintln!("sandbox authority check failed: environment differs: {environment:?}");
         return Err(failed());
     }
     let status = fs::read_to_string("/proc/self/status").map_err(|_| failed())?;
