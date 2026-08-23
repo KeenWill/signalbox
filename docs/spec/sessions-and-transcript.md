@@ -713,20 +713,19 @@ own source exists. The projection performs no implicit attachment reading, OCR,
 text extraction, or model pass.
 
 Every result carries its session, stable timeline address, positive projection
-identity, typed owning
-session/input/turn transcript entry/tool request/tool attempt/attachment/derived
-artifact identity, closed content class, and a plain-text snippet with UTF-8
-byte highlight ranges. The address is directly usable with the timeline `around`
-read even when the matching region is not loaded. An unknown stored source or
-content class, malformed identity, invalid address, or contradictory source
-shape fails closed.
+identity, typed owning session/input/turn transcript entry/tool request/tool
+attempt/attachment/derived artifact identity, closed content class, and a
+plain-text snippet with UTF-8 byte highlight ranges. The address is directly
+usable with the timeline `around` read even when the matching region is not
+loaded. An unknown stored source or content class, malformed identity, invalid
+address, or contradictory source shape fails closed.
 
 Requests accept 1 through 100 results and at most 512 UTF-8 query bytes. Each
 returned snippet is at most 512 UTF-8 bytes and carries at most 64 ordered,
-non-overlapping highlight ranges on UTF-8 boundaries. Results have a stable strict
-newest-address-first keyset order by `(event_sequence, projection_id)`; the
-adapter fetches at most one item beyond the requested page to decide whether to
-return a continuation. The GIN full-text index finds matches, while separate
+non-overlapping highlight ranges on UTF-8 boundaries. Results have a stable
+strict newest-address-first keyset order by `(event_sequence, projection_id)`;
+the adapter fetches at most one item beyond the requested page to decide whether
+to return a continuation. The GIN full-text index finds matches, while separate
 global and session indexes support the bounded keyset traversal. Search never
 materializes or scans a session transcript in the browser.
 
