@@ -439,6 +439,53 @@ async fn search_fails_closed_when_a_matching_chunk_has_contradictory_correlation
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn headline_keeps_a_match_after_a_token_beyond_the_former_sql_cap()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x2e0).await?;
+    let source = Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x2e1);
+    let address = session_created_address(&pool, session).await?;
+    let content = format!("{} needle after", "x".repeat(2_049));
+
+    sqlx::query(
+        "INSERT INTO web_search_projection (
+             source_kind, source_id, session_id, event_sequence, item_kind, item_id,
+             turn_id, content_class, projection_ordinal, content_text
+         ) VALUES (
+             'derived_artifact', $1, $2, $3, 'derived_artifact', $1,
+             NULL, 'derived_text_artifact', 0, $4
+         )",
+    )
+    .bind(source)
+    .bind(session.into_uuid())
+    .bind(rust_decimal::Decimal::from(address.sequence().get()))
+    .bind(content)
+    .execute(&pool)
+    .await?;
+
+    let page = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "needle",
+            SearchScope::Session(session),
+            10,
+            None,
+        ))
+        .await?;
+    let result = page.results.first().expect("fixture projection matches");
+
+    assert!(result.snippet.contains("needle"));
+    assert!(result.highlights.iter().any(|highlight| {
+        &result.snippet[usize::from(highlight.start_byte)..usize::from(highlight.end_byte)]
+            == "needle"
+    }));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn large_result_set_pages_with_stable_strict_cursors() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = create_search_session(&pool, 0x300).await?;

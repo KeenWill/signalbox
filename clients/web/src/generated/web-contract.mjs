@@ -1003,16 +1003,21 @@ function validSearchSourceCorrelation(result) {
 export function decodeWebSearchPage(value) {
   assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
   const encoder = new TextEncoder();
-  let previousAddress = null;
+  let previousKey = null;
   value.results.forEach((result, resultIndex) => {
     const address = BigInt(result.address.event_sequence);
-    if (previousAddress !== null && address > previousAddress) {
+    const projection = BigInt(result.projection_id);
+    if (
+      previousKey !== null &&
+      (address > previousKey.address ||
+        (address === previousKey.address && projection >= previousKey.projection))
+    ) {
       fail(
-        `search_page.results[${resultIndex}].address`,
-        "a newest-first nonincreasing search result address",
+        `search_page.results[${resultIndex}]`,
+        "a strictly descending search result key",
       );
     }
-    previousAddress = address;
+    previousKey = { address, projection };
     if (!validSearchSourceCorrelation(result)) {
       fail(
         `search_page.results[${resultIndex}].source`,

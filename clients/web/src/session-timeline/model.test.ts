@@ -551,6 +551,66 @@ describe('BoundedSessionHistory', () => {
     ).rejects.toThrow('byte charge does not match')
   })
 
+  it('rejects an unknown event kind from a custom source', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async () =>
+        ({
+          session_id: sessionId,
+          items: [
+            {
+              address: { event_sequence: '1' },
+              kind: 'future_event',
+              projected_structured_bytes: 76,
+            },
+          ],
+          projected_structured_bytes: 76,
+          continuation_before: null,
+          continuation_after: null,
+        }) as never,
+    }
+
+    await expect(
+      new BoundedSessionHistory(sessionId, source).load(
+        { kind: 'first' },
+        { maxItems: 1, maxBytes: 256 },
+      ),
+    ).rejects.toThrow()
+  })
+
+  it('rejects conflicting data for a retained address', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    let readCount = 0
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async () => {
+        readCount += 1
+        return {
+          session_id: sessionId,
+          items: [
+            {
+              address: { event_sequence: '1' },
+              kind: readCount === 1 ? 'input_accepted' : 'turn_activated',
+              projected_structured_bytes: 78,
+            },
+          ],
+          projected_structured_bytes: 78,
+          continuation_before: null,
+          continuation_after: null,
+        }
+      },
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.load({ kind: 'first' }, { maxItems: 1, maxBytes: 256 })
+
+    await expect(
+      history.load({ kind: 'around', eventSequence: '1' }, { maxItems: 1, maxBytes: 256 }),
+    ).rejects.toThrow('conflicting data for a retained address')
+  })
+
   it('rejects a continuation that is not a returned boundary', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const source: SessionTimelineSource = {

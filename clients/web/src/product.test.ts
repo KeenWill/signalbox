@@ -545,7 +545,7 @@ describe('SameOriginProductTransport', () => {
         maxItems: 2,
         maxSnippetBytes: 512,
       }),
-    ).rejects.toThrow('newest-first nonincreasing search result address')
+    ).rejects.toThrow('strictly descending search result key')
   })
 
   it('rejects same-address results whose projection IDs are not newest first', async () => {
@@ -571,7 +571,7 @@ describe('SameOriginProductTransport', () => {
         maxItems: 2,
         maxSnippetBytes: 512,
       }),
-    ).rejects.toThrow('not ordered newest first')
+    ).rejects.toThrow('strictly descending search result key')
   })
 
   const rejectContinuation = async (

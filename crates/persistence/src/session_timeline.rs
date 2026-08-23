@@ -187,6 +187,12 @@ impl SessionTimelineRepository {
         items.sort_by_key(|item| item.address);
         let first = items.first().map(|item| item.address);
         let latest = items.last().map(|item| item.address);
+        if first.is_some_and(|loaded| descriptor.bounds.first.is_none_or(|bound| loaded < bound))
+            || latest
+                .is_some_and(|loaded| descriptor.bounds.latest.is_none_or(|bound| loaded > bound))
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window bounds").into());
+        }
         let continuation_before = match first.zip(descriptor.bounds.first) {
             Some((loaded, bound)) if loaded > bound => TimelineContinuation::MoreAt(loaded),
             _ => TimelineContinuation::Exhausted,
