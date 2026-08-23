@@ -328,14 +328,17 @@ async fn rejected_response_text_position_constraint(
     .bind(second_start)
     .execute(&mut *transaction)
     .await?;
-    let error = transaction
-        .commit()
-        .await
-        .expect_err("non-contiguous response text positions must not commit");
+    let error = sqlx::query(
+        "SET CONSTRAINTS semantic_transcript_response_text_positions_contiguous IMMEDIATE",
+    )
+    .execute(&mut *transaction)
+    .await
+    .expect_err("non-contiguous response text positions must be rejected");
     let constraint = error
         .as_database_error()
         .and_then(sqlx::error::DatabaseError::constraint)
         .map(str::to_owned);
+    transaction.rollback().await?;
 
     pool.close().await;
     drop(container);
