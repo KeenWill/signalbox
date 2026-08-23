@@ -66,5 +66,14 @@ describe('command registry', () => {
       density: 'comfortable',
       theme: 'light',
     })
+
+    invokeCommand('preferences.reset', context)
+
+    expect(selectApp(store.getState())).toMatchObject({
+      layout: 'workbench',
+      density: 'compact',
+      detail: 'condensed',
+      theme: 'dark',
+    })
   })
 })

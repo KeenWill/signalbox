@@ -389,6 +389,15 @@ export const commandRegistry = [
     run: (context) => context.dispatch(actions.themeSet('light')),
   },
   {
+    id: 'preferences.reset',
+    title: 'Restore preference defaults',
+    description: 'Restore the browser-local presentation preferences to their defaults.',
+    category: 'View',
+    bindings: [],
+    available: presentationPreferences,
+    run: (context) => context.dispatch(actions.preferencesReset()),
+  },
+  {
     id: 'detail.full',
     title: 'Show full transcript detail',
     description: 'Show every supported timeline record.',

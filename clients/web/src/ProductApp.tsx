@@ -337,6 +337,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   useEffect(() => {
     if (app.overlay === 'navigation') restoreNavigationFocusRef.current = true
   }, [app.overlay])
+  useEffect(() => {
+    if (app.overlay === 'help') dispatch(actions.overlaySet(null))
+  }, [app.overlay, dispatch])
   const context = useMemo<CommandContext>(() => {
     const surfaceContext = surface === 'imports' ? importsCommandContext : null
     return {

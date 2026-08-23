@@ -166,7 +166,7 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
       </div>
 
       <div className="settings-actions">
-        <button type="button" onClick={() => dispatch(actions.preferencesReset())}>
+        <button type="button" onClick={() => invokeCommand('preferences.reset', context)}>
           Restore defaults
         </button>
         <small>

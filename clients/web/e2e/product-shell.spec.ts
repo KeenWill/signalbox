@@ -211,6 +211,28 @@ test('moves focus after entering Scenario studio from desktop navigation', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('clears scenario-only keyboard help when browser history returns to the product', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+
+  const modifier = await platformModifier(page)
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /Open keyboard help/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  await page.goBack()
+
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toHaveCount(0)
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('applies saved presentation preferences on a direct Imports scenario load', async ({
   page,
 }) => {
