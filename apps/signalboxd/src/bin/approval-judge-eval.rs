@@ -775,6 +775,15 @@ async fn run(options: RunOptions) -> Result<(), String> {
                         let cause = String::from("reported usage exceeds configured limits");
                         eprintln!("call failed for {}: {cause}", case.name);
                         failure_causes.push(cause);
+                    } else if recording.is_some()
+                        && !recording_rationale_is_storable(&verdict.rationale)
+                    {
+                        failures += 1;
+                        let cause = String::from(
+                            "provider rationale contains U+0000, which database recording cannot store",
+                        );
+                        eprintln!("call failed for {}: {cause}", case.name);
+                        failure_causes.push(cause);
                     } else {
                         if recording.is_some() {
                             recorded_calls.push(ApprovalJudgeEvalCallRecord {
@@ -945,9 +954,16 @@ fn storable_provider_reported_model(model: Option<&str>) -> Option<String> {
     Some(encoded)
 }
 
+fn recording_rationale_is_storable(rationale: &str) -> bool {
+    !rationale.contains('\u{0}')
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PAID_CALLS, paid_call_count, storable_provider_reported_model};
+    use super::{
+        MAX_PAID_CALLS, paid_call_count, recording_rationale_is_storable,
+        storable_provider_reported_model,
+    };
 
     #[test]
     fn paid_call_count_accepts_the_safety_ceiling() {
@@ -990,5 +1006,15 @@ mod tests {
                 "signalbox:utf8-hex-v1:7369676e616c626f783a757466382d6865782d76313a6c69746572616c"
             ))
         );
+    }
+
+    #[test]
+    fn provider_rationale_with_nul_is_not_storable_for_recording() {
+        assert!(!recording_rationale_is_storable("because\u{0}details"));
+    }
+
+    #[test]
+    fn ordinary_provider_rationale_is_storable_for_recording() {
+        assert!(recording_rationale_is_storable("because details"));
     }
 }

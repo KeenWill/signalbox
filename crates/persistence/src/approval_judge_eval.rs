@@ -109,14 +109,6 @@ pub struct ApprovalJudgeEvalCallRecord {
     pub usage: ProviderReportedTokenUsage,
 }
 
-/// Reports whether both eval recording tables exist in the connected database
-/// and admit inserts for the connected role, so a caller can refuse to start
-/// work whose recording would predictably fail against a database the daemon
-/// has not migrated yet or an underprivileged role. Schema application stays
-/// with the daemon; this only observes it. The checked privileges are exactly
-/// what recording exercises: INSERT on both tables, plus SELECT on the run
-/// table because the sealing trigger reads the run's recording transaction
-/// while admitting each call row.
 /// Schema containing the migration-owned eval recording objects.
 ///
 /// This token can only be obtained by resolving the physical sealing trigger
@@ -130,6 +122,15 @@ pub struct ApprovalJudgeEvalRecordingSchema {
 
 /// Resolves and verifies the migration-owned recording schema, returning a
 /// token that pins later writes to that same physical schema.
+///
+/// Reports whether both eval recording tables exist in the connected database
+/// and admit inserts for the connected role, so a caller can refuse to start
+/// work whose recording would predictably fail against a database the daemon
+/// has not migrated yet or an underprivileged role. Schema application stays
+/// with the daemon; this only observes it. The checked privileges are exactly
+/// what recording exercises: INSERT on both tables, plus SELECT on the run
+/// table because the sealing trigger reads the run's recording transaction
+/// while admitting each call row.
 pub async fn verify_recording_schema(
     pool: &PgPool,
 ) -> Result<ApprovalJudgeEvalRecordingSchema, ApprovalJudgeEvalRecordingError> {
