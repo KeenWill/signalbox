@@ -573,7 +573,7 @@ async fn headline_preserves_literal_private_use_marker_characters() -> Result<()
     let session = create_search_session(&pool, 0x2f0).await?;
     let source = Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x2f1);
     let address = session_created_address(&pool, session).await?;
-    let content = "before \u{e000} needle \u{e001} after";
+    let content = "before <sb-search-start> &lt; \u{e000} needle \u{e001} <sb-search-stop> after";
 
     sqlx::query(
         "INSERT INTO web_search_projection (

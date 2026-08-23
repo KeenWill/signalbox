@@ -30,15 +30,21 @@ const SEARCH_SQL: &str = "
 WITH lexical_query AS (
     SELECT plainto_tsquery('simple'::regconfig, $1) AS value
 ), query_terms AS (
-    SELECT unnest(
+    SELECT DISTINCT unnest(
         tsvector_to_array(to_tsvector('simple'::regconfig, $1))
     ) AS lexeme
-), candidate_query AS (
-    SELECT to_tsquery(
-        'simple'::regconfig,
-        string_agg(quote_literal(lexeme), ' | ')
-    ) AS value
-      FROM query_terms
+), candidate_sources AS MATERIALIZED (
+    SELECT matching_chunk.source_kind, matching_chunk.source_id,
+           matching_chunk.content_class
+      FROM query_terms AS term
+      JOIN web_search_projection AS matching_chunk
+        ON matching_chunk.search_vector @@ to_tsquery(
+               'simple'::regconfig, quote_literal(term.lexeme)
+           )
+       AND ($2::uuid IS NULL OR matching_chunk.session_id = $2)
+     GROUP BY matching_chunk.source_kind, matching_chunk.source_id,
+              matching_chunk.content_class
+    HAVING count(DISTINCT term.lexeme) = (SELECT count(*) FROM query_terms)
 )
 SELECT projection.projection_id, projection.session_id,
        projection.event_sequence, projection.item_kind, projection.item_id,
@@ -57,47 +63,25 @@ SELECT projection.projection_id, projection.session_id,
                   OR correlated_chunk.turn_id IS DISTINCT FROM projection.turn_id
               )
        ) AS source_group_valid,
-       headline_markers.start_marker, headline_markers.stop_marker,
+       '<sb-search-start>' AS start_marker,
+       '<sb-search-stop>' AS stop_marker,
        ts_headline(
            'simple'::regconfig,
-           projection.content_text,
+           replace(
+               replace(projection.content_text, '&', '&amp;'),
+               '<', '&lt;'
+           ),
            lexical_query.value,
-           'StartSel=' || headline_markers.start_marker ||
-           ', StopSel=' || headline_markers.stop_marker ||
+           'StartSel=<sb-search-start>, StopSel=<sb-search-stop>' ||
            ', MaxWords=32, MinWords=8, ShortWord=1, MaxFragments=1'
        ) AS marked_snippet
   FROM web_search_projection AS projection
+  JOIN candidate_sources
+    ON candidate_sources.source_kind = projection.source_kind
+   AND candidate_sources.source_id = projection.source_id
+   AND candidate_sources.content_class = projection.content_class
  CROSS JOIN lexical_query
- CROSS JOIN candidate_query
- CROSS JOIN LATERAL (
-     SELECT candidate.start_marker, candidate.stop_marker
-       FROM (
-           SELECT chr(57344) || projection.projection_id::text || ':' || nonce::text || chr(57344)
-                      AS start_marker,
-                  chr(57345) || projection.projection_id::text || ':' || nonce::text || chr(57345)
-                      AS stop_marker
-             FROM generate_series(0, 65536) AS nonce
-       ) AS candidate
-      WHERE strpos(projection.content_text, candidate.start_marker) = 0
-        AND strpos(projection.content_text, candidate.stop_marker) = 0
-      LIMIT 1
- ) AS headline_markers
- WHERE projection.search_vector @@ candidate_query.value
-   AND NOT EXISTS (
-       SELECT 1
-         FROM query_terms AS term
-        WHERE NOT EXISTS (
-            SELECT 1
-              FROM web_search_projection AS matching_chunk
-             WHERE matching_chunk.source_kind = projection.source_kind
-               AND matching_chunk.source_id = projection.source_id
-               AND matching_chunk.content_class = projection.content_class
-               AND term.lexeme = ANY(
-                   tsvector_to_array(matching_chunk.search_vector)
-               )
-        )
-   )
-   AND projection.projection_id = (
+ WHERE projection.projection_id = (
        SELECT min(candidate.projection_id)
          FROM web_search_projection AS candidate
         WHERE candidate.source_kind = projection.source_kind
@@ -111,8 +95,8 @@ SELECT projection.projection_id, projection.session_id,
           AND EXISTS (
               SELECT 1
                 FROM query_terms AS term
-               WHERE term.lexeme = ANY(
-                   tsvector_to_array(candidate.search_vector)
+               WHERE candidate.search_vector @@ to_tsquery(
+                   'simple'::regconfig, quote_literal(term.lexeme)
                )
           )
    )
@@ -646,6 +630,16 @@ fn decode_headline(
             remaining = rest;
             continue;
         }
+        if let Some(rest) = remaining.strip_prefix("&lt;") {
+            plain.push('<');
+            remaining = rest;
+            continue;
+        }
+        if let Some(rest) = remaining.strip_prefix("&amp;") {
+            plain.push('&');
+            remaining = rest;
+            continue;
+        }
         let Some(character) = remaining.chars().next() else {
             break;
         };
@@ -779,6 +773,24 @@ mod tests {
             snippet,
             format!("literal {HEADLINE_START} needle {HEADLINE_END}")
         );
+        assert_eq!(highlights.len(), 1);
+        let highlight = highlights[0];
+        assert_eq!(
+            &snippet[usize::from(highlight.start_byte)..usize::from(highlight.end_byte)],
+            "needle"
+        );
+    }
+
+    #[test]
+    fn headline_decoder_restores_escaped_framing_text() {
+        const START: &str = "<sb-search-start>";
+        const STOP: &str = "<sb-search-stop>";
+        let marked =
+            format!("&lt;sb-search-start> &amp;lt; {START}needle{STOP} &lt;sb-search-stop>");
+        let (snippet, highlights) =
+            decode_headline(marked, START, STOP).expect("escaped framing text decodes");
+
+        assert_eq!(snippet, "<sb-search-start> &lt; needle <sb-search-stop>");
         assert_eq!(highlights.len(), 1);
         let highlight = highlights[0];
         assert_eq!(
