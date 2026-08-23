@@ -153,12 +153,19 @@ impl SessionTimelineRepository {
             transaction.commit().await?;
             return Ok(None);
         };
-        let requires_nonempty_window = matches!(
-            &anchor,
+        let requires_nonempty_window = match &anchor {
             TimelineWindowAnchor::First
-                | TimelineWindowAnchor::Latest
-                | TimelineWindowAnchor::Around(_)
-        );
+            | TimelineWindowAnchor::Latest
+            | TimelineWindowAnchor::Around(_) => true,
+            TimelineWindowAnchor::Before(address) => descriptor
+                .bounds
+                .first
+                .is_some_and(|first| *address > first),
+            TimelineWindowAnchor::After(address) => descriptor
+                .bounds
+                .latest
+                .is_some_and(|latest| *address < latest),
+        };
         let requires_first_bound = matches!(&anchor, TimelineWindowAnchor::First);
         let requires_latest_bound = matches!(&anchor, TimelineWindowAnchor::Latest);
         let fetch_limit = i64::from(limits.max_items()) + 1;
@@ -229,6 +236,12 @@ impl SessionTimelineRepository {
             items.push(item);
         }
         items.sort_by_key(|item| item.address);
+        if items
+            .windows(2)
+            .any(|pair| pair[0].address == pair[1].address)
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window addresses").into());
+        }
         if requires_nonempty_window && items.is_empty() {
             return Err(SessionTimelineCorruption::InvalidOrdinal("window items").into());
         }
@@ -1447,6 +1460,7 @@ async fn load_descriptor(
         .checked_sub(first.sequence().get())
         .and_then(|span| span.checked_add(1));
     if first > latest
+        || (item_count == 1 && first != latest)
         || latest.sequence().get() > observed_through
         || address_span.is_none_or(|span| item_count > span)
     {

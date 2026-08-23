@@ -273,6 +273,7 @@ export class BoundedSessionHistory {
     if (
       itemCount === 0n ||
       firstAddress > latestAddress ||
+      (itemCount === 1n && firstAddress !== latestAddress) ||
       latestAddress > observedThrough ||
       itemCount > addressSpan
     ) {
@@ -314,6 +315,11 @@ export class BoundedSessionHistory {
         projectedStructuredBytes < cachedProjectedStructuredBytes ||
         referencedBlobCount < cachedReferencedBlobCount ||
         referencedBlobBytes < cachedReferencedBlobBytes
+      const latestAddressAdvanced = latestAddress > cachedLatestAddress
+      const itemCountAdvanced = itemCount > cachedItemCount
+      const appendGrowthContradiction =
+        latestAddressAdvanced !== itemCountAdvanced ||
+        (itemCountAdvanced && projectedStructuredBytes <= cachedProjectedStructuredBytes)
       const equalCursorFactsChanged =
         observedThrough === cachedObservedThrough &&
         (latestAddress !== cachedLatestAddress ||
@@ -322,7 +328,7 @@ export class BoundedSessionHistory {
           projectedStructuredBytes !== cachedProjectedStructuredBytes ||
           referencedBlobCount !== cachedReferencedBlobCount ||
           referencedBlobBytes !== cachedReferencedBlobBytes)
-      if (durableFactsRegressed || equalCursorFactsChanged) {
+      if (durableFactsRegressed || appendGrowthContradiction || equalCursorFactsChanged) {
         throw new TypeError('descriptor append-only facts are contradictory')
       }
     }
@@ -432,6 +438,16 @@ export class BoundedSessionHistory {
       }
     }
     const cachedDescriptor = this.descriptorValue
+    if (cachedDescriptor && window.items.length === 0 && anchorAddress !== undefined) {
+      const cachedFirstAddress = decimalAddress(cachedDescriptor.first_address.event_sequence)
+      const cachedLatestAddress = decimalAddress(cachedDescriptor.latest_address.event_sequence)
+      if (
+        (anchorKind === 'before' && anchorAddress > cachedFirstAddress) ||
+        (anchorKind === 'after' && anchorAddress < cachedLatestAddress)
+      ) {
+        throw new TypeError('cached descriptor requires a nonempty addressed window')
+      }
+    }
     if (cachedDescriptor && firstItemAddress && lastItemAddress) {
       if (
         decimalAddress(firstItemAddress) <

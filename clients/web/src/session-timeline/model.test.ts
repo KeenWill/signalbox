@@ -202,6 +202,49 @@ describe('BoundedSessionHistory', () => {
     )
   })
 
+  it('rejects a one-item descriptor with distinct bounds', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        sizes: { ...descriptor.sizes, item_count: '1', projected_structured_bytes: '78' },
+        first_address: { event_sequence: '100' },
+        latest_address: { event_sequence: '200' },
+      }),
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+
+    await expect(new BoundedSessionHistory(sessionId, source).describe()).rejects.toThrow(
+      'boundaries are contradictory',
+    )
+  })
+
+  it('correlates latest-address and item-count growth', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const original = await scenario.readDescriptor(sessionId)
+    const contradictory = {
+      ...original,
+      observed_through: String(BigInt(original.observed_through) + 1n),
+      latest_address: {
+        event_sequence: String(BigInt(original.latest_address.event_sequence) + 1n),
+      },
+    }
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: vi
+        .fn<SessionTimelineSource['readDescriptor']>()
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(contradictory),
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(history.describe()).rejects.toThrow('append-only facts are contradictory')
+  })
+
   it('rejects a descriptor structured total impossible for its item count', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const descriptor = await scenario.readDescriptor(sessionId)
@@ -868,26 +911,36 @@ describe('BoundedSessionHistory', () => {
 
   it('rejects conflicting data for a retained address', async () => {
     const scenario = new EnormousSessionScenarioSource()
-    let readCount = 0
+    const retainedWindow = {
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '1' },
+          kind: 'input_accepted' as const,
+          projected_structured_bytes: 78,
+        },
+      ],
+      projected_structured_bytes: 78,
+      continuation_before: null,
+      continuation_after: null,
+    }
+    const conflictingWindow = {
+      ...retainedWindow,
+      items: [
+        {
+          address: { event_sequence: '1' },
+          kind: 'turn_activated' as const,
+          projected_structured_bytes: 78,
+        },
+      ],
+    }
     const source: SessionTimelineSource = {
       limits: scenario.limits,
       readDescriptor: scenario.readDescriptor.bind(scenario),
-      readWindow: async () => {
-        readCount += 1
-        return {
-          session_id: sessionId,
-          items: [
-            {
-              address: { event_sequence: '1' },
-              kind: readCount === 1 ? 'input_accepted' : 'turn_activated',
-              projected_structured_bytes: 78,
-            },
-          ],
-          projected_structured_bytes: 78,
-          continuation_before: null,
-          continuation_after: null,
-        }
-      },
+      readWindow: vi
+        .fn<SessionTimelineSource['readWindow']>()
+        .mockResolvedValueOnce(retainedWindow)
+        .mockResolvedValueOnce(conflictingWindow),
     }
     const history = new BoundedSessionHistory(sessionId, source)
     await history.load({ kind: 'first' }, { maxItems: 1, maxBytes: 256 })
@@ -1039,6 +1092,27 @@ describe('BoundedSessionHistory', () => {
         { maxItems: 1, maxBytes: 256 },
       ),
     ).rejects.toThrow('requires a nonempty window')
+  })
+
+  it('rejects an empty addressed window when cached bounds prove an item', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [],
+        projected_structured_bytes: 0,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(
+      history.load({ kind: 'before', eventSequence: '500' }, { maxItems: 1, maxBytes: 256 }),
+    ).rejects.toThrow('requires a nonempty addressed window')
   })
 
   it('bounds an HTTP timeline response before JSON decoding', async () => {

@@ -516,7 +516,10 @@ async fn window_outside_projection_facts_is_corruption() -> Result<(), Box<dyn E
     create_session(&pool, identity).await?;
     commission_fixture_session_goal(&pool, identity, 0x0009_9700).await?;
     sqlx::query(
-        "UPDATE session_timeline_fact SET item_count = 1, first_sequence = latest_sequence WHERE session_id = $1",
+        "UPDATE session_timeline_fact \
+         SET item_count = 1, first_sequence = latest_sequence, \
+             event_kind_bytes = octet_length('session_created') \
+         WHERE session_id = $1",
     )
     .bind(identity.into_uuid())
     .execute(&pool)
@@ -548,7 +551,7 @@ async fn window_exceeding_projection_totals_is_corruption() -> Result<(), Box<dy
     commission_fixture_session_goal(&pool, identity, 0x0009_9900).await?;
     sqlx::query(
         "UPDATE session_timeline_fact \
-         SET item_count = 1, event_kind_bytes = octet_length('session_created') \
+         SET item_count = 2, event_kind_bytes = 2 * octet_length('session_created') \
          WHERE session_id = $1",
     )
     .bind(identity.into_uuid())
@@ -580,7 +583,10 @@ async fn first_window_must_reach_stored_first_address() -> Result<(), Box<dyn Er
     let identity = session(0x99b);
     create_session(&pool, identity).await?;
     sqlx::query(
-        "UPDATE session_timeline_fact SET first_sequence = first_sequence - 1 WHERE session_id = $1",
+        "UPDATE session_timeline_fact \
+         SET item_count = 2, first_sequence = first_sequence - 1, \
+             event_kind_bytes = 2 * octet_length('session_created') \
+         WHERE session_id = $1",
     )
     .bind(identity.into_uuid())
     .execute(&pool)
