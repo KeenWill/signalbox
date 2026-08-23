@@ -215,7 +215,22 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       { signal },
     )
     if (!response.ok) return throwApiError(response)
-    const window = decodeWebSessionTimelineWindow(await readBoundedJson(response))
+    const rawWindow = await readBoundedJson(response)
+    const rawItems = (rawWindow as { items?: unknown } | null)?.items
+    if (Array.isArray(rawItems) && rawItems.length > bounded.maxItems) {
+      throw new TypeError('timeline window exceeds the requested item ceiling')
+    }
+    const window = decodeWebSessionTimelineWindow(rawWindow)
+    const projectedStructuredBytes = window.items.reduce(
+      (total, item) => total + item.projected_structured_bytes,
+      0,
+    )
+    if (
+      window.projected_structured_bytes > bounded.maxBytes ||
+      projectedStructuredBytes > bounded.maxBytes
+    ) {
+      throw new TypeError('timeline window exceeds the requested byte ceiling')
+    }
     if (canonicalSessionId(window.session_id) !== requestedSessionId) {
       throw new TypeError('timeline window session mismatch')
     }
@@ -225,8 +240,6 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
 
 export class BoundedSessionHistory {
   private descriptorValue: WebSessionTimelineDescriptor | undefined
-  private descriptorRequestRevision = 0
-  private descriptorAppliedRevision = 0
   private retainedValue: WebSessionTimelineWindow['items'] = []
   private readonly sessionId: string
 
@@ -246,7 +259,6 @@ export class BoundedSessionHistory {
   }
 
   async describe(signal?: AbortSignal): Promise<WebSessionTimelineDescriptor> {
-    const requestRevision = ++this.descriptorRequestRevision
     const descriptor = decodeWebSessionTimelineDescriptor(
       await this.source.readDescriptor(this.sessionId, signal),
     )
@@ -278,10 +290,42 @@ export class BoundedSessionHistory {
     decimalU64(descriptor.sizes.referenced_blob_bytes)
     decimalU64(descriptor.work.active_turn_count)
     decimalU64(descriptor.work.queued_turn_count)
-    if (requestRevision < this.descriptorAppliedRevision && this.descriptorValue) {
-      return cloneTimelineDescriptor(this.descriptorValue)
+    const cached = this.descriptorValue
+    if (cached) {
+      const cachedObservedThrough = decimalU64(cached.observed_through)
+      if (observedThrough < cachedObservedThrough) {
+        return cloneTimelineDescriptor(cached)
+      }
+      const cachedFirstAddress = decimalAddress(cached.first_address.event_sequence)
+      const cachedLatestAddress = decimalAddress(cached.latest_address.event_sequence)
+      const cachedItemCount = decimalU64(cached.sizes.item_count)
+      const cachedProjectedTextBytes = decimalU64(cached.sizes.projected_text_bytes)
+      const cachedProjectedStructuredBytes = decimalU64(cached.sizes.projected_structured_bytes)
+      const cachedReferencedBlobCount = decimalU64(cached.sizes.referenced_blob_count)
+      const cachedReferencedBlobBytes = decimalU64(cached.sizes.referenced_blob_bytes)
+      const projectedTextBytes = decimalU64(descriptor.sizes.projected_text_bytes)
+      const referencedBlobCount = decimalU64(descriptor.sizes.referenced_blob_count)
+      const referencedBlobBytes = decimalU64(descriptor.sizes.referenced_blob_bytes)
+      const durableFactsRegressed =
+        firstAddress !== cachedFirstAddress ||
+        latestAddress < cachedLatestAddress ||
+        itemCount < cachedItemCount ||
+        projectedTextBytes < cachedProjectedTextBytes ||
+        projectedStructuredBytes < cachedProjectedStructuredBytes ||
+        referencedBlobCount < cachedReferencedBlobCount ||
+        referencedBlobBytes < cachedReferencedBlobBytes
+      const equalCursorFactsChanged =
+        observedThrough === cachedObservedThrough &&
+        (latestAddress !== cachedLatestAddress ||
+          itemCount !== cachedItemCount ||
+          projectedTextBytes !== cachedProjectedTextBytes ||
+          projectedStructuredBytes !== cachedProjectedStructuredBytes ||
+          referencedBlobCount !== cachedReferencedBlobCount ||
+          referencedBlobBytes !== cachedReferencedBlobBytes)
+      if (durableFactsRegressed || equalCursorFactsChanged) {
+        throw new TypeError('descriptor append-only facts are contradictory')
+      }
     }
-    this.descriptorAppliedRevision = requestRevision
     this.descriptorValue = cloneTimelineDescriptor(descriptor)
     return cloneTimelineDescriptor(descriptor)
   }

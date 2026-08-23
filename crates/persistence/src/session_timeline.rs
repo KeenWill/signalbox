@@ -17,7 +17,8 @@ use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
 use crate::{
     mapping::{
-        OutboxEventDiscriminator, input_position_from_numeric, outbox_event_discriminator_from_str,
+        OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS, OutboxEventDiscriminator, input_position_from_numeric,
+        outbox_event_discriminator_from_str,
     },
     outbox::{
         DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEvent,
@@ -158,6 +159,8 @@ impl SessionTimelineRepository {
                 | TimelineWindowAnchor::Latest
                 | TimelineWindowAnchor::Around(_)
         );
+        let requires_first_bound = matches!(&anchor, TimelineWindowAnchor::First);
+        let requires_latest_bound = matches!(&anchor, TimelineWindowAnchor::Latest);
         let fetch_limit = i64::from(limits.max_items()) + 1;
         let rows = match anchor {
             TimelineWindowAnchor::First => {
@@ -231,11 +234,21 @@ impl SessionTimelineRepository {
         }
         let first = items.first().map(|item| item.address);
         let latest = items.last().map(|item| item.address);
-        if first.is_some_and(|loaded| descriptor.bounds.first.is_none_or(|bound| loaded < bound))
+        if (requires_first_bound && first != descriptor.bounds.first)
+            || (requires_latest_bound && latest != descriptor.bounds.latest)
+            || first
+                .is_some_and(|loaded| descriptor.bounds.first.is_none_or(|bound| loaded < bound))
             || latest
                 .is_some_and(|loaded| descriptor.bounds.latest.is_none_or(|bound| loaded > bound))
         {
             return Err(SessionTimelineCorruption::InvalidOrdinal("window bounds").into());
+        }
+        let item_count = u64::try_from(items.len())
+            .map_err(|_| SessionTimelineCorruption::InvalidOrdinal("window totals"))?;
+        if item_count > descriptor.sizes.item_count
+            || u64::from(projected_bytes) > descriptor.sizes.projected_structured_bytes
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window totals").into());
         }
         let continuation_before = match first.zip(descriptor.bounds.first) {
             Some((loaded, bound)) if loaded > bound => TimelineContinuation::MoreAt(loaded),
@@ -1439,15 +1452,33 @@ async fn load_descriptor(
     {
         return Err(SessionTimelineCorruption::InvalidOrdinal("timeline bounds").into());
     }
+    let projected_structured_bytes = nonnegative(
+        row.try_get("structured_bytes")?,
+        "projected structured bytes",
+    )?;
+    let minimum_item_bytes = u64::from(PROJECTED_ITEM_ENVELOPE_BYTES)
+        .checked_add(OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS.0)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    let maximum_item_bytes = u64::from(PROJECTED_ITEM_ENVELOPE_BYTES)
+        .checked_add(OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS.1)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    let minimum_structured_bytes = item_count
+        .checked_mul(minimum_item_bytes)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    let maximum_structured_bytes = item_count
+        .checked_mul(maximum_item_bytes)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    if projected_structured_bytes < minimum_structured_bytes
+        || projected_structured_bytes > maximum_structured_bytes
+    {
+        return Err(SessionTimelineCorruption::InvalidOrdinal("projected structured bytes").into());
+    }
     Ok(Some(SessionTimelineDescriptor {
         session,
         sizes: SessionTimelineSizeFacts {
             item_count,
             projected_text_bytes: nonnegative(row.try_get("text_bytes")?, "projected text bytes")?,
-            projected_structured_bytes: nonnegative(
-                row.try_get("structured_bytes")?,
-                "projected structured bytes",
-            )?,
+            projected_structured_bytes,
             referenced_blob_count: 0,
             referenced_blob_bytes: 0,
         },
