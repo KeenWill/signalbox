@@ -382,6 +382,11 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          # This job's shared cache contains a stale nested target path
+          # (`target/tests/target`) that rust-cache traverses after restore and
+          # reports as ENOENT. Keep registry/git dependency caching, but build
+          # test artifacts in the fresh hosted-runner target directory.
+          cache-targets: false
           shared-key: rust
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run tests
