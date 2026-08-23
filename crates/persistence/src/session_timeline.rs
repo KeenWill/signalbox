@@ -12,7 +12,10 @@ use signalbox_application::{
 use signalbox_domain::SessionId;
 use sqlx::{PgConnection, PgPool, Row};
 
-use crate::mapping::{OutboxEventDiscriminator, outbox_event_discriminator_from_str};
+use crate::mapping::{
+    OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS, OutboxEventDiscriminator,
+    outbox_event_discriminator_from_str,
+};
 
 const PROJECTED_ITEM_ENVELOPE_BYTES: u32 = 64;
 
@@ -361,15 +364,33 @@ async fn load_descriptor(
     {
         return Err(SessionTimelineCorruption::InvalidOrdinal("timeline bounds").into());
     }
+    let projected_structured_bytes = nonnegative(
+        row.try_get("structured_bytes")?,
+        "projected structured bytes",
+    )?;
+    let minimum_item_bytes = u64::from(PROJECTED_ITEM_ENVELOPE_BYTES)
+        .checked_add(OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS.0)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    let maximum_item_bytes = u64::from(PROJECTED_ITEM_ENVELOPE_BYTES)
+        .checked_add(OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS.1)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    let minimum_structured_bytes = item_count
+        .checked_mul(minimum_item_bytes)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    let maximum_structured_bytes = item_count
+        .checked_mul(maximum_item_bytes)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    if projected_structured_bytes < minimum_structured_bytes
+        || projected_structured_bytes > maximum_structured_bytes
+    {
+        return Err(SessionTimelineCorruption::InvalidOrdinal("projected structured bytes").into());
+    }
     Ok(Some(SessionTimelineDescriptor {
         session,
         sizes: SessionTimelineSizeFacts {
             item_count,
             projected_text_bytes: nonnegative(row.try_get("text_bytes")?, "projected text bytes")?,
-            projected_structured_bytes: nonnegative(
-                row.try_get("structured_bytes")?,
-                "projected structured bytes",
-            )?,
+            projected_structured_bytes,
             referenced_blob_count: 0,
             referenced_blob_bytes: 0,
         },

@@ -112,6 +112,34 @@ describe('BoundedSessionHistory', () => {
     expect(history.descriptor?.observed_through).toBe(newer.observed_through)
   })
 
+  it('rejects append-only descriptor facts that regress at a higher cursor', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const original = await scenario.readDescriptor(sessionId)
+    const regressed = {
+      ...original,
+      observed_through: String(BigInt(original.observed_through) + 1n),
+      sizes: {
+        ...original.sizes,
+        item_count: '1',
+        projected_structured_bytes: '78',
+      },
+      first_address: { event_sequence: String(SESSION_FOUNDATION_TOTAL) },
+      latest_address: { event_sequence: String(SESSION_FOUNDATION_TOTAL) },
+    }
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: vi
+        .fn<SessionTimelineSource['readDescriptor']>()
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(regressed),
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(history.describe()).rejects.toThrow('append-only facts are contradictory')
+  })
+
   it('canonicalizes every UUID form accepted by the server', async () => {
     const scenario = new EnormousSessionScenarioSource()
 
@@ -484,6 +512,57 @@ describe('BoundedSessionHistory', () => {
     await expect(HttpSessionTimelineSource.connect(request)).rejects.toThrow(
       'timeline limits are invalid',
     )
+  })
+
+  it('checks an HTTP response item ceiling before generated decoding', async () => {
+    let requestCount = 0
+    const request = async () => {
+      requestCount += 1
+      if (requestCount === 1) {
+        return new Response(
+          JSON.stringify({
+            contract: { name: 'signalbox.web-http', version: '1' },
+            capabilities: {
+              bounded_json: true,
+              same_origin_json_mutations: true,
+              ndjson_streaming: true,
+              bounded_session_timeline: true,
+            },
+            limits: {
+              max_json_body_bytes: 64 * 1024,
+              max_ndjson_item_bytes: 64 * 1024,
+              max_timeline_window_items: 256,
+              max_timeline_window_bytes: 64 * 1024,
+            },
+          }),
+        )
+      }
+      return new Response(
+        JSON.stringify({
+          session_id: sessionId,
+          items: [
+            {
+              address: { event_sequence: 'invalid-before-generated-decoding' },
+              kind: 'input_accepted',
+              projected_structured_bytes: 78,
+            },
+            {
+              address: { event_sequence: '2' },
+              kind: 'input_accepted',
+              projected_structured_bytes: 78,
+            },
+          ],
+          projected_structured_bytes: 156,
+          continuation_before: null,
+          continuation_after: null,
+        }),
+      )
+    }
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    await expect(
+      source.readWindow(sessionId, { kind: 'first' }, { maxItems: 1, maxBytes: 256 }),
+    ).rejects.toThrow('requested item ceiling')
   })
 
   it('does not expose mutable retained items', async () => {
