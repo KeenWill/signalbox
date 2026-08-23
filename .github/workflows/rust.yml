@@ -742,6 +742,10 @@ jobs:
           PARTITION: ${{ matrix.partition }}
           PARTITIONS: ${{ matrix.partitions }}
           FILTER: ${{ matrix.filter }}
+          # nextest runs each ignored integration test in its own libtest
+          # process. Keep deeply composed scheduler fixtures from exhausting
+          # the platform's smaller default test-thread stack.
+          RUST_MIN_STACK: "8388608"
         run: >-
           cargo nextest run
           --archive-file "$RUNNER_TEMP/archive/$SUITE.tar.zst"
