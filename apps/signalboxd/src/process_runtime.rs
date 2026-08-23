@@ -101,7 +101,8 @@ use signalbox_persistence::{
         PostgresCommissionedDispatchStore,
     },
     context_compaction::{
-        AppliedContextCompaction, ContextCompactionCommandLookup, ContextCompactionRepository,
+        AppliedContextCompaction, AutomaticContextCompactionPreviewMember,
+        ContextCompactionCommandLookup, ContextCompactionRepository,
         ContextCompactionRepositoryError, FailedContextCompactionDisposition,
         PrepareContextCompactionOutcome, PrepareContextCompactionRequest,
         PreparedContextCompaction,
@@ -6956,7 +6957,6 @@ where
             session,
             requested_through_position,
             automatic_for_turn: None,
-            automatic_content_byte_target: None,
             defaults_version: defaults.version(),
             selection,
             target,
@@ -7167,6 +7167,7 @@ pub(crate) enum AutomaticContextCompactionError {
     Repository(ContextCompactionRepositoryError),
     Model,
     Configuration,
+    InputDoesNotFit,
     State,
     Integrity,
     AlreadyAttempted,
@@ -7193,7 +7194,7 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
             Self::Read(ProcessReadError::Corruption(_)) | Self::Integrity => {
                 signalbox_application::OperatorFailureClass::FailClosedCorruption
             }
-            Self::Configuration | Self::State | Self::AlreadyAttempted => {
+            Self::Configuration | Self::InputDoesNotFit | Self::State | Self::AlreadyAttempted => {
                 signalbox_application::OperatorFailureClass::CallerOrHubBug
             }
         }
@@ -7218,11 +7219,79 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
             }
             Self::Model => "context_compaction_model",
             Self::Configuration => "context_compaction_configuration",
+            Self::InputDoesNotFit => "context_compaction_input_does_not_fit",
             Self::State => "context_compaction_state",
             Self::Integrity => "context_compaction_integrity",
             Self::AlreadyAttempted => "context_compaction_already_attempted",
         }
     }
+}
+
+fn automatic_context_compaction_boundary(
+    members: &[AutomaticContextCompactionPreviewMember],
+    entries: &[ProcessTranscriptEntry],
+    input_byte_budget: u64,
+) -> Result<Option<u64>, AutomaticContextCompactionError> {
+    if members.len() != entries.len() {
+        return Err(AutomaticContextCompactionError::Integrity);
+    }
+    let mut encoded_lengths = Vec::with_capacity(entries.len());
+    let mut boundaries = Vec::with_capacity(entries.len());
+    for (member, entry) in members.iter().zip(entries) {
+        if member.reference() != transcript_entry_reference(entry) {
+            return Err(AutomaticContextCompactionError::Integrity);
+        }
+        let encoded = serde_json::to_vec(&context_compaction_entry_value(entry))
+            .map_err(|_| AutomaticContextCompactionError::Integrity)?;
+        encoded_lengths.push(
+            u64::try_from(encoded.len()).map_err(|_| AutomaticContextCompactionError::Integrity)?,
+        );
+        boundaries.push((member.position(), member.is_safe_boundary()));
+    }
+    Ok(bounded_rendered_compaction_boundary(
+        &encoded_lengths,
+        &boundaries,
+        input_byte_budget,
+    ))
+}
+
+fn bounded_rendered_compaction_boundary(
+    encoded_lengths: &[u64],
+    boundaries: &[(u64, bool)],
+    input_byte_budget: u64,
+) -> Option<u64> {
+    if encoded_lengths.len() != boundaries.len() {
+        return None;
+    }
+    let separators = u64::try_from(encoded_lengths.len().saturating_sub(1)).ok()?;
+    let total_bytes = encoded_lengths
+        .iter()
+        .fold(2_u64, |total, length| total.saturating_add(*length));
+    let target_bytes = total_bytes
+        .saturating_add(separators)
+        .div_ceil(2)
+        .min(input_byte_budget);
+    let mut prefix_bytes = 1_u64;
+    let mut latest_safe = None;
+    for (index, ((position, safe_boundary), encoded_length)) in
+        boundaries.iter().zip(encoded_lengths).enumerate()
+    {
+        if index > 0 {
+            prefix_bytes = prefix_bytes.saturating_add(1);
+        }
+        prefix_bytes = prefix_bytes.saturating_add(*encoded_length);
+        let candidate_bytes = prefix_bytes.saturating_add(1);
+        if candidate_bytes > input_byte_budget {
+            break;
+        }
+        if *safe_boundary {
+            latest_safe = Some(*position);
+            if candidate_bytes >= target_bytes {
+                return latest_safe;
+            }
+        }
+    }
+    latest_safe
 }
 
 pub(crate) async fn compact_automatically(
@@ -7263,22 +7332,50 @@ pub(crate) async fn compact_automatically(
     let definition = runtime_models
         .resolve(target)
         .ok_or(AutomaticContextCompactionError::Configuration)?;
-    let automatic_content_byte_target = u64::from(definition.context_window_tokens())
+    let compaction_prompt = model_configuration.compaction_prompt();
+    let prompt_bytes = u64::try_from(compaction_prompt.len())
+        .map_err(|_| AutomaticContextCompactionError::Configuration)?;
+    let automatic_input_byte_budget = u64::from(definition.context_window_tokens())
         .checked_sub(u64::from(definition.max_output_tokens()))
-        .and_then(NonZeroU64::new)
+        .and_then(|available| available.checked_sub(prompt_bytes))
+        .filter(|available| *available > 0)
         .ok_or(AutomaticContextCompactionError::Configuration)?;
     let credential_reference = model_calls
         .resolve_session_credential_reference(session, target)
         .await
         .map_err(AutomaticContextCompactionError::Credential)?;
     let repository = ContextCompactionRepository::new(model_calls.pool().clone());
+    let preview = repository
+        .preview_automatic_range(session)
+        .await
+        .map_err(AutomaticContextCompactionError::Repository)?
+        .ok_or(AutomaticContextCompactionError::State)?;
+    let preview_positions = preview
+        .members()
+        .iter()
+        .map(|member| member.position())
+        .collect::<Vec<_>>();
+    let preview_entries = preview
+        .members()
+        .iter()
+        .map(|member| member.reference())
+        .collect::<Vec<_>>();
+    let rendered_entries = ProcessReadRepository::new(model_calls.pool().clone())
+        .read_selected_transcript_entries(&preview_positions, &preview_entries)
+        .await
+        .map_err(AutomaticContextCompactionError::Read)?;
+    let requested_through_position = automatic_context_compaction_boundary(
+        preview.members(),
+        &rendered_entries,
+        automatic_input_byte_budget,
+    )?
+    .ok_or(AutomaticContextCompactionError::InputDoesNotFit)?;
     let prepared = loop {
         let request = PrepareContextCompactionRequest {
             command: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
             session,
-            requested_through_position: None,
+            requested_through_position: Some(requested_through_position),
             automatic_for_turn: Some(turn),
-            automatic_content_byte_target: Some(automatic_content_byte_target),
             defaults_version: defaults.version(),
             selection,
             target,
@@ -7337,6 +7434,19 @@ pub(crate) async fn compact_automatically(
             return Err(AutomaticContextCompactionError::Integrity);
         }
     };
+    if u64::try_from(rendered_range.len())
+        .ok()
+        .is_none_or(|rendered_bytes| rendered_bytes > automatic_input_byte_budget)
+    {
+        fail_context_compaction_until_resolved(
+            &repository,
+            &prepared,
+            FailedContextCompactionDisposition::KnownFailed,
+        )
+        .await
+        .map_err(AutomaticContextCompactionError::Repository)?;
+        return Err(AutomaticContextCompactionError::InputDoesNotFit);
+    }
     authorize_context_compaction_until_resolved(&repository, &prepared)
         .await
         .map_err(AutomaticContextCompactionError::Repository)?;
@@ -7346,7 +7456,7 @@ pub(crate) async fn compact_automatically(
         selection: prepared.selection(),
         target: prepared.target(),
         credential_reference: prepared.credential_reference().to_owned(),
-        system_prompt: model_configuration.compaction_prompt().to_owned(),
+        system_prompt: compaction_prompt.to_owned(),
         rendered_range,
     };
     let result = match model.execute(request).await {
@@ -15446,11 +15556,12 @@ mod tests {
         acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
         acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
         admit_snapshot_reader, admitted_user_content, blob_read_budget,
-        blob_upload_begin_preflight, canonical_review_request_digest,
-        claude_conversion_failure_disposition, codex_conversion_failure_disposition,
-        consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
-        foreground_peer_activity, handle_append_conversation_import,
-        handle_begin_conversation_import, handle_commit_conversation_import, import_evidence,
+        blob_upload_begin_preflight, bounded_rendered_compaction_boundary,
+        canonical_review_request_digest, claude_conversion_failure_disposition,
+        codex_conversion_failure_disposition, consume_snapshot_queued_update,
+        context_compaction_failure_disposition, execute_import, foreground_peer_activity,
+        handle_append_conversation_import, handle_begin_conversation_import,
+        handle_commit_conversation_import, import_evidence,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, map_rejection, nudge_after_process_await_rejection,
         nudge_after_process_message_rejection, nudge_delegation_issuer, nudge_delegation_wake,
@@ -15837,6 +15948,54 @@ mod tests {
         assert_eq!(
             context_compaction_failure_disposition(ContextCompactionModelError::BoundaryLoss),
             FailedContextCompactionDisposition::Ambiguous
+        );
+    }
+
+    #[test]
+    fn automatic_compaction_boundary_counts_the_rendered_json_envelope() {
+        let first = serde_json::json!({
+            "position": 1,
+            "type": "user",
+            "content": "x".repeat(90),
+        });
+        let second = serde_json::json!({
+            "position": 2,
+            "type": "assistant",
+            "content": "y".repeat(90),
+        });
+        let first_bytes = u64::try_from(
+            serde_json::to_vec(&first)
+                .expect("the fixture JSON is serializable")
+                .len(),
+        )
+        .expect("the fixture length fits u64");
+        let second_bytes = u64::try_from(
+            serde_json::to_vec(&second)
+                .expect("the fixture JSON is serializable")
+                .len(),
+        )
+        .expect("the fixture length fits u64");
+        let first_array_bytes = first_bytes + 2;
+
+        assert_eq!(
+            bounded_rendered_compaction_boundary(
+                &[first_bytes, second_bytes],
+                &[(11, true), (12, true)],
+                first_array_bytes,
+            ),
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn automatic_compaction_boundary_never_crosses_the_model_budget_for_a_tool_exchange() {
+        assert_eq!(
+            bounded_rendered_compaction_boundary(
+                &[60, 100, 100],
+                &[(21, true), (22, false), (23, true)],
+                170,
+            ),
+            Some(21)
         );
     }
 

@@ -271,7 +271,6 @@ async fn context_compaction_usage_is_available_to_pre_activation_compaction()
             session: fixture.session,
             requested_through_position: Some(1),
             automatic_for_turn: None,
-            automatic_content_byte_target: None,
             defaults_version: SessionConfigurationDefaultsVersion::first(),
             selection: DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
             target,

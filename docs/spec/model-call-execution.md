@@ -16,9 +16,9 @@ headroom is verified against this PR
 successor frontier is verified against this PR
 (`agent/daemon-live-headroom-disjoint-suffix`). Dedicated-compaction usage as
 the next queued-turn baseline is verified against this PR
-(`agent/daemon-live-compaction-source-headroom`). Automatic compaction's
-model-bounded content-weighted boundary is verified against this PR
-(`agent/daemon-live-model-bounded-compaction`). Codex advisory output
+(`agent/daemon-live-compaction-source-headroom`). Automatic compaction's exact
+model-visible input boundary is verified against this PR
+(`agent/daemon-live-compaction-rendered-input-bound`). Codex advisory output
 reservation behavior is re-verified against this PR
 (`agent/daemon-live-codex-output-reservation`). Failed automatic-compaction
 terminal closure is verified against this PR
@@ -407,16 +407,18 @@ closed. The daemon retries database and ambiguous-commit outcomes at this seam;
 it does not start provider interaction until authorization is resolved. The
 automatic preparation path retries transient database failures while loading its
 selected transcript range, retaining the live `Prepared` call as provably unsent
-rather than consuming that queued turn's sole automatic attempt. It weights each
-model-visible entry by its durable content bytes, with unit weight for an empty
-entry, and selects the first safe boundary at or beyond the smaller of half the
-total weight and the selected model's context window after its configured output
-reservation. An open tool exchange extends the prefix through its first safe
-closing boundary. This keeps a few large entries from remaining indefinitely in
-a count-light tail without making the summary request repeat a complete
-oversized input merely because the visible history kept growing; an indivisible
-entry or tool exchange can still cross the derived target. An integrity failure
-still terminalizes the unsent call. After a successful provider result, the
+rather than consuming that queued turn's sole automatic attempt. Before that
+claim, it reads the projected model-visible inventory and renders each entry in
+the same compact JSON shape the summary model receives. It selects the first
+closed tool-exchange boundary at or beyond half the rendered range only while
+that exact JSON prefix, the configured compaction prompt, and the configured
+output reservation fit the selected model's context window. If an open tool
+exchange would cross the budget, selection falls back to the latest preceding
+safe boundary; no provider call is prepared when even the first safe prefix
+cannot fit. Preparation records that exact position. A second rendering after
+the claim prevents a concurrent frontier change from sending a range outside the
+same bound: an oversized mismatch terminalizes the still-unsent dedicated call.
+An integrity failure does the same. After a successful provider result, the
 daemon retains the summary and its usage in memory until the exact completion is
 durably applied or replayed.
 

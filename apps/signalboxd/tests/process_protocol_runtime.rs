@@ -2075,7 +2075,6 @@ fn direct_compaction_request(
         session: SessionId::from_uuid(session_id.into_uuid()),
         requested_through_position,
         automatic_for_turn: None,
-        automatic_content_byte_target: None,
         defaults_version: SessionConfigurationDefaultsVersion::first(),
         selection: DirectModelSelection::from_uuid(Uuid::from_u128(1)),
         target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
@@ -7761,7 +7760,6 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
             session: SessionId::from_uuid(session_id.into_uuid()),
             requested_through_position: None,
             automatic_for_turn: None,
-            automatic_content_byte_target: None,
             defaults_version: SessionConfigurationDefaultsVersion::first(),
             selection: DirectModelSelection::from_uuid(Uuid::from_u128(1)),
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
@@ -7809,7 +7807,6 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
             session: SessionId::from_uuid(session_id.into_uuid()),
             requested_through_position: None,
             automatic_for_turn: None,
-            automatic_content_byte_target: None,
             defaults_version: SessionConfigurationDefaultsVersion::first(),
             selection: DirectModelSelection::from_uuid(Uuid::from_u128(1)),
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
@@ -8203,7 +8200,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
             .replace("max_output_tokens = 256", "max_output_tokens = 1")
             .replace(
                 "context_window_tokens = 200000",
-                "context_window_tokens = 5",
+                "context_window_tokens = 4096",
             ),
     )?;
     let ordinary_runtime = RecordingCountedScriptedModel::following(
@@ -8212,7 +8209,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
             "automatic guard current reply",
             TokenUsage::unreported(),
         )],
-        [40, 4],
+        [8192, 4],
     );
     let summary_text = String::from("automatic guard summary");
     let summary_runtime = ScriptedModel::single(completed_script(
@@ -8248,10 +8245,6 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
             (
                 signalbox_model_runtime::ConversationRole::User,
                 format!("Signalbox prior-conversation summary:\n{summary_text}"),
-            ),
-            (
-                signalbox_model_runtime::ConversationRole::Assistant,
-                first_assistant.clone(),
             ),
             (
                 signalbox_model_runtime::ConversationRole::User,
@@ -8308,7 +8301,7 @@ async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
     )
     .await?;
     let saturated_usage = TokenUsage {
-        input_tokens: Some(50),
+        input_tokens: Some(5000),
         output_tokens: Some(0),
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
@@ -8342,7 +8335,7 @@ async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
             .replace("max_output_tokens = 256", "max_output_tokens = 1")
             .replace(
                 "context_window_tokens = 200000",
-                "context_window_tokens = 50",
+                "context_window_tokens = 4096",
             ),
     )?;
     let runtime_models = configuration.runtime_model_catalog();
@@ -8450,11 +8443,11 @@ async fn s01_s03_inv014_inv015_failed_automatic_compaction_closes_turn_call_free
             .replace("max_output_tokens = 256", "max_output_tokens = 1")
             .replace(
                 "context_window_tokens = 200000",
-                "context_window_tokens = 5",
+                "context_window_tokens = 4096",
             ),
     )?;
     let ordinary_runtime =
-        RecordingCountedScriptedModel::following(std::iter::empty::<Script>(), [40, 40, 40]);
+        RecordingCountedScriptedModel::following(std::iter::empty::<Script>(), [8192, 8192, 8192]);
     let ordinary_probe = ordinary_runtime.clone();
     let summary_runtime = ScriptedModel::single(Script::delivering(
         TerminalEvidence::ProviderError(ProviderErrorEvidence {

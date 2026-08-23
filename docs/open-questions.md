@@ -142,48 +142,6 @@ specification diff. Accepted cross-component and wire contracts live in the
   whether an interrupt-only path may bypass `StopRequested` remains undecided.
   Later scope. (S07)
 
-### Automatic context compaction
-
-This is a blocking condition rather than an open design question. Automatic
-context compaction ships with a known defect on its primary path, accepted on
-the grounds that the code sits unused until something depends on it. That ground
-disappears the moment anything relies on it, so the condition is recorded here
-rather than only in the review thread that raised it.
-
-**The defect.** The compaction request wraps accumulated plain-text history in
-JSON with provenance metadata and reserves the same `max_output_tokens` as the
-ordinary call, and is never counted against `context_window_tokens`. It can
-therefore be *larger* than the input that already overflowed the window. The
-provider may reject the summary call for context overflow; that call is then
-terminalized, and the per-turn automatic marker prevents a second attempt.
-
-**The consequence.** A session that crosses its context window has its queued
-turn stalled with its single automatic attempt consumed and no path forward
-inside the running daemon — which is the exact situation automatic compaction
-exists to rescue. Nothing durable is corrupted, no summary boundary is written
-wrong, and no transcript entries are lost: the failed call is recorded as
-legitimate terminal non-Completed evidence. The session is stalled, not damaged.
-
-**The trigger is the common case, not an edge of it.** Compaction is invoked
-precisely when history is large. History large enough that wrapping it in JSON
-with metadata overflows the window is the middle of that condition rather than
-its boundary.
-
-**The condition.** Automatic context compaction must not be relied on until the
-summary call is guaranteed to fit. Anything built on top of it, and any workflow
-that assumes a long-running session will rescue itself, is blocked on that fix
-rather than merely improved by it. Explicit compaction is unaffected by this
-particular defect.
-
-**Shape of the fix.** Count the summary request against `context_window_tokens`
-before triggering it, or select a compaction strategy guaranteed to fit — for
-example bounding the history actually wrapped rather than reserving the full
-`max_output_tokens` on top of unbounded input. Scheduled as a follow-up pull
-request against a quiet `main` rather than inside the compaction stack.
-
-Raised as a review finding and dispositioned with this condition attached:
-https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
-
 ## Session organization, visibility, and retention
 
 - **Creation-attributed default visibility.** The implemented visibility and

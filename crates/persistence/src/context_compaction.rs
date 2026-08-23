@@ -1,6 +1,6 @@
 //! Durable explicit context-compaction command and call lifecycle.
 
-use std::{collections::BTreeMap, error::Error, fmt, num::NonZeroU64};
+use std::{collections::BTreeMap, error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
@@ -34,8 +34,6 @@ pub struct PrepareContextCompactionRequest {
     pub requested_through_position: Option<u64>,
     /// Queued turn whose context guard owns this automatic attempt.
     pub automatic_for_turn: Option<TurnId>,
-    /// Model-derived content-byte target for an automatic summary prefix.
-    pub automatic_content_byte_target: Option<NonZeroU64>,
     /// Current defaults epoch observed before entering the transaction.
     pub defaults_version: SessionConfigurationDefaultsVersion,
     /// Current direct model selection after freezing any alias.
@@ -76,6 +74,50 @@ pub struct PreparedContextCompaction {
     summarized_positions: Box<[u64]>,
     summary_entry: SemanticTranscriptEntryId,
     result_frontier: ContextFrontierId,
+}
+
+/// Read-only model-visible inventory used to choose an automatic boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutomaticContextCompactionPreview {
+    source_frontier: ContextFrontierId,
+    members: Box<[AutomaticContextCompactionPreviewMember]>,
+}
+
+impl AutomaticContextCompactionPreview {
+    /// Returns the complete frontier whose projected members were observed.
+    pub const fn source_frontier(&self) -> ContextFrontierId {
+        self.source_frontier
+    }
+
+    /// Returns projected members in model-visible order.
+    pub fn members(&self) -> &[AutomaticContextCompactionPreviewMember] {
+        &self.members
+    }
+}
+
+/// One projected entry and whether it closes every preceding tool exchange.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AutomaticContextCompactionPreviewMember {
+    position: u64,
+    reference: SemanticTranscriptEntryRef,
+    safe_boundary: bool,
+}
+
+impl AutomaticContextCompactionPreviewMember {
+    /// Returns the entry's one-based physical frontier position.
+    pub const fn position(self) -> u64 {
+        self.position
+    }
+
+    /// Returns the exact semantic entry reference.
+    pub const fn reference(self) -> SemanticTranscriptEntryRef {
+        self.reference
+    }
+
+    /// Reports whether a summary through this entry closes all tool exchanges.
+    pub const fn is_safe_boundary(self) -> bool {
+        self.safe_boundary
+    }
 }
 
 impl PreparedContextCompaction {
@@ -283,6 +325,34 @@ impl ContextCompactionRepository {
             None,
         )
         .await
+    }
+
+    /// Reads the current projected frontier without claiming a compaction.
+    ///
+    /// Automatic callers render this immutable inventory before choosing the
+    /// exact boundary they later commit. The prepare transaction reselects the
+    /// frontier and validates that boundary before any provider interaction.
+    pub async fn preview_automatic_range(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<AutomaticContextCompactionPreview>, ContextCompactionRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let source = load_compaction_source(&mut transaction, session).await?;
+        let preview = match source {
+            Some(source) if source.member_count > 0 => {
+                let visible =
+                    load_projected_frontier_members(&mut transaction, session, source.frontier)
+                        .await?;
+                let members = preview_members(&visible)?;
+                Some(AutomaticContextCompactionPreview {
+                    source_frontier: source.frontier,
+                    members: members.into_boxed_slice(),
+                })
+            }
+            Some(_) | None => None,
+        };
+        transaction.rollback().await?;
+        Ok(preview)
     }
 
     /// Commits InFlight before any provider interaction begins.
@@ -775,13 +845,56 @@ impl PreparedContextCompaction {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompactionSource {
+    frontier: ContextFrontierId,
+    member_count: u64,
+}
+
+async fn load_compaction_source(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session: SessionId,
+) -> Result<Option<CompactionSource>, ContextCompactionRepositoryError> {
+    let row = sqlx::query(
+        "WITH candidate (frontier_id) AS (
+            SELECT turn_lifecycle_effective_terminal_frontier(session_id, turn_id)
+              FROM turn_lifecycle
+             WHERE session_id = $1
+               AND (state_kind = 'terminal' OR delegation_runtime_terminal)
+            UNION ALL
+            SELECT seed_context_frontier_id
+              FROM imported_session_seed
+             WHERE session_id = $1
+            UNION ALL
+            SELECT result_frontier_id
+              FROM context_compaction
+             WHERE session_id = $1
+         )
+         SELECT frontier.context_frontier_id, frontier.member_count
+           FROM candidate
+           JOIN context_frontier AS frontier
+             ON frontier.owning_session_id = $1
+            AND frontier.context_frontier_id = candidate.frontier_id
+          ORDER BY frontier.member_count DESC
+          LIMIT 1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    row.map(|row| {
+        Ok(CompactionSource {
+            frontier: ContextFrontierId::from_uuid(row.try_get("context_frontier_id")?),
+            member_count: decode_u64(row.try_get("member_count")?, "source member count")?,
+        })
+    })
+    .transpose()
+}
+
 async fn prepare_in_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     request: &PrepareContextCompactionRequest,
 ) -> Result<(bool, PrepareContextCompactionOutcome), ContextCompactionRepositoryError> {
-    if request.automatic_for_turn.is_some() != request.automatic_content_byte_target.is_some()
-        || request.automatic_for_turn.is_some() && request.requested_through_position.is_some()
-    {
+    if request.automatic_for_turn.is_some() && request.requested_through_position.is_none() {
         return Ok((false, PrepareContextCompactionOutcome::InvalidBoundary));
     }
     match lookup_command_on_connection(
@@ -956,38 +1069,12 @@ async fn prepare_in_transaction(
     if busy {
         return Ok((false, PrepareContextCompactionOutcome::Busy));
     }
-    let source = sqlx::query(
-        "WITH candidate (frontier_id) AS (
-            SELECT turn_lifecycle_effective_terminal_frontier(session_id, turn_id)
-              FROM turn_lifecycle
-             WHERE session_id = $1
-               AND (state_kind = 'terminal' OR delegation_runtime_terminal)
-            UNION ALL
-            SELECT seed_context_frontier_id
-              FROM imported_session_seed
-             WHERE session_id = $1
-            UNION ALL
-            SELECT result_frontier_id
-              FROM context_compaction
-             WHERE session_id = $1
-         )
-         SELECT frontier.context_frontier_id, frontier.member_count
-           FROM candidate
-           JOIN context_frontier AS frontier
-             ON frontier.owning_session_id = $1
-            AND frontier.context_frontier_id = candidate.frontier_id
-          ORDER BY frontier.member_count DESC
-          LIMIT 1",
-    )
-    .bind(session_id_to_uuid(request.session))
-    .fetch_optional(&mut **transaction)
-    .await?;
+    let source = load_compaction_source(transaction, request.session).await?;
     let Some(source) = source else {
         return Ok((false, PrepareContextCompactionOutcome::NoBoundary));
     };
-    let source_frontier = ContextFrontierId::from_uuid(source.try_get("context_frontier_id")?);
-    let member_count = decode_u64(source.try_get("member_count")?, "source member count")?;
-    if member_count == 0 {
+    let source_frontier = source.frontier;
+    if source.member_count == 0 {
         return Ok((false, PrepareContextCompactionOutcome::NoBoundary));
     }
     let predecessor = sqlx::query(
@@ -1017,10 +1104,7 @@ async fn prepare_in_transaction(
         Some(position) => visible
             .iter()
             .position(|member| member.position == position),
-        None => match request.automatic_content_byte_target {
-            Some(target) => bounded_safe_boundary(&visible, target.get()),
-            None => latest_safe_boundary(&visible),
-        },
+        None => latest_safe_boundary(&visible),
     };
     let Some(through_index) = through_index else {
         return Ok((false, PrepareContextCompactionOutcome::InvalidBoundary));
@@ -1189,7 +1273,6 @@ struct ProjectedFrontierMember {
     position: u64,
     reference: SemanticTranscriptEntryRef,
     payload_kind: String,
-    content_bytes: u64,
     summary_range: Option<(SemanticTranscriptEntryRef, SemanticTranscriptEntryRef)>,
 }
 
@@ -1201,33 +1284,6 @@ async fn load_projected_frontier_members(
     let rows = sqlx::query(
         "SELECT member.member_position, member.source_session_id,
                 member.semantic_entry_id, entry.payload_kind,
-                CASE entry.payload_kind
-                    WHEN 'imported_entry' THEN
-                        COALESCE(octet_length(imported.content_encoding), 0)
-                    WHEN 'origin_accepted_input' THEN
-                        COALESCE(octet_length(input.content_text), 0)
-                    WHEN 'steering_accepted_input' THEN
-                        COALESCE(octet_length(input.content_text), 0)
-                    WHEN 'context_summary' THEN
-                        COALESCE(octet_length(entry.context_summary_value), 0)
-                    WHEN 'assistant_text' THEN
-                        COALESCE(octet_length(entry.assistant_text_value), 0)
-                    WHEN 'assistant_tool_use' THEN
-                        COALESCE(octet_length(request.tool_name), 0)
-                        + COALESCE(octet_length(request.arguments_text), 0)
-                    WHEN 'tool_execution_result' THEN
-                        COALESCE(octet_length(attempt.result_text), 0)
-                        + COALESCE(octet_length(attempt.error_detail), 0)
-                    WHEN 'tool_denied' THEN
-                        COALESCE(octet_length(decision.denial_reason), 0)
-                    WHEN 'delegated_task' THEN
-                        COALESCE(octet_length(task.task_content), 0)
-                    WHEN 'delegation_message' THEN
-                        COALESCE(octet_length(message.content_text), 0)
-                    WHEN 'delegation_result' THEN
-                        COALESCE(octet_length(child_result.content_text), 0)
-                    ELSE 0
-                END::numeric AS content_bytes,
                 entry.context_summary_first_source_session_id,
                 entry.context_summary_first_entry_id,
                 entry.context_summary_through_source_session_id,
@@ -1236,29 +1292,6 @@ async fn load_projected_frontier_members(
            JOIN semantic_transcript_entry AS entry
              ON entry.source_session_id = member.source_session_id
             AND entry.semantic_entry_id = member.semantic_entry_id
-           LEFT JOIN accepted_input AS input
-             ON input.accepted_input_id = entry.origin_accepted_input_id
-            AND input.session_id = entry.source_session_id
-           LEFT JOIN imported_transcript_entry AS imported
-             ON imported.imported_conversation_id = entry.imported_conversation_id
-            AND imported.imported_transcript_entry_id =
-                entry.imported_transcript_entry_id
-           LEFT JOIN tool_request AS request
-             ON request.request_id = entry.assistant_tool_request_id
-            AND request.session_id = entry.source_session_id
-           LEFT JOIN tool_attempt AS attempt
-             ON attempt.attempt_id = entry.tool_result_attempt_id
-            AND attempt.session_id = entry.source_session_id
-           LEFT JOIN tool_approval_decision AS decision
-             ON decision.request_id = entry.tool_result_request_id
-           LEFT JOIN session_delegation_initial_task AS task
-             ON task.child_session_id = entry.source_session_id
-            AND task.semantic_entry_id = entry.semantic_entry_id
-           LEFT JOIN session_message AS message
-             ON message.message_id = entry.delegation_message_id
-           LEFT JOIN session_child_result AS child_result
-             ON child_result.spawning_tool_request_id =
-                entry.delegation_result_spawning_tool_request_id
           WHERE member.owning_session_id = $1
             AND member.context_frontier_id = $2
           ORDER BY member.member_position",
@@ -1307,7 +1340,6 @@ async fn load_projected_frontier_members(
                 SemanticTranscriptEntryId::from_uuid(row.try_get("semantic_entry_id")?),
             ),
             payload_kind,
-            content_bytes: decode_u64(row.try_get("content_bytes")?, "entry content bytes")?,
             summary_range,
         });
     }
@@ -1386,6 +1418,30 @@ fn range_closes_tool_exchanges(members: &[ProjectedFrontierMember]) -> bool {
     open_requests == 0
 }
 
+fn preview_members(
+    members: &[ProjectedFrontierMember],
+) -> Result<Vec<AutomaticContextCompactionPreviewMember>, ContextCompactionRepositoryError> {
+    let mut open_requests = 0_usize;
+    let mut preview = Vec::with_capacity(members.len());
+    for member in members {
+        match member.payload_kind.as_str() {
+            "assistant_tool_use" => open_requests = open_requests.saturating_add(1),
+            "tool_execution_result" | "tool_denied" | "tool_closed_by_turn_end" => {
+                open_requests = open_requests.checked_sub(1).ok_or(
+                    ContextCompactionCorruption::Inconsistent("context compaction tool exchange"),
+                )?;
+            }
+            _ => {}
+        }
+        preview.push(AutomaticContextCompactionPreviewMember {
+            position: member.position,
+            reference: member.reference,
+            safe_boundary: open_requests == 0,
+        });
+    }
+    Ok(preview)
+}
+
 fn latest_safe_boundary(members: &[ProjectedFrontierMember]) -> Option<usize> {
     let mut latest = None;
     let mut open_requests = 0usize;
@@ -1402,32 +1458,6 @@ fn latest_safe_boundary(members: &[ProjectedFrontierMember]) -> Option<usize> {
         }
     }
     latest
-}
-
-fn bounded_safe_boundary(
-    members: &[ProjectedFrontierMember],
-    content_byte_target: u64,
-) -> Option<usize> {
-    let total_weight = members.iter().fold(0_u64, |total, member| {
-        total.saturating_add(member.content_bytes.max(1))
-    });
-    let target_weight = total_weight.div_ceil(2).min(content_byte_target);
-    let mut through_weight = 0_u64;
-    let mut open_requests = 0_usize;
-    for (index, member) in members.iter().enumerate() {
-        through_weight = through_weight.saturating_add(member.content_bytes.max(1));
-        match member.payload_kind.as_str() {
-            "assistant_tool_use" => open_requests = open_requests.saturating_add(1),
-            "tool_execution_result" | "tool_denied" | "tool_closed_by_turn_end" => {
-                open_requests = open_requests.checked_sub(1)?;
-            }
-            _ => {}
-        }
-        if through_weight >= target_weight && open_requests == 0 {
-            return Some(index);
-        }
-    }
-    None
 }
 
 fn required<T>(
@@ -1573,7 +1603,7 @@ impl From<ContextCompactionCorruption> for ContextCompactionRepositoryError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProjectedFrontierMember, Uuid, bounded_safe_boundary, latest_safe_boundary,
+        ProjectedFrontierMember, Uuid, latest_safe_boundary, preview_members,
         project_frontier_members,
     };
     use signalbox_domain::{SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId};
@@ -1586,19 +1616,10 @@ mod tests {
     }
 
     fn ordinary(position: u64, reference: SemanticTranscriptEntryRef) -> ProjectedFrontierMember {
-        weighted_ordinary(position, reference, 1)
-    }
-
-    fn weighted_ordinary(
-        position: u64,
-        reference: SemanticTranscriptEntryRef,
-        content_bytes: u64,
-    ) -> ProjectedFrontierMember {
         ProjectedFrontierMember {
             position,
             reference,
             payload_kind: String::from("origin_accepted_input"),
-            content_bytes,
             summary_range: None,
         }
     }
@@ -1613,7 +1634,6 @@ mod tests {
             position,
             reference,
             payload_kind: String::from("context_summary"),
-            content_bytes: 1,
             summary_range: Some((first, through)),
         }
     }
@@ -1666,102 +1686,40 @@ mod tests {
     }
 
     #[test]
-    fn automatic_boundary_selects_first_safe_member_at_half_weight() {
-        let visible = vec![
-            ordinary(1, entry(0x7021)),
-            ordinary(2, entry(0x7022)),
-            ordinary(3, entry(0x7023)),
-            ordinary(4, entry(0x7024)),
-        ];
-
-        assert_eq!(bounded_safe_boundary(&visible, u64::MAX), Some(1));
-    }
-
-    #[test]
-    fn automatic_boundary_closes_a_tool_exchange_crossing_the_midpoint() {
+    fn automatic_preview_marks_only_closed_tool_exchange_boundaries_safe() {
         let visible = vec![
             ProjectedFrontierMember {
                 position: 1,
                 reference: entry(0x7031),
                 payload_kind: "assistant_tool_use".to_owned(),
-                content_bytes: 1,
                 summary_range: None,
             },
             ProjectedFrontierMember {
                 position: 2,
                 reference: entry(0x7032),
                 payload_kind: "assistant_tool_use".to_owned(),
-                content_bytes: 1,
                 summary_range: None,
             },
             ProjectedFrontierMember {
                 position: 3,
                 reference: entry(0x7033),
                 payload_kind: "tool_execution_result".to_owned(),
-                content_bytes: 1,
                 summary_range: None,
             },
             ProjectedFrontierMember {
                 position: 4,
                 reference: entry(0x7034),
                 payload_kind: "tool_execution_result".to_owned(),
-                content_bytes: 1,
                 summary_range: None,
             },
             ordinary(5, entry(0x7035)),
-            ordinary(6, entry(0x7036)),
         ];
+        let preview = preview_members(&visible).expect("the tool exchange is balanced");
 
-        assert_eq!(bounded_safe_boundary(&visible, u64::MAX), Some(3));
-    }
-
-    #[test]
-    fn automatic_boundary_consumes_half_of_a_byte_heavy_tail() {
-        let visible = vec![
-            weighted_ordinary(1, entry(0x7041), 1),
-            weighted_ordinary(2, entry(0x7042), 1),
-            weighted_ordinary(3, entry(0x7043), 100),
-            weighted_ordinary(4, entry(0x7044), 100),
-        ];
-
-        assert_eq!(bounded_safe_boundary(&visible, u64::MAX), Some(2));
-    }
-
-    #[test]
-    fn automatic_boundary_stops_at_the_model_derived_content_budget() {
-        let visible = vec![
-            weighted_ordinary(1, entry(0x7051), 100),
-            weighted_ordinary(2, entry(0x7052), 100),
-            weighted_ordinary(3, entry(0x7053), 100),
-            weighted_ordinary(4, entry(0x7054), 100),
-            weighted_ordinary(5, entry(0x7055), 100),
-            weighted_ordinary(6, entry(0x7056), 100),
-        ];
-
-        assert_eq!(bounded_safe_boundary(&visible, 200), Some(1));
-    }
-
-    #[test]
-    fn automatic_boundary_closes_a_tool_exchange_crossing_the_model_budget() {
-        let visible = vec![
-            weighted_ordinary(1, entry(0x7061), 100),
-            ProjectedFrontierMember {
-                position: 2,
-                reference: entry(0x7062),
-                payload_kind: "assistant_tool_use".to_owned(),
-                content_bytes: 100,
-                summary_range: None,
-            },
-            ProjectedFrontierMember {
-                position: 3,
-                reference: entry(0x7063),
-                payload_kind: "tool_execution_result".to_owned(),
-                content_bytes: 100,
-                summary_range: None,
-            },
-            weighted_ordinary(4, entry(0x7064), 100),
-        ];
-
-        assert_eq!(bounded_safe_boundary(&visible, 150), Some(2));
+        assert!(!preview[0].is_safe_boundary());
+        assert!(!preview[1].is_safe_boundary());
+        assert!(!preview[2].is_safe_boundary());
+        assert!(preview[3].is_safe_boundary());
+        assert!(preview[4].is_safe_boundary());
     }
 }
