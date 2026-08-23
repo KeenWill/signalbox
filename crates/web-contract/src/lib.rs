@@ -561,6 +561,10 @@ pub enum WebTimelineToolFailureCause {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "browser wire DTO variants preserve their direct contract shape without allocation-only indirection"
+)]
 pub enum WebTimelineToolAttemptEvidence {
     RequestOnly {},
     PhysicalAttempt {
