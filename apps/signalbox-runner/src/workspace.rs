@@ -1126,8 +1126,11 @@ fn remove_directory_steps(
     while let Some(step) = steps.pop() {
         match step {
             RemovalStep::Inspect { parent, name } => {
-                let status =
-                    statat(parent.as_ref(), &name, AtFlags::SYMLINK_NOFOLLOW).map_err(rustix_io)?;
+                let status = match statat(parent.as_ref(), &name, AtFlags::SYMLINK_NOFOLLOW) {
+                    Ok(status) => status,
+                    Err(error) if error == rustix::io::Errno::NOENT => continue,
+                    Err(error) => return Err(rustix_io(error)),
+                };
                 if FileType::from_raw_mode(status.st_mode) == FileType::Directory {
                     let opaque_descriptor = openat(
                         parent.as_ref(),
@@ -1318,6 +1321,7 @@ mod tests {
         fs, future,
         os::unix::{ffi::OsStringExt as _, fs::PermissionsExt as _},
         path::Path,
+        rc::Rc,
         sync::Arc,
         time::Duration,
     };
@@ -1333,8 +1337,9 @@ mod tests {
     use crate::{EnrollmentAuthority, EnrollmentReceipt, RunnerStateRoot};
 
     use super::{
-        DOCUMENT_MODE, MANIFEST_FILE, PrepareRepositoryWorkspaceError, PrivateWorkspaceRequest,
-        RepositoryWorkspaceRequest, RunnerWorkspaceError, TRASH_DIRECTORY,
+        CLEANUP_DIRECTORY_RESCAN_LIMIT, DOCUMENT_MODE, DirectoryIdentity, MANIFEST_FILE,
+        PrepareRepositoryWorkspaceError, PrivateWorkspaceRequest, RemovalStep,
+        RepositoryWorkspaceRequest, RunnerWorkspaceError, TRASH_DIRECTORY, remove_directory_steps,
     };
 
     const SESSION: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e1;
@@ -1668,6 +1673,42 @@ mod tests {
             1,
         )
         .expect("cleanup rescans and removes the concurrently written file");
+
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn directory_cleanup_ignores_a_recorded_entry_that_disappears() {
+        let parent = tempfile::tempdir().expect("the cleanup fixture parent exists");
+        let staging_name = "staging";
+        let entry_name = "disappearing";
+        let staging = parent.path().join(staging_name);
+        fs::create_dir(&staging).expect("the cleanup fixture staging directory exists");
+        fs::write(staging.join(entry_name), LATE_REPOSITORY_WRITE_BYTES)
+            .expect("the cleanup fixture entry exists before inspection");
+        let parent_descriptor =
+            Rc::new(fs::File::open(parent.path()).expect("the cleanup fixture parent opens"));
+        let staging_descriptor =
+            Rc::new(fs::File::open(&staging).expect("the cleanup fixture staging directory opens"));
+        let identity = DirectoryIdentity::from_file(staging_descriptor.as_ref())
+            .expect("the cleanup fixture staging identity is available");
+        let steps = vec![
+            RemovalStep::RemoveDirectory {
+                parent: parent_descriptor,
+                name: OsString::from(staging_name),
+                identity,
+                directory: Rc::clone(&staging_descriptor),
+            },
+            RemovalStep::Inspect {
+                parent: staging_descriptor,
+                name: OsString::from(entry_name),
+            },
+        ];
+        fs::remove_file(staging.join(entry_name))
+            .expect("the preparer removes the recorded entry before inspection");
+
+        remove_directory_steps(steps, CLEANUP_DIRECTORY_RESCAN_LIMIT)
+            .expect("cleanup ignores the entry that already disappeared");
 
         assert!(!staging.exists());
     }
