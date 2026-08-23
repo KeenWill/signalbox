@@ -11,6 +11,7 @@ export interface CommandContext {
   selectedImportEntry?: string | null
   requestedImportEntry?: string
   selectImportEntry?: (id: string) => void
+  canSelectImportEntry?: boolean
   canContinueImport?: boolean
   continueImport?: (relationship: 'resume' | 'fork') => void
   canRetryImport?: boolean
@@ -142,7 +143,9 @@ export const commandRegistry = [
     category: 'Imports',
     bindings: [],
     available: (context) =>
-      context.requestedImportEntry !== undefined && context.selectImportEntry !== undefined,
+      context.canSelectImportEntry === true &&
+      context.requestedImportEntry !== undefined &&
+      context.selectImportEntry !== undefined,
     run: (context) => context.selectImportEntry?.(context.requestedImportEntry ?? ''),
   },
   {
@@ -155,7 +158,9 @@ export const commandRegistry = [
       { label: 'ArrowDown', scope: 'imports' },
     ],
     available: (context) =>
-      (context.importEntryIds?.length ?? 0) > 0 && context.selectImportEntry !== undefined,
+      context.canSelectImportEntry === true &&
+      (context.importEntryIds?.length ?? 0) > 0 &&
+      context.selectImportEntry !== undefined,
     run: (context) => {
       const ids = context.importEntryIds ?? []
       const currentIndex = ids.indexOf(context.selectedImportEntry ?? '')
@@ -173,7 +178,9 @@ export const commandRegistry = [
       { label: 'ArrowUp', scope: 'imports' },
     ],
     available: (context) =>
-      (context.importEntryIds?.length ?? 0) > 0 && context.selectImportEntry !== undefined,
+      context.canSelectImportEntry === true &&
+      (context.importEntryIds?.length ?? 0) > 0 &&
+      context.selectImportEntry !== undefined,
     run: (context) => {
       const ids = context.importEntryIds ?? []
       const currentIndex = Math.max(ids.indexOf(context.selectedImportEntry ?? ''), 0)
@@ -194,7 +201,9 @@ export const commandRegistry = [
       { label: 'Home', scope: 'imports' },
     ],
     available: (context) =>
-      (context.importEntryIds?.length ?? 0) > 0 && context.selectImportEntry !== undefined,
+      context.canSelectImportEntry === true &&
+      (context.importEntryIds?.length ?? 0) > 0 &&
+      context.selectImportEntry !== undefined,
     run: (context) => context.selectImportEntry?.(context.importEntryIds?.[0] ?? ''),
   },
   {
@@ -211,7 +220,9 @@ export const commandRegistry = [
       { label: 'End', scope: 'imports' },
     ],
     available: (context) =>
-      (context.importEntryIds?.length ?? 0) > 0 && context.selectImportEntry !== undefined,
+      context.canSelectImportEntry === true &&
+      (context.importEntryIds?.length ?? 0) > 0 &&
+      context.selectImportEntry !== undefined,
     run: (context) => context.selectImportEntry?.(context.importEntryIds?.at(-1) ?? ''),
   },
   {

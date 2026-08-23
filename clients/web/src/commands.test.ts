@@ -28,12 +28,30 @@ describe('command registry', () => {
       focusTimeline: () => undefined,
       importEntryIds,
       selectedImportEntry,
+      canSelectImportEntry: true,
       selectImportEntry: (id) => {
         selectedImportEntry = id as (typeof importEntryIds)[number]
       },
     })
 
     expect(selectedImportEntry).toBe(importEntryIds[1])
+  })
+
+  it('does not run imported-entry navigation while exact recovery freezes selection', () => {
+    const selected: string[] = []
+
+    invokeCommand('imports.entry.next', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      importEntryIds: ['import-entry-1', 'import-entry-2'],
+      selectedImportEntry: 'import-entry-1',
+      canSelectImportEntry: false,
+      selectImportEntry: (id) => selected.push(id),
+    })
+
+    expect(selected).toEqual([])
   })
 
   it('runs available continuation actions through stable command identities', () => {

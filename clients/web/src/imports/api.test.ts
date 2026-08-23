@@ -3,6 +3,8 @@ import {
   HttpImportApi,
   ImportDescriptorCorrelationError,
   ImportListCorrelationError,
+  ImportReceiptCorrelationError,
+  ImportResponseTooLargeError,
   ImportWindowCorrelationError,
 } from './api'
 
@@ -70,6 +72,43 @@ describe('HttpImportApi correlation', () => {
 
     expect(bootstrapValidation).toHaveBeenCalledTimes(2)
     expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('revalidates the bootstrap after the successful validation lifetime expires', async () => {
+    let now = 1_000
+    const bootstrapValidation = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+    const fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            items: [],
+            next_cursor: null,
+            search_correlation: null,
+            exact_source_session_id_sha256: null,
+          }),
+        ),
+    )
+    vi.stubGlobal('fetch', fetch)
+    const api = new HttpImportApi(bootstrapValidation, () => now)
+
+    await api.list({ limit: 1 })
+    now += 30_000
+    await api.list({ limit: 1 })
+
+    expect(bootstrapValidation).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects a declared oversized catalog response before parsing it', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () => new Response('{}', { headers: { 'Content-Length': String(1024 * 1024 + 1) } }),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).list({ limit: 1 }),
+    ).rejects.toBeInstanceOf(ImportResponseTooLargeError)
   })
 
   it('accepts the documented omitted first-window anchor', async () => {
@@ -463,5 +502,36 @@ describe('HttpImportApi correlation', () => {
         source_session_id: 'shared prefix and complete value',
       }),
     ).rejects.toBeInstanceOf(ImportListCorrelationError)
+  })
+
+  it('rejects a continuation receipt with a non-canonical session identity', async () => {
+    const request = {
+      command_id: firstId,
+      frontier: {
+        imported_conversation_id: firstId,
+        imported_entry_id: secondId,
+        position: 1,
+      },
+      relationship: 'resume' as const,
+      initial_model_selection: { kind: 'direct' as const, selection_id: secondId },
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              session_id: '',
+              command_id: request.command_id,
+              frontier: request.frontier,
+              relationship: request.relationship,
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).continueImport(firstId, request),
+    ).rejects.toBeInstanceOf(ImportReceiptCorrelationError)
   })
 })

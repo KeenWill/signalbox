@@ -68,6 +68,13 @@ export class ImportListCorrelationError extends Error {
   }
 }
 
+export class ImportResponseTooLargeError extends Error {
+  constructor() {
+    super('import API response exceeds its byte ceiling')
+    this.name = 'ImportResponseTooLargeError'
+  }
+}
+
 const correlateListPage = (
   request: WebImportListRequest,
   page: WebImportListPage,
@@ -134,6 +141,13 @@ const sha256 = async (value: string): Promise<string> => {
 
 const DEFAULT_IMPORT_LIST_ITEMS = 50
 const DEFAULT_IMPORT_WINDOW_RADIUS = 25
+const BOOTSTRAP_RESPONSE_BYTES = 64 * 1024
+const LIST_RESPONSE_BYTES = 1024 * 1024
+const DESCRIPTOR_RESPONSE_BYTES = 128 * 1024
+const ENTRY_WINDOW_RESPONSE_BYTES = 2 * 1024 * 1024
+const CONTINUATION_RESPONSE_BYTES = 128 * 1024
+const BOOTSTRAP_VALIDATION_TTL_MS = 30_000
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const correlateEntryWindow = (
   importedConversationId: string,
@@ -180,15 +194,47 @@ type Decoder<Value> = (value: unknown) => Value
 const decodeResponse = async <Value>(
   response: Response,
   decoder: Decoder<Value>,
+  maximumBytes: number,
 ): Promise<Value> => {
-  const value: unknown = await response.json()
+  const contentLength = response.headers.get('Content-Length')
+  if (contentLength !== null) {
+    const declaredLength = Number(contentLength)
+    if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+      throw new ImportResponseTooLargeError()
+    }
+  }
+  if (!response.body) throw new TypeError('import API response has no body')
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let receivedBytes = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      receivedBytes += value.byteLength
+      if (receivedBytes > maximumBytes) {
+        await reader.cancel()
+        throw new ImportResponseTooLargeError()
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  const bytes = new Uint8Array(receivedBytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
   if (!response.ok) throw new ImportApiError(decodeWebApiErrorResponse(value))
   return decoder(value)
 }
 
 export const validateWebContractBootstrap = async (): Promise<void> => {
   const response = await fetch('/api/bootstrap')
-  await decodeResponse(response, decodeWebContractBootstrap)
+  await decodeResponse(response, decodeWebContractBootstrap, BOOTSTRAP_RESPONSE_BYTES)
 }
 
 const queryString = (request: WebImportListRequest | WebImportEntryWindowRequest): string => {
@@ -202,14 +248,30 @@ const queryString = (request: WebImportListRequest | WebImportEntryWindowRequest
 
 export class HttpImportApi implements ImportApi {
   private bootstrapValidationPromise: Promise<void> | undefined
+  private bootstrapValidatedAt: number | undefined
 
-  constructor(private readonly bootstrapValidation = validateWebContractBootstrap) {}
+  constructor(
+    private readonly bootstrapValidation = validateWebContractBootstrap,
+    private readonly now = Date.now,
+  ) {}
 
   private validateBootstrap(): Promise<void> {
-    this.bootstrapValidationPromise ??= this.bootstrapValidation().catch((error: unknown) => {
+    if (
+      this.bootstrapValidatedAt !== undefined &&
+      this.now() - this.bootstrapValidatedAt >= BOOTSTRAP_VALIDATION_TTL_MS
+    ) {
       this.bootstrapValidationPromise = undefined
-      throw error
-    })
+      this.bootstrapValidatedAt = undefined
+    }
+    this.bootstrapValidationPromise ??= this.bootstrapValidation()
+      .then(() => {
+        this.bootstrapValidatedAt = this.now()
+      })
+      .catch((error: unknown) => {
+        this.bootstrapValidationPromise = undefined
+        this.bootstrapValidatedAt = undefined
+        throw error
+      })
     return this.bootstrapValidationPromise
   }
 
@@ -233,13 +295,16 @@ export class HttpImportApi implements ImportApi {
       )
       return correlateListPage(
         request,
-        await decodeResponse(response, decodeWebImportListPage),
+        await decodeResponse(response, decodeWebImportListPage, LIST_RESPONSE_BYTES),
         searchCorrelation,
         exactSourceSessionDigest,
       )
     }
     const response = await fetch(`/api/imports/${queryString(request)}`, { signal })
-    return correlateListPage(request, await decodeResponse(response, decodeWebImportListPage))
+    return correlateListPage(
+      request,
+      await decodeResponse(response, decodeWebImportListPage, LIST_RESPONSE_BYTES),
+    )
   }
 
   async descriptor(
@@ -250,7 +315,11 @@ export class HttpImportApi implements ImportApi {
     const response = await fetch(`/api/imports/${encodeURIComponent(importedConversationId)}`, {
       signal,
     })
-    const descriptor = await decodeResponse(response, decodeWebImportDescriptor)
+    const descriptor = await decodeResponse(
+      response,
+      decodeWebImportDescriptor,
+      DESCRIPTOR_RESPONSE_BYTES,
+    )
     if (
       descriptor.imported_conversation_id !== importedConversationId ||
       descriptor.timeline.first.imported_conversation_id !== importedConversationId ||
@@ -274,7 +343,11 @@ export class HttpImportApi implements ImportApi {
       `/api/imports/${encodeURIComponent(importedConversationId)}/entries${queryString(request)}`,
       { signal },
     )
-    const window = await decodeResponse(response, decodeWebImportEntryWindow)
+    const window = await decodeResponse(
+      response,
+      decodeWebImportEntryWindow,
+      ENTRY_WINDOW_RESPONSE_BYTES,
+    )
     return correlateEntryWindow(importedConversationId, request, window, knownLatestPosition)
   }
 
@@ -291,8 +364,14 @@ export class HttpImportApi implements ImportApi {
         body: JSON.stringify(request),
       },
     )
-    const receipt = await decodeResponse(response, decodeWebImportContinuationResponse)
+    const receipt = await decodeResponse(
+      response,
+      decodeWebImportContinuationResponse,
+      CONTINUATION_RESPONSE_BYTES,
+    )
     if (
+      !CANONICAL_UUID.test(receipt.session_id) ||
+      receipt.session_id === '00000000-0000-0000-0000-000000000000' ||
       receipt.command_id !== request.command_id ||
       receipt.relationship !== request.relationship ||
       receipt.frontier.imported_conversation_id !== request.frontier.imported_conversation_id ||
