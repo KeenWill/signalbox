@@ -170,14 +170,14 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   const resetContinuation = continuation.reset
   const selectImportEntry = useCallback(
     (id: string) => {
-      if (hasRetainedCommand || overlay !== null) return
+      if (hasRetainedCommand || store.getState().app.overlay !== null) return
       resetContinuation()
       setSelectedFrontier(
         entryWindow?.items.find((entry) => entry.frontier.imported_entry_id === id)?.frontier ??
           null,
       )
     },
-    [entryWindow?.items, hasRetainedCommand, overlay, resetContinuation],
+    [entryWindow?.items, hasRetainedCommand, resetContinuation],
   )
   const modelSelectionMissing = modelSelectionId.trim().length === 0
   const canContinueImport =
@@ -229,9 +229,9 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       timelineIds: [],
       focusTimeline: () =>
         document.querySelector<HTMLElement>('[aria-label="Imported source entries"]')?.focus(),
-      importEntryIds: overlay === null ? importEntryIds : [],
+      importEntryIds,
       selectedImportEntry: selectedFrontier?.imported_entry_id ?? null,
-      canSelectImportEntry: !hasRetainedCommand && overlay === null,
+      canSelectImportEntry: !hasRetainedCommand,
       selectImportEntry,
       canContinueImport,
       continueImport: continueAt,
@@ -247,7 +247,6 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       continueAt,
       hasRetainedCommand,
       importEntryIds,
-      overlay,
       retryExactCommand,
       selectImportEntry,
       selectedFrontier?.imported_entry_id,
