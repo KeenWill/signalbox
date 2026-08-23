@@ -288,6 +288,15 @@ export function SessionWorkspaceSurface({
       loadTimelineWindow: loadWindow,
     })
   }
+  const invokeBoundaryCommand = (command: 'selection.first' | 'selection.last') =>
+    invokeCommand(command, {
+      dispatch,
+      getState: store.getState,
+      timelineIds,
+      timelineWindowAvailable: displayedSession !== undefined,
+      focusTimeline: () => timelineRef.current?.focus(),
+      loadTimelineWindow: loadWindow,
+    })
   const toggleExpanded = (eventSequence: string) => {
     const next = new Set(expanded)
     if (next.has(eventSequence)) next.delete(eventSequence)
@@ -379,10 +388,10 @@ export function SessionWorkspaceSurface({
             </dl>
           </header>
           <div className="session-window-controls" role="toolbar" aria-label="Timeline window">
-            <button type="button" onClick={() => loadWindow('first')}>
+            <button type="button" onClick={() => invokeBoundaryCommand('selection.first')}>
               <SkipBack aria-hidden="true" /> First <kbd>gg</kbd>
             </button>
-            <button type="button" onClick={() => loadWindow('latest')}>
+            <button type="button" onClick={() => invokeBoundaryCommand('selection.last')}>
               <SkipForward aria-hidden="true" /> Latest <kbd>G</kbd>
             </button>
             <span>

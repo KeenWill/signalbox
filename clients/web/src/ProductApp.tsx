@@ -14,6 +14,7 @@ import {
 import {
   invokeProductCommand,
   type ProductCommandContext,
+  type ProductCommandId,
   productCommandAvailable,
   productCommandRegistry,
   productHotkeyBindings,
@@ -74,9 +75,11 @@ const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; ques
 
 function ProductNavigation({
   active,
+  context,
   onActivate,
 }: {
   active: ProductRouteId
+  context: ProductCommandContext
   onActivate?: () => void
 }) {
   return (
@@ -94,7 +97,20 @@ function ProductNavigation({
             params={{ surface: route.id }}
             className={active === route.id ? 'product-link active' : 'product-link'}
             aria-current={active === route.id ? 'page' : undefined}
-            onClick={onActivate}
+            onClick={(event) => {
+              if (
+                event.button !== 0 ||
+                event.metaKey ||
+                event.ctrlKey ||
+                event.shiftKey ||
+                event.altKey
+              ) {
+                return
+              }
+              event.preventDefault()
+              onActivate?.()
+              invokeProductCommand(`navigate.${route.id}` as ProductCommandId, context)
+            }}
           >
             <span>{route.label}</span>
             <small>{route.description}</small>
@@ -447,7 +463,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   return (
     <div className={`product-shell layout-${app.layout}`} style={shellStyle}>
       <aside className="product-navigation-pane">
-        <ProductNavigation active={surface} />
+        <ProductNavigation active={surface} context={context} />
       </aside>
       <main className="product-main" tabIndex={-1}>
         <header className="product-header">
@@ -551,6 +567,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             </Dialog.Description>
             <ProductNavigation
               active={surface}
+              context={context}
               onActivate={() => dispatch(actions.overlaySet(null))}
             />
           </Dialog.Content>
