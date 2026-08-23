@@ -145,6 +145,7 @@ const validateSearchPageBounds = (
   const requestedSession =
     request.sessionId === undefined ? undefined : canonicalUuid(request.sessionId)
   let previousAddress: bigint | undefined
+  let previousProjectionId: bigint | undefined
   for (const result of page.results) {
     const resultSession = canonicalUuid(result.session_id)
     if (
@@ -166,10 +167,18 @@ const validateSearchPageBounds = (
       throw new TypeError('search result source contradicts its session')
     }
     const address = BigInt(result.address.event_sequence)
-    if (previousAddress !== undefined && address > previousAddress) {
+    const projectionId = BigInt(result.projection_id)
+    if (
+      previousAddress !== undefined &&
+      (address > previousAddress ||
+        (address === previousAddress &&
+          previousProjectionId !== undefined &&
+          projectionId >= previousProjectionId))
+    ) {
       throw new TypeError('search page is not ordered newest first')
     }
     previousAddress = address
+    previousProjectionId = projectionId
     const snippetBytes = encoder.encode(result.snippet)
     const snippetLength = snippetBytes.byteLength
     if (snippetLength > request.maxSnippetBytes) {

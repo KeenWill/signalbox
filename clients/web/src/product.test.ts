@@ -539,6 +539,32 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('not ordered newest first')
   })
 
+  it('rejects same-address results whose projection IDs are not newest first', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...searchPageFixture,
+              results: [
+                { ...searchPageFixture.results[0], projection_id: '41' },
+                { ...searchPageFixture.results[0], projection_id: '42' },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 2,
+        maxSnippetBytes: 512,
+      }),
+    ).rejects.toThrow('not ordered newest first')
+  })
+
   const rejectContinuation = async (
     continuation: {
       address: { event_sequence: string }

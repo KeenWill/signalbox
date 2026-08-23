@@ -135,9 +135,11 @@ function ProductNavigation({
 function CommandPalette({
   context,
   returnFocusRef,
+  destinationFocusRef,
 }: {
   context: CommandContext
   returnFocusRef: RefObject<HTMLElement | null>
+  destinationFocusRef: RefObject<HTMLElement | null>
 }) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
   return (
@@ -178,6 +180,9 @@ function CommandPalette({
                   key={command.id}
                   type="button"
                   onClick={() => {
+                    if (command.id.startsWith('navigate.')) {
+                      returnFocusRef.current = destinationFocusRef.current
+                    }
                     invokeCommand('surface.escape', context)
                     invokeCommand(command.id, context)
                   }}
@@ -496,7 +501,11 @@ export function ProductApp({
           </dl>
         </aside>
       )}
-      <CommandPalette context={context} returnFocusRef={paletteReturnFocusRef} />
+      <CommandPalette
+        context={context}
+        returnFocusRef={paletteReturnFocusRef}
+        destinationFocusRef={primaryRef}
+      />
       <Dialog.Root
         open={app.overlay === 'navigation'}
         onOpenChange={(open) => {

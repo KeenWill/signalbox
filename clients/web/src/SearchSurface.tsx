@@ -12,18 +12,18 @@ import {
 type SearchResult = WebSearchPage['results'][number]
 
 const displayClass = (value: string) => value.replaceAll('_', ' ')
-const MAX_UUID_TEXT_LENGTH = 47
 const MAX_U64 = 18_446_744_073_709_551_615n
 const MAX_I64 = 9_223_372_036_854_775_807n
 
 const validUuid = (value: string) => {
-  if (value.length > MAX_UUID_TEXT_LENGTH) return false
-  const compact = value
-    .toLowerCase()
-    .replace(/^urn:uuid:/, '')
-    .replace(/^\{(.*)\}$/, '$1')
-    .replaceAll('-', '')
-  return /^[0-9a-f]{32}$/.test(compact)
+  const simple = /^[0-9a-f]{32}$/i
+  const hyphenated = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  return (
+    simple.test(value) ||
+    hyphenated.test(value) ||
+    (value.startsWith('{') && value.endsWith('}') && hyphenated.test(value.slice(1, -1))) ||
+    (/^urn:uuid:/i.test(value) && hyphenated.test(value.slice(9)))
+  )
 }
 
 const validPositiveDecimal = (value: string, maximum: bigint) =>
@@ -33,27 +33,6 @@ const validCursor = (after: { address: string; projectionId: string } | undefine
   after === undefined ||
   (validPositiveDecimal(after.address, MAX_U64) &&
     validPositiveDecimal(after.projectionId, MAX_I64))
-
-const sourceIdentity = (result: SearchResult) => {
-  const source = result.source
-  switch (source.kind) {
-    case 'session':
-      return source.session_id
-    case 'accepted_input':
-      return source.accepted_input_id
-    case 'turn_transcript_entry':
-    case 'session_transcript_entry':
-      return source.semantic_entry_id
-    case 'tool_request':
-      return source.tool_request_id
-    case 'tool_attempt':
-      return source.tool_attempt_id
-    case 'attachment':
-      return source.attachment_id
-    case 'derived_artifact':
-      return source.artifact_id
-  }
-}
 
 function highlightedSnippet(result: SearchResult): ReactNode {
   const bytes = new TextEncoder().encode(result.snippet)
@@ -289,7 +268,7 @@ export function SearchSurface({
               <ol role="list">
                 {results.data.results.map((result) => (
                   <li
-                    key={`${result.session_id}:${result.address.event_sequence}:${result.source.kind}:${result.content_class}:${sourceIdentity(result)}`}
+                    key={`${result.session_id}:${result.address.event_sequence}:${result.projection_id}`}
                   >
                     <div className="search-result-meta">
                       <span>{displayClass(result.content_class)}</span>

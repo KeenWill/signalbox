@@ -86,6 +86,7 @@ test('completes route switching from the command palette without a mouse', async
   await page.getByRole('button', { name: /Go to Sessions/ }).focus()
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page.getByRole('main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
