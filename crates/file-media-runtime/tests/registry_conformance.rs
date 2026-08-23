@@ -497,9 +497,22 @@ fn probe_recognized_malformed_is_terminal() {
         SYNTHETIC_MEDIA_TYPE,
         SYNTHETIC_MEDIA_TYPE,
         StreamingTextFallback::Disabled,
-    );
+    )
+    .expect("recognized malformed probe is terminal");
 
-    assert!(matches!(outcome, Ok(FileInspection::Malformed { .. })));
+    let FileInspection::Malformed {
+        media_type: detected_media_type,
+        reason_code,
+        ..
+    } = outcome
+    else {
+        panic!("recognized malformed probe must produce malformed inspection");
+    };
+    assert_eq!(detected_media_type, media_type(SYNTHETIC_MEDIA_TYPE));
+    assert_eq!(
+        reason_code,
+        ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")
+    );
 }
 
 #[test]
@@ -510,9 +523,22 @@ fn validation_malformed_is_terminal_for_strong_evidence() {
         SYNTHETIC_MEDIA_TYPE,
         SYNTHETIC_MEDIA_TYPE,
         StreamingTextFallback::Disabled,
-    );
+    )
+    .expect("malformed strong validation is terminal");
 
-    assert!(matches!(outcome, Ok(FileInspection::Malformed { .. })));
+    let FileInspection::Malformed {
+        media_type: detected_media_type,
+        reason_code,
+        ..
+    } = outcome
+    else {
+        panic!("malformed strong validation must produce malformed inspection");
+    };
+    assert_eq!(detected_media_type, media_type(SYNTHETIC_MEDIA_TYPE));
+    assert_eq!(
+        reason_code,
+        ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")
+    );
 }
 
 #[test]
@@ -523,12 +549,17 @@ fn validation_encrypted_is_terminal_for_strong_evidence() {
         SYNTHETIC_MEDIA_TYPE,
         SYNTHETIC_MEDIA_TYPE,
         StreamingTextFallback::Disabled,
-    );
+    )
+    .expect("encrypted strong validation is terminal");
 
-    assert!(matches!(
-        outcome,
-        Ok(FileInspection::EncryptedOrLocked { .. })
-    ));
+    let FileInspection::EncryptedOrLocked {
+        media_type: detected_media_type,
+        ..
+    } = outcome
+    else {
+        panic!("encrypted strong validation must produce encrypted inspection");
+    };
+    assert_eq!(detected_media_type, media_type(SYNTHETIC_MEDIA_TYPE));
 }
 
 #[test]
@@ -565,9 +596,12 @@ fn declared_validation_no_match_becomes_unknown() {
         SYNTHETIC_MEDIA_TYPE,
         SYNTHETIC_MEDIA_TYPE,
         StreamingTextFallback::Disabled,
-    );
+    )
+    .expect("declared validation miss becomes unknown");
 
-    assert!(matches!(outcome, Ok(FileInspection::Unknown { .. })));
+    let FileInspection::Unknown { .. } = outcome else {
+        panic!("declared validation miss must produce unknown inspection");
+    };
 }
 
 #[test]
@@ -578,9 +612,12 @@ fn streaming_text_validation_no_match_becomes_unknown() {
         "text/plain",
         "unknown",
         StreamingTextFallback::Enabled,
-    );
+    )
+    .expect("streaming text validation miss becomes unknown");
 
-    assert!(matches!(outcome, Ok(FileInspection::Unknown { .. })));
+    let FileInspection::Unknown { .. } = outcome else {
+        panic!("streaming text validation miss must produce unknown inspection");
+    };
 }
 
 /// INV-075: byte signatures, not caller metadata, select one reader.
