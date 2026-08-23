@@ -26,6 +26,7 @@ type RepositoryStatus = WebRepoWatchRepositoryStatusPage['repositories'][number]
 type PullRequest = WebRepoWatchPullRequestPage['pull_requests'][number]
 type PullRequestSession = WebRepoWatchPullRequestSessionPage['sessions'][number]
 type SingletonScope = WebRepoWatchWorkPage['held_slots'][number]['scope']
+type HeldSlot = WebRepoWatchWorkPage['held_slots'][number]
 type ObligationReadiness = WebRepoWatchWorkPage['queued_obligations'][number]['readiness']
 
 interface ActivityRow {
@@ -123,6 +124,9 @@ export const readinessLabel = (readiness: ObligationReadiness) => {
       return `parked · since ${time(readiness.parked_at_unix_milliseconds)}`
   }
 }
+
+export const heldOwnershipLabel = (slot: HeldSlot) =>
+  `dispatch ${slot.dispatch_id} · sessions ${slot.session_ids.join(', ') || 'none'}`
 
 const errorMessage = (error: unknown) =>
   error instanceof ProductRequestError
@@ -408,6 +412,7 @@ function WorkTables({
           <thead>
             <tr>
               <th scope="col">PR / rule</th>
+              <th scope="col">Ownership</th>
               <th scope="col">Held</th>
               <th scope="col">Typed blockers</th>
             </tr>
@@ -418,6 +423,7 @@ function WorkTables({
                 <td>
                   {singletonScopeLabel(slot.scope)} · {slot.rule}
                 </td>
+                <td>{heldOwnershipLabel(slot)}</td>
                 <td>{cursorTime(slot.held_since_unix_microseconds)}</td>
                 <td>{slot.blockers.map(words).join(', ') || 'No blocker'}</td>
               </tr>
@@ -548,6 +554,7 @@ export function ActivitySurface() {
       (item) => item.repository === repository,
     )
     if (first && !selectedIsLoaded) {
+      if (repository !== null) repositorySelectFocus.current?.focus()
       setRepository(first)
       setPullRequestAfter(null)
       setSelectedPullRequest(null)
@@ -662,6 +669,12 @@ export function ActivitySurface() {
   const selected = pullRequests.data?.pull_requests.find(
     (item) => item.number === selectedPullRequest,
   )
+  useLayoutEffect(() => {
+    if (selectedPullRequest === null || !pullRequests.data || selected) return
+    setSelectedPullRequest(null)
+    setSessionBefore(undefined)
+    pullRequestHeadingFocus.current?.focus()
+  }, [pullRequests.data, selected, selectedPullRequest])
   useLayoutEffect(() => {
     if (pullRequestFocusPending.current !== pullRequestAfter || !pullRequests.data) return
     pullRequestFocusPending.current = undefined

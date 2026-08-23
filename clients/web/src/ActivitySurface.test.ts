@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { readinessLabel, retainActivityPage, singletonScopeLabel } from './ActivitySurface'
+import {
+  heldOwnershipLabel,
+  readinessLabel,
+  retainActivityPage,
+  singletonScopeLabel,
+} from './ActivitySurface'
 import type { WebRepoWatchActivityPage } from './generated/web-contract.mjs'
 
 const page = (receiptSequence: string): WebRepoWatchActivityPage => ({
@@ -68,5 +73,20 @@ describe('queued-work readiness labels', () => {
     expect(
       readinessLabel({ kind: 'parked', parked_at_unix_milliseconds: '9007199254740991' }),
     ).toBe('parked · since 9007199254740991')
+  })
+})
+
+describe('held-work ownership labels', () => {
+  it('preserves dispatch and session identities', () => {
+    expect(
+      heldOwnershipLabel({
+        blockers: ['pursuing_goal'],
+        dispatch_id: 'dispatch-4',
+        held_since_unix_microseconds: '1724200000000000',
+        rule: 'review',
+        scope: { kind: 'repository', repository: 'example/repository' },
+        session_ids: ['session-1', 'session-2'],
+      }),
+    ).toBe('dispatch dispatch-4 · sessions session-1, session-2')
   })
 })
