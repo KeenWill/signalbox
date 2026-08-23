@@ -49,18 +49,15 @@ SELECT projection.projection_id, projection.session_id,
                   OR correlated_chunk.turn_id IS DISTINCT FROM projection.turn_id
               )
        ) AS source_group_valid,
-       left(
-           ts_headline(
-               'simple'::regconfig,
-               replace(
-                   replace(projection.content_text, chr(57344), ''),
-                   chr(57345), ''
-               ),
-               lexical_query.value,
-               'StartSel=' || chr(57344) || ', StopSel=' || chr(57345) ||
-               ', MaxWords=32, MinWords=8, ShortWord=1, MaxFragments=1'
+       ts_headline(
+           'simple'::regconfig,
+           replace(
+               replace(projection.content_text, chr(57344), ''),
+               chr(57345), ''
            ),
-           2048
+           lexical_query.value,
+           'StartSel=' || chr(57344) || ', StopSel=' || chr(57345) ||
+           ', MaxWords=32, MinWords=8, ShortWord=1, MaxFragments=1'
        ) AS marked_snippet
   FROM web_search_projection AS projection
  CROSS JOIN lexical_query
@@ -434,6 +431,7 @@ fn decode_row(row: PgRow) -> Result<(SearchCursor, SearchResult), SearchReposito
         SearchResult {
             session,
             address,
+            projection,
             source,
             content_class,
             snippet,

@@ -472,6 +472,7 @@ pub struct WebSearchCursor {
 pub struct WebSearchResult {
     pub session_id: WebSessionId,
     pub address: WebTimelineAddress,
+    pub projection_id: WebSearchProjectionId,
     pub source: WebSearchResultSource,
     pub content_class: WebSearchContentClass,
     #[schemars(length(max = 512))]
@@ -859,7 +860,8 @@ export function decodeWebSearchPage(value) {{
     const lastResult = value.results.at(-1);
     if (
       lastResult === undefined ||
-      value.continuation.address.event_sequence !== lastResult.address.event_sequence
+      value.continuation.address.event_sequence !== lastResult.address.event_sequence ||
+      value.continuation.projection_id !== lastResult.projection_id
     ) {{
       fail(
         "search_page.continuation",
@@ -868,16 +870,21 @@ export function decodeWebSearchPage(value) {{
     }}
   }}
   const encoder = new TextEncoder();
-  let previousAddress = null;
+  let previousKey = null;
   value.results.forEach((result, resultIndex) => {{
     const address = BigInt(result.address.event_sequence);
-    if (previousAddress !== null && address > previousAddress) {{
+    const projection = BigInt(result.projection_id);
+    if (
+      previousKey !== null &&
+      (address > previousKey.address ||
+        (address === previousKey.address && projection >= previousKey.projection))
+    ) {{
       fail(
-        `search_page.results[${{resultIndex}}].address`,
-        "a newest-first nonincreasing search result address",
+        `search_page.results[${{resultIndex}}]`,
+        "a strictly descending search result key",
       );
     }}
-    previousAddress = address;
+    previousKey = {{ address, projection }};
     if (!validSearchSourceCorrelation(result)) {{
       fail(
         `search_page.results[${{resultIndex}}].source`,

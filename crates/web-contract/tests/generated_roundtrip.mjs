@@ -19,6 +19,7 @@ function searchPage() {
       {
         session_id: "00000000-0000-0000-0000-000000000991",
         address: { event_sequence: "1" },
+        projection_id: "1",
         source: {
           kind: "session",
           session_id: "00000000-0000-0000-0000-000000000991",
@@ -227,18 +228,41 @@ test("generated search decoder validates continuation against the final result",
     () => decodeWebSearchPage(mismatched),
     /cursor anchored to the final search result/,
   );
+
+  const mismatchedProjection = searchPage();
+  mismatchedProjection.continuation.projection_id = "2";
+  assert.throws(
+    () => decodeWebSearchPage(mismatchedProjection),
+    /cursor anchored to the final search result/,
+  );
 });
 
 test("generated search decoder rejects out-of-order result addresses", () => {
   const page = searchPage();
   const newer = structuredClone(page.results[0]);
   newer.address.event_sequence = "2";
+  newer.projection_id = "2";
   page.results.push(newer);
   page.continuation.address.event_sequence = "2";
+  page.continuation.projection_id = "2";
 
   assert.throws(
     () => decodeWebSearchPage(page),
-    /newest-first nonincreasing search result address/,
+    /strictly descending search result key/,
+  );
+});
+
+test("generated search decoder rejects out-of-order same-address projections", () => {
+  const page = searchPage();
+  page.results[0].projection_id = "2";
+  const outOfOrder = structuredClone(page.results[0]);
+  outOfOrder.projection_id = "3";
+  page.results.push(outOfOrder);
+  page.continuation.projection_id = "3";
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /strictly descending search result key/,
   );
 });
 

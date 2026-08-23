@@ -439,6 +439,7 @@ fn search_result_dto(result: signalbox_application::SearchResult) -> WebSearchRe
     WebSearchResult {
         session_id: WebSessionId::from_validated_uuid(result.session.into_uuid().to_string()),
         address: address_dto(result.address),
+        projection_id: WebSearchProjectionId::from_nonzero(result.projection),
         source: search_source_dto(result.source),
         content_class: search_content_class_dto(result.content_class),
         snippet: result.snippet,

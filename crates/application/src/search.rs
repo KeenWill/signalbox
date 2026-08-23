@@ -377,6 +377,8 @@ pub struct SearchResult {
     pub session: SessionId,
     /// Stable address used by an `around` timeline read.
     pub address: super::TimelineAddress,
+    /// Stable projection component of the strict descending result key.
+    pub projection: NonZeroU64,
     /// Typed durable source rather than a storage record discriminator.
     pub source: SearchResultSource,
     /// Projection whose text matched.
