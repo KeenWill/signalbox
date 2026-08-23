@@ -51,6 +51,7 @@ const STREAM_CHANNEL_CHUNKS: usize = 4;
 const MIN_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024;
 const MAX_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const MAX_MULTIPART_PARTS: u64 = 10_000;
+const MAX_S3_OBJECT_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 const MAX_CREATE_RESPONSE_BYTES: usize = 65_536;
 const MAX_COMPLETE_RESPONSE_BYTES: usize = 65_536;
 const MAX_UPLOAD_ID_BYTES: usize = 1_024;
@@ -241,13 +242,20 @@ impl S3BlobStore {
         }
     }
 
-    async fn ensure_namespace_ready(&self) -> Result<(), BlobStoreError> {
+    async fn ensure_namespace_ready(
+        &self,
+        credentials: &Credentials,
+    ) -> Result<(), BlobStoreError> {
         let Some(marker) = &self.namespace_marker else {
             return Ok(());
         };
         let result = marker
             .verified
-            .get_or_init(|| async { self.verify_namespace_marker(marker).await.map_err(|_| ()) })
+            .get_or_init(|| async {
+                self.verify_namespace_marker_with(credentials, marker)
+                    .await
+                    .map_err(|_| ())
+            })
             .await;
         match result {
             Ok(()) => Ok(()),
@@ -332,11 +340,11 @@ impl S3BlobStore {
         source: BlobReader,
         reconciliation: &StdMutex<PutReconciliation>,
     ) -> Result<BlobPutOutcome, BlobStoreError> {
-        self.ensure_namespace_ready().await?;
+        let credentials = self.credentials().await?;
+        self.ensure_namespace_ready(&credentials).await?;
         let key = BlobObjectKey::for_digest(expected.digest());
         let stripe = usize::from(expected.digest().as_bytes()[0]) % PUBLICATION_LOCK_STRIPES;
         let _publication = self.publication_locks[stripe].lock().await;
-        let credentials = self.credentials().await?;
         reconciliation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -361,7 +369,14 @@ impl S3BlobStore {
 
         self.multipart_publish(&credentials, &key, expected, source)
             .await?;
-        self.verify_object(&credentials, &key, expected).await?;
+        if let Err(error) = self.verify_object(&credentials, &key, expected).await {
+            if error.kind() == signalbox_blob_store::BlobStoreFailureKind::Unavailable {
+                return Err(BlobStoreError::publication_ambiguous(
+                    "reconcile S3 post-publication verification",
+                ));
+            }
+            return Err(error);
+        }
         if replacing {
             Ok(BlobPutOutcome::Repaired { key })
         } else {
@@ -376,6 +391,9 @@ impl S3BlobStore {
         expected: ExpectedBlob,
         source: BlobReader,
     ) -> Result<(), BlobStoreError> {
+        if multipart_part_bytes(expected.byte_length()).is_none() {
+            return Err(BlobStoreError::unavailable("bound S3 multipart object"));
+        }
         let create = self
             .bucket
             .create_multipart_upload(Some(credentials), key.as_str());
@@ -583,8 +601,8 @@ impl S3BlobStore {
     }
 
     async fn open_inner(&self, key: &BlobObjectKey) -> Result<OpenedBlob, BlobStoreError> {
-        self.ensure_namespace_ready().await?;
         let credentials = self.credentials().await?;
+        self.ensure_namespace_ready(&credentials).await?;
         let response = self.open_response(&credentials, key).await?;
         let length = response
             .content_length()
@@ -599,7 +617,6 @@ impl S3BlobStore {
         offset: u64,
         length: u64,
     ) -> Result<OpenedBlob, BlobStoreError> {
-        self.ensure_namespace_ready().await?;
         if length == 0 || length > MAX_BLOB_RANGE_BYTES {
             return Err(BlobStoreError::unavailable("validate S3 object range"));
         }
@@ -610,6 +627,7 @@ impl S3BlobStore {
         let capacity = usize::try_from(length)
             .map_err(|_| BlobStoreError::unavailable("allocate S3 object range"))?;
         let credentials = self.credentials().await?;
+        self.ensure_namespace_ready(&credentials).await?;
         let response = self.open_response(&credentials, key).await?;
         let mut reader = response_reader(response);
         let mut hasher = Sha256::new();
@@ -832,6 +850,9 @@ async fn bounded_response(
 }
 
 fn multipart_part_bytes(length: u64) -> Option<u64> {
+    if length > MAX_S3_OBJECT_BYTES {
+        return None;
+    }
     let ceiling = length.div_ceil(MAX_MULTIPART_PARTS);
     let part_bytes = ceiling.max(MIN_MULTIPART_PART_BYTES);
     if part_bytes > MAX_MULTIPART_PART_BYTES {
@@ -1202,8 +1223,8 @@ mod tests {
     use url::Url;
 
     use super::{
-        CredentialFileError, LifecycleConfiguration, LifecycleRule, MAX_MULTIPART_PART_BYTES,
-        MAX_MULTIPART_PARTS, MIN_MULTIPART_PART_BYTES, S3BlobStore, multipart_part_bytes,
+        CredentialFileError, LifecycleConfiguration, LifecycleRule, MAX_MULTIPART_PARTS,
+        MAX_S3_OBJECT_BYTES, MIN_MULTIPART_PART_BYTES, S3BlobStore, multipart_part_bytes,
         read_credentials, validate_completion_response,
     };
 
@@ -1317,14 +1338,8 @@ mod tests {
             multipart_part_bytes(MIN_MULTIPART_PART_BYTES * MAX_MULTIPART_PARTS),
             Some(MIN_MULTIPART_PART_BYTES)
         );
-        assert_eq!(
-            multipart_part_bytes(MAX_MULTIPART_PART_BYTES * MAX_MULTIPART_PARTS),
-            Some(MAX_MULTIPART_PART_BYTES)
-        );
-        assert_eq!(
-            multipart_part_bytes(MAX_MULTIPART_PART_BYTES * MAX_MULTIPART_PARTS + 1),
-            None
-        );
+        assert!(multipart_part_bytes(MAX_S3_OBJECT_BYTES).is_some());
+        assert_eq!(multipart_part_bytes(MAX_S3_OBJECT_BYTES + 1), None);
     }
 
     #[test]
