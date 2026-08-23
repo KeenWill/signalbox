@@ -13,7 +13,7 @@ import {
 import { type ComponentType, type ReactNode, useState } from 'react'
 import { type CommandContext, invokeCommand } from '../../commands'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import { actions, useAppDispatch, useAppSelector } from '../../state'
+import { useAppSelector } from '../../state'
 import { artifactScenario } from './artifactScenario'
 import {
   ARTIFACT_PREVIEW_CHARACTERS,
@@ -61,10 +61,7 @@ interface RendererProps<T extends RenderableArtifact> {
   commandContext: CommandContext
 }
 
-type ArtifactCommandId =
-  | 'artifact.preview.expand'
-  | 'artifact.preview.collapse'
-  | 'artifact.original.load'
+type ArtifactCommandId = 'artifact.preview.expand' | 'artifact.preview.collapse'
 
 const selectArtifact = (commandContext: CommandContext, artifactId: string) => {
   invokeCommand('artifact.select', {
@@ -182,18 +179,18 @@ function BoundedFooter({
   )
 }
 
-function SignalboxImageBody({ artifact, commandContext }: RendererProps<SignalboxImageArtifact>) {
-  const dispatch = useAppDispatch()
+function SignalboxImageBody({ artifact }: RendererProps<SignalboxImageArtifact>) {
   const [failedAutomaticUrls, setFailedAutomaticUrls] = useState<ReadonlySet<string>>(
     () => new Set(),
   )
-  const originalState = useAppSelector((state) => state.app.originalArtifacts[artifact.id])
   const { descriptor } = artifact.source
   const automatic = selectImageView(descriptor, failedAutomaticUrls)
   const original = viewByKind(descriptor, 'browser_native')
   const download = viewByKind(descriptor, 'download')
-  const originalRequested = originalState === 'loading' || originalState === 'loaded'
-  const rendered = originalRequested && original ? original : automatic
+  // Browser-native descriptors provide encoded byte length but no decoded dimensions. Assigning
+  // one to an image could therefore perform unbounded decode work even after a deliberate click.
+  // Keep originals download-only until an owning service enforces both bounds.
+  const rendered = automatic
   const derivation = rendered?.derivations[0]
 
   return (
@@ -204,21 +201,12 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
             src={rendered.content_url}
             alt={`${imageViewLabel(rendered.kind)} of ${artifact.displayName}`}
             loading="lazy"
-            onLoad={() => {
-              if (rendered.kind === 'browser_native' && originalState === 'loading') {
-                dispatch(actions.artifactOriginalSettled({ id: artifact.id, result: 'loaded' }))
-              }
-            }}
             onError={() => {
-              if (rendered.kind === 'browser_native') {
-                dispatch(actions.artifactOriginalSettled({ id: artifact.id, result: 'failed' }))
-              } else {
-                setFailedAutomaticUrls((current) => {
-                  const next = new Set(current)
-                  next.add(rendered.content_url)
-                  return next
-                })
-              }
+              setFailedAutomaticUrls((current) => {
+                const next = new Set(current)
+                next.add(rendered.content_url)
+                return next
+              })
             }}
           />
         ) : (
@@ -232,34 +220,12 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
         provenance={derivation?.transformation_name ?? 'original bytes'}
       >
         {original && (
-          <button
-            type="button"
-            aria-pressed={originalState === 'loaded'}
-            aria-disabled={originalState === 'loading' || originalState === 'loaded'}
-            onClick={() => {
-              if (originalState !== 'loading' && originalState !== 'loaded') {
-                invokeArtifactAction(commandContext, 'artifact.original.load', artifact.id)
-              }
-            }}
-          >
-            <Maximize2 aria-hidden="true" />
-            {originalState === 'loading'
-              ? 'Loading original'
-              : originalState === 'loaded'
-                ? 'Original loaded'
-                : originalState === 'failed'
-                  ? 'Retry original'
-                  : 'Load original'}
-          </button>
-        )}
-        {originalState === 'failed' && (
-          <p role="status">
-            {automatic
-              ? `Original image failed to load. The ${automatic.kind} remains available.`
-              : 'Original image failed to load. No automatic image view remains available.'}
+          <p>
+            Original inline rendering requires enforced byte and decode bounds. Download remains
+            available.
           </p>
         )}
-        {originalState !== 'failed' && failedAutomaticUrls.size > 0 && !automatic && (
+        {failedAutomaticUrls.size > 0 && !automatic && (
           <p role="status">
             No admitted inline image view could be loaded. Metadata and download remain available.
           </p>

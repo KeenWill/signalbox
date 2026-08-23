@@ -28,8 +28,8 @@ describe('artifact renderer compatibility', () => {
     expect(artifactPreviewIds).toEqual(['incident-notes', 'renderer-source'])
   })
 
-  it('derives original-capable artifact IDs from admitted descriptor views', () => {
-    expect(artifactOriginalIds).toEqual(['orbital-map'])
+  it('keeps browser-native originals ineligible without decoded-size bounds', () => {
+    expect(artifactOriginalIds).toEqual([])
   })
 
   it('registers the closed text, code, and image renderer set', () => {

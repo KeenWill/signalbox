@@ -132,10 +132,6 @@ export const artifactPreviewIds = artifactScenario
       boundArtifactText(artifact.content, artifact.characterCount, 'preview').omittedCharacters > 0,
   )
   .map((artifact) => artifact.id)
-export const artifactOriginalIds = artifactScenario.flatMap((artifact) =>
-  artifact.kind === 'image' &&
-  artifact.source.kind === 'signalbox_blob' &&
-  artifact.source.descriptor.available_views.some((view) => view.kind === 'browser_native')
-    ? [artifact.id]
-    : [],
-)
+// Browser-native descriptors do not carry an enforceable decoded-dimension ceiling, so no
+// original is currently eligible for inline rendering. Originals remain available for download.
+export const artifactOriginalIds: ReadonlyArray<string> = []
