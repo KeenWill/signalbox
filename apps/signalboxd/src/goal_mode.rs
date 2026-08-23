@@ -11,9 +11,10 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputId, DurableCommandId, Goal, GoalBlockProvenance, GoalCommandResult, GoalEvent,
-    GoalEventKind, GoalEventOrdinal, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed,
-    GoalReport, GoalSchedulerProvenance, GoalUserAction, GoalUserCommand, NormalizedToolArguments,
-    SessionId, ToolEffectClass, ToolExecutionErrorDetail, ToolName, ToolPermissionDefault, TurnId,
+    GoalEventKind, GoalEventOrdinal, GoalGuidance, GoalModelBlockedReasonKind, GoalModelProvenance,
+    GoalNeed, GoalReport, GoalSchedulerProvenance, GoalTextError, GoalUserAction, GoalUserCommand,
+    NormalizedToolArguments, SessionId, ToolEffectClass, ToolExecutionErrorDetail, ToolName,
+    ToolPermissionDefault, TurnId,
 };
 use signalbox_persistence::{
     goal::{
@@ -69,6 +70,8 @@ const EXECUTION_FAILURE_NEED: &str =
 /// a durably rejected command, a daemon restart, an unreachable database —
 /// leaves this text as what the operator reads.
 const EXECUTION_FAILURE_RESUMING_PREAMBLE: &str = "The goal turn failed to execute and automatic resumption is scheduled. If the goal is still blocked here once resumption ends, it is waiting for an operator.";
+/// Guidance for a failure the session caused and should not repeat unchanged.
+const CHARGEABLE_FAILURE_RESUME_GUIDANCE: &str = "Continue pursuing the commissioned goal. The preceding turn failed to execute. Inspect the durable session state and choose a different safe approach before repeating the failed operation.";
 /// Retries one armed attempt may spend on a database that answers nothing.
 ///
 /// These are not resumptions and do not spend the attempt budget: nothing was
@@ -633,13 +636,57 @@ impl PostgresGoalPassDisposition {
                 return ResumeAttempt::Unsettled;
             }
         };
-        if !reread.is_some_and(|goal| awaits_automatic_resumption(&goal, blocked)) {
+        let Some(goal) = reread else {
+            return ResumeAttempt::Settled;
+        };
+        if !awaits_automatic_resumption(&goal, blocked) {
             return ResumeAttempt::Settled;
         }
+        let Some(failed_turn) = goal.events().last().and_then(execution_failure_turn) else {
+            tracing::error!(
+                session = %session.into_uuid(),
+                event_ordinal = blocked.get(),
+                cause_code = "goal_automatic_resume_failure_turn_missing",
+                "automatic goal resumption could not identify its blocked turn"
+            );
+            return ResumeAttempt::Unsettled;
+        };
+        let unchargeable = match self
+            .repository
+            .unchargeable_automatic_resume_turns(session, &[failed_turn])
+            .await
+        {
+            Ok(turns) => turns.contains(&failed_turn),
+            Err(error) => {
+                tracing::error!(
+                    session = %session.into_uuid(),
+                    turn = %failed_turn.into_uuid(),
+                    event_ordinal = blocked.get(),
+                    cause_code = "goal_automatic_resume_failure_classification_failed",
+                    cause = %error,
+                    "automatic goal resumption could not classify its failed turn"
+                );
+                return ResumeAttempt::Unsettled;
+            }
+        };
+        let guidance = match automatic_resume_guidance(unchargeable) {
+            Ok(guidance) => guidance,
+            Err(error) => {
+                tracing::error!(
+                    session = %session.into_uuid(),
+                    event_ordinal = blocked.get(),
+                    cause_code = "goal_automatic_resume_guidance_invalid",
+                    cause = %error,
+                    "automatic goal resumption could not construct its static guidance"
+                );
+                return ResumeAttempt::Unsettled;
+            }
+        };
+        let strategy_guidance = guidance.is_some();
         let command = GoalUserCommand::new(
             automatic_resume_command(session, blocked),
             session,
-            GoalUserAction::Resume(None),
+            GoalUserAction::Resume(guidance),
         );
         let candidates = GoalTurnCandidates::new(
             AcceptedInputId::from_uuid(Uuid::now_v7()),
@@ -663,6 +710,7 @@ impl PostgresGoalPassDisposition {
                     session = %session.into_uuid(),
                     event_ordinal = event.ordinal().get(),
                     blocked_event_ordinal = blocked.get(),
+                    strategy_guidance,
                     "automatically resumed a goal blocked by execution failure"
                 );
                 ResumeAttempt::Settled
@@ -1024,6 +1072,13 @@ fn chargeable_automatic_resume_attempts(
     u32::try_from(spent).unwrap_or(u32::MAX)
 }
 
+fn automatic_resume_guidance(unchargeable: bool) -> Result<Option<GoalGuidance>, GoalTextError> {
+    if unchargeable {
+        return Ok(None);
+    }
+    GoalGuidance::try_new(String::from(CHARGEABLE_FAILURE_RESUME_GUIDANCE)).map(Some)
+}
+
 /// Whether the goal is still blocked by exactly the named failure event.
 fn awaits_automatic_resumption(goal: &Goal, blocked: GoalEventOrdinal) -> bool {
     goal.events()
@@ -1363,6 +1418,23 @@ mod tests {
         assert_eq!(
             scheduled.as_str(),
             "The goal turn failed to execute and automatic resumption is scheduled. If the goal is still blocked here once resumption ends, it is waiting for an operator. Resolve the failed goal turn's execution condition, then resume the goal."
+        );
+    }
+
+    #[test]
+    fn a_chargeable_failure_changes_the_next_turn_input() {
+        let guidance = automatic_resume_guidance(false)
+            .expect("the static guidance is admitted")
+            .expect("a chargeable failure carries guidance");
+
+        assert_eq!(guidance.as_str(), CHARGEABLE_FAILURE_RESUME_GUIDANCE);
+    }
+
+    #[test]
+    fn an_unchargeable_failure_reuses_the_commissioned_statement() {
+        assert_eq!(
+            automatic_resume_guidance(true).expect("no guidance needs admission"),
+            None
         );
     }
 

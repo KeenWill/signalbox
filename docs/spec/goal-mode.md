@@ -22,7 +22,9 @@ parking of an operator-commissioned escalation is verified against this PR
 automatic resumptions is verified against this PR
 (`agent/daemon-live-goal-resume-rearm`). Automatic-resume failure accounting and
 its twenty-attempt ceiling are verified against this PR
-(`agent/daemon-live-goal-resume-failure-budget`). Identity and durable-command
+(`agent/daemon-live-goal-resume-failure-budget`). Chargeable-failure resume
+guidance is verified against this PR
+(`agent/daemon-live-chargeable-resume-guidance`). Identity and durable-command
 mechanics remain owned by [identity and commands](identity-and-commands.md),
 turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
@@ -205,22 +207,19 @@ and therefore independently eligible to continue.
 automatic resumption. The daemon derives from the goal event history how many
 consecutive automatic resumptions the current run has already spent: the run is
 the trailing alternation of execution-failure blocks and the resumptions that
-answered them, and every other event ends it. Below a budget of twenty
-chargeable consecutive attempts, the appended need text states that automatic
+answered them, and every other event ends it. Below the required configured
+chargeable-attempt budget, the appended need text states that automatic
 resumption is scheduled and names the operator repair for a goal still blocked
-once resumption ends, and exactly one resume follows after a backoff of two
-minutes doubled per attempt already spent, to a thirty-minute maximum. At the
-budget the goal stays blocked, and its need text states that automatic
-resumption is exhausted and states the operator repair. All three bounds are
-fixed in source and no configuration reads them: an automatic resumption spends
-provider budget on a session no operator asked about, so its cadence and its end
-are product decisions rather than deployment ones. Every need text an
-execution-failure block carries names the operator repair, because an armed
-attempt can also fail to resume by being durably rejected, by losing its
-process, or by never reaching the database, and in each case that text is what
-an operator reads. Resumption does not bypass execution-failure blocking or make
-a failure a silent retry — the block is appended first, and every attempt is an
-ordinary recorded `resumed` event.
+once resumption ends, and exactly one resume follows after the required
+configured backoff doubled per attempt already spent, up to its required
+configured cap. At the budget the goal stays blocked, and its need text states
+that automatic resumption is exhausted and states the operator repair. Every
+need text an execution-failure block carries names the operator repair, because
+an armed attempt can also fail to resume by being durably rejected, by losing
+its process, or by never reaching the database, and in each case that text is
+what an operator reads. Resumption does not bypass execution-failure blocking or
+make a failure a silent retry — the block is appended first, and every attempt
+is an ordinary recorded `resumed` event.
 
 A resumed turn does not spend that twenty-attempt goal budget when durable
 evidence attributes its failure outside the session: its exact model-call or
@@ -234,6 +233,16 @@ and unrecognized provider failures remain chargeable because they do not prove a
 transient provider-availability condition. Typed records rather than a log line
 remain authority, so deploys, reconciliation deadlines, and transient provider
 availability cannot exhaust work the session did not fail.
+
+A chargeable failure resumes with fixed guidance to inspect durable state and
+choose a different safe approach before repeating the failed operation, making
+the resumed run reconsider its strategy rather than simply replaying the
+immutable commissioned statement. An unchargeable failure resumes without
+guidance and therefore reuses that statement: infrastructure recovery must not
+invent a new model instruction. The exact failed-turn evidence used for budget
+charging selects between those inputs; inability to read it leaves the
+resumption unsettled for the existing bounded database retry rather than
+guessing.
 
 **Implemented behavior.** An automatic resumption's durable command identity is
 derived from the session and the exact blocked event it answers rather than
