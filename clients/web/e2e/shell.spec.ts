@@ -484,6 +484,19 @@ test('the command palette opens keyboard help without closing it', async ({ page
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('standalone Imports exposes keyboard help from its binding and palette', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/imports')
+
+  await page.keyboard.press('?')
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('button', { name: /Open keyboard help/ })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('keeps million-row imports and enormous entry histories bounded', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto(importsFixture.path)

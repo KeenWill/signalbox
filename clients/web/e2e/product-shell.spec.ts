@@ -487,6 +487,29 @@ test('switches Imports layout before the product pane clips', async ({ page }) =
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('stacks Imports from the available product pane width', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.addInitScript(() => {
+    localStorage.setItem(
+      'signalbox.web.preferences.v1',
+      JSON.stringify({ paneSizes: { navigation: 360, inspector: 480 } }),
+    )
+  })
+  await page.setViewportSize({ width: 1280, height: 844 })
+  await page.goto('/imports')
+
+  const workspace = page.locator('.imports-workspace-product')
+  const inspectorBody = page.locator('.import-inspector-body')
+  await expect(workspace).toBeVisible()
+  await expect(inspectorBody).toHaveCSS('grid-template-columns', /^(?!.* ).+$/)
+  expect(await workspace.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+    true,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('locks product navigation while an ambiguous continuation command is retained', async ({
   page,
 }) => {

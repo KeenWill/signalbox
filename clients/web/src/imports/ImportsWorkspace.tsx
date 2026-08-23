@@ -239,6 +239,7 @@ export function ImportsWorkspace({
       timelineIds: [],
       focusTimeline: () =>
         document.querySelector<HTMLElement>('[aria-label="Imported source entries"]')?.focus(),
+      keyboardHelpAvailable: presentation === 'standalone',
       importEntryIds,
       selectedImportEntry: selectedFrontier?.imported_entry_id ?? null,
       selectImportEntry,
@@ -255,6 +256,7 @@ export function ImportsWorkspace({
       canRecoverRetainedCommand,
       continueAt,
       importEntryIds,
+      presentation,
       retryExactCommand,
       selectImportEntry,
       selectedFrontier?.imported_entry_id,

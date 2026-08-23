@@ -36,6 +36,19 @@ describe('command registry', () => {
     expect(selectedImportEntry).toBe(importEntryIds[1])
   })
 
+  it('opens keyboard help for standalone Imports without timeline rows', () => {
+    invokeCommand('help.open', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      keyboardHelpAvailable: true,
+    })
+
+    expect(selectApp(store.getState()).overlay).toBe('help')
+    store.dispatch(actions.overlaySet(null))
+  })
+
   it('sets transcript detail through the registry in Settings without a timeline', () => {
     invokeCommand('detail.results', {
       dispatch: store.dispatch,

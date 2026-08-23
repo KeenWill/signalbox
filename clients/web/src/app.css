@@ -550,6 +550,7 @@ kbd {
 }
 .product-main-imports {
   overflow: auto;
+  container-type: inline-size;
 }
 .imports-workspace-product {
   overflow: hidden;
@@ -925,6 +926,66 @@ kbd {
   }
   .imports-workspace-product .imports-table-header > div:nth-child(2),
   .imports-workspace-product .imports-table-row > div:nth-child(2) {
+    display: none;
+  }
+}
+
+@container (max-width: 960px) {
+  .imports-shell-product {
+    min-height: 920px;
+    overflow: visible;
+  }
+  .imports-workspace-product {
+    overflow: visible;
+    grid-template-rows: minmax(340px, 0.8fr) minmax(580px, 1.2fr);
+  }
+  .imports-workspace-product .imports-catalog,
+  .imports-workspace-product .import-inspector {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .imports-workspace-product .imports-catalog-header,
+  .imports-workspace-product .import-inspector-header {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 0.45rem 0.55rem;
+  }
+  .imports-workspace-product .imports-filters,
+  .imports-workspace-product .window-controls {
+    flex-wrap: wrap;
+  }
+  .imports-workspace-product .imports-filters {
+    width: 100%;
+  }
+  .imports-workspace-product .imports-filters > label:not(.source-session-filter-toggle) {
+    flex: 1 1 calc(50% - 0.2rem);
+    min-width: 0;
+  }
+  .imports-workspace-product .imports-filters > label > input,
+  .imports-workspace-product .imports-filters > label > select {
+    width: 100%;
+    min-width: 0;
+  }
+  .product-main-imports .surface-question p {
+    width: min(320px, 100%);
+  }
+  .imports-workspace-product .import-inspector-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(180px, auto) minmax(260px, 1fr);
+  }
+  .imports-workspace-product .import-evidence {
+    display: block;
+    max-height: 42dvh;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .imports-workspace-product .imports-table-header,
+  .imports-workspace-product .imports-table-row {
+    grid-template-columns: minmax(220px, 1fr) 80px;
+  }
+  .imports-workspace-product .imports-table-header > div:nth-child(2),
+  .imports-workspace-product .imports-table-row > div:nth-child(2),
+  .imports-workspace-product .imports-table-header > div:last-child,
+  .imports-workspace-product .imports-table-row > div:last-child {
     display: none;
   }
 }

@@ -8,6 +8,7 @@ export interface CommandContext {
   timelineIds: readonly string[]
   focusTimeline: () => void
   focusPrimaryWhenNavigationHides?: () => void
+  keyboardHelpAvailable?: boolean
   importEntryIds?: readonly string[]
   selectedImportEntry?: string | null
   requestedImportEntry?: string
@@ -45,6 +46,8 @@ interface CommandDefinitionShape {
 const always = () => true
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
 const scenarioTimeline = (context: CommandContext) => context.timelineIds.length > 0
+const keyboardHelp = (context: CommandContext) =>
+  scenarioTimeline(context) || context.keyboardHelpAvailable === true
 const transcriptDetail = (context: CommandContext) =>
   scenarioTimeline(context) || context.transcriptPreferences === true
 const presentationPreferences = (context: CommandContext) =>
@@ -146,7 +149,7 @@ export const commandRegistry = [
     description: 'Review modal navigation and command bindings.',
     category: 'Surface',
     bindings: [{ label: '?', registration: { kind: 'hotkey', hotkey: { key: '/', shift: true } } }],
-    available: scenarioTimeline,
+    available: keyboardHelp,
     run: (context) => context.dispatch(actions.overlaySet('help')),
   },
   {
