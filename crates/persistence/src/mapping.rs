@@ -6,7 +6,9 @@ use crate::repo_watch_webhook::RepoWatchWebhookDisposition;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
-use signalbox_application::{RepoWatchPullRequestLifecycle, RepoWatchThreadState};
+use signalbox_application::{
+    RepoWatchPullRequestLifecycle, RepoWatchThreadState, SearchContentClass,
+};
 use signalbox_domain::{
     AcceptedInputId, AnthropicServiceTier, BoundChildAction, CheckConclusion, ChecksOutcome,
     CodexCliServiceTier, DangerousToolAutoApproval, DelegateApprovalRecommendation,
@@ -42,6 +44,78 @@ pub(crate) const TURN_RECONCILIATION_REQUIRED: &str = "turn_reconciliation_requi
 pub(crate) const RUNNER_STATE_TRANSITION: &str = "runner_state_transition";
 pub(crate) const DELEGATION_UPDATE: &str = "delegation_update";
 pub(crate) const DELEGATION_WAKE: &str = "delegation_wake";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SearchProjectionSourceKind {
+    SessionMetadata,
+    AcceptedInput,
+    SteeringInput,
+    SemanticEntry,
+    ToolRequest,
+    ToolAttempt,
+    Attachment,
+    DerivedArtifact,
+}
+
+pub(crate) const fn search_projection_source_kind_to_str(
+    value: SearchProjectionSourceKind,
+) -> &'static str {
+    match value {
+        SearchProjectionSourceKind::SessionMetadata => "session_metadata",
+        SearchProjectionSourceKind::AcceptedInput => "accepted_input",
+        SearchProjectionSourceKind::SteeringInput => "steering_input",
+        SearchProjectionSourceKind::SemanticEntry => "semantic_entry",
+        SearchProjectionSourceKind::ToolRequest => "tool_request",
+        SearchProjectionSourceKind::ToolAttempt => "tool_attempt",
+        SearchProjectionSourceKind::Attachment => "attachment",
+        SearchProjectionSourceKind::DerivedArtifact => "derived_artifact",
+    }
+}
+
+pub(crate) fn search_projection_source_kind_from_str(
+    value: &str,
+) -> Option<SearchProjectionSourceKind> {
+    Some(match value {
+        "session_metadata" => SearchProjectionSourceKind::SessionMetadata,
+        "accepted_input" => SearchProjectionSourceKind::AcceptedInput,
+        "steering_input" => SearchProjectionSourceKind::SteeringInput,
+        "semantic_entry" => SearchProjectionSourceKind::SemanticEntry,
+        "tool_request" => SearchProjectionSourceKind::ToolRequest,
+        "tool_attempt" => SearchProjectionSourceKind::ToolAttempt,
+        "attachment" => SearchProjectionSourceKind::Attachment,
+        "derived_artifact" => SearchProjectionSourceKind::DerivedArtifact,
+        _ => return None,
+    })
+}
+
+pub(crate) const fn search_projection_content_class_to_str(
+    value: SearchContentClass,
+) -> &'static str {
+    match value {
+        SearchContentClass::UserTranscript => "user_transcript",
+        SearchContentClass::AssistantTranscript => "assistant_transcript",
+        SearchContentClass::ToolArguments => "tool_arguments",
+        SearchContentClass::ToolResult => "tool_result",
+        SearchContentClass::SessionMetadata => "session_metadata",
+        SearchContentClass::AttachmentFilename => "attachment_filename",
+        SearchContentClass::AttachmentMediaMetadata => "attachment_media_metadata",
+        SearchContentClass::DerivedTextArtifact => "derived_text_artifact",
+    }
+}
+
+pub(crate) fn search_projection_content_class_from_str(value: &str) -> Option<SearchContentClass> {
+    Some(match value {
+        "user_transcript" => SearchContentClass::UserTranscript,
+        "assistant_transcript" => SearchContentClass::AssistantTranscript,
+        "tool_arguments" => SearchContentClass::ToolArguments,
+        "tool_result" => SearchContentClass::ToolResult,
+        "session_metadata" => SearchContentClass::SessionMetadata,
+        "attachment_filename" => SearchContentClass::AttachmentFilename,
+        "attachment_media_metadata" => SearchContentClass::AttachmentMediaMetadata,
+        "derived_text_artifact" => SearchContentClass::DerivedTextArtifact,
+        _ => return None,
+    })
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OutboxEventDiscriminator {

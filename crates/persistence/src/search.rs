@@ -15,7 +15,15 @@ use signalbox_domain::{
 use sqlx::{PgPool, Row, postgres::PgRow};
 use uuid::Uuid;
 
+use crate::mapping::{
+    SearchProjectionSourceKind, search_projection_content_class_from_str,
+    search_projection_content_class_to_str, search_projection_source_kind_from_str,
+    search_projection_source_kind_to_str,
+};
+
+#[cfg(test)]
 const HEADLINE_START: &str = "\u{e000}";
+#[cfg(test)]
 const HEADLINE_END: &str = "\u{e001}";
 
 const SEARCH_SQL: &str = "
@@ -49,19 +57,31 @@ SELECT projection.projection_id, projection.session_id,
                   OR correlated_chunk.turn_id IS DISTINCT FROM projection.turn_id
               )
        ) AS source_group_valid,
+       headline_markers.start_marker, headline_markers.stop_marker,
        ts_headline(
            'simple'::regconfig,
-           replace(
-               replace(projection.content_text, chr(57344), ''),
-               chr(57345), ''
-           ),
+           projection.content_text,
            lexical_query.value,
-           'StartSel=' || chr(57344) || ', StopSel=' || chr(57345) ||
+           'StartSel=' || headline_markers.start_marker ||
+           ', StopSel=' || headline_markers.stop_marker ||
            ', MaxWords=32, MinWords=8, ShortWord=1, MaxFragments=1'
        ) AS marked_snippet
   FROM web_search_projection AS projection
  CROSS JOIN lexical_query
  CROSS JOIN candidate_query
+ CROSS JOIN LATERAL (
+     SELECT candidate.start_marker, candidate.stop_marker
+       FROM (
+           SELECT chr(57344) || projection.projection_id::text || ':' || nonce::text || chr(57344)
+                      AS start_marker,
+                  chr(57345) || projection.projection_id::text || ':' || nonce::text || chr(57345)
+                      AS stop_marker
+             FROM generate_series(0, 65536) AS nonce
+       ) AS candidate
+      WHERE strpos(projection.content_text, candidate.start_marker) = 0
+        AND strpos(projection.content_text, candidate.stop_marker) = 0
+      LIMIT 1
+ ) AS headline_markers
  WHERE projection.search_vector @@ candidate_query.value
    AND NOT EXISTS (
        SELECT 1
@@ -283,16 +303,21 @@ impl SearchRepository {
         projection: SearchArtifactProjection,
     ) -> Result<(), SearchRepositoryError> {
         let (source_kind, content_class) = match projection.class {
-            SearchArtifactProjectionClass::AttachmentFilename => {
-                ("attachment", "attachment_filename")
-            }
-            SearchArtifactProjectionClass::AttachmentMediaMetadata => {
-                ("attachment", "attachment_media_metadata")
-            }
-            SearchArtifactProjectionClass::DerivedText => {
-                ("derived_artifact", "derived_text_artifact")
-            }
+            SearchArtifactProjectionClass::AttachmentFilename => (
+                SearchProjectionSourceKind::Attachment,
+                SearchContentClass::AttachmentFilename,
+            ),
+            SearchArtifactProjectionClass::AttachmentMediaMetadata => (
+                SearchProjectionSourceKind::Attachment,
+                SearchContentClass::AttachmentMediaMetadata,
+            ),
+            SearchArtifactProjectionClass::DerivedText => (
+                SearchProjectionSourceKind::DerivedArtifact,
+                SearchContentClass::DerivedTextArtifact,
+            ),
         };
+        let source_kind = search_projection_source_kind_to_str(source_kind);
+        let content_class = search_projection_content_class_to_str(content_class);
         let mut transaction = self.pool.begin().await?;
         let address_belongs_to_session = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (
@@ -425,7 +450,10 @@ fn decode_row(row: PgRow) -> Result<(SearchCursor, SearchResult), SearchReposito
         content_class,
     )?;
     let source = decode_source(&source_kind, &item_kind, item_id, turn_id, session)?;
-    let (snippet, highlights) = decode_headline(row.try_get("marked_snippet")?)?;
+    let start_marker: String = row.try_get("start_marker")?;
+    let stop_marker: String = row.try_get("stop_marker")?;
+    let (snippet, highlights) =
+        decode_headline(row.try_get("marked_snippet")?, &start_marker, &stop_marker)?;
     Ok((
         SearchCursor::new(address, projection),
         SearchResult {
@@ -517,73 +545,74 @@ fn decode_source(
     turn: Option<Uuid>,
     session: SessionId,
 ) -> Result<SearchResultSource, SearchProjectionCorruption> {
+    let source_kind = search_projection_source_kind_from_str(source_kind).ok_or_else(|| {
+        SearchProjectionCorruption::Unsupported {
+            field: "source kind",
+            value: source_kind.to_owned(),
+        }
+    })?;
     match (source_kind, item_kind, turn) {
-        ("session_metadata", "session", None) if source == session.into_uuid() => {
+        (SearchProjectionSourceKind::SessionMetadata, "session", None)
+            if source == session.into_uuid() =>
+        {
             Ok(SearchResultSource::Session(session))
         }
-        ("accepted_input", "accepted_input", Some(turn)) => Ok(SearchResultSource::AcceptedInput {
-            input: AcceptedInputId::from_uuid(source),
-            turn: TurnId::from_uuid(turn),
-        }),
-        ("steering_input", "accepted_input", Some(source_turn)) => {
+        (SearchProjectionSourceKind::AcceptedInput, "accepted_input", Some(turn)) => {
+            Ok(SearchResultSource::AcceptedInput {
+                input: AcceptedInputId::from_uuid(source),
+                turn: TurnId::from_uuid(turn),
+            })
+        }
+        (SearchProjectionSourceKind::SteeringInput, "accepted_input", Some(source_turn)) => {
             Ok(SearchResultSource::SteeringInput {
                 input: AcceptedInputId::from_uuid(source),
                 source_turn: TurnId::from_uuid(source_turn),
             })
         }
-        ("semantic_entry", "transcript_entry", Some(turn)) => {
+        (SearchProjectionSourceKind::SemanticEntry, "transcript_entry", Some(turn)) => {
             Ok(SearchResultSource::TurnTranscriptEntry {
                 entry: SemanticTranscriptEntryId::from_uuid(source),
                 turn: TurnId::from_uuid(turn),
             })
         }
-        ("semantic_entry", "transcript_entry", None) => {
+        (SearchProjectionSourceKind::SemanticEntry, "transcript_entry", None) => {
             Ok(SearchResultSource::SessionTranscriptEntry {
                 entry: SemanticTranscriptEntryId::from_uuid(source),
             })
         }
-        ("tool_request", "tool_request", Some(turn)) => Ok(SearchResultSource::ToolRequest {
-            request: ToolRequestId::from_uuid(source),
-            turn: TurnId::from_uuid(turn),
-        }),
-        ("tool_attempt", "tool_attempt", Some(turn)) => Ok(SearchResultSource::ToolAttempt {
-            attempt: ToolAttemptId::from_uuid(source),
-            turn: TurnId::from_uuid(turn),
-        }),
-        ("attachment", "attachment", None) => Ok(SearchResultSource::Attachment {
-            attachment: SearchArtifactId::from_uuid(source),
-        }),
-        ("derived_artifact", "derived_artifact", None) => Ok(SearchResultSource::DerivedArtifact {
-            artifact: SearchArtifactId::from_uuid(source),
-        }),
-        (
-            "session_metadata" | "accepted_input" | "steering_input" | "semantic_entry"
-            | "tool_request" | "tool_attempt" | "attachment" | "derived_artifact",
-            _,
-            _,
-        ) => Err(SearchProjectionCorruption::SourceShape),
-        _ => Err(SearchProjectionCorruption::Unsupported {
-            field: "source kind",
-            value: source_kind.to_owned(),
-        }),
+        (SearchProjectionSourceKind::ToolRequest, "tool_request", Some(turn)) => {
+            Ok(SearchResultSource::ToolRequest {
+                request: ToolRequestId::from_uuid(source),
+                turn: TurnId::from_uuid(turn),
+            })
+        }
+        (SearchProjectionSourceKind::ToolAttempt, "tool_attempt", Some(turn)) => {
+            Ok(SearchResultSource::ToolAttempt {
+                attempt: ToolAttemptId::from_uuid(source),
+                turn: TurnId::from_uuid(turn),
+            })
+        }
+        (SearchProjectionSourceKind::Attachment, "attachment", None) => {
+            Ok(SearchResultSource::Attachment {
+                attachment: SearchArtifactId::from_uuid(source),
+            })
+        }
+        (SearchProjectionSourceKind::DerivedArtifact, "derived_artifact", None) => {
+            Ok(SearchResultSource::DerivedArtifact {
+                artifact: SearchArtifactId::from_uuid(source),
+            })
+        }
+        _ => Err(SearchProjectionCorruption::SourceShape),
     }
 }
 
 fn decode_content_class(value: String) -> Result<SearchContentClass, SearchProjectionCorruption> {
-    match value.as_str() {
-        "user_transcript" => Ok(SearchContentClass::UserTranscript),
-        "assistant_transcript" => Ok(SearchContentClass::AssistantTranscript),
-        "tool_arguments" => Ok(SearchContentClass::ToolArguments),
-        "tool_result" => Ok(SearchContentClass::ToolResult),
-        "session_metadata" => Ok(SearchContentClass::SessionMetadata),
-        "attachment_filename" => Ok(SearchContentClass::AttachmentFilename),
-        "attachment_media_metadata" => Ok(SearchContentClass::AttachmentMediaMetadata),
-        "derived_text_artifact" => Ok(SearchContentClass::DerivedTextArtifact),
-        _ => Err(SearchProjectionCorruption::Unsupported {
+    search_projection_content_class_from_str(&value).ok_or(
+        SearchProjectionCorruption::Unsupported {
             field: "content class",
             value,
-        }),
-    }
+        },
+    )
 }
 
 fn required_address(value: Decimal) -> Result<TimelineAddress, SearchProjectionCorruption> {
@@ -599,18 +628,20 @@ fn required_address(value: Decimal) -> Result<TimelineAddress, SearchProjectionC
 
 fn decode_headline(
     marked: String,
+    start_marker: &str,
+    stop_marker: &str,
 ) -> Result<(String, Vec<SearchHighlight>), SearchProjectionCorruption> {
     let mut plain = String::new();
     let mut marked_ranges = Vec::new();
     let mut active_start = None;
     let mut remaining = marked.as_str();
     while !remaining.is_empty() {
-        if let Some(rest) = remaining.strip_prefix(HEADLINE_START) {
+        if let Some(rest) = remaining.strip_prefix(start_marker) {
             active_start = Some(plain.len());
             remaining = rest;
             continue;
         }
-        if let Some(rest) = remaining.strip_prefix(HEADLINE_END) {
+        if let Some(rest) = remaining.strip_prefix(stop_marker) {
             append_marked_range(&mut marked_ranges, active_start.take(), plain.len());
             remaining = rest;
             continue;
@@ -684,7 +715,8 @@ mod tests {
         const MATCH: &str = "café";
         const SUFFIX: &str = "</b> after";
         let marked = format!("{PREFIX}{HEADLINE_START}{MATCH}{HEADLINE_END}{SUFFIX}");
-        let (snippet, highlights) = decode_headline(marked).expect("fixture headline decodes");
+        let (snippet, highlights) = decode_headline(marked, HEADLINE_START, HEADLINE_END)
+            .expect("fixture headline decodes");
 
         assert_eq!(snippet, format!("{PREFIX}{MATCH}{SUFFIX}"));
         assert_eq!(
@@ -702,7 +734,8 @@ mod tests {
             "{HEADLINE_START}{}{HEADLINE_END}",
             "x".repeat(max_search_snippet_bytes() * 2)
         );
-        let (snippet, highlights) = decode_headline(marked).expect("fixture headline decodes");
+        let (snippet, highlights) = decode_headline(marked, HEADLINE_START, HEADLINE_END)
+            .expect("fixture headline decodes");
 
         assert_eq!(snippet.len(), max_search_snippet_bytes());
         assert_eq!(
@@ -721,7 +754,8 @@ mod tests {
             "{}{HEADLINE_START}needle{HEADLINE_END} after",
             "x".repeat(max_search_snippet_bytes() + 64)
         );
-        let (snippet, highlights) = decode_headline(marked).expect("fixture headline decodes");
+        let (snippet, highlights) = decode_headline(marked, HEADLINE_START, HEADLINE_END)
+            .expect("fixture headline decodes");
 
         assert!(snippet.contains("needle"));
         assert_eq!(highlights.len(), 1);
@@ -731,5 +765,25 @@ mod tests {
             "needle"
         );
         assert!(snippet.len() <= max_search_snippet_bytes());
+    }
+
+    #[test]
+    fn headline_decoder_preserves_literal_private_use_characters() {
+        const START: &str = "<search-start>";
+        const STOP: &str = "<search-stop>";
+        let marked = format!("literal {HEADLINE_START} {START}needle{STOP} {HEADLINE_END}");
+        let (snippet, highlights) =
+            decode_headline(marked, START, STOP).expect("fixture headline decodes");
+
+        assert_eq!(
+            snippet,
+            format!("literal {HEADLINE_START} needle {HEADLINE_END}")
+        );
+        assert_eq!(highlights.len(), 1);
+        let highlight = highlights[0];
+        assert_eq!(
+            &snippet[usize::from(highlight.start_byte)..usize::from(highlight.end_byte)],
+            "needle"
+        );
     }
 }
