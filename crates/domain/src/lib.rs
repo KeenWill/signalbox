@@ -187,10 +187,10 @@ pub use repo_watch::{
     RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchLabelMatcher,
     RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
     RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleContentDigest, RepoWatchRuleId,
-    RepoWatchRuleValidationError, RepoWatchRuleVersion, RepoWatchSingletonScope,
-    RepoWatchTemplateContextDeclaration, RepoWatchTemplateContextDeclarationError,
-    RepoWatchTextError, RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId,
-    WorkflowName,
+    RepoWatchRuleIdentityField, RepoWatchRuleIdentityFieldDigest, RepoWatchRuleValidationError,
+    RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
+    RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepoWatchWorkflowRunAttempt,
+    RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
 };
 pub use review_workflow::{
     ReviewChangeRequestNumber, ReviewConfidence, ReviewConfidenceError, ReviewEventOrdinal,
@@ -548,6 +548,11 @@ define_identity!(
 );
 
 define_identity!(
+    /// Identifies one durable operator-commissioned dispatch audit record.
+    CommissionedDispatchId
+);
+
+define_identity!(
     /// Identifies one durable workspace an authority grant may be scoped to.
     WorkspaceId
 );
@@ -615,11 +620,12 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptedInputId, ContextFrontierId, DurableCommandId, GitRemoteMintId,
-        GitRemoteWithdrawalId, ImportedConversationId, ImportedTranscriptEntryId, ModelCallId,
-        ProviderTargetEvidenceId, RepoWatchDispatchId, RepoWatchEventId, RunnerAuthenticationId,
-        RunnerEnrollmentId, RunnerId, RunnerLeaseId, SemanticTranscriptEntryId, SessionId,
-        ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId, WorkspaceId, WorkspaceManifestId,
+        AcceptedInputId, CommissionedDispatchId, ContextFrontierId, DurableCommandId,
+        GitRemoteMintId, GitRemoteWithdrawalId, ImportedConversationId, ImportedTranscriptEntryId,
+        ModelCallId, ProviderTargetEvidenceId, RepoWatchDispatchId, RepoWatchEventId,
+        RunnerAuthenticationId, RunnerEnrollmentId, RunnerId, RunnerLeaseId,
+        SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+        WorkspaceId, WorkspaceManifestId,
     };
     use uuid::Uuid;
 
@@ -660,6 +666,7 @@ mod tests {
         assert_uuid_contract!(WorkspaceManifestId);
         assert_uuid_contract!(RepoWatchEventId);
         assert_uuid_contract!(RepoWatchDispatchId);
+        assert_uuid_contract!(CommissionedDispatchId);
         assert_uuid_contract!(WorkspaceId);
         assert_uuid_contract!(GitRemoteMintId);
         assert_uuid_contract!(GitRemoteWithdrawalId);

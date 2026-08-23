@@ -22,6 +22,10 @@ The `AlwaysConfirm` interaction with an explicitly configured approval posture �
 `Delegated` admitted, `Auto` refused — is verified through this PR
 (`agent/approval-posture-alwaysconfirm`).
 
+The immutable repository-watch authority supplied to a dispatched approval judge
+and the unattended-escalation terminal path are verified against this PR
+(`agent/headless-approval-escalation`).
+
 The per-session workspace root the workspace, local Git, and execution families
 bind is verified against this PR (`agent/per-session-workspaces`).
 
@@ -221,19 +225,60 @@ in model-call history with its selection, resolved provider target, credential
 reference, state, disposition, and reported token usage. Its closed result is
 `Approve`, `Deny`, or `EscalateToHuman`, always with rationale.
 
-The judge may approve or deny only a request frozen as `Delegated`. An
-`EscalateToHuman` result stores the completed call but no approval decision and
-leaves the same request parked. A `KnownFailed`, `Refused`, `Cancelled`, or
-`Ambiguous` terminal judge call likewise retains that park while immediately
-admitting a user decision, so a terminal judge failure cannot strand the
-approval wait. A request frozen as `Human` admits only that escalation result
-from a delegate; a delegate approval or denial is rejected by both domain
-reconstruction and relational provenance constraints (INV-049). Thus delegation
-can narrow authority but never widen it. A completed approve or deny atomically
-records the decision and advances the same proposal-ordered batch transition
-used by a user decision. Each explicit user or delegate decision emits one
-ordered `ToolApprovalDecided` event carrying the decision, decider kind and
-identity, and delegate rationale when present.
+For a turn recorded in the generation a repository-watch dispatch commissioned,
+preparation also reads the immutable dispatch authority linked to that dispatch.
+Pull-request authority contains the dispatch identity, watched repository,
+pull-request number, exact head commit, head repository and branch, and base
+branch; branch authority contains the dispatch identity, repository, and branch.
+The judge receives this structured authority beside the commissioned goal,
+template, and frozen system prompt. A judged turn in any other generation of
+that session — an unrelated successor goal it later accepted — resolves no such
+authority, as does a turn no generation recorded: the dispatch described
+neither. Those turns are prepared, judged, and escalated exactly as in a session
+no dispatch created, which [repository watch](repo-watch.md) states from the
+dispatch side. Every session-derived field is separately delimited and quoted as
+untrusted evidence, and the judge prompt treats it as scope to compare with the
+proposed request rather than as instruction. The context comes from the
+append-only dispatch action and triggering event, not from mutable provider
+state or text reconstructed from the goal.
+
+The judge may approve or deny only a request frozen as `Delegated`. In a session
+without repository-watch dispatch authority, an `EscalateToHuman` result stores
+the completed call but no approval decision and leaves the same request parked.
+A `KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous` terminal judge call
+likewise retains that attended park while immediately admitting a user decision,
+so a terminal judge failure cannot prevent that decision. In a session judged
+under dispatch authority, no user attends the approval wait — unless steering
+accepted while the judge was outstanding still names the judged turn, which is a
+user attending it, or the session has already recorded an escalation while the
+commissioned goal's authority still stands, which means an operator resumed this
+work by hand — nothing else can, because the block an escalation writes is
+exempt from automatic resumption. Either turn keeps the attended park described
+above: its completed `EscalateToHuman` leaves the turn active and the request
+parked for that user, exactly as in a session no dispatch created, and no steer
+is reclassified or stranded by a terminalization it did not expect. Otherwise a
+completed `EscalateToHuman` closes every unresolved request in the active batch
+as `ToolClosed`, appends `TurnFailed`, terminalizes the turn with the completed
+judge escalation as its typed cause, and blocks the commissioned goal for
+execution failure while that goal's authority still stands. A generation
+stopped, achieved, or superseded during the provider round-trip is failed but
+not blocked: [goal mode](goal-mode.md) fixes that the authority the block would
+record has already ended, and a released batch whose authority ended this way is
+the stale work [repository watch](repo-watch.md) terminalizes rather than parks.
+The same transaction records an append-only audit row linking the judge call and
+rationale, request, dispatch action, terminal attempt, failure entry, and
+terminal frontier. The blocked goal then participates in the ordinary
+repository-watch release and re-arm rules instead of leaving the active turn
+parked.
+
+A request frozen as `Human` admits only an escalation result from a delegate; a
+delegate approval or denial is rejected by both domain reconstruction and
+relational provenance constraints (INV-049). Thus delegation can narrow
+authority but never widen it. A completed approve or deny atomically records the
+decision and advances the same proposal-ordered batch transition used by a user
+decision. Each explicit user or delegate decision emits one ordered
+`ToolApprovalDecided` event carrying the decision, decider kind and identity,
+and delegate rationale when present.
 
 The consume-and-proceed transaction locks the owning session, validates that the
 request is the turn's earliest undecided request, records the command and
@@ -1322,6 +1367,9 @@ rather than applying one global version constant.
 
 ## Open edges
 
+- Replacing direct approval-judge recommendations with graded risk and brief
+  alignment remains recorded under
+  [Graded approval judging](../open-questions.md#graded-approval-judging).
 - Dynamic execution-strategy policy beyond the two named runner profiles,
   model-declared approval expiry and additional high-risk guardrails are
   recorded in [Tool safety](../open-questions.md#tool-safety).

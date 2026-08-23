@@ -6,6 +6,26 @@ use crate::*;
 /// can park one request for the judge without that request resembling the
 /// re-proposal a recorded override pre-approves.
 const JUDGED_TOOL_NAME: &str = "current_weather";
+const FAILURE_ENTRY_ID_OFFSET: u128 = 0x1_000;
+const TERMINAL_FRONTIER_ID_OFFSET: u128 = 0x1_001;
+const CLOSED_RESULT_ID_OFFSET: u128 = 0x2_000_000;
+
+fn approval_judge_completion_identities(
+    fresh_seed: u128,
+    attempt_seed: u128,
+) -> ApprovalJudgeCompletionIdentities {
+    ApprovalJudgeCompletionIdentities::new(
+        TurnAttemptId::from_uuid(Uuid::from_u128(attempt_seed)),
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(fresh_seed + FAILURE_ENTRY_ID_OFFSET)),
+        ContextFrontierId::from_uuid(Uuid::from_u128(fresh_seed + TERMINAL_FRONTIER_ID_OFFSET)),
+    )
+}
+
+fn approval_judge_closed_result_entry(request: ToolRequestId) -> SemanticTranscriptEntryId {
+    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+        request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+    ))
+}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -307,7 +327,8 @@ async fn approval_judge_repository_atomically_applies_provenanced_approval()
             DelegateApprovalRecommendation::Approve,
             rationale,
             ProviderReportedTokenUsage::unreported().with_input_tokens(Some(13)),
-            TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+            approval_judge_completion_identities(seed, seed + 0xe1),
+            approval_judge_closed_result_entry,
         )
         .await?;
     let stored: AppliedApprovalJudgeProjection = sqlx::query_as(
@@ -400,7 +421,8 @@ async fn terminal_approval_judge_usage_joins_the_transcript_usage_projection()
             ProviderReportedTokenUsage::unreported()
                 .with_input_tokens(Some(JUDGE_INPUT_TOKENS))
                 .with_output_tokens(Some(JUDGE_OUTPUT_TOKENS)),
-            TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+            approval_judge_completion_identities(seed, seed + 0xe1),
+            approval_judge_closed_result_entry,
         )
         .await?;
     let snapshot = ProcessReadRepository::new(pool.clone())
@@ -462,7 +484,8 @@ async fn approval_judge_repository_atomically_applies_a_delegate_denial()
             DelegateApprovalRecommendation::Deny,
             rationale,
             ProviderReportedTokenUsage::unreported(),
-            TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+            approval_judge_completion_identities(seed, seed + 0xe1),
+            approval_judge_closed_result_entry,
         )
         .await?;
     let stored: DeniedApprovalJudgeProjection = sqlx::query_as(
@@ -550,7 +573,8 @@ async fn approval_judge_completion_replay_rejects_another_continuation_identity(
             DelegateApprovalRecommendation::Approve,
             rationale.clone(),
             ProviderReportedTokenUsage::unreported(),
-            persisted_attempt,
+            approval_judge_completion_identities(seed, persisted_attempt.into_uuid().as_u128()),
+            approval_judge_closed_result_entry,
         )
         .await?;
     let error = repository
@@ -559,7 +583,11 @@ async fn approval_judge_completion_replay_rejects_another_continuation_identity(
             DelegateApprovalRecommendation::Approve,
             rationale,
             ProviderReportedTokenUsage::unreported(),
-            conflicting_attempt,
+            approval_judge_completion_identities(
+                seed + 0x10,
+                conflicting_attempt.into_uuid().as_u128(),
+            ),
+            approval_judge_closed_result_entry,
         )
         .await
         .expect_err("a replay cannot substitute another continuation identity");
@@ -608,7 +636,8 @@ async fn approval_judge_completion_identity_collision_rolls_back_for_retry()
             DelegateApprovalRecommendation::Approve,
             rationale.clone(),
             ProviderReportedTokenUsage::unreported(),
-            fixture.attempt,
+            approval_judge_completion_identities(seed, fixture.attempt.into_uuid().as_u128()),
+            approval_judge_closed_result_entry,
         )
         .await
         .expect_err("a taken continuation identity rolls back the completion");
@@ -618,7 +647,8 @@ async fn approval_judge_completion_identity_collision_rolls_back_for_retry()
             DelegateApprovalRecommendation::Approve,
             rationale,
             ProviderReportedTokenUsage::unreported(),
-            TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+            approval_judge_completion_identities(seed + 0x10, seed + 0xe1),
+            approval_judge_closed_result_entry,
         )
         .await?;
 
@@ -666,7 +696,8 @@ async fn approval_judge_repository_escalation_keeps_the_request_parked_for_user_
             DelegateApprovalRecommendation::EscalateToHuman,
             ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?,
             ProviderReportedTokenUsage::unreported(),
-            TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+            approval_judge_completion_identities(seed, seed + 0xe1),
+            approval_judge_closed_result_entry,
         )
         .await?;
     let parked: EscalatedApprovalJudgeProjection = sqlx::query_as(
@@ -767,7 +798,8 @@ async fn approval_judge_completion_escalates_after_the_judged_goal_is_stopped()
             DelegateApprovalRecommendation::Approve,
             ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?,
             ProviderReportedTokenUsage::unreported(),
-            TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+            approval_judge_completion_identities(seed, seed + 0xe1),
+            approval_judge_closed_result_entry,
         )
         .await?;
     let parked: EscalatedApprovalJudgeProjection = sqlx::query_as(
@@ -994,7 +1026,8 @@ async fn approval_judge_completion_serializes_with_a_concurrent_goal_achievement
                 DelegateApprovalRecommendation::Approve,
                 completion_rationale,
                 ProviderReportedTokenUsage::unreported(),
-                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1)),
+                approval_judge_completion_identities(seed, seed + 0xe1),
+                approval_judge_closed_result_entry,
             )
             .await
     });
@@ -2903,7 +2936,11 @@ async fn judge_completion_replay_rejects_a_mismatch_behind_a_user_override_appro
                 DelegateApprovalRecommendation::Approve,
                 rationale.clone(),
                 ProviderReportedTokenUsage::unreported(),
-                persisted_attempt,
+                approval_judge_completion_identities(
+                    seed,
+                    persisted_attempt.into_uuid().as_u128(),
+                ),
+                approval_judge_closed_result_entry,
             )
             .await?,
         CompleteApprovalJudgeOutcome::Decided
@@ -2914,7 +2951,11 @@ async fn judge_completion_replay_rejects_a_mismatch_behind_a_user_override_appro
             DelegateApprovalRecommendation::Approve,
             rationale,
             ProviderReportedTokenUsage::unreported(),
-            conflicting_attempt,
+            approval_judge_completion_identities(
+                seed + 0x10,
+                conflicting_attempt.into_uuid().as_u128(),
+            ),
+            approval_judge_closed_result_entry,
         )
         .await
         .expect_err("a replay behind a proposal-time override cannot substitute another continuation identity");
@@ -3203,7 +3244,8 @@ async fn judged_reproposal_after_a_recorded_override(
                 recommendation,
                 rationale,
                 ProviderReportedTokenUsage::unreported(),
-                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x124)),
+                approval_judge_completion_identities(seed, seed + 0x124),
+                approval_judge_closed_result_entry,
             )
             .await?,
         CompleteApprovalJudgeOutcome::Decided
