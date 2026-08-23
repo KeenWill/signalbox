@@ -385,6 +385,7 @@ enum SessionTimelineRequestError {
     InvalidAnchor,
     MissingBounds,
     InvalidProjectedSessionId,
+    InvalidProjectedToolAttempt,
 }
 
 impl SessionTimelineRequestError {
@@ -425,6 +426,17 @@ impl SessionTimelineRequestError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "session_projection_failed",
                     "an existing session has an invalid durable identity",
+                )
+            }
+            Self::InvalidProjectedToolAttempt => {
+                tracing::error!(
+                    failure_class = "fail_closed_corruption",
+                    "session timeline projection has an invalid tool-attempt shape"
+                );
+                application_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_projection_failed",
+                    "an existing session has invalid durable tool-attempt evidence",
                 )
             }
         }
@@ -984,7 +996,10 @@ fn detail_body_dto(
                 }
             },
             projected_member_index,
-            tools: tools.into_iter().map(tool_attempt_dto).collect(),
+            tools: tools
+                .into_iter()
+                .map(tool_attempt_dto)
+                .collect::<Result<Vec<_>, SessionTimelineRequestError>>()?,
             goal_events: goal_events.into_iter().map(goal_event_dto).collect(),
         },
         SessionTimelineDetailBody::ToolApprovalDecision {
@@ -1600,11 +1615,9 @@ const fn bound_child_action_dto(action: TimelineBoundChildAction) -> WebTimeline
     }
 }
 
-// The persistence projection validates the closed failure-cause vocabulary and
-// all-or-none physical-attempt fields before constructing this application DTO.
-// Keep the invariant assertions here so future projection drift fails closed.
-#[allow(clippy::unreachable)]
-fn tool_attempt_dto(attempt: TimelineToolAttempt) -> WebTimelineToolAttempt {
+fn tool_attempt_dto(
+    attempt: TimelineToolAttempt,
+) -> Result<WebTimelineToolAttempt, SessionTimelineRequestError> {
     let evidence = match (
         attempt.attempt_id,
         attempt.effect_posture,
@@ -1641,19 +1654,24 @@ fn tool_attempt_dto(attempt: TimelineToolAttempt) -> WebTimelineToolAttempt {
                     TimelineToolState::KnownFailed => WebTimelineToolState::KnownFailed,
                     TimelineToolState::Ambiguous => WebTimelineToolState::Ambiguous,
                 },
-                cause: cause.map(|cause| match cause {
-                    "unknown_tool" => WebTimelineToolFailureCause::UnknownTool,
-                    "invalid_arguments" => WebTimelineToolFailureCause::InvalidArguments,
-                    "execution_failed" => WebTimelineToolFailureCause::ExecutionFailed,
-                    "result_too_large" => WebTimelineToolFailureCause::ResultTooLarge,
-                    "crash_lost" => WebTimelineToolFailureCause::CrashLost,
-                    _ => unreachable!("persistence closes tool failure causes"),
-                }),
+                cause: match cause {
+                    None => None,
+                    Some("unknown_tool") => Some(WebTimelineToolFailureCause::UnknownTool),
+                    Some("invalid_arguments") => {
+                        Some(WebTimelineToolFailureCause::InvalidArguments)
+                    }
+                    Some("execution_failed") => Some(WebTimelineToolFailureCause::ExecutionFailed),
+                    Some("result_too_large") => Some(WebTimelineToolFailureCause::ResultTooLarge),
+                    Some("crash_lost") => Some(WebTimelineToolFailureCause::CrashLost),
+                    Some(_) => {
+                        return Err(SessionTimelineRequestError::InvalidProjectedToolAttempt);
+                    }
+                },
             }
         }
-        _ => unreachable!("persistence closes tool attempt evidence shapes"),
+        _ => return Err(SessionTimelineRequestError::InvalidProjectedToolAttempt),
     };
-    WebTimelineToolAttempt {
+    Ok(WebTimelineToolAttempt {
         request_id: attempt.request_id.into_uuid().to_string(),
         tool_name: WebToolName::from_checked(attempt.tool_name.into_string()),
         arguments: attempt.arguments.map(text_excerpt_dto),
@@ -1665,7 +1683,7 @@ fn tool_attempt_dto(attempt: TimelineToolAttempt) -> WebTimelineToolAttempt {
         approval_judge_escalated: attempt.approval_judge_escalated,
         operator_required: attempt.operator_required,
         evidence,
-    }
+    })
 }
 
 fn model_call_state_dto(state: TimelineModelCallState) -> WebTimelineModelCallState {
