@@ -55,7 +55,7 @@ impl <Identity> {
 }
 ```
 
-The twenty-eight identities defined in `lib.rs`:
+The twenty-nine identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -83,6 +83,7 @@ pub struct ReviewFindingId(/* private */);
 pub struct ReviewExternalLinkId(/* private */);
 pub struct RepoWatchEventId(/* private */);
 pub struct RepoWatchDispatchId(/* private */);
+pub struct CommissionedDispatchId(/* private */);
 pub struct WorkspaceId(/* private */);
 pub struct GitRemoteMintId(/* private */);
 pub struct GitRemoteWithdrawalId(/* private */);
@@ -5768,12 +5769,141 @@ impl WorkspaceRecord {
 ## application: approval_judge
 
 ```rust
+pub enum ApprovalJudgeDispatchProvenance {
+    RepoWatch(RepoWatchDispatchId),
+    Commissioned(CommissionedDispatchId),
+}
+impl ApprovalJudgeDispatchProvenance {
+    pub const fn into_uuid(self) -> uuid::Uuid;
+}
+
+pub enum ApprovalJudgeDispatchAuthority {
+    PullRequest(ApprovalJudgePullRequestAuthority),
+    Branch(ApprovalJudgeBranchAuthority),
+}
+impl ApprovalJudgeDispatchAuthority {
+    // accessor: dispatch()
+}
+
+pub struct ApprovalJudgePullRequestAuthorityInput {
+    pub dispatch: ApprovalJudgeDispatchProvenance,
+    pub repository: RepositorySlug,
+    pub pull_request: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub head_repository: RepositorySlug,
+    pub head_branch: BranchName,
+    pub base_branch: BranchName,
+}
+
+pub struct ApprovalJudgePullRequestAuthority { /* private */ }
+impl ApprovalJudgePullRequestAuthority {
+    pub const fn new(input: ApprovalJudgePullRequestAuthorityInput) -> Self;
+    // accessors: dispatch(), repository(), pull_request(), head_sha(), head_repository(), head_branch(), base_branch()
+}
+
+pub struct ApprovalJudgeBranchAuthorityInput {
+    pub dispatch: ApprovalJudgeDispatchProvenance,
+    pub repository: RepositorySlug,
+    pub branch: BranchName,
+}
+
+pub struct ApprovalJudgeBranchAuthority { /* private */ }
+impl ApprovalJudgeBranchAuthority {
+    pub const fn new(input: ApprovalJudgeBranchAuthorityInput) -> Self;
+    // accessors: dispatch(), repository(), branch()
+}
+
+pub struct ApprovalJudgeCompletionIdentities { /* private */ }
+impl ApprovalJudgeCompletionIdentities {
+    pub const fn new(
+        continuation_attempt: TurnAttemptId,
+        failure_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self;
+    // accessors: continuation_attempt(), failure_entry(), terminal_frontier()
+}
+
 pub trait ApprovalJudgeAuthorization {
     fn request(&self) -> &ToolRequest;
     fn call(&self) -> ModelCallId;
     fn selection(&self) -> DirectModelSelection;
     fn target(&self) -> ResolvedProviderTarget;
     fn credential_reference(&self) -> &str;
+}
+```
+
+## application: commissioned_dispatch
+
+```rust
+pub enum CommissionedDispatchFence {
+    PullRequest {
+        repository: RepositorySlug,
+        pull_request: PullRequestNumber,
+        head_sha: CommitSha,
+        head_repository: RepositorySlug,
+        head_branch: BranchName,
+        base_branch: BranchName,
+    },
+    Branch {
+        repository: RepositorySlug,
+        branch: BranchName,
+    },
+}
+
+pub trait CommissionedDispatchIdGenerator {
+    fn next_dispatch_id(&mut self) -> CommissionedDispatchId;
+    fn next_command_id(&mut self) -> DurableCommandId;
+    fn next_session_id(&mut self) -> SessionId;
+    fn next_accepted_input_id(&mut self) -> AcceptedInputId;
+    fn next_turn_id(&mut self) -> TurnId;
+    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> ContextFrontierId;
+}
+
+pub struct UuidV7CommissionedDispatchIdGenerator;
+
+pub struct CommissionDispatchRequest { /* private */ }
+impl CommissionDispatchRequest {
+    pub fn try_new(
+        command_id: DurableCommandId,
+        template: SessionTemplateName,
+        fence: CommissionedDispatchFence,
+        statement: GoalStatement,
+        context: UserContent,
+    ) -> Result<Self, InvalidDurableCommandId>;
+    pub fn prepare(
+        self,
+        ids: &mut impl CommissionedDispatchIdGenerator,
+        template_provenance: SessionTemplateProvenance,
+        resolved_defaults: SessionConfigurationDefaults,
+    ) -> Result<PreparedCommissionedDispatch, CommissionDispatchPreparationError>;
+    // accessors: command_id(), template(), fence(), statement(),
+    //            initial_content_digest()
+}
+
+// sealed: CommissionDispatchRequest::prepare
+pub struct PreparedCommissionedDispatch { /* private */ }
+impl PreparedCommissionedDispatch {
+    pub fn into_parts(
+        self,
+    ) -> (
+        CommissionedDispatchId,
+        CommissionedDispatchFence,
+        PreparedCreateSession,
+        SubmitInput,
+        AcceptedInputId,
+        TurnId,
+        SemanticTranscriptEntryId,
+        ContextFrontierId,
+        GoalUserCommand,
+    );
+    // accessors: dispatch_id(), fence(), prepared_session(), goal(), session(),
+    //            initial_content_digest()
+}
+
+pub enum CommissionDispatchPreparationError {
+    TemplateMismatch,
+    SessionPreparation,
 }
 ```
 
@@ -6395,6 +6525,11 @@ pub trait FailPreparedModelCallTransaction {
         session: SessionId,
         call: ModelCallId,
     ) -> impl Future<Output = Result<RetainedCapabilityFailureStatus, Self::Error>> + Send;
+}
+
+pub enum PreparedModelCallFailureCause {
+    CapabilityKnownFailure,
+    ToolRoundLimitReached,
 }
 
 pub enum RetainedCapabilityFailureStatus {
@@ -8250,6 +8385,8 @@ impl<
 ## application: scheduler
 
 ```rust
+pub const fn scheduler_pass_admission_cap() -> usize;
+
 pub struct ReconciliationSweepInterval(/* private */);
 impl ReconciliationSweepInterval {
     pub const fn baseline() -> Self;
@@ -8365,6 +8502,7 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
         pass: Pass,
         max_in_flight_passes: NonZeroUsize,
     ) -> Self;
+    pub const fn paused(work_source: WorkSource, pass: Pass) -> Self;
     pub fn into_parts(self) -> (WorkSource, Pass);
 }
 impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass>
@@ -8764,6 +8902,68 @@ pub trait ToolExecutionTransaction {
     ) -> impl Future<Output = Result<PrepareToolContinuationOutcome, Self::Error>> + Send
     where
         NextSteering: FnMut(AcceptedInputId) -> (SemanticTranscriptEntryId, TurnId) + Send;
+}
+```
+
+## application: turn_liveness
+
+```rust
+pub struct StaleActiveTurnBound(/* private */);
+impl StaleActiveTurnBound {
+    pub const fn hard_ceiling() -> Self;
+    pub fn try_lowered(bound: Duration) -> Result<Self, TurnLivenessBoundError>;
+    pub const fn as_secs(self) -> u64;
+    pub const fn get(self) -> Duration;
+}
+
+pub struct TurnLivenessScanInterval(/* private */);
+impl TurnLivenessScanInterval {
+    pub const fn baseline() -> Self;
+    pub const fn get(self) -> Duration;
+}
+
+pub enum TurnLivenessBoundError {
+    Zero,
+    AboveCeiling,
+    Subsecond,
+}
+// impl Display + std::error::Error
+
+pub struct TurnLivenessEvidence { /* private */ }
+impl TurnLivenessEvidence {
+    pub const fn new(current_attempt: TurnAttemptId, outbox_frontier: Option<u64>) -> Self;
+    pub const fn current_attempt(self) -> TurnAttemptId;
+    pub const fn outbox_frontier(self) -> Option<u64>;
+}
+
+pub struct StaleTurnCandidate { /* private */ }
+impl StaleTurnCandidate {
+    pub const fn new(
+        session: SessionId,
+        turn: TurnId,
+        evidence: TurnLivenessEvidence,
+    ) -> Self;
+    pub const fn session(self) -> SessionId;
+    pub const fn turn(self) -> TurnId;
+    pub const fn evidence(self) -> TurnLivenessEvidence;
+}
+
+pub enum StaleTurnOutcome {
+    Terminalized,
+    Superseded,
+    BlockedByPendingSteering,
+}
+
+pub struct TurnLivenessLedger { /* private */ }
+impl TurnLivenessLedger {
+    pub fn new(bound: StaleActiveTurnBound) -> Self;
+    pub const fn bound(&self) -> StaleActiveTurnBound;
+    pub fn watched_turn_count(&self) -> usize;
+    pub fn reconcile(
+        &mut self,
+        quiescent: &[StaleTurnCandidate],
+        now: Instant,
+    ) -> Box<[StaleTurnCandidate]>;
 }
 ```
 
@@ -10827,7 +11027,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types                     |
 | -------------------------------------------------- | -------------------------------- |
-| domain: lib.rs identities                          | 28                               |
+| domain: lib.rs identities                          | 29                               |
 | domain: actor                                      | 1                                |
 | domain: blob                                       | 3                                |
 | domain: program_journal                            | 25                               |
@@ -10867,8 +11067,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                               |
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
-| **signalbox-domain total**                         | **805 (+12 free fn)**            |
-| application: approval_judge                        | 1 (incl. 1 trait)                |
+| **signalbox-domain total**                         | **806 (+12 free fn)**            |
+| application: approval_judge                        | 8 (incl. 1 trait)                |
+| application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
 | application: create_session                        | 8 (incl. 2 traits)               |
 | application: update_session_placement              | 4 (incl. 1 trait)                |
@@ -10885,11 +11086,12 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
 | application: session_metadata                      | 12 (incl. 4 traits)              |
-| application: scheduler                             | 15 (incl. 5 traits)              |
+| application: scheduler                             | 15 (+1 free fn) (incl. 5 traits) |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)               |
 | application: startup_scan                          | 7 (incl. 2 traits)               |
 | application: submit_input                          | 7 (incl. 2 traits)               |
 | application: tool_dispatch_gate                    | 2                                |
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
-| **signalbox-application total**                    | **276 (+5 free fn)**             |
+| application: turn_liveness                         | 7                                |
+| **signalbox-application total**                    | **296 (+6 free fn)**             |
