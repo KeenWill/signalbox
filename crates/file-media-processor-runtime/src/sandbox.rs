@@ -853,11 +853,15 @@ impl InvocationTaskCgroup {
             return;
         }
         let _ = fs::write(self.path.join("cgroup.kill"), "1");
+        let deadline = Instant::now() + CLEANUP_TIMEOUT;
         loop {
             let empty = fs::read_to_string(self.path.join("cgroup.events"))
                 .is_ok_and(|events| !cgroup_is_populated(&events));
             if empty && fs::remove_dir(&self.path).is_ok() {
                 self.cleaned = true;
+                return;
+            }
+            if Instant::now() >= deadline {
                 return;
             }
             tokio::time::sleep(CGROUP_CLEANUP_POLL).await;
