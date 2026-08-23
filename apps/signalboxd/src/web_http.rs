@@ -710,7 +710,7 @@ fn descriptor_dto(
         return Err(SessionTimelineRequestError::MissingBounds);
     };
     Ok(WebSessionTimelineDescriptor {
-        session_id: WebSessionId::from_validated_uuid(descriptor.session.into_uuid().to_string()),
+        session_id: WebSessionId::from_uuid_bytes(*descriptor.session.into_uuid().as_bytes()),
         sizes: WebSessionTimelineSizeFacts {
             item_count: WebU64::from_u64(descriptor.sizes.item_count),
             projected_text_bytes: WebU64::from_u64(descriptor.sizes.projected_text_bytes),
@@ -740,7 +740,7 @@ fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
         TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
     };
     WebSessionTimelineWindow {
-        session_id: WebSessionId::from_validated_uuid(window.session.into_uuid().to_string()),
+        session_id: WebSessionId::from_uuid_bytes(*window.session.into_uuid().as_bytes()),
         items: window
             .items
             .into_iter()
