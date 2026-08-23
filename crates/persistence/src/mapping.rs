@@ -2,6 +2,7 @@
 
 use std::{error::Error, fmt};
 
+use crate::repo_watch_webhook::RepoWatchWebhookDisposition;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -340,6 +341,34 @@ pub fn delegation_wake_subject_from_str(value: &str) -> Option<DelegationWakeSto
     match value {
         "result" => Some(DelegationWakeStorageKind::Result),
         "message" => Some(DelegationWakeStorageKind::Message),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_webhook_disposition_to_str(
+    value: RepoWatchWebhookDisposition,
+) -> &'static str {
+    match value {
+        RepoWatchWebhookDisposition::Projected => "projected",
+        RepoWatchWebhookDisposition::DuplicateState => "duplicate_state",
+        RepoWatchWebhookDisposition::Superseded => "superseded",
+        RepoWatchWebhookDisposition::Ignored => "ignored",
+        RepoWatchWebhookDisposition::Quarantined => "quarantined",
+    }
+}
+
+/// Paired with the encoder above so a renamed or added disposition cannot
+/// update the writer while leaving a reader interpreting the old spelling.
+#[cfg(feature = "test-support")]
+pub(crate) fn repo_watch_webhook_disposition_from_str(
+    value: &str,
+) -> Option<RepoWatchWebhookDisposition> {
+    match value {
+        "projected" => Some(RepoWatchWebhookDisposition::Projected),
+        "duplicate_state" => Some(RepoWatchWebhookDisposition::DuplicateState),
+        "superseded" => Some(RepoWatchWebhookDisposition::Superseded),
+        "ignored" => Some(RepoWatchWebhookDisposition::Ignored),
+        "quarantined" => Some(RepoWatchWebhookDisposition::Quarantined),
         _ => None,
     }
 }
@@ -1139,6 +1168,29 @@ pub(crate) const fn repo_watch_event_target_to_str(
     match value {
         RepoWatchEventTargetStorageKind::PullRequest => "pull_request",
         RepoWatchEventTargetStorageKind::Branch => "branch",
+    }
+}
+
+/// Which producer recorded one repository-watch event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchEventProducerStorageKind {
+    Poll,
+}
+
+pub(crate) const fn repo_watch_event_producer_to_str(
+    value: RepoWatchEventProducerStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchEventProducerStorageKind::Poll => "poll",
+    }
+}
+
+pub(crate) fn repo_watch_event_producer_from_str(
+    value: &str,
+) -> Option<RepoWatchEventProducerStorageKind> {
+    match value {
+        "poll" => Some(RepoWatchEventProducerStorageKind::Poll),
+        _ => None,
     }
 }
 
