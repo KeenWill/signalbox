@@ -468,7 +468,7 @@ fn encoded_byte_total(
     lengths.try_fold(0_u64, |total, length| {
         total
             .checked_add(usize_to_u64(length, field)?)
-            .ok_or_else(|| invalid_ordinal(field).into())
+            .ok_or_else(|| invalid_ordinal(field))
     })
 }
 
