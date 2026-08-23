@@ -37,7 +37,10 @@ pub use limits::{
     MAX_WORKER_FILE_DESCRIPTORS, MAX_WORKER_MEMORY_BYTES, MAX_WORKER_STDERR_BYTES,
     MAX_WORKER_TASKS, MAX_WORKER_WALL_SECONDS, MIN_WORKER_FILE_DESCRIPTORS,
 };
-pub use registry::{FileMediaRegistry, FileMediaRegistryConstructionError, ProcessorIsolation};
+pub use registry::{
+    FileMediaRegistry, FileMediaRegistryConstructionError, MAX_READERS_PER_PROVIDER,
+    MAX_REGISTRY_READERS, ProcessorIsolation,
+};
 pub use value::{
     AttachmentKind, BoundedMetadata, CanonicalJsonObjectSchema, CanonicalMediaType,
     DeclaredMediaType, DisplayFilename, FileDigest, FileReaderName, FileReaderProviderName,

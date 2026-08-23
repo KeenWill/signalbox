@@ -22,7 +22,7 @@ pub(crate) struct RangeBroker {
     arbitrary_range_count: u32,
     prefix_read: bool,
     suffix_read: bool,
-    next_stream_offset: u64,
+    stream_end_offset: u64,
 }
 
 impl RangeBroker {
@@ -40,7 +40,7 @@ impl RangeBroker {
             arbitrary_range_count: 0,
             prefix_read: false,
             suffix_read: false,
-            next_stream_offset: 0,
+            stream_end_offset: 0,
         }
     }
 
@@ -85,13 +85,13 @@ impl RangeBroker {
                 ranges,
                 cumulative_bytes,
             } => {
-                if offset != self.next_stream_offset
+                if offset < self.stream_end_offset
                     || count > ranges
                     || cumulative > cumulative_bytes
                 {
                     return Err(BrokerError::Range);
                 }
-                self.next_stream_offset = end;
+                self.stream_end_offset = end;
             }
             WireReadEnvelope::RandomAccess {
                 ranges,
@@ -265,6 +265,20 @@ mod tests {
         );
         assert!(broker.admit(0, 10).is_ok());
         assert_eq!(broker.admit(10, 10), Err(BrokerError::Range));
+    }
+
+    #[test]
+    fn streaming_envelope_accepts_a_nonzero_start_and_forward_gap() {
+        let mut broker = RangeBroker::new(
+            100,
+            WireReadEnvelope::Streaming {
+                ranges: 2,
+                cumulative_bytes: 20,
+            },
+            100,
+        );
+        assert!(broker.admit(20, 10).is_ok());
+        assert!(broker.admit(40, 10).is_ok());
     }
 
     #[test]

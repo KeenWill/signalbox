@@ -24,10 +24,11 @@ use signalbox_file_media_runtime::{
     FileMediaProviderDeclaration, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
     FileReadInput, MAX_PROBE_CUMULATIVE_BYTES, MAX_PROBE_PREFIX_BYTES, MAX_PROBE_RANGES,
     MAX_PROBE_SUFFIX_BYTES, MAX_READ_OPTIONS_BYTES, MAX_READ_RANGES, MAX_READ_SOURCE_BYTES,
-    MAX_VALIDATION_RANGES, MAX_VALIDATION_SOURCE_BYTES, MAX_WORKER_TASKS, ProbeDeclaration,
-    ProcessorBoundaryFailure, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadViewDeclaration,
-    ReaderDeclaration, ReaderIdentity, VerifiedBlobSource,
+    MAX_READERS_PER_PROVIDER, MAX_REGISTRY_READERS, MAX_VALIDATION_RANGES,
+    MAX_VALIDATION_SOURCE_BYTES, MAX_WORKER_TASKS, ProbeDeclaration, ProcessorBoundaryFailure,
+    ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadAccessPattern, ReadViewDeclaration, ReaderDeclaration,
+    ReaderIdentity, VerifiedBlobSource,
 };
 use tokio::{
     io::AsyncReadExt as _,
@@ -118,6 +119,11 @@ impl SandboxedFileMediaProcessor {
             return Err(SandboxedFileMediaProcessorConstructionError::Unsupported);
         }
         admit_worker_binding_count(bindings.len())?;
+        admit_reader_inventory(
+            bindings
+                .iter()
+                .map(|binding| binding.declaration.readers().len()),
+        )?;
         let task_cgroup_root = delegated_task_cgroup_root()?;
         if !FileMediaProcessCeilings::version_one().admits(ceilings) {
             return Err(SandboxedFileMediaProcessorConstructionError::Ceilings);
@@ -1396,6 +1402,22 @@ fn admit_worker_binding_count(
     }
 }
 
+fn admit_reader_inventory(
+    reader_counts: impl IntoIterator<Item = usize>,
+) -> Result<(), SandboxedFileMediaProcessorConstructionError> {
+    let mut aggregate = 0_usize;
+    for readers in reader_counts {
+        if readers > MAX_READERS_PER_PROVIDER {
+            return Err(SandboxedFileMediaProcessorConstructionError::ReaderInventory);
+        }
+        aggregate = aggregate
+            .checked_add(readers)
+            .filter(|count| *count <= MAX_REGISTRY_READERS)
+            .ok_or(SandboxedFileMediaProcessorConstructionError::ReaderInventory)?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum ConstructionTarget {
     Bubblewrap,
@@ -1415,6 +1437,8 @@ pub enum SandboxedFileMediaProcessorConstructionError {
     ExecutableSnapshots,
     /// Worker bindings exceeded their compiled count ceiling.
     WorkerBindings,
+    /// Reader declarations exceeded their registry-compatible count ceilings.
+    ReaderInventory,
     /// A process ceiling was zero or exceeded its compiled maximum.
     Ceilings,
     /// No validated writable delegated cgroup-v2 task controller was configured.
@@ -1435,6 +1459,7 @@ impl fmt::Display for SandboxedFileMediaProcessorConstructionError {
                 "file-media executable snapshots exceed their aggregate ceiling"
             }
             Self::WorkerBindings => "file-media worker bindings exceed their count ceiling",
+            Self::ReaderInventory => "file-media worker readers exceed their inventory ceiling",
             Self::Ceilings => "file-media process ceilings are invalid",
             Self::TaskController => "file-media per-invocation task controller is unavailable",
             Self::DuplicateProvider => "file-media worker provider is duplicated",
@@ -1458,8 +1483,9 @@ mod tests {
     use super::{
         CompletedOutput, ConstructionTarget, MAX_AGGREGATE_EXECUTABLE_SNAPSHOT_BYTES,
         MAX_EXECUTABLE_SNAPSHOT_BYTES, MAX_PROBE_CUMULATIVE_BYTES, MAX_PROBE_PREFIX_BYTES,
-        MAX_READ_OPTIONS_BYTES, MAX_READ_RANGES, MAX_READ_SOURCE_BYTES, MAX_WORKER_BINDINGS,
-        admit_completed, admit_executable_snapshot_bytes, admit_worker_binding_count,
+        MAX_READ_OPTIONS_BYTES, MAX_READ_RANGES, MAX_READ_SOURCE_BYTES, MAX_READERS_PER_PROVIDER,
+        MAX_REGISTRY_READERS, MAX_WORKER_BINDINGS, admit_completed,
+        admit_executable_snapshot_bytes, admit_reader_inventory, admit_worker_binding_count,
         cgroup_is_populated, direct_read_input_fits, open_executable_snapshot,
         open_worker_executable, probe_envelope_fits, read_envelope_fits, sandbox_arguments,
         seccomp_instructions, startup_pipe, worker_memory_budget,
@@ -1497,6 +1523,19 @@ mod tests {
         assert_eq!(
             admit_worker_binding_count(MAX_WORKER_BINDINGS + 1),
             Err(super::SandboxedFileMediaProcessorConstructionError::WorkerBindings)
+        );
+    }
+
+    #[test]
+    fn reader_inventory_rejects_per_provider_and_aggregate_excess() {
+        assert_eq!(admit_reader_inventory([MAX_REGISTRY_READERS]), Ok(()));
+        assert_eq!(
+            admit_reader_inventory([MAX_READERS_PER_PROVIDER + 1]),
+            Err(super::SandboxedFileMediaProcessorConstructionError::ReaderInventory)
+        );
+        assert_eq!(
+            admit_reader_inventory([MAX_REGISTRY_READERS, 1]),
+            Err(super::SandboxedFileMediaProcessorConstructionError::ReaderInventory)
         );
     }
 

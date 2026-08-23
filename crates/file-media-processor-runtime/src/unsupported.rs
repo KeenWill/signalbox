@@ -99,6 +99,8 @@ pub enum SandboxedFileMediaProcessorConstructionError {
     ExecutableSnapshots,
     /// Worker bindings exceeded their count ceiling.
     WorkerBindings,
+    /// Reader declarations exceeded their registry-compatible count ceilings.
+    ReaderInventory,
     /// Process ceilings were invalid.
     Ceilings,
     /// The per-invocation controller was unavailable.

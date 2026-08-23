@@ -13,9 +13,9 @@ use crate::{
 // numeric-bound: ceiling - bounds process-lifetime provider inventory memory
 const MAX_REGISTRY_PROVIDERS: usize = 256;
 // numeric-bound: ceiling - bounds per-provider reader inventory memory and startup work
-const MAX_READERS_PER_PROVIDER: usize = 256;
+pub const MAX_READERS_PER_PROVIDER: usize = 256;
 // numeric-bound: ceiling - bounds aggregate process-lifetime reader inventory memory
-const MAX_REGISTRY_READERS: usize = 256;
+pub const MAX_REGISTRY_READERS: usize = 256;
 // numeric-bound: ceiling - bounds per-reader media-claim memory and conflict checks
 const MAX_MEDIA_TYPES_PER_READER: usize = 256;
 // numeric-bound: ceiling - bounds aggregate process-lifetime media-claim memory
@@ -193,12 +193,17 @@ impl FileMediaRegistry {
             }
             Ok::<_, FileMediaFailure>((candidates, malformed))
         };
-        let (candidates, mut malformed) = tokio::time::timeout(
-            std::time::Duration::from_secs(MAX_WORKER_WALL_SECONDS),
-            probes,
-        )
-        .await
-        .map_err(|_| FileMediaFailure::ProcessorTimedOut)??;
+        let probes = Box::pin(probes);
+        let deadline = Box::pin(futures_timer::Delay::new(std::time::Duration::from_secs(
+            MAX_WORKER_WALL_SECONDS,
+        )));
+        let (candidates, mut malformed) = match futures_util::future::select(probes, deadline).await
+        {
+            futures_util::future::Either::Left((result, _)) => result?,
+            futures_util::future::Either::Right(((), _)) => {
+                return Err(FileMediaFailure::ProcessorTimedOut);
+            }
+        };
         if !malformed.is_empty() {
             malformed.sort();
             malformed.dedup();
