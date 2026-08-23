@@ -1551,7 +1551,7 @@ where
             .await
         {
             Ok(ToolAttemptAuthorizationOutcome::Authorized(authorized)) => *authorized,
-            Ok(ToolAttemptAuthorizationOutcome::PreauthorizationRejected) => {
+            Ok(ToolAttemptAuthorizationOutcome::PreauthorizationRejected { detail }) => {
                 let ended = self
                     .transaction
                     .commit_preflight_error(
@@ -1560,7 +1560,7 @@ where
                         prepared.attempt(),
                         ToolExecutionError::new(
                             ToolExecutionErrorKind::PreauthorizationRejected,
-                            None,
+                            Some(detail),
                         ),
                     )
                     .await

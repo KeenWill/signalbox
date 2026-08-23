@@ -68,7 +68,7 @@ async fn prepare_confirmed_tool_attempt(
             fixture.session,
             fixture.turn,
             attempt,
-            ToolEffectClass::EffectFree,
+            ToolEffectClass::ExternalEffect,
         )
         .await?;
     Ok((fixture, attempt))
@@ -155,7 +155,10 @@ async fn inv069_unattached_blob_read_is_rejected_before_dispatch() -> Result<(),
         .await?;
     assert_eq!(
         hidden,
-        ToolAttemptAuthorizationOutcome::PreauthorizationRejected
+        ToolAttemptAuthorizationOutcome::PreauthorizationRejected {
+            detail: ToolExecutionErrorDetail::try_new(String::from("blob_not_visible"))
+                .expect("the fixed rejection detail is valid"),
+        }
     );
     let hidden_state: String =
         sqlx::query_scalar("SELECT state_kind FROM tool_attempt WHERE attempt_id = $1")

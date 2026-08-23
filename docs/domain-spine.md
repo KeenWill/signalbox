@@ -8210,6 +8210,10 @@ impl<
 ## application: scheduler
 
 ```rust
+pub async fn relinquish_scheduler_capacity<Work>(work: Work) -> Work::Output
+where
+    Work: Future;
+
 pub struct ReconciliationSweepInterval(/* private */);
 impl ReconciliationSweepInterval {
     pub const fn baseline() -> Self;
@@ -8651,7 +8655,9 @@ pub enum ToolAttemptAuthorizationStatus {
 
 pub enum ToolAttemptAuthorizationOutcome {
     Authorized(Box<ToolDispatchAuthority>),
-    PreauthorizationRejected,
+    PreauthorizationRejected {
+        detail: ToolExecutionErrorDetail,
+    },
 }
 
 pub trait ToolExecutionTransaction {
@@ -10849,11 +10855,11 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
 | application: session_metadata                      | 12 (incl. 4 traits)              |
-| application: scheduler                             | 15 (incl. 5 traits)              |
+| application: scheduler                             | 15 (+1 free fn) (incl. 5 traits) |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)               |
 | application: startup_scan                          | 7 (incl. 2 traits)               |
 | application: submit_input                          | 7 (incl. 2 traits)               |
 | application: tool_dispatch_gate                    | 2                                |
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 9 (incl. 2 traits)               |
-| **signalbox-application total**                    | **262 (+3 free fn)**             |
+| **signalbox-application total**                    | **262 (+4 free fn)**             |

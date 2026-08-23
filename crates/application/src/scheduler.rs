@@ -12,15 +12,19 @@ use std::{
     future::{Future, ready},
     num::NonZeroUsize,
     pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 
 use signalbox_domain::{SessionId, TurnId};
 use tokio::{
     pin, select,
-    sync::mpsc::{
-        self,
-        error::{TryRecvError, TrySendError},
+    sync::{
+        Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore,
+        mpsc::{
+            self,
+            error::{TryRecvError, TrySendError},
+        },
     },
     task::{Id, JoinError, JoinSet},
     time::{self, Instant, Interval, MissedTickBehavior},
@@ -42,6 +46,57 @@ const BASELINE_RECONCILIATION_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 const BASELINE_NUDGE_BUFFER_CAPACITY: usize = 1_024;
 // numeric-bound: tunable - controls baseline reconciliation concurrency
 const BASELINE_MAX_IN_FLIGHT_PASSES: usize = 16;
+
+tokio::task_local! {
+    static ACTIVE_SCHEDULER_CAPACITY: SchedulerPassCapacity;
+}
+
+#[derive(Clone, Debug)]
+struct SchedulerPassCapacity {
+    semaphore: Arc<Semaphore>,
+    held: Arc<AsyncMutex<Option<OwnedSemaphorePermit>>>,
+}
+
+impl SchedulerPassCapacity {
+    fn new(semaphore: Arc<Semaphore>, permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            semaphore,
+            held: Arc::new(AsyncMutex::new(Some(permit))),
+        }
+    }
+
+    async fn relinquish_around<Work>(&self, work: Work) -> Work::Output
+    where
+        Work: Future,
+    {
+        let released = self.held.lock().await.take();
+        let Some(released) = released else {
+            return work.await;
+        };
+        drop(released);
+        let output = work.await;
+        if let Ok(permit) = Arc::clone(&self.semaphore).acquire_owned().await {
+            *self.held.lock().await = Some(permit);
+        }
+        output
+    }
+}
+
+/// Runs bounded external work without occupying one scheduler-pass slot.
+///
+/// When called from an authoritative pass, the pass remains in flight for
+/// per-session deduplication and reacquires capacity before this future
+/// returns. Calls outside the scheduler preserve ordinary execution.
+pub async fn relinquish_scheduler_capacity<Work>(work: Work) -> Work::Output
+where
+    Work: Future,
+{
+    let capacity = ACTIVE_SCHEDULER_CAPACITY.try_with(Clone::clone).ok();
+    match capacity {
+        Some(capacity) => capacity.relinquish_around(work).await,
+        None => work.await,
+    }
+}
 
 /// A validated nonzero reconciliation-sweep interval.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -674,14 +729,17 @@ where
         let mut in_flight_sessions = HashSet::new();
         let mut pending_hints = VecDeque::new();
         let mut pending_reruns = HashSet::new();
+        let capacity = Arc::new(Semaphore::new(self.max_in_flight_passes));
 
         'scheduler: loop {
-            if task_sessions.len() == self.max_in_flight_passes {
+            if let Some(session) = pending_hints.front().copied() {
+                let available = Arc::clone(&capacity).acquire_owned();
+                pin!(available);
                 select! {
                     biased;
 
                     () = &mut shutdown => break,
-                    completed = passes.join_next_with_id() => {
+                    completed = passes.join_next_with_id(), if !task_sessions.is_empty() => {
                         if let Some(completed) = completed
                             && let Some(session) = observe_pass_completion::<Pass>(
                                 completed,
@@ -693,28 +751,23 @@ where
                             pending_hints.push_back(session);
                         }
                     }
-                    hint = self.work_source.next(), if pending_hints.is_empty() => {
-                        match hint {
-                            Ok(session) if in_flight_sessions.contains(&session) => {
-                                pending_reruns.insert(session);
-                            }
-                            Ok(session) => pending_hints.push_back(session),
-                            Err(error) => log_sweep_failure(&error),
-                        }
-                    }
-                }
-                continue;
-            }
-
-            if let Some(session) = pending_hints.pop_front() {
-                select! {
-                    biased;
-
-                    () = &mut shutdown => break,
-                    () = ready(()) => {
+                    permit = &mut available => {
+                        let Ok(permit) = permit else {
+                            break 'scheduler;
+                        };
+                        pending_hints.pop_front();
                         if in_flight_sessions.insert(session) {
-                            let task = passes
-                                .spawn(self.pass.run(session).instrument(session_work_span(session)));
+                            let execution = self
+                                .pass
+                                .run(session)
+                                .instrument(session_work_span(session));
+                            let pass_capacity = SchedulerPassCapacity::new(
+                                Arc::clone(&capacity),
+                                permit,
+                            );
+                            let task = passes.spawn(
+                                ACTIVE_SCHEDULER_CAPACITY.scope(pass_capacity, execution),
+                            );
                             task_sessions.insert(task.id(), session);
                         } else {
                             pending_reruns.insert(session);
@@ -758,18 +811,10 @@ where
             };
 
             match hint {
-                Ok(session) => {
-                    if in_flight_sessions.insert(session) {
-                        let task = passes.spawn(
-                            self.pass
-                                .run(session)
-                                .instrument(session_work_span(session)),
-                        );
-                        task_sessions.insert(task.id(), session);
-                    } else {
-                        pending_reruns.insert(session);
-                    }
+                Ok(session) if in_flight_sessions.contains(&session) => {
+                    pending_reruns.insert(session);
                 }
+                Ok(session) => pending_hints.push_back(session),
                 Err(error) => log_sweep_failure(&error),
             }
         }
@@ -910,7 +955,7 @@ mod tests {
         EligibilitySweep, EligibilitySweepBatch, EligibilityWorkSource, GoalAwareEligibilityPass,
         GoalAwareEligibilityPassError, GoalPassDisposition, InProcessEligibilityWorkSource,
         InvalidReconciliationSweepInterval, ReconciliationSweepInterval, SchedulerLoop,
-        SchedulerLoopExit,
+        SchedulerLoopExit, relinquish_scheduler_capacity,
     };
     use crate::{
         OperatorFailureClass, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
@@ -2040,6 +2085,86 @@ mod tests {
             )
             .await,
             Ok(SchedulerLoopExit::Shutdown)
+        );
+    }
+
+    #[derive(Clone, Debug)]
+    struct RelinquishingPass {
+        first: SessionId,
+        first_relinquished: Arc<Notify>,
+        release_first: Arc<Notify>,
+        second_started: Arc<Notify>,
+    }
+
+    impl EligibilityPass for RelinquishingPass {
+        type Error = FakeSweepError;
+
+        fn run(
+            &mut self,
+            session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let first = self.first;
+            let first_relinquished = Arc::clone(&self.first_relinquished);
+            let release_first = Arc::clone(&self.release_first);
+            let second_started = Arc::clone(&self.second_started);
+            async move {
+                if session == first {
+                    relinquish_scheduler_capacity(async move {
+                        first_relinquished.notify_one();
+                        release_first.notified().await;
+                    })
+                    .await;
+                } else {
+                    second_started.notify_one();
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// INV-062: bounded attachment work can relinquish scheduler capacity
+    /// without ending the session's in-flight pass.
+    #[tokio::test]
+    async fn inv062_relinquished_scheduler_capacity_admits_another_session() {
+        let first = session(47);
+        let second = session(48);
+        let first_relinquished = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+        let second_started = Arc::new(Notify::new());
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let scheduler = SchedulerLoop::with_max_in_flight(
+            FakeWorkSource {
+                hints: VecDeque::from([Ok(first), Ok(second)]),
+            },
+            RelinquishingPass {
+                first,
+                first_relinquished: Arc::clone(&first_relinquished),
+                release_first: Arc::clone(&release_first),
+                second_started: Arc::clone(&second_started),
+            },
+            NonZeroUsize::new(1).expect("test capacity is nonzero"),
+        );
+        let runtime = tokio::spawn(async move {
+            let mut scheduler = scheduler;
+            scheduler
+                .run_until(async {
+                    shutdown_receiver.await.expect("test requests shutdown");
+                })
+                .await
+        });
+
+        first_relinquished.notified().await;
+        timeout(Duration::from_secs(1), second_started.notified())
+            .await
+            .expect("a second session starts while the first relinquishes capacity");
+        release_first.notify_one();
+        shutdown_sender
+            .send(())
+            .expect("the scheduler still listens for shutdown");
+
+        assert_eq!(
+            runtime.await.expect("scheduler task completes"),
+            SchedulerLoopExit::Shutdown
         );
     }
 

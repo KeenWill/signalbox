@@ -213,7 +213,9 @@ use crate::telemetry::{ModelMetricDisposition, TelemetryMetrics, TurnMetricOutco
 use crate::{
     BlobStoreRegistry, FatalRecoveryReporter, HubModelConfiguration, LocalProcessListener,
     LocalSocketError, SessionTemplateConfiguration,
-    blob_read_runtime::{BlobReadError, read_blob_chunk, read_blob_entry, read_blob_metadata},
+    blob_read_runtime::{
+        BLOB_READ_TIMEOUT, BlobReadError, read_blob_chunk, read_blob_entry, read_blob_metadata,
+    },
     blob_upload_runtime::{
         BeginBlobUploadOutcome, BlobUploadError, PendingBlobUpload, begin_blob_upload,
     },
@@ -241,8 +243,6 @@ const MAX_CONCURRENT_REVIEW_COMMANDS: usize = 1;
 const MAX_CONCURRENT_BLOB_READS: usize = crate::blob_storage_runtime::MAX_CONCURRENT_BLOB_READS;
 const BULK_INGEST_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const BULK_INGEST_SESSION_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
-/// Hard safety ceiling bounding store latency and retained read capacity.
-const BLOB_READ_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
 
