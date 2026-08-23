@@ -15,7 +15,7 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
-    search::SearchRepository,
+    search::{SearchProjectionCorruption, SearchRepository, SearchRepositoryError},
     session_timeline::SessionTimelineRepository,
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository},
 };
@@ -383,6 +383,54 @@ async fn oversized_canonical_assistant_text_preserves_a_searchable_tail()
     );
     assert!(chunk_bounds.0 > 1);
     assert!(usize::try_from(chunk_bounds.1).expect("fixture chunk size fits") <= 65_536);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn search_fails_closed_when_a_matching_chunk_has_contradictory_correlations()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x2c0).await?;
+    let other_session = create_search_session(&pool, 0x2d0).await?;
+    let source = Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x2c1);
+    let address = session_created_address(&pool, session).await?;
+    let sequence = rust_decimal::Decimal::from(address.sequence().get());
+
+    sqlx::query(
+        "INSERT INTO web_search_projection (
+             source_kind, source_id, session_id, event_sequence, item_kind, item_id,
+             turn_id, content_class, projection_ordinal, content_text
+         ) VALUES
+             ('derived_artifact', $1, $2, $3, 'derived_artifact', $1,
+              NULL, 'derived_text_artifact', 0, 'correlated alpha'),
+             ('derived_artifact', $1, $4, $3, 'derived_artifact', $1,
+              NULL, 'derived_text_artifact', 1, 'contradictory omega')",
+    )
+    .bind(source)
+    .bind(session.into_uuid())
+    .bind(sequence)
+    .bind(other_session.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let error = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "alpha omega",
+            SearchScope::Session(session),
+            10,
+            None,
+        ))
+        .await
+        .expect_err("contradictory chunk correlation must fail closed");
+
+    assert!(matches!(
+        error,
+        SearchRepositoryError::Corruption(SearchProjectionCorruption::SourceShape)
+    ));
 
     pool.close().await;
     drop(container);

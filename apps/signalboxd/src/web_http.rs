@@ -1469,7 +1469,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_rejects_non_product_strategy_and_partial_cursor() {
+    async fn search_rejects_a_non_product_strategy() {
         let unsupported = Request::get("/api/search?strategy=postgres&q=term&max_items=10")
             .header(header::HOST, "localhost")
             .body(Body::empty())
@@ -1482,6 +1482,13 @@ mod tests {
         let unsupported_body: serde_json::Value =
             serde_json::from_slice(&response_body(unsupported).await)
                 .expect("the rejection is structured JSON");
+
+        assert_eq!(unsupported_status, StatusCode::BAD_REQUEST);
+        assert_eq!(unsupported_body["error"]["code"], "invalid_search_query");
+    }
+
+    #[tokio::test]
+    async fn search_rejects_a_partial_cursor() {
         let partial =
             Request::get("/api/search?strategy=lexical&q=term&max_items=10&after_address=5")
                 .header(header::HOST, "localhost")
@@ -1494,6 +1501,13 @@ mod tests {
         let partial_status = partial.status();
         let partial_body: serde_json::Value = serde_json::from_slice(&response_body(partial).await)
             .expect("the rejection is structured JSON");
+
+        assert_eq!(partial_status, StatusCode::BAD_REQUEST);
+        assert_eq!(partial_body["error"]["code"], "invalid_search_query");
+    }
+
+    #[tokio::test]
+    async fn search_rejects_an_oversized_projection_cursor() {
         let oversized = Request::get(
             "/api/search?strategy=lexical&q=term&max_items=10&after_address=5&after_projection=9223372036854775808",
         )
@@ -1506,10 +1520,6 @@ mod tests {
             .expect("the production router responds");
         let oversized_status = oversized.status();
 
-        assert_eq!(unsupported_status, StatusCode::BAD_REQUEST);
-        assert_eq!(unsupported_body["error"]["code"], "invalid_search_query");
-        assert_eq!(partial_status, StatusCode::BAD_REQUEST);
-        assert_eq!(partial_body["error"]["code"], "invalid_search_query");
         assert_eq!(oversized_status, StatusCode::BAD_REQUEST);
     }
 

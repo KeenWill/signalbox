@@ -857,7 +857,16 @@ function validSearchSourceCorrelation(result) {{
 export function decodeWebSearchPage(value) {{
   assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
   const encoder = new TextEncoder();
+  let previousAddress = null;
   value.results.forEach((result, resultIndex) => {{
+    const address = BigInt(result.address.event_sequence);
+    if (previousAddress !== null && address > previousAddress) {{
+      fail(
+        `search_page.results[${{resultIndex}}].address`,
+        "a newest-first nonincreasing search result address",
+      );
+    }}
+    previousAddress = address;
     if (!validSearchSourceCorrelation(result)) {{
       fail(
         `search_page.results[${{resultIndex}}].source`,

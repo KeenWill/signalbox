@@ -536,7 +536,7 @@ describe('SameOriginProductTransport', () => {
         maxItems: 2,
         maxSnippetBytes: 512,
       }),
-    ).rejects.toThrow('not ordered newest first')
+    ).rejects.toThrow('newest-first nonincreasing search result address')
   })
 
   it('rejects same-address results whose projection IDs are not newest first', async () => {

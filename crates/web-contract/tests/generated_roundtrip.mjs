@@ -254,6 +254,19 @@ test("generated search decoder validates continuation against the final result",
   );
 });
 
+test("generated search decoder rejects out-of-order result addresses", () => {
+  const page = searchPage();
+  const newer = structuredClone(page.results[0]);
+  newer.address.event_sequence = "2";
+  page.results.push(newer);
+  page.continuation.address.event_sequence = "2";
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /newest-first nonincreasing search result address/,
+  );
+});
+
 test("generated search decoder rejects malformed result identities", () => {
   const page = searchPage();
   page.results[0].session_id = "not-a-uuid";
