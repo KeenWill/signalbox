@@ -561,14 +561,19 @@ fn has_loopback_host(headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
 }
 
 fn is_loopback_authority(authority: &axum::http::uri::Authority) -> bool {
-    let host = authority
-        .host()
-        .trim_start_matches('[')
-        .trim_end_matches(']');
+    let host = normalized_authority_host(authority);
     host.eq_ignore_ascii_case("localhost")
         || host
             .parse::<IpAddr>()
             .is_ok_and(|address| address.is_loopback())
+}
+
+fn normalized_authority_host(authority: &axum::http::uri::Authority) -> &str {
+    normalized_host(authority.host())
+}
+
+fn normalized_host(host: &str) -> &str {
+    host.trim_start_matches('[').trim_end_matches(']')
 }
 
 fn has_json_content_type(headers: &HeaderMap) -> bool {
@@ -606,10 +611,9 @@ fn validate_supplied_origin(headers: &HeaderMap) -> Result<(), OriginValidationE
         .and_then(|host| host.parse::<axum::http::uri::Authority>().ok());
     let matching = origin.zip(authority).is_some_and(|(origin, authority)| {
         let authority_port = authority.port_u16().unwrap_or(HTTP_DEFAULT_PORT);
-        origin
-            .host_str()
-            .is_some_and(|host| host.eq_ignore_ascii_case(authority.host()))
-            && origin.port_or_known_default() == Some(authority_port)
+        origin.host_str().is_some_and(|host| {
+            normalized_host(host).eq_ignore_ascii_case(normalized_authority_host(&authority))
+        }) && origin.port_or_known_default() == Some(authority_port)
     });
     if matching {
         Ok(())
@@ -824,6 +828,28 @@ mod tests {
         let request = Request::post("/api/test/mutate")
             .header(header::HOST, "signalbox.test")
             .header(header::ORIGIN, "http://signalbox.test")
+            .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+            .body(Body::from(
+                serde_json::to_vec(&example()).expect("the fixture serializes"),
+            ))
+            .expect("the request is valid");
+        let response = deterministic_test_router()
+            .oneshot(request)
+            .await
+            .expect("the deterministic router responds");
+        let status = response.status();
+        let decoded: WebContractExample = serde_json::from_slice(&response_body(response).await)
+            .expect("the response is the example DTO");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(decoded, example());
+    }
+
+    #[tokio::test]
+    async fn mutation_with_matching_ipv6_origin_round_trips_bounded_json() {
+        let request = Request::post("/api/test/mutate")
+            .header(header::HOST, "[::1]:37231")
+            .header(header::ORIGIN, "http://[::1]:37231")
             .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
             .body(Body::from(
                 serde_json::to_vec(&example()).expect("the fixture serializes"),

@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { HttpImportApi, ImportListCorrelationError, ImportWindowCorrelationError } from './api'
+import {
+  HttpImportApi,
+  ImportDescriptorCorrelationError,
+  ImportListCorrelationError,
+  ImportWindowCorrelationError,
+} from './api'
 
 const firstId = '00000000-0000-7000-8000-000000000001'
 const secondId = '00000000-0000-7000-8000-000000000002'
@@ -291,6 +296,143 @@ describe('HttpImportApi correlation', () => {
       `/api/imports/searches?limit=1&search_correlation=${searchCorrelation}`,
       expect.objectContaining({ body: exact }),
     )
+  })
+
+  it('rejects duplicate entry identities in a correlated window', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              anchor_position: 1,
+              first_position: 1,
+              last_position: 2,
+              has_before: false,
+              has_after: false,
+              items: [
+                {
+                  frontier: {
+                    imported_conversation_id: firstId,
+                    imported_entry_id: secondId,
+                    position: 1,
+                  },
+                  raw_record_position: 1,
+                  record_entry_position: 1,
+                  source_speaker: 'not_attested',
+                  content_kind: 'message_content_absent',
+                  text: null,
+                },
+                {
+                  frontier: {
+                    imported_conversation_id: firstId,
+                    imported_entry_id: secondId,
+                    position: 2,
+                  },
+                  raw_record_position: 1,
+                  record_entry_position: 2,
+                  source_speaker: 'not_attested',
+                  content_kind: 'message_content_absent',
+                  text: null,
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).entries(firstId, {
+        anchor: 'first',
+        before: 0,
+        after: 1,
+      }),
+    ).rejects.toBeInstanceOf(ImportWindowCorrelationError)
+  })
+
+  it('rejects a catalog page larger than the requested limit', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              items: [summary(firstId), summary(secondId)],
+              next_cursor: secondId,
+              search_correlation: null,
+              exact_source_session_id_sha256: null,
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).list({ limit: 1 }),
+    ).rejects.toBeInstanceOf(ImportListCorrelationError)
+  })
+
+  it('rejects a partial catalog page carrying a next cursor', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              items: [summary(firstId)],
+              next_cursor: firstId,
+              search_correlation: null,
+              exact_source_session_id_sha256: null,
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).list({ limit: 2 }),
+    ).rejects.toBeInstanceOf(ImportListCorrelationError)
+  })
+
+  it('rejects descriptor frontiers outside the immutable timeline bounds', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              imported_conversation_id: firstId,
+              display_title: null,
+              raw_record_count: 2,
+              entry_count: 2,
+              source: {
+                format: 'claude_code_session_jsonl_v2',
+                source_digest_sha256: exactSourceSessionDigest,
+                source_session_id: null,
+              },
+              sizes: {
+                raw_source_bytes: 1,
+                normalized_source_record_bytes: 1,
+                normalized_entry_bytes: 1,
+              },
+              timeline: {
+                first: {
+                  imported_conversation_id: firstId,
+                  imported_entry_id: firstId,
+                  position: 1,
+                },
+                latest: {
+                  imported_conversation_id: secondId,
+                  imported_entry_id: secondId,
+                  position: 1,
+                },
+              },
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).descriptor(firstId),
+    ).rejects.toBeInstanceOf(ImportDescriptorCorrelationError)
   })
 
   it('rejects a response-controlled digest that does not match the exact search request', async () => {
