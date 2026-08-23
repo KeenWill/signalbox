@@ -502,9 +502,11 @@ command. This proposal is accepted with the implementing stack's merge.
    nonfatal deferred execution result and is never routed to
    `FatalExecutionSupervisor`. Authoritative cancellation aborts store I/O,
    returns `NoWork`, and never substitutes an attachment failure for the
-   cancellation closure. A successful check seeds only the bounded turn-scoped
-   verification inventory owned by
-   [blob storage](blob-storage.md#wire-vocabulary).
+   cancellation closure. Reusing a successful check through the bounded
+   turn-scoped verification inventory is committed unimplemented functionality
+   until a blob-store adapter supplies the immutable-generation token required
+   by [blob storage](blob-storage.md#wire-vocabulary); current later ranges
+   therefore reverify.
 4. **Authorize-send transaction.** After acquiring the process-shared
    per-attempt dispatch gate, a distinct transaction reloads authority and
    commits `Prepared -> InFlight`. A `Prepared` owning attempt moves
