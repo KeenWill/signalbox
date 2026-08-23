@@ -326,6 +326,32 @@ const schemas = {
   },
   "WebSessionTimelineDetailPage": {
     "$defs": {
+      "WebBlobId": {
+        "description": "Checked canonical SHA-256 identity used for browser-visible blob references.",
+        "pattern": "^sha256:[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "WebProviderModelCallFailureCause": {
+        "description": "Closed provider-neutral failure cause exposed at the browser boundary.",
+        "enum": [
+          "credential_rejected",
+          "permission_denied",
+          "invalid_request",
+          "target_not_found",
+          "request_too_large",
+          "rate_limited",
+          "quota_exhausted",
+          "overloaded",
+          "provider_internal",
+          "unrecognized"
+        ],
+        "type": "string"
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
       "WebSessionTimelineDetail": {
         "additionalProperties": false,
         "description": "One typed body at a stable timeline address.",
@@ -403,13 +429,14 @@ const schemas = {
                 "items": {
                   "$ref": "#/$defs/WebTimelineBlobReference"
                 },
+                "maxItems": 256,
                 "type": "array"
               },
               "text": {
                 "$ref": "#/$defs/WebTimelineTextExcerpt"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "user_input",
@@ -427,17 +454,21 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
-              "cause_code": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
               "model_call_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "model_identity_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "provider_failure_cause": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebProviderModelCallFailureCause"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "request_context_items": {
                 "$ref": "#/$defs/WebU64"
@@ -456,7 +487,7 @@ const schemas = {
                 "$ref": "#/$defs/WebTimelineModelCallState"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "model_call",
@@ -489,6 +520,14 @@ const schemas = {
               },
               "producing_model_call_id": {
                 "type": "string"
+              },
+              "projected_member_index": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "state": {
                 "$ref": "#/$defs/WebTimelineToolBatchState"
@@ -544,7 +583,7 @@ const schemas = {
                 "type": "string"
               },
               "tool_name": {
-                "type": "string"
+                "$ref": "#/$defs/WebToolName"
               },
               "turn_id": {
                 "type": "string"
@@ -633,7 +672,7 @@ const schemas = {
                 "$ref": "#/$defs/WebTimelineTurnLifecycleKind"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "turn_lifecycle",
@@ -666,6 +705,9 @@ const schemas = {
               "operator_required": {
                 "type": "boolean"
               },
+              "terminal_frontier_id": {
+                "type": "string"
+              },
               "turn_id": {
                 "type": "string"
               },
@@ -678,6 +720,7 @@ const schemas = {
               "type",
               "turn_id",
               "operation",
+              "terminal_frontier_id",
               "attempt_count",
               "exhausted",
               "operator_required",
@@ -851,7 +894,7 @@ const schemas = {
         "description": "Reference-only blob fact carried without blob bytes.",
         "properties": {
           "blob_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebBlobId"
           },
           "length_bytes": {
             "$ref": "#/$defs/WebU64"
@@ -1557,18 +1600,33 @@ const schemas = {
       "WebTimelineImportedEvidence": {
         "additionalProperties": false,
         "properties": {
+          "imported_conversation_id": {
+            "type": "string"
+          },
           "imported_entry_id": {
             "type": "string"
           },
           "imported_position": {
             "$ref": "#/$defs/WebU64"
+          },
+          "relationship": {
+            "$ref": "#/$defs/WebTimelineImportedRelationship"
           }
         },
         "required": [
+          "imported_conversation_id",
           "imported_entry_id",
-          "imported_position"
+          "imported_position",
+          "relationship"
         ],
         "type": "object"
+      },
+      "WebTimelineImportedRelationship": {
+        "enum": [
+          "resume",
+          "fork"
+        ],
+        "type": "string"
       },
       "WebTimelineModelCallDisposition": {
         "description": "Closed terminal model-call disposition.",
@@ -2315,7 +2373,7 @@ const schemas = {
             "type": "string"
           },
           "tool_name": {
-            "type": "string"
+            "$ref": "#/$defs/WebToolName"
           }
         },
         "required": [
@@ -2508,6 +2566,13 @@ const schemas = {
         ],
         "type": "string"
       },
+      "WebToolName": {
+        "description": "Checked browser-visible tool name using the domain's exact spelling rules.",
+        "maxLength": 64,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "type": "string"
+      },
       "WebU64": {
         "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
         "pattern": "^(0|[1-9][0-9]*)$",
@@ -2541,7 +2606,7 @@ const schemas = {
         "type": "integer"
       },
       "session_id": {
-        "type": "string"
+        "$ref": "#/$defs/WebSessionId"
       }
     },
     "required": [
@@ -2812,6 +2877,13 @@ function assertSchema(root, schema, value, path) {
   if (typeof value !== schema.type) {
     fail(path, schema.type);
   }
+  if (
+    schema.type === "string" &&
+    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+    value.length > 20
+  ) {
+    fail(path, "an unsigned 64-bit integer");
+  }
   if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {
     fail(path, `a string matching ${schema.pattern}`);
   }
@@ -2837,7 +2909,7 @@ function sameBodyContinuation(left, right) {
   );
 }
 
-function assertTimelineExcerpt(excerpt, address, field, memberIndex, path) {
+function assertTimelineExcerpt(excerpt, address, field, path) {
   const offset = BigInt(excerpt.offset_bytes);
   const total = BigInt(excerpt.total_bytes);
   const end = offset + BigInt(new TextEncoder().encode(excerpt.text).byteLength);
@@ -2851,15 +2923,14 @@ function assertTimelineExcerpt(excerpt, address, field, memberIndex, path) {
     return null;
   }
   const continuation = excerpt.continuation;
+  if (continuation.member_index !== 0) {
+    fail(`${path}.continuation.member_index`, "zero for a singular body field");
+  }
   if (end >= total) {
     fail(`${path}.continuation`, "present only before the declared body end");
   }
-  if (
-    !sameTimelineAddress(continuation.address, address) ||
-    continuation.field !== field ||
-    continuation.member_index !== memberIndex
-  ) {
-    fail(`${path}.continuation`, "the same body member at the same address");
+  if (!sameTimelineAddress(continuation.address, address) || continuation.field !== field) {
+    fail(`${path}.continuation`, "the same body field at the same address");
   }
   if (BigInt(continuation.offset_bytes) !== end) {
     fail(`${path}.continuation.offset_bytes`, "the byte immediately after the excerpt");
@@ -2867,7 +2938,7 @@ function assertTimelineExcerpt(excerpt, address, field, memberIndex, path) {
   return continuation;
 }
 
-function pageToolContinuation(value, address, field) {
+function pageToolContinuation(value, address, field, memberIndex) {
   if (
     value.continuation === undefined ||
     value.continuation === null ||
@@ -2882,14 +2953,69 @@ function pageToolContinuation(value, address, field) {
   ) {
     return null;
   }
-  const allowed = field === "tool_arguments"
-    ? new Set(["tool_arguments", "tool_result", "tool_failure", "goal_text"])
+  const sameMember = continuation.member_index === memberIndex;
+  const nextMember = continuation.member_index === memberIndex + 1;
+  const valid = field === "tool_arguments"
+    ? (
+        ((continuation.field === "tool_result" || continuation.field === "tool_failure") && sameMember) ||
+        (continuation.field === "tool_arguments" && nextMember) ||
+        (continuation.field === "goal_text" && continuation.member_index === 0)
+      )
     : field === "tool_result" || field === "tool_failure"
-      ? new Set(["tool_arguments", "goal_text"])
+      ? (
+          (continuation.field === "tool_arguments" && nextMember) ||
+          (continuation.field === "goal_text" && continuation.member_index === 0)
+        )
       : field === "goal_text"
-        ? new Set(["goal_text"])
-        : new Set();
-  return allowed.has(continuation.field) ? continuation : null;
+        ? continuation.field === "goal_text" && nextMember
+        : false;
+  return valid ? continuation : null;
+}
+
+function sameSettingValue(left, right) {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
+function resolveModelSetting(layers, field, providerDefault) {
+  for (const [source, layer] of layers) {
+    const overlay = layer[field];
+    if (overlay.kind === "inherit") continue;
+    if (overlay.kind === "provider_default") return [providerDefault, source];
+    return [overlay.value, source];
+  }
+  return [providerDefault, null];
+}
+
+function assertModelSettingsSnapshot(snapshot, path) {
+  const layers = [
+    ["per_call", snapshot.precedence.per_call],
+    ["session", snapshot.precedence.session],
+    ["profile", snapshot.precedence.profile],
+    ["global_default", snapshot.precedence.global_default],
+  ];
+  const [reasoning, reasoningSource] = resolveModelSetting(layers, "reasoning_level", null);
+  const [fastMode, fastModeSource] = resolveModelSetting(layers, "fast_mode", "disabled");
+  const [serviceTier, serviceTierSource] = resolveModelSetting(layers, "service_tier", null);
+  const valid =
+    sameSettingValue(snapshot.effective.reasoning_level, reasoning) &&
+    snapshot.effective.fast_mode === fastMode &&
+    sameSettingValue(snapshot.effective.service_tier, serviceTier) &&
+    (snapshot.reasoning_source ?? null) === reasoningSource &&
+    (snapshot.fast_mode_source ?? null) === fastModeSource &&
+    (snapshot.service_tier_source ?? null) === serviceTierSource;
+  if (!valid) {
+    fail(path, "a precedence-resolved model-settings snapshot");
+  }
+  const providerDefaults =
+    reasoning === null && reasoningSource === null &&
+    fastMode === "disabled" && fastModeSource === null &&
+    serviceTier === null && serviceTierSource === null;
+  const validationAbsent =
+    snapshot.validated_for_selection_id === undefined ||
+    snapshot.validated_for_selection_id === null;
+  if (validationAbsent !== providerDefaults) {
+    fail(`${path}.validated_for_selection_id`, "absent exactly for provider defaults");
+  }
 }
 
 function assertTimelineDetailPage(value) {
@@ -2928,36 +3054,92 @@ function assertTimelineDetailPage(value) {
       fail(`${path}.address`, "strictly increasing after the previous item");
     }
     previousAddress = address;
-    const excerpts = [];
+    let continuation = null;
+    let textBytes = 0;
     switch (item.body.type) {
       case "user_input":
         if (item.kind !== "input_accepted") {
           fail(`${path}.kind`, "input_accepted for a user_input body");
         }
-        excerpts.push([item.body.text, "input_text", 0, `${path}.body.text`]);
+        continuation = assertTimelineExcerpt(
+          item.body.text,
+          item.address,
+          "input_text",
+          `${path}.body.text`,
+        );
+        textBytes = new TextEncoder().encode(item.body.text.text).byteLength;
         break;
       case "model_call":
         if (item.kind !== "model_call_transition") {
           fail(`${path}.kind`, "model_call_transition for a model_call body");
         }
         if (item.body.response !== undefined && item.body.response !== null) {
-          excerpts.push([item.body.response, "model_response", 0, `${path}.body.response`]);
+          continuation = assertTimelineExcerpt(
+            item.body.response,
+            item.address,
+            "model_response",
+            `${path}.body.response`,
+          );
+          textBytes = new TextEncoder().encode(item.body.response.text).byteLength;
+        }
+        if (item.body.state.type !== "terminal") {
+          const hasUsage = Object.values(item.body.usage).some(
+            (count) => count !== undefined && count !== null,
+          );
+          if (
+            (item.body.response !== undefined && item.body.response !== null) ||
+            hasUsage ||
+            (item.body.provider_failure_cause !== undefined &&
+              item.body.provider_failure_cause !== null)
+          ) {
+            fail(
+              `${path}.body`,
+              "terminal evidence only at a terminal model-call state",
+            );
+          }
+        } else {
+          const hasFailureCause =
+            item.body.provider_failure_cause !== undefined &&
+            item.body.provider_failure_cause !== null;
+          if ((item.body.state.disposition === "known_failed") !== hasFailureCause) {
+            fail(
+              `${path}.body.provider_failure_cause`,
+              "present exactly for a known_failed terminal model call",
+            );
+          }
         }
         break;
-      case "tool_batch":
+      case "tool_batch": {
         if (item.kind !== "tool_batch_transition") {
           fail(`${path}.kind`, "tool_batch_transition for a tool_batch body");
         }
         if (item.body.tools.length + item.body.goal_events.length > 1) {
           fail(`${path}.body`, "at most one projected tool or goal member");
         }
-        item.body.tools.forEach((tool, memberIndex) => {
+        const tool = item.body.tools[0];
+        const goal = item.body.goal_events[0];
+        const memberIndex = item.body.projected_member_index;
+        if ((tool !== undefined || goal !== undefined) && (memberIndex === undefined || memberIndex === null)) {
+          fail(
+            `${path}.body.projected_member_index`,
+            "present for a projected tool-batch member",
+          );
+        }
+        if (tool !== undefined) {
+          const operatorRequired =
+            tool.approval_judge_escalated || tool.approval_posture === "human";
+          if (tool.operator_required !== operatorRequired) {
+            fail(
+              `${path}.body.tools[0].operator_required`,
+              "equal to approval_judge_escalated || approval_posture === human",
+            );
+          }
           const physical = tool.evidence.type === "physical_attempt" ? tool.evidence : null;
           if (physical !== null) {
             const terminalFailure = physical.state === "known_failed";
             if ((physical.cause !== undefined && physical.cause !== null) !== terminalFailure) {
               fail(
-                `${path}.body.tools[${memberIndex}].evidence.cause`,
+                `${path}.body.tools[0].evidence.cause`,
                 "present exactly for a known_failed attempt",
               );
             }
@@ -2967,7 +3149,7 @@ function assertTimelineDetailPage(value) {
               physical.state !== "completed"
             ) {
               fail(
-                `${path}.body.tools[${memberIndex}].evidence.result`,
+                `${path}.body.tools[0].evidence.result`,
                 "present only for a completed attempt",
               );
             }
@@ -2977,45 +3159,73 @@ function assertTimelineDetailPage(value) {
               !terminalFailure
             ) {
               fail(
-                `${path}.body.tools[${memberIndex}].evidence.failure`,
+                `${path}.body.tools[0].evidence.failure`,
                 "present only for a known_failed attempt",
               );
             }
             if (physical.state === "ambiguous" && physical.effect_posture !== "external_effect") {
               fail(
-                `${path}.body.tools[${memberIndex}].evidence.effect_posture`,
+                `${path}.body.tools[0].evidence.effect_posture`,
                 "external_effect for an ambiguous attempt",
               );
             }
           }
-          const projectedTextFields = [tool.arguments, physical?.result, physical?.failure].filter(
-            (excerpt) => excerpt !== undefined && excerpt !== null,
+          const excerpts = [
+            [tool.arguments, "tool_arguments", `${path}.body.tools[0].arguments`],
+            [physical?.result, "tool_result", `${path}.body.tools[0].evidence.result`],
+            [physical?.failure, "tool_failure", `${path}.body.tools[0].evidence.failure`],
+          ].filter(([excerpt]) => excerpt !== undefined && excerpt !== null);
+          if (excerpts.length > 1) {
+            fail(`${path}.body.tools[0]`, "at most one projected text field");
+          }
+          if (excerpts.length === 1) {
+            const [excerpt, field, excerptPath] = excerpts[0];
+            continuation = assertTimelineExcerpt(excerpt, item.address, field, excerptPath);
+            if (continuation === null) {
+              continuation = pageToolContinuation(
+                value,
+                item.address,
+                field,
+                item.body.projected_member_index,
+              );
+            }
+            textBytes = new TextEncoder().encode(excerpt.text).byteLength;
+          }
+        }
+        if (goal !== undefined && goal.text !== undefined && goal.text !== null) {
+          if (tool !== undefined) {
+            fail(`${path}.body`, "one projected tool or goal member");
+          }
+          continuation = assertTimelineExcerpt(
+            goal.text,
+            item.address,
+            "goal_text",
+            `${path}.body.goal_events[0].text`,
           );
-          if (projectedTextFields.length > 1) {
-            fail(`${path}.body.tools[${memberIndex}]`, "at most one projected text field");
+          if (continuation === null) {
+            continuation = pageToolContinuation(
+              value,
+              item.address,
+              "goal_text",
+              item.body.projected_member_index,
+            );
           }
-          if (tool.arguments !== undefined && tool.arguments !== null) {
-            excerpts.push([tool.arguments, "tool_arguments", memberIndex, `${path}.body.tools[${memberIndex}].arguments`]);
-          }
-          if (physical?.result !== undefined && physical.result !== null) {
-            excerpts.push([physical.result, "tool_result", memberIndex, `${path}.body.tools[${memberIndex}].evidence.result`]);
-          }
-          if (physical?.failure !== undefined && physical.failure !== null) {
-            excerpts.push([physical.failure, "tool_failure", memberIndex, `${path}.body.tools[${memberIndex}].evidence.failure`]);
-          }
-        });
-        item.body.goal_events.forEach((event, memberIndex) => {
-          if (event.text !== undefined && event.text !== null) {
-            excerpts.push([event.text, "goal_text", memberIndex, `${path}.body.goal_events[${memberIndex}].text`]);
-          }
-        });
+          textBytes = new TextEncoder().encode(goal.text.text).byteLength;
+        }
         break;
+      }
       case "tool_approval_decision":
         if (item.kind !== "tool_approval_decided") {
           fail(`${path}.kind`, "tool_approval_decided for a tool_approval_decision body");
         }
         if (item.body.rationale !== undefined && item.body.rationale !== null) {
-          excerpts.push([item.body.rationale, "approval_rationale", 0, `${path}.body.rationale`]);
+          continuation = assertTimelineExcerpt(
+            item.body.rationale,
+            item.address,
+            "approval_rationale",
+            `${path}.body.rationale`,
+          );
+          textBytes = new TextEncoder().encode(item.body.rationale.text).byteLength;
         }
         break;
       case "goal_event":
@@ -3023,14 +3233,26 @@ function assertTimelineDetailPage(value) {
           fail(`${path}.kind`, "goal_turn_retired for a goal_event body");
         }
         if (item.body.event.text !== undefined && item.body.event.text !== null) {
-          excerpts.push([item.body.event.text, "goal_text", 0, `${path}.body.event.text`]);
+          continuation = assertTimelineExcerpt(
+            item.body.event.text,
+            item.address,
+            "goal_text",
+            `${path}.body.event.text`,
+          );
+          textBytes = new TextEncoder().encode(item.body.event.text).byteLength;
         }
         break;
       case "context_compaction":
         if (item.kind !== "context_compacted") {
           fail(`${path}.kind`, "context_compacted for a context_compaction body");
         }
-        excerpts.push([item.body.summary, "compaction_summary", 0, `${path}.body.summary`]);
+        continuation = assertTimelineExcerpt(
+          item.body.summary,
+          item.address,
+          "compaction_summary",
+          `${path}.body.summary`,
+        );
+        textBytes = new TextEncoder().encode(item.body.summary.text).byteLength;
         break;
       case "reconciliation":
         if (item.kind !== "turn_reconciliation_required") {
@@ -3069,7 +3291,13 @@ function assertTimelineDetailPage(value) {
               ? item.body.detail.content
               : null;
         if (content !== undefined && content !== null) {
-          excerpts.push([content, "delegation_content", 0, `${path}.body.detail.content`]);
+          continuation = assertTimelineExcerpt(
+            content,
+            item.address,
+            "delegation_content",
+            `${path}.body.detail.content`,
+          );
+          textBytes = new TextEncoder().encode(content.text).byteLength;
         }
         break;
       }
@@ -3097,6 +3325,21 @@ function assertTimelineDetailPage(value) {
             "turn_model_settings_resolved for resolved turn detail",
           );
         }
+        if (item.body.detail.type === "session_defaults_changed") {
+          assertModelSettingsSnapshot(
+            item.body.detail.prior_settings,
+            `${path}.body.detail.prior_settings`,
+          );
+          assertModelSettingsSnapshot(
+            item.body.detail.installed_settings,
+            `${path}.body.detail.installed_settings`,
+          );
+        } else {
+          assertModelSettingsSnapshot(
+            item.body.detail.settings,
+            `${path}.body.detail.settings`,
+          );
+        }
         break;
       case "turn_lifecycle":
         if (item.body.lifecycle === "activated" && item.kind !== "turn_activated") {
@@ -3105,6 +3348,17 @@ function assertTimelineDetailPage(value) {
         if (item.body.lifecycle === "terminalized" && !terminalKinds.has(item.kind)) {
           fail(`${path}.kind`, "a terminal turn event for a terminalized lifecycle");
         }
+        const lifecycleCauseByKind = {
+          turn_activated: "activated",
+          turn_failed: "failed",
+          turn_completed: "completed",
+          turn_refused: "refused",
+          turn_cancelled: "cancelled",
+          turn_reconciliation_required: "reconciliation_required",
+        };
+        if (item.body.cause_code !== lifecycleCauseByKind[item.kind]) {
+          fail(`${path}.body.cause_code`, `the cause for ${item.kind}`);
+        }
         break;
       case "event_fact":
         if (item.body.kind !== item.kind || bodyOwnedKinds.has(item.kind)) {
@@ -3112,23 +3366,6 @@ function assertTimelineDetailPage(value) {
         }
         break;
     }
-    let textBytes = 0;
-    excerpts.forEach(([excerpt, field, memberIndex, excerptPath]) => {
-      const continuation = assertTimelineExcerpt(
-        excerpt,
-        item.address,
-        field,
-        memberIndex,
-        excerptPath,
-      );
-      textBytes += new TextEncoder().encode(excerpt.text).byteLength;
-      if (continuation !== null) {
-        if (expectedBodyContinuation !== null) {
-          fail(path, "at most one continued body per page");
-        }
-        expectedBodyContinuation = continuation;
-      }
-    });
     const computedItemBytes = detailEnvelopeBytes + textBytes;
     if (item.projected_body_bytes !== computedItemBytes) {
       fail(`${path}.projected_body_bytes`, `the computed ${computedItemBytes} bytes`);
@@ -3136,6 +3373,12 @@ function assertTimelineDetailPage(value) {
     computedProjectedBodyBytes += computedItemBytes;
     if (computedProjectedBodyBytes > maxProjectedBodyBytes) {
       fail("timeline_detail_page.projected_body_bytes", `at most ${maxProjectedBodyBytes} bytes`);
+    }
+    if (continuation !== null) {
+      if (expectedBodyContinuation !== null) {
+        fail(path, "at most one continued body per page");
+      }
+      expectedBodyContinuation = continuation;
     }
   });
   if (value.projected_body_bytes !== computedProjectedBodyBytes) {
@@ -3153,7 +3396,7 @@ function assertTimelineDetailPage(value) {
   }
   if (value.continuation.type === "more_body") {
     if (
-      expectedBodyContinuation !== null &&
+      expectedBodyContinuation === null ||
       !sameBodyContinuation(value.continuation.body, expectedBodyContinuation)
     ) {
       fail("timeline_detail_page.continuation.body", "the excerpt body continuation");

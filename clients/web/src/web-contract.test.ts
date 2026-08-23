@@ -9,10 +9,16 @@ const ambiguousModelCallItem = {
     turn_id: '00000000-0000-0000-0000-000000000002',
     model_call_id: '00000000-0000-0000-0000-000000000003',
     state: { type: 'terminal', disposition: 'ambiguous' },
-    model_identity_id: 'anthropic:claude-sonnet',
+    model_identity_id: '00000000-0000-0000-0000-000000000004',
     request_context_items: '4',
-    usage: {},
-    cause_code: 'transport_interrupted',
+    response: null,
+    usage: {
+      input_tokens: null,
+      output_tokens: null,
+      cache_creation_input_tokens: null,
+      cache_read_input_tokens: null,
+    },
+    provider_failure_cause: null,
   },
   projected_body_bytes: 128,
 }
@@ -61,7 +67,11 @@ const sessionDefaultsSettingsBody = {
   },
 }
 
-function expectTimelineBodyRejected(kind: string, body: object) {
+function expectTimelineBodyRejected(
+  kind: string,
+  body: object,
+  expectedMessage = 'timeline_detail_page.items[0].body must be one recognized variant',
+) {
   const page = {
     session_id: ambiguousModelCallPage.session_id,
     items: [
@@ -75,9 +85,7 @@ function expectTimelineBodyRejected(kind: string, body: object) {
     projected_body_bytes: 128,
   }
 
-  expect(() => decodeWebSessionTimelineDetailPage(page)).toThrow(
-    'timeline_detail_page.items[0].body must be one recognized variant',
-  )
+  expect(() => decodeWebSessionTimelineDetailPage(page)).toThrow(expectedMessage)
 }
 
 describe('generated timeline detail decoder', () => {
@@ -114,6 +122,7 @@ describe('generated timeline detail decoder', () => {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000002',
             producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+            projected_member_index: 0,
             state: {
               type: 'results_projected',
               frontier_id: '00000000-0000-0000-0000-000000000008',
@@ -190,6 +199,7 @@ describe('generated timeline detail decoder', () => {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000002',
             producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+            projected_member_index: 0,
             state: 'future_state',
             tools: [],
             goal_events: [],
@@ -266,6 +276,7 @@ describe('generated timeline detail decoder', () => {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000002',
             producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+            projected_member_index: 0,
             state: {
               type: 'results_projected',
               frontier_id: '00000000-0000-0000-0000-000000000008',
@@ -469,6 +480,7 @@ describe('generated timeline detail decoder', () => {
               type: 'model_call',
               model_call_id: '00000000-0000-0000-0000-000000000003',
             },
+            terminal_frontier_id: '00000000-0000-0000-0000-00000000000d',
             attempt_count: '2',
             exhausted: true,
             operator_required: true,
@@ -491,6 +503,7 @@ describe('generated timeline detail decoder', () => {
         type: 'future',
         operation_id: '00000000-0000-0000-0000-00000000000c',
       },
+      terminal_frontier_id: '00000000-0000-0000-0000-00000000000d',
       attempt_count: '2',
       exhausted: true,
       operator_required: true,
@@ -506,6 +519,7 @@ describe('generated timeline detail decoder', () => {
         type: 'model_call',
         model_call_id: '00000000-0000-0000-0000-000000000003',
       },
+      terminal_frontier_id: '00000000-0000-0000-0000-00000000000d',
       attempt_count: '2',
       exhausted: true,
       operator_required: true,
@@ -608,6 +622,62 @@ describe('generated timeline detail decoder', () => {
     })
   })
 
+  it('rejects a missing operator requirement for human approval', () => {
+    expectTimelineBodyRejected(
+      'tool_batch_transition',
+      {
+        type: 'tool_batch',
+        turn_id: '00000000-0000-0000-0000-000000000002',
+        producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+        projected_member_index: 0,
+        state: {
+          type: 'proposed',
+          frontier_id: '00000000-0000-0000-0000-000000000008',
+        },
+        tools: [
+          {
+            request_id: '00000000-0000-0000-0000-000000000004',
+            tool_name: 'exec',
+            approval_posture: 'human',
+            approval_judge_escalated: false,
+            operator_required: false,
+            evidence: { type: 'request_only' },
+          },
+        ],
+        goal_events: [],
+      },
+      'operator_required must be equal to approval_judge_escalated || approval_posture === human',
+    )
+  })
+
+  it('rejects an operator requirement without approval evidence', () => {
+    expectTimelineBodyRejected(
+      'tool_batch_transition',
+      {
+        type: 'tool_batch',
+        turn_id: '00000000-0000-0000-0000-000000000002',
+        producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+        projected_member_index: 0,
+        state: {
+          type: 'proposed',
+          frontier_id: '00000000-0000-0000-0000-000000000008',
+        },
+        tools: [
+          {
+            request_id: '00000000-0000-0000-0000-000000000004',
+            tool_name: 'exec',
+            approval_posture: 'auto',
+            approval_judge_escalated: false,
+            operator_required: true,
+            evidence: { type: 'request_only' },
+          },
+        ],
+        goal_events: [],
+      },
+      'operator_required must be equal to approval_judge_escalated || approval_posture === human',
+    )
+  })
+
   it('rejects a mismatched model-settings header', () => {
     const page = {
       session_id: ambiguousModelCallPage.session_id,
@@ -644,6 +714,7 @@ describe('generated timeline detail decoder', () => {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000002',
             producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+            projected_member_index: 0,
             state: {
               type: 'proposed',
               frontier_id: '00000000-0000-0000-0000-000000000008',
@@ -950,6 +1021,7 @@ describe('generated timeline detail decoder', () => {
         type: 'tool_attempt',
         tool_attempt_id: '00000000-0000-0000-0000-00000000000c',
       },
+      terminal_frontier_id: '00000000-0000-0000-0000-00000000000d',
       exhausted: true,
       operator_required: true,
       cause_code: 'ambiguous_operation',

@@ -149,6 +149,30 @@ pub struct WebSessionId(
 );
 
 impl WebSessionId {
+    /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
+    #[must_use]
+    pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
+        Self(format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+            bytes[4],
+            bytes[5],
+            bytes[6],
+            bytes[7],
+            bytes[8],
+            bytes[9],
+            bytes[10],
+            bytes[11],
+            bytes[12],
+            bytes[13],
+            bytes[14],
+            bytes[15],
+        ))
+    }
+
     /// Constructs a session identity from its canonical lowercase UUID spelling.
     #[must_use]
     pub fn from_canonical(value: String) -> Option<Self> {
@@ -234,6 +258,40 @@ impl<'de> Deserialize<'de> for WebU64 {
             ));
         }
         Ok(Self(value))
+    }
+}
+
+/// Checked browser-visible tool name using the domain's exact spelling rules.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebToolName(
+    #[schemars(length(min = 1, max = 64), regex(pattern = r"^[A-Za-z0-9_-]+$"))] String,
+);
+
+impl WebToolName {
+    /// Converts an already checked application-boundary tool name.
+    #[must_use]
+    pub fn from_checked(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebToolName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let valid = !value.is_empty()
+            && value.len() <= 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+        valid.then_some(Self(value)).ok_or_else(|| {
+            de::Error::custom(
+                "tool name must be 1-64 ASCII alphanumeric, underscore, or hyphen bytes",
+            )
+        })
     }
 }
 
@@ -355,11 +413,40 @@ pub struct WebTimelineTextExcerpt {
     pub continuation: Option<WebTimelineBodyContinuation>,
 }
 
+/// Checked canonical SHA-256 identity used for browser-visible blob references.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebBlobId(#[schemars(regex(pattern = r"^sha256:[0-9a-f]{64}$"))] String);
+
+impl WebBlobId {
+    /// Constructs a blob identity from its canonical external spelling.
+    #[must_use]
+    pub fn from_canonical(value: String) -> Option<Self> {
+        let digest = value.strip_prefix("sha256:")?;
+        (digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        .then_some(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for WebBlobId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_canonical(value)
+            .ok_or_else(|| de::Error::custom("blob ID must be a canonical SHA-256 identity"))
+    }
+}
+
 /// Reference-only blob fact carried without blob bytes.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineBlobReference {
-    pub blob_id: String,
+    pub blob_id: WebBlobId,
     pub length_bytes: WebU64,
     pub media_type: Option<String>,
 }
@@ -385,6 +472,22 @@ pub enum WebTimelineModelCallDisposition {
     Refused,
     Cancelled,
     Ambiguous,
+}
+
+/// Closed provider-neutral failure cause exposed at the browser boundary.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebProviderModelCallFailureCause {
+    CredentialRejected,
+    PermissionDenied,
+    InvalidRequest,
+    TargetNotFound,
+    RequestTooLarge,
+    RateLimited,
+    QuotaExhausted,
+    Overloaded,
+    ProviderInternal,
+    Unrecognized,
 }
 
 /// Independently optional provider-reported usage counts.
@@ -457,10 +560,6 @@ pub enum WebTimelineToolFailureCause {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-// Keep the tagged wire representation direct: boxing a variant field would
-// alter the generated schema and TypeScript contract solely to optimize the
-// in-memory size of this boundary DTO.
-#[allow(clippy::large_enum_variant)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 pub enum WebTimelineToolAttemptEvidence {
     RequestOnly {},
@@ -479,7 +578,7 @@ pub enum WebTimelineToolAttemptEvidence {
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineToolAttempt {
     pub request_id: String,
-    pub tool_name: String,
+    pub tool_name: WebToolName,
     pub arguments: Option<WebTimelineTextExcerpt>,
     pub approval_posture: WebTimelineToolApprovalPosture,
     pub approval_judge_escalated: bool,
@@ -714,8 +813,17 @@ pub enum WebTimelineDelegationDetail {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineImportedEvidence {
+    pub imported_conversation_id: String,
     pub imported_entry_id: String,
     pub imported_position: WebU64,
+    pub relationship: WebTimelineImportedRelationship,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineImportedRelationship {
+    Resume,
+    Fork,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -917,24 +1025,26 @@ pub enum WebSessionTimelineDetailBody {
         detail: WebTimelineModelSettingsDetail,
     },
     UserInput {
-        turn_id: String,
+        turn_id: WebSessionId,
         text: WebTimelineTextExcerpt,
+        #[schemars(length(max = 256))]
         attachments: Vec<WebTimelineBlobReference>,
     },
     ModelCall {
-        turn_id: String,
-        model_call_id: String,
+        turn_id: WebSessionId,
+        model_call_id: WebSessionId,
         state: WebTimelineModelCallState,
-        model_identity_id: String,
+        model_identity_id: WebSessionId,
         request_context_items: WebU64,
         response: Option<WebTimelineTextExcerpt>,
         usage: WebTimelineModelUsage,
-        cause_code: Option<String>,
+        provider_failure_cause: Option<WebProviderModelCallFailureCause>,
     },
     ToolBatch {
         turn_id: String,
         producing_model_call_id: String,
         state: WebTimelineToolBatchState,
+        projected_member_index: Option<u32>,
         #[schemars(length(max = 1))]
         tools: Vec<WebTimelineToolAttempt>,
         #[schemars(length(max = 1))]
@@ -943,7 +1053,7 @@ pub enum WebSessionTimelineDetailBody {
     ToolApprovalDecision {
         turn_id: String,
         request_id: String,
-        tool_name: String,
+        tool_name: WebToolName,
         decision: WebTimelineApprovalDecision,
         actor: WebTimelineApprovalActor,
         rationale: Option<WebTimelineTextExcerpt>,
@@ -962,13 +1072,14 @@ pub enum WebSessionTimelineDetailBody {
         summary: WebTimelineTextExcerpt,
     },
     TurnLifecycle {
-        turn_id: String,
+        turn_id: WebSessionId,
         lifecycle: WebTimelineTurnLifecycleKind,
         cause_code: String,
     },
     Reconciliation {
         turn_id: String,
         operation: WebTimelineReconciliationOperation,
+        terminal_frontier_id: String,
         attempt_count: WebU64,
         exhausted: bool,
         operator_required: bool,
@@ -1008,7 +1119,7 @@ pub enum WebTimelineDetailContinuation {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineDetailPage {
-    pub session_id: String,
+    pub session_id: WebSessionId,
     #[schemars(length(max = 128))]
     pub items: Vec<WebSessionTimelineDetail>,
     pub projected_body_bytes: u32,
@@ -1308,6 +1419,13 @@ function assertSchema(root, schema, value, path) {{
   if (typeof value !== schema.type) {{
     fail(path, schema.type);
   }}
+  if (
+    schema.type === "string" &&
+    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+    value.length > 20
+  ) {{
+    fail(path, "an unsigned 64-bit integer");
+  }}
   if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {{
     fail(path, `a string matching ${{schema.pattern}}`);
   }}
@@ -1333,7 +1451,7 @@ function sameBodyContinuation(left, right) {{
   );
 }}
 
-function assertTimelineExcerpt(excerpt, address, field, memberIndex, path) {{
+function assertTimelineExcerpt(excerpt, address, field, path) {{
   const offset = BigInt(excerpt.offset_bytes);
   const total = BigInt(excerpt.total_bytes);
   const end = offset + BigInt(new TextEncoder().encode(excerpt.text).byteLength);
@@ -1347,15 +1465,14 @@ function assertTimelineExcerpt(excerpt, address, field, memberIndex, path) {{
     return null;
   }}
   const continuation = excerpt.continuation;
+  if (continuation.member_index !== 0) {{
+    fail(`${{path}}.continuation.member_index`, "zero for a singular body field");
+  }}
   if (end >= total) {{
     fail(`${{path}}.continuation`, "present only before the declared body end");
   }}
-  if (
-    !sameTimelineAddress(continuation.address, address) ||
-    continuation.field !== field ||
-    continuation.member_index !== memberIndex
-  ) {{
-    fail(`${{path}}.continuation`, "the same body member at the same address");
+  if (!sameTimelineAddress(continuation.address, address) || continuation.field !== field) {{
+    fail(`${{path}}.continuation`, "the same body field at the same address");
   }}
   if (BigInt(continuation.offset_bytes) !== end) {{
     fail(`${{path}}.continuation.offset_bytes`, "the byte immediately after the excerpt");
@@ -1363,7 +1480,7 @@ function assertTimelineExcerpt(excerpt, address, field, memberIndex, path) {{
   return continuation;
 }}
 
-function pageToolContinuation(value, address, field) {{
+function pageToolContinuation(value, address, field, memberIndex) {{
   if (
     value.continuation === undefined ||
     value.continuation === null ||
@@ -1378,14 +1495,69 @@ function pageToolContinuation(value, address, field) {{
   ) {{
     return null;
   }}
-  const allowed = field === "tool_arguments"
-    ? new Set(["tool_arguments", "tool_result", "tool_failure", "goal_text"])
+  const sameMember = continuation.member_index === memberIndex;
+  const nextMember = continuation.member_index === memberIndex + 1;
+  const valid = field === "tool_arguments"
+    ? (
+        ((continuation.field === "tool_result" || continuation.field === "tool_failure") && sameMember) ||
+        (continuation.field === "tool_arguments" && nextMember) ||
+        (continuation.field === "goal_text" && continuation.member_index === 0)
+      )
     : field === "tool_result" || field === "tool_failure"
-      ? new Set(["tool_arguments", "goal_text"])
+      ? (
+          (continuation.field === "tool_arguments" && nextMember) ||
+          (continuation.field === "goal_text" && continuation.member_index === 0)
+        )
       : field === "goal_text"
-        ? new Set(["goal_text"])
-        : new Set();
-  return allowed.has(continuation.field) ? continuation : null;
+        ? continuation.field === "goal_text" && nextMember
+        : false;
+  return valid ? continuation : null;
+}}
+
+function sameSettingValue(left, right) {{
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}}
+
+function resolveModelSetting(layers, field, providerDefault) {{
+  for (const [source, layer] of layers) {{
+    const overlay = layer[field];
+    if (overlay.kind === "inherit") continue;
+    if (overlay.kind === "provider_default") return [providerDefault, source];
+    return [overlay.value, source];
+  }}
+  return [providerDefault, null];
+}}
+
+function assertModelSettingsSnapshot(snapshot, path) {{
+  const layers = [
+    ["per_call", snapshot.precedence.per_call],
+    ["session", snapshot.precedence.session],
+    ["profile", snapshot.precedence.profile],
+    ["global_default", snapshot.precedence.global_default],
+  ];
+  const [reasoning, reasoningSource] = resolveModelSetting(layers, "reasoning_level", null);
+  const [fastMode, fastModeSource] = resolveModelSetting(layers, "fast_mode", "disabled");
+  const [serviceTier, serviceTierSource] = resolveModelSetting(layers, "service_tier", null);
+  const valid =
+    sameSettingValue(snapshot.effective.reasoning_level, reasoning) &&
+    snapshot.effective.fast_mode === fastMode &&
+    sameSettingValue(snapshot.effective.service_tier, serviceTier) &&
+    (snapshot.reasoning_source ?? null) === reasoningSource &&
+    (snapshot.fast_mode_source ?? null) === fastModeSource &&
+    (snapshot.service_tier_source ?? null) === serviceTierSource;
+  if (!valid) {{
+    fail(path, "a precedence-resolved model-settings snapshot");
+  }}
+  const providerDefaults =
+    reasoning === null && reasoningSource === null &&
+    fastMode === "disabled" && fastModeSource === null &&
+    serviceTier === null && serviceTierSource === null;
+  const validationAbsent =
+    snapshot.validated_for_selection_id === undefined ||
+    snapshot.validated_for_selection_id === null;
+  if (validationAbsent !== providerDefaults) {{
+    fail(`${{path}}.validated_for_selection_id`, "absent exactly for provider defaults");
+  }}
 }}
 
 function assertTimelineDetailPage(value) {{
@@ -1424,36 +1596,92 @@ function assertTimelineDetailPage(value) {{
       fail(`${{path}}.address`, "strictly increasing after the previous item");
     }}
     previousAddress = address;
-    const excerpts = [];
+    let continuation = null;
+    let textBytes = 0;
     switch (item.body.type) {{
       case "user_input":
         if (item.kind !== "input_accepted") {{
           fail(`${{path}}.kind`, "input_accepted for a user_input body");
         }}
-        excerpts.push([item.body.text, "input_text", 0, `${{path}}.body.text`]);
+        continuation = assertTimelineExcerpt(
+          item.body.text,
+          item.address,
+          "input_text",
+          `${{path}}.body.text`,
+        );
+        textBytes = new TextEncoder().encode(item.body.text.text).byteLength;
         break;
       case "model_call":
         if (item.kind !== "model_call_transition") {{
           fail(`${{path}}.kind`, "model_call_transition for a model_call body");
         }}
         if (item.body.response !== undefined && item.body.response !== null) {{
-          excerpts.push([item.body.response, "model_response", 0, `${{path}}.body.response`]);
+          continuation = assertTimelineExcerpt(
+            item.body.response,
+            item.address,
+            "model_response",
+            `${{path}}.body.response`,
+          );
+          textBytes = new TextEncoder().encode(item.body.response.text).byteLength;
+        }}
+        if (item.body.state.type !== "terminal") {{
+          const hasUsage = Object.values(item.body.usage).some(
+            (count) => count !== undefined && count !== null,
+          );
+          if (
+            (item.body.response !== undefined && item.body.response !== null) ||
+            hasUsage ||
+            (item.body.provider_failure_cause !== undefined &&
+              item.body.provider_failure_cause !== null)
+          ) {{
+            fail(
+              `${{path}}.body`,
+              "terminal evidence only at a terminal model-call state",
+            );
+          }}
+        }} else {{
+          const hasFailureCause =
+            item.body.provider_failure_cause !== undefined &&
+            item.body.provider_failure_cause !== null;
+          if ((item.body.state.disposition === "known_failed") !== hasFailureCause) {{
+            fail(
+              `${{path}}.body.provider_failure_cause`,
+              "present exactly for a known_failed terminal model call",
+            );
+          }}
         }}
         break;
-      case "tool_batch":
+      case "tool_batch": {{
         if (item.kind !== "tool_batch_transition") {{
           fail(`${{path}}.kind`, "tool_batch_transition for a tool_batch body");
         }}
         if (item.body.tools.length + item.body.goal_events.length > 1) {{
           fail(`${{path}}.body`, "at most one projected tool or goal member");
         }}
-        item.body.tools.forEach((tool, memberIndex) => {{
+        const tool = item.body.tools[0];
+        const goal = item.body.goal_events[0];
+        const memberIndex = item.body.projected_member_index;
+        if ((tool !== undefined || goal !== undefined) && (memberIndex === undefined || memberIndex === null)) {{
+          fail(
+            `${{path}}.body.projected_member_index`,
+            "present for a projected tool-batch member",
+          );
+        }}
+        if (tool !== undefined) {{
+          const operatorRequired =
+            tool.approval_judge_escalated || tool.approval_posture === "human";
+          if (tool.operator_required !== operatorRequired) {{
+            fail(
+              `${{path}}.body.tools[0].operator_required`,
+              "equal to approval_judge_escalated || approval_posture === human",
+            );
+          }}
           const physical = tool.evidence.type === "physical_attempt" ? tool.evidence : null;
           if (physical !== null) {{
             const terminalFailure = physical.state === "known_failed";
             if ((physical.cause !== undefined && physical.cause !== null) !== terminalFailure) {{
               fail(
-                `${{path}}.body.tools[${{memberIndex}}].evidence.cause`,
+                `${{path}}.body.tools[0].evidence.cause`,
                 "present exactly for a known_failed attempt",
               );
             }}
@@ -1463,7 +1691,7 @@ function assertTimelineDetailPage(value) {{
               physical.state !== "completed"
             ) {{
               fail(
-                `${{path}}.body.tools[${{memberIndex}}].evidence.result`,
+                `${{path}}.body.tools[0].evidence.result`,
                 "present only for a completed attempt",
               );
             }}
@@ -1473,45 +1701,73 @@ function assertTimelineDetailPage(value) {{
               !terminalFailure
             ) {{
               fail(
-                `${{path}}.body.tools[${{memberIndex}}].evidence.failure`,
+                `${{path}}.body.tools[0].evidence.failure`,
                 "present only for a known_failed attempt",
               );
             }}
             if (physical.state === "ambiguous" && physical.effect_posture !== "external_effect") {{
               fail(
-                `${{path}}.body.tools[${{memberIndex}}].evidence.effect_posture`,
+                `${{path}}.body.tools[0].evidence.effect_posture`,
                 "external_effect for an ambiguous attempt",
               );
             }}
           }}
-          const projectedTextFields = [tool.arguments, physical?.result, physical?.failure].filter(
-            (excerpt) => excerpt !== undefined && excerpt !== null,
+          const excerpts = [
+            [tool.arguments, "tool_arguments", `${{path}}.body.tools[0].arguments`],
+            [physical?.result, "tool_result", `${{path}}.body.tools[0].evidence.result`],
+            [physical?.failure, "tool_failure", `${{path}}.body.tools[0].evidence.failure`],
+          ].filter(([excerpt]) => excerpt !== undefined && excerpt !== null);
+          if (excerpts.length > 1) {{
+            fail(`${{path}}.body.tools[0]`, "at most one projected text field");
+          }}
+          if (excerpts.length === 1) {{
+            const [excerpt, field, excerptPath] = excerpts[0];
+            continuation = assertTimelineExcerpt(excerpt, item.address, field, excerptPath);
+            if (continuation === null) {{
+              continuation = pageToolContinuation(
+                value,
+                item.address,
+                field,
+                item.body.projected_member_index,
+              );
+            }}
+            textBytes = new TextEncoder().encode(excerpt.text).byteLength;
+          }}
+        }}
+        if (goal !== undefined && goal.text !== undefined && goal.text !== null) {{
+          if (tool !== undefined) {{
+            fail(`${{path}}.body`, "one projected tool or goal member");
+          }}
+          continuation = assertTimelineExcerpt(
+            goal.text,
+            item.address,
+            "goal_text",
+            `${{path}}.body.goal_events[0].text`,
           );
-          if (projectedTextFields.length > 1) {{
-            fail(`${{path}}.body.tools[${{memberIndex}}]`, "at most one projected text field");
+          if (continuation === null) {{
+            continuation = pageToolContinuation(
+              value,
+              item.address,
+              "goal_text",
+              item.body.projected_member_index,
+            );
           }}
-          if (tool.arguments !== undefined && tool.arguments !== null) {{
-            excerpts.push([tool.arguments, "tool_arguments", memberIndex, `${{path}}.body.tools[${{memberIndex}}].arguments`]);
-          }}
-          if (physical?.result !== undefined && physical.result !== null) {{
-            excerpts.push([physical.result, "tool_result", memberIndex, `${{path}}.body.tools[${{memberIndex}}].evidence.result`]);
-          }}
-          if (physical?.failure !== undefined && physical.failure !== null) {{
-            excerpts.push([physical.failure, "tool_failure", memberIndex, `${{path}}.body.tools[${{memberIndex}}].evidence.failure`]);
-          }}
-        }});
-        item.body.goal_events.forEach((event, memberIndex) => {{
-          if (event.text !== undefined && event.text !== null) {{
-            excerpts.push([event.text, "goal_text", memberIndex, `${{path}}.body.goal_events[${{memberIndex}}].text`]);
-          }}
-        }});
+          textBytes = new TextEncoder().encode(goal.text.text).byteLength;
+        }}
         break;
+      }}
       case "tool_approval_decision":
         if (item.kind !== "tool_approval_decided") {{
           fail(`${{path}}.kind`, "tool_approval_decided for a tool_approval_decision body");
         }}
         if (item.body.rationale !== undefined && item.body.rationale !== null) {{
-          excerpts.push([item.body.rationale, "approval_rationale", 0, `${{path}}.body.rationale`]);
+          continuation = assertTimelineExcerpt(
+            item.body.rationale,
+            item.address,
+            "approval_rationale",
+            `${{path}}.body.rationale`,
+          );
+          textBytes = new TextEncoder().encode(item.body.rationale.text).byteLength;
         }}
         break;
       case "goal_event":
@@ -1519,14 +1775,26 @@ function assertTimelineDetailPage(value) {{
           fail(`${{path}}.kind`, "goal_turn_retired for a goal_event body");
         }}
         if (item.body.event.text !== undefined && item.body.event.text !== null) {{
-          excerpts.push([item.body.event.text, "goal_text", 0, `${{path}}.body.event.text`]);
+          continuation = assertTimelineExcerpt(
+            item.body.event.text,
+            item.address,
+            "goal_text",
+            `${{path}}.body.event.text`,
+          );
+          textBytes = new TextEncoder().encode(item.body.event.text).byteLength;
         }}
         break;
       case "context_compaction":
         if (item.kind !== "context_compacted") {{
           fail(`${{path}}.kind`, "context_compacted for a context_compaction body");
         }}
-        excerpts.push([item.body.summary, "compaction_summary", 0, `${{path}}.body.summary`]);
+        continuation = assertTimelineExcerpt(
+          item.body.summary,
+          item.address,
+          "compaction_summary",
+          `${{path}}.body.summary`,
+        );
+        textBytes = new TextEncoder().encode(item.body.summary.text).byteLength;
         break;
       case "reconciliation":
         if (item.kind !== "turn_reconciliation_required") {{
@@ -1565,7 +1833,13 @@ function assertTimelineDetailPage(value) {{
               ? item.body.detail.content
               : null;
         if (content !== undefined && content !== null) {{
-          excerpts.push([content, "delegation_content", 0, `${{path}}.body.detail.content`]);
+          continuation = assertTimelineExcerpt(
+            content,
+            item.address,
+            "delegation_content",
+            `${{path}}.body.detail.content`,
+          );
+          textBytes = new TextEncoder().encode(content.text).byteLength;
         }}
         break;
       }}
@@ -1593,6 +1867,21 @@ function assertTimelineDetailPage(value) {{
             "turn_model_settings_resolved for resolved turn detail",
           );
         }}
+        if (item.body.detail.type === "session_defaults_changed") {{
+          assertModelSettingsSnapshot(
+            item.body.detail.prior_settings,
+            `${{path}}.body.detail.prior_settings`,
+          );
+          assertModelSettingsSnapshot(
+            item.body.detail.installed_settings,
+            `${{path}}.body.detail.installed_settings`,
+          );
+        }} else {{
+          assertModelSettingsSnapshot(
+            item.body.detail.settings,
+            `${{path}}.body.detail.settings`,
+          );
+        }}
         break;
       case "turn_lifecycle":
         if (item.body.lifecycle === "activated" && item.kind !== "turn_activated") {{
@@ -1601,6 +1890,17 @@ function assertTimelineDetailPage(value) {{
         if (item.body.lifecycle === "terminalized" && !terminalKinds.has(item.kind)) {{
           fail(`${{path}}.kind`, "a terminal turn event for a terminalized lifecycle");
         }}
+        const lifecycleCauseByKind = {{
+          turn_activated: "activated",
+          turn_failed: "failed",
+          turn_completed: "completed",
+          turn_refused: "refused",
+          turn_cancelled: "cancelled",
+          turn_reconciliation_required: "reconciliation_required",
+        }};
+        if (item.body.cause_code !== lifecycleCauseByKind[item.kind]) {{
+          fail(`${{path}}.body.cause_code`, `the cause for ${{item.kind}}`);
+        }}
         break;
       case "event_fact":
         if (item.body.kind !== item.kind || bodyOwnedKinds.has(item.kind)) {{
@@ -1608,23 +1908,6 @@ function assertTimelineDetailPage(value) {{
         }}
         break;
     }}
-    let textBytes = 0;
-    excerpts.forEach(([excerpt, field, memberIndex, excerptPath]) => {{
-      const continuation = assertTimelineExcerpt(
-        excerpt,
-        item.address,
-        field,
-        memberIndex,
-        excerptPath,
-      );
-      textBytes += new TextEncoder().encode(excerpt.text).byteLength;
-      if (continuation !== null) {{
-        if (expectedBodyContinuation !== null) {{
-          fail(path, "at most one continued body per page");
-        }}
-        expectedBodyContinuation = continuation;
-      }}
-    }});
     const computedItemBytes = detailEnvelopeBytes + textBytes;
     if (item.projected_body_bytes !== computedItemBytes) {{
       fail(`${{path}}.projected_body_bytes`, `the computed ${{computedItemBytes}} bytes`);
@@ -1632,6 +1915,12 @@ function assertTimelineDetailPage(value) {{
     computedProjectedBodyBytes += computedItemBytes;
     if (computedProjectedBodyBytes > maxProjectedBodyBytes) {{
       fail("timeline_detail_page.projected_body_bytes", `at most ${{maxProjectedBodyBytes}} bytes`);
+    }}
+    if (continuation !== null) {{
+      if (expectedBodyContinuation !== null) {{
+        fail(path, "at most one continued body per page");
+      }}
+      expectedBodyContinuation = continuation;
     }}
   }});
   if (value.projected_body_bytes !== computedProjectedBodyBytes) {{
@@ -1649,7 +1938,7 @@ function assertTimelineDetailPage(value) {{
   }}
   if (value.continuation.type === "more_body") {{
     if (
-      expectedBodyContinuation !== null &&
+      expectedBodyContinuation === null ||
       !sameBodyContinuation(value.continuation.body, expectedBodyContinuation)
     ) {{
       fail("timeline_detail_page.continuation.body", "the excerpt body continuation");

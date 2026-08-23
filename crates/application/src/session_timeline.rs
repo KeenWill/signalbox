@@ -8,10 +8,11 @@ use std::{fmt, future::Future, num::NonZeroU64};
 
 use signalbox_domain::{
     AcceptedInputId, BlobDigest, ContextCompactionId, ContextFrontierId, DelegationMessageId,
-    DirectModelSelection, DurableCommandId, FrozenModelSelection, ImportedTranscriptEntryId,
-    ModelCallId, ModelChangeAdjustment, ModelSelectionRequest, ModelSettingsOverlay,
+    DirectModelSelection, DurableCommandId, FrozenModelSelection, ImportedConversationId,
+    ImportedSessionRelationship, ImportedTranscriptEntryId, ModelCallId, ModelChangeAdjustment,
+    ModelSelectionRequest, ModelSettingsOverlay, ProviderModelCallFailureCause,
     ProviderModelIdentity, RunnerId, SemanticTranscriptEntryId,
-    SessionConfigurationDefaultsVersion, SessionId, ToolAttemptId, ToolRequestId, TurnId,
+    SessionConfigurationDefaultsVersion, SessionId, ToolAttemptId, ToolName, ToolRequestId, TurnId,
     ValidatedModelSettings,
 };
 
@@ -465,7 +466,7 @@ pub enum TimelineToolState {
 pub struct TimelineToolAttempt {
     pub request_id: ToolRequestId,
     pub attempt_id: Option<ToolAttemptId>,
-    pub tool_name: String,
+    pub tool_name: ToolName,
     pub arguments: Option<TimelineTextExcerpt>,
     pub result: Option<TimelineTextExcerpt>,
     pub failure: Option<TimelineTextExcerpt>,
@@ -730,8 +731,10 @@ pub enum TimelineDelegationDetail {
 /// Imported-frontier provenance; source bytes remain reference-only.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TimelineImportedEvidence {
+    pub imported_conversation_id: ImportedConversationId,
     pub imported_entry_id: ImportedTranscriptEntryId,
     pub imported_position: u64,
+    pub relationship: ImportedSessionRelationship,
 }
 
 /// Typed detail body, separate from storage, process-wire, and browser DTOs.
@@ -758,13 +761,14 @@ pub enum SessionTimelineDetailBody {
         request_context_items: u64,
         response: Option<TimelineTextExcerpt>,
         usage: TimelineModelUsage,
-        cause_code: Option<String>,
+        provider_failure_cause: Option<ProviderModelCallFailureCause>,
     },
     /// A tool batch with one progressively selected request/attempt member.
     ToolBatch {
         turn_id: TurnId,
         producing_model_call_id: ModelCallId,
         state: TimelineToolBatchState,
+        projected_member_index: Option<u32>,
         tools: Vec<TimelineToolAttempt>,
         goal_events: Vec<TimelineGoalEvent>,
     },
@@ -772,7 +776,7 @@ pub enum SessionTimelineDetailBody {
     ToolApprovalDecision {
         turn_id: TurnId,
         request_id: ToolRequestId,
-        tool_name: String,
+        tool_name: ToolName,
         decision: TimelineApprovalDecision,
         actor: TimelineApprovalActor,
         rationale: Option<TimelineTextExcerpt>,
@@ -802,6 +806,7 @@ pub enum SessionTimelineDetailBody {
     Reconciliation {
         turn_id: TurnId,
         operation: TimelineReconciliationOperation,
+        terminal_frontier_id: ContextFrontierId,
         attempt_count: u64,
         exhausted: bool,
         operator_required: bool,

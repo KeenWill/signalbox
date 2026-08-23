@@ -6539,6 +6539,8 @@ pub enum TimelineToolBatchState {
     RecoveryRequired { attempt_id: ToolAttemptId },
 }
 pub struct TimelineToolAttempt { /* fields */ }
+// Tool-batch detail also carries the selected immutable snapshot member index
+// so browser continuation validation can enforce exact ordinal transitions.
 pub enum TimelineApprovalDecision { Approve, Deny }
 pub enum TimelineApprovalActor {
     Policy,
@@ -6609,8 +6611,10 @@ pub enum TimelineDelegationDetail {
     MessageWake { /* fields */ },
 }
 pub struct TimelineImportedEvidence {
+    pub imported_conversation_id: ImportedConversationId,
     pub imported_entry_id: ImportedTranscriptEntryId,
     pub imported_position: u64,
+    pub relationship: ImportedSessionRelationship,
 }
 pub enum TimelineReconciliationOperation {
     ModelCall(ModelCallId),

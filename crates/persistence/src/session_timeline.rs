@@ -20,14 +20,18 @@ use signalbox_application::{
     TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::{
-    ImportedTranscriptEntryId, ModelCallId, ProviderModelIdentity, RunnerSandboxProfile, SessionId,
+    ImportedConversationId, ImportedSessionRelationship, ImportedTranscriptEntryId, ModelCallId,
+    ProviderModelCallFailureCause, ProviderModelIdentity, RunnerSandboxProfile, SessionId,
     ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution, ToolAttemptId,
-    ToolDecisionSource, ToolRequestId, TurnId,
+    ToolDecisionSource, ToolName, ToolRequestId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
 use crate::{
-    mapping::{OutboxEventDiscriminator, outbox_event_discriminator_from_str},
+    mapping::{
+        OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS, OutboxEventDiscriminator, input_position_from_numeric,
+        outbox_event_discriminator_from_str,
+    },
     outbox::{
         DispatchedBoundChildAction, DispatchedDelegationOutcome, DispatchedDelegationPolicy,
         DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
@@ -173,6 +177,21 @@ impl SessionTimelineRepository {
             transaction.commit().await?;
             return Ok(None);
         };
+        let requires_nonempty_window = match &anchor {
+            TimelineWindowAnchor::First
+            | TimelineWindowAnchor::Latest
+            | TimelineWindowAnchor::Around(_) => true,
+            TimelineWindowAnchor::Before(address) => descriptor
+                .bounds
+                .first
+                .is_some_and(|first| *address > first),
+            TimelineWindowAnchor::After(address) => descriptor
+                .bounds
+                .latest
+                .is_some_and(|latest| *address < latest),
+        };
+        let requires_first_bound = matches!(&anchor, TimelineWindowAnchor::First);
+        let requires_latest_bound = matches!(&anchor, TimelineWindowAnchor::Latest);
         let fetch_limit = i64::from(limits.max_items()) + 1;
         let rows = match anchor {
             TimelineWindowAnchor::First => {
@@ -241,8 +260,33 @@ impl SessionTimelineRepository {
             items.push(item);
         }
         items.sort_by_key(|item| item.address);
+        if items
+            .windows(2)
+            .any(|pair| pair[0].address == pair[1].address)
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window addresses").into());
+        }
+        if requires_nonempty_window && items.is_empty() {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window items").into());
+        }
         let first = items.first().map(|item| item.address);
         let latest = items.last().map(|item| item.address);
+        if (requires_first_bound && first != descriptor.bounds.first)
+            || (requires_latest_bound && latest != descriptor.bounds.latest)
+            || first
+                .is_some_and(|loaded| descriptor.bounds.first.is_none_or(|bound| loaded < bound))
+            || latest
+                .is_some_and(|loaded| descriptor.bounds.latest.is_none_or(|bound| loaded > bound))
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window bounds").into());
+        }
+        let item_count = u64::try_from(items.len())
+            .map_err(|_| SessionTimelineCorruption::InvalidOrdinal("window totals"))?;
+        if item_count > descriptor.sizes.item_count
+            || u64::from(projected_bytes) > descriptor.sizes.projected_structured_bytes
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window totals").into());
+        }
         let continuation_before = match first.zip(descriptor.bounds.first) {
             Some((loaded, bound)) if loaded > bound => TimelineContinuation::MoreAt(loaded),
             _ => TimelineContinuation::Exhausted,
@@ -689,6 +733,7 @@ async fn load_detail_event(
         let row = sqlx::query(
             r#"
 SELECT event.turn_id,
+       accepted.acceptance_position,
        octet_length(accepted.content_text)::numeric AS total_bytes,
        substring(
            convert_to(accepted.content_text, 'UTF8')
@@ -754,6 +799,8 @@ SELECT event.turn_id,
         .fetch_optional(&mut **transaction)
         .await?
         .ok_or(SessionTimelineCorruption::MissingDetailRecord)?;
+        input_position_from_numeric(row.try_get("acceptance_position")?)
+            .map_err(|_| SessionTimelineCorruption::InvalidOrdinal("input acceptance position"))?;
         let total_bytes = nonnegative(row.try_get("total_bytes")?, "input byte length")?;
         if offset > total_bytes {
             return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
@@ -907,7 +954,7 @@ async fn project_detail_event(
                             request_context_items: row.request_context_items,
                             response,
                             usage: row.usage,
-                            cause_code: row.cause_code,
+                            provider_failure_cause: row.provider_failure_cause,
                         },
                         continuation,
                     )
@@ -1054,7 +1101,9 @@ SELECT octet_length(context_summary_value)::numeric AS total_bytes,
                     terminal_turn_body(*turn, "cancelled", cursor)?
                 }
                 DispatchedOutboxEventKind::TurnReconciliationRequired {
-                    turn, operation, ..
+                    turn,
+                    operation,
+                    terminal_frontier,
                 } => {
                     require_no_body_cursor(cursor)?;
                     let operation = reconciliation_operation(*operation);
@@ -1063,6 +1112,7 @@ SELECT octet_length(context_summary_value)::numeric AS total_bytes,
                         SessionTimelineDetailBody::Reconciliation {
                             turn_id: *turn,
                             operation,
+                            terminal_frontier_id: *terminal_frontier,
                             attempt_count,
                             exhausted: true,
                             operator_required: true,
@@ -1144,20 +1194,37 @@ async fn load_imported_evidence(
     session: SessionId,
 ) -> Result<Option<TimelineImportedEvidence>, SessionTimelineRepositoryError> {
     let row = sqlx::query(
-        "SELECT imported_frontier_entry_id, imported_frontier_position
+        "SELECT imported_conversation_id, imported_frontier_entry_id,
+                imported_frontier_position, imported_relationship_kind
            FROM session WHERE session_id = $1",
     )
     .bind(session.into_uuid())
     .fetch_one(&mut **transaction)
     .await?;
+    let conversation = row.try_get::<Option<uuid::Uuid>, _>("imported_conversation_id")?;
     let entry = row.try_get::<Option<uuid::Uuid>, _>("imported_frontier_entry_id")?;
     let position = row.try_get::<Option<Decimal>, _>("imported_frontier_position")?;
-    match (entry, position) {
-        (None, None) => Ok(None),
-        (Some(entry), Some(position)) => Ok(Some(TimelineImportedEvidence {
-            imported_entry_id: ImportedTranscriptEntryId::from_uuid(entry),
-            imported_position: nonnegative(position, "imported frontier position")?,
-        })),
+    let relationship = row.try_get::<Option<String>, _>("imported_relationship_kind")?;
+    match (conversation, entry, position, relationship.as_deref()) {
+        (None, None, None, None) => Ok(None),
+        (Some(conversation), Some(entry), Some(position), Some(relationship)) => {
+            let relationship = match relationship {
+                "resume" => ImportedSessionRelationship::Resume,
+                "fork" => ImportedSessionRelationship::Fork,
+                _ => {
+                    return Err(SessionTimelineCorruption::InvalidStoredValue(
+                        "imported relationship",
+                    )
+                    .into());
+                }
+            };
+            Ok(Some(TimelineImportedEvidence {
+                imported_conversation_id: ImportedConversationId::from_uuid(conversation),
+                imported_entry_id: ImportedTranscriptEntryId::from_uuid(entry),
+                imported_position: nonnegative(position, "imported frontier position")?,
+                relationship,
+            }))
+        }
         _ => Err(SessionTimelineCorruption::Missing("imported frontier evidence").into()),
     }
 }
@@ -1327,7 +1394,7 @@ async fn project_tool_batch(
     };
     let row = sqlx::query(
         "WITH selected_member AS (
-            SELECT request_id, attempt_id
+            SELECT request_id, attempt_id, approval_judge_escalated
               FROM tool_batch_transition_detail_member
              WHERE event_sequence = $1
                AND member_kind = 'tool'
@@ -1372,11 +1439,7 @@ async fn project_tool_batch(
                      ORDER BY lease.generation DESC
                      LIMIT 1
                 ) AS sandbox_posture,
-                EXISTS (
-                    SELECT 1 FROM tool_approval_judge_model_call AS judge
-                     WHERE judge.request_id = request.request_id
-                       AND judge.recommendation_kind = 'escalate_to_human'
-                ) AS judge_escalated
+                selected.approval_judge_escalated AS judge_escalated
            FROM selected_member AS selected
            JOIN tool_request AS request
              ON request.request_id = selected.request_id
@@ -1394,7 +1457,7 @@ async fn project_tool_batch(
         let selected_body: Option<String> = row.try_get("selected_body")?;
         let selected = selected_body
             .as_deref()
-            .ok_or(SessionTimelineCorruption::InvalidDetailCursor)?;
+            .ok_or(SessionTimelineRepositoryError::InvalidDetailQuery)?;
         let excerpt = excerpt_text(
             selected,
             address,
@@ -1439,7 +1502,8 @@ async fn project_tool_batch(
         tools.push(TimelineToolAttempt {
             request_id: ToolRequestId::from_uuid(row.try_get("request_id")?),
             attempt_id: attempt_id.map(ToolAttemptId::from_uuid),
-            tool_name: row.try_get("tool_name")?,
+            tool_name: ToolName::try_new(row.try_get("tool_name")?)
+                .map_err(|_| SessionTimelineCorruption::InvalidStoredValue("tool name"))?,
             arguments: (requested_field == TimelineBodyField::ToolArguments)
                 .then_some(excerpt.clone()),
             result: (requested_field == TimelineBodyField::ToolResult).then_some(excerpt.clone()),
@@ -1473,6 +1537,7 @@ async fn project_tool_batch(
             turn_id: turn,
             producing_model_call_id: producing_call,
             state: tool_batch_state(state),
+            projected_member_index: (!tools.is_empty()).then_some(member_index),
             tools,
             goal_events: Vec::new(),
         },
@@ -1646,6 +1711,7 @@ fn project_tool_goal(
             turn_id: turn,
             producing_model_call_id: producing_call,
             state: tool_batch_state(state),
+            projected_member_index: Some(cursor.member_index),
             tools: Vec::new(),
             goal_events: vec![timeline_goal_event(
                 row.generation,
@@ -1685,7 +1751,8 @@ async fn project_tool_approval(
     .bind(approval.request().into_uuid())
     .fetch_one(&mut **transaction)
     .await?;
-    let tool_name: String = row.try_get("tool_name")?;
+    let tool_name = ToolName::try_new(row.try_get("tool_name")?)
+        .map_err(|_| SessionTimelineCorruption::InvalidStoredValue("tool name"))?;
     let approval_judge_escalated: bool = row.try_get("judge_escalated")?;
     let rationale = approval
         .rationale()
@@ -2204,7 +2271,7 @@ struct ModelDetailRow {
     request_context_items: u64,
     response: Option<ModelResponseSlice>,
     usage: TimelineModelUsage,
-    cause_code: Option<String>,
+    provider_failure_cause: Option<ProviderModelCallFailureCause>,
 }
 
 struct ModelResponseSlice {
@@ -2341,12 +2408,34 @@ SELECT substring(
                 None
             },
         },
-        cause_code: if include_terminal_evidence {
-            row.try_get("terminal_provider_failure_cause")?
+        provider_failure_cause: if include_terminal_evidence {
+            row.try_get::<Option<String>, _>("terminal_provider_failure_cause")?
+                .map(|value| provider_failure_cause_from_str(&value))
+                .transpose()?
         } else {
             None
         },
     })
+}
+
+fn provider_failure_cause_from_str(
+    value: &str,
+) -> Result<ProviderModelCallFailureCause, SessionTimelineRepositoryError> {
+    if value == "credential_rejected" {
+        return Ok(ProviderModelCallFailureCause::CredentialRejected);
+    }
+    match value {
+        "permission_denied" => Ok(ProviderModelCallFailureCause::PermissionDenied),
+        "invalid_request" => Ok(ProviderModelCallFailureCause::InvalidRequest),
+        "target_not_found" => Ok(ProviderModelCallFailureCause::TargetNotFound),
+        "request_too_large" => Ok(ProviderModelCallFailureCause::RequestTooLarge),
+        "rate_limited" => Ok(ProviderModelCallFailureCause::RateLimited),
+        "quota_exhausted" => Ok(ProviderModelCallFailureCause::QuotaExhausted),
+        "overloaded" => Ok(ProviderModelCallFailureCause::Overloaded),
+        "provider_internal" => Ok(ProviderModelCallFailureCause::ProviderInternal),
+        "unrecognized" => Ok(ProviderModelCallFailureCause::Unrecognized),
+        value => Err(SessionTimelineCorruption::UnsupportedEventKind(value.to_owned()).into()),
+    }
 }
 
 fn call_session_uuid(row: &sqlx::postgres::PgRow) -> Result<uuid::Uuid, sqlx::Error> {
@@ -2591,20 +2680,39 @@ async fn load_descriptor(
         .checked_sub(first.sequence().get())
         .and_then(|span| span.checked_add(1));
     if first > latest
+        || (item_count == 1 && first != latest)
         || latest.sequence().get() > observed_through
         || address_span.is_none_or(|span| item_count > span)
     {
         return Err(SessionTimelineCorruption::InvalidOrdinal("timeline bounds").into());
+    }
+    let projected_structured_bytes = nonnegative(
+        row.try_get("structured_bytes")?,
+        "projected structured bytes",
+    )?;
+    let minimum_item_bytes = u64::from(PROJECTED_ITEM_ENVELOPE_BYTES)
+        .checked_add(OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS.0)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    let maximum_item_bytes = u64::from(PROJECTED_ITEM_ENVELOPE_BYTES)
+        .checked_add(OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS.1)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    let minimum_structured_bytes = item_count
+        .checked_mul(minimum_item_bytes)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    let maximum_structured_bytes = item_count
+        .checked_mul(maximum_item_bytes)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    if projected_structured_bytes < minimum_structured_bytes
+        || projected_structured_bytes > maximum_structured_bytes
+    {
+        return Err(SessionTimelineCorruption::InvalidOrdinal("projected structured bytes").into());
     }
     Ok(Some(SessionTimelineDescriptor {
         session,
         sizes: SessionTimelineSizeFacts {
             item_count,
             projected_text_bytes: nonnegative(row.try_get("text_bytes")?, "projected text bytes")?,
-            projected_structured_bytes: nonnegative(
-                row.try_get("structured_bytes")?,
-                "projected structured bytes",
-            )?,
+            projected_structured_bytes,
             referenced_blob_count: 0,
             referenced_blob_bytes: 0,
         },
