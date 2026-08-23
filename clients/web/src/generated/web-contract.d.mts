@@ -58,6 +58,7 @@ export type WebImportSummary = {
   readonly format: WebImportFormat;
   readonly imported_conversation_id: string;
   readonly source_session_id?: WebImportSourceSessionEvidence | null;
+  readonly source_session_id_sha256?: string | null;
 };
 
 export type WebImportTextCompleteness = "complete" | "truncated";
@@ -79,7 +80,7 @@ export type WebImportTimelineBounds = {
 
 export type WebImportWindowAnchor = "first" | "latest" | "position";
 
-export type WebImportedContentKind = "opaque_non_text" | "source_event" | "source_message_block" | "text" | "tool_call" | "tool_result" | "thinking" | "redacted_thinking" | "document" | "message_content_absent";
+export type WebImportedContentKind = "source_event" | "source_message_block" | "text" | "tool_call" | "tool_result" | "thinking" | "redacted_thinking" | "document" | "message_content_absent";
 
 export type WebImportedEntry = {
   readonly content_kind: WebImportedContentKind;
@@ -121,12 +122,15 @@ export type WebImportListRequest = {
   readonly after?: string | null;
   readonly format?: WebImportFormat | null;
   readonly limit?: number | null;
+  readonly search_correlation?: string | null;
   readonly source_session_id?: string | null;
 };
 
 export type WebImportListPage = {
+  readonly exact_source_session_id_sha256?: string | null;
   readonly items: ReadonlyArray<WebImportSummary>;
   readonly next_cursor?: string | null;
+  readonly search_correlation?: string | null;
 };
 
 export type WebImportDescriptor = {

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { Page } from '@playwright/test'
 import type {
   WebImportContinuationRequest,
@@ -19,16 +20,33 @@ export const useDeterministicImportApi = async (page: Page) => {
     const importedConversationId = decodeURIComponent(segments[2] ?? '')
 
     if (segments.length === 2 || (segments[2] === 'searches' && request.method() === 'POST')) {
+      const sourceSessionId =
+        segments[2] === 'searches'
+          ? (request.postData() ?? undefined)
+          : (url.searchParams.get('source_session_id') ?? undefined)
       const listRequest: WebImportListRequest = {
         after: url.searchParams.get('after') ?? undefined,
         format: (url.searchParams.get('format') as WebImportFormat | null) ?? undefined,
         limit: optionalNumber(url.searchParams.get('limit')),
-        source_session_id:
-          segments[2] === 'searches'
-            ? (request.postData() ?? undefined)
-            : (url.searchParams.get('source_session_id') ?? undefined),
+        source_session_id: sourceSessionId,
       }
-      await route.fulfill({ json: await api.list(listRequest) })
+      const page = await api.list(listRequest)
+      if (segments[2] === 'searches' && sourceSessionId !== undefined) {
+        const digest = createHash('sha256').update(sourceSessionId).digest('hex')
+        await route.fulfill({
+          json: {
+            ...page,
+            items: page.items.map((item) => ({
+              ...item,
+              source_session_id_sha256: digest,
+            })),
+            search_correlation: url.searchParams.get('search_correlation'),
+            exact_source_session_id_sha256: digest,
+          },
+        })
+        return
+      }
+      await route.fulfill({ json: page })
       return
     }
     if (segments[3] === 'entries') {

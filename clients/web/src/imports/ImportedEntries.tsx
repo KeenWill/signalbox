@@ -1,4 +1,4 @@
-import { useVirtualizer } from '@tanstack/react-virtual'
+import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual'
 import { useEffect, useRef } from 'react'
 import { type CommandContext, invokeCommand } from '../commands'
 import type {
@@ -48,16 +48,21 @@ export function ImportedEntries({
   density: 'compact' | 'comfortable'
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
+  const selectedIndex = entries.findIndex(
+    (entry) => entry.frontier.imported_entry_id === selected?.imported_entry_id,
+  )
   const virtualizer = useVirtualizer({
     count: entries.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => (density === 'comfortable' ? 74 : 58),
     overscan: IMPORT_ENTRY_OVERSCAN_ROWS,
     getItemKey: (index) => entries[index]?.frontier.imported_entry_id ?? index,
+    rangeExtractor: (range) => {
+      const indexes = defaultRangeExtractor(range)
+      if (selectedIndex < 0 || indexes.includes(selectedIndex)) return indexes
+      return [...indexes, selectedIndex].sort((left, right) => left - right)
+    },
   })
-  const selectedIndex = entries.findIndex(
-    (entry) => entry.frontier.imported_entry_id === selected?.imported_entry_id,
-  )
   const virtualRows = virtualizer.getVirtualItems()
   useEffect(() => {
     if (selectedIndex >= 0) virtualizer.scrollToIndex(selectedIndex, { align: 'auto' })

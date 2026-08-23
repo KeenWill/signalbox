@@ -1,5 +1,6 @@
 import {
   decodeWebApiErrorResponse,
+  decodeWebContractBootstrap,
   decodeWebImportContinuationResponse,
   decodeWebImportDescriptor,
   decodeWebImportEntryWindow,
@@ -69,7 +70,14 @@ export class ImportListCorrelationError extends Error {
 const correlateListPage = (
   request: WebImportListRequest,
   page: WebImportListPage,
+  searchCorrelation?: string,
 ): WebImportListPage => {
+  if ((page.search_correlation ?? undefined) !== searchCorrelation) {
+    throw new ImportListCorrelationError()
+  }
+  if (searchCorrelation !== undefined && !page.exact_source_session_id_sha256) {
+    throw new ImportListCorrelationError()
+  }
   let previous = request.after ?? undefined
   for (const item of page.items) {
     if (
@@ -89,6 +97,9 @@ const correlateListPage = (
       ) {
         throw new ImportListCorrelationError()
       }
+      if (item.source_session_id_sha256 !== page.exact_source_session_id_sha256) {
+        throw new ImportListCorrelationError()
+      }
     }
     previous = item.imported_conversation_id
   }
@@ -102,12 +113,16 @@ const correlateListPage = (
   return page
 }
 
+const DEFAULT_IMPORT_WINDOW_RADIUS = 25
+
 const correlateEntryWindow = (
   importedConversationId: string,
   request: WebImportEntryWindowRequest,
   window: WebImportEntryWindow,
 ): WebImportEntryWindow => {
   const normalizedAnchor = request.anchor ?? 'first'
+  const requestedBefore = request.before ?? DEFAULT_IMPORT_WINDOW_RADIUS
+  const requestedAfter = request.after ?? DEFAULT_IMPORT_WINDOW_RADIUS
   const expectedAnchor =
     normalizedAnchor === 'first'
       ? 1
@@ -125,6 +140,8 @@ const correlateEntryWindow = (
     window.anchor_position !== expectedAnchor ||
     window.first_position > window.anchor_position ||
     window.last_position < window.anchor_position ||
+    window.anchor_position - window.first_position > requestedBefore ||
+    window.last_position - window.anchor_position > requestedAfter ||
     window.last_position - window.first_position + 1 !== window.items.length ||
     !positionsCorrelate ||
     !window.items.some((entry) => entry.frontier.position === window.anchor_position)
@@ -145,6 +162,11 @@ const decodeResponse = async <Value>(
   return decoder(value)
 }
 
+export const validateWebContractBootstrap = async (): Promise<void> => {
+  const response = await fetch('/api/bootstrap')
+  await decodeResponse(response, decodeWebContractBootstrap)
+}
+
 const queryString = (request: WebImportListRequest | WebImportEntryWindowRequest): string => {
   const query = new URLSearchParams()
   for (const [name, value] of Object.entries(request)) {
@@ -155,16 +177,40 @@ const queryString = (request: WebImportListRequest | WebImportEntryWindowRequest
 }
 
 export class HttpImportApi implements ImportApi {
+  private bootstrapValidationPromise: Promise<void> | undefined
+
+  constructor(private readonly bootstrapValidation = validateWebContractBootstrap) {}
+
+  private validateBootstrap(): Promise<void> {
+    this.bootstrapValidationPromise ??= this.bootstrapValidation().catch((error: unknown) => {
+      this.bootstrapValidationPromise = undefined
+      throw error
+    })
+    return this.bootstrapValidationPromise
+  }
+
   async list(request: WebImportListRequest, signal?: AbortSignal): Promise<WebImportListPage> {
+    await this.validateBootstrap()
     if (request.source_session_id !== undefined && request.source_session_id !== null) {
       const { source_session_id: sourceSessionId, ...catalogRequest } = request
-      const response = await fetch(`/api/imports/searches${queryString(catalogRequest)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-        body: sourceSessionId,
-        signal,
-      })
-      return correlateListPage(request, await decodeResponse(response, decodeWebImportListPage))
+      const searchCorrelation = crypto.randomUUID()
+      const response = await fetch(
+        `/api/imports/searches${queryString({
+          ...catalogRequest,
+          search_correlation: searchCorrelation,
+        })}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+          body: sourceSessionId,
+          signal,
+        },
+      )
+      return correlateListPage(
+        request,
+        await decodeResponse(response, decodeWebImportListPage),
+        searchCorrelation,
+      )
     }
     const response = await fetch(`/api/imports/${queryString(request)}`, { signal })
     return correlateListPage(request, await decodeResponse(response, decodeWebImportListPage))
@@ -174,6 +220,7 @@ export class HttpImportApi implements ImportApi {
     importedConversationId: string,
     signal?: AbortSignal,
   ): Promise<WebImportDescriptor> {
+    await this.validateBootstrap()
     const response = await fetch(`/api/imports/${encodeURIComponent(importedConversationId)}`, {
       signal,
     })
@@ -189,6 +236,7 @@ export class HttpImportApi implements ImportApi {
     request: WebImportEntryWindowRequest,
     signal?: AbortSignal,
   ): Promise<WebImportEntryWindow> {
+    await this.validateBootstrap()
     const response = await fetch(
       `/api/imports/${encodeURIComponent(importedConversationId)}/entries${queryString(request)}`,
       { signal },
@@ -201,6 +249,7 @@ export class HttpImportApi implements ImportApi {
     importedConversationId: string,
     request: WebImportContinuationRequest,
   ): Promise<WebImportContinuationResponse> {
+    await this.validateBootstrap()
     const response = await fetch(
       `/api/imports/${encodeURIComponent(importedConversationId)}/continuations`,
       {

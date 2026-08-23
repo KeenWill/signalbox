@@ -10,6 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use sha2::Digest;
 use signalbox_application::{
     CreateSessionFromImportedFrontierOutcome, CreateSessionFromImportedFrontierRequest,
     CreateSessionFromImportedFrontierService, UuidV7CreateSessionFromImportedFrontierIdGenerator,
@@ -92,10 +93,10 @@ async fn list_imports(
         Ok(request) => request,
         Err(_) => return invalid_request("imports query is malformed"),
     };
-    if request.source_session_id.is_some() {
+    if request.source_session_id.is_some() || request.search_correlation.is_some() {
         return invalid_request("exact source-session filters use the bounded search body");
     }
-    execute_list_imports(state, request).await
+    execute_list_imports(state, request, None).await
 }
 
 async fn search_imports(
@@ -110,6 +111,11 @@ async fn search_imports(
     if catalog_request.source_session_id.is_some() {
         return invalid_request("exact source-session filters belong in the search body");
     }
+    let search_correlation = match catalog_request.search_correlation.as_deref() {
+        Some(value) if required_uuid(value).is_ok() => Some(value.to_owned()),
+        Some(_) => return invalid_request("imports search correlation is not a UUID"),
+        None => return invalid_request("imports search correlation is required"),
+    };
     let maximum_bytes = state
         .model_configuration
         .conversation_import_max_source_bytes();
@@ -118,10 +124,14 @@ async fn search_imports(
         Err(response) => return response,
     };
     catalog_request.source_session_id = Some(source_session_id);
-    execute_list_imports(state, catalog_request).await
+    execute_list_imports(state, catalog_request, search_correlation).await
 }
 
-async fn execute_list_imports(state: WebImportState, request: WebImportListRequest) -> Response {
+async fn execute_list_imports(
+    state: WebImportState,
+    request: WebImportListRequest,
+    search_correlation: Option<String>,
+) -> Response {
     let limit = request.limit.unwrap_or(DEFAULT_IMPORT_LIST_ITEMS);
     let Some(limit) = NonZeroU32::new(limit).filter(|limit| limit.get() <= MAX_IMPORT_LIST_ITEMS)
     else {
@@ -134,6 +144,10 @@ async fn execute_list_imports(state: WebImportState, request: WebImportListReque
     let Some(source_session_maximum_bytes) = source_session_maximum_bytes() else {
         return invalid_import_contract();
     };
+    let exact_source_session_id_sha256 = request
+        .source_session_id
+        .as_deref()
+        .map(|value| lowercase_hex(&sha2::Sha256::digest(value.as_bytes())));
     let query = ImportedConversationPageRequest {
         after,
         format: request.format.map(domain_format),
@@ -148,6 +162,8 @@ async fn execute_list_imports(state: WebImportState, request: WebImportListReque
         Ok(page) => Json(WebImportListPage {
             items: page.items.into_iter().map(web_summary).collect(),
             next_cursor: page.next_after.map(|cursor| cursor.into_uuid().to_string()),
+            search_correlation,
+            exact_source_session_id_sha256,
         })
         .into_response(),
         Err(error) => discovery_error(error),
@@ -347,7 +363,11 @@ async fn execute_continuation(
         .resolve_session_model(request.model_selection)
         .is_err()
     {
-        return invalid_request("initial model selection is not configured");
+        return application_error(
+            StatusCode::BAD_REQUEST,
+            "model_not_configured",
+            "initial model selection is not configured",
+        );
     }
     let application_request = match CreateSessionFromImportedFrontierRequest::try_new(
         request.command_id,
@@ -385,6 +405,10 @@ fn web_summary(summary: ImportedConversationSummary) -> WebImportSummary {
         display_title: summary.display_title.map(|title| title.into_string()),
         format: web_format(summary.format),
         source_session_id: summary.source_session_id.map(web_source_session),
+        source_session_id_sha256: summary
+            .source_session_digest
+            .as_ref()
+            .map(|digest| lowercase_hex(digest)),
         entry_count: summary.entry_count,
     }
 }
@@ -448,9 +472,6 @@ fn web_content(
     content: &ImportedEntryContentProjection,
 ) -> (WebImportedContentKind, Option<WebImportTextEvidence>) {
     match content {
-        ImportedEntryContentProjection::OpaqueNonText => {
-            (WebImportedContentKind::OpaqueNonText, None)
-        }
         ImportedEntryContentProjection::SourceEvent => (WebImportedContentKind::SourceEvent, None),
         ImportedEntryContentProjection::SourceMessageBlock => {
             (WebImportedContentKind::SourceMessageBlock, None)

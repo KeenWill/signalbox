@@ -83,11 +83,19 @@ export function ImportsWorkspace({
   const [selectedFrontier, setSelectedFrontier] = useState<WebImportContinuationReference | null>(
     null,
   )
-  const [modelKind, setModelKind] = useState<ModelKind>('direct')
-  const [modelSelectionId, setModelSelectionId] = useState(scenario ? SCENARIO_MODEL_SELECTION : '')
   const [pendingCommand, setPendingCommand] = useState<WebImportContinuationRequest | null>(() =>
     loadRetainedCommand(queryScope),
   )
+  const [modelKind, setModelKind] = useState<ModelKind>(
+    () => pendingCommand?.initial_model_selection.kind ?? 'direct',
+  )
+  const [modelSelectionId, setModelSelectionId] = useState(() => {
+    const retainedModel = pendingCommand?.initial_model_selection
+    if (retainedModel?.kind === 'direct') return retainedModel.selection_id
+    if (retainedModel?.kind === 'alias') return retainedModel.alias_id
+    return scenario ? SCENARIO_MODEL_SELECTION : ''
+  })
+  const [retainedStorageFailed, setRetainedStorageFailed] = useState(false)
   const hasRetainedCommand = pendingCommand !== null
 
   useEffect(() => {
@@ -174,6 +182,35 @@ export function ImportsWorkspace({
     },
     [entryWindow?.items, hasRetainedCommand, resetContinuation],
   )
+  const modelSelectionMissing = modelSelectionId.trim().length === 0
+  const canContinueImport =
+    selectedFrontier !== null &&
+    !modelSelectionMissing &&
+    !descriptorQuery.isError &&
+    !continuation.isPending &&
+    !hasRetainedCommand
+  const continueAt = useCallback(
+    (relationship: WebImportedSessionRelationship) => {
+      if (!canContinueImport || !selectedFrontier) return
+      const request: WebImportContinuationRequest = {
+        command_id: crypto.randomUUID(),
+        frontier: selectedFrontier,
+        relationship,
+        initial_model_selection:
+          modelKind === 'direct'
+            ? { kind: 'direct', selection_id: modelSelectionId.trim() }
+            : { kind: 'alias', alias_id: modelSelectionId.trim() },
+      }
+      if (!storeRetainedCommand(queryScope, request)) {
+        setRetainedStorageFailed(true)
+        return
+      }
+      setRetainedStorageFailed(false)
+      setPendingCommand(request)
+      continuation.mutate(request)
+    },
+    [canContinueImport, continuation, modelKind, modelSelectionId, queryScope, selectedFrontier],
+  )
   const commandContext = useMemo<CommandContext>(
     () => ({
       dispatch: store.dispatch,
@@ -184,8 +221,16 @@ export function ImportsWorkspace({
       importEntryIds,
       selectedImportEntry: selectedFrontier?.imported_entry_id ?? null,
       selectImportEntry,
+      canContinueImport,
+      continueImport: continueAt,
     }),
-    [importEntryIds, selectImportEntry, selectedFrontier?.imported_entry_id],
+    [
+      canContinueImport,
+      continueAt,
+      importEntryIds,
+      selectImportEntry,
+      selectedFrontier?.imported_entry_id,
+    ],
   )
   useEffect(() => {
     onCommandContext?.(commandContext)
@@ -307,23 +352,6 @@ export function ImportsWorkspace({
   const retryableContinuationFailure =
     continuation.isError && isRetryableContinuationError(continuation.error)
   const retainedCommandNeedsAction = pendingCommand !== null && !continuation.isPending
-  const modelSelectionMissing = modelSelectionId.trim().length === 0
-
-  const continueAt = (relationship: WebImportedSessionRelationship) => {
-    if (hasRetainedCommand || !selectedFrontier || modelSelectionId.trim().length === 0) return
-    const request: WebImportContinuationRequest = {
-      command_id: crypto.randomUUID(),
-      frontier: selectedFrontier,
-      relationship,
-      initial_model_selection:
-        modelKind === 'direct'
-          ? { kind: 'direct', selection_id: modelSelectionId.trim() }
-          : { kind: 'alias', alias_id: modelSelectionId.trim() },
-    }
-    storeRetainedCommand(queryScope, request)
-    setPendingCommand(request)
-    continuation.mutate(request)
-  }
 
   return (
     <>
@@ -574,7 +602,7 @@ export function ImportsWorkspace({
                   <div className="continuation-actions">
                     <button
                       type="button"
-                      onClick={() => continueAt('resume')}
+                      onClick={() => invokeCommand('imports.continue.resume', commandContext)}
                       disabled={
                         !selectedFrontier ||
                         modelSelectionMissing ||
@@ -587,7 +615,7 @@ export function ImportsWorkspace({
                     </button>
                     <button
                       type="button"
-                      onClick={() => continueAt('fork')}
+                      onClick={() => invokeCommand('imports.continue.fork', commandContext)}
                       disabled={
                         !selectedFrontier ||
                         modelSelectionMissing ||
@@ -616,6 +644,12 @@ export function ImportsWorkspace({
                       </>
                     )}
                   </div>
+                  {retainedStorageFailed && (
+                    <p role="alert">
+                      The exact continuation command could not be retained in session storage. No
+                      request was sent.
+                    </p>
+                  )}
                   {retainedCommandNeedsAction && pendingCommand && (
                     <p role="alert">
                       The exact command for import{' '}
@@ -630,9 +664,15 @@ export function ImportsWorkspace({
                     </p>
                   )}
                   {continuation.data && (
-                    <p className="continuation-result">
-                      Session created: {continuation.data.session_id}
-                    </p>
+                    <>
+                      <p className="continuation-result">
+                        Session created: {continuation.data.session_id}
+                      </p>
+                      <p className="continuation-result">
+                        Receipt source: import {continuation.data.frontier.imported_conversation_id}
+                        , position {continuation.data.frontier.position.toLocaleString()}
+                      </p>
+                    </>
                   )}
                 </div>
               </div>

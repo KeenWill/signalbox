@@ -12,12 +12,9 @@ use signalbox_domain::{
 };
 use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid};
 
-use crate::{
-    conversation_import::{
-        DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_PENDING, DISPLAY_TITLE_STATE_UNDERIVABLE,
-        decode_format, decode_source_speaker, encode_format, positive_u64,
-    },
-    conversation_import_codec::validate_content_structure,
+use crate::conversation_import::{
+    DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_PENDING, DISPLAY_TITLE_STATE_UNDERIVABLE,
+    decode_format, decode_source_speaker, encode_format, positive_u64,
 };
 
 /// Exact filters and exclusive keyset position for one imports page.
@@ -55,6 +52,8 @@ pub struct ImportedConversationSummary {
     pub format: ImportedConversationFormat,
     /// Byte-bounded consistent source-session evidence.
     pub source_session_id: Option<ImportedTextProjection>,
+    /// SHA-256 of the complete source-session identifier, when present.
+    pub source_session_digest: Option<[u8; 32]>,
     /// Declared normalized entry count.
     pub entry_count: u64,
 }
@@ -144,8 +143,6 @@ pub struct ImportedEntryProjection {
 /// Browser discovery facts decoded from a byte-bounded stored-content projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ImportedEntryContentProjection {
-    /// A non-text encoding whose complete value exceeds the validation bound.
-    OpaqueNonText,
     /// A source event whose potentially large details are not projected.
     SourceEvent,
     /// Text attestation with a byte-bounded UTF-8 projection.
@@ -323,15 +320,20 @@ impl ImportedConversationDiscoveryRepository {
             });
         let rows = sqlx::query(
             "SELECT imported_conversation_id, source_format, converter_version,
-                    substring(source_session_id FROM 1 FOR $6) AS source_session_prefix,
+                    substring(source_session_id FROM 1 FOR $6::integer) AS source_session_prefix,
                     octet_length(source_session_id)::bigint AS source_session_bytes,
+                    CASE WHEN $4::bytea IS NOT NULL
+                         THEN sha256(source_session_id) END AS source_session_digest,
                     $6::bigint AS source_session_maximum_bytes,
                     declared_entry_count, display_title, display_title_state
                FROM imported_conversation
               WHERE ($1::uuid IS NULL OR imported_conversation_id > $1)
                 AND ($2::text IS NULL OR source_format = $2)
                 AND ($3::smallint IS NULL OR converter_version = $3)
-                AND ($4::bytea IS NULL OR source_session_id = $4)
+                AND ($4::bytea IS NULL OR (
+                    sha256(source_session_id) = sha256($4)
+                    AND source_session_id = $4
+                ))
               ORDER BY imported_conversation_id
               LIMIT $5",
         )
@@ -368,7 +370,7 @@ impl ImportedConversationDiscoveryRepository {
         let row = sqlx::query(
             "SELECT imported.imported_conversation_id, imported.source_format,
                     imported.converter_version, imported.source_digest,
-                    substring(imported.source_session_id FROM 1 FOR $2)
+                    substring(imported.source_session_id FROM 1 FOR $2::integer)
                         AS source_session_prefix,
                     octet_length(imported.source_session_id)::bigint AS source_session_bytes,
                     $2::bigint AS source_session_maximum_bytes,
@@ -464,10 +466,9 @@ impl ImportedConversationDiscoveryRepository {
                     substring(content_encoding FROM 1 FOR 12) AS content_header,
                     CASE WHEN get_byte(content_encoding, 2) = 1
                               AND get_byte(content_encoding, 3) = 2
-                         THEN substring(content_encoding FROM 13 FOR $4) END
+                         THEN substring(content_encoding FROM 13 FOR $4::integer) END
                          AS content_text_prefix,
-                    CASE WHEN get_byte(content_encoding, 2) <> 1
-                         THEN content_encoding END AS validated_content_encoding,
+                    content_kind,
                     octet_length(content_encoding)::bigint AS content_bytes,
                     $4::bigint AS content_projected_bytes
                FROM imported_transcript_entry
@@ -514,8 +515,23 @@ fn decode_summary(
         display_title: checked_display_title(row)?,
         format,
         source_session_id: checked_source_session_id(row)?,
+        source_session_digest: checked_optional_digest(row, "source_session_digest")?,
         entry_count: positive(row.try_get("declared_entry_count")?, "declared entry count")?,
     })
+}
+
+fn checked_optional_digest(
+    row: &PgRow,
+    field: &'static str,
+) -> Result<Option<[u8; 32]>, ImportedConversationDiscoveryError> {
+    let digest: Option<Vec<u8>> = row.try_get(field)?;
+    digest
+        .map(|digest| {
+            digest
+                .try_into()
+                .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidDigest.into())
+        })
+        .transpose()
 }
 
 fn decode_descriptor(
@@ -623,44 +639,25 @@ fn checked_content_projection(
     if header.len() < 3 || !matches!(header[0], 1 | 2) || header[1] != 1 || total_bytes < 3 {
         return Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into());
     }
-    match header[2] {
-        0 => checked_non_text_content(row, ImportedEntryContentProjection::SourceEvent),
-        1 => checked_text_projection(&header, row, total_bytes, projected_bytes)
-            .map(ImportedEntryContentProjection::Text),
-        2 => checked_non_text_content(row, ImportedEntryContentProjection::ToolCall),
-        3 => checked_non_text_content(row, ImportedEntryContentProjection::ToolResult),
-        4 => checked_non_text_content(row, ImportedEntryContentProjection::Thinking),
-        5 => checked_non_text_content(row, ImportedEntryContentProjection::RedactedThinking),
-        6 => checked_non_text_content(row, ImportedEntryContentProjection::Document),
-        7 => checked_non_text_content(row, ImportedEntryContentProjection::MessageContentAbsent),
-        8 => checked_non_text_content(row, ImportedEntryContentProjection::SourceMessageBlock),
-        _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
-    }
-}
-
-fn checked_non_text_content(
-    row: &PgRow,
-    projection: ImportedEntryContentProjection,
-) -> Result<ImportedEntryContentProjection, ImportedConversationDiscoveryError> {
-    let encoding: Option<Vec<u8>> = row.try_get("validated_content_encoding")?;
-    let encoding = encoding.ok_or(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
-    let kind = validate_content_structure(&encoding)
-        .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
-    let kind_matches = matches!(
-        (&projection, kind),
-        (ImportedEntryContentProjection::SourceEvent, 0)
-            | (ImportedEntryContentProjection::ToolCall, 2)
-            | (ImportedEntryContentProjection::ToolResult, 3)
-            | (ImportedEntryContentProjection::Thinking, 4)
-            | (ImportedEntryContentProjection::RedactedThinking, 5)
-            | (ImportedEntryContentProjection::Document, 6)
-            | (ImportedEntryContentProjection::MessageContentAbsent, 7)
-            | (ImportedEntryContentProjection::SourceMessageBlock, 8)
-    );
-    if !kind_matches {
+    let content_kind: i16 = row.try_get("content_kind")?;
+    if i16::from(header[2]) != content_kind {
         return Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into());
     }
-    Ok(projection)
+    match content_kind {
+        0 => Ok(ImportedEntryContentProjection::SourceEvent),
+        1 => checked_text_projection(&header, row, total_bytes, projected_bytes)
+            .map(ImportedEntryContentProjection::Text),
+        2 => Ok(ImportedEntryContentProjection::ToolCall),
+        3 => Ok(ImportedEntryContentProjection::ToolResult),
+        4 => Ok(ImportedEntryContentProjection::Thinking),
+        5 => Ok(ImportedEntryContentProjection::RedactedThinking),
+        6 => Ok(ImportedEntryContentProjection::Document),
+        7 if total_bytes == 4 && matches!(header.get(3), Some(0..=4)) => {
+            Ok(ImportedEntryContentProjection::MessageContentAbsent)
+        }
+        8 => Ok(ImportedEntryContentProjection::SourceMessageBlock),
+        _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
+    }
 }
 
 fn checked_text_projection(

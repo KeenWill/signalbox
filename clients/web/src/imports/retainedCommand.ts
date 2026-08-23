@@ -31,17 +31,18 @@ export const loadRetainedCommand = (scope: string): WebImportContinuationRequest
 export const storeRetainedCommand = (
   scope: string,
   command: WebImportContinuationRequest | null,
-): void => {
+): boolean => {
   try {
     const key = storageKey(scope)
     if (command === null) {
       window.sessionStorage.removeItem(key)
-      return
+      return true
     }
     const encoded = JSON.stringify(command)
-    if (new TextEncoder().encode(encoded).length > MAX_RETAINED_COMMAND_BYTES) return
+    if (new TextEncoder().encode(encoded).length > MAX_RETAINED_COMMAND_BYTES) return false
     window.sessionStorage.setItem(key, encoded)
+    return true
   } catch {
-    // Route-local retention still applies when storage is unavailable.
+    return false
   }
 }

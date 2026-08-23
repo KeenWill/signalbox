@@ -34,6 +34,7 @@ function ScenarioResults({
           className={activeId === scenario.id ? 'scenario-link active' : 'scenario-link'}
           aria-current={activeId === scenario.id ? 'page' : undefined}
           aria-disabled={disabled || undefined}
+          tabIndex={disabled ? -1 : undefined}
           onClick={(event) => {
             if (disabled) event.preventDefault()
             else onSelect?.()

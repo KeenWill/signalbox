@@ -14,6 +14,8 @@ export interface CommandContext {
   navigate?: (path: string) => void
   transcriptPreferences?: boolean
   presentationPreferences?: boolean
+  canContinueImport?: boolean
+  continueImport?: (relationship: 'resume' | 'fork') => void
 }
 
 export interface CommandBinding {
@@ -297,6 +299,26 @@ export const commandRegistry = [
     available: (context) =>
       (context.importEntryIds?.length ?? 0) > 0 && context.selectImportEntry !== undefined,
     run: (context) => context.selectImportEntry?.(context.importEntryIds?.at(-1) ?? ''),
+  },
+  {
+    id: 'imports.continue.resume',
+    title: 'Resume from imported frontier',
+    description: 'Create a native session by resuming the selected imported frontier.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) =>
+      context.canContinueImport === true && context.continueImport !== undefined,
+    run: (context) => context.continueImport?.('resume'),
+  },
+  {
+    id: 'imports.continue.fork',
+    title: 'Fork from imported frontier',
+    description: 'Create a native session by forking the selected imported frontier.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) =>
+      context.canContinueImport === true && context.continueImport !== undefined,
+    run: (context) => context.continueImport?.('fork'),
   },
   {
     id: 'layout.toggle',

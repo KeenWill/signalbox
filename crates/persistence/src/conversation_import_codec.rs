@@ -176,6 +176,7 @@ pub(crate) fn decode_content(
 }
 
 /// Validates one content encoding without materializing its potentially large values.
+#[cfg(test)]
 pub(crate) fn validate_content_structure(
     bytes: &[u8],
 ) -> Result<u8, ImportedConversationEncodingFailure> {
@@ -680,6 +681,7 @@ impl<'bytes> Decoder<'bytes> {
         ))
     }
 
+    #[cfg(test)]
     fn skip_text(&mut self) -> Result<(), ImportedConversationEncodingFailure> {
         let length = self.length()?;
         let bytes = self.take(length)?;
@@ -688,6 +690,7 @@ impl<'bytes> Decoder<'bytes> {
             .map_err(|_| ImportedConversationEncodingFailure::InvalidUtf8("imported text"))
     }
 
+    #[cfg(test)]
     fn skip_boolean(&mut self) -> Result<(), ImportedConversationEncodingFailure> {
         match self.byte()? {
             0 | 1 => Ok(()),
@@ -698,6 +701,7 @@ impl<'bytes> Decoder<'bytes> {
         }
     }
 
+    #[cfg(test)]
     fn skip_attestation(
         &mut self,
         skip_value: impl FnOnce(&mut Self) -> Result<(), ImportedConversationEncodingFailure>,
@@ -712,6 +716,7 @@ impl<'bytes> Decoder<'bytes> {
         }
     }
 
+    #[cfg(test)]
     fn skip_structured(&mut self, depth: usize) -> Result<(), ImportedConversationEncodingFailure> {
         match self.byte()? {
             0 => Ok(()),
@@ -750,6 +755,7 @@ impl<'bytes> Decoder<'bytes> {
         }
     }
 
+    #[cfg(test)]
     fn skip_tool_result_value(&mut self) -> Result<(), ImportedConversationEncodingFailure> {
         match self.byte()? {
             0 => self.skip_text(),
@@ -767,6 +773,7 @@ impl<'bytes> Decoder<'bytes> {
         }
     }
 
+    #[cfg(test)]
     fn skip_tool_result_block(&mut self) -> Result<(), ImportedConversationEncodingFailure> {
         match self.byte()? {
             0 | 2 => self.skip_attestation(Decoder::skip_text),
@@ -781,6 +788,7 @@ impl<'bytes> Decoder<'bytes> {
         }
     }
 
+    #[cfg(test)]
     fn skip_media_source(&mut self) -> Result<(), ImportedConversationEncodingFailure> {
         self.skip_attestation(Decoder::skip_text)?;
         self.skip_attestation(Decoder::skip_text)?;
