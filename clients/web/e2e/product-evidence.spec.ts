@@ -27,6 +27,7 @@ const bootstrapFixture = {
 
 const toolEvidenceArguments = '{"path":"docs/spec/sessions-and-transcript.md"}'
 const toolEvidenceResult = 'Read 64 bounded lines from the owning contract.'
+const toolEvidenceGoal = 'Bounded session evidence complete.'
 const encodedBytes = (value: string) => new TextEncoder().encode(value).byteLength
 const timelineHeaderBytes = (kind: string) => 64 + encodedBytes(kind)
 const timelineDetailBytes = (text = '') => 128 + encodedBytes(text)
@@ -45,7 +46,10 @@ const sessionEvidenceFixture = {
           type: 'tool_batch',
           turn_id: '00000000-0000-0000-0000-000000999998',
           producing_model_call_id: '00000000-0000-0000-0000-000000999898',
-          state: 'proposed',
+          state: {
+            type: 'proposed',
+            frontier_id: '00000000-0000-0000-0000-000000999598',
+          },
           tools: [
             {
               request_id: '00000000-0000-0000-0000-000000999798',
@@ -94,7 +98,10 @@ const sessionEvidenceFixture = {
           type: 'tool_batch',
           turn_id: '00000000-0000-0000-0000-000000999998',
           producing_model_call_id: '00000000-0000-0000-0000-000000999898',
-          state: 'results_projected',
+          state: {
+            type: 'results_projected',
+            frontier_id: '00000000-0000-0000-0000-000000999598',
+          },
           tools: [
             {
               request_id: '00000000-0000-0000-0000-000000999798',
@@ -143,21 +150,28 @@ const sessionEvidenceFixture = {
           type: 'tool_batch',
           turn_id: '00000000-0000-0000-0000-000000999998',
           producing_model_call_id: '00000000-0000-0000-0000-000000999898',
-          state: 'results_projected',
+          state: {
+            type: 'results_projected',
+            frontier_id: '00000000-0000-0000-0000-000000999598',
+          },
           tools: [],
           goal_events: [
             {
-              event_kind: 'achieved',
+              type: 'achieved',
               generation: '19',
-              reason: null,
-              text: null,
+              text: {
+                text: toolEvidenceGoal,
+                offset_bytes: '0',
+                total_bytes: String(new TextEncoder().encode(toolEvidenceGoal).byteLength),
+                continuation: null,
+              },
             },
           ],
         },
-        projected_body_bytes: timelineDetailBytes(),
+        projected_body_bytes: timelineDetailBytes(toolEvidenceGoal),
       },
     ],
-    projected_body_bytes: timelineDetailBytes(),
+    projected_body_bytes: timelineDetailBytes(toolEvidenceGoal),
     continuation: null,
   },
 } as const

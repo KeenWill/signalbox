@@ -65,7 +65,10 @@ const sessionWorkspaceFixture = {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000042',
             producing_model_call_id: '00000000-0000-0000-0000-000000000142',
-            state: 'proposed',
+            state: {
+              type: 'proposed',
+              frontier_id: '00000000-0000-0000-0000-000000000442',
+            },
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000242',
@@ -114,7 +117,10 @@ const sessionWorkspaceFixture = {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000042',
             producing_model_call_id: '00000000-0000-0000-0000-000000000142',
-            state: 'results_projected',
+            state: {
+              type: 'results_projected',
+              frontier_id: '00000000-0000-0000-0000-000000000442',
+            },
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000242',
@@ -163,13 +169,15 @@ const sessionWorkspaceFixture = {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000042',
             producing_model_call_id: '00000000-0000-0000-0000-000000000142',
-            state: 'results_projected',
+            state: {
+              type: 'results_projected',
+              frontier_id: '00000000-0000-0000-0000-000000000442',
+            },
             tools: [],
             goal_events: [
               {
-                event_kind: 'achieved',
+                type: 'achieved',
                 generation: '7',
-                reason: null,
                 text: {
                   text: toolGoalText,
                   offset_bytes: '0',
