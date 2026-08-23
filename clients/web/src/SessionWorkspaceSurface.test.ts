@@ -179,24 +179,32 @@ describe('Session Workspace projection', () => {
 
     const sessionSettings = {
       type: 'model_settings',
-      turn_id: null,
-      cause_code: 'session_defaults_changed',
+      detail: { type: 'session_defaults_changed' },
     } as const
-    expect(isCompatibleDetailBody('session_model_settings_changed', sessionSettings)).toBe(true)
+    expect(
+      isCompatibleDetailBody(
+        'session_model_settings_changed',
+        sessionSettings as unknown as Parameters<typeof isCompatibleDetailBody>[1],
+      ),
+    ).toBe(true)
     expect(
       isCompatibleDetailBody('session_model_settings_changed', {
         ...sessionSettings,
-        turn_id: '00000000-0000-0000-0000-000000000041',
-      }),
+        detail: { type: 'turn_resolved' },
+      } as unknown as Parameters<typeof isCompatibleDetailBody>[1]),
     ).toBe(false)
     expect(
       isCompatibleDetailBody('turn_model_settings_resolved', {
         ...sessionSettings,
-        turn_id: '00000000-0000-0000-0000-000000000041',
-        cause_code: 'turn_settings_resolved',
-      }),
+        detail: { type: 'turn_resolved' },
+      } as unknown as Parameters<typeof isCompatibleDetailBody>[1]),
     ).toBe(true)
-    expect(isCompatibleDetailBody('turn_model_settings_resolved', sessionSettings)).toBe(false)
+    expect(
+      isCompatibleDetailBody(
+        'turn_model_settings_resolved',
+        sessionSettings as unknown as Parameters<typeof isCompatibleDetailBody>[1],
+      ),
+    ).toBe(false)
 
     const delegation = {
       type: 'delegation',
@@ -232,37 +240,40 @@ describe('Session Workspace projection', () => {
       type: 'goal_event',
       turn_id: '00000000-0000-0000-0000-000000000041',
       event: {
-        event_kind: 'blocked',
+        type: 'blocked',
         generation: '1',
         reason: 'authorization_required',
-        text: null,
+        text: { text: '', offset_bytes: '0', total_bytes: '0' },
       },
     } as const
     expect(isCompatibleDetailBody('goal_turn_retired', goalEvent)).toBe(true)
     expect(
       isCompatibleDetailBody('goal_turn_retired', {
         ...goalEvent,
-        event: { ...goalEvent.event, reason: null },
-      }),
+        event: { ...goalEvent.event, reason: 'invented' },
+      } as unknown as Parameters<typeof isCompatibleDetailBody>[1]),
     ).toBe(false)
     expect(
       isCompatibleDetailBody('goal_turn_retired', {
         ...goalEvent,
-        event: { ...goalEvent.event, event_kind: 'achieved', reason: null },
+        event: { type: 'achieved', generation: '1', text: goalEvent.event.text },
       }),
     ).toBe(true)
     expect(
       isCompatibleDetailBody('goal_turn_retired', {
         ...goalEvent,
-        event: { ...goalEvent.event, event_kind: 'achieved' },
-      }),
+        event: { ...goalEvent.event, type: 'invented' },
+      } as unknown as Parameters<typeof isCompatibleDetailBody>[1]),
     ).toBe(false)
 
     const toolBatch = {
       type: 'tool_batch',
       turn_id: '00000000-0000-0000-0000-000000000041',
       producing_model_call_id: '00000000-0000-0000-0000-000000000042',
-      state: 'results_projected',
+      state: {
+        type: 'results_projected',
+        frontier_id: '00000000-0000-0000-0000-000000000045',
+      },
       tools: [],
       goal_events: [goalEvent.event],
     } as const
@@ -270,8 +281,8 @@ describe('Session Workspace projection', () => {
     expect(
       isCompatibleDetailBody('tool_batch_transition', {
         ...toolBatch,
-        goal_events: [{ ...goalEvent.event, reason: null }],
-      }),
+        goal_events: [{ ...goalEvent.event, reason: 'invented' }],
+      } as unknown as Parameters<typeof isCompatibleDetailBody>[1]),
     ).toBe(false)
     expect(
       isCompatibleDetailBody('tool_batch_transition', {
@@ -443,18 +454,23 @@ describe('Session Workspace projection', () => {
       request_id: '00000000-0000-0000-0000-000000000042',
       tool_name: 'workspace_read',
       decision: 'approve',
-      source: 'user',
-      decider: { type: 'user', command_id: '00000000-0000-0000-0000-000000000043' },
+      actor: { type: 'user', command_id: '00000000-0000-0000-0000-000000000043' },
       rationale: null,
       approval_judge_escalated: false,
     } as const
     expect(isCompatibleDetailBody('tool_approval_decided', approval)).toBe(true)
     expect(
-      isCompatibleDetailBody('tool_approval_decided', { ...approval, source: 'delegate' }),
+      isCompatibleDetailBody('tool_approval_decided', {
+        ...approval,
+        actor: { type: 'invented' },
+      } as unknown as Parameters<typeof isCompatibleDetailBody>[1]),
     ).toBe(false)
-    expect(isCompatibleDetailBody('tool_approval_decided', { ...approval, source: 'policy' })).toBe(
-      true,
-    )
+    expect(
+      isCompatibleDetailBody('tool_approval_decided', {
+        ...approval,
+        actor: { type: 'policy' },
+      }),
+    ).toBe(true)
     expect(
       isCompatibleDetailBody('tool_approval_decided', {
         ...approval,

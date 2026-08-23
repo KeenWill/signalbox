@@ -76,7 +76,10 @@ describe('generated timeline detail decoder', () => {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000002',
             producing_model_call_id: '00000000-0000-0000-0000-000000000003',
-            state: 'results_projected',
+            state: {
+              type: 'results_projected',
+              frontier_id: '00000000-0000-0000-0000-000000000008',
+            },
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000004',
@@ -117,8 +120,7 @@ describe('generated timeline detail decoder', () => {
             request_id: '00000000-0000-0000-0000-000000000004',
             tool_name: 'exec',
             decision: 'approve',
-            source: 'delegate',
-            decider: {
+            actor: {
               type: 'delegate',
               model_selection_id: '00000000-0000-0000-0000-000000000005',
               model_call_id: '00000000-0000-0000-0000-000000000006',
@@ -221,7 +223,10 @@ describe('generated timeline detail decoder', () => {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000002',
             producing_model_call_id: '00000000-0000-0000-0000-000000000003',
-            state: 'results_projected',
+            state: {
+              type: 'results_projected',
+              frontier_id: '00000000-0000-0000-0000-000000000008',
+            },
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000004',
@@ -254,15 +259,16 @@ describe('generated timeline detail decoder', () => {
             type: 'goal_event',
             turn_id: '00000000-0000-0000-0000-000000000002',
             event: {
+              type: 'blocked',
               generation: '7',
-              event_kind: 'blocked',
               reason: 'authorization_required',
+              text: { text: 'approval needed', offset_bytes: '0', total_bytes: '15' },
             },
           },
-          projected_body_bytes: 128,
+          projected_body_bytes: 143,
         },
       ],
-      projected_body_bytes: 128,
+      projected_body_bytes: 143,
     }
 
     expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
@@ -326,7 +332,10 @@ describe('generated timeline detail decoder', () => {
       type: 'tool_batch',
       turn_id: '00000000-0000-0000-0000-000000000002',
       producing_model_call_id: '00000000-0000-0000-0000-000000000003',
-      state: 'proposed',
+      state: {
+        type: 'proposed',
+        frontier_id: '00000000-0000-0000-0000-000000000008',
+      },
       tools: [
         {
           request_id: '00000000-0000-0000-0000-000000000004',
@@ -345,7 +354,10 @@ describe('generated timeline detail decoder', () => {
       type: 'tool_batch',
       turn_id: '00000000-0000-0000-0000-000000000002',
       producing_model_call_id: '00000000-0000-0000-0000-000000000003',
-      state: 'results_projected',
+      state: {
+        type: 'results_projected',
+        frontier_id: '00000000-0000-0000-0000-000000000008',
+      },
       tools: [
         {
           request_id: '00000000-0000-0000-0000-000000000004',
@@ -365,7 +377,10 @@ describe('generated timeline detail decoder', () => {
       type: 'tool_batch',
       turn_id: '00000000-0000-0000-0000-000000000002',
       producing_model_call_id: '00000000-0000-0000-0000-000000000003',
-      state: 'results_projected',
+      state: {
+        type: 'results_projected',
+        frontier_id: '00000000-0000-0000-0000-000000000008',
+      },
       tools: [
         {
           request_id: '00000000-0000-0000-0000-000000000004',
@@ -440,7 +455,10 @@ describe('generated timeline detail decoder', () => {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000002',
             producing_model_call_id: '00000000-0000-0000-0000-000000000003',
-            state: 'proposed',
+            state: {
+              type: 'proposed',
+              frontier_id: '00000000-0000-0000-0000-000000000008',
+            },
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000004',
@@ -475,8 +493,7 @@ describe('generated timeline detail decoder', () => {
       request_id: '00000000-0000-0000-0000-000000000004',
       tool_name: 'exec',
       decision: 'defer',
-      source: 'user',
-      decider: {
+      actor: {
         type: 'user',
         command_id: '00000000-0000-0000-0000-000000000005',
       },
@@ -504,7 +521,10 @@ describe('generated timeline detail decoder', () => {
       type: 'tool_batch',
       turn_id: '00000000-0000-0000-0000-000000000002',
       producing_model_call_id: '00000000-0000-0000-0000-000000000003',
-      state: 'proposed',
+      state: {
+        type: 'proposed',
+        frontier_id: '00000000-0000-0000-0000-000000000008',
+      },
       tools: [firstTool, secondTool],
       goal_events: [],
     })
@@ -518,7 +538,10 @@ describe('generated timeline detail decoder', () => {
       type: 'tool_batch',
       turn_id: '00000000-0000-0000-0000-000000000002',
       producing_model_call_id: '00000000-0000-0000-0000-000000000003',
-      state: 'proposed',
+      state: {
+        type: 'proposed',
+        frontier_id: '00000000-0000-0000-0000-000000000008',
+      },
       tools: [],
       goal_events: [firstGoal, secondGoal],
     })
@@ -535,7 +558,10 @@ describe('generated timeline detail decoder', () => {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000002',
             producing_model_call_id: '00000000-0000-0000-0000-000000000003',
-            state: 'proposed',
+            state: {
+              type: 'proposed',
+              frontier_id: '00000000-0000-0000-0000-000000000008',
+            },
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000004',
@@ -545,7 +571,7 @@ describe('generated timeline detail decoder', () => {
                 operator_required: false,
               },
             ],
-            goal_events: [{ generation: '1', event_kind: 'achieved' }],
+            goal_events: [{ type: 'user_stopped', generation: '1' }],
           },
           projected_body_bytes: 128,
         },
@@ -570,7 +596,10 @@ describe('generated timeline detail decoder', () => {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000002',
             producing_model_call_id: '00000000-0000-0000-0000-000000000003',
-            state: 'results_projected',
+            state: {
+              type: 'results_projected',
+              frontier_id: '00000000-0000-0000-0000-000000000008',
+            },
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000004',

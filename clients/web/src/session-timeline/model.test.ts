@@ -1229,7 +1229,10 @@ describe('BoundedSessionHistory', () => {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000041',
             producing_model_call_id: '00000000-0000-0000-0000-000000000141',
-            state: 'proposed',
+            state: {
+              type: 'proposed',
+              frontier_id: '00000000-0000-0000-0000-000000000341',
+            },
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000241',
@@ -1292,12 +1295,15 @@ describe('BoundedSessionHistory', () => {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000041',
             producing_model_call_id: '00000000-0000-0000-0000-000000000141',
-            state: 'results_projected',
+            state: {
+              type: 'results_projected',
+              frontier_id: '00000000-0000-0000-0000-000000000341',
+            },
             tools: [],
             goal_events: [
               {
                 generation: '1',
-                event_kind: 'achieved',
+                type: 'achieved',
                 text: {
                   text: 'done',
                   offset_bytes: '0',
@@ -1342,7 +1348,10 @@ describe('BoundedSessionHistory', () => {
             type: 'tool_batch',
             turn_id: '00000000-0000-0000-0000-000000000041',
             producing_model_call_id: '00000000-0000-0000-0000-000000000141',
-            state: 'proposed',
+            state: {
+              type: 'proposed',
+              frontier_id: '00000000-0000-0000-0000-000000000341',
+            },
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000241',

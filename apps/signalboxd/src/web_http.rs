@@ -29,13 +29,13 @@ use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
     SessionTimelineDescriptor, SessionTimelineDetailBody, SessionTimelineDetailPage,
-    SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress, TimelineApprovalDecider,
-    TimelineApprovalDecision, TimelineApprovalSource, TimelineBodyContinuation, TimelineBodyField,
+    SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress, TimelineApprovalActor,
+    TimelineApprovalDecision, TimelineBodyContinuation, TimelineBodyField,
     TimelineBoundChildAction, TimelineContinuation, TimelineDelegationDetail,
     TimelineDelegationOutcome, TimelineDelegationPolicy, TimelineDelegationProvenance,
     TimelineDelegationReason, TimelineDelegationWaitMode, TimelineDetailContinuation,
     TimelineDetailCursor, TimelineDetailLimits, TimelineGoalBlockedReason, TimelineGoalEvent,
-    TimelineGoalEventKind, TimelineModelCallDisposition, TimelineModelCallState,
+    TimelineModelCallDisposition, TimelineModelCallState, TimelineModelSettingsDetail,
     TimelineReconciliationOperation, TimelineRunnerSandboxPosture, TimelineRunnerState,
     TimelineTextExcerpt, TimelineToolApprovalPosture, TimelineToolAttempt, TimelineToolBatchState,
     TimelineToolEffectPosture, TimelineToolSandboxPosture, TimelineToolState,
@@ -51,15 +51,19 @@ use signalbox_web_contract::{
     WebContractBootstrap, WebContractExample, WebSessionId, WebSessionTimelineDescriptor,
     WebSessionTimelineDetail, WebSessionTimelineDetailBody, WebSessionTimelineDetailPage,
     WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
-    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineApprovalDecider,
-    WebTimelineApprovalDecision, WebTimelineApprovalSource, WebTimelineBlobReference,
-    WebTimelineBodyContinuation, WebTimelineBodyField, WebTimelineBoundChildAction,
-    WebTimelineDelegationDetail, WebTimelineDelegationOutcome, WebTimelineDelegationPolicy,
-    WebTimelineDelegationProvenance, WebTimelineDelegationReason, WebTimelineDelegationWaitMode,
-    WebTimelineDetailContinuation, WebTimelineEventSequence, WebTimelineGoalBlockedReason,
-    WebTimelineGoalEvent, WebTimelineGoalEventKind, WebTimelineImportedEvidence,
-    WebTimelineModelCallDisposition, WebTimelineModelCallState, WebTimelineModelUsage,
-    WebTimelineReconciliationOperation, WebTimelineRunnerSandboxPosture, WebTimelineRunnerState,
+    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineApprovalActor,
+    WebTimelineApprovalDecision, WebTimelineBlobReference, WebTimelineBodyContinuation,
+    WebTimelineBodyField, WebTimelineBoundChildAction, WebTimelineDelegationDetail,
+    WebTimelineDelegationOutcome, WebTimelineDelegationPolicy, WebTimelineDelegationProvenance,
+    WebTimelineDelegationReason, WebTimelineDelegationWaitMode, WebTimelineDetailContinuation,
+    WebTimelineEffectiveModelSettings, WebTimelineEventSequence, WebTimelineFastMode,
+    WebTimelineFastModeOverlay, WebTimelineGoalBlockedReason, WebTimelineGoalEvent,
+    WebTimelineImportedEvidence, WebTimelineModelCallDisposition, WebTimelineModelCallState,
+    WebTimelineModelChangeAdjustment, WebTimelineModelSelection, WebTimelineModelSettingSource,
+    WebTimelineModelSettingsDetail, WebTimelineModelSettingsOverlay,
+    WebTimelineModelSettingsPrecedence, WebTimelineModelSettingsSnapshot, WebTimelineModelUsage,
+    WebTimelineReasoningLevel, WebTimelineReconciliationOperation, WebTimelineRunnerSandboxPosture,
+    WebTimelineRunnerState, WebTimelineServiceTier, WebTimelineSettingOverlay,
     WebTimelineTextExcerpt, WebTimelineToolApprovalPosture, WebTimelineToolAttempt,
     WebTimelineToolBatchState, WebTimelineToolEffectPosture, WebTimelineToolSandboxPosture,
     WebTimelineToolState, WebTimelineTurnLifecycleKind, WebU64,
@@ -869,13 +873,11 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
                 }),
             }
         }
-        SessionTimelineDetailBody::ModelSettings {
-            turn_id,
-            cause_code,
-        } => WebSessionTimelineDetailBody::ModelSettings {
-            turn_id: turn_id.map(|turn| turn.into_uuid().to_string()),
-            cause_code,
-        },
+        SessionTimelineDetailBody::ModelSettings { detail } => {
+            WebSessionTimelineDetailBody::ModelSettings {
+                detail: model_settings_detail_dto(detail),
+            }
+        }
         SessionTimelineDetailBody::UserInput {
             turn_id,
             text,
@@ -928,12 +930,20 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             turn_id: turn_id.into_uuid().to_string(),
             producing_model_call_id: producing_model_call_id.into_uuid().to_string(),
             state: match state {
-                TimelineToolBatchState::Proposed => WebTimelineToolBatchState::Proposed,
-                TimelineToolBatchState::ResultsProjected => {
-                    WebTimelineToolBatchState::ResultsProjected
+                TimelineToolBatchState::Proposed { frontier_id } => {
+                    WebTimelineToolBatchState::Proposed {
+                        frontier_id: frontier_id.into_uuid().to_string(),
+                    }
                 }
-                TimelineToolBatchState::RecoveryRequired => {
-                    WebTimelineToolBatchState::RecoveryRequired
+                TimelineToolBatchState::ResultsProjected { frontier_id } => {
+                    WebTimelineToolBatchState::ResultsProjected {
+                        frontier_id: frontier_id.into_uuid().to_string(),
+                    }
+                }
+                TimelineToolBatchState::RecoveryRequired { attempt_id } => {
+                    WebTimelineToolBatchState::RecoveryRequired {
+                        tool_attempt_id: attempt_id.into_uuid().to_string(),
+                    }
                 }
             },
             tools: tools.into_iter().map(tool_attempt_dto).collect(),
@@ -944,8 +954,7 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             request_id,
             tool_name,
             decision,
-            source,
-            decider,
+            actor,
             rationale,
             approval_judge_escalated,
         } => WebSessionTimelineDetailBody::ToolApprovalDecision {
@@ -956,19 +965,15 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
                 TimelineApprovalDecision::Approve => WebTimelineApprovalDecision::Approve,
                 TimelineApprovalDecision::Deny => WebTimelineApprovalDecision::Deny,
             },
-            source: match source {
-                TimelineApprovalSource::Policy => WebTimelineApprovalSource::Policy,
-                TimelineApprovalSource::Delegate => WebTimelineApprovalSource::Delegate,
-                TimelineApprovalSource::User => WebTimelineApprovalSource::User,
-            },
-            decider: match decider {
-                TimelineApprovalDecider::User { command_id } => WebTimelineApprovalDecider::User {
+            actor: match actor {
+                TimelineApprovalActor::Policy => WebTimelineApprovalActor::Policy {},
+                TimelineApprovalActor::User { command_id } => WebTimelineApprovalActor::User {
                     command_id: command_id.into_uuid().to_string(),
                 },
-                TimelineApprovalDecider::Delegate {
+                TimelineApprovalActor::Delegate {
                     model_selection_id,
                     model_call_id,
-                } => WebTimelineApprovalDecider::Delegate {
+                } => WebTimelineApprovalActor::Delegate {
                     model_selection_id: model_selection_id.into_uuid().to_string(),
                     model_call_id: model_call_id.into_uuid().to_string(),
                 },
@@ -1080,31 +1085,304 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
 }
 
 fn goal_event_dto(event: TimelineGoalEvent) -> WebTimelineGoalEvent {
-    WebTimelineGoalEvent {
-        generation: WebU64::from_u64(event.generation),
-        event_kind: match event.event_kind {
-            TimelineGoalEventKind::Commissioned => WebTimelineGoalEventKind::Commissioned,
-            TimelineGoalEventKind::Blocked => WebTimelineGoalEventKind::Blocked,
-            TimelineGoalEventKind::Resumed => WebTimelineGoalEventKind::Resumed,
-            TimelineGoalEventKind::Achieved => WebTimelineGoalEventKind::Achieved,
-            TimelineGoalEventKind::UserStopped => WebTimelineGoalEventKind::UserStopped,
-            TimelineGoalEventKind::Superseded => WebTimelineGoalEventKind::Superseded,
+    let reason_dto = |reason| match reason {
+        TimelineGoalBlockedReason::UserInputRequired => {
+            WebTimelineGoalBlockedReason::UserInputRequired
+        }
+        TimelineGoalBlockedReason::ExternalChangeRequired => {
+            WebTimelineGoalBlockedReason::ExternalChangeRequired
+        }
+        TimelineGoalBlockedReason::AuthorizationRequired => {
+            WebTimelineGoalBlockedReason::AuthorizationRequired
+        }
+        TimelineGoalBlockedReason::ExecutionFailure => {
+            WebTimelineGoalBlockedReason::ExecutionFailure
+        }
+    };
+    match event {
+        TimelineGoalEvent::Commissioned { generation, text } => {
+            WebTimelineGoalEvent::Commissioned {
+                generation: WebU64::from_u64(generation),
+                text: text_excerpt_dto(text),
+            }
+        }
+        TimelineGoalEvent::Blocked {
+            generation,
+            reason,
+            text,
+        } => WebTimelineGoalEvent::Blocked {
+            generation: WebU64::from_u64(generation),
+            reason: reason_dto(reason),
+            text: text_excerpt_dto(text),
         },
-        reason: event.reason.map(|reason| match reason {
-            TimelineGoalBlockedReason::UserInputRequired => {
-                WebTimelineGoalBlockedReason::UserInputRequired
+        TimelineGoalEvent::Resumed { generation, text } => WebTimelineGoalEvent::Resumed {
+            generation: WebU64::from_u64(generation),
+            text: text.map(text_excerpt_dto),
+        },
+        TimelineGoalEvent::Achieved { generation, text } => WebTimelineGoalEvent::Achieved {
+            generation: WebU64::from_u64(generation),
+            text: text_excerpt_dto(text),
+        },
+        TimelineGoalEvent::UserStopped { generation } => WebTimelineGoalEvent::UserStopped {
+            generation: WebU64::from_u64(generation),
+        },
+        TimelineGoalEvent::Superseded { generation, text } => WebTimelineGoalEvent::Superseded {
+            generation: WebU64::from_u64(generation),
+            text: text_excerpt_dto(text),
+        },
+    }
+}
+
+fn model_settings_detail_dto(
+    detail: TimelineModelSettingsDetail,
+) -> WebTimelineModelSettingsDetail {
+    match detail {
+        TimelineModelSettingsDetail::SessionDefaultsChanged {
+            command_id,
+            prior_defaults_version,
+            installed_defaults_version,
+            prior_model,
+            installed_model,
+            prior_settings,
+            installed_settings,
+            caller_override,
+            adjustments,
+        } => WebTimelineModelSettingsDetail::SessionDefaultsChanged {
+            command_id: command_id.into_uuid().to_string(),
+            prior_defaults_version: WebU64::from_u64(prior_defaults_version.as_u64()),
+            installed_defaults_version: WebU64::from_u64(installed_defaults_version.as_u64()),
+            prior_model: model_selection_request_dto(prior_model),
+            installed_model: model_selection_request_dto(installed_model),
+            prior_settings: model_settings_snapshot_dto(prior_settings),
+            installed_settings: model_settings_snapshot_dto(installed_settings),
+            caller_override: model_settings_overlay_dto(caller_override),
+            adjustments: adjustments
+                .into_iter()
+                .map(model_change_adjustment_dto)
+                .collect(),
+        },
+        TimelineModelSettingsDetail::TurnResolved {
+            accepted_input_id,
+            turn_id,
+            defaults_version,
+            selection,
+            per_call_override,
+            settings,
+            adjusted_from_selection_id,
+            adjustments,
+        } => WebTimelineModelSettingsDetail::TurnResolved {
+            accepted_input_id: accepted_input_id.into_uuid().to_string(),
+            turn_id: turn_id.into_uuid().to_string(),
+            defaults_version: WebU64::from_u64(defaults_version.as_u64()),
+            requested_model: frozen_model_selection_dto(selection),
+            selected_direct_id: selection.selected_direct().into_uuid().to_string(),
+            per_call_override: model_settings_overlay_dto(per_call_override),
+            settings: model_settings_snapshot_dto(settings),
+            adjusted_from_selection_id: adjusted_from_selection_id
+                .map(|selection| selection.into_uuid().to_string()),
+            adjustments: adjustments
+                .into_iter()
+                .map(model_change_adjustment_dto)
+                .collect(),
+        },
+    }
+}
+
+fn model_selection_request_dto(
+    selection: signalbox_domain::ModelSelectionRequest,
+) -> WebTimelineModelSelection {
+    match selection {
+        signalbox_domain::ModelSelectionRequest::Direct(selection) => {
+            WebTimelineModelSelection::Direct {
+                selection_id: selection.into_uuid().to_string(),
             }
-            TimelineGoalBlockedReason::ExternalChangeRequired => {
-                WebTimelineGoalBlockedReason::ExternalChangeRequired
+        }
+        signalbox_domain::ModelSelectionRequest::Alias(alias) => WebTimelineModelSelection::Alias {
+            alias_id: alias.into_uuid().to_string(),
+        },
+    }
+}
+
+fn frozen_model_selection_dto(
+    selection: signalbox_domain::FrozenModelSelection,
+) -> WebTimelineModelSelection {
+    match selection {
+        signalbox_domain::FrozenModelSelection::Direct(selection) => {
+            WebTimelineModelSelection::Direct {
+                selection_id: selection.into_uuid().to_string(),
             }
-            TimelineGoalBlockedReason::AuthorizationRequired => {
-                WebTimelineGoalBlockedReason::AuthorizationRequired
+        }
+        signalbox_domain::FrozenModelSelection::FrozenAlias { alias, .. } => {
+            WebTimelineModelSelection::Alias {
+                alias_id: alias.into_uuid().to_string(),
             }
-            TimelineGoalBlockedReason::ExecutionFailure => {
-                WebTimelineGoalBlockedReason::ExecutionFailure
+        }
+    }
+}
+
+fn model_settings_snapshot_dto(
+    settings: signalbox_domain::ValidatedModelSettings,
+) -> WebTimelineModelSettingsSnapshot {
+    let precedence = settings.precedence();
+    let resolved = settings.resolved();
+    let effective = resolved.effective();
+    WebTimelineModelSettingsSnapshot {
+        precedence: WebTimelineModelSettingsPrecedence {
+            per_call: model_settings_overlay_dto(precedence.per_call()),
+            session: model_settings_overlay_dto(precedence.session()),
+            profile: model_settings_overlay_dto(precedence.profile()),
+            global_default: model_settings_overlay_dto(precedence.global_default()),
+        },
+        effective: WebTimelineEffectiveModelSettings {
+            reasoning_level: effective.reasoning_level().map(reasoning_level_dto),
+            fast_mode: fast_mode_dto(effective.fast_mode()),
+            service_tier: effective.service_tier().map(service_tier_dto),
+        },
+        reasoning_source: resolved.reasoning_source().map(model_setting_source_dto),
+        fast_mode_source: resolved.fast_mode_source().map(model_setting_source_dto),
+        service_tier_source: resolved.service_tier_source().map(model_setting_source_dto),
+        validated_for_selection_id: settings
+            .validated_for()
+            .map(|selection| selection.into_uuid().to_string()),
+    }
+}
+
+fn model_settings_overlay_dto(
+    overlay: signalbox_domain::ModelSettingsOverlay,
+) -> WebTimelineModelSettingsOverlay {
+    WebTimelineModelSettingsOverlay {
+        reasoning_level: setting_overlay_dto(overlay.reasoning_level(), reasoning_level_dto),
+        fast_mode: match overlay.fast_mode() {
+            signalbox_domain::FastModeOverlay::Inherit => WebTimelineFastModeOverlay::Inherit,
+            signalbox_domain::FastModeOverlay::Value(value) => {
+                WebTimelineFastModeOverlay::Value(fast_mode_dto(value))
             }
-        }),
-        text: event.text.map(text_excerpt_dto),
+        },
+        service_tier: setting_overlay_dto(overlay.service_tier(), service_tier_dto),
+    }
+}
+
+fn setting_overlay_dto<DomainT, WebT>(
+    value: signalbox_domain::SettingOverlay<DomainT>,
+    map: impl FnOnce(DomainT) -> WebT,
+) -> WebTimelineSettingOverlay<WebT> {
+    match value {
+        signalbox_domain::SettingOverlay::Inherit => WebTimelineSettingOverlay::Inherit,
+        signalbox_domain::SettingOverlay::ProviderDefault => {
+            WebTimelineSettingOverlay::ProviderDefault
+        }
+        signalbox_domain::SettingOverlay::Value(value) => {
+            WebTimelineSettingOverlay::Value(map(value))
+        }
+    }
+}
+
+const fn reasoning_level_dto(value: signalbox_domain::ReasoningLevel) -> WebTimelineReasoningLevel {
+    match value {
+        signalbox_domain::ReasoningLevel::None => WebTimelineReasoningLevel::None,
+        signalbox_domain::ReasoningLevel::Minimal => WebTimelineReasoningLevel::Minimal,
+        signalbox_domain::ReasoningLevel::Low => WebTimelineReasoningLevel::Low,
+        signalbox_domain::ReasoningLevel::Medium => WebTimelineReasoningLevel::Medium,
+        signalbox_domain::ReasoningLevel::High => WebTimelineReasoningLevel::High,
+        signalbox_domain::ReasoningLevel::XHigh => WebTimelineReasoningLevel::Xhigh,
+        signalbox_domain::ReasoningLevel::Max => WebTimelineReasoningLevel::Max,
+        signalbox_domain::ReasoningLevel::Ultra => WebTimelineReasoningLevel::Ultra,
+    }
+}
+
+const fn fast_mode_dto(value: signalbox_domain::FastMode) -> WebTimelineFastMode {
+    match value {
+        signalbox_domain::FastMode::Disabled => WebTimelineFastMode::Disabled,
+        signalbox_domain::FastMode::Enabled => WebTimelineFastMode::Enabled,
+    }
+}
+
+const fn model_setting_source_dto(
+    value: signalbox_domain::ModelSettingSource,
+) -> WebTimelineModelSettingSource {
+    match value {
+        signalbox_domain::ModelSettingSource::PerCall => WebTimelineModelSettingSource::PerCall,
+        signalbox_domain::ModelSettingSource::Session => WebTimelineModelSettingSource::Session,
+        signalbox_domain::ModelSettingSource::Profile => WebTimelineModelSettingSource::Profile,
+        signalbox_domain::ModelSettingSource::GlobalDefault => {
+            WebTimelineModelSettingSource::GlobalDefault
+        }
+    }
+}
+
+const fn service_tier_dto(value: signalbox_domain::ServiceTier) -> WebTimelineServiceTier {
+    match value {
+        signalbox_domain::ServiceTier::Anthropic(value) => {
+            WebTimelineServiceTier::Anthropic(match value {
+                signalbox_domain::AnthropicServiceTier::Auto => {
+                    signalbox_web_contract::WebTimelineAnthropicServiceTier::Auto
+                }
+                signalbox_domain::AnthropicServiceTier::StandardOnly => {
+                    signalbox_web_contract::WebTimelineAnthropicServiceTier::StandardOnly
+                }
+            })
+        }
+        signalbox_domain::ServiceTier::OpenAi(value) => {
+            WebTimelineServiceTier::OpenAi(match value {
+                signalbox_domain::OpenAiServiceTier::Auto => {
+                    signalbox_web_contract::WebTimelineOpenAiServiceTier::Auto
+                }
+                signalbox_domain::OpenAiServiceTier::Default => {
+                    signalbox_web_contract::WebTimelineOpenAiServiceTier::Default
+                }
+                signalbox_domain::OpenAiServiceTier::Flex => {
+                    signalbox_web_contract::WebTimelineOpenAiServiceTier::Flex
+                }
+                signalbox_domain::OpenAiServiceTier::Scale => {
+                    signalbox_web_contract::WebTimelineOpenAiServiceTier::Scale
+                }
+                signalbox_domain::OpenAiServiceTier::Priority => {
+                    signalbox_web_contract::WebTimelineOpenAiServiceTier::Priority
+                }
+                signalbox_domain::OpenAiServiceTier::Fast => {
+                    signalbox_web_contract::WebTimelineOpenAiServiceTier::Fast
+                }
+            })
+        }
+        signalbox_domain::ServiceTier::CodexCli(value) => {
+            WebTimelineServiceTier::CodexCli(match value {
+                signalbox_domain::CodexCliServiceTier::Default => {
+                    signalbox_web_contract::WebTimelineCodexCliServiceTier::Default
+                }
+                signalbox_domain::CodexCliServiceTier::Priority => {
+                    signalbox_web_contract::WebTimelineCodexCliServiceTier::Priority
+                }
+                signalbox_domain::CodexCliServiceTier::Flex => {
+                    signalbox_web_contract::WebTimelineCodexCliServiceTier::Flex
+                }
+            })
+        }
+    }
+}
+
+fn model_change_adjustment_dto(
+    adjustment: signalbox_domain::ModelChangeAdjustment,
+) -> WebTimelineModelChangeAdjustment {
+    match adjustment {
+        signalbox_domain::ModelChangeAdjustment::ReasoningLevelClamped { from, to } => {
+            WebTimelineModelChangeAdjustment::ReasoningLevelClamped {
+                from: reasoning_level_dto(from),
+                to: reasoning_level_dto(to),
+            }
+        }
+        signalbox_domain::ModelChangeAdjustment::ReasoningLevelCleared { from } => {
+            WebTimelineModelChangeAdjustment::ReasoningLevelCleared {
+                from: reasoning_level_dto(from),
+            }
+        }
+        signalbox_domain::ModelChangeAdjustment::FastModeDisabled => {
+            WebTimelineModelChangeAdjustment::FastModeDisabled {}
+        }
+        signalbox_domain::ModelChangeAdjustment::ServiceTierCleared { from } => {
+            WebTimelineModelChangeAdjustment::ServiceTierCleared {
+                from: service_tier_dto(from),
+            }
+        }
     }
 }
 

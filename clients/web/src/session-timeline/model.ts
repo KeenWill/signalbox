@@ -314,7 +314,9 @@ const isCanonicalCrossFieldContinuation = (
     const goal = body.goal_events.length === 1 ? body.goal_events[0] : undefined
     return (
       body.tools.length === 0 &&
-      goal?.text != null &&
+      goal != null &&
+      'text' in goal &&
+      goal.text != null &&
       goal.text.continuation === null &&
       continuation.field === 'goal_text' &&
       continuation.member_index === currentMember + 1

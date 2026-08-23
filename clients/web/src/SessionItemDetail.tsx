@@ -66,10 +66,8 @@ const toolFailureCauses = new Set([
   'crash_lost',
 ])
 const hasCompatibleGoalReason = (event: GoalEvent): boolean =>
-  goalEventKinds.has(event.event_kind) &&
-  (event.event_kind === 'blocked'
-    ? typeof event.reason === 'string' && goalBlockedReasons.has(event.reason)
-    : event.reason == null)
+  goalEventKinds.has(event.type) &&
+  (event.type !== 'blocked' || goalBlockedReasons.has(event.reason))
 
 const compatibleKinds = {
   session_created: ['session_created'],
@@ -95,9 +93,9 @@ const compatibleKinds = {
 export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): boolean => {
   if (body.type === 'model_settings') {
     return kind === 'session_model_settings_changed'
-      ? body.turn_id === null && body.cause_code === 'session_defaults_changed'
+      ? body.detail.type === 'session_defaults_changed'
       : kind === 'turn_model_settings_resolved'
-        ? body.turn_id !== null && body.cause_code === 'turn_settings_resolved'
+        ? body.detail.type === 'turn_resolved'
         : false
   }
   if (body.type === 'turn_lifecycle') {
@@ -176,7 +174,7 @@ export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): bool
     return (
       kind === 'tool_approval_decided' &&
       (body.decision === 'approve' || body.decision === 'deny') &&
-      (body.source === 'policy' || body.source === body.decider.type)
+      (body.actor.type === 'policy' || body.actor.type === 'user' || body.actor.type === 'delegate')
     )
   }
   return (compatibleKinds[body.type] as readonly DetailKind[]).includes(kind)
@@ -214,12 +212,12 @@ const GoalEventDetail = ({ event }: { event: GoalEvent }) => (
   <article className="session-detail-member">
     <Facts
       facts={[
-        ['Goal event', event.event_kind.replaceAll('_', ' ')],
+        ['Goal event', event.type.replaceAll('_', ' ')],
         ['Generation', event.generation],
-        ['Reason', event.reason ?? 'not recorded'],
+        ['Reason', event.type === 'blocked' ? event.reason : 'not recorded'],
       ]}
     />
-    {event.text && <TextDetail label="Goal text" excerpt={event.text} />}
+    {'text' in event && event.text && <TextDetail label="Goal text" excerpt={event.text} />}
   </article>
 )
 
@@ -368,10 +366,19 @@ const detailContent = (body: DetailBody): ReactNode => {
     case 'model_settings':
       return (
         <Facts
-          facts={[
-            ['Cause', body.cause_code],
-            ['Turn', body.turn_id ?? 'session default'],
-          ]}
+          facts={
+            body.detail.type === 'session_defaults_changed'
+              ? [
+                  ['Change', 'session defaults changed'],
+                  ['Command', body.detail.command_id],
+                  ['Installed version', body.detail.installed_defaults_version],
+                ]
+              : [
+                  ['Change', 'turn settings resolved'],
+                  ['Turn', body.detail.turn_id],
+                  ['Accepted input', body.detail.accepted_input_id],
+                ]
+          }
         />
       )
     case 'user_input': {
@@ -436,7 +443,7 @@ const detailContent = (body: DetailBody): ReactNode => {
             facts={[
               ['Turn', body.turn_id],
               ['Producing call', body.producing_model_call_id],
-              ['State', body.state.replaceAll('_', ' ')],
+              ['State', body.state.type.replaceAll('_', ' ')],
               ['Tool attempts in this page', String(body.tools.length)],
               ['Goal events in this page', String(body.goal_events.length)],
             ]}
@@ -467,13 +474,15 @@ const detailContent = (body: DetailBody): ReactNode => {
       )
     }
     case 'tool_approval_decision': {
-      const deciderFacts: ReadonlyArray<readonly [string, ReactNode]> =
-        body.decider.type === 'user'
-          ? [['Command', body.decider.command_id]]
-          : [
-              ['Model selection', body.decider.model_selection_id],
-              ['Model call', body.decider.model_call_id],
-            ]
+      const actorFacts: ReadonlyArray<readonly [string, ReactNode]> =
+        body.actor.type === 'policy'
+          ? []
+          : body.actor.type === 'user'
+            ? [['Command', body.actor.command_id]]
+            : [
+                ['Model selection', body.actor.model_selection_id],
+                ['Model call', body.actor.model_call_id],
+              ]
       return (
         <>
           <Facts
@@ -482,9 +491,9 @@ const detailContent = (body: DetailBody): ReactNode => {
               ['Request', body.request_id],
               ['Turn', body.turn_id],
               ['Decision', body.decision.replaceAll('_', ' ')],
-              ['Source', body.source],
+              ['Source', body.actor.type],
               ['Judge escalated', body.approval_judge_escalated ? 'yes' : 'no'],
-              ...deciderFacts,
+              ...actorFacts,
             ]}
           />
           {body.rationale && <TextDetail label="Approval rationale" excerpt={body.rationale} />}
