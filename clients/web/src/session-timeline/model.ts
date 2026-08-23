@@ -221,6 +221,16 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       throw new TypeError('timeline window exceeds the requested item ceiling')
     }
     const window = decodeWebSessionTimelineWindow(rawWindow)
+    const projectedStructuredBytes = window.items.reduce(
+      (total, item) => total + item.projected_structured_bytes,
+      0,
+    )
+    if (
+      window.projected_structured_bytes > bounded.maxBytes ||
+      projectedStructuredBytes > bounded.maxBytes
+    ) {
+      throw new TypeError('timeline window exceeds the requested byte ceiling')
+    }
     if (canonicalSessionId(window.session_id) !== requestedSessionId) {
       throw new TypeError('timeline window session mismatch')
     }
