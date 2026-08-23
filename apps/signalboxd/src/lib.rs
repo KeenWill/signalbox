@@ -989,11 +989,13 @@ where
                     source,
                 });
             }
-            if let Some(compaction) = reported_usage_compaction {
-                compaction
-                    .compact_if_needed(session)
-                    .await
-                    .map_err(ActivatedTurnPassError::ReportedUsageCompaction)?;
+            if let Some(compaction) = reported_usage_compaction
+                && let Err(error) = compaction.compact_if_needed(session).await
+            {
+                if let Some(recovery) = &occupancy_recovery {
+                    recovery.clear_turn(session);
+                }
+                return Err(reported_usage_compaction_failure(&execution, error));
             }
             let outcome = match activation.await {
                 Ok(outcome) => outcome,
@@ -1274,6 +1276,17 @@ where
     if commit_outcome_is_unknown(error) {
         execution.report_post_activation_failure();
     }
+}
+
+fn reported_usage_compaction_failure<Execution, ActivationError>(
+    execution: &Execution,
+    error: ReportedUsageCompactionError,
+) -> ActivatedTurnPassError<ActivationError, Execution::Error>
+where
+    Execution: ActivatedTurnExecution,
+{
+    report_ambiguous_commit(execution, &error);
+    ActivatedTurnPassError::ReportedUsageCompaction(error)
 }
 
 /// Whether one classified failure left a durable commit outcome the running
@@ -2467,7 +2480,10 @@ mod tests {
         AcceptedInputTurnActivationIdentities, ActivatedTurn, ContextFrontierId,
         SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId,
     };
-    use signalbox_persistence::turn_liveness::TurnLivenessPersistenceBounds;
+    use signalbox_persistence::{
+        start_eligible_turn::{CommitActivationPreviewError, StartEligibleTurnRepositoryError},
+        turn_liveness::TurnLivenessPersistenceBounds,
+    };
     use tokio::sync::watch;
     use uuid::Uuid;
 
@@ -2476,12 +2492,12 @@ mod tests {
         ActivatedTurnPassError, ApprovalJudgeModelError, ExpiredPassRecoveryPolicy,
         FailedApprovalJudgeDisposition, FatalExecutionGuardState, FatalExecutionOccupancyExpiry,
         FatalExecutionSignal, FatalExecutionSupervisor, JudgeRequestFields,
-        MAX_QUOTED_CONTEXT_BYTES, SchedulerPassOccupancyRecovery, SessionAuthorityContext,
-        TokenUsage, TurnLivenessRepositoryError, TurnPassExecutionStage,
+        MAX_QUOTED_CONTEXT_BYTES, ReportedUsageCompactionError, SchedulerPassOccupancyRecovery,
+        SessionAuthorityContext, TokenUsage, TurnLivenessRepositoryError, TurnPassExecutionStage,
         activation_session_matches, expired_pass_recovery_retry_delay,
         matches_exact_slot_held_turn, reconcile_retained_once, render_dispatch_authority,
-        render_judge_request_payload, render_session_authority_context, supervise_execution,
-        supervise_execution_for_session,
+        render_judge_request_payload, render_session_authority_context,
+        reported_usage_compaction_failure, supervise_execution, supervise_execution_for_session,
     };
 
     fn example_expired_pass_policy() -> ExpiredPassRecoveryPolicy {
@@ -2583,6 +2599,16 @@ mod tests {
     impl ClassifyOperatorFailure for ExecutionFailure {
         fn operator_failure_class(&self) -> OperatorFailureClass {
             OperatorFailureClass::CallerOrHubBug
+        }
+    }
+
+    #[track_caller]
+    fn assert_reported_usage_compaction_error(
+        error: ActivatedTurnPassError<ExecutionFailure, ExecutionFailure>,
+    ) {
+        match error {
+            ActivatedTurnPassError::ReportedUsageCompaction(_) => {}
+            other => panic!("expected reported-usage compaction failure, got {other:?}"),
         }
     }
 
@@ -3041,6 +3067,26 @@ mod tests {
             error,
             super::ActivatedTurnPassError::Activation(CommitAmbiguousActivationFailure)
         ));
+        assert!(signal.is_triggered());
+    }
+
+    #[test]
+    fn inv034_ambiguous_reported_usage_failure_closure_raises_the_fatal_recovery_signal() {
+        let (execution, signal) = FatalExecutionSupervisor::new(NoopExecution);
+        let source =
+            CommitActivationPreviewError::Activation(StartEligibleTurnRepositoryError::Database {
+                source: sqlx::Error::PoolClosed,
+                commit_ambiguous: true,
+            });
+        let error = ReportedUsageCompactionError::CompactionFailureClosure {
+            turn: TurnId::from_uuid(Uuid::from_u128(11)),
+            source,
+        };
+
+        let reported: ActivatedTurnPassError<ExecutionFailure, ExecutionFailure> =
+            reported_usage_compaction_failure(&execution, error);
+
+        assert_reported_usage_compaction_error(reported);
         assert!(signal.is_triggered());
     }
 

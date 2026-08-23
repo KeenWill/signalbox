@@ -128,6 +128,11 @@ pub struct ReportedUsageCompaction {
     compaction_model: Arc<dyn ContextCompactionModel>,
 }
 
+struct ReportedUsageCompactionCandidate {
+    preview: PreparedActivationPreview,
+    turn: TurnId,
+}
+
 impl fmt::Debug for ReportedUsageCompaction {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -167,63 +172,10 @@ impl ReportedUsageCompaction {
         &self,
         session: SessionId,
     ) -> Result<(), ReportedUsageCompactionError> {
-        let Some(preview) = self
-            .activation
-            .preview(session, activation_identities())
-            .await
-            .map_err(ReportedUsageCompactionError::Activation)?
-        else {
+        let Some(candidate) = self.compaction_candidate(session).await? else {
             return Ok(());
         };
-        let turn = preview.prepared().turn().turn();
-        let prospective = self
-            .model_calls
-            .preview_activation_operation(
-                preview.prepared(),
-                ModelCallId::from_uuid(uuid::Uuid::now_v7()),
-            )
-            .await
-            .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?;
-        let Some(prospective) = prospective else {
-            return Ok(());
-        };
-        let operation = prospective
-            .render(self.tools.definitions())
-            .map_err(|_| ReportedUsageCompactionError::Render(turn))?;
-        let target = operation.request().call().target();
-        let selected = self
-            .runtime_models
-            .resolve(target)
-            .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
-        let definition = self
-            .runtime_models
-            .effective_definition(
-                selected,
-                operation.request().model_settings().effective().fast_mode(),
-            )
-            .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
-        let Some(reported) = self
-            .model_calls
-            .latest_reported_usage(
-                session,
-                target,
-                operation.request().call().frontier().snapshot(),
-            )
-            .await
-            .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?
-        else {
-            return Ok(());
-        };
-        if !reported_usage_requires_compaction(
-            reported.usage(),
-            reported.input_includes_cache_tokens(),
-            reported.output_is_retained(),
-            reported.projected_unreported_content_bytes(),
-            u64::from(definition.max_output_tokens()),
-            u64::from(definition.context_window_tokens()),
-        ) {
-            return Ok(());
-        }
+        let ReportedUsageCompactionCandidate { preview, turn } = candidate;
         let applied = match compact_automatically(
             &self.model_calls,
             &self.model_configuration,
@@ -290,7 +242,97 @@ impl ReportedUsageCompaction {
             context_compaction_id = %applied.compaction.into_uuid(),
             "provider-reported usage exhausted reserved context headroom; queued turn compacted before activation"
         );
-        Ok(())
+        let Some(remaining) = self.compaction_candidate(session).await? else {
+            return Ok(());
+        };
+        let remaining_turn = remaining.turn;
+        match close_failed_compaction_turn(&self.activation, &self.model_calls, remaining.preview)
+            .await
+            .map_err(
+                |source| ReportedUsageCompactionError::CompactionFailureClosure {
+                    turn: remaining_turn,
+                    source,
+                },
+            )? {
+            CommitCompactionFailurePreviewOutcome::Failed(_) => {
+                tracing::warn!(
+                    cause_code = "reported_usage_context_still_exceeded",
+                    session_id = %session.as_uuid(),
+                    turn_id = %remaining_turn.as_uuid(),
+                    "automatic compaction did not restore reserved context headroom; the queued turn was closed before provider dispatch"
+                );
+                Err(ReportedUsageCompactionError::Compaction {
+                    turn: remaining_turn,
+                    failure_class: OperatorFailureClass::CallerOrHubBug,
+                    cause_code: "reported_usage_context_still_exceeded",
+                })
+            }
+            CommitCompactionFailurePreviewOutcome::Stale => Ok(()),
+        }
+    }
+
+    async fn compaction_candidate(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<ReportedUsageCompactionCandidate>, ReportedUsageCompactionError> {
+        let Some(preview) = self
+            .activation
+            .preview(session, activation_identities())
+            .await
+            .map_err(ReportedUsageCompactionError::Activation)?
+        else {
+            return Ok(None);
+        };
+        let turn = preview.prepared().turn().turn();
+        let prospective = self
+            .model_calls
+            .preview_activation_operation(
+                preview.prepared(),
+                ModelCallId::from_uuid(uuid::Uuid::now_v7()),
+            )
+            .await
+            .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?;
+        let Some(prospective) = prospective else {
+            return Ok(None);
+        };
+        let operation = prospective
+            .render(self.tools.definitions())
+            .map_err(|_| ReportedUsageCompactionError::Render(turn))?;
+        let target = operation.request().call().target();
+        let selected = self
+            .runtime_models
+            .resolve(target)
+            .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
+        let definition = self
+            .runtime_models
+            .effective_definition(
+                selected,
+                operation.request().model_settings().effective().fast_mode(),
+            )
+            .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
+        let Some(reported) = self
+            .model_calls
+            .latest_reported_usage(
+                session,
+                target,
+                operation.request().call().frontier().snapshot(),
+            )
+            .await
+            .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?
+        else {
+            return Ok(None);
+        };
+        if !reported_usage_requires_compaction(
+            reported.usage(),
+            reported.input_includes_cache_tokens(),
+            reported.output_is_retained(),
+            reported.projected_unreported_content_bytes(),
+            u64::from(definition.max_output_tokens()),
+            u64::from(definition.context_window_tokens()),
+        ) {
+            return Ok(None);
+        }
+        Ok(Some(ReportedUsageCompactionCandidate { preview, turn }))
     }
 }
 

@@ -51,7 +51,10 @@ use signalbox_domain::{
     SessionMetadataContent, ToolCallProposal, ToolName, ToolRequestId, ToolResponsePartIdentity,
     ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnId,
 };
-use signalbox_model_provider_runtime::{RuntimeContextCompactionModel, RuntimeModelCallProvider};
+use signalbox_model_provider_runtime::{
+    RuntimeContextCompactionModel, RuntimeInputTokenCountError, RuntimeModelCallProvider,
+    RuntimeModelCallProviderError,
+};
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CancellationSignal, CompletionEvidence, CompletionFinish,
     DeliveryMode, ExchangeFacts, InputTokenCountOutcome, LossCause, MessagePart,
@@ -103,8 +106,9 @@ use signalboxd::{
     ActivatedTurnPass, BlobStorageClass, BlobStoreRegistry, ContextGuardedTurnPass,
     ContextGuardedTurnPassError, ExpiredPassRecoveryPolicy, FatalExecutionSupervisor,
     HubModelConfiguration, LocalProcessListener, PostgresProviderModelExecution,
-    ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError,
-    SessionTemplateConfiguration, TurnLivenessNumericBounds, TurnLivenessRuntime,
+    ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError, ReportedUsageCompaction,
+    ReportedUsageCompactionError, SessionTemplateConfiguration, TurnLivenessNumericBounds,
+    TurnLivenessRuntime,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tempfile::TempDir;
@@ -138,6 +142,47 @@ fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin 
     ])
     .expect("test credential pin is valid")
 }
+
+#[track_caller]
+fn exactly_one_credential_reference(references: &[String]) -> &str {
+    match references {
+        [reference] => reference.as_str(),
+        _ => panic!("the fixture pins exactly one credential family"),
+    }
+}
+
+#[track_caller]
+fn reported_usage_still_exceeded_turn(outcome: Result<(), ReportedUsageCompactionError>) -> TurnId {
+    match outcome {
+        Err(ReportedUsageCompactionError::Compaction {
+            turn,
+            cause_code: "reported_usage_context_still_exceeded",
+            ..
+        }) => turn,
+        other => panic!("expected a still-exceeded compaction failure, got {other:?}"),
+    }
+}
+
+#[track_caller]
+fn failed_automatic_compaction_turn(
+    outcome: Result<
+        (),
+        ContextGuardedTurnPassError<
+            RuntimeInputTokenCountError,
+            signalboxd::PostgresProviderModelExecutionError<RuntimeModelCallProviderError>,
+        >,
+    >,
+) -> TurnId {
+    match outcome {
+        Err(ContextGuardedTurnPassError::Compaction {
+            turn,
+            cause_code: "context_compaction_model",
+            ..
+        }) => turn,
+        other => panic!("expected a failed automatic compaction, got {other:?}"),
+    }
+}
+
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const OVERSIZED_SUBMITTED_INPUT_BYTES: usize = MAX_SUBMITTED_INPUT_BYTES + 1;
 const STREAMING_DELTA_COUNT: usize = 192;
@@ -8246,6 +8291,119 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
     runtime.stop().await
 }
 
+/// S01 / S03 / INV-014 / INV-015: provider-reported preflight rechecks the
+/// completed summary and closes the queued candidate call-free when reserved
+/// headroom is still unavailable.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, first_turn) = submit_first_input(
+        &mut connection,
+        session_id,
+        String::from("reported usage historical request"),
+    )
+    .await?;
+    let saturated_usage = TokenUsage {
+        input_tokens: Some(50),
+        output_tokens: Some(0),
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    };
+    let first_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "reported usage historical reply",
+        saturated_usage,
+    ));
+    let first_probe =
+        execute_streamed_turn(&mut runtime, first_runtime, session_id, first_turn).await?;
+    assert_eq!(first_probe.received_operations().len(), 1);
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            40,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: InputContent::new(String::from("reported usage queued suffix")),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
+    let configuration = support::parse_model_configuration(
+        &MODEL_CONFIGURATION
+            .replace("max_output_tokens = 256", "max_output_tokens = 1")
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 50",
+            ),
+    )?;
+    let runtime_models = configuration.runtime_model_catalog();
+    let summary_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "reported usage summary remains saturated",
+        saturated_usage,
+    ));
+    let summary_probe = summary_runtime.clone();
+    let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
+        Arc::new(RuntimeContextCompactionModel::new(
+            summary_runtime,
+            runtime_models.clone(),
+        ));
+    let repository = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        configuration.target_catalog(),
+        ModelCallCredentialReference::new("reported-usage-recheck-fixture"),
+    )
+    .with_session_credentials(configuration.credential_family_catalog());
+    let compaction = ReportedUsageCompaction::new(
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+        repository,
+        NoToolCatalog,
+        runtime_models,
+        configuration,
+        compaction_model,
+    );
+
+    let failed_turn = reported_usage_still_exceeded_turn(
+        compaction
+            .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()))
+            .await,
+    );
+
+    assert_eq!(*failed_turn.as_uuid(), queued_turn.into_uuid());
+    assert_eq!(summary_probe.received_operations().len(), 1);
+    let ordinary_call_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")
+            .bind(queued_turn.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(ordinary_call_count, 0);
+    let lifecycle: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, terminal_model_call_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session_id.into_uuid())
+    .bind(queued_turn.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(
+        lifecycle,
+        (String::from("terminal"), Some(String::from("failed")), None)
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
 /// S01 / S03 / INV-014 / INV-015: a failed automatic compaction closes the
 /// queued candidate call-free, so a later eligibility pass cannot dispatch
 /// the known-oversized ordinary request.
@@ -8339,9 +8497,7 @@ async fn s01_s03_inv014_inv015_failed_automatic_compaction_closes_turn_call_free
         .credentials()
         .map(|credential| credential.credential_reference().to_owned())
         .collect();
-    let [expected_compaction_credential] = pinned_references.as_slice() else {
-        panic!("the fixture pins exactly one credential family")
-    };
+    let expected_compaction_credential = exactly_one_credential_reference(&pinned_references);
     let mut pass = ContextGuardedTurnPass::new(
         StartEligibleTurnRepository::new(runtime.pool.clone()),
         guarded_repository,
@@ -8353,15 +8509,7 @@ async fn s01_s03_inv014_inv015_failed_automatic_compaction_closes_turn_call_free
         execution,
     );
     let session = SessionId::from_uuid(session_id.into_uuid());
-    let first_attempt = pass.run(session).await;
-    let Err(ContextGuardedTurnPassError::Compaction {
-        turn,
-        cause_code: "context_compaction_model",
-        ..
-    }) = first_attempt
-    else {
-        panic!("failed automatic compaction must surface its typed pass failure")
-    };
+    let turn = failed_automatic_compaction_turn(pass.run(session).await);
     assert_eq!(*turn.as_uuid(), queued_turn.into_uuid());
     let second_attempt = pass.run(session).await;
     assert!(second_attempt.is_ok());
@@ -8373,7 +8521,7 @@ async fn s01_s03_inv014_inv015_failed_automatic_compaction_closes_turn_call_free
         summary_probe.received_operations()[0]
             .credential_reference
             .as_str(),
-        expected_compaction_credential.as_str()
+        expected_compaction_credential
     );
     let compaction_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM context_compaction WHERE session_id = $1")
