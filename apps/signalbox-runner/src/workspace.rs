@@ -938,11 +938,18 @@ impl UnpublishedDirectory {
 impl Drop for UnpublishedDirectory {
     fn drop(&mut self) {
         if let Ok(cleanup) = self.take_cleanup() {
+            let (cleanup_sender, cleanup_receiver) =
+                std::sync::mpsc::channel::<UnpublishedDirectoryCleanup>();
             let _ = std::thread::Builder::new()
                 .name("repository-staging-cleanup".to_owned())
                 .spawn(move || {
-                    let _ = cleanup.remove_and_sync();
+                    if let Ok(cleanup) = cleanup_receiver.recv() {
+                        let _ = cleanup.remove_and_sync();
+                    }
                 });
+            if let Err(error) = cleanup_sender.send(cleanup) {
+                let _ = error.0.remove_and_sync();
+            }
         }
     }
 }
@@ -956,6 +963,7 @@ struct UnpublishedDirectoryCleanup {
 
 impl UnpublishedDirectoryCleanup {
     fn remove_and_sync(self) -> Result<(), RunnerWorkspaceError> {
+        fchmod(&self.parent, Mode::RUSR | Mode::WUSR | Mode::XUSR).map_err(rustix_io)?;
         for directory in &self.cleanup_directories {
             fchmod(directory, Mode::RUSR | Mode::WUSR | Mode::XUSR).map_err(rustix_io)?;
         }
@@ -1357,12 +1365,16 @@ mod tests {
     async fn wait_for_empty_directory(directory: &Path) {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if fs::read_dir(directory)
-                    .expect("the directory remains readable while cleanup completes")
-                    .next()
-                    .is_none()
-                {
-                    break;
+                match fs::read_dir(directory) {
+                    Ok(mut entries) => {
+                        if entries.next().is_none() {
+                            break;
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
+                    Err(error) => {
+                        panic!("the directory remains available while cleanup completes: {error}")
+                    }
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -1859,23 +1871,30 @@ mod tests {
 
     #[tokio::test]
     async fn repository_workspace_rechecks_session_permissions_before_publish() {
-        let (_parent, state) = fixture_root();
+        let (parent, state) = fixture_root();
+        let expected = repository_request();
+        let session = parent
+            .path()
+            .join("runner-state")
+            .join("sessions")
+            .join(expected.session().to_string());
         let failure = state
             .workspace_store()
             .expect("the locked root forms a workspace store")
-            .prepare_repository_workspace(&repository_request(), |target| async move {
+            .prepare_repository_workspace(&expected, |target| async move {
                 let session = target
                     .path()
                     .parent()
                     .and_then(std::path::Path::parent)
                     .expect("the repository fixture has a session ancestor");
-                fs::set_permissions(session, fs::Permissions::from_mode(OPEN_DIRECTORY_MODE))?;
+                fs::set_permissions(session, fs::Permissions::from_mode(0o000))?;
                 Ok::<Recovery, std::io::Error>(Recovery::Commit {
                     revision: "1".repeat(40),
                 })
             })
             .await
-            .expect_err("an open session directory cannot publish a repository");
+            .expect_err("an inaccessible session directory cannot publish a repository");
+        wait_for_empty_directory(&session).await;
 
         assert!(matches!(
             failure,

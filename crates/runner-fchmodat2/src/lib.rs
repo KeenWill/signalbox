@@ -10,6 +10,7 @@ use std::{
 const AT_EMPTY_PATH: c_int = 0x1000;
 const SYS_FCHMODAT2: c_long = 452;
 const INVALID_DESCRIPTOR: c_int = -1;
+const EBADF: c_int = 9;
 
 unsafe extern "C" {
     fn syscall(number: c_long, ...) -> c_long;
@@ -36,7 +37,7 @@ pub fn ensure_available() -> io::Result<()> {
         )
     };
     let error = io::Error::last_os_error();
-    if result == -1 && error.raw_os_error() == Some(9) {
+    if result == -1 && error.raw_os_error() == Some(EBADF) {
         Ok(())
     } else if result == -1 {
         Err(error)
