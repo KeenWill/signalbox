@@ -7,7 +7,9 @@
 
 use std::error::Error;
 
-use signalbox_application::{TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits};
+use signalbox_application::{
+    TimelineAddress, TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits,
+};
 use signalbox_domain::{
     CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
@@ -262,6 +264,57 @@ async fn window_outside_projection_facts_is_corruption() -> Result<(), Box<dyn E
         error,
         SessionTimelineRepositoryError::Corruption(SessionTimelineCorruption::InvalidOrdinal(
             "window bounds"
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn empty_endpoint_and_around_windows_are_corruption() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x998);
+    create_session(&pool, identity).await?;
+    sqlx::query("DELETE FROM outbox_event WHERE session_id = $1")
+        .bind(identity.into_uuid())
+        .execute(&pool)
+        .await?;
+    let repository = SessionTimelineRepository::new(pool.clone());
+    let limits = TimelineWindowLimits::new(1, 256).expect("fixture limits are bounded");
+    let first = repository
+        .read_window(identity, TimelineWindowAnchor::First, limits)
+        .await
+        .expect_err("an empty first window is durable corruption");
+    let latest = repository
+        .read_window(identity, TimelineWindowAnchor::Latest, limits)
+        .await
+        .expect_err("an empty latest window is durable corruption");
+    let address =
+        TimelineAddress::new(std::num::NonZeroU64::new(1).expect("fixture address is nonzero"));
+    let around = repository
+        .read_window(identity, TimelineWindowAnchor::Around(address), limits)
+        .await
+        .expect_err("an empty around window is durable corruption");
+
+    assert!(matches!(
+        first,
+        SessionTimelineRepositoryError::Corruption(SessionTimelineCorruption::InvalidOrdinal(
+            "window items"
+        ))
+    ));
+    assert!(matches!(
+        latest,
+        SessionTimelineRepositoryError::Corruption(SessionTimelineCorruption::InvalidOrdinal(
+            "window items"
+        ))
+    ));
+    assert!(matches!(
+        around,
+        SessionTimelineRepositoryError::Corruption(SessionTimelineCorruption::InvalidOrdinal(
+            "window items"
         ))
     ));
 
