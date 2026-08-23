@@ -103,6 +103,7 @@ const correlateListPage = (
   let previous = request.after ?? undefined
   for (const item of page.items) {
     if (
+      !isCanonicalUuid(item.imported_conversation_id) ||
       (previous !== undefined && item.imported_conversation_id <= previous) ||
       (request.format !== undefined && request.format !== null && item.format !== request.format)
     ) {
@@ -149,6 +150,9 @@ const ENTRY_WINDOW_RESPONSE_BYTES = 2 * 1024 * 1024
 const CONTINUATION_RESPONSE_BYTES = 128 * 1024
 const BOOTSTRAP_VALIDATION_TTL_MS = 30_000
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const NIL_UUID = '00000000-0000-0000-0000-000000000000'
+
+const isCanonicalUuid = (value: string): boolean => CANONICAL_UUID.test(value) && value !== NIL_UUID
 
 const correlateEntryWindow = (
   importedConversationId: string,

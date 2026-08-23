@@ -8,6 +8,56 @@ CREATE INDEX imported_conversation_source_session_catalog_idx
     )
     WHERE source_session_id IS NOT NULL;
 
+-- Descriptor byte totals are immutable snapshot facts. Compute them once for
+-- existing imports, and require new imports to persist them with the snapshot.
+CREATE TABLE imported_conversation_size_totals (
+    imported_conversation_id uuid PRIMARY KEY,
+    raw_source_bytes numeric(20, 0) NOT NULL,
+    normalized_source_record_bytes numeric(20, 0) NOT NULL,
+    normalized_entry_bytes numeric(20, 0) NOT NULL,
+
+    CONSTRAINT imported_conversation_size_totals_nonnegative_u64
+        CHECK (
+            raw_source_bytes BETWEEN 0 AND 18446744073709551615
+            AND normalized_source_record_bytes BETWEEN 0 AND 18446744073709551615
+            AND normalized_entry_bytes BETWEEN 0 AND 18446744073709551615
+        ),
+    CONSTRAINT imported_conversation_size_totals_owner_fk
+        FOREIGN KEY (imported_conversation_id)
+        REFERENCES imported_conversation (imported_conversation_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED
+);
+
+INSERT INTO imported_conversation_size_totals (
+    imported_conversation_id,
+    raw_source_bytes,
+    normalized_source_record_bytes,
+    normalized_entry_bytes
+)
+SELECT imported.imported_conversation_id,
+       (SELECT COALESCE(SUM(octet_length(blob.raw_bytes)), 0)::numeric
+          FROM imported_conversation_raw_record AS occurrence
+          JOIN imported_raw_source_record AS blob
+            ON blob.content_hash = occurrence.content_hash
+         WHERE occurrence.imported_conversation_id = imported.imported_conversation_id),
+       (SELECT COALESCE(SUM(octet_length(normalized_value_encoding)), 0)::numeric
+          FROM imported_conversation_raw_record AS occurrence
+         WHERE occurrence.imported_conversation_id = imported.imported_conversation_id),
+       (SELECT COALESCE(SUM(
+                    octet_length(content_encoding)
+                    + octet_length(source_metadata_encoding)
+                ), 0)::numeric
+          FROM imported_transcript_entry AS entry
+         WHERE entry.imported_conversation_id = imported.imported_conversation_id)
+  FROM imported_conversation AS imported;
+
+CREATE TRIGGER imported_conversation_size_totals_is_append_only
+BEFORE UPDATE OR DELETE ON imported_conversation_size_totals
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
 -- Imported entries are immutable. Validate their complete encoding once when
 -- this migration backfills existing rows and whenever a new row is inserted,
 -- then retain only the compact validated kind needed by bounded discovery. The

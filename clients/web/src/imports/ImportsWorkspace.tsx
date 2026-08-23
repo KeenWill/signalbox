@@ -513,6 +513,7 @@ export function ImportsWorkspace({
               <div className="window-controls">
                 <button
                   type="button"
+                  disabled={hasRetainedCommand}
                   onClick={() =>
                     showWindow({ anchor: 'first', before: 0, after: IMPORT_WINDOW_RADIUS })
                   }
@@ -521,6 +522,7 @@ export function ImportsWorkspace({
                 </button>
                 <button
                   type="button"
+                  disabled={hasRetainedCommand}
                   onClick={() =>
                     showWindow({ anchor: 'latest', before: IMPORT_WINDOW_RADIUS, after: 0 })
                   }
@@ -533,10 +535,14 @@ export function ImportsWorkspace({
                     aria-label="Imported entry position"
                     inputMode="numeric"
                     value={positionInput}
-                    onChange={(event) => setPositionInput(event.target.value)}
+                    disabled={hasRetainedCommand}
+                    onChange={(event) => {
+                      if (hasRetainedCommand) return
+                      setPositionInput(event.target.value)
+                    }}
                   />
                 </label>
-                <button type="button" onClick={showPosition}>
+                <button type="button" disabled={hasRetainedCommand} onClick={showPosition}>
                   Go
                 </button>
               </div>

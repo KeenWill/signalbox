@@ -307,6 +307,27 @@ describe('HttpImportApi correlation', () => {
     ).rejects.toBeInstanceOf(ImportListCorrelationError)
   })
 
+  it('rejects a catalog page with a non-UUID conversation identity', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              items: [summary('not-a-uuid')],
+              next_cursor: null,
+              search_correlation: null,
+              exact_source_session_id_sha256: null,
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).list({ limit: 1 }),
+    ).rejects.toBeInstanceOf(ImportListCorrelationError)
+  })
+
   it('carries an exact source session as a raw bounded body', async () => {
     const exact = ' source session '
     stubCrypto(exactSourceSessionDigest)

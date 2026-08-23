@@ -259,6 +259,9 @@ impl ImportedConversationRepository {
         let declared_raw_record_count =
             usize_to_u64(encoded.raws.len(), "declared raw-record count")?;
         let declared_entry_count = usize_to_u64(encoded.entries.len(), "declared entry count")?;
+        let raw_source_bytes = encoded.raw_source_bytes()?;
+        let normalized_source_record_bytes = encoded.normalized_source_record_bytes()?;
+        let normalized_entry_bytes = encoded.normalized_entry_bytes()?;
         let mut transaction = self.pool.begin().await?;
         if let Some(existing) = resolve_existing_snapshot(
             &mut transaction,
@@ -326,6 +329,14 @@ impl ImportedConversationRepository {
         }
         insert_raw_occurrences(&mut transaction, candidate_id, &encoded.raws).await?;
         insert_entries(&mut transaction, candidate_id, &encoded.entries).await?;
+        insert_size_totals(
+            &mut transaction,
+            candidate_id,
+            raw_source_bytes,
+            normalized_source_record_bytes,
+            normalized_entry_bytes,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(ImportedConversationStoreOutcome::Inserted {
             conversation: candidate_id,
@@ -425,6 +436,40 @@ impl EncodedConversation {
             entries,
         })
     }
+
+    fn raw_source_bytes(&self) -> Result<u64, ImportedConversationRepositoryError> {
+        encoded_byte_total(
+            self.raws.iter().map(|raw| raw.bytes.len()),
+            "raw source bytes",
+        )
+    }
+
+    fn normalized_source_record_bytes(&self) -> Result<u64, ImportedConversationRepositoryError> {
+        encoded_byte_total(
+            self.raws.iter().map(|raw| raw.normalized.len()),
+            "normalized source-record bytes",
+        )
+    }
+
+    fn normalized_entry_bytes(&self) -> Result<u64, ImportedConversationRepositoryError> {
+        encoded_byte_total(
+            self.entries
+                .iter()
+                .flat_map(|entry| [entry.content.len(), entry.source.len()]),
+            "normalized entry bytes",
+        )
+    }
+}
+
+fn encoded_byte_total(
+    mut lengths: impl Iterator<Item = usize>,
+    field: &'static str,
+) -> Result<u64, ImportedConversationRepositoryError> {
+    lengths.try_fold(0_u64, |total, length| {
+        total
+            .checked_add(usize_to_u64(length, field)?)
+            .ok_or_else(|| invalid_ordinal(field))
+    })
 }
 
 /// Maps a derived-or-absent display title to its closed resolved state.
@@ -590,6 +635,28 @@ async fn insert_entries(
         .execute(&mut *connection)
         .await?;
     }
+    Ok(())
+}
+
+async fn insert_size_totals(
+    connection: &mut PgConnection,
+    conversation: ImportedConversationId,
+    raw_source_bytes: u64,
+    normalized_source_record_bytes: u64,
+    normalized_entry_bytes: u64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO imported_conversation_size_totals
+            (imported_conversation_id, raw_source_bytes,
+             normalized_source_record_bytes, normalized_entry_bytes)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(conversation.into_uuid())
+    .bind(Decimal::from(raw_source_bytes))
+    .bind(Decimal::from(normalized_source_record_bytes))
+    .bind(Decimal::from(normalized_entry_bytes))
+    .execute(connection)
+    .await?;
     Ok(())
 }
 
