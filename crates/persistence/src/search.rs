@@ -33,18 +33,6 @@ WITH lexical_query AS (
     SELECT DISTINCT unnest(
         tsvector_to_array(to_tsvector('simple'::regconfig, $1))
     ) AS lexeme
-), candidate_sources AS MATERIALIZED (
-    SELECT matching_chunk.source_kind, matching_chunk.source_id,
-           matching_chunk.content_class
-      FROM query_terms AS term
-      JOIN web_search_projection AS matching_chunk
-        ON matching_chunk.search_vector @@ to_tsquery(
-               'simple'::regconfig, quote_literal(term.lexeme)
-           )
-       AND ($2::uuid IS NULL OR matching_chunk.session_id = $2)
-     GROUP BY matching_chunk.source_kind, matching_chunk.source_id,
-              matching_chunk.content_class
-    HAVING count(DISTINCT term.lexeme) = (SELECT count(*) FROM query_terms)
 )
 SELECT projection.projection_id, projection.session_id,
        projection.event_sequence, projection.item_kind, projection.item_id,
@@ -63,6 +51,49 @@ SELECT projection.projection_id, projection.session_id,
                   OR correlated_chunk.turn_id IS DISTINCT FROM projection.turn_id
               )
        ) AS source_group_valid,
+       CASE projection.source_kind
+           WHEN 'accepted_input' THEN EXISTS (
+               SELECT 1 FROM accepted_input AS owner
+                WHERE owner.accepted_input_id = projection.source_id
+                  AND owner.session_id = projection.session_id
+                  AND owner.origin_turn_id = projection.turn_id
+           )
+           WHEN 'steering_input' THEN EXISTS (
+               SELECT 1 FROM semantic_transcript_entry AS owner
+                WHERE owner.origin_accepted_input_id = projection.source_id
+                  AND owner.source_session_id = projection.session_id
+                  AND owner.steering_source_turn_id = projection.turn_id
+                  AND owner.payload_kind = 'steering_accepted_input'
+           )
+           WHEN 'semantic_entry' THEN EXISTS (
+               SELECT 1
+                 FROM semantic_transcript_entry AS owner
+                 LEFT JOIN model_call AS call
+                   ON call.model_call_id = owner.producing_model_call_id
+                WHERE owner.semantic_entry_id = projection.source_id
+                  AND owner.source_session_id = projection.session_id
+                  AND (
+                      projection.turn_id IS NULL
+                      OR (call.turn_id = projection.turn_id
+                          AND call.session_id = projection.session_id)
+                  )
+           )
+           WHEN 'tool_request' THEN EXISTS (
+               SELECT 1 FROM tool_request AS owner
+                WHERE owner.request_id = projection.source_id
+                  AND owner.session_id = projection.session_id
+                  AND owner.turn_id = projection.turn_id
+           )
+           WHEN 'tool_attempt' THEN EXISTS (
+               SELECT 1 FROM tool_attempt AS owner
+                WHERE owner.attempt_id = projection.source_id
+                  AND owner.session_id = projection.session_id
+                  AND owner.turn_id = projection.turn_id
+           )
+           WHEN 'session_metadata' THEN
+               projection.source_id = projection.session_id
+           ELSE true
+       END AS source_owner_valid,
        '<sb-search-start>' AS start_marker,
        '<sb-search-stop>' AS stop_marker,
        ts_headline(
@@ -76,10 +107,6 @@ SELECT projection.projection_id, projection.session_id,
            ', MaxWords=32, MinWords=8, ShortWord=1, MaxFragments=1'
        ) AS marked_snippet
   FROM web_search_projection AS projection
-  JOIN candidate_sources
-    ON candidate_sources.source_kind = projection.source_kind
-   AND candidate_sources.source_id = projection.source_id
-   AND candidate_sources.content_class = projection.content_class
  CROSS JOIN lexical_query
  WHERE projection.projection_id = (
        SELECT min(candidate.projection_id)
@@ -99,6 +126,20 @@ SELECT projection.projection_id, projection.session_id,
                    'simple'::regconfig, quote_literal(term.lexeme)
                )
           )
+   )
+   AND NOT EXISTS (
+       SELECT 1
+         FROM query_terms AS term
+        WHERE NOT EXISTS (
+            SELECT 1
+              FROM web_search_projection AS matching_chunk
+             WHERE matching_chunk.source_kind = projection.source_kind
+               AND matching_chunk.source_id = projection.source_id
+               AND matching_chunk.content_class = projection.content_class
+               AND matching_chunk.search_vector @@ to_tsquery(
+                   'simple'::regconfig, quote_literal(term.lexeme)
+               )
+        )
    )
    AND ($2::uuid IS NULL OR projection.session_id = $2)
    AND (
@@ -409,7 +450,9 @@ fn decode_page(rows: Vec<PgRow>, limit: usize) -> Result<SearchPage, SearchRepos
 }
 
 fn decode_row(row: PgRow) -> Result<(SearchCursor, SearchResult), SearchRepositoryError> {
-    if !row.try_get::<bool, _>("source_group_valid")? {
+    if !row.try_get::<bool, _>("source_group_valid")?
+        || !row.try_get::<bool, _>("source_owner_valid")?
+    {
         return Err(SearchProjectionCorruption::SourceShape.into());
     }
     let projection_id: i64 = row.try_get("projection_id")?;

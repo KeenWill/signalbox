@@ -334,35 +334,33 @@ async fn artifact_identity_rejects_cross_session_cross_class_publication()
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn oversized_canonical_assistant_text_preserves_a_searchable_tail()
--> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-    let session_offset = 0x280;
+async fn project_oversized_assistant_text(
+    pool: &PgPool,
+    session_offset: u128,
+) -> Result<(SessionId, String), Box<dyn Error>> {
     let session_seed = SEARCH_FIXTURE_SEED + session_offset;
-    let session = create_search_session(&pool, session_offset).await?;
-    let turn = TurnId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x281));
+    let session = create_search_session(pool, session_offset).await?;
+    let turn = TurnId::from_uuid(Uuid::from_u128(session_seed + 0x10));
     SubmitInputRepository::new(pool.clone())
         .handle(
             start_input(
-                SEARCH_FIXTURE_SEED + 0x282,
+                session_seed + 0x11,
                 session.as_uuid().as_u128(),
                 "search an oversized assistant reply",
                 1,
                 ModelSelectionOverride::UseSessionDefault,
             ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x283)),
+            AcceptedInputId::from_uuid(Uuid::from_u128(session_seed + 0x12)),
             Some(turn),
         )
         .await?;
     activate_earliest_queued_turn(
-        &pool,
+        pool,
         EarliestQueuedTurnActivation {
             session: session.into_uuid(),
-            origin_entry: Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x284),
-            starting_frontier: Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x285),
-            initial_attempt: Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x286),
+            origin_entry: Uuid::from_u128(session_seed + 0x13),
+            starting_frontier: Uuid::from_u128(session_seed + 0x14),
+            initial_attempt: Uuid::from_u128(session_seed + 0x15),
         },
     )
     .await?;
@@ -370,7 +368,7 @@ async fn oversized_canonical_assistant_text_preserves_a_searchable_tail()
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
         selection,
         ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
-            SEARCH_FIXTURE_SEED + 0x287,
+            session_seed + 0x16,
         ))),
     )])
     .expect("fixture selection resolves to one target");
@@ -381,14 +379,23 @@ async fn oversized_canonical_assistant_text_preserves_a_searchable_tail()
         "x".repeat(max_search_projection_text_bytes() + 1)
     );
     complete_text_turn(
-        &pool,
+        pool,
         session,
         targets,
         model_credential_reference(),
-        SEARCH_FIXTURE_SEED + 0x290,
+        session_seed + 0x17,
         &response,
     )
     .await?;
+    Ok((session, boundary_lexeme))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn oversized_assistant_text_matches_terms_across_projection_chunks()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, _) = project_oversized_assistant_text(&pool, 0x280).await?;
     let page = SearchRepository::new(pool.clone())
         .search(lexical_query(
             "head anchor tail needle",
@@ -397,7 +404,24 @@ async fn oversized_canonical_assistant_text_preserves_a_searchable_tail()
             None,
         ))
         .await?;
-    let boundary_page = SearchRepository::new(pool.clone())
+
+    assert_eq!(page.results.len(), 1);
+    assert_eq!(
+        page.results[0].content_class,
+        SearchContentClass::AssistantTranscript
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn projection_chunk_overlap_preserves_a_boundary_lexeme() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, boundary_lexeme) = project_oversized_assistant_text(&pool, 0x2a0).await?;
+    let page = SearchRepository::new(pool.clone())
         .search(lexical_query(
             &boundary_lexeme,
             SearchScope::Session(session),
@@ -405,6 +429,20 @@ async fn oversized_canonical_assistant_text_preserves_a_searchable_tail()
             None,
         ))
         .await?;
+
+    assert_eq!(page.results.len(), 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn assistant_projection_chunks_stay_below_the_storage_ceiling() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, _) = project_oversized_assistant_text(&pool, 0x2b0).await?;
     let chunk_bounds: (i64, i32) = sqlx::query_as(
         "SELECT count(*), max(octet_length(content_text))
            FROM web_search_projection
@@ -414,14 +452,63 @@ async fn oversized_canonical_assistant_text_preserves_a_searchable_tail()
     .fetch_one(&pool)
     .await?;
 
-    assert_eq!(page.results.len(), 1);
-    assert_eq!(boundary_page.results.len(), 1);
-    assert_eq!(
-        page.results[0].content_class,
-        SearchContentClass::AssistantTranscript
-    );
     assert!(chunk_bounds.0 > 1);
     assert!(usize::try_from(chunk_bounds.1).expect("fixture chunk size fits") <= 65_536);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn search_rejects_a_canonical_source_rewired_to_another_session() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let source_session = create_search_session(&pool, 0x2b8).await?;
+    let result_session = create_search_session(&pool, 0x2b9).await?;
+    let input = AcceptedInputId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x2ba));
+    let turn = TurnId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x2bb));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                SEARCH_FIXTURE_SEED + 0x2bc,
+                source_session.as_uuid().as_u128(),
+                "rewired canonical source",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            input,
+            Some(turn),
+        )
+        .await?;
+    let result_address = session_created_address(&pool, result_session).await?;
+
+    sqlx::query(
+        "UPDATE web_search_projection
+            SET session_id = $1, event_sequence = $2
+          WHERE source_kind = 'accepted_input' AND source_id = $3",
+    )
+    .bind(result_session.into_uuid())
+    .bind(rust_decimal::Decimal::from(result_address.sequence().get()))
+    .bind(input.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let error = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "rewired canonical source",
+            SearchScope::Session(result_session),
+            10,
+            None,
+        ))
+        .await
+        .expect_err("cross-session canonical source must fail closed");
+
+    assert!(matches!(
+        error,
+        SearchRepositoryError::Corruption(SearchProjectionCorruption::SourceShape)
+    ));
 
     pool.close().await;
     drop(container);
