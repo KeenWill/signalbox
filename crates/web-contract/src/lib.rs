@@ -674,7 +674,14 @@ function assertSameOriginBlobUrl(value, path) {{
       "content/image-webp": "image/webp",
     }}[route[2]];
   }}
-  return {{ digest: route[1], kind: route[2], mediaType }};
+  return {{
+    digest: route[1],
+    kind: route[2],
+    mediaType,
+    displayFilename: route[2] === "download"
+      ? parsed.searchParams.get("display_filename") ?? undefined
+      : undefined,
+  }};
 }}
 
 function u64Bytes(value) {{
@@ -749,6 +756,12 @@ export function decodeWebBlobDescriptor(value) {{
       }}
       if (view.kind === "download" && view.media_type !== value.declared_media_type) {{
         fail(`blob_descriptor.available_views[${{index}}].media_type`, "the descriptor declared media type for the download representation");
+      }}
+      if (
+        view.kind === "download" &&
+        contentRoute.displayFilename !== value.display_filename[0]
+      ) {{
+        fail(contentPath, "download filename metadata matching the descriptor");
       }}
       if (
         view.kind === "browser_native" &&

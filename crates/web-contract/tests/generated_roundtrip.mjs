@@ -108,7 +108,7 @@ test("generated blob decoder accepts capability-projected views", () => {
     available_views: [
       {
         kind: "download",
-        content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
+        content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng&display_filename=capture.png`,
         media_type: "image/png",
         byte_length: "94371840",
         derivations: [],
@@ -999,6 +999,27 @@ test("generated blob decoder rejects unsupported routes and incomplete download 
         ],
       }),
     /canonical blob API route/,
+  );
+});
+
+test("generated blob decoder binds download filenames to descriptor metadata", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+
+  assert.throws(
+    () => decodeWebBlobDescriptor({
+      digest,
+      byte_length: "1",
+      declared_media_type: "application/pdf",
+      display_filename: ["report.pdf"],
+      available_views: [{
+        kind: "download",
+        content_url: `/api/blobs/${digest}/download?media_type=application%2Fpdf&display_filename=payload.exe`,
+        media_type: "application/pdf",
+        byte_length: "1",
+        derivations: [],
+      }],
+    }),
+    /content_url must be download filename metadata matching the descriptor/,
   );
 });
 
