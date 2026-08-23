@@ -7,6 +7,7 @@ use std::{
     os::unix::ffi::OsStrExt as _,
     path::{Path, PathBuf},
     process::ExitCode,
+    time::Duration,
 };
 
 use arguments::{
@@ -75,6 +76,14 @@ const MAX_METADATA_PAGE_SIZE: u64 = 100;
 /// Largest finding inventory one review run can own.
 // numeric-bound: ceiling - protects memory and writes from runaway model findings
 const MAX_REVIEW_FINDINGS_PER_RUN: u64 = 32;
+/// Maximum time a terminal follower waits before rereading recovery state.
+// numeric-bound: interval - exposes reconciliation exhaustion without busy polling
+#[cfg(not(test))]
+const FOLLOW_RECOVERY_REFETCH_INTERVAL: Duration = Duration::from_secs(30);
+/// Short equivalent used by deterministic socket tests.
+// numeric-bound: interval - keeps follower refetch tests bounded
+#[cfg(test)]
+const FOLLOW_RECOVERY_REFETCH_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -4284,7 +4293,22 @@ async fn await_turn_terminal(
         queued_turn_recovery(&mut snapshot, turn_id)?;
         let mut observed_cursor = snapshot.cursor();
         loop {
-            match connection.message().await? {
+            let message =
+                match tokio::time::timeout(FOLLOW_RECOVERY_REFETCH_INTERVAL, connection.message())
+                    .await
+                {
+                    Ok(message) => message?,
+                    Err(_) => {
+                        let mut refreshed = transcript(client, session_id).await?;
+                        let refreshed_state = refreshed.turn_state(turn_id)?;
+                        if let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())? {
+                            return Ok(terminal);
+                        }
+                        queued_turn_recovery(&mut refreshed, turn_id)?;
+                        continue;
+                    }
+                };
+            match message {
                 ServerMessage::SessionEvent {
                     cursor,
                     session_id: event_session,
@@ -4375,8 +4399,15 @@ fn queued_turn_recovery(
 
 fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), ClientError> {
     match state {
-        TurnState::ActiveAwaitingModelCallRecovery { .. }
+        TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: true,
+            ..
+        }
         | TurnState::ActiveAwaitingToolRecovery { .. } => Err(ClientError::TurnRecoveryRequired),
+        TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: false,
+            ..
+        } => Ok(()),
         TurnState::ActiveAwaitingRunnerRecovery { .. } => Err(ClientError::RunnerRecoveryRequired),
         TurnState::Queued { .. }
         | TurnState::QueuedDelegated { .. }
@@ -4505,10 +4536,17 @@ fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTermi
             | TurnState::ActiveAwaitingToolApproval { .. }
             | TurnState::ActiveAwaitingChild { .. },
         ) => Ok(None),
-        Some(
-            TurnState::ActiveAwaitingModelCallRecovery { .. }
-            | TurnState::ActiveAwaitingToolRecovery { .. },
-        ) => Err(ClientError::TurnRecoveryRequired),
+        Some(TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: true,
+            ..
+        })
+        | Some(TurnState::ActiveAwaitingToolRecovery { .. }) => {
+            Err(ClientError::TurnRecoveryRequired)
+        }
+        Some(TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: false,
+            ..
+        }) => Ok(None),
         Some(TurnState::ActiveAwaitingRunnerRecovery { .. }) => {
             Err(ClientError::RunnerRecoveryRequired)
         }
@@ -6764,12 +6802,24 @@ mod tests {
     }
 
     #[test]
-    fn send_fails_explicitly_when_model_call_recovery_is_required() {
+    fn send_waits_while_automatic_model_call_recovery_owns_the_decision() {
         let state = TurnState::ActiveAwaitingModelCallRecovery {
             ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
             recovery_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
             automatic_reconciliation_attempts: CanonicalU64::new(0),
             operator_action_required: false,
+        };
+
+        assert!(matches!(terminal_snapshot_state(Some(&state)), Ok(None)));
+    }
+
+    #[test]
+    fn send_fails_when_model_call_recovery_requires_operator_action() {
+        let state = TurnState::ActiveAwaitingModelCallRecovery {
+            ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            recovery_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            automatic_reconciliation_attempts: CanonicalU64::new(5),
+            operator_action_required: true,
         };
 
         assert!(matches!(
@@ -6977,6 +7027,31 @@ mod tests {
                 },
             )?;
             refresh_writer.write_all(&refreshed).await?;
+
+            let (exhausted_stream, mut exhausted_writer) = listener.accept().await?.0.into_split();
+            let mut exhausted_reader = BufReader::new(exhausted_stream);
+            let mut exhausted_line = Vec::new();
+            exhausted_reader
+                .read_until(b'\n', &mut exhausted_line)
+                .await?;
+            let exhausted_request =
+                decode_client_line(&exhausted_line).map_err(io::Error::other)?;
+            assert_eq!(
+                exhausted_request.request(),
+                &ClientRequest::ReadTranscript { session_id }
+            );
+            let exhausted = snapshot(
+                exhausted_request.version(),
+                exhausted_request.request_id(),
+                1,
+                TurnState::ActiveAwaitingModelCallRecovery {
+                    ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(8)),
+                    recovery_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(9)),
+                    automatic_reconciliation_attempts: CanonicalU64::new(5),
+                    operator_action_required: true,
+                },
+            )?;
+            exhausted_writer.write_all(&exhausted).await?;
             Ok::<(), io::Error>(())
         });
 

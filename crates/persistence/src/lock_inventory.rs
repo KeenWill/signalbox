@@ -120,7 +120,6 @@ pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY: &str = "WITH dis
             SELECT turn_id, session_id, recovery_model_call_id
               FROM turn_lifecycle, discovery
              WHERE state_kind = 'active'
-               AND origin_kind = 'accepted_input'
                AND active_phase_kind = 'awaiting_model_call_recovery'
                AND recovery_model_call_id IS NOT NULL
                AND (after_turn_id IS NULL OR turn_id > after_turn_id)
@@ -163,7 +162,6 @@ pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION: &str = "WITH 
                  WHERE lifecycle.turn_id = page.turn_id
                    AND lifecycle.session_id = page.session_id
                    AND lifecycle.state_kind = 'active'
-                   AND lifecycle.origin_kind = 'accepted_input'
                    AND lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
                    AND lifecycle.recovery_model_call_id = page.model_call_id
             )

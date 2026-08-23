@@ -9,14 +9,17 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AmbiguousModelCallTurnIdentities, ContextFrontierId, PendingSteeringReclassificationIdentity,
-    ProviderReportedTokenUsage, TurnId,
+    TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row};
 
 use crate::{
     commit_failure_is_ambiguous,
     mapping::{session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid},
-    model_execution::{ModelCallRepositoryError, persist_reconciliation_required},
+    model_execution::{
+        ModelCallRepositoryError, load_delegated_model_call_recovery,
+        persist_automatic_reconciliation,
+    },
     session::{SessionRepositoryError, load_session_from_connection},
     submit_input::{SubmitInputRepositoryError, load_scheduling_projection},
 };
@@ -216,28 +219,25 @@ impl PostgresModelCallReconciliationRepository {
             .bind(session_id_to_uuid(claimed.session()))
             .fetch_optional(&mut *transaction)
             .await?;
-        let exact_wait: bool = sqlx::query_scalar(
-            "SELECT EXISTS (
-                SELECT 1
-                  FROM turn_lifecycle
-                 WHERE session_id = $1
-                   AND turn_id = $2
-                   AND state_kind = 'active'
-                   AND origin_kind = 'accepted_input'
-                   AND active_phase_kind = 'awaiting_model_call_recovery'
-                   AND recovery_model_call_id = $3
-            )",
+        let origin: Option<String> = sqlx::query_scalar(
+            "SELECT origin_kind
+               FROM turn_lifecycle
+              WHERE session_id = $1
+                AND turn_id = $2
+                AND state_kind = 'active'
+                AND active_phase_kind = 'awaiting_model_call_recovery'
+                AND recovery_model_call_id = $3",
         )
         .bind(session_id_to_uuid(claimed.session()))
         .bind(turn_id_to_uuid(claimed.turn()))
         .bind(claimed.call().into_uuid())
-        .fetch_one(&mut *transaction)
+        .fetch_optional(&mut *transaction)
         .await?;
-        if !exact_wait {
+        let Some(origin) = origin else {
             finish_superseded(&mut transaction, claimed).await?;
             transaction.commit().await.map_err(Self::commit_error)?;
             return Ok(ModelCallReconciliationOutcome::Superseded);
-        }
+        };
         let Some(session) = load_session_from_connection(&mut transaction, claimed.session())
             .await
             .map_err(ModelCallReconciliationRepositoryError::Session)?
@@ -249,35 +249,78 @@ impl PostgresModelCallReconciliationRepository {
         let scheduling = load_scheduling_projection(&mut transaction, session)
             .await
             .map_err(ModelCallReconciliationRepositoryError::Scheduling)?;
-        let pending = scheduling
-            .active_turn_execution()
-            .filter(|turn| turn.turn() == claimed.turn())
-            .map(|turn| {
-                turn.pending_steering()
-                    .iter()
-                    .map(|steering| {
-                        PendingSteeringReclassificationIdentity::new(
-                            steering.accepted_input(),
-                            TurnId::from_uuid(uuid::Uuid::now_v7()),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            });
-        let pending = pending.ok_or(ModelCallReconciliationRepositoryError::Corruption(
-            "active turn for exact wait",
-        ))?;
-        let identities = AmbiguousModelCallTurnIdentities::new(ContextFrontierId::from_uuid(
-            uuid::Uuid::now_v7(),
-        ))
-        .with_pending_steering_reclassifications(pending);
         let Some(attempt) = std::num::NonZeroU32::new(claimed.attempt().get()) else {
             return Err(ModelCallReconciliationRepositoryError::Corruption(
                 "zero attempt ordinal",
             ));
         };
-        let reconciliation = match scheduling
-            .apply_automatic_model_call_reconciliation(attempt, identities)
-        {
+        let reconciliation = match origin.as_str() {
+            "accepted_input" => {
+                let active = scheduling
+                    .active_turn_execution()
+                    .filter(|turn| turn.turn() == claimed.turn())
+                    .ok_or(ModelCallReconciliationRepositoryError::Corruption(
+                        "accepted-input active turn for exact wait",
+                    ))?;
+                let identities = AmbiguousModelCallTurnIdentities::new(
+                    ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
+                )
+                .with_pending_steering_reclassifications(
+                    active
+                        .pending_steering()
+                        .iter()
+                        .map(|steering| {
+                            PendingSteeringReclassificationIdentity::new(
+                                steering.accepted_input(),
+                                TurnId::from_uuid(uuid::Uuid::now_v7()),
+                            )
+                        })
+                        .collect(),
+                );
+                scheduling.apply_automatic_model_call_reconciliation(attempt, identities)
+            }
+            "delegation" => {
+                let recovery = load_delegated_model_call_recovery(
+                    &mut transaction,
+                    claimed.session(),
+                    &scheduling,
+                )
+                .await
+                .map_err(ModelCallReconciliationRepositoryError::Model)?
+                .ok_or(ModelCallReconciliationRepositoryError::Corruption(
+                    "delegated active turn for exact wait",
+                ))?;
+                let identities = AmbiguousModelCallTurnIdentities::new(
+                    ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
+                )
+                .with_pending_steering_reclassifications(
+                    recovery
+                        .active
+                        .pending_steering()
+                        .iter()
+                        .map(|steering| {
+                            PendingSteeringReclassificationIdentity::new(
+                                steering.accepted_input(),
+                                TurnId::from_uuid(uuid::Uuid::now_v7()),
+                            )
+                        })
+                        .collect(),
+                );
+                recovery.active.apply_automatic_model_call_reconciliation(
+                    recovery.call,
+                    recovery.attempt,
+                    recovery.source_snapshot,
+                    attempt,
+                    identities,
+                )
+            }
+            _ => {
+                return Err(ModelCallReconciliationRepositoryError::Corruption(
+                    "origin for exact wait",
+                ));
+            }
+        };
+        let reconciliation = match reconciliation {
             Ok(reconciliation) if reconciliation.call().id() == claimed.call() => reconciliation,
             Ok(_) | Err(_) => {
                 return Err(ModelCallReconciliationRepositoryError::Corruption(
@@ -285,13 +328,9 @@ impl PostgresModelCallReconciliationRepository {
                 ));
             }
         };
-        persist_reconciliation_required(
-            &mut transaction,
-            &reconciliation,
-            ProviderReportedTokenUsage::unreported(),
-        )
-        .await
-        .map_err(ModelCallReconciliationRepositoryError::Model)?;
+        persist_automatic_reconciliation(&mut transaction, &reconciliation)
+            .await
+            .map_err(ModelCallReconciliationRepositoryError::Model)?;
         finish_attempt(&mut transaction, claimed, "reconciled", "reconciled").await?;
         transaction.commit().await.map_err(Self::commit_error)?;
         Ok(ModelCallReconciliationOutcome::Reconciled)
@@ -368,7 +407,7 @@ mod tests {
         assert!(CLAIM_WINDOW > 0);
         assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("turn_id > after_turn_id"));
         assert!(
-            AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY
+            !AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY
                 .contains("origin_kind = 'accepted_input'")
         );
         assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("ORDER BY turn_id"));
@@ -389,7 +428,7 @@ mod tests {
         );
         assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION.contains("LIMIT $1"));
         assert!(
-            AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION
+            !AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION
                 .contains("origin_kind = 'accepted_input'")
         );
         assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION.contains("SET after_turn_id"));

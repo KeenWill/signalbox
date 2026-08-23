@@ -1293,6 +1293,9 @@ impl TerminalChildTurn {
     pub const fn from_cancelled(value: &CancelledModelCallTurn) -> Self;
     pub const fn from_cancelled_tool_round(value: &CancelledToolRoundModelCallTurn) -> Self;
     pub const fn from_refused(value: &RefusedModelCallTurn) -> Self;
+    pub const fn from_reconciliation_required(
+        value: &ReconciliationRequiredModelCallTurn,
+    ) -> Self;
     // accessors: session(), turn(), reason()
 }
 
@@ -1369,6 +1372,9 @@ impl DelegationOutcome {
     pub fn from_refused_child(value: &RefusedModelCallTurn) -> Self;
     pub fn from_cancelled_child(value: &CancelledModelCallTurn) -> Self;
     pub fn from_cancelled_tool_round_child(value: &CancelledToolRoundModelCallTurn) -> Self;
+    pub fn from_reconciliation_required_child(
+        value: &ReconciliationRequiredModelCallTurn,
+    ) -> Self;
     pub fn from_terminal_child(terminal: TerminalChildTurn, content: Option<DelegationContent>)
         -> Option<Self>;
     pub fn reconstitute(
@@ -3513,6 +3519,14 @@ impl ActivatedTurn {
         &self,
         entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
     ) -> Option<Vec<SemanticTranscriptEntry>>;
+    pub fn apply_automatic_model_call_reconciliation(
+        self,
+        call: EndedModelCall,
+        attempt: EndedTurnAttempt,
+        source_snapshot: ResolvedContextFrontierSnapshot,
+        recovery_attempt: NonZeroU32,
+        identities: AmbiguousModelCallTurnIdentities,
+    ) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError>;
     pub fn apply_interrupt_to_runner_recovery(
         self,
         starting_snapshot: ResolvedContextFrontierSnapshot,
@@ -3566,6 +3580,18 @@ pub struct DelegatedWakeTurnActivationInput {
     pub initial_attempt: TurnAttemptId,
 }
 
+pub struct DelegatedModelCallRecoveryReconstitutionInput { /* private */ }
+impl DelegatedModelCallRecoveryReconstitutionInput {
+    pub const fn new(
+        phase: ActiveTurnSchedulingReconstitutionInput,
+        pinned_target: PinnedProviderTargetReconstitutionInput,
+        call: ModelCallReconstitutionInput,
+        source_snapshot: ResolvedContextFrontierReconstitutionInput,
+        pending_steering: Vec<PendingSteeringInput>,
+        consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
+    ) -> Self;
+}
+
 pub struct PreparedDelegatedTurnActivation { /* private */ }
 // sealed: PreparedDelegatedTurnActivation::prepare
 impl PreparedDelegatedTurnActivation {
@@ -3584,6 +3610,16 @@ impl PreparedDelegatedTurnActivation {
     ) -> Option<(
         ActivatedDelegatedTurn,
         Vec<SemanticTranscriptEntry>,
+        ResolvedContextFrontierSnapshot,
+    )>;
+    pub fn with_reconstituted_model_call_recovery(
+        self,
+        input: DelegatedModelCallRecoveryReconstitutionInput,
+    ) -> Option<(
+        ActivatedTurn,
+        EndedModelCall,
+        EndedTurnAttempt,
+        ResolvedContextFrontierSnapshot,
         ResolvedContextFrontierSnapshot,
     )>;
 }
@@ -8380,6 +8416,17 @@ impl<
     where
         Transaction: Clone + Send + 'static,
         Transaction::Error: Send + 'static;
+    pub fn execute_with_cloned_transaction_and_observer(
+        &mut self,
+        session: SessionId,
+        observer: Arc<dyn Fn(TurnId) + Send + Sync>,
+    ) -> impl Future<
+        Output = Result<StartEligibleTurnOutcome, Transaction::Error>,
+    > + Send
+           + 'static
+    where
+        Transaction: Clone + Send + 'static,
+        Transaction::Error: Send + 'static;
 }
 ```
 
@@ -11126,7 +11173,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: queue_order                                | 5 (+1 free fn)                   |
 | domain: repo_watch                                 | 51                               |
 | domain: turn_lifecycle                             | 10                               |
-| domain: turn_eligibility                           | 37                               |
+| domain: turn_eligibility                           | 38                               |
 | domain: turn_attempt                               | 13                               |
 | domain: model_call                                 | 12                               |
 | domain: context_compaction                         | 12                               |
@@ -11146,7 +11193,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                               |
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
-| **signalbox-domain total**                         | **806 (+12 free fn)**            |
+| **signalbox-domain total**                         | **807 (+12 free fn)**            |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |

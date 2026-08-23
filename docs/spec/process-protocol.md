@@ -2320,10 +2320,14 @@ The terminal `send` command follows the submitted turn, accepts terminal state
 from the initial snapshot or waits for its durable terminal event, rereads the
 authoritative transcript, and prints the committed assistant text. Its terminal
 waiter accepts and ignores provider-text deltas for the selected session and
-rejects a cross-wired delta. The client exits with a typed nonzero
-recovery-required diagnostic after observing
-`active_awaiting_model_call_recovery` or a live terminal `ambiguous` model-call
-transition followed by that authoritative state.
+rejects a cross-wired delta. The client keeps following while an authoritative
+`active_awaiting_model_call_recovery` state has
+`operator_action_required = false`; a bounded cancellation-safe reread makes an
+exhaustion-only projection change visible even when no session event is emitted.
+It exits with a typed nonzero recovery-required diagnostic only after the
+authoritative state has `operator_action_required = true`. A live terminal
+`ambiguous` model-call transition triggers an immediate authoritative reread but
+does not by itself require operator action.
 
 The client applies the same behavior to `active_awaiting_tool_recovery` and to
 `tool_batch_transition { recovery_required }` followed by that state. An

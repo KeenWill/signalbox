@@ -748,17 +748,6 @@ impl Drop for SchedulerPassActiveTurnGuard {
 }
 
 impl SchedulerPassOccupancyRecovery {
-    fn track_active_turn(&self, session: SessionId, turn: TurnId) -> SchedulerPassActiveTurnGuard {
-        self.active_turns
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(session, turn);
-        SchedulerPassActiveTurnGuard {
-            active_turns: std::sync::Arc::clone(&self.active_turns),
-            session,
-        }
-    }
-
     fn active_turn(&self, session: SessionId) -> Option<TurnId> {
         self.active_turns
             .lock()
@@ -892,17 +881,22 @@ where
         &mut self,
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-        let activation = self.activation.execute_with_cloned_transaction(session);
         let execution = self.execution.clone();
         let occupancy_recovery = self.occupancy_recovery.clone();
+        let occupancy_tracking = occupancy_recovery
+            .as_ref()
+            .map(|recovery| recovery.resume_turn_observer(session));
+        let observe_turn = occupancy_tracking
+            .as_ref()
+            .map(|(_, observer)| std::sync::Arc::clone(observer))
+            .unwrap_or_else(|| std::sync::Arc::new(|_| {}));
+        let activation = self
+            .activation
+            .execute_with_cloned_transaction_and_observer(
+                session,
+                std::sync::Arc::clone(&observe_turn),
+            );
         async move {
-            let resume_tracking = occupancy_recovery
-                .as_ref()
-                .map(|recovery| recovery.resume_turn_observer(session));
-            let observe_turn = resume_tracking
-                .as_ref()
-                .map(|(_, observer)| std::sync::Arc::clone(observer))
-                .unwrap_or_else(|| std::sync::Arc::new(|_| {}));
             execution
                 .resume_active_with_observer(session, observe_turn)
                 .await
@@ -911,7 +905,6 @@ where
                     turn: Execution::active_resume_failure_turn(&source),
                     source,
                 })?;
-            drop(resume_tracking);
             let outcome = match activation.await {
                 Ok(outcome) => outcome,
                 Err(error) => {
@@ -919,16 +912,13 @@ where
                     return Err(ActivatedTurnPassError::Activation(error));
                 }
             };
-            match outcome {
+            let result = match outcome {
                 StartEligibleTurnOutcome::NoEligibleTurn => Ok(()),
                 StartEligibleTurnOutcome::Activated(activated) => {
                     let turn = activated.turn();
                     if !activation_session_matches(&execution, session, activated.session()) {
                         return Err(ActivatedTurnPassError::ActivationSessionMismatch);
                     }
-                    let _occupancy_guard = occupancy_recovery
-                        .as_ref()
-                        .map(|recovery| recovery.track_active_turn(session, turn));
                     execution
                         .execute(activated)
                         .instrument(turn_work_span(session, turn))
@@ -939,7 +929,9 @@ where
                             source,
                         })
                 }
-            }
+            };
+            drop(occupancy_tracking);
+            result
         }
     }
 }
@@ -2344,6 +2336,12 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     struct CommitAmbiguousTransaction;
 
+    impl CommitAmbiguousTransaction {
+        fn activated_turn() -> TurnId {
+            TurnId::from_uuid(Uuid::from_u128(11))
+        }
+    }
+
     impl StartEligibleTurnTransaction for CommitAmbiguousTransaction {
         type Error = CommitAmbiguousActivationFailure;
 
@@ -2352,6 +2350,16 @@ mod tests {
             _session: SessionId,
             _identities: AcceptedInputTurnActivationIdentities,
         ) -> impl Future<Output = Result<StartEligibleTurnOutcome, Self::Error>> + Send {
+            ready(Err(CommitAmbiguousActivationFailure))
+        }
+
+        fn handle_with_activation_observer(
+            &mut self,
+            _session: SessionId,
+            _identities: AcceptedInputTurnActivationIdentities,
+            observer: Arc<dyn Fn(TurnId) + Send + Sync>,
+        ) -> impl Future<Output = Result<StartEligibleTurnOutcome, Self::Error>> + Send {
+            observer(Self::activated_turn());
             ready(Err(CommitAmbiguousActivationFailure))
         }
     }
@@ -2535,6 +2543,31 @@ mod tests {
             super::ActivatedTurnPassError::Activation(CommitAmbiguousActivationFailure)
         ));
         assert!(signal.is_triggered());
+    }
+
+    #[tokio::test]
+    async fn commit_ambiguous_activation_is_observed_before_acknowledgement_failure() {
+        let observed = Arc::new(Mutex::new(None));
+        let observer_state = Arc::clone(&observed);
+        let observer: Arc<dyn Fn(TurnId) + Send + Sync> = Arc::new(move |turn| {
+            *observer_state.lock().expect("activation observer lock") = Some(turn);
+        });
+        let mut service =
+            StartEligibleTurnService::new(AdvancingIds::new(), CommitAmbiguousTransaction);
+
+        let error = service
+            .execute_with_cloned_transaction_and_observer(
+                SessionId::from_uuid(Uuid::from_u128(9)),
+                observer,
+            )
+            .await
+            .expect_err("commit acknowledgement remains ambiguous");
+
+        assert!(matches!(error, CommitAmbiguousActivationFailure));
+        assert_eq!(
+            *observed.lock().expect("activation observer lock"),
+            Some(CommitAmbiguousTransaction::activated_turn())
+        );
     }
 
     #[test]
