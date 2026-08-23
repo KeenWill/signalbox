@@ -234,21 +234,25 @@ test("generated search decoder rejects overlapping highlight ranges", () => {
   );
 });
 
-test("generated search decoder validates continuation against the final result", () => {
+test("generated search decoder rejects continuation on an empty page", () => {
   const empty = searchPage();
   empty.results = [];
   assert.throws(
     () => decodeWebSearchPage(empty),
     /continuation must be the last result ordering key/,
   );
+});
 
+test("generated search decoder rejects a continuation address mismatch", () => {
   const mismatched = searchPage();
   mismatched.continuation.address.event_sequence = "2";
   assert.throws(
     () => decodeWebSearchPage(mismatched),
     /continuation must be the last result ordering key/,
   );
+});
 
+test("generated search decoder rejects a continuation projection mismatch", () => {
   const mismatchedProjection = searchPage();
   mismatchedProjection.continuation.projection_id = "2";
   assert.throws(
@@ -300,7 +304,7 @@ test("generated search decoder rejects malformed result identities", () => {
   assert.throws(() => decodeWebSearchPage(page), /matching/);
 });
 
-test("generated search decoder rejects contradictory source correlations", () => {
+test("generated search decoder rejects a contradictory source session", () => {
   const mismatchedSession = searchPage();
   mismatchedSession.results[0].source.session_id =
     "00000000-0000-0000-0000-000000000992";
@@ -308,7 +312,9 @@ test("generated search decoder rejects contradictory source correlations", () =>
     () => decodeWebSearchPage(mismatchedSession),
     /source consistent with the result session and content class/,
   );
+});
 
+test("generated search decoder rejects a contradictory content class", () => {
   const mismatchedContent = searchPage();
   mismatchedContent.results[0].content_class = "tool_result";
   assert.throws(
