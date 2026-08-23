@@ -55,6 +55,23 @@ describe('command registry', () => {
     expect(loaded).toEqual(['first', 'latest'])
   })
 
+  it('routes selected timeline expansion through the central command', () => {
+    let toggles = 0
+    store.dispatch(actions.timelineSelected('42'))
+
+    invokeCommand('selection.toggleExpansion', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: ['41', '42'],
+      focusTimeline: () => undefined,
+      toggleTimelineExpansion: () => {
+        toggles += 1
+      },
+    })
+
+    expect(toggles).toBe(1)
+  })
+
   it('keeps server-window boundary commands available when Results has no visible rows', () => {
     const loaded: Array<'first' | 'latest'> = []
     const context = {

@@ -169,6 +169,7 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
               .filter(
                 (command) =>
                   command.id !== 'surface.escape' &&
+                  command.id !== 'palette.open' &&
                   (!('available' in command) || command.available(context)),
               )
               .map((command) => (

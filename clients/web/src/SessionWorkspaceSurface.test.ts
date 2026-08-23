@@ -1,7 +1,9 @@
+import { QueryClient } from '@tanstack/react-query'
 import { describe, expect, it } from 'vitest'
 import { decodeWebSessionTimelineWindow } from './generated/web-contract.mjs'
 import {
   boundarySessionItemId,
+  evictInactiveSessionWorkspaceQueries,
   isCanonicalSessionId,
   pruneExpandedSessionItems,
   reconcileVisibleSessionSelection,
@@ -74,6 +76,27 @@ describe('Session Workspace projection', () => {
       'session-workspace',
       fixture.session_id,
     ])
+  })
+
+  it('bounds cached session workspaces to the active session and three inactive sessions', () => {
+    const queryClient = new QueryClient()
+    const sessionIds = Array.from(
+      { length: 6 },
+      (_, index) => `00000000-0000-0000-0000-${String(index + 1).padStart(12, '0')}`,
+    )
+    for (const sessionId of sessionIds) {
+      queryClient.setQueryData(sessionWorkspaceQueryKey(sessionId), { sessionId })
+    }
+
+    const activeSessionId = sessionIds[5]
+    if (activeSessionId === undefined) throw new Error('missing active session fixture')
+    evictInactiveSessionWorkspaceQueries(queryClient, activeSessionId)
+
+    const retained = queryClient
+      .getQueryCache()
+      .findAll({ queryKey: ['production', 'session-workspace'] })
+    expect(retained).toHaveLength(4)
+    expect(queryClient.getQueryData(sessionWorkspaceQueryKey(activeSessionId))).toBeDefined()
   })
 
   it('selects the visible row at the successfully loaded boundary', () => {

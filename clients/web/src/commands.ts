@@ -9,6 +9,7 @@ export interface CommandContext {
   timelineWindowAvailable?: boolean
   focusTimeline: () => void
   loadTimelineWindow?: (anchor: 'first' | 'latest') => void
+  toggleTimelineExpansion?: () => void
 }
 
 export interface CommandBinding {
@@ -100,6 +101,18 @@ export const commandRegistry = [
       const previousIndex = Math.max(currentIndex - 1, 0)
       context.dispatch(actions.timelineSelected(context.timelineIds[previousIndex] ?? null))
     },
+  },
+  {
+    id: 'selection.toggleExpansion',
+    title: 'Toggle selected timeline item detail',
+    description: 'Expand or collapse the selected timeline item.',
+    category: 'View',
+    bindings: [{ label: 'Enter / Space' }],
+    available: (context) =>
+      context.getState().app.selectedTimeline !== null &&
+      context.timelineIds.includes(context.getState().app.selectedTimeline ?? '') &&
+      context.toggleTimelineExpansion !== undefined,
+    run: (context) => context.toggleTimelineExpansion?.(),
   },
   {
     id: 'selection.first',

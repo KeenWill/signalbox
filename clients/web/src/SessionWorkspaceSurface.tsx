@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
 import {
   type FormEvent,
@@ -23,6 +23,7 @@ const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 const NATIVE_SESSION_ID_PATTERN = String.raw`\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*`
 const SESSION_WINDOW_ITEMS = 80
 const SESSION_WINDOW_BYTES = 64 * 1024
+const MAX_CACHED_SESSION_WORKSPACES = 4
 type TimelineCapability = 'checking' | 'available' | 'unavailable'
 export interface SessionSelectionEvidence {
   sessionId: string
@@ -34,6 +35,26 @@ export interface SessionSelectionEvidence {
 export const isCanonicalSessionId = (value: string): boolean => SESSION_ID_PATTERN.test(value)
 export const sessionWorkspaceQueryKey = (sessionId: string | null) =>
   ['production', 'session-workspace', sessionId] as const
+
+export const evictInactiveSessionWorkspaceQueries = (
+  queryClient: QueryClient,
+  retainedSessionId: string | null,
+): void => {
+  const inactiveQueries = queryClient
+    .getQueryCache()
+    .findAll({ queryKey: ['production', 'session-workspace'] })
+    .filter(
+      (query) =>
+        typeof query.queryKey[2] === 'string' &&
+        query.queryKey[2] !== retainedSessionId &&
+        query.getObserversCount() === 0,
+    )
+    .sort((left, right) => right.state.dataUpdatedAt - left.state.dataUpdatedAt)
+
+  for (const query of inactiveQueries.slice(MAX_CACHED_SESSION_WORKSPACES - 1)) {
+    queryClient.removeQueries({ queryKey: query.queryKey, exact: true })
+  }
+}
 
 export const sessionHasLiveWork = (activeTurnCount: string, queuedTurnCount: string): boolean =>
   BigInt(activeTurnCount) !== BigInt(0) || BigInt(queuedTurnCount) !== BigInt(0)
@@ -173,6 +194,16 @@ export function SessionWorkspaceSurface({
     },
     [dispatch, refetchSession, timelineRef],
   )
+  const toggleSelectedExpansion = useCallback(() => {
+    const eventSequence = store.getState().app.selectedTimeline
+    if (eventSequence === null || !timelineIds.includes(eventSequence)) return
+    setExpanded((current) => {
+      const next = new Set(current)
+      if (next.has(eventSequence)) next.delete(eventSequence)
+      else next.add(eventSequence)
+      return next
+    })
+  }, [timelineIds])
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
@@ -217,6 +248,9 @@ export function SessionWorkspaceSurface({
     [displayedSession, onTimelineWindowAvailable, timelineCapability],
   )
   useEffect(() => () => onTimelineWindowAvailable(false), [onTimelineWindowAvailable])
+  useEffect(() => {
+    evictInactiveSessionWorkspaceQueries(queryClient, sessionId)
+  }, [queryClient, sessionId])
   useEffect(() => {
     if (windowRequest === null || sessionId === null) return
     void loadWindow(windowRequest.anchor)
@@ -286,10 +320,27 @@ export function SessionWorkspaceSurface({
   const select = (eventSequence: string) => {
     dispatch(actions.timelineSelected(eventSequence))
   }
+  const invokeTimelineCommand = (
+    command:
+      | 'selection.next'
+      | 'selection.previous'
+      | 'selection.first'
+      | 'selection.last'
+      | 'selection.toggleExpansion',
+  ) =>
+    invokeCommand(command, {
+      dispatch,
+      getState: store.getState,
+      timelineIds,
+      timelineWindowAvailable: displayedSession !== undefined,
+      focusTimeline: () => timelineRef.current?.focus(),
+      loadTimelineWindow: loadWindow,
+      toggleTimelineExpansion: toggleSelectedExpansion,
+    })
   const handleTimelineKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if ((event.key === 'Enter' || event.key === ' ') && selected !== null) {
       event.preventDefault()
-      toggleExpanded(selected)
+      invokeTimelineCommand('selection.toggleExpansion')
       return
     }
     if (['j', 'k', 'ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
@@ -308,30 +359,10 @@ export function SessionWorkspaceSurface({
       | undefined
     if (!command) return
     event.preventDefault()
-    invokeCommand(command, {
-      dispatch,
-      getState: store.getState,
-      timelineIds,
-      timelineWindowAvailable: displayedSession !== undefined,
-      focusTimeline: () => timelineRef.current?.focus(),
-      loadTimelineWindow: loadWindow,
-    })
+    invokeTimelineCommand(command)
   }
   const invokeBoundaryCommand = (command: 'selection.first' | 'selection.last') =>
-    invokeCommand(command, {
-      dispatch,
-      getState: store.getState,
-      timelineIds,
-      timelineWindowAvailable: displayedSession !== undefined,
-      focusTimeline: () => timelineRef.current?.focus(),
-      loadTimelineWindow: loadWindow,
-    })
-  const toggleExpanded = (eventSequence: string) => {
-    const next = new Set(expanded)
-    if (next.has(eventSequence)) next.delete(eventSequence)
-    else next.add(eventSequence)
-    setExpanded(next)
-  }
+    invokeTimelineCommand(command)
 
   return (
     <div className="surface-body session-workspace-surface">
@@ -460,7 +491,7 @@ export function SessionWorkspaceSurface({
                   className={selected === id ? 'selected' : undefined}
                   onClick={() => {
                     select(id)
-                    toggleExpanded(id)
+                    invokeTimelineCommand('selection.toggleExpansion')
                     timelineRef.current?.focus()
                   }}
                   onKeyDown={(event) => {
@@ -468,7 +499,7 @@ export function SessionWorkspaceSurface({
                     event.preventDefault()
                     event.stopPropagation()
                     select(id)
-                    toggleExpanded(id)
+                    invokeTimelineCommand('selection.toggleExpansion')
                     timelineRef.current?.focus()
                   }}
                 >
