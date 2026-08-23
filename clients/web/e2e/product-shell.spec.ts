@@ -282,6 +282,17 @@ test('suppresses ordinary view hotkeys while an overlay owns input', async ({ pa
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeHidden()
 })
 
+test('restores focus before focus layout hides product navigation', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('link', { name: 'Attention' }).focus()
+  await page.keyboard.press('Shift+W')
+
+  await expect(page.locator('.product-shell')).toHaveClass(/layout-focus/)
+  await expect(page.getByRole('main')).toBeFocused()
+})
+
 test('changes visible product spacing with the density control', async ({ page }) => {
   await useDeterministicBootstrap(page)
   await page.goto('/search')

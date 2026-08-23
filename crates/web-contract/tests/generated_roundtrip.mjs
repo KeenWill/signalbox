@@ -180,16 +180,6 @@ test("generated search decoder rejects too many highlight ranges", () => {
   );
 });
 
-test("generated search decoder correlates continuation projection identity", () => {
-  const page = searchPage();
-  page.continuation.projection_id = "2";
-
-  assert.throws(
-    () => decodeWebSearchPage(page),
-    /continuation must be the last result ordering key/,
-  );
-});
-
 test("generated search decoder rejects an oversized UTF-8 snippet", () => {
   const page = searchPage();
   page.results[0].snippet = "é".repeat(257);

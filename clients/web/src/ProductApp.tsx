@@ -401,6 +401,9 @@ export function ProductApp({
         if (binding.commandId === 'palette.open') {
           paletteReturnFocusRef.current = primaryRef.current
         }
+        if (binding.commandId === 'layout.toggle' && app.layout === 'workbench') {
+          primaryRef.current?.focus()
+        }
         invokeCommand(binding.commandId, context)
       },
     })),

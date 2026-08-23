@@ -119,6 +119,7 @@ export function SearchSurface({
   const requestIsValid =
     queryBytes > 0 &&
     queryBytes <= queryLimit &&
+    !queryText.includes('\0') &&
     sessionIsValid &&
     cursorMetadataIsValid &&
     validCursor(activeAfter)

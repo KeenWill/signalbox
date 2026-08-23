@@ -255,6 +255,20 @@ test('does not request malformed session or cursor URL state', async ({ page }) 
   expect(searchRequests).toBe(0)
 })
 
+test('does not request NUL-bearing search text', async ({ page }) => {
+  let searchRequests = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/search?**', (route) => {
+    searchRequests += 1
+    return route.fulfill({ json: firstPage })
+  })
+
+  await page.goto('/search?q=term%00suffix')
+
+  await expect(page.getByRole('alert')).toContainText('Search parameters are malformed')
+  expect(searchRequests).toBe(0)
+})
+
 test('does not request an unpaired cursor URL field', async ({ page }) => {
   let searchRequests = 0
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
