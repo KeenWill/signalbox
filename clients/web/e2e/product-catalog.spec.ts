@@ -294,11 +294,28 @@ test('gates catalog reads on a successful bootstrap', async ({ page }) => {
   })
 
   await page.goto('/sessions')
-  await expect(page.getByText('Transport unavailable')).toBeVisible()
+  await expect(page.getByText('Contract handshake failed')).toBeVisible()
   await expect(
     page.getByText('Sessions are unavailable until the browser contract handshake succeeds.'),
   ).toBeVisible()
   expect(sessionReads).toBe(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('leaves search editing before dismissing a selected inspector', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+  await page.getByRole('button', { name: firstPage.summaries[0].title_summary }).click()
+
+  const search = page.getByRole('textbox', { name: 'Search titles' })
+  await search.focus()
+  await page.keyboard.press('Escape')
+
+  await expect(page.getByRole('main')).toBeFocused()
+  await expect(
+    page.getByRole('heading', { name: firstPage.summaries[0].title_summary, level: 2 }),
+  ).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

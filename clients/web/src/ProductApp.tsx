@@ -121,7 +121,13 @@ function ProductNavigation({
   )
 }
 
-function CommandPalette({ context }: { context: CommandContext }) {
+function CommandPalette({
+  context,
+  onCloseAutoFocus,
+}: {
+  context: CommandContext
+  onCloseAutoFocus: (event: Event) => void
+}) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
   return (
     <Dialog.Root
@@ -135,6 +141,7 @@ function CommandPalette({ context }: { context: CommandContext }) {
         <Dialog.Content
           className="dialog-content product-palette"
           aria-describedby="product-palette-description"
+          onCloseAutoFocus={onCloseAutoFocus}
         >
           <div className="dialog-heading">
             <div>
@@ -283,6 +290,7 @@ export function ProductApp({
   const primaryRef = useRef<HTMLElement>(null)
   const sessionOpenedHere = useRef(false)
   const focusAfterBootstrapRetry = useRef(false)
+  const focusAfterCommandNavigation = useRef(false)
   const currentSession = useRef(search.session)
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
@@ -331,7 +339,15 @@ export function ProductApp({
         if (search.session) dismissSession()
         else primaryRef.current?.focus()
       },
-      navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      navigate: (path) => {
+        const destination = path.slice(1) as ProductRouteId
+        focusAfterCommandNavigation.current = true
+        primaryRef.current?.focus()
+        void navigate({ to: '/$surface', params: { surface: destination } }).then(() => {
+          focusAfterCommandNavigation.current = false
+          requestAnimationFrame(() => primaryRef.current?.focus())
+        })
+      },
     }),
     [dismissSession, dispatch, navigate, search.session],
   )
@@ -345,6 +361,14 @@ export function ProductApp({
           target instanceof Element &&
           target.closest('.product-palette, .mobile-navigation') !== null
         if (store.getState().app.overlay !== null || escapeHandledByOverlay) return
+        if (
+          binding.commandId === 'surface.escape' &&
+          target instanceof HTMLElement &&
+          (target.matches('input, textarea, select') || target.isContentEditable)
+        ) {
+          primaryRef.current?.focus()
+          return
+        }
         if (
           binding.commandId === 'layout.toggle' &&
           document.activeElement?.closest('.product-navigation-pane')
@@ -430,7 +454,7 @@ export function ProductApp({
             {bootstrap.isSuccess
               ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
               : bootstrap.isError
-                ? 'Transport unavailable'
+                ? 'Contract handshake failed'
                 : 'Checking contract…'}
           </span>
         </div>
@@ -457,7 +481,13 @@ export function ProductApp({
           </dl>
         </aside>
       )}
-      <CommandPalette context={context} />
+      <CommandPalette
+        context={context}
+        onCloseAutoFocus={(event) => {
+          if (!focusAfterCommandNavigation.current) return
+          event.preventDefault()
+        }}
+      />
       <Dialog.Root
         open={app.overlay === 'navigation'}
         onOpenChange={(open) => {

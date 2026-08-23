@@ -5,6 +5,7 @@ import {
   type WebAttentionSnapshot,
   type WebContractBootstrap,
 } from './generated/web-contract.mjs'
+import generatedBootstrap from './generated/web-contract-bootstrap.json' with { type: 'json' }
 
 export const productRoutes = [
   { id: 'attention', label: 'Attention', description: 'Actionable work and fleet state' },
@@ -76,11 +77,11 @@ export const MAX_SESSION_PAGE_ITEMS = 32
 export const MAX_PRODUCT_HTTP_RESPONSE_BYTES = 64 * 1024
 export const MAX_SESSION_SEARCH_BYTES = 1024
 const MAX_SESSION_SUMMARY_SCALARS = 128
-const PRODUCT_CONTRACT_NAME = 'signalbox.web-http'
-const PRODUCT_CONTRACT_VERSION = '1'
 
 const isCanonicalUnsigned64 = (value: string) =>
   CANONICAL_UNSIGNED_INTEGER.test(value) && BigInt(value) <= MAX_UNSIGNED_64
+const isCanonicalPositiveUnsigned64 = (value: string) =>
+  /^[1-9]\d*$/.test(value) && BigInt(value) <= MAX_UNSIGNED_64
 
 const expectedActionByState: Record<
   WebAttentionSnapshot['summaries'][number]['state'],
@@ -146,8 +147,12 @@ const validateSessionPage = (
   if (page.summaries.length > MAX_SESSION_PAGE_ITEMS) {
     throw new Error(`session catalog response exceeds ${MAX_SESSION_PAGE_ITEMS} summaries`)
   }
-  if (!isCanonicalUnsigned64(page.total) || BigInt(page.total) < BigInt(page.summaries.length)) {
-    throw new Error('session catalog response contains a contradictory total')
+  if (
+    !isCanonicalUnsigned64(page.cursor) ||
+    !isCanonicalUnsigned64(page.total) ||
+    BigInt(page.total) < BigInt(page.summaries.length)
+  ) {
+    throw new Error('session catalog response contains a contradictory numeric page field')
   }
   const sessionIdentities = new Set<string>()
   for (const summary of page.summaries) {
@@ -174,9 +179,14 @@ const validateSessionPage = (
     }
     if (
       !isCanonicalUnsigned64(summary.active_turn_count) ||
-      !isCanonicalUnsigned64(summary.queued_turn_count)
+      !isCanonicalUnsigned64(summary.queued_turn_count) ||
+      !isCanonicalUnsigned64(summary.judge.actionable) ||
+      !isCanonicalUnsigned64(summary.judge.completed) ||
+      !isCanonicalUnsigned64(summary.judge.escalated) ||
+      !isCanonicalUnsigned64(summary.judge.failed) ||
+      (summary.goal_block != null && !isCanonicalPositiveUnsigned64(summary.goal_block.generation))
     ) {
-      throw new Error('session catalog response contains a non-canonical turn count')
+      throw new Error('session catalog response contains a non-canonical numeric field')
     }
     if (summary.action !== expectedActionByState[summary.state]) {
       throw new Error('session catalog response contains a contradictory state and action')
@@ -249,6 +259,13 @@ const validateSessionPage = (
       throw new Error(`session catalog rows contradict ${expectedSort}`)
     }
   }
+  if (
+    request.afterSession === undefined &&
+    page.continuation === null &&
+    BigInt(page.total) > BigInt(page.summaries.length)
+  ) {
+    throw new Error('session catalog response omits a required continuation')
+  }
   if (page.continuation) {
     if (BigInt(page.total) <= BigInt(page.summaries.length)) {
       throw new Error('session catalog continuation contradicts the declared total')
@@ -296,8 +313,8 @@ export class SameOriginProductTransport implements ProductTransport {
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
     const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
     if (
-      bootstrap.contract.name !== PRODUCT_CONTRACT_NAME ||
-      bootstrap.contract.version !== PRODUCT_CONTRACT_VERSION
+      bootstrap.contract.name !== generatedBootstrap.contract.name ||
+      bootstrap.contract.version !== generatedBootstrap.contract.version
     ) {
       throw new Error('bootstrap carries an incompatible web contract')
     }

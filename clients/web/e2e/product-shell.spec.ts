@@ -77,6 +77,20 @@ test('completes route switching from the command palette without a mouse', async
   await page.getByRole('button', { name: /Go to Sessions/ }).focus()
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page.getByRole('main')).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('moves focus after sequence-driven product navigation', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page.getByRole('main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

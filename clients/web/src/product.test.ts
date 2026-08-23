@@ -421,7 +421,48 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('contradictory total')
+    ).rejects.toThrow('contradictory numeric page field')
+  })
+
+  it('rejects malformed catalog cursors', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+              cursor: 'not-a-number',
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('contradictory numeric page field')
+  })
+
+  it('requires a continuation when an initial page omits matching rows', async () => {
+    const pageFixture = fullActivityPageFixture()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ ...pageFixture, continuation: null, total: '48' })),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('omits a required continuation')
   })
 
   it('rejects contradictory state and action pairs', async () => {
@@ -609,7 +650,69 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('non-canonical turn count')
+    ).rejects.toThrow('non-canonical numeric field')
+  })
+
+  it('rejects non-canonical approval-judge counts', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+              summaries: [
+                {
+                  ...sessionPageFixture.summaries[0],
+                  judge: { ...sessionPageFixture.summaries[0].judge, actionable: 'NaN' },
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('non-canonical numeric field')
+  })
+
+  it('rejects zero goal generations', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+              summaries: [
+                {
+                  ...sessionPageFixture.summaries[0],
+                  state: 'blocked',
+                  action: 'provide_goal_need',
+                  goal_block: {
+                    generation: '0',
+                    reason: 'user_input_required',
+                    need_summary: 'Choose a target.',
+                  },
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('non-canonical numeric field')
   })
 
   it('rejects pre-epoch activity timestamps', async () => {
