@@ -374,8 +374,10 @@ describe('Session Workspace projection', () => {
     const reconciliation = {
       type: 'reconciliation',
       turn_id: '00000000-0000-0000-0000-000000000041',
-      operation_id: '00000000-0000-0000-0000-000000000042',
-      operation_kind: 'model_call',
+      operation: {
+        type: 'model_call',
+        model_call_id: '00000000-0000-0000-0000-000000000042',
+      },
       attempt_count: '2',
       cause_code: 'ambiguous_operation',
       exhausted: true,
@@ -385,8 +387,8 @@ describe('Session Workspace projection', () => {
     expect(
       isCompatibleDetailBody('turn_reconciliation_required', {
         ...reconciliation,
-        operation_kind: 'invented',
-      }),
+        operation: { type: 'invented' },
+      } as unknown as typeof reconciliation),
     ).toBe(false)
     expect(
       isCompatibleDetailBody('turn_reconciliation_required', {

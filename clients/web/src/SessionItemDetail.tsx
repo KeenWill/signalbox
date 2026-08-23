@@ -149,7 +149,7 @@ export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): bool
   if (body.type === 'reconciliation') {
     return (
       kind === 'turn_reconciliation_required' &&
-      (body.operation_kind === 'model_call' || body.operation_kind === 'tool_attempt') &&
+      (body.operation.type === 'model_call' || body.operation.type === 'tool_attempt') &&
       body.cause_code === 'ambiguous_operation' &&
       body.exhausted &&
       body.operator_required
@@ -511,8 +511,13 @@ const detailContent = (body: DetailBody): ReactNode => {
         <Facts
           facts={[
             ['Turn', body.turn_id],
-            ['Operation', body.operation_id],
-            ['Kind', body.operation_kind.replaceAll('_', ' ')],
+            [
+              'Operation',
+              body.operation.type === 'model_call'
+                ? body.operation.model_call_id
+                : body.operation.tool_attempt_id,
+            ],
+            ['Kind', body.operation.type.replaceAll('_', ' ')],
             ['Attempts', body.attempt_count],
             ['Cause', body.cause_code],
             ['Exhausted', body.exhausted ? 'yes' : 'no'],
