@@ -260,8 +260,15 @@ export class HttpImportApi implements ImportApi {
     private readonly now = Date.now,
   ) {}
 
-  static withAdmittedBootstrap(_bootstrap: WebContractBootstrap): HttpImportApi {
-    return new HttpImportApi(async () => undefined)
+  static withAdmittedBootstrap(
+    _bootstrap: WebContractBootstrap,
+    bootstrapValidation = validateWebContractBootstrap,
+    now = Date.now,
+  ): HttpImportApi {
+    const api = new HttpImportApi(bootstrapValidation, now)
+    api.bootstrapValidationPromise = Promise.resolve()
+    api.bootstrapValidatedAt = now()
+    return api
   }
 
   private validateBootstrap(): Promise<void> {

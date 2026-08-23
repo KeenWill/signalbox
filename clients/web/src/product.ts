@@ -4,6 +4,7 @@ const EXPECTED_BOOTSTRAP_LIMITS = {
   max_json_body_bytes: 65_536,
   max_ndjson_item_bytes: 65_536,
 } as const
+const BOOTSTRAP_RESPONSE_BYTES = 64 * 1024
 
 export class ProductContractAdmissionError extends Error {
   constructor(cause: unknown) {
@@ -83,6 +84,41 @@ export interface ProductTransport {
   readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap>
 }
 
+const readBoundedJson = async (response: Response, maximumBytes: number): Promise<unknown> => {
+  const contentLength = response.headers.get('Content-Length')
+  if (contentLength !== null) {
+    const declaredLength = Number(contentLength)
+    if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+      throw new Error('bootstrap response exceeds its byte ceiling')
+    }
+  }
+  if (!response.body) throw new TypeError('bootstrap response has no body')
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let receivedBytes = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      receivedBytes += value.byteLength
+      if (receivedBytes > maximumBytes) {
+        await reader.cancel()
+        throw new Error('bootstrap response exceeds its byte ceiling')
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  const bytes = new Uint8Array(receivedBytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+}
+
 export class SameOriginProductTransport implements ProductTransport {
   async readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap> {
     const response = await fetch('/api/bootstrap', {
@@ -92,7 +128,9 @@ export class SameOriginProductTransport implements ProductTransport {
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
     try {
-      const bootstrap = decodeWebContractBootstrap(await response.json())
+      const bootstrap = decodeWebContractBootstrap(
+        await readBoundedJson(response, BOOTSTRAP_RESPONSE_BYTES),
+      )
       if (Object.values(bootstrap.capabilities).some((enabled) => !enabled)) {
         throw new Error('incompatible web contract capabilities')
       }

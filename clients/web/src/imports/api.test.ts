@@ -98,6 +98,47 @@ describe('HttpImportApi correlation', () => {
     expect(bootstrapValidation).toHaveBeenCalledTimes(2)
   })
 
+  it('revalidates an admitted bootstrap after its validation lifetime expires', async () => {
+    let now = 1_000
+    const bootstrapValidation = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              items: [],
+              next_cursor: null,
+              search_correlation: null,
+              exact_source_session_id_sha256: null,
+            }),
+          ),
+      ),
+    )
+    const api = HttpImportApi.withAdmittedBootstrap(
+      {
+        contract: { name: 'signalbox.web-http', version: '2' },
+        capabilities: {
+          bounded_json: true,
+          import_discovery: true,
+          imported_continuations: true,
+          same_origin_json_mutations: true,
+          ndjson_streaming: true,
+        },
+        limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 65_536 },
+      },
+      bootstrapValidation,
+      () => now,
+    )
+
+    await api.list({ limit: 1 })
+    expect(bootstrapValidation).not.toHaveBeenCalled()
+    now += 30_000
+    await api.list({ limit: 1 })
+
+    expect(bootstrapValidation).toHaveBeenCalledTimes(1)
+  })
+
   it('rejects a declared oversized catalog response before parsing it', async () => {
     vi.stubGlobal(
       'fetch',

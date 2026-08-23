@@ -99,6 +99,27 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('fails closed and cancels an oversized streamed bootstrap response', async () => {
+    const cancel = vi.fn()
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(65_536))
+        controller.enqueue(new Uint8Array(1))
+      },
+      cancel,
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body)),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      ProductContractAdmissionError,
+    )
+
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+
   it('reports an unsuccessful HTTP response without decoding its body', async () => {
     vi.stubGlobal(
       'fetch',
