@@ -28,8 +28,10 @@
 #
 # The age bound is what keeps a live test's container safe: a container serving
 # a running test is minutes old at most, and the default two-hour floor sits far
-# above any suite's runtime. Removal is `--volumes`, so each container's
-# anonymous volume — roughly 49 MB of stranded disk apiece — goes with it.
+# above any suite's runtime. A disposable container's database state lives on a
+# bounded tmpfs Docker frees with the container — stranded state pins memory,
+# not disk — and removal still passes `--volumes`, so any anonymous volume a
+# marked container carries goes with it too.
 #
 # A volume whose container was already removed separately is dangling, belongs
 # to no container, and so is beyond anything this script can select; every

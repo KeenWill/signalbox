@@ -40,7 +40,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::{TcpListener, TcpStream},
     select,
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, watch},
     time::{Instant as TokioInstant, Sleep, sleep, timeout},
 };
 use uuid::Uuid;
@@ -183,7 +183,7 @@ impl RepoWatchWebhookRuntime {
     pub(crate) fn try_new(
         pool: PgPool,
         configuration: &RepositoryWatchConfiguration,
-        mut workers: HashMap<RepositorySlug, mpsc::Sender<()>>,
+        mut workers: HashMap<RepositorySlug, Arc<watch::Sender<()>>>,
     ) -> Result<Option<Self>, RepoWatchWebhookRuntimeConstructionError> {
         let Some(listener_configuration) = configuration.webhook() else {
             return Ok(None);
@@ -456,7 +456,7 @@ struct WebhookHookBinding {
     repository: RepositorySlug,
     secret: FileCredentialAccess,
     secret_reference: CredentialReference,
-    nudge: mpsc::Sender<()>,
+    nudge: Arc<watch::Sender<()>>,
 }
 
 #[derive(Deserialize)]
@@ -569,32 +569,22 @@ async fn admit_webhook(
         Err(_) => return StatusCode::BAD_REQUEST,
     };
     match state.store.admit(&admission).await {
-        Ok(RepoWatchWebhookAdmissionOutcome::Admitted(receipt)) => {
-            if hook.nudge.try_send(()).is_err() {
-                tracing::debug!(
-                    repository = %hook.repository.as_str(),
-                    hook_id = headers.hook_id().get(),
-                    delivery_id = %headers.delivery_id(),
-                    receipt_sequence = receipt.sequence().get(),
-                    "durable webhook delivery awaits repository worker drain"
-                );
+        Ok(RepoWatchWebhookAdmissionOutcome::Admitted(receipt))
+        | Ok(RepoWatchWebhookAdmissionOutcome::EqualDuplicate(receipt)) => {
+            match hook.nudge.send(()) {
+                Ok(()) => StatusCode::ACCEPTED,
+                Err(_) => {
+                    tracing::error!(
+                        repository = %hook.repository.as_str(),
+                        hook_id = headers.hook_id().get(),
+                        delivery_id = %headers.delivery_id(),
+                        receipt_sequence = receipt.sequence().get(),
+                        cause_code = "webhook_drain_task_unavailable",
+                        "durable webhook delivery could not wake its repository task"
+                    );
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
             }
-            StatusCode::ACCEPTED
-        }
-        Ok(RepoWatchWebhookAdmissionOutcome::EqualDuplicate(receipt)) => {
-            // The admission whose result was lost still returned no nudge, so
-            // this replay carries it. Waking the worker for a delivery that is
-            // already terminal costs one empty drain and nothing else.
-            if hook.nudge.try_send(()).is_err() {
-                tracing::debug!(
-                    repository = %hook.repository.as_str(),
-                    hook_id = headers.hook_id().get(),
-                    delivery_id = %headers.delivery_id(),
-                    receipt_sequence = receipt.sequence().get(),
-                    "equal webhook replay awaits repository worker drain"
-                );
-            }
-            StatusCode::ACCEPTED
         }
         Ok(RepoWatchWebhookAdmissionOutcome::Conflict) => {
             tracing::warn!(
@@ -1037,7 +1027,7 @@ fn advance_rate_buckets(window: &mut HookRateWindow, now: Instant) {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, num::NonZeroU64, time::Duration};
+    use std::{error::Error, fs, num::NonZeroU64, time::Duration};
 
     use axum::{
         body::Body,
@@ -1048,10 +1038,18 @@ mod tests {
     use sha2::Sha256;
     use signalbox_domain::RepositorySlug;
     use signalbox_model_runtime::CredentialReference;
-    use signalbox_persistence::repo_watch_webhook::PostgresRepoWatchWebhookStore;
-    use sqlx::postgres::PgPoolOptions;
+    use signalbox_persistence::{
+        disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+        disposable_test_container_labels, local_test_connection_options, migrate,
+        repo_watch_webhook::PostgresRepoWatchWebhookStore,
+    };
+    use sqlx::{PgPool, postgres::PgPoolOptions};
     use tempfile::TempDir;
-    use tokio::sync::{Semaphore, mpsc};
+    use testcontainers_modules::{
+        postgres::Postgres,
+        testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
+    };
+    use tokio::sync::{Semaphore, watch};
 
     use super::{
         FileCredentialAccess, GitHubWebhookHeadersV1, MAX_WEBHOOK_BODY_BYTES,
@@ -1069,6 +1067,34 @@ mod tests {
     const FIXTURE_SECRET: &[u8] = b"correct horse battery staple";
     const FIXTURE_REPOSITORY: &str = "keenwill/signalbox";
     const FIXTURE_FOREIGN_BODY: &[u8] = br#"{"repository":{"full_name":"someone/else"}}"#;
+    const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+    const DATABASE_NAME: &str = "signalbox_webhook_wake";
+    const DATABASE_USER: &str = "signalbox";
+    const DATABASE_PASSWORD: &str = "signalbox-test-only";
+    const WAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+        let container = Postgres::default()
+            .with_db_name(DATABASE_NAME)
+            .with_user(DATABASE_USER)
+            .with_password(DATABASE_PASSWORD)
+            .with_cmd(disposable_postgres_server_args())
+            .with_mount(disposable_postgres_state_tmpfs())
+            .with_tag(POSTGRES_IMAGE_TAG)
+            .with_labels(disposable_test_container_labels())
+            .start()
+            .await?;
+        let host = container.get_host().await?;
+        let port = container.get_host_port_ipv4(5432).await?;
+        let database_url =
+            format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect_with(local_test_connection_options(&database_url)?)
+            .await?;
+        migrate(&pool).await?;
+        Ok((container, pool))
+    }
 
     fn valid_headers() -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -1114,11 +1140,20 @@ mod tests {
     }
 
     fn fixture_state() -> (TempDir, WebhookHttpState) {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://fixture:fixture@127.0.0.1/fixture")
+            .expect("fixture PostgreSQL URL is valid");
+        let (directory, state, _receiver) = fixture_state_with_pool(pool);
+        (directory, state)
+    }
+
+    fn fixture_state_with_pool(pool: PgPool) -> (TempDir, WebhookHttpState, watch::Receiver<()>) {
         let directory = TempDir::new().expect("fixture directory is created");
         let secret_path = directory.path().join("webhook-secret");
         fs::write(&secret_path, FIXTURE_SECRET).expect("fixture secret is written");
         let secret_reference = CredentialReference::new("fixture-webhook");
-        let (nudge, _receiver) = mpsc::channel(1);
+        let (nudge, receiver) = watch::channel(());
+        let nudge = std::sync::Arc::new(nudge);
         let repository = RepositorySlug::try_new(FIXTURE_REPOSITORY.to_owned())
             .expect("fixture repository is canonical");
         let hooks = std::collections::HashMap::from([(
@@ -1134,9 +1169,6 @@ mod tests {
                 nudge,
             },
         )]);
-        let pool = PgPoolOptions::new()
-            .connect_lazy("postgres://fixture:fixture@127.0.0.1/fixture")
-            .expect("fixture PostgreSQL URL is valid");
         (
             directory,
             WebhookHttpState {
@@ -1147,6 +1179,7 @@ mod tests {
                 body_read_timeout: WEBHOOK_BODY_READ_TIMEOUT,
                 rate_limiter: std::sync::Arc::new(WebhookRateLimiter::new()),
             },
+            receiver,
         )
     }
 
@@ -1289,6 +1322,39 @@ mod tests {
         let status = admit_webhook(State(state), request).await;
 
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn durable_http_admission_directly_wakes_the_repository_task()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let (_directory, state, mut receiver) = fixture_state_with_pool(pool);
+        let request = fixture_request(FIXTURE_BODY.to_vec(), FIXTURE_BODY);
+
+        let status = admit_webhook(State(state), request).await;
+        tokio::time::timeout(WAKE_TIMEOUT, receiver.changed()).await??;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn equal_durable_replay_rewakes_the_repository_task() -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let (_directory, state, mut receiver) = fixture_state_with_pool(pool);
+        let first = fixture_request(FIXTURE_BODY.to_vec(), FIXTURE_BODY);
+        let replay = fixture_request(FIXTURE_BODY.to_vec(), FIXTURE_BODY);
+
+        let first_status = admit_webhook(State(state.clone()), first).await;
+        tokio::time::timeout(WAKE_TIMEOUT, receiver.changed()).await??;
+        let replay_status = admit_webhook(State(state), replay).await;
+        tokio::time::timeout(WAKE_TIMEOUT, receiver.changed()).await??;
+
+        assert_eq!(first_status, StatusCode::ACCEPTED);
+        assert_eq!(replay_status, StatusCode::ACCEPTED);
+        Ok(())
     }
 
     #[test]
