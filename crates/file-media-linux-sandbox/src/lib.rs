@@ -27,6 +27,8 @@ pub struct ChildSetup {
     pub seccomp_fd: i32,
     /// Startup-gate descriptor made inheritable only in the forked child.
     pub startup_gate_fd: i32,
+    /// Sealed worker snapshot made inheritable only in the forked child.
+    pub worker_fd: i32,
     /// Writable `cgroup.procs` descriptor for this invocation's delegated cgroup.
     pub cgroup_procs_fd: i32,
 }
@@ -42,23 +44,15 @@ pub fn install_pre_exec(command: &mut Command, setup: ChildSetup) {
 }
 
 fn prepare_child(setup: ChildSetup) -> io::Result<()> {
-    enter_cgroup(setup.cgroup_procs_fd).map_err(|error| child_setup_error("cgroup", error))?;
-    set_limit(libc::RLIMIT_AS, setup.address_space_bytes)
-        .map_err(|error| child_setup_error("address-space limit", error))?;
-    set_limit(libc::RLIMIT_CPU, setup.cpu_seconds)
-        .map_err(|error| child_setup_error("CPU limit", error))?;
-    set_limit(libc::RLIMIT_CORE, 0).map_err(|error| child_setup_error("core-dump limit", error))?;
-    set_limit(libc::RLIMIT_NOFILE, setup.file_descriptors)
-        .map_err(|error| child_setup_error("descriptor limit", error))?;
-    inherit_descriptor(setup.seccomp_fd)
-        .map_err(|error| child_setup_error("seccomp descriptor", error))?;
-    inherit_descriptor(setup.startup_gate_fd)
-        .map_err(|error| child_setup_error("startup-gate descriptor", error))?;
-    detach_session_keyring().map_err(|error| child_setup_error("session keyring", error))
-}
-
-fn child_setup_error(stage: &str, error: io::Error) -> io::Error {
-    io::Error::new(error.kind(), format!("file-media child {stage}: {error}"))
+    enter_cgroup(setup.cgroup_procs_fd)?;
+    set_limit(libc::RLIMIT_AS, setup.address_space_bytes)?;
+    set_limit(libc::RLIMIT_CPU, setup.cpu_seconds)?;
+    set_limit(libc::RLIMIT_CORE, 0)?;
+    set_limit(libc::RLIMIT_NOFILE, setup.file_descriptors)?;
+    inherit_descriptor(setup.seccomp_fd)?;
+    inherit_descriptor(setup.startup_gate_fd)?;
+    inherit_descriptor(setup.worker_fd)?;
+    detach_session_keyring()
 }
 
 fn enter_cgroup(cgroup_procs_fd: i32) -> io::Result<()> {

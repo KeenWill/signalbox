@@ -69,7 +69,7 @@ pub struct WorkerBinding {
 
 #[derive(Debug)]
 struct PinnedExecutable {
-    _file: fs::File,
+    file: fs::File,
     proc_path: PathBuf,
     byte_length: u64,
 }
@@ -228,13 +228,6 @@ impl SandboxedFileMediaProcessor {
             .stdout
             .take()
             .ok_or(ProcessorFailure::Unavailable)?;
-        let stderr = running
-            .child_mut()?
-            .stderr
-            .take()
-            .ok_or(ProcessorFailure::Unavailable)?;
-        let stderr_limit = self.ceilings.stderr_bytes();
-        let mut stderr_task = tokio::spawn(read_and_discard_diagnostics(stderr, stderr_limit));
         let expected = declaration_fingerprint(declarations);
         let output_limit = u64::try_from(expected.len())
             .map_err(|_| ProcessorFailure::Unavailable)?
@@ -265,17 +258,6 @@ impl SandboxedFileMediaProcessor {
         };
         if result.is_err() {
             running.terminate().await;
-        }
-        if let Ok(Ok(Ok(diagnostics))) =
-            tokio::time::timeout(CLEANUP_TIMEOUT, &mut stderr_task).await
-            && result.is_err()
-            && std::env::var_os("CI").is_some()
-            && !diagnostics.is_empty()
-        {
-            eprintln!(
-                "file-media sandbox probe stderr: {}",
-                String::from_utf8_lossy(&diagnostics)
-            );
         }
         result
     }
@@ -399,7 +381,7 @@ impl SandboxedFileMediaProcessor {
             InvocationTaskCgroup::create(&self.task_cgroup_root, self.ceilings.memory_bytes())
                 .map_err(|_| ProcessorFailure::Unavailable)?;
         let profile = sandbox_arguments(
-            &worker.proc_path,
+            worker.file.as_raw_fd(),
             seccomp.as_raw_fd(),
             block_read.as_raw_fd(),
             self.ceilings.memory_bytes(),
@@ -413,7 +395,7 @@ impl SandboxedFileMediaProcessor {
             .env_clear()
             .stdin(if probe { Stdio::null() } else { Stdio::piped() })
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(if probe { Stdio::null() } else { Stdio::piped() })
             .kill_on_drop(true);
         let seccomp_fd = seccomp.as_raw_fd();
         let block_fd = block_read.as_raw_fd();
@@ -428,15 +410,11 @@ impl SandboxedFileMediaProcessor {
                 file_descriptors: self.ceilings.file_descriptors(),
                 seccomp_fd,
                 startup_gate_fd: block_fd,
+                worker_fd: worker.file.as_raw_fd(),
                 cgroup_procs_fd,
             },
         );
-        let child = command.spawn().map_err(|error| {
-            if std::env::var_os("CI").is_some() {
-                eprintln!("file-media sandbox spawn failed: {error}");
-            }
-            ProcessorFailure::Unavailable
-        })?;
+        let child = command.spawn().map_err(|_| ProcessorFailure::Unavailable)?;
         drop(block_read);
         let raw_pid = child.id().ok_or(ProcessorFailure::Unavailable)?;
         let pid =
@@ -1003,13 +981,14 @@ fn startup_pipe() -> Result<(rustix::fd::OwnedFd, rustix::fd::OwnedFd), rustix::
 }
 
 fn sandbox_arguments(
-    worker: &Path,
+    worker_fd: i32,
     seccomp_fd: i32,
     block_fd: i32,
     memory_bytes: u64,
     probe_declarations: Option<&[FileMediaProviderDeclaration]>,
 ) -> Vec<std::ffi::OsString> {
     let memory = worker_memory_budget(memory_bytes);
+    let worker = PathBuf::from(format!("/proc/self/fd/{worker_fd}"));
     let mut arguments = [
         "--die-with-parent",
         "--new-session",
@@ -1054,7 +1033,7 @@ fn sandbox_arguments(
         std::ffi::OsString::from("--tmpfs"),
         std::ffi::OsString::from("/dev/shm"),
         std::ffi::OsString::from("--ro-bind"),
-        worker.as_os_str().to_owned(),
+        worker.into_os_string(),
         std::ffi::OsString::from(WORKER_SANDBOX_PATH),
         std::ffi::OsString::from("--seccomp"),
         std::ffi::OsString::from(seccomp_fd.to_string()),
@@ -1391,7 +1370,7 @@ fn open_executable_snapshot(
         file.as_raw_fd()
     ));
     Ok(PinnedExecutable {
-        _file: file,
+        file,
         proc_path,
         byte_length: copied,
     })
@@ -1487,9 +1466,7 @@ impl Error for SandboxedFileMediaProcessorConstructionError {}
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        ffi::OsStr, fs, os::unix::fs::PermissionsExt as _, path::Path, sync::atomic::AtomicU64,
-    };
+    use std::{ffi::OsStr, fs, os::unix::fs::PermissionsExt as _, sync::atomic::AtomicU64};
 
     use signalbox_file_media_runtime::{
         CancellationSignal, CanonicalJsonObjectSchema, FileReadInput, MAX_READ_OPTIONS_BYTES,
@@ -1629,8 +1606,7 @@ mod tests {
 
     #[test]
     fn sandbox_profile_clears_authority_before_the_exact_worker() {
-        let arguments =
-            sandbox_arguments(Path::new("/fixture/worker"), 8, 9, 512 * 1024 * 1024, None);
+        let arguments = sandbox_arguments(7, 8, 9, 512 * 1024 * 1024, None);
         let expected_prefix = [
             "--die-with-parent",
             "--new-session",
@@ -1650,7 +1626,7 @@ mod tests {
             window
                 == [
                     OsStr::new("--ro-bind"),
-                    OsStr::new("/fixture/worker"),
+                    OsStr::new("/proc/self/fd/7"),
                     OsStr::new("/signalbox-file-media-worker"),
                 ]
         }));

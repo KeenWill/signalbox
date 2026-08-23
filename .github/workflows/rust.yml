@@ -370,8 +370,6 @@ jobs:
       - name: Install Bubblewrap
         run: |
           sudo apt-get install --yes bubblewrap
-          bwrap --version
-          bwrap --help | grep -E -- '--size|--disable-userns|--assert-userns-disabled'
       - name: Enable unprivileged user namespaces for Bubblewrap
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Delegate the file-media task controller
