@@ -24,7 +24,7 @@ use std::{
     process::Stdio,
     sync::{
         Arc, Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::JoinHandle,
     time::Instant,
@@ -80,6 +80,8 @@ const GIT_DIRECTORY_MARKER_PREFIX: &str = "gitdir: ";
 const GIT_ADMINISTRATION_MARKER: &str = ".git";
 #[cfg(target_os = "linux")]
 const GIT_WORKTREE_BACKLINK: &str = "gitdir";
+#[cfg(target_os = "linux")]
+static GIT_BACKLINK_TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const SANDBOX_DISPATCH_PROGRAM: &str = "/signalbox-exec-dispatch";
 const SANDBOX_FALLBACK_PATH: &str = "/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 pub(crate) const SANDBOX_DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
@@ -1215,6 +1217,7 @@ impl<Runner: ProcessRunner> CommandExecution for UnsandboxedCommandRunner<Runner
             &self.workspace_identity,
             &arguments.working_directory,
             &arguments.program,
+            &arguments.arguments,
         );
         #[cfg(target_os = "linux")]
         if let Some(git_worktree) = &git_worktree {
@@ -1243,8 +1246,9 @@ fn pin_sandbox_linked_worktree(
     workspace: &WorkspaceIdentity,
     working_directory: &str,
     program: &str,
+    arguments: &[String],
 ) -> Option<GitWorktreeIdentity> {
-    if Path::new(program).file_name()? != "git" {
+    if Path::new(program).file_name()? != "git" || git_arguments_select_repository(arguments) {
         return None;
     }
     let mut candidate = Path::new(working_directory).to_owned();
@@ -1262,9 +1266,36 @@ fn pin_sandbox_linked_worktree(
                 worktree,
             });
         }
+        if !git_administration_marker_absent(&worktree._directory) {
+            return None;
+        }
         if !candidate.pop() {
             return None;
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn git_arguments_select_repository(arguments: &[String]) -> bool {
+    arguments.iter().any(|argument| {
+        argument == "init"
+            || argument.starts_with("-C")
+            || argument == "--git-dir"
+            || argument.starts_with("--git-dir=")
+            || argument == "--work-tree"
+            || argument.starts_with("--work-tree=")
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn git_administration_marker_absent(directory: &rustix::fd::OwnedFd) -> bool {
+    match rustix::fs::statat(
+        directory,
+        GIT_ADMINISTRATION_MARKER,
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    ) {
+        Ok(_) => false,
+        Err(error) => error == rustix::io::Errno::NOENT,
     }
 }
 
@@ -1356,7 +1387,7 @@ fn repair_linked_worktree_backlink(
     if backlink != format!("{}\n", expected_sandbox_backlink.display()).as_bytes() {
         return None;
     }
-    let temporary_name = format!(".signalbox-gitdir-{}", std::process::id());
+    let temporary_name = linked_worktree_backlink_temporary_name();
     let descriptor = rustix::fs::openat(
         &administration._directory,
         temporary_name.as_str(),
@@ -1394,6 +1425,12 @@ fn repair_linked_worktree_backlink(
         return None;
     }
     Some(())
+}
+
+#[cfg(target_os = "linux")]
+fn linked_worktree_backlink_temporary_name() -> String {
+    let sequence = GIT_BACKLINK_TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!(".signalbox-gitdir-{}-{sequence}", std::process::id())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -3018,6 +3055,45 @@ mod tests {
     const ISOLATION_FIXTURE_TIMEOUT: Duration = Duration::from_secs(30);
 
     #[cfg(target_os = "linux")]
+    async fn assert_unsandboxed_git_environment_absent(
+        workspace: &ReplacementWorkspace,
+        arguments: Vec<String>,
+        working_directory: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_process(b"complete"),
+        );
+        let observation = runner.clone();
+        let mut command_runner = UnsandboxedCommandRunner::try_new(runner, &workspace.path)?;
+
+        command_runner
+            .execute(ExecArguments {
+                program: String::from("git"),
+                arguments,
+                working_directory: String::from(working_directory),
+                timeout_seconds: 30,
+            })
+            .await;
+        let requests = observation.recorded_requests();
+        let request = requests
+            .first()
+            .ok_or_else(|| std::io::Error::other("one direct process request"))?;
+
+        assert!(
+            !request
+                .environment
+                .contains_key(std::ffi::OsStr::new("GIT_DIR"))
+        );
+        assert!(
+            !request
+                .environment
+                .contains_key(std::ffi::OsStr::new("GIT_WORK_TREE"))
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn cleanup_supervision_failure_remains_distinct() {
         let outcome = supervisor_outcome(
@@ -4119,6 +4195,7 @@ mod tests {
             &workspace_identity,
             SANDBOX_LINKED_WORKTREE_DIRECTORY,
             "git",
+            &[String::from("status")],
         )
         .ok_or_else(|| std::io::Error::other("pinned linked worktree"))?;
         assert_eq!(
@@ -4187,8 +4264,13 @@ mod tests {
             format!("{SANDBOX_WORKSPACE}/{SANDBOX_LINKED_WORKTREE_DIRECTORY}/.git\n"),
         )?;
         let workspace_identity = WorkspaceIdentity::capture(&workspace.path)?;
-        let pinned = pin_sandbox_linked_worktree(&workspace_identity, "linked/src", "git")
-            .ok_or_else(|| std::io::Error::other("pinned ancestor linked worktree"))?;
+        let pinned = pin_sandbox_linked_worktree(
+            &workspace_identity,
+            "linked/src",
+            "git",
+            &[String::from("status")],
+        )
+        .ok_or_else(|| std::io::Error::other("pinned ancestor linked worktree"))?;
         assert_eq!(
             pinned.worktree.bind_source.canonicalize()?,
             worktree.canonicalize()?
@@ -4267,6 +4349,136 @@ mod tests {
                 .contains_key(std::ffi::OsStr::new("GIT_WORK_TREE"))
         );
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn unsandboxed_git_stops_at_a_nested_repository_marker() -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let worktree = workspace.path.join(SANDBOX_LINKED_WORKTREE_DIRECTORY);
+        let nested = worktree.join("nested");
+        let administration = workspace.path.join(SANDBOX_LINKED_ADMINISTRATION_RELATIVE);
+        std::fs::create_dir_all(nested.join(GIT_ADMINISTRATION_MARKER))?;
+        std::fs::create_dir_all(&administration)?;
+        std::fs::write(
+            worktree.join(GIT_ADMINISTRATION_MARKER),
+            format!("{GIT_DIRECTORY_MARKER_PREFIX}{SANDBOX_LINKED_ADMINISTRATION_PATH}\n"),
+        )?;
+        std::fs::write(
+            administration.join(GIT_WORKTREE_BACKLINK),
+            format!("{SANDBOX_WORKSPACE}/{SANDBOX_LINKED_WORKTREE_DIRECTORY}/.git\n"),
+        )?;
+
+        assert_unsandboxed_git_environment_absent(
+            &workspace,
+            vec![String::from("status")],
+            "linked/nested",
+        )
+        .await
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn unsandboxed_git_preserves_an_explicit_repository_selector()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let worktree = workspace.path.join(SANDBOX_LINKED_WORKTREE_DIRECTORY);
+        let administration = workspace.path.join(SANDBOX_LINKED_ADMINISTRATION_RELATIVE);
+        std::fs::create_dir_all(&worktree)?;
+        std::fs::create_dir_all(&administration)?;
+        std::fs::write(
+            worktree.join(GIT_ADMINISTRATION_MARKER),
+            format!("{GIT_DIRECTORY_MARKER_PREFIX}{SANDBOX_LINKED_ADMINISTRATION_PATH}\n"),
+        )?;
+        std::fs::write(
+            administration.join(GIT_WORKTREE_BACKLINK),
+            format!("{SANDBOX_WORKSPACE}/{SANDBOX_LINKED_WORKTREE_DIRECTORY}/.git\n"),
+        )?;
+
+        assert_unsandboxed_git_environment_absent(
+            &workspace,
+            vec![
+                String::from("-C"),
+                String::from("../other"),
+                String::from("status"),
+            ],
+            SANDBOX_LINKED_WORKTREE_DIRECTORY,
+        )
+        .await
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn unsandboxed_git_init_does_not_inherit_the_linked_worktree_environment()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let worktree = workspace.path.join(SANDBOX_LINKED_WORKTREE_DIRECTORY);
+        let administration = workspace.path.join(SANDBOX_LINKED_ADMINISTRATION_RELATIVE);
+        std::fs::create_dir_all(&worktree)?;
+        std::fs::create_dir_all(&administration)?;
+        std::fs::write(
+            worktree.join(GIT_ADMINISTRATION_MARKER),
+            format!("{GIT_DIRECTORY_MARKER_PREFIX}{SANDBOX_LINKED_ADMINISTRATION_PATH}\n"),
+        )?;
+        std::fs::write(
+            administration.join(GIT_WORKTREE_BACKLINK),
+            format!("{SANDBOX_WORKSPACE}/{SANDBOX_LINKED_WORKTREE_DIRECTORY}/.git\n"),
+        )?;
+
+        assert_unsandboxed_git_environment_absent(
+            &workspace,
+            vec![String::from("init")],
+            SANDBOX_LINKED_WORKTREE_DIRECTORY,
+        )
+        .await
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn unsandboxed_git_rejects_a_marker_outside_the_sandbox_workspace()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let worktree = workspace.path.join(SANDBOX_LINKED_WORKTREE_DIRECTORY);
+        std::fs::create_dir_all(&worktree)?;
+        std::fs::write(
+            worktree.join(GIT_ADMINISTRATION_MARKER),
+            "gitdir: /outside/worktrees/linked\n",
+        )?;
+
+        assert_unsandboxed_git_environment_absent(
+            &workspace,
+            vec![String::from("status")],
+            SANDBOX_LINKED_WORKTREE_DIRECTORY,
+        )
+        .await
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn unsandboxed_git_rejects_a_traversing_sandbox_marker() -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let worktree = workspace.path.join(SANDBOX_LINKED_WORKTREE_DIRECTORY);
+        std::fs::create_dir_all(&worktree)?;
+        std::fs::write(
+            worktree.join(GIT_ADMINISTRATION_MARKER),
+            "gitdir: /workspace/../outside/worktrees/linked\n",
+        )?;
+
+        assert_unsandboxed_git_environment_absent(
+            &workspace,
+            vec![String::from("status")],
+            SANDBOX_LINKED_WORKTREE_DIRECTORY,
+        )
+        .await
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linked_worktree_backlink_temporary_names_are_unique() {
+        let first = linked_worktree_backlink_temporary_name();
+        let second = linked_worktree_backlink_temporary_name();
+
+        assert_ne!(first, second);
     }
 
     #[cfg(target_os = "linux")]

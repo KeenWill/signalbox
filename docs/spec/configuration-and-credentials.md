@@ -994,8 +994,17 @@ launch. When the direct program is Git and that directory is a linked worktree
 whose `.git` marker names an administration directory below the sandbox-only
 `/workspace` path, execution pins the corresponding directory below the injected
 workspace root and supplies the pinned administration and worktree paths through
-Git's environment. Other programs and other `.git` marker shapes receive no
-Git-specific environment.
+Git's environment. Discovery stops at the first `.git` entry, so a nested clone
+or submodule never inherits an outer worktree's environment, and explicit Git
+repository selectors (`-C`, `--git-dir`, or `--work-tree`) suppress injection.
+Before injection, execution atomically rewrites the linked-worktree
+administration directory's sandbox-only `gitdir` backlink to the corresponding
+host marker path so host-side worktree maintenance does not prune the live
+worktree. That durable metadata write exposes the host workspace path to the
+sandbox-side view and can make sandbox-side worktree maintenance unable to
+resolve the backlink; callers needing that view must recreate the linked
+worktree there. Other programs and other `.git` marker shapes receive no
+Git-specific environment or metadata mutation.
 
 `sandboxed_exec` and `cargo_diagnostics` share one daemon-local bubblewrap
 profile. Its name claims more than it delivers, so this page recites the launch
