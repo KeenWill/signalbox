@@ -7,6 +7,7 @@ use std::{
     fs::File,
     future::Future,
     io::{self, Read, Write},
+    os::fd::AsFd as _,
     os::unix::ffi::{OsStrExt as _, OsStringExt as _},
     os::unix::fs::{MetadataExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
@@ -26,6 +27,8 @@ use signalbox_runner_wire::{
     RepositoryKey, SandboxProfile, WorkingDirectory, WorkspaceManifest, workspace_manifest_digest,
 };
 use uuid::Uuid;
+
+use signalbox_runner_fchmodat2::{chmod_descriptor, ensure_available};
 
 const DIRECTORY_MODE: u32 = 0o700;
 const DOCUMENT_MODE: u32 = 0o600;
@@ -257,11 +260,12 @@ pub struct RunnerWorkspaceStore {
 }
 
 impl RunnerWorkspaceStore {
-    pub(crate) const fn from_root(root: File, canonical_root: PathBuf) -> Self {
-        Self {
+    pub(crate) fn from_root(root: File, canonical_root: PathBuf) -> io::Result<Self> {
+        ensure_available()?;
+        Ok(Self {
             root,
             canonical_root,
-        }
+        })
     }
 
     /// Creates and publishes one private root, or replays its exact ready manifest.
@@ -388,7 +392,15 @@ impl RunnerWorkspaceStore {
             &manifest,
         )
         .map_err(PrepareRepositoryWorkspaceError::Storage)?;
-        sync_directory_tree(&repository).map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let durability_repository = repository
+            .try_clone()
+            .map_err(RunnerWorkspaceError::Io)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        tokio::task::spawn_blocking(move || sync_directory_tree(&durability_repository))
+            .await
+            .map_err(|error| RunnerWorkspaceError::Io(io::Error::other(error)))
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         manifest.lifecycle = ManifestLifecycle::Ready;
         write_manifest(
             staging
@@ -1079,20 +1091,36 @@ fn remove_directory_steps(
                 let status =
                     statat(parent.as_ref(), &name, AtFlags::SYMLINK_NOFOLLOW).map_err(rustix_io)?;
                 if FileType::from_raw_mode(status.st_mode) == FileType::Directory {
-                    let descriptor = openat(
+                    let opaque_descriptor = openat(
+                        parent.as_ref(),
+                        &name,
+                        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(rustix_io)?;
+                    let opaque = File::from(opaque_descriptor);
+                    let identity = DirectoryIdentity::from_file(&opaque)?;
+                    if !identity.names(parent.as_ref(), &name)? {
+                        return Err(RunnerWorkspaceError::ManifestConflict);
+                    }
+                    chmod_descriptor(
+                        opaque.as_fd(),
+                        (Mode::RUSR | Mode::WUSR | Mode::XUSR).bits(),
+                    )
+                    .map_err(RunnerWorkspaceError::Io)?;
+                    if DirectoryIdentity::from_file(&opaque)? != identity
+                        || !identity.names(parent.as_ref(), &name)?
+                    {
+                        return Err(RunnerWorkspaceError::ManifestConflict);
+                    }
+                    let readable_descriptor = openat(
                         parent.as_ref(),
                         &name,
                         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                         Mode::empty(),
                     )
                     .map_err(rustix_io)?;
-                    let child = Rc::new(File::from(descriptor));
-                    let identity = DirectoryIdentity::from_file(child.as_ref())?;
-                    if !identity.names(parent.as_ref(), &name)? {
-                        return Err(RunnerWorkspaceError::ManifestConflict);
-                    }
-                    fchmod(child.as_ref(), Mode::RUSR | Mode::WUSR | Mode::XUSR)
-                        .map_err(rustix_io)?;
+                    let child = Rc::new(File::from(readable_descriptor));
                     if DirectoryIdentity::from_file(child.as_ref())? != identity
                         || !identity.names(parent.as_ref(), &name)?
                     {
@@ -1281,6 +1309,11 @@ mod tests {
     const CLONE_URL: &str = "https://github.com/KeenWill/signalbox.git";
     const PREPARED_REPOSITORY_BYTES: &[u8] = b"repository\n";
     const LATE_REPOSITORY_WRITE_BYTES: &[u8] = b"late repository write\n";
+    const ARBITRARY_FIRST_CONCURRENT_REPOSITORY_BYTES: &[u8] = b"first\n";
+    const ARBITRARY_SECOND_CONCURRENT_REPOSITORY_BYTES: &[u8] = b"second\n";
+    const NESTED_REPOSITORY_DIRECTORY: &str = "nested";
+    const PARTIAL_REPOSITORY_BYTES: &[u8] = b"partial repository\n";
+    const ARBITRARY_NESTED_REPOSITORY_BYTES: &[u8] = b"prepared repository\n";
 
     fn fixture_root() -> (TempDir, RunnerStateRoot) {
         let parent = tempfile::tempdir().expect("the workspace fixture parent exists");
@@ -1481,7 +1514,7 @@ mod tests {
             .workspace_store()
             .expect("the locked root forms a workspace store")
             .prepare_repository_workspace(&expected, |target| async move {
-                fs::write(target.path().join("partial"), b"partial repository\n")?;
+                fs::write(target.path().join("partial"), PARTIAL_REPOSITORY_BYTES)?;
                 Err::<Recovery, std::io::Error>(std::io::Error::other(
                     "the fixture preparation fails",
                 ))
@@ -1526,8 +1559,10 @@ mod tests {
                 .workspace_store()
                 .expect("the locked root forms a workspace store")
                 .prepare_repository_workspace(&expected, |target| async move {
-                    fs::write(target.path().join("partial"), b"partial repository\n")?;
-                    fs::set_permissions(target.path(), fs::Permissions::from_mode(0o000))?;
+                    let nested = target.path().join(NESTED_REPOSITORY_DIRECTORY);
+                    fs::create_dir(&nested)?;
+                    fs::write(nested.join("partial"), PARTIAL_REPOSITORY_BYTES)?;
+                    fs::set_permissions(&nested, fs::Permissions::from_mode(0o000))?;
                     let _ = started.send(());
                     future::pending::<Result<Recovery, std::io::Error>>().await
                 })
@@ -1915,7 +1950,7 @@ mod tests {
         let repository = tempfile::tempdir().expect("the repository fixture exists");
         let nested = repository.path().join("objects").join("pack");
         fs::create_dir_all(&nested).expect("the nested repository fixture exists");
-        fs::write(nested.join("pack"), b"prepared repository\n")
+        fs::write(nested.join("pack"), ARBITRARY_NESTED_REPOSITORY_BYTES)
             .expect("the nested repository file exists");
         std::os::unix::fs::symlink("objects/pack/pack", repository.path().join("HEAD"))
             .expect("the repository symlink fixture exists");
@@ -1940,7 +1975,10 @@ mod tests {
         let first_barrier = Arc::clone(&barrier);
         let second_barrier = Arc::clone(&barrier);
         let first = first_store.prepare_repository_workspace(&expected, move |target| async move {
-            fs::write(target.path().join("prepared"), b"first\n")?;
+            fs::write(
+                target.path().join("prepared"),
+                ARBITRARY_FIRST_CONCURRENT_REPOSITORY_BYTES,
+            )?;
             first_barrier.wait().await;
             Ok::<Recovery, std::io::Error>(Recovery::Commit {
                 revision: "f".repeat(40),
@@ -1948,7 +1986,10 @@ mod tests {
         });
         let second =
             second_store.prepare_repository_workspace(&expected, move |target| async move {
-                fs::write(target.path().join("prepared"), b"second\n")?;
+                fs::write(
+                    target.path().join("prepared"),
+                    ARBITRARY_SECOND_CONCURRENT_REPOSITORY_BYTES,
+                )?;
                 second_barrier.wait().await;
                 Ok::<Recovery, std::io::Error>(Recovery::Commit {
                     revision: "0".repeat(40),

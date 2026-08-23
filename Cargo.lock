@@ -3380,6 +3380,7 @@ dependencies = [
  "signalbox-model-provider-runtime",
  "signalbox-model-runtime",
  "signalbox-persistence",
+ "signalbox-runner-fchmodat2",
  "signalbox-runner-wire",
  "signalbox-test-bin",
  "signalbox-tools-exec",
@@ -3391,6 +3392,14 @@ dependencies = [
  "toml",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "signalbox-runner-fchmodat2"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "tempfile",
 ]
 
 [[package]]
