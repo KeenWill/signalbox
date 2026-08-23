@@ -2029,6 +2029,7 @@ fn direct_compaction_request(
         session: SessionId::from_uuid(session_id.into_uuid()),
         requested_through_position,
         automatic_for_turn: None,
+        automatic_content_byte_target: None,
         defaults_version: SessionConfigurationDefaultsVersion::first(),
         selection: DirectModelSelection::from_uuid(Uuid::from_u128(1)),
         target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
@@ -7714,6 +7715,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
             session: SessionId::from_uuid(session_id.into_uuid()),
             requested_through_position: None,
             automatic_for_turn: None,
+            automatic_content_byte_target: None,
             defaults_version: SessionConfigurationDefaultsVersion::first(),
             selection: DirectModelSelection::from_uuid(Uuid::from_u128(1)),
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
@@ -7761,6 +7763,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
             session: SessionId::from_uuid(session_id.into_uuid()),
             requested_through_position: None,
             automatic_for_turn: None,
+            automatic_content_byte_target: None,
             defaults_version: SessionConfigurationDefaultsVersion::first(),
             selection: DirectModelSelection::from_uuid(Uuid::from_u128(1)),
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(

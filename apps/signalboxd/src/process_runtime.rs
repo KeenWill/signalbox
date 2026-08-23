@@ -6956,6 +6956,7 @@ where
             session,
             requested_through_position,
             automatic_for_turn: None,
+            automatic_content_byte_target: None,
             defaults_version: defaults.version(),
             selection,
             target,
@@ -7254,11 +7255,18 @@ pub(crate) async fn compact_automatically(
         .resolve(FrozenModelSelection::Direct(selection))
         .map_err(|_| AutomaticContextCompactionError::Configuration)?
         .target();
-    let input_includes_cache_tokens = model_configuration
+    let route = model_configuration
         .resolve_direct_model(selection)
-        .ok_or(AutomaticContextCompactionError::Configuration)?
-        .adapter()
-        .reports_cache_inclusive_input();
+        .ok_or(AutomaticContextCompactionError::Configuration)?;
+    let input_includes_cache_tokens = route.adapter().reports_cache_inclusive_input();
+    let runtime_models = model_configuration.runtime_model_catalog();
+    let definition = runtime_models
+        .resolve(target)
+        .ok_or(AutomaticContextCompactionError::Configuration)?;
+    let automatic_content_byte_target = u64::from(definition.context_window_tokens())
+        .checked_sub(u64::from(definition.max_output_tokens()))
+        .and_then(NonZeroU64::new)
+        .ok_or(AutomaticContextCompactionError::Configuration)?;
     let credential_reference = model_calls
         .resolve_session_credential_reference(session, target)
         .await
@@ -7270,6 +7278,7 @@ pub(crate) async fn compact_automatically(
             session,
             requested_through_position: None,
             automatic_for_turn: Some(turn),
+            automatic_content_byte_target: Some(automatic_content_byte_target),
             defaults_version: defaults.version(),
             selection,
             target,

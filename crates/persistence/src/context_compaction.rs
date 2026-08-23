@@ -1,6 +1,6 @@
 //! Durable explicit context-compaction command and call lifecycle.
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{collections::BTreeMap, error::Error, fmt, num::NonZeroU64};
 
 use rust_decimal::Decimal;
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
@@ -34,6 +34,8 @@ pub struct PrepareContextCompactionRequest {
     pub requested_through_position: Option<u64>,
     /// Queued turn whose context guard owns this automatic attempt.
     pub automatic_for_turn: Option<TurnId>,
+    /// Model-derived content-byte target for an automatic summary prefix.
+    pub automatic_content_byte_target: Option<NonZeroU64>,
     /// Current defaults epoch observed before entering the transaction.
     pub defaults_version: SessionConfigurationDefaultsVersion,
     /// Current direct model selection after freezing any alias.
@@ -777,6 +779,11 @@ async fn prepare_in_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     request: &PrepareContextCompactionRequest,
 ) -> Result<(bool, PrepareContextCompactionOutcome), ContextCompactionRepositoryError> {
+    if request.automatic_for_turn.is_some() != request.automatic_content_byte_target.is_some()
+        || request.automatic_for_turn.is_some() && request.requested_through_position.is_some()
+    {
+        return Ok((false, PrepareContextCompactionOutcome::InvalidBoundary));
+    }
     match lookup_command_on_connection(
         transaction,
         request.command,
@@ -1010,8 +1017,10 @@ async fn prepare_in_transaction(
         Some(position) => visible
             .iter()
             .position(|member| member.position == position),
-        None if request.automatic_for_turn.is_some() => bounded_safe_boundary(&visible),
-        None => latest_safe_boundary(&visible),
+        None => match request.automatic_content_byte_target {
+            Some(target) => bounded_safe_boundary(&visible, target.get()),
+            None => latest_safe_boundary(&visible),
+        },
     };
     let Some(through_index) = through_index else {
         return Ok((false, PrepareContextCompactionOutcome::InvalidBoundary));
@@ -1395,11 +1404,14 @@ fn latest_safe_boundary(members: &[ProjectedFrontierMember]) -> Option<usize> {
     latest
 }
 
-fn bounded_safe_boundary(members: &[ProjectedFrontierMember]) -> Option<usize> {
+fn bounded_safe_boundary(
+    members: &[ProjectedFrontierMember],
+    content_byte_target: u64,
+) -> Option<usize> {
     let total_weight = members.iter().fold(0_u64, |total, member| {
         total.saturating_add(member.content_bytes.max(1))
     });
-    let midpoint_weight = total_weight.div_ceil(2);
+    let target_weight = total_weight.div_ceil(2).min(content_byte_target);
     let mut through_weight = 0_u64;
     let mut open_requests = 0_usize;
     for (index, member) in members.iter().enumerate() {
@@ -1411,7 +1423,7 @@ fn bounded_safe_boundary(members: &[ProjectedFrontierMember]) -> Option<usize> {
             }
             _ => {}
         }
-        if through_weight >= midpoint_weight && open_requests == 0 {
+        if through_weight >= target_weight && open_requests == 0 {
             return Some(index);
         }
     }
@@ -1662,7 +1674,7 @@ mod tests {
             ordinary(4, entry(0x7024)),
         ];
 
-        assert_eq!(bounded_safe_boundary(&visible), Some(1));
+        assert_eq!(bounded_safe_boundary(&visible, u64::MAX), Some(1));
     }
 
     #[test]
@@ -1700,7 +1712,7 @@ mod tests {
             ordinary(6, entry(0x7036)),
         ];
 
-        assert_eq!(bounded_safe_boundary(&visible), Some(3));
+        assert_eq!(bounded_safe_boundary(&visible, u64::MAX), Some(3));
     }
 
     #[test]
@@ -1712,6 +1724,44 @@ mod tests {
             weighted_ordinary(4, entry(0x7044), 100),
         ];
 
-        assert_eq!(bounded_safe_boundary(&visible), Some(2));
+        assert_eq!(bounded_safe_boundary(&visible, u64::MAX), Some(2));
+    }
+
+    #[test]
+    fn automatic_boundary_stops_at_the_model_derived_content_budget() {
+        let visible = vec![
+            weighted_ordinary(1, entry(0x7051), 100),
+            weighted_ordinary(2, entry(0x7052), 100),
+            weighted_ordinary(3, entry(0x7053), 100),
+            weighted_ordinary(4, entry(0x7054), 100),
+            weighted_ordinary(5, entry(0x7055), 100),
+            weighted_ordinary(6, entry(0x7056), 100),
+        ];
+
+        assert_eq!(bounded_safe_boundary(&visible, 200), Some(1));
+    }
+
+    #[test]
+    fn automatic_boundary_closes_a_tool_exchange_crossing_the_model_budget() {
+        let visible = vec![
+            weighted_ordinary(1, entry(0x7061), 100),
+            ProjectedFrontierMember {
+                position: 2,
+                reference: entry(0x7062),
+                payload_kind: "assistant_tool_use".to_owned(),
+                content_bytes: 100,
+                summary_range: None,
+            },
+            ProjectedFrontierMember {
+                position: 3,
+                reference: entry(0x7063),
+                payload_kind: "tool_execution_result".to_owned(),
+                content_bytes: 100,
+                summary_range: None,
+            },
+            weighted_ordinary(4, entry(0x7064), 100),
+        ];
+
+        assert_eq!(bounded_safe_boundary(&visible, 150), Some(2));
     }
 }
