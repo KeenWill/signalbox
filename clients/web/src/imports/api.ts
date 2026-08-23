@@ -6,6 +6,7 @@ import {
   decodeWebImportEntryWindow,
   decodeWebImportListPage,
   type WebApiErrorResponse,
+  type WebContractBootstrap,
   type WebImportContinuationRequest,
   type WebImportContinuationResponse,
   type WebImportDescriptor,
@@ -180,6 +181,10 @@ export class HttpImportApi implements ImportApi {
   private bootstrapValidationPromise: Promise<void> | undefined
 
   constructor(private readonly bootstrapValidation = validateWebContractBootstrap) {}
+
+  static withAdmittedBootstrap(_bootstrap: WebContractBootstrap): HttpImportApi {
+    return new HttpImportApi(async () => undefined)
+  }
 
   private validateBootstrap(): Promise<void> {
     this.bootstrapValidationPromise ??= this.bootstrapValidation().catch((error: unknown) => {

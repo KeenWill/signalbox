@@ -14,6 +14,7 @@ export interface CommandContext {
   navigate?: (path: string) => void
   transcriptPreferences?: boolean
   presentationPreferences?: boolean
+  requestedPaneSizes?: RootState['app']['paneSizes']
   canContinueImport?: boolean
   continueImport?: (relationship: 'resume' | 'fork') => void
 }
@@ -418,6 +419,20 @@ export const commandRegistry = [
     bindings: [],
     available: presentationPreferences,
     run: (context) => context.dispatch(actions.preferencesReset()),
+  },
+  {
+    id: 'panes.resize',
+    title: 'Resize workbench panes',
+    description: 'Set the browser-local navigation and inspector pane widths.',
+    category: 'View',
+    bindings: [],
+    available: (context) =>
+      presentationPreferences(context) && context.requestedPaneSizes !== undefined,
+    run: (context) => {
+      if (context.requestedPaneSizes !== undefined) {
+        context.dispatch(actions.paneSizesSet(context.requestedPaneSizes))
+      }
+    },
   },
   {
     id: 'detail.full',

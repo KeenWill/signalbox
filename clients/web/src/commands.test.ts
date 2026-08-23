@@ -77,6 +77,21 @@ describe('command registry', () => {
     })
   })
 
+  it('resizes workbench panes through the command registry', () => {
+    const requestedPaneSizes = { navigation: 280, inspector: 360 }
+
+    invokeCommand('panes.resize', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      presentationPreferences: true,
+      requestedPaneSizes,
+    })
+
+    expect(selectApp(store.getState()).paneSizes).toEqual(requestedPaneSizes)
+  })
+
   it('runs available continuation actions through stable command identities', () => {
     const relationships: Array<'resume' | 'fork'> = []
     const context = {

@@ -33,8 +33,6 @@ import {
 import { SettingsSurface } from './SettingsSurface'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
-const productImportApi = new HttpImportApi()
-
 const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; question: string }> = {
   attention: {
     eyebrow: 'Operator overview',
@@ -166,7 +164,12 @@ function CommandPalette({ context }: { context: CommandContext }) {
           </div>
           <div className="command-list">
             {commandRegistry
-              .filter((command) => command.id !== 'surface.escape' && command.available(context))
+              .filter(
+                (command) =>
+                  command.id !== 'surface.escape' &&
+                  command.id !== 'palette.open' &&
+                  command.available(context),
+              )
               .map((command) => (
                 <button
                   key={command.id}
@@ -331,6 +334,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     retryDelay: (attemptIndex) => 250 * (attemptIndex + 1),
     staleTime: Number.POSITIVE_INFINITY,
   })
+  const productImportApi = useMemo(
+    () =>
+      bootstrap.data === undefined ? null : HttpImportApi.withAdmittedBootstrap(bootstrap.data),
+    [bootstrap.data],
+  )
   const focusDestination = useCallback(() => {
     requestAnimationFrame(() => primaryRef.current?.focus())
   }, [])
@@ -388,7 +396,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <SessionsSurface />
     ) : surface === 'settings' ? (
       <SettingsSurface context={context} />
-    ) : surface === 'imports' && bootstrap.isSuccess ? (
+    ) : surface === 'imports' && bootstrap.isSuccess && productImportApi !== null ? (
       <ImportsWorkspace
         api={productImportApi}
         scenario={false}

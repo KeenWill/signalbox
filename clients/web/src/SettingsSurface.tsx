@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { type CommandContext, invokeCommand } from './commands'
 import { defaultBrowserPreferences, paneSizeBounds } from './preferences'
-import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
+import { selectApp, useAppSelector } from './state'
 
 function PreferenceGroup({ legend, children }: { legend: string; children: ReactNode }) {
   return (
@@ -14,7 +14,6 @@ function PreferenceGroup({ legend, children }: { legend: string; children: React
 
 export function SettingsSurface({ context }: { context: CommandContext }) {
   const app = useAppSelector(selectApp)
-  const dispatch = useAppDispatch()
   return (
     <div className="surface-body settings-surface">
       <section className="settings-intro">
@@ -135,12 +134,13 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
               max={paneSizeBounds.navigation.maximum}
               value={app.paneSizes.navigation}
               onChange={(event) =>
-                dispatch(
-                  actions.paneSizesSet({
+                invokeCommand('panes.resize', {
+                  ...context,
+                  requestedPaneSizes: {
                     ...app.paneSizes,
                     navigation: event.currentTarget.valueAsNumber,
-                  }),
-                )
+                  },
+                })
               }
             />
           </label>
@@ -153,12 +153,13 @@ export function SettingsSurface({ context }: { context: CommandContext }) {
               max={paneSizeBounds.inspector.maximum}
               value={app.paneSizes.inspector}
               onChange={(event) =>
-                dispatch(
-                  actions.paneSizesSet({
+                invokeCommand('panes.resize', {
+                  ...context,
+                  requestedPaneSizes: {
                     ...app.paneSizes,
                     inspector: event.currentTarget.valueAsNumber,
-                  }),
-                )
+                  },
+                })
               }
             />
           </label>
