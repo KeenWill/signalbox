@@ -107,11 +107,12 @@ export function SearchSurface({
   const routeAfterAddress = routeSearch.get('afterAddress') ?? undefined
   const routeAfterProjection = routeSearch.get('afterProjection') ?? undefined
   const cursorMetadataIsValid =
-    routeAfterAddress === undefined && routeAfterProjection === undefined
+    state.cursorParametersAreValid !== false &&
+    (routeAfterAddress === undefined && routeAfterProjection === undefined
       ? true
       : routeAfterAddress !== undefined && routeAfterProjection !== undefined
         ? validCursor({ address: routeAfterAddress, projectionId: routeAfterProjection })
-        : false
+        : false)
   const requestIsValid =
     queryBytes > 0 &&
     queryBytes <= queryLimit &&

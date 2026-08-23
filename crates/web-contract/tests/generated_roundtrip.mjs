@@ -243,7 +243,7 @@ test("generated search decoder validates continuation against the final result",
   mismatchedProjection.continuation.projection_id = "2";
   assert.throws(
     () => decodeWebSearchPage(mismatchedProjection),
-    /cursor anchored to the final search result/,
+    /continuation must be the last result ordering key/,
   );
 });
 

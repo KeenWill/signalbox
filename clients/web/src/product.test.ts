@@ -784,4 +784,21 @@ describe('readProductSearchState', () => {
       around: undefined,
     })
   })
+
+  it('preserves repeated cursor parameters as invalid state', () => {
+    expect(
+      readProductSearchState({
+        q: 'term',
+        afterAddress: ['750', '700'],
+        afterProjection: ['42', '41'],
+      }),
+    ).toEqual({
+      q: 'term',
+      session: undefined,
+      afterAddress: undefined,
+      afterProjection: undefined,
+      cursorParametersAreValid: false,
+      around: undefined,
+    })
+  })
 })

@@ -26,6 +26,7 @@ export interface ProductSearchState {
   sessionParameterIsValid?: false
   afterAddress?: string
   afterProjection?: string
+  cursorParametersAreValid?: false
   around?: string
 }
 
@@ -248,6 +249,9 @@ export const readProductSearchState = (value: Record<string, unknown>): ProductS
     ...(Array.isArray(value.session) ? { sessionParameterIsValid: false as const } : {}),
     afterAddress: cursorText('afterAddress'),
     afterProjection: cursorText('afterProjection'),
+    ...(Array.isArray(value.afterAddress) || Array.isArray(value.afterProjection)
+      ? { cursorParametersAreValid: false as const }
+      : {}),
     around: text('around'),
   }
 }
