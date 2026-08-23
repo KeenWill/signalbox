@@ -480,8 +480,11 @@ kbd {
   font-size: 0.62rem;
 }
 .product-inspector dd {
+  min-width: 0;
   margin: 0;
+  overflow-wrap: anywhere;
   font-family: ui-monospace, monospace;
+  text-align: right;
 }
 .mobile-navigation {
   position: fixed;
@@ -489,6 +492,12 @@ kbd {
   inset: 0 auto 0 0;
   width: min(310px, 86vw);
   background: var(--surface-1);
+}
+.mobile-navigation-close {
+  position: absolute;
+  z-index: 1;
+  top: 0.65rem;
+  right: 0.55rem;
 }
 
 @media (max-width: 1260px) {

@@ -234,7 +234,9 @@ test('completes route switching from the command palette without a mouse', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('uses a navigation sheet on a phone viewport and unwinds it with Escape', async ({ page }) => {
+test('uses a navigation sheet on a phone viewport with a semantic close control', async ({
+  page,
+}) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.setViewportSize({ width: 390, height: 844 })
@@ -243,7 +245,7 @@ test('uses a navigation sheet on a phone viewport and unwinds it with Escape', a
   const openNavigation = page.getByRole('button', { name: 'Open navigation' })
   await openNavigation.click()
   await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeVisible()
-  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: 'Close navigation' }).click()
   await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeHidden()
   await expect(openNavigation).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })

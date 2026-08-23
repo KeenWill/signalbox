@@ -4,9 +4,12 @@ import { productCommandRegistry } from './productCommands'
 import { actions, selectApp, store } from './state'
 
 describe('command registry', () => {
-  it('omits scenario navigation from the product command registry', () => {
+  it('replaces scenario navigation with product navigation', () => {
     const productCommandIds: readonly string[] = productCommandRegistry.map((command) => command.id)
-    expect(productCommandIds).not.toContain('navigation.open')
+    expect(productCommandIds.filter((id) => id === 'navigation.open')).toHaveLength(1)
+    expect(productCommandRegistry.find((command) => command.id === 'navigation.open')?.title).toBe(
+      'Open product navigation',
+    )
   })
 
   it('selects the first timeline item when next starts from a missing selection', () => {

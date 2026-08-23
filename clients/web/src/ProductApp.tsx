@@ -306,7 +306,7 @@ function ProductToolbar({ context }: { context: ProductCommandContext }) {
         className="icon-button mobile-only"
         type="button"
         aria-label="Open navigation"
-        onClick={() => context.dispatch(actions.overlaySet('navigation'))}
+        onClick={() => invokeProductCommand('navigation.open', context)}
       >
         <Menu />
       </button>
@@ -565,6 +565,15 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <Dialog.Description id="mobile-navigation-description" className="sr-only">
               Choose a Signalbox surface.
             </Dialog.Description>
+            <Dialog.Close asChild>
+              <button
+                className="icon-button mobile-navigation-close"
+                type="button"
+                aria-label="Close navigation"
+              >
+                <X />
+              </button>
+            </Dialog.Close>
             <ProductNavigation
               active={surface}
               context={context}
