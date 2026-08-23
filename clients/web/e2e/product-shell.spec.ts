@@ -55,13 +55,11 @@ test('applies saved visual preferences before the first rendered frame', async (
     )
     const observed: string[] = []
     Object.defineProperty(window, '__visualPreferenceMutations', { value: observed })
-    const observer = new MutationObserver(() => {
+    requestAnimationFrame(() => {
       observed.push(
         `${document.documentElement.dataset.theme}:${document.documentElement.dataset.density}`,
       )
     })
-    Object.defineProperty(window, '__visualPreferenceObserver', { value: observer })
-    observer.observe(document.documentElement, { attributes: true })
   })
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
