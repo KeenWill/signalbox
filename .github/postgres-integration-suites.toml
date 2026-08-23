@@ -54,7 +54,7 @@ features = ["postgres-integration"]
 # Six shards were sized when every test database wrote to the shared scratch
 # disks. With that state in memory and sixteen tests running per shard, a
 # shard ran about 3m45s of which roughly 1m15s was fixed cost — archive
-# download, runner setup, image pull — so three shards spend six fewer pool
+# download, runner setup, image pull — so three shards spend three fewer pool
 # slots and their repeated fixed costs for the same tests. Not fewer than two,
 # so a failing shard can be re-run without re-running the whole suite.
 shards = 3

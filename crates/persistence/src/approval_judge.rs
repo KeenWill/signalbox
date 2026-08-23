@@ -6,17 +6,19 @@ use rust_decimal::Decimal;
 use signalbox_application::{
     ApprovalJudgeAuthorization, ApprovalJudgeBranchAuthority, ApprovalJudgeBranchAuthorityInput,
     ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
-    ApprovalJudgePullRequestAuthority, ApprovalJudgePullRequestAuthorityInput,
-    ClassifyOperatorFailure, ModelCallCredentialReference, OperatorFailureClass,
+    ApprovalJudgeDispatchProvenance, ApprovalJudgePullRequestAuthority,
+    ApprovalJudgePullRequestAuthorityInput, ClassifyOperatorFailure, ModelCallCredentialReference,
+    OperatorFailureClass,
 };
 use signalbox_domain::{
-    ActiveTurnPhase, BranchName, CommitSha, ContextFrontierId, DelegateApprovalRecommendation,
-    DelegateToolApproval, DirectModelSelection, FrozenModelSelection, GoalGeneration,
-    GoalGenerationSnapshot, GoalNeed, GoalSchedulerProvenance, GoalStatement, ModelCallId,
-    ModelTargetCatalog, ProviderModelIdentity, ProviderReportedTokenUsage, PullRequestNumber,
-    RepoWatchDispatchId, RepositorySlug, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryRef, SessionId, SessionSystemPrompt, SessionTemplateName,
-    ToolApprovalPosture, ToolDecisionRationale, ToolRequest, ToolRequestId, TurnAttemptId, TurnId,
+    ActiveTurnPhase, BranchName, CommissionedDispatchId, CommitSha, ContextFrontierId,
+    DelegateApprovalRecommendation, DelegateToolApproval, DirectModelSelection,
+    FrozenModelSelection, GoalGeneration, GoalGenerationSnapshot, GoalNeed,
+    GoalSchedulerProvenance, GoalStatement, ModelCallId, ModelTargetCatalog, ProviderModelIdentity,
+    ProviderReportedTokenUsage, PullRequestNumber, RepoWatchDispatchId, RepositorySlug,
+    ResolvedProviderTarget, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
+    SessionSystemPrompt, SessionTemplateName, ToolApprovalPosture, ToolDecisionRationale,
+    ToolRequest, ToolRequestId, TurnAttemptId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -728,6 +730,17 @@ impl PostgresApprovalJudgeRepository {
 /// is the whole of what an operator is promised.
 const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated with no attending user, so this goal turn was failed. Repository watch redispatches the work under a fresh dispatch once its batch ends, unless its rule has been deactivated, the pull request has closed or merged since, or this attempt spent the lineage's retry budget and parked it for an operator or new pull-request activity; no automatic resumption is scheduled for this block either way. Resume this goal only to continue this session by hand: a further escalation on work you resumed waits for you instead of failing the turn again.";
 
+/// Need text for the execution-failure block a commissioned-dispatch
+/// escalation appends.
+///
+/// A commissioned dispatch has no rule, batch, or obligation behind it, so
+/// unlike the repository-watch text above it promises no redispatch at all:
+/// whoever commissioned the session decides whether the work is dispatched
+/// again. It promises no automatic resumption either, for the same reason that
+/// block is exempt — resuming would re-run the escalating turn against a
+/// request no user is attending.
+const COMMISSIONED_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated with no attending user, so this goal turn was failed. This session was commissioned directly rather than dispatched by repository watch, so nothing redispatches the work: whoever commissioned it decides whether to dispatch it again, and no automatic resumption is scheduled for this block. Resume this goal only to continue this session by hand: a further escalation on work you resumed waits for you instead of failing the turn again.";
+
 /// The generation a repository-watch dispatch commissions in the session it
 /// creates, which is the only generation its authority describes.
 ///
@@ -789,6 +802,10 @@ async fn unattended_escalation_applies(
     let escalated_before: bool = sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1 FROM repo_watch_headless_approval_escalation WHERE session_id = $1
+        ) OR EXISTS (
+            SELECT 1
+              FROM commissioned_dispatch_headless_approval_escalation
+             WHERE session_id = $1
         )",
     )
     .bind(session_id_to_uuid(prepared.request.session()))
@@ -1018,26 +1035,46 @@ async fn persist_headless_escalation(
         },
     )
     .await?;
-    let audited = sqlx::query(
-        "INSERT INTO repo_watch_headless_approval_escalation
-            (model_call_id, request_id, dispatch_id, action_ordinal, session_id,
-             turn_id, terminal_attempt_id, failure_entry_id, terminal_frontier_id)
-         SELECT $1, $2, action.dispatch_id, action.action_ordinal, $3, $4, $5, $6, $7
-           FROM repo_watch_dispatch_action AS action
-          WHERE action.session_id = $3 AND action.dispatch_id = $8",
-    )
-    .bind(prepared.call.into_uuid())
-    .bind(tool_request_id_to_uuid(prepared.request.id()))
-    .bind(session_id_to_uuid(session))
-    .bind(turn_id_to_uuid(turn))
-    .bind(attempt)
-    .bind(failure_entry.into_uuid())
-    .bind(identities.terminal_frontier().into_uuid())
-    .bind(dispatch.as_uuid())
-    .execute(&mut *connection)
-    .await
-    .map_err(classify_insert)?
-    .rows_affected();
+    let audited = match dispatch {
+        ApprovalJudgeDispatchProvenance::RepoWatch(dispatch) => sqlx::query(
+            "INSERT INTO repo_watch_headless_approval_escalation
+                    (model_call_id, request_id, dispatch_id, action_ordinal, session_id,
+                     turn_id, terminal_attempt_id, failure_entry_id, terminal_frontier_id)
+                 SELECT $1, $2, action.dispatch_id, action.action_ordinal, $3, $4, $5, $6, $7
+                   FROM repo_watch_dispatch_action AS action
+                  WHERE action.session_id = $3 AND action.dispatch_id = $8",
+        )
+        .bind(prepared.call.into_uuid())
+        .bind(tool_request_id_to_uuid(prepared.request.id()))
+        .bind(session_id_to_uuid(session))
+        .bind(turn_id_to_uuid(turn))
+        .bind(attempt)
+        .bind(failure_entry.into_uuid())
+        .bind(identities.terminal_frontier().into_uuid())
+        .bind(dispatch.as_uuid())
+        .execute(&mut *connection)
+        .await
+        .map_err(classify_insert)?
+        .rows_affected(),
+        ApprovalJudgeDispatchProvenance::Commissioned(dispatch) => sqlx::query(
+            "INSERT INTO commissioned_dispatch_headless_approval_escalation
+                    (model_call_id, request_id, dispatch_id, session_id, turn_id,
+                     terminal_attempt_id, failure_entry_id, terminal_frontier_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(prepared.call.into_uuid())
+        .bind(tool_request_id_to_uuid(prepared.request.id()))
+        .bind(dispatch.as_uuid())
+        .bind(session_id_to_uuid(session))
+        .bind(turn_id_to_uuid(turn))
+        .bind(attempt)
+        .bind(failure_entry.into_uuid())
+        .bind(identities.terminal_frontier().into_uuid())
+        .execute(&mut *connection)
+        .await
+        .map_err(classify_insert)?
+        .rows_affected(),
+    };
     require_single(audited, "headless escalation audit")?;
 
     if authority_stands {
@@ -1054,8 +1091,13 @@ async fn persist_headless_escalation(
         // redispatch is withheld, because the rule was deactivated or the pull
         // request closed, the work is not wanted at all and resuming it is
         // worse still. The need text above therefore names the repair itself
-        // rather than promising resumption.
-        let need = GoalNeed::try_new(String::from(HEADLESS_ESCALATION_GOAL_NEED))
+        // rather than promising resumption. A commissioned dispatch has no
+        // redispatch to name, so its text promises none.
+        let need_text = match dispatch {
+            ApprovalJudgeDispatchProvenance::RepoWatch(_) => HEADLESS_ESCALATION_GOAL_NEED,
+            ApprovalJudgeDispatchProvenance::Commissioned(_) => COMMISSIONED_ESCALATION_GOAL_NEED,
+        };
+        let need = GoalNeed::try_new(String::from(need_text))
             .map_err(|_| ApprovalJudgeCorruption::Inconsistent("headless escalation goal need"))?;
         let outcome = goal::block_execution_failure_locked(
             connection,
@@ -1072,11 +1114,15 @@ async fn persist_headless_escalation(
             .into());
         }
     }
-    sqlx::query("SELECT repo_watch_release_completed_dispatch_batches_for_turn($1, $2)")
-        .bind(turn_id_to_uuid(turn))
-        .bind(session_id_to_uuid(session))
-        .execute(&mut *connection)
-        .await?;
+    // Only a repository-watch dispatch holds a batch singleton to release; a
+    // commissioned dispatch owns no batch, so there is nothing to settle.
+    if matches!(dispatch, ApprovalJudgeDispatchProvenance::RepoWatch(_)) {
+        sqlx::query("SELECT repo_watch_release_completed_dispatch_batches_for_turn($1, $2)")
+            .bind(turn_id_to_uuid(turn))
+            .bind(session_id_to_uuid(session))
+            .execute(&mut *connection)
+            .await?;
+    }
     Ok(())
 }
 
@@ -1237,6 +1283,11 @@ async fn load_session_authority_context(
 
 /// Reads the dispatch authority in force for one judged turn.
 ///
+/// Two append-only sources may record a fence: the repository-watch dispatch
+/// action and the operator-commissioned dispatch. Both commission generation
+/// one of the session they create in the transaction that creates it, so one
+/// generation gate serves both, and one session recording both is corruption.
+///
 /// A dispatch commissions generation one of the session it creates and owns
 /// nothing else in it: [`docs/spec/repo-watch.md`] admits a later unrelated
 /// successor goal on the same session, and that generation's turns were never
@@ -1257,6 +1308,21 @@ async fn load_dispatch_authority(
     if generation != Some(DISPATCH_COMMISSIONED_GENERATION) {
         return Ok(None);
     }
+    let repo_watch = load_repo_watch_dispatch_authority(&mut *connection, session).await?;
+    let commissioned = load_commissioned_dispatch_authority(&mut *connection, session).await?;
+    match (repo_watch, commissioned) {
+        (Some(_), Some(_)) => {
+            Err(ApprovalJudgeCorruption::Inconsistent("dispatch session ownership").into())
+        }
+        (authority @ Some(_), None) | (None, authority) => Ok(authority),
+    }
+}
+
+/// Reads the repository-watch fence recorded for one dispatched session.
+async fn load_repo_watch_dispatch_authority(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<Option<ApprovalJudgeDispatchAuthority>, ApprovalJudgeRepositoryError> {
     let rows = sqlx::query(
         "SELECT action.dispatch_id, event.repository, event.target_kind,
                 event.pull_request_number, event.head_sha, event.head_repository,
@@ -1277,13 +1343,89 @@ async fn load_dispatch_authority(
             return Err(ApprovalJudgeCorruption::Inconsistent("dispatch session ownership").into());
         }
     };
-    let dispatch = RepoWatchDispatchId::from_uuid(required(row, "dispatch_id")?);
-    let repository = RepositorySlug::try_new(required(row, "repository")?)
+    let dispatch = ApprovalJudgeDispatchProvenance::RepoWatch(RepoWatchDispatchId::from_uuid(
+        required(row, "dispatch_id")?,
+    ));
+    decode_dispatch_authority(DispatchAuthorityRow {
+        dispatch,
+        repository: required(row, "repository")?,
+        target_kind: required(row, "target_kind")?,
+        pull_request_number: row.try_get("pull_request_number")?,
+        head_sha: row.try_get("head_sha")?,
+        head_repository: row.try_get("head_repository")?,
+        head_branch: row.try_get("head_branch")?,
+        base_branch: row.try_get("base_branch")?,
+        branch: row.try_get("workflow_branch")?,
+    })
+    .map(Some)
+}
+
+/// Reads the commissioned fence recorded for one operator-commissioned session.
+///
+/// The row is written by the commissioning transaction itself, so unlike the
+/// repository-watch source there is no action/event join and no multi-action
+/// ambiguity: the session identity is unique in the table.
+async fn load_commissioned_dispatch_authority(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<Option<ApprovalJudgeDispatchAuthority>, ApprovalJudgeRepositoryError> {
+    let Some(row) = sqlx::query(
+        "SELECT dispatch_id, repository, target_kind, pull_request_number,
+                head_sha, head_repository, head_branch, base_branch, branch
+           FROM commissioned_dispatch
+          WHERE session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let dispatch = ApprovalJudgeDispatchProvenance::Commissioned(
+        CommissionedDispatchId::from_uuid(required(&row, "dispatch_id")?),
+    );
+    decode_dispatch_authority(DispatchAuthorityRow {
+        dispatch,
+        repository: required(&row, "repository")?,
+        target_kind: required(&row, "target_kind")?,
+        pull_request_number: row.try_get("pull_request_number")?,
+        head_sha: row.try_get("head_sha")?,
+        head_repository: row.try_get("head_repository")?,
+        head_branch: row.try_get("head_branch")?,
+        base_branch: row.try_get("base_branch")?,
+        branch: row.try_get("branch")?,
+    })
+    .map(Some)
+}
+
+/// One fence row read from either append-only dispatch source.
+struct DispatchAuthorityRow {
+    dispatch: ApprovalJudgeDispatchProvenance,
+    repository: String,
+    target_kind: String,
+    pull_request_number: Option<Decimal>,
+    head_sha: Option<String>,
+    head_repository: Option<String>,
+    head_branch: Option<String>,
+    base_branch: Option<String>,
+    branch: Option<String>,
+}
+
+/// Admits one stored fence row into the exact authority the judge consumes.
+fn decode_dispatch_authority(
+    row: DispatchAuthorityRow,
+) -> Result<ApprovalJudgeDispatchAuthority, ApprovalJudgeRepositoryError> {
+    let repository = RepositorySlug::try_new(row.repository)
         .map_err(|_| ApprovalJudgeCorruption::Inconsistent("dispatch repository admission"))?;
-    let target_kind: String = required(row, "target_kind")?;
-    match target_kind.as_str() {
+    let stored = |value: Option<String>, relationship: &'static str| {
+        value.ok_or(ApprovalJudgeCorruption::Missing(relationship))
+    };
+    match row.target_kind.as_str() {
         "pull_request" => {
-            let number = positive_u64_from_numeric(required(row, "pull_request_number")?)
+            let number = row
+                .pull_request_number
+                .ok_or(ApprovalJudgeCorruption::Missing("pull_request_number"))
+                .map(positive_u64_from_numeric)?
                 .ok()
                 .and_then(NonZeroU64::new)
                 .map(PullRequestNumber::new)
@@ -1291,38 +1433,41 @@ async fn load_dispatch_authority(
                     "dispatch pull request admission",
                 ))?;
             let input = ApprovalJudgePullRequestAuthorityInput {
-                dispatch,
+                dispatch: row.dispatch,
                 repository,
                 pull_request: number,
-                head_sha: CommitSha::try_new(required(row, "head_sha")?).map_err(|_| {
+                head_sha: CommitSha::try_new(stored(row.head_sha, "head_sha")?).map_err(|_| {
                     ApprovalJudgeCorruption::Inconsistent("dispatch head SHA admission")
                 })?,
-                head_repository: RepositorySlug::try_new(required(row, "head_repository")?)
-                    .map_err(|_| {
-                        ApprovalJudgeCorruption::Inconsistent("dispatch head repository admission")
-                    })?,
-                head_branch: BranchName::try_new(required(row, "head_branch")?).map_err(|_| {
-                    ApprovalJudgeCorruption::Inconsistent("dispatch head branch admission")
+                head_repository: RepositorySlug::try_new(stored(
+                    row.head_repository,
+                    "head_repository",
+                )?)
+                .map_err(|_| {
+                    ApprovalJudgeCorruption::Inconsistent("dispatch head repository admission")
                 })?,
-                base_branch: BranchName::try_new(required(row, "base_branch")?).map_err(|_| {
-                    ApprovalJudgeCorruption::Inconsistent("dispatch base branch admission")
-                })?,
+                head_branch: BranchName::try_new(stored(row.head_branch, "head_branch")?).map_err(
+                    |_| ApprovalJudgeCorruption::Inconsistent("dispatch head branch admission"),
+                )?,
+                base_branch: BranchName::try_new(stored(row.base_branch, "base_branch")?).map_err(
+                    |_| ApprovalJudgeCorruption::Inconsistent("dispatch base branch admission"),
+                )?,
             };
-            Ok(Some(ApprovalJudgeDispatchAuthority::PullRequest(
+            Ok(ApprovalJudgeDispatchAuthority::PullRequest(
                 ApprovalJudgePullRequestAuthority::new(input),
-            )))
+            ))
         }
         "branch" => {
             let input = ApprovalJudgeBranchAuthorityInput {
-                dispatch,
+                dispatch: row.dispatch,
                 repository,
-                branch: BranchName::try_new(required(row, "workflow_branch")?).map_err(|_| {
+                branch: BranchName::try_new(stored(row.branch, "branch")?).map_err(|_| {
                     ApprovalJudgeCorruption::Inconsistent("dispatch branch admission")
                 })?,
             };
-            Ok(Some(ApprovalJudgeDispatchAuthority::Branch(
+            Ok(ApprovalJudgeDispatchAuthority::Branch(
                 ApprovalJudgeBranchAuthority::new(input),
-            )))
+            ))
         }
         _ => Err(ApprovalJudgeCorruption::Inconsistent("dispatch target kind").into()),
     }
@@ -1705,7 +1850,9 @@ async fn exact_completed(
 
 /// Reads the identities a headless escalation durably closed the turn under.
 ///
-/// Absence is the attended escalation, which records no such row.
+/// Either audit family may hold the record — one call closes under exactly one
+/// dispatch source — and absence in both is the attended escalation, which
+/// records no such row.
 async fn headless_escalation_identities(
     connection: &mut PgConnection,
     call: ModelCallId,
@@ -1713,6 +1860,10 @@ async fn headless_escalation_identities(
     let Some(row) = sqlx::query(
         "SELECT terminal_attempt_id, failure_entry_id, terminal_frontier_id
            FROM repo_watch_headless_approval_escalation
+          WHERE model_call_id = $1
+         UNION ALL
+         SELECT terminal_attempt_id, failure_entry_id, terminal_frontier_id
+           FROM commissioned_dispatch_headless_approval_escalation
           WHERE model_call_id = $1",
     )
     .bind(call.into_uuid())

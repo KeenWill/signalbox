@@ -44,6 +44,56 @@ specification diff. Accepted cross-component and wire contracts live in the
 
 ## Model-input projection
 
+### Graded approval judging
+
+Whether execution-approval judging should replace its direct recommendation with
+separate risk and brief-alignment grades remains undecided. Any such change must
+define the grade contract, trusted outcome derivation, remaining input evidence,
+durable audit shape, graded wire and projection data, evaluation method, and
+shadow-to-live promotion path in an owner-accepted specification and
+implementing stack. Safety ceilings remain owned by
+[Additional high-risk guardrails](#tool-safety), while parent-supplied task and
+authority evidence remains owned by
+[Turn-origin instructions in the approval-judge request](#tool-safety). The
+interactive prompting and later client-form choices remain owned by
+[Client approval presentation](#client-scope). The following related questions
+also require owner rulings:
+
+- **Corpus governance.** Approval corpora follow the identity, admitted storage
+  forms, digest, and cross-storage reproducibility contract owned by
+  [evaluation system](spec/eval-system.md#corpus-and-expectations). Which
+  admitted storage form this corpus uses remains undecided, together with
+  access, redaction, retention, and deletion rules.
+
+- **Promotion bounds.** The maximum false-allow rate, minimum acceptable
+  improvement, minimum labeled case count, required slices, and statistical
+  treatment for promotion from shadow to live graded authority remain open. A
+  promotion comparison must define each metric's denominator and its treatment
+  of parks, failed calls, and repeated trials.
+
+- **Label semantics.** Whether an ordinary user allow or deny is the final
+  quality label, or evaluation needs a separate “judge correct” ruling and an
+  approval rationale, remains open. Execution rulings are observations rather
+  than correctness labels until this is decided.
+
+- **Unparked sampling.** Whether and how operators may provide post-hoc labels
+  for automatically allowed or denied requests remains open. Without it, the
+  recorded corpus is selected toward parked requests and cannot support
+  whole-population promotion claims.
+
+- **Shadow budget.** The graded shadow sampling fraction for production shadow
+  traffic remains open. Provider-cost ceilings and concurrency remain owned by
+  [First-release resource limits](#identity-credentials-and-resource-governance).
+  Retention and deletion of observations admitted to the approval corpus remain
+  owned by Corpus governance above.
+
+- **Configuration actor audit.** If trusted outcome derivation introduces
+  mutable threshold configuration, whether source-control and deployment audit
+  are sufficient provenance for changes to it, or Signalbox needs an
+  authenticated configuration-change command, remains open.
+
+### Further projection and summarization
+
 - **Projection and summarization beyond the implemented role mappings.**
   [Model-call execution](spec/model-call-execution.md) owns the implemented
   model-input projections; [conversation-import](spec/conversation-import.md)
@@ -682,10 +732,11 @@ questions below remain open.
   by [process-protocol](spec/process-protocol.md). Remote access still requires
   decisions for client identity, authentication, authorization, revocation, and
   credential delivery. (S01, S24)
-- **Browser transport.** Technology remains open and blocks the web client;
-  snapshot and durable-update semantics are defined by
-  [process-protocol](spec/process-protocol.md), while transient model-update
-  streaming remains open below. (S02, S24)
+- **Browser transport.** Settled for the web client: the same-origin browser
+  transport merged in PR #1000 and is owned by
+  [configuration-and-credentials](spec/configuration-and-credentials.md). It no
+  longer blocks the web client; transient model-update streaming remains open
+  below. (S02, S24)
 - **Remote runner transport and reconnect.** The dedicated local socket,
   framing, heartbeat, reconnect inventory, and transaction orchestration are
   owned by [runner protocol and placement](spec/runner-protocol.md). Remote
@@ -738,8 +789,9 @@ questions below remain open.
   is a TUI, web app, or native app remains unselected. (S01, S02, S10, S24)
 - **Apple client code organization.** Defer until the protocol and the first
   native slice are known. (S01, S24)
-- **Web client technology (Rust/Wasm or TypeScript).** No leaning until the
-  browser protocol and product slice are measured. (S01, S02, S24)
+- **Web client technology.** Settled: the web campaign uses React and TypeScript
+  with TanStack, Redux Toolkit, and Radix. This owner-approved platform choice
+  is no longer open. (S01, S02, S24)
 - **Client approval presentation.** The terminal baseline now surfaces the
   pending request through the transcript's awaiting-turn and tool-use lines and
   collects decisions through `approve`/`deny`

@@ -119,7 +119,7 @@ tracing-subscriber = { version = "0.3.20", default-features = false, features = 
     "fmt",
     "registry",
 ] }
-tower-http = { version = "0.6.11", default-features = false, features = ["fs"] }
+tower-http = { version = "0.7.0", default-features = false, features = ["fs"] }
 url = "2.5.8"
 uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
 
