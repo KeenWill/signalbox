@@ -620,7 +620,76 @@ impl PostgresRepoWatchDispatchStore {
         Ok(())
     }
 
-    /// Drains durable lifecycle cutoffs before repository-specific tasks start.
+    /// Processes a bounded batch of expired start leases before repository-specific tasks start.
+    pub async fn process_pending_expired_start_leases<NextCommandId>(
+        &self,
+        mut next_command_id: NextCommandId,
+    ) -> Result<(), RepoWatchDispatchRepositoryError>
+    where
+        NextCommandId: FnMut() -> DurableCommandId,
+    {
+        const MAX_PENDING_EXPIRED_START_LEASES: usize = 16;
+        for _ in 0..MAX_PENDING_EXPIRED_START_LEASES {
+            let repository: Option<String> = sqlx::query_scalar(
+                "SELECT origin.repository
+                   FROM repo_watch_dispatch_start_lease AS lease
+                   JOIN repo_watch_dispatch_batch AS batch
+                     ON batch.dispatch_id = lease.dispatch_id
+                   JOIN repo_watch_event AS origin ON origin.event_id = batch.event_id
+                  WHERE lease.expires_at <= clock_timestamp()
+                    AND NOT EXISTS (
+                        SELECT 1 FROM model_call AS call
+                         WHERE call.session_id = lease.session_id
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_dispatch_start_lease_expiration AS expired
+                         WHERE expired.dispatch_id = lease.dispatch_id
+                           AND expired.action_ordinal = lease.action_ordinal
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM repo_watch_dispatch_release AS released
+                         WHERE released.dispatch_id = lease.dispatch_id
+                    )
+                    AND EXISTS (
+                        SELECT 1
+                          FROM goal_event AS current_goal
+                         WHERE current_goal.session_id = lease.session_id
+                           AND current_goal.event_ordinal = (
+                                SELECT max(candidate.event_ordinal)
+                                  FROM goal_event AS candidate
+                                 WHERE candidate.session_id = lease.session_id
+                           )
+                           AND current_goal.event_kind IN (
+                                'commissioned', 'resumed', 'superseded'
+                           )
+                    )
+                  ORDER BY lease.expires_at, lease.session_id
+                  LIMIT 1",
+            )
+            .fetch_optional(&self.pool)
+            .await?;
+            let Some(repository) = repository else {
+                return Ok(());
+            };
+            let repository = RepositorySlug::try_new(repository).map_err(|_| {
+                RepoWatchDispatchRepositoryError::Corruption(
+                    "pending dispatch start lease has an invalid repository",
+                )
+            })?;
+            if !self
+                .process_next_expired_start_lease(&repository, &mut next_command_id)
+                .await?
+            {
+                return Err(RepoWatchDispatchRepositoryError::Corruption(
+                    "selected pending dispatch start lease disappeared",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Processes a bounded batch of lifecycle cutoffs before repository-specific tasks start.
     pub async fn process_pending_lifecycle_cutoffs<NextCommandId>(
         &self,
         mut next_command_id: NextCommandId,
@@ -628,7 +697,8 @@ impl PostgresRepoWatchDispatchStore {
     where
         NextCommandId: FnMut() -> DurableCommandId,
     {
-        loop {
+        const MAX_PENDING_LIFECYCLE_CUTOFFS: usize = 16;
+        for _ in 0..MAX_PENDING_LIFECYCLE_CUTOFFS {
             let repository: Option<String> = sqlx::query_scalar(
                 "SELECT event.repository
                    FROM repo_watch_event AS event
@@ -667,6 +737,7 @@ impl PostgresRepoWatchDispatchStore {
                 Err(error) => return Err(error),
             }
         }
+        Ok(())
     }
 
     /// Deactivates rules belonging to repositories absent from configuration.

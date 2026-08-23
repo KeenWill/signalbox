@@ -19,9 +19,12 @@ use std::{
 use signalbox_domain::{SessionId, TurnId};
 use tokio::{
     pin, select,
-    sync::mpsc::{
-        self,
-        error::{TryRecvError, TrySendError},
+    sync::{
+        Notify,
+        mpsc::{
+            self,
+            error::{TryRecvError, TrySendError},
+        },
     },
     task::{Id, JoinError, JoinSet},
     time::{self, Instant, Interval, MissedTickBehavior},
@@ -191,6 +194,11 @@ pub trait EligibilityWorkSource {
     /// Takes one buffered dispatch-start hint without consuming ordinary work.
     fn take_pending_dispatch_start(&mut self) -> Option<SessionId> {
         None
+    }
+
+    /// Waits for one buffered dispatch-start hint without consuming ordinary work.
+    fn next_pending_dispatch_start(&mut self) -> impl Future<Output = SessionId> + Send {
+        std::future::pending()
     }
 }
 
@@ -458,6 +466,7 @@ where
 pub struct InProcessEligibilityNudge {
     sender: mpsc::Sender<SessionId>,
     pending: Arc<Mutex<HashMap<SessionId, EligibilityHintPriority>>>,
+    dispatch_start_available: Arc<Notify>,
 }
 
 impl InProcessEligibilityNudge {
@@ -478,16 +487,38 @@ impl InProcessEligibilityNudge {
             if *existing < priority {
                 *existing = priority;
             }
+            drop(pending);
+            if priority == EligibilityHintPriority::DispatchStart {
+                self.dispatch_start_available.notify_one();
+            }
             return EligibilityNudgeOutcome::Coalesced;
         }
+        let dispatch_start_already_pending = pending
+            .values()
+            .any(|pending_priority| *pending_priority == EligibilityHintPriority::DispatchStart);
         pending.insert(session, priority);
         let outcome = match self.sender.try_send(session) {
             Ok(()) => EligibilityNudgeOutcome::Enqueued,
+            Err(TrySendError::Full(_))
+                if priority == EligibilityHintPriority::DispatchStart
+                    && !dispatch_start_already_pending =>
+            {
+                // Preserve one coalescing priority-only overflow outside the
+                // ordinary channel so a full ordinary buffer cannot consume
+                // the reserved lane's wakeup path.
+                EligibilityNudgeOutcome::Enqueued
+            }
             Err(TrySendError::Full(_)) => EligibilityNudgeOutcome::DroppedAtCapacity,
             Err(TrySendError::Closed(_)) => EligibilityNudgeOutcome::WorkSourceClosed,
         };
         if outcome != EligibilityNudgeOutcome::Enqueued {
             pending.remove(&session);
+        }
+        drop(pending);
+        if outcome == EligibilityNudgeOutcome::Enqueued
+            && priority == EligibilityHintPriority::DispatchStart
+        {
+            self.dispatch_start_available.notify_one();
         }
         outcome
     }
@@ -521,6 +552,7 @@ where
 {
     nudges: mpsc::Receiver<SessionId>,
     pending_nudges: Arc<Mutex<HashMap<SessionId, EligibilityHintPriority>>>,
+    dispatch_start_available: Arc<Notify>,
     returned_priority: Option<(SessionId, EligibilityHintPriority)>,
     sweep: Option<Sweep>,
     sweep_in_progress: Option<InProgressEligibilitySweep<Sweep>>,
@@ -593,9 +625,11 @@ where
     ) -> (InProcessEligibilityNudge, Self) {
         let (sender, nudges) = mpsc::channel(nudge_buffer_capacity.get());
         let pending_nudges = Arc::new(Mutex::new(HashMap::new()));
+        let dispatch_start_available = Arc::new(Notify::new());
         let nudge = InProcessEligibilityNudge {
             sender,
             pending: Arc::clone(&pending_nudges),
+            dispatch_start_available: Arc::clone(&dispatch_start_available),
         };
         let now = Instant::now();
         let first_sweep_deadline = now.checked_add(sweep_interval.get()).unwrap_or(now);
@@ -604,6 +638,7 @@ where
         let source = Self {
             nudges,
             pending_nudges,
+            dispatch_start_available,
             returned_priority: None,
             sweep: Some(sweep),
             sweep_in_progress: None,
@@ -791,6 +826,17 @@ where
         })?;
         pending.remove(&session);
         Some(session)
+    }
+
+    async fn next_pending_dispatch_start(&mut self) -> SessionId {
+        let dispatch_start_available = Arc::clone(&self.dispatch_start_available);
+        loop {
+            let notified = dispatch_start_available.notified();
+            if let Some(session) = self.take_pending_dispatch_start() {
+                return session;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -1010,11 +1056,25 @@ where
                     );
                     continue;
                 }
+                let pending_dispatch_start = self.work_source.next_pending_dispatch_start();
+                pin!(pending_dispatch_start);
                 loop {
                     select! {
                         biased;
 
                         () = &mut shutdown => break 'scheduler,
+                        session = &mut pending_dispatch_start => {
+                            enqueue_pending_hint(
+                                session,
+                                EligibilityHintPriority::DispatchStart,
+                                &in_flight_sessions,
+                                &mut pending_reruns,
+                                &mut pending_hints,
+                                &mut pending_dispatch_starts,
+                                &mut pending_ordinary,
+                            );
+                            break None;
+                        }
                         completed = passes.join_next_with_id(),
                             if !task_sessions.is_empty() =>
                         {
@@ -1327,7 +1387,7 @@ mod tests {
         SessionId, TurnAttemptId,
     };
     use tokio::{
-        sync::{Notify, oneshot},
+        sync::{Notify, mpsc, oneshot},
         time::timeout,
     };
     use uuid::Uuid;
@@ -2102,7 +2162,8 @@ mod tests {
             &mut dispatch_starts,
             &mut ordinary_hints,
         );
-        in_flight.extend((0..14).map(|offset| session(100 + offset)));
+        let filler_count = SCHEDULER_PASS_ADMISSION_CAP - 2;
+        in_flight.extend((0..filler_count).map(|offset| session(100 + offset as u128)));
 
         assert_eq!(
             take_admissible_hint(
@@ -2119,7 +2180,7 @@ mod tests {
             ),
             Some((dispatch_start, EligibilityHintPriority::DispatchStart))
         );
-        assert_eq!(in_flight.len(), SCHEDULER_PASS_ADMISSION_CAP - 1);
+        assert!(pending.is_empty());
     }
 
     #[test]
@@ -2596,6 +2657,151 @@ mod tests {
             )
             .await,
             Ok(SchedulerLoopExit::Shutdown)
+        );
+    }
+
+    #[tokio::test]
+    async fn inv069_dispatch_start_wakes_when_the_ordinary_nudge_buffer_is_full() {
+        let ordinary = session(53);
+        let dispatch_start = session(54);
+        let (nudge, mut source) = InProcessEligibilityWorkSource::with_options(
+            FakeSweep::returning([Ok(vec![])]),
+            ReconciliationSweepInterval::baseline(),
+            NonZeroUsize::new(1).expect("the test nudge buffer is nonzero"),
+        );
+
+        assert_eq!(nudge.nudge(ordinary), EligibilityNudgeOutcome::Enqueued);
+        assert_eq!(
+            nudge.nudge_dispatch_start(dispatch_start),
+            EligibilityNudgeOutcome::Enqueued
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(1), source.next_pending_dispatch_start())
+                .await
+                .expect("the priority-only notification wakes promptly"),
+            dispatch_start
+        );
+        assert_eq!(source.next().await, Ok(ordinary));
+    }
+
+    #[derive(Debug)]
+    struct ReservedLaneWakeWorkSource {
+        ordinary: VecDeque<SessionId>,
+        ordinary_calls: Arc<AtomicUsize>,
+        ordinary_backlog_returned: Arc<Notify>,
+        dispatch_starts: mpsc::Receiver<SessionId>,
+    }
+
+    impl EligibilityWorkSource for ReservedLaneWakeWorkSource {
+        type Error = FakeSweepError;
+
+        async fn next(&mut self) -> Result<SessionId, Self::Error> {
+            let call = self.ordinary_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if let Some(session) = self.ordinary.pop_front() {
+                if call == 2 {
+                    self.ordinary_backlog_returned.notify_one();
+                }
+                return Ok(session);
+            }
+            pending().await
+        }
+
+        async fn next_pending_dispatch_start(&mut self) -> SessionId {
+            self.dispatch_starts
+                .recv()
+                .await
+                .expect("the test retains its dispatch-start sender")
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct ReservedLaneWakePass {
+        dispatch_started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl EligibilityPass for ReservedLaneWakePass {
+        type Error = FakeSweepError;
+
+        fn run(
+            &mut self,
+            _session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let release = Arc::clone(&self.release);
+            async move {
+                release.notified().await;
+                Ok(())
+            }
+        }
+
+        fn run_dispatch_start(
+            &mut self,
+            _session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let dispatch_started = Arc::clone(&self.dispatch_started);
+            let release = Arc::clone(&self.release);
+            async move {
+                dispatch_started.notify_one();
+                release.notified().await;
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn inv069_new_dispatch_start_wakes_the_reserved_lane_at_ordinary_capacity() {
+        let first_ordinary = session(55);
+        let queued_ordinary = session(56);
+        let dispatch_start = session(57);
+        let ordinary_calls = Arc::new(AtomicUsize::new(0));
+        let ordinary_backlog_returned = Arc::new(Notify::new());
+        let dispatch_started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let (dispatch_sender, dispatch_starts) = mpsc::channel(1);
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let mut scheduler = SchedulerLoop::with_max_in_flight(
+            ReservedLaneWakeWorkSource {
+                ordinary: VecDeque::from([first_ordinary, queued_ordinary]),
+                ordinary_calls: Arc::clone(&ordinary_calls),
+                ordinary_backlog_returned: Arc::clone(&ordinary_backlog_returned),
+                dispatch_starts,
+            },
+            ReservedLaneWakePass {
+                dispatch_started: Arc::clone(&dispatch_started),
+                release: Arc::clone(&release),
+            },
+            NonZeroUsize::new(2).expect("the test admits one ordinary and one reserved pass"),
+        );
+        let runtime = tokio::spawn(async move {
+            scheduler
+                .run_until(async {
+                    shutdown_receiver.await.expect("the test requests shutdown");
+                })
+                .await
+        });
+
+        timeout(Duration::from_secs(1), ordinary_backlog_returned.notified())
+            .await
+            .expect("the ordinary backlog reaches the scheduler");
+        dispatch_sender
+            .send(dispatch_start)
+            .await
+            .expect("the scheduler retains the dispatch-start receiver");
+        timeout(Duration::from_secs(1), dispatch_started.notified())
+            .await
+            .expect("the new dispatch start enters the reserved lane");
+
+        assert_eq!(ordinary_calls.load(Ordering::SeqCst), 2);
+        shutdown_sender
+            .send(())
+            .expect("the scheduler still waits for shutdown");
+        release.notify_waiters();
+        assert_eq!(
+            timeout(Duration::from_secs(1), runtime)
+                .await
+                .expect("the scheduler exits within its bounded window")
+                .expect("the scheduler task completes"),
+            SchedulerLoopExit::Shutdown
         );
     }
 

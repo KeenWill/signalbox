@@ -8425,6 +8425,10 @@ pub trait EligibilityWorkSource {
 
     fn next(&mut self) -> impl Future<Output = Result<SessionId, Self::Error>> + Send;
     fn take_returned_dispatch_start(&mut self, _session: SessionId) -> bool;
+    fn take_pending_dispatch_start(&mut self) -> Option<SessionId>;
+    fn next_pending_dispatch_start(
+        &mut self,
+    ) -> impl Future<Output = SessionId> + Send;
 }
 
 pub trait EligibilityPass {
@@ -8433,6 +8437,10 @@ pub trait EligibilityPass {
     fn failure_stage(_error: &Self::Error) -> &'static str;
     fn failure_turn(_error: &Self::Error) -> Option<TurnId>;
     fn run(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
+    fn run_dispatch_start(
         &mut self,
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;

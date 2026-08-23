@@ -183,6 +183,15 @@ pub trait ActivatedTurnExecution {
         activated: Box<ActivatedTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
 
+    /// Drives a dispatch-start activation only through its first durable call
+    /// checkpoint so reserved scheduler admission can be released.
+    fn execute_dispatch_start(
+        &self,
+        activated: Box<ActivatedTurn>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.execute(activated)
+    }
+
     /// Reconciles a durable active tool turn for one scheduler hint.
     ///
     /// Implementations without tool orchestration have no active work to
@@ -300,6 +309,14 @@ where
         activated: Box<ActivatedTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let execution = self.execution.execute(activated);
+        supervise_execution(self.fatal_signal.clone(), execution)
+    }
+
+    fn execute_dispatch_start(
+        &self,
+        activated: Box<ActivatedTurn>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self.execution.execute_dispatch_start(activated);
         supervise_execution(self.fatal_signal.clone(), execution)
     }
 
@@ -703,7 +720,7 @@ where
                         return Err(ActivatedTurnPassError::ActivationSessionMismatch);
                     }
                     execution
-                        .execute(activated)
+                        .execute_dispatch_start(activated)
                         .instrument(turn_work_span(session, turn))
                         .await
                         .map_err(|source| ActivatedTurnPassError::Execution {
@@ -938,20 +955,19 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
             approval_judge_configuration: None,
         }
     }
-}
 
-impl<Provider> ActivatedTurnExecution for PostgresProviderModelExecution<Provider>
-where
-    Provider: ModelCallProvider + Clone + Send + 'static,
-    Provider::Capability: Send,
-    Provider::Error: Send + 'static,
-{
-    type Error = PostgresProviderModelExecutionError<Provider::Error>;
-
-    fn execute(
+    fn execute_with_checkpoint_boundary(
         &self,
         activated: Box<ActivatedTurn>,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        return_on_checkpoint: bool,
+    ) -> impl Future<Output = Result<(), PostgresProviderModelExecutionError<Provider::Error>>>
+    + Send
+    + 'static
+    where
+        Provider: ModelCallProvider + Clone + Send + 'static,
+        Provider::Capability: Send,
+        Provider::Error: Send + 'static,
+    {
         let repository = self.repository.clone();
         let gate = self.gate.clone();
         let provider = self.provider.clone();
@@ -971,9 +987,6 @@ where
                 let outcome = match service.execute(session).await {
                     Ok(outcome) => outcome,
                     Err(error) if service.retained_state().is_some() => {
-                        // Preserve same-incarnation evidence for one
-                        // authoritative reconciliation pass before fatal
-                        // supervision hands authority to startup recovery.
                         reconcile_retained_once(error, service.execute(session)).await?
                     }
                     Err(error) => return Err(RetainedModelExecutionError::Primary(error)),
@@ -982,8 +995,11 @@ where
                     ModelCallExecutionOutcome::RetryBackoff(delay) => {
                         tokio::time::sleep(delay).await;
                     }
-                    ModelCallExecutionOutcome::Checkpointed(_) => return Ok(()),
-                    ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
+                    ModelCallExecutionOutcome::Checkpointed(_) if return_on_checkpoint => {
+                        return Ok(());
+                    }
+                    ModelCallExecutionOutcome::Checkpointed(_)
+                    | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
                     ModelCallExecutionOutcome::NoWork
                     | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
@@ -994,6 +1010,29 @@ where
                 }
             }
         }
+    }
+}
+
+impl<Provider> ActivatedTurnExecution for PostgresProviderModelExecution<Provider>
+where
+    Provider: ModelCallProvider + Clone + Send + 'static,
+    Provider::Capability: Send,
+    Provider::Error: Send + 'static,
+{
+    type Error = PostgresProviderModelExecutionError<Provider::Error>;
+
+    fn execute(
+        &self,
+        activated: Box<ActivatedTurn>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.execute_with_checkpoint_boundary(activated, false)
+    }
+
+    fn execute_dispatch_start(
+        &self,
+        activated: Box<ActivatedTurn>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.execute_with_checkpoint_boundary(activated, true)
     }
 }
 
@@ -1504,6 +1543,7 @@ where
         &self,
         session: SessionId,
         turn: signalbox_domain::TurnId,
+        return_on_model_checkpoint: bool,
     ) -> impl Future<
         Output = Result<
             (),
@@ -1628,7 +1668,10 @@ where
                     ModelCallExecutionOutcome::RetryBackoff(delay) => {
                         tokio::time::sleep(delay).await;
                     }
-                    ModelCallExecutionOutcome::Checkpointed(_) => return Ok(()),
+                    ModelCallExecutionOutcome::Checkpointed(_) if return_on_model_checkpoint => {
+                        return Ok(());
+                    }
+                    ModelCallExecutionOutcome::Checkpointed(_) => {}
                     ModelCallExecutionOutcome::AvailabilitySuccessor(_) => {}
                     ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::PoolExhausted(_)
@@ -1667,7 +1710,17 @@ where
         let session = activated.session();
         let turn = activated.turn();
         drop(activated);
-        self.execute_scope(session, turn)
+        self.execute_scope(session, turn, false)
+    }
+
+    fn execute_dispatch_start(
+        &self,
+        activated: Box<ActivatedTurn>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let session = activated.session();
+        let turn = activated.turn();
+        drop(activated);
+        self.execute_scope(session, turn, true)
     }
 
     fn resume_active(
@@ -1683,7 +1736,7 @@ where
                 .map_err(PostgresProviderToolLoopExecutionError::ResumeLookup)?;
             match turn {
                 Some(turn) => execution
-                    .execute_scope(session, turn)
+                    .execute_scope(session, turn, false)
                     .instrument(turn_work_span(session, turn))
                     .await
                     .map_err(
@@ -1736,15 +1789,13 @@ impl PostgresScriptedModelExecution {
             assistant_reply,
         }
     }
-}
 
-impl ActivatedTurnExecution for PostgresScriptedModelExecution {
-    type Error = PostgresScriptedModelExecutionError;
-
-    fn execute(
+    fn execute_with_checkpoint_boundary(
         &self,
         activated: Box<ActivatedTurn>,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        return_on_checkpoint: bool,
+    ) -> impl Future<Output = Result<(), PostgresScriptedModelExecutionError>> + Send + 'static
+    {
         let repository = self.repository.clone();
         let gate = self.gate.clone();
         let assistant_reply = self.assistant_reply.clone();
@@ -1768,12 +1819,6 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
                 let outcome = match service.execute(session).await {
                     Ok(outcome) => outcome,
                     Err(error) if service.retained_state().is_some() => {
-                        // docs/spec/model-call-execution.md gives
-                        // same-incarnation evidence one authoritative
-                        // reconciliation pass before fatal supervision hands
-                        // authority to startup recovery. A second failure
-                        // does not replace the causal stage error that
-                        // created the retained obligation.
                         reconcile_retained_once(error, service.execute(session)).await?
                     }
                     Err(error) => return Err(RetainedModelExecutionError::Primary(error)),
@@ -1782,8 +1827,11 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
                     ModelCallExecutionOutcome::RetryBackoff(delay) => {
                         tokio::time::sleep(delay).await;
                     }
-                    ModelCallExecutionOutcome::Checkpointed(_) => return Ok(()),
-                    ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
+                    ModelCallExecutionOutcome::Checkpointed(_) if return_on_checkpoint => {
+                        return Ok(());
+                    }
+                    ModelCallExecutionOutcome::Checkpointed(_)
+                    | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
                     ModelCallExecutionOutcome::NoWork
                     | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
@@ -1794,6 +1842,24 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
                 }
             }
         }
+    }
+}
+
+impl ActivatedTurnExecution for PostgresScriptedModelExecution {
+    type Error = PostgresScriptedModelExecutionError;
+
+    fn execute(
+        &self,
+        activated: Box<ActivatedTurn>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.execute_with_checkpoint_boundary(activated, false)
+    }
+
+    fn execute_dispatch_start(
+        &self,
+        activated: Box<ActivatedTurn>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.execute_with_checkpoint_boundary(activated, true)
     }
 }
 

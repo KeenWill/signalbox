@@ -4826,6 +4826,42 @@ async fn inv069_expiry_retires_releases_and_rearms_the_dispatch() -> Result<(), 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_drain_expires_a_lease_after_repository_removal() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for_with_lease(
+        one_action_rule(Duration::ZERO)?,
+        Some(Duration::from_millis(1)),
+    )
+    .await?;
+    let session = fixture.session(0);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    fixture
+        .store
+        .deactivate_unconfigured_repositories(&[])
+        .await?;
+
+    fixture
+        .store
+        .process_pending_expired_start_leases(|| {
+            DurableCommandId::from_uuid(Uuid::from_u128(STARTUP_DRAIN_STOP_COMMAND_ID))
+        })
+        .await?;
+
+    let goal = GoalRepository::new(fixture.pool.clone())
+        .load_goal(session)
+        .await?
+        .expect("the removed repository goal remains readable");
+    let expiration_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_start_lease_expiration")
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(goal.current().state(), &GoalState::UserStopped);
+    assert_eq!(expiration_count, 1);
+    assert_eq!(release_count(&fixture).await?, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn dispatch_batch_creates_every_session_and_audit_row_atomically()
 -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture().await?;

@@ -4132,6 +4132,14 @@ async fn s18_inv005_inv032_delegated_turn_reclassifies_its_pending_steering()
         panic!("the delegated child's first model call must checkpoint");
     };
     assert_eq!(checkpointed, call);
+
+    let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(eligible.contains(&session(child)));
+    assert!(!continuation);
+
     let AuthorizeModelCallOutcome::Authorized(authorized) =
         model_calls.authorize_send(session(child), call).await?
     else {
