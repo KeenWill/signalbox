@@ -309,6 +309,67 @@ describe('Session Workspace projection', () => {
         state: { type: 'in_flight' },
       }),
     ).toBe(false)
+    expect(
+      isCompatibleDetailBody('model_call_transition', {
+        ...modelCall,
+        state: { type: 'in_flight' },
+        cause_code: null,
+        usage: { input_tokens: '1' },
+      }),
+    ).toBe(false)
+    expect(
+      isCompatibleDetailBody('model_call_transition', {
+        ...modelCall,
+        state: { type: 'in_flight' },
+        cause_code: null,
+        usage: {},
+      }),
+    ).toBe(true)
+
+    expect(
+      isCompatibleDetailBody('tool_batch_transition', {
+        ...toolBatch,
+        tools: [
+          {
+            request_id: '00000000-0000-0000-0000-000000000043',
+            tool_name: 'workspace_read',
+            approval_posture: 'auto',
+            approval_judge_escalated: false,
+            operator_required: false,
+            arguments: null,
+            attempt_id: null,
+            state: 'completed',
+            effect_posture: null,
+            sandbox_posture: null,
+            result: null,
+            failure: null,
+            cause_code: null,
+          },
+        ],
+      }),
+    ).toBe(false)
+    expect(
+      isCompatibleDetailBody('tool_batch_transition', {
+        ...toolBatch,
+        tools: [
+          {
+            request_id: '00000000-0000-0000-0000-000000000043',
+            tool_name: 'workspace_read',
+            approval_posture: 'auto',
+            approval_judge_escalated: false,
+            operator_required: false,
+            arguments: null,
+            attempt_id: '00000000-0000-0000-0000-000000000044',
+            state: null,
+            effect_posture: 'effect_free',
+            sandbox_posture: null,
+            result: null,
+            failure: null,
+            cause_code: null,
+          },
+        ],
+      }),
+    ).toBe(false)
 
     const reconciliation = {
       type: 'reconciliation',

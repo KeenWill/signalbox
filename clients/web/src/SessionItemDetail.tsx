@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { type ReactNode, useState } from 'react'
+import { type ReactNode, useEffect, useState } from 'react'
 import type {
   WebSessionTimelineDetailPage,
   WebSessionTimelineWindow,
@@ -113,8 +113,11 @@ export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): bool
   }
   if (body.type === 'model_call') {
     const knownFailure = body.state.type === 'terminal' && body.state.disposition === 'known_failed'
+    const terminal = body.state.type === 'terminal'
+    const usageIsCompatible = terminal || Object.values(body.usage).every((value) => value == null)
     return (
       kind === 'model_call_transition' &&
+      usageIsCompatible &&
       (knownFailure
         ? body.cause_code == null || modelFailureCauses.has(body.cause_code)
         : body.cause_code == null)
@@ -127,11 +130,20 @@ export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): bool
     return (
       kind === 'tool_batch_transition' &&
       body.goal_events.every(hasCompatibleGoalReason) &&
-      body.tools.every(
-        (tool) =>
+      body.tools.every((tool) => {
+        const attemptFactsMatch =
+          tool.attempt_id === null
+            ? tool.state === null &&
+              tool.effect_posture === null &&
+              tool.sandbox_posture === null &&
+              tool.cause_code === null
+            : tool.state !== null
+        return (
+          attemptFactsMatch &&
           tool.operator_required ===
-          (tool.approval_judge_escalated || tool.approval_posture === 'human'),
-      )
+            (tool.approval_judge_escalated || tool.approval_posture === 'human')
+        )
+      })
     )
   }
   if (body.type === 'reconciliation') {
@@ -226,6 +238,97 @@ const ToolAttemptDetail = ({ tool }: { tool: ToolAttempt }) => (
     {tool.failure && <TextDetail label="Tool failure" excerpt={tool.failure} />}
   </article>
 )
+
+type DelegationDetail = Extract<DetailBody, { type: 'delegation' }>['detail']
+type Fact = readonly [string, ReactNode]
+
+const delegationProvenanceFacts = (
+  provenance: Extract<
+    DelegationDetail,
+    { type: 'child_lifecycle_disposition' | 'child_result' }
+  >['provenance'],
+): ReadonlyArray<Fact> => {
+  switch (provenance.type) {
+    case 'child_turn':
+      return [
+        ['Provenance', 'child turn'],
+        ['Provenance session', provenance.session_id],
+        ['Provenance turn', provenance.turn_id],
+      ]
+    case 'parent_turn_command':
+      return [
+        ['Provenance', 'parent turn command'],
+        ['Provenance session', provenance.session_id],
+        ['Provenance turn', provenance.turn_id],
+        ['Provenance command', provenance.command_id],
+      ]
+    case 'parent_goal_command':
+      return [
+        ['Provenance', 'parent goal command'],
+        ['Provenance session', provenance.session_id],
+        ['Goal generation', provenance.goal_generation],
+        ['Provenance command', provenance.command_id],
+      ]
+  }
+}
+
+const delegationFacts = (detail: DelegationDetail): ReadonlyArray<Fact> => {
+  const common: ReadonlyArray<Fact> = [
+    ['Event', detail.type.replaceAll('_', ' ')],
+    ['Relationship', detail.relationship_id],
+  ]
+  switch (detail.type) {
+    case 'child_spawned':
+      return [
+        ...common,
+        ['Child session', detail.child_session_id],
+        ['Policy', detail.policy.type],
+        ...(detail.policy.type === 'bound'
+          ? ([
+              ['On parent stopped', detail.policy.on_parent_stopped.replaceAll('_', ' ')],
+              ['On parent cancelled', detail.policy.on_parent_cancelled.replaceAll('_', ' ')],
+            ] satisfies ReadonlyArray<Fact>)
+          : []),
+      ]
+    case 'child_waiting':
+      return [
+        ...common,
+        ['Child session', detail.child_session_id],
+        ['Awaiting request', detail.awaiting_request_id],
+        ['Wait mode', detail.mode],
+      ]
+    case 'child_lifecycle_disposition':
+      return [
+        ...common,
+        ['Child session', detail.child_session_id],
+        ['Event ordinal', detail.event_ordinal],
+        ['Outcome', detail.outcome.replaceAll('_', ' ')],
+        ['Reason', detail.reason.replaceAll('_', ' ')],
+        ...delegationProvenanceFacts(detail.provenance),
+      ]
+    case 'child_result':
+      return [
+        ...common,
+        ['Child session', detail.child_session_id],
+        ['Outcome', detail.outcome.replaceAll('_', ' ')],
+        ['Reason', detail.reason.replaceAll('_', ' ')],
+        ...delegationProvenanceFacts(detail.provenance),
+      ]
+    case 'session_message':
+      return [
+        ...common,
+        ['Message', detail.message_id],
+        ['Sender session', detail.sender_session_id],
+        ['Recipient session', detail.recipient_session_id],
+        ['Message ordinal', detail.message_ordinal],
+        ['Delivery sequence', detail.delivery_sequence],
+      ]
+    case 'result_wake':
+      return [...common, ['Awaiting request', detail.awaiting_request_id ?? 'not recorded']]
+    case 'message_wake':
+      return [...common, ['Message', detail.message_id]]
+  }
+}
 
 const unreachableBody = (body: never): never => {
   throw new TypeError(`unhandled generated timeline detail body: ${String(body)}`)
@@ -431,32 +534,10 @@ const detailContent = (body: DetailBody): ReactNode => {
       )
     case 'delegation': {
       const detail = body.detail
-      const policyFacts: ReadonlyArray<readonly [string, ReactNode]> =
-        detail.type === 'child_spawned' && detail.policy.type === 'bound'
-          ? [
-              ['Policy', 'bound'],
-              ['On parent stopped', detail.policy.on_parent_stopped.replaceAll('_', ' ')],
-              ['On parent cancelled', detail.policy.on_parent_cancelled.replaceAll('_', ' ')],
-            ]
-          : detail.type === 'child_spawned' && detail.policy.type === 'background'
-            ? [['Policy', 'background']]
-            : [['Policy', 'not recorded']]
-      const childSession = 'child_session_id' in detail ? detail.child_session_id : 'not recorded'
-      const outcome = 'outcome' in detail ? detail.outcome.replaceAll('_', ' ') : 'not recorded'
-      const reason = 'reason' in detail ? detail.reason : 'not recorded'
       const content = 'content' in detail ? detail.content : null
       return (
         <>
-          <Facts
-            facts={[
-              ['Event', detail.type.replaceAll('_', ' ')],
-              ['Relationship', detail.relationship_id],
-              ['Subject', childSession],
-              ['Outcome', outcome],
-              ['Reason', reason],
-              ...policyFacts,
-            ]}
-          />
+          <Facts facts={delegationFacts(detail)} />
           {content && <TextDetail label="Delegation content" excerpt={content} />}
         </>
       )
@@ -488,6 +569,7 @@ export function SessionItemDetail({
   item: WebSessionTimelineWindow['items'][number]
 }) {
   const [cursor, setCursor] = useState<NonNullable<WebSessionTimelineDetailPage['continuation']>>()
+  const [restoreSummaryOnCompletion, setRestoreSummaryOnCompletion] = useState(false)
   const detail = useQuery({
     queryKey: ['production', 'session-item-detail', sessionId, item.address.event_sequence, cursor],
     queryFn: ({ signal }) =>
@@ -501,6 +583,15 @@ export function SessionItemDetail({
     gcTime: 0,
     placeholderData: (previous) => previous,
   })
+
+  useEffect(() => {
+    if (!restoreSummaryOnCompletion || detail.isFetching || !detail.data) return
+    setRestoreSummaryOnCompletion(false)
+    if (detail.data.continuation) return
+    document
+      .querySelector<HTMLButtonElement>(`[data-timeline-id="${item.address.event_sequence}"]`)
+      ?.focus()
+  }, [detail.data, detail.isFetching, item.address.event_sequence, restoreSummaryOnCompletion])
 
   if (detail.isError) {
     return (
@@ -541,7 +632,10 @@ export function SessionItemDetail({
           className="session-detail-continue"
           aria-disabled={detail.isFetching}
           onClick={() => {
-            if (!detail.isFetching) setCursor(detail.data.continuation ?? undefined)
+            if (!detail.isFetching) {
+              setRestoreSummaryOnCompletion(true)
+              setCursor(detail.data.continuation ?? undefined)
+            }
           }}
         >
           {detail.isFetching

@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CommandContext } from './commands'
 import type { WebContractBootstrap, WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import { SessionItemDetail } from './SessionItemDetail'
@@ -123,6 +123,7 @@ export function SessionWorkspaceSurface({
   const [restorePosition, setRestorePosition] = useState<string | undefined>()
   const [manualAnchor, setManualAnchor] = useState<SessionWindowAnchor | null>(null)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
+  const pendingBoundaryFocus = useRef<'first' | 'latest' | null>(null)
   const sessionCapabilitiesAvailable = hasUsableSessionTimeline(bootstrap)
   const session = useQuery({
     queryKey: ['production', 'session-workspace', sessionId, manualAnchor, restorePosition],
@@ -190,7 +191,10 @@ export function SessionWorkspaceSurface({
     [dispatch, manualAnchor, session],
   )
   const openTimelineWindow = useCallback(
-    (anchor: 'first' | 'latest') => openTimelineAnchor({ kind: anchor }),
+    (anchor: 'first' | 'latest') => {
+      pendingBoundaryFocus.current = anchor
+      openTimelineAnchor({ kind: anchor })
+    },
     [openTimelineAnchor],
   )
   useEffect(() => {
@@ -214,6 +218,12 @@ export function SessionWorkspaceSurface({
     dispatch(actions.timelineSelected(boundary))
     if (sessionId !== null) {
       dispatch(actions.logicalPositionRecorded({ sessionId, position: boundary }))
+    }
+    if (pendingBoundaryFocus.current === manualAnchor.kind) {
+      pendingBoundaryFocus.current = null
+      requestAnimationFrame(() => {
+        document.querySelector<HTMLButtonElement>(`[data-timeline-id="${boundary}"]`)?.focus()
+      })
     }
   }, [dispatch, manualAnchor, session.data?.anchor.kind, sessionId, timelineIds])
 

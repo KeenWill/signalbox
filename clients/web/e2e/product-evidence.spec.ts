@@ -61,7 +61,7 @@ const sessionEvidenceFixture = {
               },
               attempt_id: '00000000-0000-0000-0000-000000999698',
               state: 'completed',
-              effect_posture: 'read_only',
+              effect_posture: 'effect_free',
               sandbox_posture: 'sandboxed',
               result: null,
               failure: null,
@@ -105,7 +105,7 @@ const sessionEvidenceFixture = {
               arguments: null,
               attempt_id: '00000000-0000-0000-0000-000000999698',
               state: 'completed',
-              effect_posture: 'read_only',
+              effect_posture: 'effect_free',
               sandbox_posture: 'sandboxed',
               result: {
                 text: toolEvidenceResult,

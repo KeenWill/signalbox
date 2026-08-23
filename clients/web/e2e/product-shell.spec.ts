@@ -31,7 +31,7 @@ const sessionWorkspaceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
   firstAddress: '41',
   latestAddress: '43',
-  itemCount: '1000000',
+  itemCount: '3',
   projectedBytes:
     timelineHeaderBytes('input_accepted') +
     timelineHeaderBytes('tool_batch_transition') +
@@ -125,7 +125,7 @@ const sessionWorkspaceFixture = {
                 arguments: null,
                 attempt_id: '00000000-0000-0000-0000-000000000342',
                 state: 'completed',
-                effect_posture: 'read_only',
+                effect_posture: 'effect_free',
                 sandbox_posture: 'sandboxed',
                 result: {
                   text: toolResult,
@@ -285,6 +285,7 @@ const useDeterministicSession = async (page: Page) => {
       })
     }
     if (path.endsWith('/timeline')) {
+      const anchor = new URL(route.request().url()).searchParams.get('anchor')
       return route.fulfill({
         json: {
           session_id: sessionWorkspaceFixture.id,
@@ -306,7 +307,8 @@ const useDeterministicSession = async (page: Page) => {
             },
           ],
           projected_structured_bytes: sessionWorkspaceFixture.projectedBytes,
-          continuation_before: { event_sequence: sessionWorkspaceFixture.firstAddress },
+          continuation_before:
+            anchor === 'first' ? null : { event_sequence: sessionWorkspaceFixture.firstAddress },
           continuation_after: null,
         },
       })
@@ -486,10 +488,33 @@ test('moves DOM focus with j and k timeline selection', async ({ page }) => {
     name: new RegExp(`${toolAddress} tool batch transition`),
   })
   await first.focus()
+  await page.keyboard.press('Enter')
   await page.keyboard.press('j')
   await expect(tool).toBeFocused()
   await page.keyboard.press('k')
   await expect(first).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('moves focus to the loaded boundary after Home and End', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto('/sessions')
+  await page.getByRole('textbox', { name: 'Exact session ID' }).fill(sessionWorkspaceFixture.id)
+  await page.getByRole('textbox', { name: 'Exact session ID' }).press('Enter')
+
+  const first = page.getByRole('button', {
+    name: new RegExp(`${sessionWorkspaceFixture.firstAddress} input accepted`),
+  })
+  const last = page.getByRole('button', {
+    name: new RegExp(`${sessionWorkspaceFixture.latestAddress} turn completed`),
+  })
+  await last.focus()
+  await page.keyboard.press('Home')
+  await expect(first).toBeFocused()
+  await page.keyboard.press('End')
+  await expect(last).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -543,5 +568,6 @@ test('inspects closed tool and goal facts without a mouse', async ({ page }) => 
   await expect(page.getByText('achieved', { exact: true })).toBeVisible()
   await expect(page.getByText(toolGoalText, { exact: true })).toBeVisible()
   await expect(continueDetail).toBeHidden()
+  await expect(toolBatch).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
