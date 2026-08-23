@@ -149,6 +149,30 @@ pub struct WebSessionId(
 );
 
 impl WebSessionId {
+    /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
+    #[must_use]
+    pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
+        Self(format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+            bytes[4],
+            bytes[5],
+            bytes[6],
+            bytes[7],
+            bytes[8],
+            bytes[9],
+            bytes[10],
+            bytes[11],
+            bytes[12],
+            bytes[13],
+            bytes[14],
+            bytes[15],
+        ))
+    }
+
     /// Constructs a session identity from its canonical lowercase UUID spelling.
     #[must_use]
     pub fn from_canonical(value: String) -> Option<Self> {
@@ -389,11 +413,40 @@ pub struct WebTimelineTextExcerpt {
     pub continuation: Option<WebTimelineBodyContinuation>,
 }
 
+/// Checked canonical SHA-256 identity used for browser-visible blob references.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebBlobId(#[schemars(regex(pattern = r"^sha256:[0-9a-f]{64}$"))] String);
+
+impl WebBlobId {
+    /// Constructs a blob identity from its canonical external spelling.
+    #[must_use]
+    pub fn from_canonical(value: String) -> Option<Self> {
+        let digest = value.strip_prefix("sha256:")?;
+        (digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        .then_some(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for WebBlobId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_canonical(value)
+            .ok_or_else(|| de::Error::custom("blob ID must be a canonical SHA-256 identity"))
+    }
+}
+
 /// Reference-only blob fact carried without blob bytes.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineBlobReference {
-    pub blob_id: String,
+    pub blob_id: WebBlobId,
     pub length_bytes: WebU64,
     pub media_type: Option<String>,
 }
@@ -419,6 +472,22 @@ pub enum WebTimelineModelCallDisposition {
     Refused,
     Cancelled,
     Ambiguous,
+}
+
+/// Closed provider-neutral failure cause exposed at the browser boundary.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebProviderModelCallFailureCause {
+    CredentialRejected,
+    PermissionDenied,
+    InvalidRequest,
+    TargetNotFound,
+    RequestTooLarge,
+    RateLimited,
+    QuotaExhausted,
+    Overloaded,
+    ProviderInternal,
+    Unrecognized,
 }
 
 /// Independently optional provider-reported usage counts.
@@ -956,19 +1025,20 @@ pub enum WebSessionTimelineDetailBody {
         detail: WebTimelineModelSettingsDetail,
     },
     UserInput {
-        turn_id: String,
+        turn_id: WebSessionId,
         text: WebTimelineTextExcerpt,
+        #[schemars(length(max = 256))]
         attachments: Vec<WebTimelineBlobReference>,
     },
     ModelCall {
-        turn_id: String,
-        model_call_id: String,
+        turn_id: WebSessionId,
+        model_call_id: WebSessionId,
         state: WebTimelineModelCallState,
-        model_identity_id: String,
+        model_identity_id: WebSessionId,
         request_context_items: WebU64,
         response: Option<WebTimelineTextExcerpt>,
         usage: WebTimelineModelUsage,
-        cause_code: Option<String>,
+        provider_failure_cause: Option<WebProviderModelCallFailureCause>,
     },
     ToolBatch {
         turn_id: String,
@@ -1002,7 +1072,7 @@ pub enum WebSessionTimelineDetailBody {
         summary: WebTimelineTextExcerpt,
     },
     TurnLifecycle {
-        turn_id: String,
+        turn_id: WebSessionId,
         lifecycle: WebTimelineTurnLifecycleKind,
         cause_code: String,
     },
@@ -1049,7 +1119,7 @@ pub enum WebTimelineDetailContinuation {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineDetailPage {
-    pub session_id: String,
+    pub session_id: WebSessionId,
     #[schemars(length(max = 128))]
     pub items: Vec<WebSessionTimelineDetail>,
     pub projected_body_bytes: u32,
@@ -1349,6 +1419,13 @@ function assertSchema(root, schema, value, path) {{
   if (typeof value !== schema.type) {{
     fail(path, schema.type);
   }}
+  if (
+    schema.type === "string" &&
+    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+    value.length > 20
+  ) {{
+    fail(path, "an unsigned 64-bit integer");
+  }}
   if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {{
     fail(path, `a string matching ${{schema.pattern}}`);
   }}
@@ -1388,6 +1465,9 @@ function assertTimelineExcerpt(excerpt, address, field, path) {{
     return null;
   }}
   const continuation = excerpt.continuation;
+  if (continuation.member_index !== 0) {{
+    fail(`${{path}}.continuation.member_index`, "zero for a singular body field");
+  }}
   if (end >= total) {{
     fail(`${{path}}.continuation`, "present only before the declared body end");
   }}
@@ -1543,6 +1623,32 @@ function assertTimelineDetailPage(value) {{
             `${{path}}.body.response`,
           );
           textBytes = new TextEncoder().encode(item.body.response.text).byteLength;
+        }}
+        if (item.body.state.type !== "terminal") {{
+          const hasUsage = Object.values(item.body.usage).some(
+            (count) => count !== undefined && count !== null,
+          );
+          if (
+            (item.body.response !== undefined && item.body.response !== null) ||
+            hasUsage ||
+            (item.body.provider_failure_cause !== undefined &&
+              item.body.provider_failure_cause !== null)
+          ) {{
+            fail(
+              `${{path}}.body`,
+              "terminal evidence only at a terminal model-call state",
+            );
+          }}
+        }} else {{
+          const hasFailureCause =
+            item.body.provider_failure_cause !== undefined &&
+            item.body.provider_failure_cause !== null;
+          if ((item.body.state.disposition === "known_failed") !== hasFailureCause) {{
+            fail(
+              `${{path}}.body.provider_failure_cause`,
+              "present exactly for a known_failed terminal model call",
+            );
+          }}
         }}
         break;
       case "tool_batch": {{
@@ -1780,6 +1886,17 @@ function assertTimelineDetailPage(value) {{
         }}
         if (item.body.lifecycle === "terminalized" && !terminalKinds.has(item.kind)) {{
           fail(`${{path}}.kind`, "a terminal turn event for a terminalized lifecycle");
+        }}
+        const lifecycleCauseByKind = {{
+          turn_activated: "activated",
+          turn_failed: "failed",
+          turn_completed: "completed",
+          turn_refused: "refused",
+          turn_cancelled: "cancelled",
+          turn_reconciliation_required: "reconciliation_required",
+        }};
+        if (item.body.cause_code !== lifecycleCauseByKind[item.kind]) {{
+          fail(`${{path}}.body.cause_code`, `the cause for ${{item.kind}}`);
         }}
         break;
       case "event_fact":

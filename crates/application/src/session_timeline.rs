@@ -10,9 +10,10 @@ use signalbox_domain::{
     AcceptedInputId, BlobDigest, ContextCompactionId, ContextFrontierId, DelegationMessageId,
     DirectModelSelection, DurableCommandId, FrozenModelSelection, ImportedConversationId,
     ImportedSessionRelationship, ImportedTranscriptEntryId, ModelCallId, ModelChangeAdjustment,
-    ModelSelectionRequest, ModelSettingsOverlay, ProviderModelIdentity, RunnerId,
-    SemanticTranscriptEntryId, SessionConfigurationDefaultsVersion, SessionId, ToolAttemptId,
-    ToolName, ToolRequestId, TurnId, ValidatedModelSettings,
+    ModelSelectionRequest, ModelSettingsOverlay, ProviderModelCallFailureCause,
+    ProviderModelIdentity, RunnerId, SemanticTranscriptEntryId,
+    SessionConfigurationDefaultsVersion, SessionId, ToolAttemptId, ToolName, ToolRequestId, TurnId,
+    ValidatedModelSettings,
 };
 
 /// Returns the hard ceiling on records in one historical window.
@@ -760,7 +761,7 @@ pub enum SessionTimelineDetailBody {
         request_context_items: u64,
         response: Option<TimelineTextExcerpt>,
         usage: TimelineModelUsage,
-        cause_code: Option<String>,
+        provider_failure_cause: Option<ProviderModelCallFailureCause>,
     },
     /// A tool batch with one progressively selected request/attempt member.
     ToolBatch {

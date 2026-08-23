@@ -326,6 +326,32 @@ const schemas = {
   },
   "WebSessionTimelineDetailPage": {
     "$defs": {
+      "WebBlobId": {
+        "description": "Checked canonical SHA-256 identity used for browser-visible blob references.",
+        "pattern": "^sha256:[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "WebProviderModelCallFailureCause": {
+        "description": "Closed provider-neutral failure cause exposed at the browser boundary.",
+        "enum": [
+          "credential_rejected",
+          "permission_denied",
+          "invalid_request",
+          "target_not_found",
+          "request_too_large",
+          "rate_limited",
+          "quota_exhausted",
+          "overloaded",
+          "provider_internal",
+          "unrecognized"
+        ],
+        "type": "string"
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
       "WebSessionTimelineDetail": {
         "additionalProperties": false,
         "description": "One typed body at a stable timeline address.",
@@ -403,13 +429,14 @@ const schemas = {
                 "items": {
                   "$ref": "#/$defs/WebTimelineBlobReference"
                 },
+                "maxItems": 256,
                 "type": "array"
               },
               "text": {
                 "$ref": "#/$defs/WebTimelineTextExcerpt"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "user_input",
@@ -427,17 +454,21 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
-              "cause_code": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
               "model_call_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "model_identity_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "provider_failure_cause": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebProviderModelCallFailureCause"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "request_context_items": {
                 "$ref": "#/$defs/WebU64"
@@ -456,7 +487,7 @@ const schemas = {
                 "$ref": "#/$defs/WebTimelineModelCallState"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "model_call",
@@ -641,7 +672,7 @@ const schemas = {
                 "$ref": "#/$defs/WebTimelineTurnLifecycleKind"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "turn_lifecycle",
@@ -863,7 +894,7 @@ const schemas = {
         "description": "Reference-only blob fact carried without blob bytes.",
         "properties": {
           "blob_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebBlobId"
           },
           "length_bytes": {
             "$ref": "#/$defs/WebU64"
@@ -2575,7 +2606,7 @@ const schemas = {
         "type": "integer"
       },
       "session_id": {
-        "type": "string"
+        "$ref": "#/$defs/WebSessionId"
       }
     },
     "required": [
@@ -2846,6 +2877,13 @@ function assertSchema(root, schema, value, path) {
   if (typeof value !== schema.type) {
     fail(path, schema.type);
   }
+  if (
+    schema.type === "string" &&
+    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+    value.length > 20
+  ) {
+    fail(path, "an unsigned 64-bit integer");
+  }
   if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {
     fail(path, `a string matching ${schema.pattern}`);
   }
@@ -2885,6 +2923,9 @@ function assertTimelineExcerpt(excerpt, address, field, path) {
     return null;
   }
   const continuation = excerpt.continuation;
+  if (continuation.member_index !== 0) {
+    fail(`${path}.continuation.member_index`, "zero for a singular body field");
+  }
   if (end >= total) {
     fail(`${path}.continuation`, "present only before the declared body end");
   }
@@ -3040,6 +3081,32 @@ function assertTimelineDetailPage(value) {
             `${path}.body.response`,
           );
           textBytes = new TextEncoder().encode(item.body.response.text).byteLength;
+        }
+        if (item.body.state.type !== "terminal") {
+          const hasUsage = Object.values(item.body.usage).some(
+            (count) => count !== undefined && count !== null,
+          );
+          if (
+            (item.body.response !== undefined && item.body.response !== null) ||
+            hasUsage ||
+            (item.body.provider_failure_cause !== undefined &&
+              item.body.provider_failure_cause !== null)
+          ) {
+            fail(
+              `${path}.body`,
+              "terminal evidence only at a terminal model-call state",
+            );
+          }
+        } else {
+          const hasFailureCause =
+            item.body.provider_failure_cause !== undefined &&
+            item.body.provider_failure_cause !== null;
+          if ((item.body.state.disposition === "known_failed") !== hasFailureCause) {
+            fail(
+              `${path}.body.provider_failure_cause`,
+              "present exactly for a known_failed terminal model call",
+            );
+          }
         }
         break;
       case "tool_batch": {
@@ -3277,6 +3344,17 @@ function assertTimelineDetailPage(value) {
         }
         if (item.body.lifecycle === "terminalized" && !terminalKinds.has(item.kind)) {
           fail(`${path}.kind`, "a terminal turn event for a terminalized lifecycle");
+        }
+        const lifecycleCauseByKind = {
+          turn_activated: "activated",
+          turn_failed: "failed",
+          turn_completed: "completed",
+          turn_refused: "refused",
+          turn_cancelled: "cancelled",
+          turn_reconciliation_required: "reconciliation_required",
+        };
+        if (item.body.cause_code !== lifecycleCauseByKind[item.kind]) {
+          fail(`${path}.body.cause_code`, `the cause for ${item.kind}`);
         }
         break;
       case "event_fact":
