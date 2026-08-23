@@ -23,9 +23,9 @@ against this PR (`agent/daemon-live-current-compaction-validation-scope`).
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
 
-The restore-safety search-path pin on check-reachable functions, and the
+The restore-safety search-path pin on check-reachable functions, and the lexical
 catalogue test holding it, were verified against this PR
-(`agent/restore-safe-check-functions`).
+(`agent/daemon-live-restore-call-lexing`).
 
 The delegate denial-reason storage — the superseded decision-shape constraint
 and its byte-precise checks — was verified against this PR
@@ -217,10 +217,13 @@ operation and fails only during restore; `202608200001` retrofits the pin onto
 the check-reachable set the earlier migrations create, and the
 `search_path_postgres` catalogue test (INV-070) derives the reachable set from
 the dependency catalogue — including functions reached only through a
-user-defined operator — and fails on any unpinned member or on empty discovery,
-so a future migration cannot reintroduce the gap. Why: a backup that cannot
-restore is a silent failure that surfaces only during recovery, so restorability
-is part of the schema's contract rather than an operational afterthought.
+user-defined operator — then closes transitively over lexically call-shaped body
+references. Quoted identifiers and comments between a function name and its
+opening parenthesis remain calls; names inside comments or strings and bare
+aliases do not. The test fails on any unpinned member or on empty discovery, so
+a future migration cannot reintroduce the gap. Why: a backup that cannot restore
+is a silent failure that surfaces only during recovery, so restorability is part
+of the schema's contract rather than an operational afterthought.
 
 Prefix reservation across concurrent stacks: the bottom pull request of any
 stack that will add migrations declares a reserved prefix block — a date plus a
