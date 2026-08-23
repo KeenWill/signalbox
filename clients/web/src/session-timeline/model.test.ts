@@ -1537,7 +1537,7 @@ describe('BoundedSessionHistory', () => {
 
     await expect(
       source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
-    ).rejects.toThrow('changed the stable address')
+    ).rejects.toThrow('the excerpt body continuation')
   })
 
   it('rejects item-detail more-at continuations', async () => {
@@ -1709,6 +1709,7 @@ describe('BoundedSessionHistory', () => {
               type: 'proposed',
               frontier_id: '00000000-0000-0000-0000-000000000341',
             },
+            projected_member_index: 0,
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000241',
@@ -1722,7 +1723,16 @@ describe('BoundedSessionHistory', () => {
                   total_bytes: '2',
                   continuation: null,
                 },
-                evidence: { type: 'request_only' },
+                evidence: {
+                  type: 'physical_attempt',
+                  attempt_id: '00000000-0000-0000-0000-000000000441',
+                  state: 'completed',
+                  effect_posture: 'effect_free',
+                  sandbox_posture: null,
+                  result: null,
+                  failure: null,
+                  cause: null,
+                },
               },
             ],
             goal_events: [],
@@ -1769,6 +1779,7 @@ describe('BoundedSessionHistory', () => {
               type: 'results_projected',
               frontier_id: '00000000-0000-0000-0000-000000000341',
             },
+            projected_member_index: 0,
             tools: [],
             goal_events: [
               {
@@ -1822,6 +1833,7 @@ describe('BoundedSessionHistory', () => {
               type: 'proposed',
               frontier_id: '00000000-0000-0000-0000-000000000341',
             },
+            projected_member_index: 0,
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000241',
@@ -1884,7 +1896,7 @@ describe('BoundedSessionHistory', () => {
 
     await expect(
       source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }, cursor),
-    ).rejects.toThrow('regressed from its request cursor')
+    ).rejects.toThrow('does not start at its request cursor')
   })
 
   it('rejects an incomplete excerpt without a matching page continuation', async () => {
@@ -1948,7 +1960,7 @@ describe('BoundedSessionHistory', () => {
 
     await expect(
       source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
-    ).rejects.toThrow('disagrees with its excerpt')
+    ).rejects.toThrow('the excerpt body continuation')
   })
 
   it('rejects a detail item below the fixed body envelope charge', async () => {

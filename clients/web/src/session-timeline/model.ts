@@ -174,16 +174,32 @@ const DETAIL_U64_KEYS = new Set([
   'attempt_count',
   'cache_creation_input_tokens',
   'cache_read_input_tokens',
+  'delivery_sequence',
+  'event_ordinal',
   'generation',
+  'goal_generation',
   'imported_position',
   'input_tokens',
   'length_bytes',
+  'message_ordinal',
   'offset_bytes',
   'output_tokens',
   'placement_revision',
   'request_context_items',
   'through_position',
   'total_bytes',
+])
+
+const POSITIVE_DETAIL_U64_KEYS = new Set([
+  'attempt_count',
+  'delivery_sequence',
+  'event_ordinal',
+  'generation',
+  'goal_generation',
+  'imported_position',
+  'message_ordinal',
+  'placement_revision',
+  'through_position',
 ])
 
 const validateDetailIntegerFacts = (value: unknown): void => {
@@ -193,8 +209,117 @@ const validateDetailIntegerFacts = (value: unknown): void => {
     return
   }
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-    if (DETAIL_U64_KEYS.has(key) && typeof entry === 'string') decimalU64(entry)
+    if (DETAIL_U64_KEYS.has(key) && typeof entry === 'string') {
+      const parsed = decimalU64(entry)
+      if (POSITIVE_DETAIL_U64_KEYS.has(key) && parsed === 0n) {
+        throw new TypeError(`timeline detail ${key} must be positive`)
+      }
+    }
     validateDetailIntegerFacts(entry)
+  }
+}
+
+const bodyExcerptAtCursor = (
+  body: WebSessionTimelineDetailPage['items'][number]['body'],
+  cursor: TimelineBodyCursor,
+): unknown => {
+  switch (body.type) {
+    case 'user_input':
+      return cursor.field === 'input_text' && cursor.member_index === 0 ? body.text : null
+    case 'model_call':
+      return cursor.field === 'model_response' && cursor.member_index === 0 ? body.response : null
+    case 'tool_approval_decision':
+      return cursor.field === 'approval_rationale' && cursor.member_index === 0
+        ? body.rationale
+        : null
+    case 'goal_event':
+      return cursor.field === 'goal_text' && cursor.member_index === 0 && 'text' in body.event
+        ? body.event.text
+        : null
+    case 'context_compaction':
+      return cursor.field === 'compaction_summary' && cursor.member_index === 0
+        ? body.summary
+        : null
+    case 'delegation':
+      return cursor.field === 'delegation_content' &&
+        cursor.member_index === 0 &&
+        'content' in body.detail
+        ? body.detail.content
+        : null
+    case 'tool_batch': {
+      if (body.projected_member_index !== cursor.member_index) return null
+      if (cursor.field === 'goal_text') {
+        const event = body.goal_events[0]
+        return event && 'text' in event ? event.text : null
+      }
+      const tool = body.tools[0]
+      if (!tool) return null
+      if (cursor.field === 'tool_arguments') return tool.arguments
+      if (tool.evidence.type !== 'physical_attempt') return null
+      return cursor.field === 'tool_result'
+        ? tool.evidence.result
+        : cursor.field === 'tool_failure'
+          ? tool.evidence.failure
+          : null
+    }
+    default:
+      return null
+  }
+}
+
+const bodyPageStartsAtCursor = (
+  body: WebSessionTimelineDetailPage['items'][number]['body'],
+  cursor: TimelineBodyCursor,
+): boolean => {
+  const excerpt = bodyExcerptAtCursor(body, cursor)
+  return (
+    excerpt !== null &&
+    excerpt !== undefined &&
+    typeof excerpt === 'object' &&
+    !Array.isArray(excerpt) &&
+    (excerpt as { offset_bytes?: unknown }).offset_bytes === cursor.offset_bytes
+  )
+}
+
+const initialBodyCursor = (
+  address: string,
+  body: WebSessionTimelineDetailPage['items'][number]['body'],
+): TimelineBodyCursor | undefined => {
+  const cursor = (field: TimelineBodyCursor['field']): TimelineBodyCursor => ({
+    address: { event_sequence: address },
+    field,
+    member_index: 0,
+    offset_bytes: '0',
+  })
+  switch (body.type) {
+    case 'user_input':
+      return cursor('input_text')
+    case 'model_call':
+      return body.response ? cursor('model_response') : undefined
+    case 'tool_batch': {
+      const tool = body.tools[0]
+      if (tool?.arguments) return cursor('tool_arguments')
+      if (tool?.evidence.type === 'physical_attempt' && tool.evidence.result) {
+        return cursor('tool_result')
+      }
+      if (tool?.evidence.type === 'physical_attempt' && tool.evidence.failure) {
+        return cursor('tool_failure')
+      }
+      const goal = body.goal_events[0]
+      return goal && 'text' in goal && goal.text ? cursor('goal_text') : undefined
+    }
+    case 'tool_approval_decision':
+      return body.rationale ? cursor('approval_rationale') : undefined
+    case 'goal_event':
+      return 'text' in body.event && body.event.text ? cursor('goal_text') : undefined
+    case 'context_compaction':
+      return cursor('compaction_summary')
+    case 'delegation':
+      return 'content' in body.detail && body.detail.content
+        ? cursor('delegation_content')
+        : undefined
+    default:
+      return undefined
   }
 }
 
@@ -342,7 +467,13 @@ const isCanonicalCrossFieldContinuation = (
     return continuation.member_index === 0
   }
   if (continuation.field === 'tool_result' || continuation.field === 'tool_failure') {
-    return currentField === 'tool_arguments' && continuation.member_index === currentMember
+    if (currentField !== 'tool_arguments' || continuation.member_index !== currentMember) {
+      return false
+    }
+    if (!physical) return false
+    return continuation.field === 'tool_result'
+      ? physical.state === 'completed' && physical.failure == null
+      : physical.state === 'known_failed' && physical.result == null
   }
   if (continuation.field === 'tool_arguments') {
     return continuation.member_index === currentMember + 1
@@ -510,6 +641,23 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
         throw new TypeError('item detail returned a different timeline address')
       }
       validateDetailIntegerFacts(item.body)
+      const requestedBodyCursor = cursor?.type === 'more_body' ? cursor.body : undefined
+      if (requestedBodyCursor) {
+        if (
+          requestedBodyCursor.address.event_sequence !== address ||
+          !bodyPageStartsAtCursor(item.body, requestedBodyCursor)
+        ) {
+          throw new TypeError('timeline detail page does not start at its request cursor')
+        }
+      } else {
+        const initial = initialBodyCursor(address, item.body)
+        if (initial && !bodyPageStartsAtCursor(item.body, initial)) {
+          throw new TypeError('initial timeline detail page does not start at its canonical cursor')
+        }
+        if (item.body.type === 'tool_batch' && item.body.projected_member_index !== 0) {
+          throw new TypeError('initial timeline detail page does not start at member zero')
+        }
+      }
       if (
         bodyContinuations(item.body).some(
           (continuation) => !isCompatibleBodyContinuation(item.body, continuation),
@@ -717,6 +865,12 @@ export class BoundedSessionHistory {
     for (const item of window.items) {
       const address = item.address.event_sequence
       const parsedAddress = decimalAddress(address)
+      if (
+        this.descriptorValue &&
+        parsedAddress < decimalAddress(this.descriptorValue.first_address.event_sequence)
+      ) {
+        throw new TypeError('timeline window precedes the cached first address')
+      }
       if (anchorKind === 'after' && anchorAddress !== undefined && parsedAddress <= anchorAddress) {
         throw new TypeError('timeline window item is not strictly after its anchor')
       }

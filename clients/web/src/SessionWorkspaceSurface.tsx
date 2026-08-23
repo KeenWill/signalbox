@@ -76,7 +76,18 @@ export const restoredTimelineSelection = (
 export const projectedTimelineSelection = (
   selected: string | null,
   ids: readonly string[],
-): string | null => (selected !== null && !ids.includes(selected) ? (ids[0] ?? null) : selected)
+  windowIds: readonly string[] = ids,
+): string | null => {
+  if (selected === null || ids.includes(selected)) return selected
+  const selectedIndex = windowIds.indexOf(selected)
+  if (selectedIndex < 0) return ids[0] ?? null
+  return (
+    ids.reduce<{ id: string; distance: number } | undefined>((nearest, id) => {
+      const distance = Math.abs(windowIds.indexOf(id) - selectedIndex)
+      return !nearest || distance < nearest.distance ? { id, distance } : nearest
+    }, undefined)?.id ?? null
+  )
+}
 
 export const sameSessionWindowAnchor = (
   left: SessionWindowAnchor | null,
@@ -124,6 +135,7 @@ export function SessionWorkspaceSurface({
   const [manualAnchor, setManualAnchor] = useState<SessionWindowAnchor | null>(null)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const pendingBoundaryFocus = useRef<'first' | 'latest' | null>(null)
+  const focusedTimelineId = useRef<string | null>(null)
   const sessionCapabilitiesAvailable = hasUsableSessionTimeline(bootstrap)
   const session = useQuery({
     queryKey: ['production', 'session-workspace', sessionId, manualAnchor, restorePosition],
@@ -146,7 +158,7 @@ export function SessionWorkspaceSurface({
         anchor,
         active,
         descriptor,
-        restored: !active && restorePosition !== undefined,
+        restoreRequested: !active && restorePosition !== undefined,
         source,
         window: timelineWindow,
       }
@@ -161,7 +173,17 @@ export function SessionWorkspaceSurface({
     [app.detail, session.data?.window.items],
   )
   const timelineIds = useMemo(() => items.map((item) => item.address.event_sequence), [items])
+  const windowTimelineIds = useMemo(
+    () => (session.data?.window.items ?? []).map((item) => item.address.event_sequence),
+    [session.data?.window.items],
+  )
   const selected = app.selectedTimeline
+  const restoredSelection = restoredTimelineSelection(
+    restorePosition,
+    session.data?.restoreRequested ?? false,
+    timelineIds,
+  )
+  const didRestoreSelection = restoredSelection !== undefined && selected === restoredSelection
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
@@ -170,25 +192,25 @@ export function SessionWorkspaceSurface({
       const visible = new Set([...current].filter((id) => timelineIds.includes(id)))
       return visible.size === current.size ? current : visible
     })
-    const next = projectedTimelineSelection(selected, timelineIds)
+    const next = projectedTimelineSelection(selected, timelineIds, windowTimelineIds)
     if (next === selected) return
     dispatch(actions.timelineSelected(next))
-    if (next !== null && sessionId !== null) {
-      dispatch(actions.logicalPositionRecorded({ sessionId, position: next }))
+    if (next !== null && focusedTimelineId.current === selected) {
       requestAnimationFrame(() => {
         document.querySelector<HTMLButtonElement>(`[data-timeline-id="${next}"]`)?.focus()
       })
     }
-  }, [dispatch, selected, sessionId, timelineIds])
+  }, [dispatch, selected, timelineIds, windowTimelineIds])
+  const refetchSession = session.refetch
   const openTimelineAnchor = useCallback(
     (anchor: SessionWindowAnchor) => {
       const refetchCurrentAnchor = sameSessionWindowAnchor(manualAnchor, anchor)
       setManualAnchor(anchor)
       setExpanded(new Set())
       dispatch(actions.timelineSelected(null))
-      if (refetchCurrentAnchor) void session.refetch()
+      if (refetchCurrentAnchor) void refetchSession()
     },
-    [dispatch, manualAnchor, session],
+    [dispatch, manualAnchor, refetchSession],
   )
   const openTimelineWindow = useCallback(
     (anchor: 'first' | 'latest') => {
@@ -200,6 +222,7 @@ export function SessionWorkspaceSurface({
   useEffect(() => {
     onTimelineActions({
       selectTimeline: (eventSequence) => {
+        dispatch(actions.timelineSelected(eventSequence))
         if (sessionId !== null) {
           dispatch(actions.logicalPositionRecorded({ sessionId, position: eventSequence }))
         }
@@ -228,13 +251,8 @@ export function SessionWorkspaceSurface({
   }, [dispatch, manualAnchor, session.data?.anchor.kind, sessionId, timelineIds])
 
   useEffect(() => {
-    const restored = restoredTimelineSelection(
-      restorePosition,
-      session.data?.restored ?? false,
-      timelineIds,
-    )
-    if (restored) dispatch(actions.timelineSelected(restored))
-  }, [dispatch, restorePosition, session.data?.restored, timelineIds])
+    if (restoredSelection) dispatch(actions.timelineSelected(restoredSelection))
+  }, [dispatch, restoredSelection])
 
   const openSession = (event: FormEvent) => {
     event.preventDefault()
@@ -248,7 +266,7 @@ export function SessionWorkspaceSurface({
     dispatch(actions.timelineSelected(null))
     setRestorePosition(nextRestorePosition)
     setSessionId(candidate)
-    if (refetchCurrentSession) void session.refetch()
+    if (refetchCurrentSession) void refetchSession()
   }
   const select = (eventSequence: string) => {
     dispatch(actions.timelineSelected(eventSequence))
@@ -341,9 +359,17 @@ export function SessionWorkspaceSurface({
               <p>
                 {session.data.active
                   ? 'Active · opened near latest'
-                  : session.data.restored
+                  : didRestoreSelection
                     ? 'Inactive · restored logical position'
-                    : 'Inactive · opened near latest'}
+                    : `Inactive · opened ${
+                        session.data.anchor.kind === 'latest'
+                          ? 'near latest'
+                          : session.data.anchor.kind === 'first'
+                            ? 'at first'
+                            : 'eventSequence' in session.data.anchor
+                              ? `${session.data.anchor.kind} ${session.data.anchor.eventSequence}`
+                              : session.data.anchor.kind
+                      }`}
               </p>
             </div>
             <dl className="session-telemetry">
@@ -435,6 +461,12 @@ export function SessionWorkspaceSurface({
                     data-timeline-id={id}
                     aria-expanded={isExpanded}
                     aria-current={selected === id ? 'true' : undefined}
+                    onFocus={() => {
+                      focusedTimelineId.current = id
+                    }}
+                    onBlur={() => {
+                      if (focusedTimelineId.current === id) focusedTimelineId.current = null
+                    }}
                     onClick={() => {
                       select(id)
                       toggleExpanded(id)

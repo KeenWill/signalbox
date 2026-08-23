@@ -82,8 +82,10 @@ describe('Session Workspace projection', () => {
     expect(restoredTimelineSelection('42', false, ['42'])).toBeUndefined()
   })
 
-  it('re-homes a selection removed by detail projection', () => {
-    expect(projectedTimelineSelection('44', ['41', '42', '45'])).toBe('41')
+  it('re-homes a selection removed by detail projection to the nearest visible neighbor', () => {
+    expect(
+      projectedTimelineSelection('44', ['41', '42', '45'], ['41', '42', '43', '44', '45']),
+    ).toBe('45')
     expect(projectedTimelineSelection('42', ['41', '42', '45'])).toBe('42')
     expect(projectedTimelineSelection('44', [])).toBeNull()
   })
@@ -179,7 +181,12 @@ describe('Session Workspace projection', () => {
 
     const sessionSettings = {
       type: 'model_settings',
-      detail: { type: 'session_defaults_changed' },
+      detail: {
+        type: 'session_defaults_changed',
+        prior_defaults_version: '1',
+        installed_defaults_version: '2',
+        defaults_version: '2',
+      },
     } as const
     expect(
       isCompatibleDetailBody(
@@ -190,13 +197,13 @@ describe('Session Workspace projection', () => {
     expect(
       isCompatibleDetailBody('session_model_settings_changed', {
         ...sessionSettings,
-        detail: { type: 'turn_resolved' },
+        detail: { type: 'turn_resolved', defaults_version: '2' },
       } as unknown as Parameters<typeof isCompatibleDetailBody>[1]),
     ).toBe(false)
     expect(
       isCompatibleDetailBody('turn_model_settings_resolved', {
         ...sessionSettings,
-        detail: { type: 'turn_resolved' },
+        detail: { type: 'turn_resolved', defaults_version: '2' },
       } as unknown as Parameters<typeof isCompatibleDetailBody>[1]),
     ).toBe(true)
     expect(
@@ -309,11 +316,14 @@ describe('Session Workspace projection', () => {
       response: null,
       usage: {},
       state: { type: 'terminal', disposition: 'known_failed' },
-      cause_code: 'quota_exhausted',
+      provider_failure_cause: 'quota_exhausted',
     } as const
     expect(isCompatibleDetailBody('model_call_transition', modelCall)).toBe(true)
     expect(
-      isCompatibleDetailBody('model_call_transition', { ...modelCall, cause_code: 'invented' }),
+      isCompatibleDetailBody('model_call_transition', {
+        ...modelCall,
+        provider_failure_cause: 'invented',
+      } as unknown as Parameters<typeof isCompatibleDetailBody>[1]),
     ).toBe(false)
     expect(
       isCompatibleDetailBody('model_call_transition', {
@@ -325,7 +335,7 @@ describe('Session Workspace projection', () => {
       isCompatibleDetailBody('model_call_transition', {
         ...modelCall,
         state: { type: 'in_flight' },
-        cause_code: null,
+        provider_failure_cause: null,
         usage: { input_tokens: '1' },
       }),
     ).toBe(false)
@@ -333,7 +343,7 @@ describe('Session Workspace projection', () => {
       isCompatibleDetailBody('model_call_transition', {
         ...modelCall,
         state: { type: 'in_flight' },
-        cause_code: null,
+        provider_failure_cause: null,
         usage: {},
       }),
     ).toBe(true)
@@ -341,7 +351,7 @@ describe('Session Workspace projection', () => {
       isCompatibleDetailBody('model_call_transition', {
         ...modelCall,
         state: { type: 'in_flight' },
-        cause_code: null,
+        provider_failure_cause: null,
         usage: {},
         response: { text: 'premature', offset_bytes: '0', total_bytes: '9' },
       }),
@@ -432,6 +442,7 @@ describe('Session Workspace projection', () => {
         type: 'model_call',
         model_call_id: '00000000-0000-0000-0000-000000000042',
       },
+      terminal_frontier_id: '00000000-0000-0000-0000-000000000043',
       attempt_count: '2',
       cause_code: 'ambiguous_operation',
       exhausted: true,

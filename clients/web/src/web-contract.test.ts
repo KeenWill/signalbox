@@ -864,6 +864,7 @@ describe('generated timeline detail decoder', () => {
               type: 'results_projected',
               frontier_id: '00000000-0000-0000-0000-000000000008',
             },
+            projected_member_index: 0,
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000004',

@@ -21,6 +21,7 @@ type TextExcerpt = Extract<DetailBody, { type: 'user_input' }>['text']
 type ModelCallBody = Extract<DetailBody, { type: 'model_call' }>
 type GoalEvent = Extract<DetailBody, { type: 'goal_event' }>['event']
 type ToolAttempt = Extract<DetailBody, { type: 'tool_batch' }>['tools'][number]
+type DelegationDetail = Extract<DetailBody, { type: 'delegation' }>['detail']
 type DetailKind = DetailItem['kind']
 
 const delegationUpdateKinds = new Set([
@@ -67,7 +68,51 @@ const toolFailureCauses = new Set([
 ])
 const hasCompatibleGoalReason = (event: GoalEvent): boolean =>
   goalEventKinds.has(event.type) &&
-  (event.type !== 'blocked' || goalBlockedReasons.has(event.reason))
+  (event.type !== 'blocked' || goalBlockedReasons.has(event.reason)) &&
+  (event.type === 'user_stopped' ? !('text' in event) : 'text' in event)
+
+const positiveDecimal = (value: string): boolean => /^[1-9][0-9]*$/.test(value)
+
+const compatibleDelegationOutcome = (detail: DelegationDetail): boolean => {
+  if (detail.type !== 'child_lifecycle_disposition' && detail.type !== 'child_result') return true
+  const childProvenance = detail.provenance.type === 'child_turn'
+  const parentProvenance =
+    detail.provenance.type === 'parent_turn_command' ||
+    detail.provenance.type === 'parent_goal_command'
+  const pairMatches =
+    (detail.outcome === 'result_returned' &&
+      detail.reason === 'child_completed' &&
+      childProvenance) ||
+    (detail.outcome === 'child_failed' &&
+      (detail.reason === 'child_execution_failed' ||
+        detail.reason === 'child_result_unavailable') &&
+      childProvenance) ||
+    (detail.outcome === 'child_cancelled' &&
+      detail.reason === 'child_cancelled' &&
+      childProvenance) ||
+    (detail.outcome === 'child_stopped' &&
+      detail.reason === 'parent_stopped_with_descendants' &&
+      parentProvenance) ||
+    (detail.outcome === 'child_cancelled' &&
+      detail.reason === 'parent_cancelled_with_descendants' &&
+      parentProvenance) ||
+    ((detail.outcome === 'continue_running' || detail.outcome === 'already_terminal') &&
+      (detail.reason === 'parent_stopped_with_descendants' ||
+        detail.reason === 'parent_cancelled_with_descendants') &&
+      parentProvenance)
+  if (!pairMatches) return false
+  if (
+    detail.provenance.type === 'parent_goal_command' &&
+    !positiveDecimal(detail.provenance.goal_generation)
+  ) {
+    return false
+  }
+  return detail.type !== 'child_result'
+    ? true
+    : detail.outcome === 'result_returned'
+      ? detail.content != null
+      : detail.content == null
+}
 
 const compatibleKinds = {
   session_created: ['session_created'],
@@ -90,13 +135,24 @@ const compatibleKinds = {
   delegation: ['delegation_update', 'delegation_wake'],
 } as const satisfies Record<DetailBody['type'], readonly DetailKind[]>
 
-export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): boolean => {
+export const isCompatibleDetailBody = (
+  kind: DetailKind,
+  body: DetailBody,
+  sessionId?: string,
+): boolean => {
   if (body.type === 'model_settings') {
-    return kind === 'session_model_settings_changed'
-      ? body.detail.type === 'session_defaults_changed'
-      : kind === 'turn_model_settings_resolved'
-        ? body.detail.type === 'turn_resolved'
-        : false
+    const subtypeMatches =
+      kind === 'session_model_settings_changed'
+        ? body.detail.type === 'session_defaults_changed'
+        : kind === 'turn_model_settings_resolved'
+          ? body.detail.type === 'turn_resolved'
+          : false
+    if (!subtypeMatches) return false
+    return body.detail.type === 'session_defaults_changed'
+      ? positiveDecimal(body.detail.prior_defaults_version) &&
+          BigInt(body.detail.installed_defaults_version) ===
+            BigInt(body.detail.prior_defaults_version) + 1n
+      : positiveDecimal(body.detail.defaults_version)
   }
   if (body.type === 'turn_lifecycle') {
     const lifecycleByKind = {
@@ -110,11 +166,30 @@ export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): bool
     return expected?.[0] === body.lifecycle && expected[1] === body.cause_code
   }
   if (body.type === 'delegation') {
-    return kind === 'delegation_update'
-      ? delegationUpdateKinds.has(body.detail.type)
-      : kind === 'delegation_wake'
-        ? delegationWakeKinds.has(body.detail.type)
-        : false
+    const subtypeMatches =
+      kind === 'delegation_update'
+        ? delegationUpdateKinds.has(body.detail.type)
+        : kind === 'delegation_wake'
+          ? delegationWakeKinds.has(body.detail.type)
+          : false
+    if (!subtypeMatches || !compatibleDelegationOutcome(body.detail)) return false
+    if ('child_session_id' in body.detail && body.detail.child_session_id === sessionId)
+      return false
+    if (
+      body.detail.type === 'child_lifecycle_disposition' &&
+      !positiveDecimal(body.detail.event_ordinal)
+    ) {
+      return false
+    }
+    if (body.detail.type === 'session_message') {
+      return (
+        positiveDecimal(body.detail.message_ordinal) &&
+        positiveDecimal(body.detail.delivery_sequence) &&
+        (sessionId === undefined || body.detail.recipient_session_id === sessionId) &&
+        body.detail.sender_session_id !== body.detail.recipient_session_id
+      )
+    }
+    return true
   }
   if (body.type === 'model_call') {
     const knownFailure = body.state.type === 'terminal' && body.state.disposition === 'known_failed'
@@ -126,8 +201,8 @@ export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): bool
       kind === 'model_call_transition' &&
       terminalEvidenceIsCompatible &&
       (knownFailure
-        ? body.cause_code == null || modelFailureCauses.has(body.cause_code)
-        : body.cause_code == null)
+        ? body.provider_failure_cause != null && modelFailureCauses.has(body.provider_failure_cause)
+        : body.provider_failure_cause == null)
     )
   }
   if (body.type === 'goal_event') {
@@ -156,6 +231,7 @@ export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): bool
     return (
       kind === 'turn_reconciliation_required' &&
       (body.operation.type === 'model_call' || body.operation.type === 'tool_attempt') &&
+      positiveDecimal(body.attempt_count) &&
       body.cause_code === 'ambiguous_operation' &&
       body.exhausted &&
       body.operator_required
@@ -165,14 +241,51 @@ export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): bool
     return (
       kind === 'tool_approval_decided' &&
       (body.decision === 'approve' || body.decision === 'deny') &&
-      (body.actor.type === 'policy' || body.actor.type === 'user' || body.actor.type === 'delegate')
+      (body.actor.type === 'policy' ||
+        body.actor.type === 'user' ||
+        body.actor.type === 'delegate') &&
+      (body.actor.type !== 'delegate' || body.rationale != null)
     )
+  }
+  if (body.type === 'runner') {
+    return kind === 'runner_state_transition' && positiveDecimal(body.placement_revision)
+  }
+  if (body.type === 'user_input') {
+    return kind === 'input_accepted' && body.attachments.length === 0
   }
   return (compatibleKinds[body.type] as readonly DetailKind[]).includes(kind)
 }
 
 const modelCallState = (state: ModelCallBody['state']): string =>
   state.type === 'terminal' ? `terminal · ${state.disposition}` : state.type.replaceAll('_', ' ')
+
+const modelSelection = (
+  selection: { kind: 'direct'; selection_id: string } | { kind: 'alias'; alias_id: string },
+): string =>
+  selection.kind === 'direct'
+    ? `direct · ${selection.selection_id}`
+    : `alias · ${selection.alias_id}`
+
+const effectiveSettingsFacts = (
+  settings:
+    | Extract<
+        Extract<DetailBody, { type: 'model_settings' }>['detail'],
+        { type: 'turn_resolved' }
+      >['settings']
+    | Extract<
+        Extract<DetailBody, { type: 'model_settings' }>['detail'],
+        { type: 'session_defaults_changed' }
+      >['installed_settings'],
+): ReadonlyArray<readonly [string, ReactNode]> => [
+  ['Reasoning level', settings.effective.reasoning_level ?? 'default'],
+  ['Fast mode', settings.effective.fast_mode],
+  [
+    'Service tier',
+    settings.effective.service_tier
+      ? `${settings.effective.service_tier.provider} · ${settings.effective.service_tier.value}`
+      : 'default',
+  ],
+]
 
 const TextDetail = ({ label, excerpt }: { label: string; excerpt: TextExcerpt }) => {
   return (
@@ -249,7 +362,6 @@ const ToolAttemptDetail = ({ tool }: { tool: ToolAttempt }) => {
   )
 }
 
-type DelegationDetail = Extract<DetailBody, { type: 'delegation' }>['detail']
 type Fact = readonly [string, ReactNode]
 
 const delegationProvenanceFacts = (
@@ -366,12 +478,20 @@ const detailContent = (body: DetailBody): ReactNode => {
               ? [
                   ['Change', 'session defaults changed'],
                   ['Command', body.detail.command_id],
+                  ['Prior version', body.detail.prior_defaults_version],
                   ['Installed version', body.detail.installed_defaults_version],
+                  ['Prior model', modelSelection(body.detail.prior_model)],
+                  ['Installed model', modelSelection(body.detail.installed_model)],
+                  ...effectiveSettingsFacts(body.detail.installed_settings),
                 ]
               : [
                   ['Change', 'turn settings resolved'],
                   ['Turn', body.detail.turn_id],
                   ['Accepted input', body.detail.accepted_input_id],
+                  ['Defaults version', body.detail.defaults_version],
+                  ['Requested model', modelSelection(body.detail.requested_model)],
+                  ['Selected model', body.detail.selected_direct_id],
+                  ...effectiveSettingsFacts(body.detail.settings),
                 ]
           }
         />
@@ -412,7 +532,7 @@ const detailContent = (body: DetailBody): ReactNode => {
               ['Model', body.model_identity_id],
               ['Request context items', body.request_context_items],
               ['State', modelCallState(body.state)],
-              ['Cause', body.cause_code ?? 'not recorded'],
+              ['Cause', body.provider_failure_cause ?? 'not recorded'],
               ['Input tokens', body.usage.input_tokens ?? 'not reported'],
               ['Output tokens', body.usage.output_tokens ?? 'not reported'],
               [
@@ -439,6 +559,12 @@ const detailContent = (body: DetailBody): ReactNode => {
               ['Turn', body.turn_id],
               ['Producing call', body.producing_model_call_id],
               ['State', body.state.type.replaceAll('_', ' ')],
+              [
+                body.state.type === 'recovery_required' ? 'Recovery attempt' : 'Frontier',
+                body.state.type === 'recovery_required'
+                  ? body.state.tool_attempt_id
+                  : body.state.frontier_id,
+              ],
               ['Tool attempts in this page', String(body.tools.length)],
               ['Goal events in this page', String(body.goal_events.length)],
             ]}
@@ -611,13 +737,20 @@ export function SessionItemDetail({
   })
 
   useEffect(() => {
-    if (!restoreSummaryOnCompletion || detail.isFetching || !detail.data) return
+    if (!restoreSummaryOnCompletion || detail.isFetching) return
+    if (!detail.data && !detail.isError) return
     setRestoreSummaryOnCompletion(false)
-    if (detail.data.continuation) return
+    if (!detail.isError && detail.data?.continuation) return
     document
       .querySelector<HTMLButtonElement>(`[data-timeline-id="${item.address.event_sequence}"]`)
       ?.focus()
-  }, [detail.data, detail.isFetching, item.address.event_sequence, restoreSummaryOnCompletion])
+  }, [
+    detail.data,
+    detail.isError,
+    detail.isFetching,
+    item.address.event_sequence,
+    restoreSummaryOnCompletion,
+  ])
 
   if (detail.isError) {
     return (
@@ -630,7 +763,8 @@ export function SessionItemDetail({
   if (
     detail.data.items.some(
       (detailItem) =>
-        detailItem.kind !== item.kind || !isCompatibleDetailBody(detailItem.kind, detailItem.body),
+        detailItem.kind !== item.kind ||
+        !isCompatibleDetailBody(detailItem.kind, detailItem.body, sessionId),
     )
   ) {
     return (

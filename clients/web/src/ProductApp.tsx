@@ -343,9 +343,16 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           '.session-item-summary[aria-current="true"]',
         )
         const first = document.querySelector<HTMLElement>('.session-item-summary')
+        if (!selected && first?.dataset.timelineId) {
+          timelineActions?.selectTimeline?.(first.dataset.timelineId)
+        }
         ;(selected ?? first ?? primaryRef.current)?.focus()
       },
-      navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      navigate: (path) => {
+        void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() => {
+          requestAnimationFrame(() => primaryRef.current?.focus())
+        })
+      },
       selectTimeline: timelineActions?.selectTimeline,
       openTimelineWindow: timelineActions?.openTimelineWindow,
     }),
@@ -375,7 +382,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
 
   useEffect(() => {
     if (previousLayoutRef.current === 'workbench' && app.layout === 'focus') {
-      primaryRef.current?.focus()
+      const active = document.activeElement
+      if (
+        active instanceof HTMLElement &&
+        (active.closest('.product-navigation-pane') || active.closest('.product-inspector'))
+      ) {
+        primaryRef.current?.focus()
+      }
     }
     previousLayoutRef.current = app.layout
   }, [app.layout])
