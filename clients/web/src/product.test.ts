@@ -171,7 +171,20 @@ describe('SameOriginProductTransport', () => {
       'fetch',
       vi.fn(
         async () =>
-          new Response(JSON.stringify({ ...imageArtifact, display_filename: ['different.png'] })),
+          new Response(
+            JSON.stringify({
+              ...imageArtifact,
+              display_filename: ['different.png'],
+              available_views: imageArtifact.available_views.map((view) =>
+                view.kind === 'download'
+                  ? {
+                      ...view,
+                      content_url: `/api/blobs/${imageArtifact.digest}/download?media_type=image%2Fpng&display_filename=different.png`,
+                    }
+                  : view,
+              ),
+            }),
+          ),
       ),
     )
 
