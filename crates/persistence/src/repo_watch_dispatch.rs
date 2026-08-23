@@ -534,6 +534,11 @@ impl PostgresRepoWatchDispatchStore {
                JOIN repo_watch_event AS origin ON origin.event_id = action.event_id
               WHERE origin.repository = $1
                 AND origin.pull_request_number = $2
+                AND EXISTS (
+                    SELECT 1
+                      FROM goal_event AS commissioned_goal
+                     WHERE commissioned_goal.session_id = action.session_id
+                )
               ORDER BY action.session_id",
         )
         .bind(repository.as_str())

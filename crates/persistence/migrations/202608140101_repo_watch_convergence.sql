@@ -127,7 +127,7 @@ CREATE TABLE repo_watch_pull_request_convergence_assessment (
             OR review_decision = 'changes_requested'
         )
     ),
-    UNIQUE (
+    CONSTRAINT repo_watch_pull_request_conve_assessment_id_repository_pull_key UNIQUE (
         assessment_id, repository, pull_request_number, head_sha, verdict_kind
     )
 );
@@ -141,7 +141,8 @@ CREATE TABLE repo_watch_pull_request_convergence (
         convergence_kind IN ('internally_converged', 'merge_ready')
     ),
     converged_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (repository, pull_request_number, head_sha),
+    CONSTRAINT repo_watch_pull_request_convergence_pkey
+        PRIMARY KEY (repository, pull_request_number, head_sha),
     CONSTRAINT repo_watch_convergence_assessment_matches
     FOREIGN KEY (
         assessment_id, repository, pull_request_number, head_sha,

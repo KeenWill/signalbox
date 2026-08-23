@@ -70,7 +70,8 @@ CREATE TABLE repo_watch_dispatch_batch (
     action_count integer NOT NULL,
     admitted_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
 
-    UNIQUE (event_id, rule_id, rule_version),
+    CONSTRAINT repo_watch_dispatch_batch_event_id_rule_id_rule_version_key
+        UNIQUE (event_id, rule_id, rule_version),
     UNIQUE (dispatch_id, event_id),
     FOREIGN KEY (event_id)
         REFERENCES repo_watch_event(event_id)

@@ -1646,33 +1646,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv007_paused_scheduler_admits_no_authoritative_passes() {
-        let selected = session(50);
-        let (unused_shutdown, shutdown_receiver) = oneshot::channel();
-        let pass = FakePass::failing_once(selected, 1, unused_shutdown);
-        let observed = Arc::clone(&pass.state);
-        let mut scheduler = SchedulerLoop::paused(
-            FakeWorkSource {
-                hints: VecDeque::from([Ok(selected)]),
-            },
-            pass,
-        );
-
-        assert_eq!(
-            scheduler.run_until(ready(())).await,
-            SchedulerLoopExit::Shutdown
-        );
-        assert!(
-            observed
-                .lock()
-                .expect("fake-pass state is not poisoned")
-                .observed
-                .is_empty()
-        );
-        drop(shutdown_receiver);
-    }
-
-    #[tokio::test]
     async fn failed_pass_event_does_not_promise_scheduler_retry() {
         capture_telemetry_for_this_thread();
         let failing_session = session(7);

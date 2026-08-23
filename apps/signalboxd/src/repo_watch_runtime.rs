@@ -1094,6 +1094,9 @@ impl RepositoryWatchTask {
         }
         let mut webhook_retry = WebhookDrainRetry::default();
         if self.webhook_work.is_some() {
+            if !self.initialize_cursor_before_webhooks(&mut shutdown).await {
+                return;
+            }
             let Some(outcome) = self.run_webhook_attempt_until_shutdown(&mut shutdown).await else {
                 return;
             };
@@ -1279,6 +1282,66 @@ impl RepositoryWatchTask {
                         return;
                     }
                 }
+            }
+        }
+    }
+
+    /// Establishes the durable baseline every webhook projection requires.
+    ///
+    /// Primary mode intentionally delays its first scheduled reconciliation,
+    /// so startup cannot leave a fresh repository's durable backlog waiting for
+    /// that interval. A failed initializing poll is retried while deliveries
+    /// remain safely pending.
+    async fn initialize_cursor_before_webhooks(
+        &mut self,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> bool {
+        loop {
+            match self.store.load_cursor(&self.repository).await {
+                Ok(Some(_)) => return true,
+                Ok(None) => {}
+                Err(_) => {
+                    tracing::warn!(
+                        repository = %self.repository.as_str(),
+                        cause_code = RepositoryWatchAttemptError::Persistence.cause_code(),
+                        "repository-watch could not inspect its startup cursor; initialization will retry"
+                    );
+                }
+            }
+            let mut drained = None;
+            let mut trailing_failure = None;
+            let Some(result) = run_until_shutdown(
+                shutdown,
+                self.run_attempt(WebhookDrain::Deferred, &mut drained, &mut trailing_failure),
+            )
+            .await
+            else {
+                return false;
+            };
+            match result {
+                Ok(()) => return true,
+                Err(error) if error.is_permanent() => {
+                    tracing::error!(
+                        repository = %self.repository.as_str(),
+                        cause_code = error.cause_code(),
+                        "repository-watch startup cursor initialization failed permanently"
+                    );
+                    return false;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        repository = %self.repository.as_str(),
+                        cause_code = error.cause_code(),
+                        retry_seconds = WEBHOOK_DRAIN_RETRY_DELAY.as_secs(),
+                        "repository-watch startup cursor initialization failed; retry scheduled"
+                    );
+                }
+            }
+            if run_until_shutdown(shutdown, sleep(WEBHOOK_DRAIN_RETRY_DELAY))
+                .await
+                .is_none()
+            {
+                return false;
             }
         }
     }

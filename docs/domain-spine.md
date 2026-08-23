@@ -7267,7 +7267,12 @@ impl RepoWatchEventContentIdentityV1 {
 pub struct RepoWatchEventIdentityFrontierEntryV1 { /* private */ }
 impl RepoWatchEventIdentityFrontierEntryV1 {
     pub const fn new(stream_identity: [u8; 32], sequence: NonZeroU64) -> Self;
-    // accessors: stream_identity(), sequence()
+    pub const fn for_pull_request(
+        stream_identity: [u8; 32],
+        sequence: NonZeroU64,
+        pull_request_number: PullRequestNumber,
+    ) -> Self;
+    // accessors: stream_identity(), sequence(), pull_request_number()
 }
 
 pub struct RepoWatchEventIdentityFrontierV1 { /* private */ }

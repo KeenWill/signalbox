@@ -12,12 +12,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use signalbox_application::{
     RepoWatchBranchHead, RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment,
-    RepoWatchConvergenceVerdict, RepoWatchEventContentIdentityV1,
-    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierV1,
-    RepoWatchEventOccurrenceV1, RepoWatchObservation, RepoWatchPullRequestState,
-    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
-    RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
+    RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment, RepoWatchConvergenceVerdict,
+    RepoWatchEventContentIdentityV1, RepoWatchEventIdentityFrontierEntryV1,
+    RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
+    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
     RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation,
     RepoWatchWorkflowRunObservation, repo_watch_events_have_equal_identified_content,
 };
@@ -40,10 +39,10 @@ use crate::{
         RepoWatchReactionSubjectStorageKind, positive_u64_from_numeric,
         repo_watch_check_conclusion_from_str, repo_watch_check_conclusion_to_str,
         repo_watch_checks_outcome_from_str, repo_watch_checks_outcome_to_str,
-        repo_watch_event_kind_from_str, repo_watch_event_kind_to_str,
-        repo_watch_event_producer_from_str, repo_watch_event_producer_to_str,
-        repo_watch_event_target_from_str, repo_watch_event_target_to_str,
-        repo_watch_convergence_verdict_to_str, repo_watch_mergeable_state_from_str,
+        repo_watch_convergence_verdict_to_str, repo_watch_event_kind_from_str,
+        repo_watch_event_kind_to_str, repo_watch_event_producer_from_str,
+        repo_watch_event_producer_to_str, repo_watch_event_target_from_str,
+        repo_watch_event_target_to_str, repo_watch_mergeable_state_from_str,
         repo_watch_mergeable_state_to_str, repo_watch_observed_review_state_to_str,
         repo_watch_pull_request_lifecycle_from_str, repo_watch_pull_request_lifecycle_to_str,
         repo_watch_reaction_change_from_str, repo_watch_reaction_change_to_str,
@@ -1488,6 +1487,8 @@ struct CursorRecord {
 struct EventIdentityFrontierRecord {
     stream_identity: [u8; 32],
     sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pull_request_number: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1634,6 +1635,7 @@ fn cursor_record(candidate: &RepoWatchCursorCandidate) -> CursorRecord {
             .map(|entry| EventIdentityFrontierRecord {
                 stream_identity: *entry.stream_identity(),
                 sequence: entry.sequence().get(),
+                pull_request_number: entry.pull_request_number().map(PullRequestNumber::get),
             })
             .collect(),
         state: repository_state_record(candidate.observation().state()),
@@ -1780,13 +1782,29 @@ fn decode_cursor_candidate(value: Value) -> Result<RepoWatchCursorCandidate, Rep
             .event_identity_frontier
             .into_iter()
             .map(|entry| {
-                NonZeroU64::new(entry.sequence)
-                    .map(|sequence| {
-                        RepoWatchEventIdentityFrontierEntryV1::new(entry.stream_identity, sequence)
-                    })
-                    .ok_or(RepoWatchPersistenceCorruption::InvalidCursorField(
+                let sequence = NonZeroU64::new(entry.sequence).ok_or(
+                    RepoWatchPersistenceCorruption::InvalidCursorField(
                         "event_identity_frontier.sequence",
-                    ))
+                    ),
+                )?;
+                match entry.pull_request_number {
+                    Some(number) => NonZeroU64::new(number)
+                        .map(PullRequestNumber::new)
+                        .map(|number| {
+                            RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+                                entry.stream_identity,
+                                sequence,
+                                number,
+                            )
+                        })
+                        .ok_or(RepoWatchPersistenceCorruption::InvalidCursorField(
+                            "event_identity_frontier.pull_request_number",
+                        )),
+                    None => Ok(RepoWatchEventIdentityFrontierEntryV1::new(
+                        entry.stream_identity,
+                        sequence,
+                    )),
+                }
             })
             .collect::<Result<Vec<_>, _>>()?,
     )

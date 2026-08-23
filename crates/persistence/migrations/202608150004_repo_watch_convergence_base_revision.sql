@@ -39,6 +39,25 @@ UPDATE repo_watch_pull_request_convergence_assessment AS assessment
 ALTER TABLE repo_watch_pull_request_convergence_assessment
     ENABLE TRIGGER repo_watch_convergence_assessment_is_append_only;
 
+DO $$
+DECLARE
+    unresolved_assessment_id uuid;
+BEGIN
+    SELECT assessment_id
+      INTO unresolved_assessment_id
+      FROM repo_watch_pull_request_convergence_assessment
+     WHERE base_revision IS NULL
+        OR base_revision COLLATE "C" !~ '^[0-9a-f]{40}$'
+     ORDER BY assessment_id
+     LIMIT 1;
+    IF unresolved_assessment_id IS NOT NULL THEN
+        RAISE EXCEPTION
+            'repository-watch convergence assessment % has no resolvable base revision',
+            unresolved_assessment_id;
+    END IF;
+END
+$$;
+
 ALTER TABLE repo_watch_pull_request_convergence
     DISABLE TRIGGER repo_watch_pull_request_convergence_is_append_only;
 
@@ -75,7 +94,7 @@ ALTER TABLE repo_watch_pull_request_convergence
     ALTER COLUMN base_revision SET NOT NULL,
     ADD CONSTRAINT repo_watch_convergence_base_revision_check
         CHECK (base_revision COLLATE "C" ~ '^[0-9a-f]{40}$'),
-    ADD PRIMARY KEY (
+    ADD CONSTRAINT repo_watch_pull_request_convergence_pkey PRIMARY KEY (
         repository, pull_request_number, head_sha, base_revision
     ),
     ADD CONSTRAINT repo_watch_convergence_assessment_matches

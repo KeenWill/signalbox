@@ -235,7 +235,13 @@ immutable only when the differ suppresses re-emission on members its stream key
 already names, so completed check runs are not among them: their conclusion can
 change under an unchanged run identity and completion generation, and they
 advance a frontier sequence like any recurring stream. The cursor does not
-retain resource keys, ETags, accepted transport responses, raw provider
+retain recurring streams owned by a merged pull request after deriving its
+terminal event, because GitHub does not permit a merged request to reopen. A
+closed but unmerged request remains represented so reopening cannot reuse an
+earlier occurrence identity. Repository-global workflow streams and streams for
+active pull requests remain unchanged. Legacy frontier entries acquire explicit
+ownership when their stream next advances. The cursor does not retain resource
+keys, ETags, accepted transport responses, raw provider
 payloads, or credentials. A per-repository atomic commit accepts an expected
 generation, one complete cursor candidate, and its ordered event-occurrence
 batch. It serializes competing commits, appends the cursor and every event
@@ -399,15 +405,16 @@ request, the poller retains the prior canonical head-repository identity while
 accepting the new lifecycle and other current fields; a new pull request with no
 current or prior head-repository identity still fails closed.
 
-**Implemented behavior.** Accepted events append in observation order as durable
-facts and are never updated, deleted, or truncated. The relational storage row
-fixes the event version to one, records the content-identity version and 32-byte
-digest, records `poll` as the only presently implemented producer, closes both
-target and payload discriminators, retains complete PR context, and rejects
-incoherent payload columns. Reads decode every field into the closed domain
-event and fail closed when a durable cursor or event row is malformed or
-noncanonical. Bounded keyset pages expose repository event history in
-cursor-generation and event-ordinal order.
+**Implemented behavior.** Ordinary persisted events append in observation order
+as durable facts and are never updated, deleted, or truncated. Poll and primary
+webhook reconciliation are the implemented ordinary-event producers; shadow
+webhook projections do not append ordinary event rows. The relational storage
+row fixes the event version to one, records the content-identity version and
+32-byte digest, closes both target and payload discriminators, retains complete
+PR context, and rejects incoherent payload columns. Reads decode every field
+into the closed domain event and fail closed when a durable cursor or event row
+is malformed or noncanonical. Bounded keyset pages expose repository event
+history in cursor-generation and event-ordinal order.
 
 **Implemented behavior.** The closed version-one event payloads are:
 

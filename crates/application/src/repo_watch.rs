@@ -94,6 +94,7 @@ impl RepoWatchEventContentIdentityV1 {
 pub struct RepoWatchEventIdentityFrontierEntryV1 {
     stream_identity: [u8; 32],
     sequence: NonZeroU64,
+    pull_request_number: Option<PullRequestNumber>,
 }
 
 impl RepoWatchEventIdentityFrontierEntryV1 {
@@ -106,6 +107,20 @@ impl RepoWatchEventIdentityFrontierEntryV1 {
         Self {
             stream_identity,
             sequence,
+            pull_request_number: None,
+        }
+    }
+
+    /// Pairs one stream with its last sequence and owning pull request.
+    pub const fn for_pull_request(
+        stream_identity: [u8; 32],
+        sequence: NonZeroU64,
+        pull_request_number: PullRequestNumber,
+    ) -> Self {
+        Self {
+            stream_identity,
+            sequence,
+            pull_request_number: Some(pull_request_number),
         }
     }
 
@@ -121,12 +136,23 @@ impl RepoWatchEventIdentityFrontierEntryV1 {
     pub const fn sequence(&self) -> NonZeroU64 {
         self.sequence
     }
+
+    /// Pull request owning this recurring stream, when recorded.
+    pub const fn pull_request_number(&self) -> Option<PullRequestNumber> {
+        self.pull_request_number
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RepoWatchEventIdentityFrontierSequenceV1 {
+    sequence: NonZeroU64,
+    pull_request_number: Option<PullRequestNumber>,
 }
 
 /// Canonical per-repository occurrence counters carried by the durable cursor.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RepoWatchEventIdentityFrontierV1 {
-    sequences: BTreeMap<[u8; 32], NonZeroU64>,
+    sequences: BTreeMap<[u8; 32], RepoWatchEventIdentityFrontierSequenceV1>,
 }
 
 impl RepoWatchEventIdentityFrontierV1 {
@@ -144,7 +170,13 @@ impl RepoWatchEventIdentityFrontierV1 {
         let mut sequences = BTreeMap::new();
         for entry in entries {
             if sequences
-                .insert(entry.stream_identity, entry.sequence)
+                .insert(
+                    entry.stream_identity,
+                    RepoWatchEventIdentityFrontierSequenceV1 {
+                        sequence: entry.sequence,
+                        pull_request_number: entry.pull_request_number,
+                    },
+                )
                 .is_some()
             {
                 return Err(RepoWatchEventIdentityFrontierError::DuplicateStream);
@@ -160,17 +192,26 @@ impl RepoWatchEventIdentityFrontierV1 {
     pub fn entries(
         &self,
     ) -> impl ExactSizeIterator<Item = RepoWatchEventIdentityFrontierEntryV1> + '_ {
-        self.sequences.iter().map(|(stream, sequence)| {
-            RepoWatchEventIdentityFrontierEntryV1::new(*stream, *sequence)
-        })
+        self.sequences
+            .iter()
+            .map(|(stream, entry)| match entry.pull_request_number {
+                Some(number) => RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+                    *stream,
+                    entry.sequence,
+                    number,
+                ),
+                None => RepoWatchEventIdentityFrontierEntryV1::new(*stream, entry.sequence),
+            })
     }
 
     fn advance(
         &mut self,
         stream_identity: [u8; 32],
+        pull_request_number: Option<PullRequestNumber>,
     ) -> Result<NonZeroU64, RepoWatchEventIdentityFrontierError> {
         let next = match self.sequences.get(&stream_identity) {
-            Some(sequence) => sequence
+            Some(entry) => entry
+                .sequence
                 .get()
                 .checked_add(1)
                 .and_then(NonZeroU64::new)
@@ -182,8 +223,19 @@ impl RepoWatchEventIdentityFrontierV1 {
                 NonZeroU64::MIN
             }
         };
-        self.sequences.insert(stream_identity, next);
+        self.sequences.insert(
+            stream_identity,
+            RepoWatchEventIdentityFrontierSequenceV1 {
+                sequence: next,
+                pull_request_number,
+            },
+        );
         Ok(next)
+    }
+
+    fn retire_pull_request(&mut self, number: PullRequestNumber) {
+        self.sequences
+            .retain(|_, entry| entry.pull_request_number != Some(number));
     }
 }
 
@@ -449,6 +501,8 @@ pub enum RepoWatchConvergenceVerdict {
 }
 
 const MERGE_READY_BASE_BRANCH: &str = "main";
+const MAX_REPO_WATCH_CONVERGENCE_ITEMS: usize = 10_000;
+const MAX_REPO_WATCH_GATING_CHECK_COUNT: u64 = 10_000;
 
 /// Field-labeled construction input for one exact-head convergence assessment.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -489,7 +543,11 @@ impl RepoWatchConvergenceAssessment {
         input
             .non_green_gating_checks
             .sort_by(|left, right| left.as_str().cmp(right.as_str()));
-        if input.non_green_gating_checks.len() as u64 > input.gating_check_count {
+        if input.gating_check_count > MAX_REPO_WATCH_GATING_CHECK_COUNT
+            || input.unresolved_threads.len() > MAX_REPO_WATCH_CONVERGENCE_ITEMS
+            || input.non_green_gating_checks.len() > MAX_REPO_WATCH_CONVERGENCE_ITEMS
+            || input.non_green_gating_checks.len() as u64 > input.gating_check_count
+        {
             return Err(RepoWatchConvergenceAssessmentError);
         }
         let blocked = !input.unresolved_threads.is_empty()
@@ -1086,6 +1144,21 @@ enum RepoWatchEventStreamKeyV1<'value> {
 }
 
 impl RepoWatchEventStreamKeyV1<'_> {
+    /// Pull request owning this stream, or none for repository-global streams.
+    const fn pull_request_number(&self) -> Option<PullRequestNumber> {
+        match self {
+            Self::PullRequestKind { number, .. }
+            | Self::Label { number, .. }
+            | Self::CheckSuite { number, .. }
+            | Self::CheckRun { number, .. }
+            | Self::Review { number, .. }
+            | Self::Thread { number, .. }
+            | Self::BaseAdvance { number, .. }
+            | Self::Reaction { number, .. } => Some(*number),
+            Self::Workflow { .. } => None,
+        }
+    }
+
     /// Whether this stream can state more than one fact.
     ///
     /// A stream is non-recurring only when the differ suppresses re-emission on
@@ -1225,6 +1298,12 @@ pub fn derive_repo_watch_events(
             ids,
             &mut events,
         )?;
+        // Merged pull requests cannot reopen, so their recurring streams can no
+        // longer advance. Closed-but-unmerged requests retain their sequences
+        // because GitHub permits them to reopen.
+        if current_pull_request.lifecycle() == RepoWatchPullRequestLifecycle::Merged {
+            identity_frontier.retire_pull_request(current_pull_request.context().number());
+        }
     }
     if let Some(previous) = previous {
         derive_workflow_events(
@@ -1821,9 +1900,10 @@ fn push_identified_event(
     events: &mut Vec<RepoWatchEventOccurrenceV1>,
 ) -> Result<(), RepoWatchDifferError> {
     let is_recurring = stream_key.is_recurring();
+    let pull_request_number = stream_key.pull_request_number();
     let stream_identity = repo_watch_event_stream_identity_v1(stream_key);
     let sequence = if is_recurring {
-        identity_frontier.advance(stream_identity)?
+        identity_frontier.advance(stream_identity, pull_request_number)?
     } else {
         NonZeroU64::MIN
     };
@@ -2993,6 +3073,50 @@ mod tests {
         );
 
         assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
+
+    #[test]
+    fn convergence_rejects_values_above_the_storage_bounds() -> Result<(), Box<dyn Error>> {
+        assert!(
+            convergence_assessment(ConvergenceFacts {
+                base_branch: BASE_BRANCH,
+                mergeable_state: MergeableState::Mergeable,
+                review_decision: RepoWatchReviewDecision::Approved,
+                unresolved_threads: Vec::new(),
+                gating_check_count: MAX_REPO_WATCH_GATING_CHECK_COUNT + 1,
+                non_green_gating_checks: Vec::new(),
+            })
+            .is_err()
+        );
+
+        let threads = (0..=MAX_REPO_WATCH_CONVERGENCE_ITEMS)
+            .map(|index| ReviewThreadId::try_new(format!("thread-{index}")))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(
+            convergence_assessment(ConvergenceFacts {
+                base_branch: BASE_BRANCH,
+                mergeable_state: MergeableState::Mergeable,
+                review_decision: RepoWatchReviewDecision::Approved,
+                unresolved_threads: threads,
+                gating_check_count: 0,
+                non_green_gating_checks: Vec::new(),
+            })
+            .is_err()
+        );
+
+        let check = CheckRunName::try_new(String::from(CHECK_NAME))?;
+        assert!(
+            convergence_assessment(ConvergenceFacts {
+                base_branch: BASE_BRANCH,
+                mergeable_state: MergeableState::Mergeable,
+                review_decision: RepoWatchReviewDecision::Approved,
+                unresolved_threads: Vec::new(),
+                gating_check_count: MAX_REPO_WATCH_GATING_CHECK_COUNT,
+                non_green_gating_checks: vec![check; MAX_REPO_WATCH_CONVERGENCE_ITEMS + 1],
+            })
+            .is_err()
+        );
         Ok(())
     }
 
@@ -4808,7 +4932,7 @@ mod tests {
             frontier.entries().len(),
             MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS
         );
-        assert_eq!(frontier.advance(stream_identity_for(0))?.get(), 2);
+        assert_eq!(frontier.advance(stream_identity_for(0), None)?.get(), 2);
         Ok(())
     }
 
@@ -4829,8 +4953,83 @@ mod tests {
         )?;
 
         assert_eq!(
-            frontier.advance(stream_identity_for(MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS)),
+            frontier.advance(
+                stream_identity_for(MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS),
+                None,
+            ),
             Err(RepoWatchEventIdentityFrontierError::StreamLimit)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn identity_frontier_retires_only_the_selected_pull_request() -> Result<(), Box<dyn Error>> {
+        let retired = pull_request_number(PULL_REQUEST_NUMBER);
+        let active = pull_request_number(PULL_REQUEST_NUMBER + 1);
+        let mut frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
+            RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+                stream_identity_for(1),
+                NonZeroU64::MIN,
+                retired,
+            ),
+            RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+                stream_identity_for(2),
+                NonZeroU64::MIN,
+                active,
+            ),
+            RepoWatchEventIdentityFrontierEntryV1::new(stream_identity_for(3), NonZeroU64::MIN),
+        ])?;
+
+        frontier.retire_pull_request(retired);
+
+        let entries = frontier.entries().collect::<Vec<_>>();
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.pull_request_number() == Some(active))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.pull_request_number().is_none())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn identity_frontier_recovers_from_the_stream_ceiling_after_retirement()
+    -> Result<(), Box<dyn Error>> {
+        let retired = pull_request_number(PULL_REQUEST_NUMBER);
+        let entries = (0..MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS)
+            .map(|index| {
+                RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+                    stream_identity_for(index),
+                    NonZeroU64::MIN,
+                    retired,
+                )
+            })
+            .collect();
+        let mut frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(entries)?;
+        assert_eq!(
+            frontier.advance(
+                stream_identity_for(MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS),
+                None,
+            ),
+            Err(RepoWatchEventIdentityFrontierError::StreamLimit)
+        );
+
+        frontier.retire_pull_request(retired);
+
+        assert_eq!(frontier.entries().len(), 0);
+        assert_eq!(
+            frontier
+                .advance(
+                    stream_identity_for(MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS),
+                    None,
+                )?
+                .get(),
+            1
         );
         Ok(())
     }
