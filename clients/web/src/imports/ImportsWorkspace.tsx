@@ -19,7 +19,7 @@ import type {
 } from '../generated/web-contract.mjs'
 import { ScenarioNavigation } from '../ScenarioNavigation'
 import { type DiagnosticSnapshot, IconCommand, OverlaySurfaces } from '../Surfaces'
-import { store, useAppSelector } from '../state'
+import { store } from '../state'
 import { type ImportApi, ImportApiError, ImportReceiptCorrelationError } from './api'
 import { ImportedEntries } from './ImportedEntries'
 import { ImportsTable } from './ImportsTable'
@@ -56,7 +56,6 @@ const byteLabel = (bytes: number): string => {
 
 export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: boolean }) {
   const queryClient = useQueryClient()
-  const overlay = useAppSelector((state) => state.app.overlay)
   const queryScope = scenario ? 'scenario' : 'production'
   const [format, setFormat] = useState<FormatFilter>(EMPTY_FILTER)
   const [sourceSession, setSourceSession] = useState('')
@@ -106,6 +105,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
 
   useEffect(() => {
     if (
+      imports !== undefined &&
       !hasRetainedCommand &&
       (!selectedImport ||
         !imports?.items.some((item) => item.imported_conversation_id === selectedImport))
@@ -115,7 +115,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       setSelectedFrontier(null)
       setPositionInput('')
     }
-  }, [firstImport, hasRetainedCommand, imports?.items, selectedImport])
+  }, [firstImport, hasRetainedCommand, imports, selectedImport])
 
   const descriptorQuery = useQuery({
     queryKey: ['imports', queryScope, selectedImport, 'descriptor'],
@@ -187,11 +187,10 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     !descriptorQuery.isError &&
     !windowQuery.isError &&
     !continuation.isPending &&
-    !hasRetainedCommand &&
-    overlay === null
+    !hasRetainedCommand
   const continueAt = useCallback(
     (relationship: WebImportedSessionRelationship) => {
-      if (!canContinueImport || !selectedFrontier) return
+      if (!canContinueImport || !selectedFrontier || store.getState().app.overlay !== null) return
       const request: WebImportContinuationRequest = {
         command_id: crypto.randomUUID(),
         frontier: selectedFrontier,

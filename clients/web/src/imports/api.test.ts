@@ -597,4 +597,35 @@ describe('HttpImportApi correlation', () => {
       new HttpImportApi(() => Promise.resolve()).continueImport(firstId, request),
     ).rejects.toBeInstanceOf(ImportReceiptCorrelationError)
   })
+
+  it('rejects a continuation receipt that does not correlate with its request', async () => {
+    const request = {
+      command_id: firstId,
+      frontier: {
+        imported_conversation_id: firstId,
+        imported_entry_id: secondId,
+        position: 1,
+      },
+      relationship: 'resume' as const,
+      initial_model_selection: { kind: 'direct' as const, selection_id: secondId },
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              session_id: secondId,
+              command_id: request.command_id,
+              frontier: request.frontier,
+              relationship: 'fork',
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).continueImport(firstId, request),
+    ).rejects.toBeInstanceOf(ImportReceiptCorrelationError)
+  })
 })

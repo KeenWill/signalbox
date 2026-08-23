@@ -701,6 +701,108 @@ fn conflicting_reuse() -> Response {
 mod tests {
     use super::*;
 
+    const CONVERSATION_ID: &str = "00000000-0000-7000-8000-000000000001";
+    const OTHER_CONVERSATION_ID: &str = "00000000-0000-7000-8000-000000000002";
+    const ENTRY_ID: &str = "00000000-0000-7000-8000-000000000003";
+    const COMMAND_ID: &str = "00000000-0000-7000-8000-000000000004";
+    const MODEL_ID: &str = "00000000-0000-7000-8000-000000000005";
+
+    fn continuation_request() -> WebImportContinuationRequest {
+        WebImportContinuationRequest {
+            command_id: COMMAND_ID.to_owned(),
+            frontier: WebImportContinuationReference {
+                imported_conversation_id: CONVERSATION_ID.to_owned(),
+                imported_entry_id: ENTRY_ID.to_owned(),
+                position: 1,
+            },
+            relationship: WebImportedSessionRelationship::Resume,
+            initial_model_selection: WebModelSelection::Direct {
+                selection_id: MODEL_ID.to_owned(),
+            },
+        }
+    }
+
+    fn conversation_id() -> ImportedConversationId {
+        ImportedConversationId::from_uuid(
+            Uuid::parse_str(CONVERSATION_ID).expect("fixture UUID is valid"),
+        )
+    }
+
+    #[test]
+    fn canonical_continuation_accepts_a_correlated_request() {
+        assert!(canonical_continuation_request(conversation_id(), continuation_request()).is_ok());
+    }
+
+    #[test]
+    fn canonical_continuation_rejects_a_non_uuid_command() {
+        let mut request = continuation_request();
+        request.command_id = "not-a-uuid".to_owned();
+
+        assert_eq!(
+            canonical_continuation_request(conversation_id(), request).err(),
+            Some("continuation command identity is not a UUID")
+        );
+    }
+
+    #[test]
+    fn canonical_continuation_rejects_another_import() {
+        let mut request = continuation_request();
+        request.frontier.imported_conversation_id = OTHER_CONVERSATION_ID.to_owned();
+
+        assert_eq!(
+            canonical_continuation_request(conversation_id(), request).err(),
+            Some("continuation frontier belongs to another import")
+        );
+    }
+
+    #[test]
+    fn canonical_continuation_rejects_zero_position() {
+        let mut request = continuation_request();
+        request.frontier.position = 0;
+
+        assert_eq!(
+            canonical_continuation_request(conversation_id(), request).err(),
+            Some("continuation position must be positive")
+        );
+    }
+
+    #[test]
+    fn canonical_continuation_rejects_a_non_uuid_entry() {
+        let mut request = continuation_request();
+        request.frontier.imported_entry_id = "not-a-uuid".to_owned();
+
+        assert_eq!(
+            canonical_continuation_request(conversation_id(), request).err(),
+            Some("continuation imported-entry identity is not a UUID")
+        );
+    }
+
+    #[test]
+    fn canonical_continuation_rejects_a_non_uuid_direct_model() {
+        let mut request = continuation_request();
+        request.initial_model_selection = WebModelSelection::Direct {
+            selection_id: "not-a-uuid".to_owned(),
+        };
+
+        assert_eq!(
+            canonical_continuation_request(conversation_id(), request).err(),
+            Some("direct model selection identity is not a UUID")
+        );
+    }
+
+    #[test]
+    fn canonical_continuation_rejects_a_non_uuid_alias() {
+        let mut request = continuation_request();
+        request.initial_model_selection = WebModelSelection::Alias {
+            alias_id: "not-a-uuid".to_owned(),
+        };
+
+        assert_eq!(
+            canonical_continuation_request(conversation_id(), request).err(),
+            Some("model alias identity is not a UUID")
+        );
+    }
+
     #[test]
     fn imported_text_projection_preserves_truncated_utf8_evidence() {
         let expected = "€".repeat(MAX_IMPORT_TEXT_PREVIEW_BYTES / "€".len());
