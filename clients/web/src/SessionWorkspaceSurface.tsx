@@ -315,10 +315,7 @@ export function SessionWorkspaceSurface({
     }
   }, [app.selectedTimeline])
 
-  const openSession = (event: FormEvent) => {
-    event.preventDefault()
-    const candidate = draftId.trim().toLowerCase()
-    if (!isCanonicalSessionId(candidate) || timelineCapability !== 'available') return
+  const openSession = (candidate: string) => {
     const reopeningCurrentSession = candidate === sessionId
     setOpeningPosition(app.lastLogicalPositions[candidate])
     manualAnchorRef.current = null
@@ -332,6 +329,21 @@ export function SessionWorkspaceSurface({
       boundaryRequest.current += 1
       setRefetchRequest((current) => current + 1)
     }
+  }
+  const submitSession = (event: FormEvent) => {
+    event.preventDefault()
+    const candidate = draftId.trim().toLowerCase()
+    invokeCommand('session.open', {
+      dispatch,
+      getState: store.getState,
+      timelineIds,
+      focusTimeline: () => timelineRef.current?.focus(),
+      sessionId:
+        isCanonicalSessionId(candidate) && timelineCapability === 'available'
+          ? candidate
+          : undefined,
+      openSession,
+    })
   }
   const selected = app.selectedTimeline
   const select = (eventSequence: string) => {
@@ -383,7 +395,7 @@ export function SessionWorkspaceSurface({
 
   return (
     <div className="surface-body session-workspace-surface">
-      <form className="session-open-form" onSubmit={openSession}>
+      <form className="session-open-form" onSubmit={submitSession}>
         <label>
           Exact session ID
           <input
@@ -429,9 +441,14 @@ export function SessionWorkspaceSurface({
           The daemon could not provide this bounded session window: {session.error.message}
         </p>
       ) : displayedSession === undefined ? (
-        <p className="session-load-state">Loading descriptor and bounded history…</p>
+        <p className="session-load-state" role="status">
+          Loading descriptor and bounded history…
+        </p>
       ) : (
         <section className="session-workspace" aria-labelledby="session-workspace-heading">
+          <p className="sr-only" role="status">
+            Session workspace loaded for {sessionId}.
+          </p>
           <header className="session-workspace-header">
             <div>
               <span className="eyebrow">Stable timeline identity</span>

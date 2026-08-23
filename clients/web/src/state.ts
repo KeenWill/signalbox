@@ -147,7 +147,7 @@ export const store = configureStore({
   reducer: { app: appSlice.reducer },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware().concat(traceMiddleware, preferenceMiddleware),
-  devTools: { maxAge: REDUX_DEVTOOLS_ACTIONS, trace: false },
+  devTools: import.meta.env.DEV ? { maxAge: REDUX_DEVTOOLS_ACTIONS, trace: false } : false,
 })
 
 export const actions = appSlice.actions

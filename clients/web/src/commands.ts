@@ -7,9 +7,11 @@ export interface CommandContext {
   getState: () => RootState
   timelineIds: readonly string[]
   paneSize?: number
+  sessionId?: string
   timelineWindowAvailable?: boolean
   focusTimeline: () => void
   loadTimelineWindow?: (anchor: 'first' | 'latest') => void
+  openSession?: (sessionId: string) => void
   toggleTimelineExpansion?: () => void
 }
 
@@ -218,6 +220,18 @@ export const commandRegistry = [
     bindings: [],
     available: always,
     run: (context) => context.dispatch(actions.preferencesReset()),
+  },
+  {
+    id: 'session.open',
+    title: 'Open session workspace',
+    description: 'Open a bounded workspace for an exact session identity.',
+    category: 'Navigate',
+    bindings: [],
+    available: (context) => context.sessionId !== undefined && context.openSession !== undefined,
+    run: (context) => {
+      if (context.sessionId === undefined) return
+      context.openSession?.(context.sessionId)
+    },
   },
   {
     id: 'pane.navigation.resize',

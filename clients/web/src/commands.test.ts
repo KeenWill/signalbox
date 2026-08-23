@@ -44,6 +44,21 @@ describe('command registry', () => {
     expect(selectApp(store.getState()).paneSizes).toEqual({ navigation: 320, inspector: 440 })
   })
 
+  it('routes exact session opening through a parameterized central command', () => {
+    const opened: string[] = []
+
+    invokeCommand('session.open', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      sessionId: '00000000-0000-0000-0000-000000000991',
+      openSession: (sessionId) => opened.push(sessionId),
+    })
+
+    expect(opened).toEqual(['00000000-0000-0000-0000-000000000991'])
+  })
+
   it('selects the first timeline item when next starts from a missing selection', () => {
     const timelineIds = ['event-0', 'event-1'] as const
     store.dispatch(actions.timelineSelected('filtered-out-event'))
