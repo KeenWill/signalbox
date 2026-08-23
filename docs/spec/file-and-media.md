@@ -209,7 +209,7 @@ The version-one compiled ceilings are:
 | Probe prefix and suffix               | 65,536 bytes each       |
 | Probe ranges / cumulative bytes       | 16 / 262,144            |
 | Processor frame                       | 1,048,576 bytes         |
-| Text body / JSON body                 | 174,000 / 786,432 bytes |
+| Text body / JSON body                 | 174,000 / 500,000 bytes |
 | Serialized read options               | 65,536 bytes            |
 | Structured depth / nodes              | 64 / 100,000            |
 | Observed container entries            | 10,000                  |

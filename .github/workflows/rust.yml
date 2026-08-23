@@ -392,7 +392,7 @@ jobs:
           runner_uid="$(id -u)"
           runner_gid="$(id -g)"
           runner_home="$HOME"
-          sudo --preserve-env=PATH,CARGO_HOME,RUSTUP_HOME,RUSTFLAGS,CARGO_INCREMENTAL,CARGO_PROFILE_DEV_DEBUG,CARGO_PROFILE_TEST_DEBUG,SIGNALBOX_RUN_BWRAP_INTEGRATION,SIGNALBOX_FILE_MEDIA_CGROUP_ROOT \
+          sudo --preserve-env=CI,PATH,CARGO_HOME,RUSTUP_HOME,RUSTFLAGS,CARGO_INCREMENTAL,CARGO_PROFILE_DEV_DEBUG,CARGO_PROFILE_TEST_DEBUG,SIGNALBOX_RUN_BWRAP_INTEGRATION,SIGNALBOX_FILE_MEDIA_CGROUP_ROOT \
             sh -c '
               echo $$ > "$SIGNALBOX_FILE_MEDIA_CGROUP_ROOT/runner/cgroup.procs"
               exec setpriv --reuid="$1" --regid="$2" --init-groups \

@@ -1130,6 +1130,7 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
     let (inotify_init1, inotify_add_watch) = (294_u32, 254_u32);
     #[cfg(target_arch = "aarch64")]
     let (inotify_init1, inotify_add_watch) = (26_u32, 27_u32);
+    let io_uring_setup = 425_u32;
     let mut syscall_denials = vec![
         memfd_create,
         shmget,
@@ -1137,6 +1138,7 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         mq_open,
         semget,
         io_setup,
+        io_uring_setup,
         inotify_init1,
         inotify_add_watch,
         add_key,
@@ -1693,6 +1695,12 @@ mod tests {
         #[cfg(target_arch = "aarch64")]
         let io_setup = 0_u32;
         assert_syscall_denied(&program, io_setup, "io_setup");
+    }
+
+    #[test]
+    fn descendant_filter_denies_unbudgeted_io_uring_allocation() {
+        let program = seccomp_instructions().expect("the test architecture is supported");
+        assert_syscall_denied(&program, 425_u32, "io_uring_setup");
     }
 
     #[test]

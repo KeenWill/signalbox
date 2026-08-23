@@ -6,10 +6,18 @@
 
 mod broker;
 mod protocol;
+#[cfg(target_os = "linux")]
 mod sandbox;
+#[cfg(not(target_os = "linux"))]
+mod unsupported;
 mod worker;
 
+#[cfg(target_os = "linux")]
 pub use sandbox::{
+    SandboxedFileMediaProcessor, SandboxedFileMediaProcessorConstructionError, WorkerBinding,
+};
+#[cfg(not(target_os = "linux"))]
+pub use unsupported::{
     SandboxedFileMediaProcessor, SandboxedFileMediaProcessorConstructionError, WorkerBinding,
 };
 pub use worker::{WorkerCatalog, WorkerCatalogConstructionError, WorkerServiceError, serve_one};

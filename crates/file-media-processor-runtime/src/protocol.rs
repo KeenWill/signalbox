@@ -505,3 +505,27 @@ pub(crate) fn encode_bytes(bytes: &[u8]) -> String {
 pub(crate) fn decode_bytes(encoded: &str) -> Result<Vec<u8>, ProtocolValueError> {
     STANDARD.decode(encoded).map_err(|_| ProtocolValueError)
 }
+
+#[cfg(test)]
+mod tests {
+    use signalbox_file_media_runtime::{
+        MAX_PROCESSOR_FRAME_BYTES, MAX_TEXT_OR_JSON_BYTES, ProcessorReadOutput,
+    };
+
+    use super::WorkerFrame;
+
+    #[test]
+    fn maximum_escape_heavy_structured_output_fits_one_frame() {
+        let body_json = format!("\"{}\"", "\\\\".repeat((MAX_TEXT_OR_JSON_BYTES - 2) / 2));
+        assert_eq!(body_json.len(), MAX_TEXT_OR_JSON_BYTES);
+        let frame = WorkerFrame::ReadResult {
+            output: ProcessorReadOutput::Structured {
+                body_json,
+                truncated: false,
+                cursor: None,
+            },
+        };
+        let encoded = serde_json::to_vec(&frame).expect("worker frame serializes");
+        assert!(encoded.len() <= MAX_PROCESSOR_FRAME_BYTES);
+    }
+}
