@@ -64,8 +64,13 @@ impl PullRequestCheck {
     /// Whether this exact check is excluded from convergence gating.
     pub fn is_non_gating(&self) -> bool {
         self.name.ends_with("(report only)")
-            || matches!(self.state, PullRequestCheckState::StatusContext { .. })
-                && self.name.eq_ignore_ascii_case("CodeRabbit")
+            || match &self.state {
+                PullRequestCheckState::StatusContext { .. } => {
+                    self.name.eq_ignore_ascii_case("CodeRabbit")
+                }
+                PullRequestCheckState::CheckRunInProgress
+                | PullRequestCheckState::CheckRunCompleted { .. } => false,
+            }
     }
 
     /// Whether the provider state satisfies the convergence predicate.

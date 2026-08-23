@@ -240,29 +240,72 @@ pub(crate) fn convergence_sweep_failure_from_str(
     }
 }
 
-pub(crate) const fn convergence_sweep_failure_outcome_to_str(
-    value: ConvergenceSweepFailureKind,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConvergenceSweepOutcomeStorageKind {
+    Dispatched,
+    Converged,
+    CoolingOff,
+    LiveSession,
+    FactsFetchFailed,
+    CommissionRefused,
+    TemplateDrift,
+    NoModelActivity,
+    StateAccessFailed,
+}
+
+pub(crate) const fn convergence_sweep_outcome_to_str(
+    value: ConvergenceSweepOutcomeStorageKind,
 ) -> &'static str {
     match value {
-        ConvergenceSweepFailureKind::FactsFetch => "facts_fetch_failed",
-        ConvergenceSweepFailureKind::CommissionRefused => "commission_refused",
-        ConvergenceSweepFailureKind::TemplateDrift => "template_drift",
-        ConvergenceSweepFailureKind::NoModelActivity => "no_model_activity",
-        ConvergenceSweepFailureKind::StateAccess => "state_access_failed",
+        ConvergenceSweepOutcomeStorageKind::Dispatched => "dispatched",
+        ConvergenceSweepOutcomeStorageKind::Converged => "converged",
+        ConvergenceSweepOutcomeStorageKind::CoolingOff => "cooling_off",
+        ConvergenceSweepOutcomeStorageKind::LiveSession => "live_session",
+        ConvergenceSweepOutcomeStorageKind::FactsFetchFailed => "facts_fetch_failed",
+        ConvergenceSweepOutcomeStorageKind::CommissionRefused => "commission_refused",
+        ConvergenceSweepOutcomeStorageKind::TemplateDrift => "template_drift",
+        ConvergenceSweepOutcomeStorageKind::NoModelActivity => "no_model_activity",
+        ConvergenceSweepOutcomeStorageKind::StateAccessFailed => "state_access_failed",
     }
 }
 
 #[cfg(test)]
-pub(crate) fn convergence_sweep_failure_outcome_from_str(
+pub(crate) fn convergence_sweep_outcome_from_str(
     value: &str,
-) -> Option<ConvergenceSweepFailureKind> {
+) -> Option<ConvergenceSweepOutcomeStorageKind> {
     match value {
-        "facts_fetch_failed" => Some(ConvergenceSweepFailureKind::FactsFetch),
-        "commission_refused" => Some(ConvergenceSweepFailureKind::CommissionRefused),
-        "template_drift" => Some(ConvergenceSweepFailureKind::TemplateDrift),
-        "no_model_activity" => Some(ConvergenceSweepFailureKind::NoModelActivity),
-        "state_access_failed" => Some(ConvergenceSweepFailureKind::StateAccess),
+        "dispatched" => Some(ConvergenceSweepOutcomeStorageKind::Dispatched),
+        "converged" => Some(ConvergenceSweepOutcomeStorageKind::Converged),
+        "cooling_off" => Some(ConvergenceSweepOutcomeStorageKind::CoolingOff),
+        "live_session" => Some(ConvergenceSweepOutcomeStorageKind::LiveSession),
+        "facts_fetch_failed" => Some(ConvergenceSweepOutcomeStorageKind::FactsFetchFailed),
+        "commission_refused" => Some(ConvergenceSweepOutcomeStorageKind::CommissionRefused),
+        "template_drift" => Some(ConvergenceSweepOutcomeStorageKind::TemplateDrift),
+        "no_model_activity" => Some(ConvergenceSweepOutcomeStorageKind::NoModelActivity),
+        "state_access_failed" => Some(ConvergenceSweepOutcomeStorageKind::StateAccessFailed),
         _ => None,
+    }
+}
+
+pub(crate) const fn convergence_sweep_failure_outcome(
+    value: ConvergenceSweepFailureKind,
+) -> ConvergenceSweepOutcomeStorageKind {
+    match value {
+        ConvergenceSweepFailureKind::FactsFetch => {
+            ConvergenceSweepOutcomeStorageKind::FactsFetchFailed
+        }
+        ConvergenceSweepFailureKind::CommissionRefused => {
+            ConvergenceSweepOutcomeStorageKind::CommissionRefused
+        }
+        ConvergenceSweepFailureKind::TemplateDrift => {
+            ConvergenceSweepOutcomeStorageKind::TemplateDrift
+        }
+        ConvergenceSweepFailureKind::NoModelActivity => {
+            ConvergenceSweepOutcomeStorageKind::NoModelActivity
+        }
+        ConvergenceSweepFailureKind::StateAccess => {
+            ConvergenceSweepOutcomeStorageKind::StateAccessFailed
+        }
     }
 }
 
@@ -292,23 +335,13 @@ pub(crate) fn convergence_sweep_operator_need_from_str(
     }
 }
 
-pub(crate) const fn convergence_sweep_decision_to_str(
+pub(crate) const fn convergence_sweep_decision_outcome(
     value: ConvergenceSweepDecision,
-) -> &'static str {
+) -> ConvergenceSweepOutcomeStorageKind {
     match value {
-        ConvergenceSweepDecision::Converged => "converged",
-        ConvergenceSweepDecision::CoolingOff => "cooling_off",
-        ConvergenceSweepDecision::LiveSession => "live_session",
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn convergence_sweep_decision_from_str(value: &str) -> Option<ConvergenceSweepDecision> {
-    match value {
-        "converged" => Some(ConvergenceSweepDecision::Converged),
-        "cooling_off" => Some(ConvergenceSweepDecision::CoolingOff),
-        "live_session" => Some(ConvergenceSweepDecision::LiveSession),
-        _ => None,
+        ConvergenceSweepDecision::Converged => ConvergenceSweepOutcomeStorageKind::Converged,
+        ConvergenceSweepDecision::CoolingOff => ConvergenceSweepOutcomeStorageKind::CoolingOff,
+        ConvergenceSweepDecision::LiveSession => ConvergenceSweepOutcomeStorageKind::LiveSession,
     }
 }
 
@@ -2393,10 +2426,10 @@ mod tests {
 
     use super::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
-        ConvergenceSweepStateStorageKind, DelegationPolicyStorageKind,
-        DelegationRejectionStorageKind, DelegationUpdateStorageKind, DelegationWakeStorageKind,
-        DurableCommandIdMappingError, DurableCommandKind, PlanEventStorageKind,
-        PositiveOrdinalMappingError, RepoWatchEvaluationOutcomeStorageKind,
+        ConvergenceSweepOutcomeStorageKind, ConvergenceSweepStateStorageKind,
+        DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
+        DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
+        PlanEventStorageKind, PositiveOrdinalMappingError, RepoWatchEvaluationOutcomeStorageKind,
         RepoWatchLifecycleCutoffDispositionStorageKind, RepoWatchObligationSettlementStorageKind,
         RunnerLossPropagationStateStorageKind, SessionCreationCauseStorageKind,
         SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
@@ -2405,13 +2438,12 @@ mod tests {
         approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
         approval_judge_state_from_str, approval_judge_state_to_str,
         approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
-        bound_child_action_from_str, bound_child_action_to_str,
-        convergence_sweep_decision_from_str, convergence_sweep_decision_to_str,
-        convergence_sweep_failure_from_str, convergence_sweep_failure_outcome_from_str,
-        convergence_sweep_failure_outcome_to_str, convergence_sweep_failure_to_str,
-        convergence_sweep_operator_need_from_str, convergence_sweep_operator_need_to_str,
-        convergence_sweep_state_from_str, convergence_sweep_state_to_str,
-        defaults_version_from_numeric, defaults_version_to_numeric,
+        bound_child_action_from_str, bound_child_action_to_str, convergence_sweep_decision_outcome,
+        convergence_sweep_failure_from_str, convergence_sweep_failure_outcome,
+        convergence_sweep_failure_to_str, convergence_sweep_operator_need_from_str,
+        convergence_sweep_operator_need_to_str, convergence_sweep_outcome_from_str,
+        convergence_sweep_outcome_to_str, convergence_sweep_state_from_str,
+        convergence_sweep_state_to_str, defaults_version_from_numeric, defaults_version_to_numeric,
         delegation_message_direction_from_str, delegation_message_direction_to_str,
         delegation_outcome_kind_from_str, delegation_outcome_kind_to_str,
         delegation_outcome_reason_from_str, delegation_outcome_reason_to_str,
@@ -2475,7 +2507,6 @@ mod tests {
         assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::NoModelActivity);
         assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::StateAccess);
         assert_eq!(convergence_sweep_failure_from_str("unknown"), None);
-        assert_eq!(convergence_sweep_failure_outcome_from_str("unknown"), None);
         assert_eq!(convergence_sweep_operator_need_from_str("unknown"), None);
     }
 
@@ -2485,11 +2516,10 @@ mod tests {
             convergence_sweep_failure_from_str(convergence_sweep_failure_to_str(failure)),
             Some(failure)
         );
+        let outcome = convergence_sweep_failure_outcome(failure);
         assert_eq!(
-            convergence_sweep_failure_outcome_from_str(convergence_sweep_failure_outcome_to_str(
-                failure
-            ),),
-            Some(failure)
+            convergence_sweep_outcome_from_str(convergence_sweep_outcome_to_str(outcome)),
+            Some(outcome)
         );
         assert_eq!(
             convergence_sweep_operator_need_from_str(convergence_sweep_operator_need_to_str(
@@ -2500,26 +2530,41 @@ mod tests {
     }
 
     #[test]
-    fn convergence_sweep_decision_mapping_is_closed() {
+    fn convergence_sweep_outcome_mapping_is_closed() {
+        assert_convergence_sweep_outcome_mapping(ConvergenceSweepOutcomeStorageKind::Dispatched);
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_decision_outcome(
+            ConvergenceSweepDecision::Converged,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_decision_outcome(
+            ConvergenceSweepDecision::CoolingOff,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_decision_outcome(
+            ConvergenceSweepDecision::LiveSession,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
+            ConvergenceSweepFailureKind::FactsFetch,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
+            ConvergenceSweepFailureKind::CommissionRefused,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
+            ConvergenceSweepFailureKind::TemplateDrift,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
+            ConvergenceSweepFailureKind::NoModelActivity,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
+            ConvergenceSweepFailureKind::StateAccess,
+        ));
+        assert_eq!(convergence_sweep_outcome_from_str("unknown"), None);
+    }
+
+    #[track_caller]
+    fn assert_convergence_sweep_outcome_mapping(value: ConvergenceSweepOutcomeStorageKind) {
         assert_eq!(
-            convergence_sweep_decision_from_str(convergence_sweep_decision_to_str(
-                ConvergenceSweepDecision::Converged,
-            )),
-            Some(ConvergenceSweepDecision::Converged)
+            convergence_sweep_outcome_from_str(convergence_sweep_outcome_to_str(value)),
+            Some(value)
         );
-        assert_eq!(
-            convergence_sweep_decision_from_str(convergence_sweep_decision_to_str(
-                ConvergenceSweepDecision::CoolingOff,
-            )),
-            Some(ConvergenceSweepDecision::CoolingOff)
-        );
-        assert_eq!(
-            convergence_sweep_decision_from_str(convergence_sweep_decision_to_str(
-                ConvergenceSweepDecision::LiveSession,
-            )),
-            Some(ConvergenceSweepDecision::LiveSession)
-        );
-        assert_eq!(convergence_sweep_decision_from_str("unknown"), None);
     }
 
     #[test]

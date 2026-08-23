@@ -77,6 +77,28 @@ fn content_digest(value: u8) -> [u8; 32] {
     [value; 32]
 }
 
+async fn record_zero_delay_facts_failure(
+    store: &PostgresConvergenceSweepStore,
+    event_id: Uuid,
+    repository: &RepositorySlug,
+    observation: &ConvergenceSweepObservation,
+) -> Result<(), Box<dyn Error>> {
+    store
+        .record_failure(
+            event_id,
+            repository,
+            inactive_pull_request(),
+            Some(observation),
+            ConvergenceSweepFailureKind::FactsFetch,
+            ConvergenceSweepRetryPolicy {
+                backoff_base: Duration::ZERO,
+                backoff_cap: Duration::ZERO,
+            },
+        )
+        .await?;
+    Ok(())
+}
+
 fn credential_pin() -> SessionCredentialPin {
     SessionCredentialPin::try_new(vec![SessionModelCredential::new(
         "fixture-family",
@@ -650,21 +672,16 @@ async fn configured_target_reenrollment_clears_a_durable_park() -> Result<(), Bo
     let repository = repository()?;
     let observation = observation()?;
 
-    for event in 0..RETRY_BUDGET {
-        store
-            .record_failure(
-                Uuid::from_u128(0x89_215 + u128::from(event as u16)),
-                &repository,
-                inactive_pull_request(),
-                Some(&observation),
-                ConvergenceSweepFailureKind::FactsFetch,
-                ConvergenceSweepRetryPolicy {
-                    backoff_base: Duration::ZERO,
-                    backoff_cap: Duration::ZERO,
-                },
-            )
-            .await?;
-    }
+    record_zero_delay_facts_failure(&store, Uuid::from_u128(0x89_215), &repository, &observation)
+        .await?;
+    record_zero_delay_facts_failure(&store, Uuid::from_u128(0x89_216), &repository, &observation)
+        .await?;
+    record_zero_delay_facts_failure(&store, Uuid::from_u128(0x89_217), &repository, &observation)
+        .await?;
+    record_zero_delay_facts_failure(&store, Uuid::from_u128(0x89_218), &repository, &observation)
+        .await?;
+    record_zero_delay_facts_failure(&store, Uuid::from_u128(0x89_219), &repository, &observation)
+        .await?;
     store
         .reenroll_target(&repository, inactive_pull_request())
         .await?;
@@ -720,21 +737,16 @@ async fn removed_targets_leave_the_parked_operator_view() -> Result<(), Box<dyn 
     let store = PostgresConvergenceSweepStore::new(pool.clone());
     let repository = repository()?;
     let observation = observation()?;
-    for event in 0..RETRY_BUDGET {
-        store
-            .record_failure(
-                Uuid::from_u128(0x89_218 + u128::from(event as u16)),
-                &repository,
-                inactive_pull_request(),
-                Some(&observation),
-                ConvergenceSweepFailureKind::FactsFetch,
-                ConvergenceSweepRetryPolicy {
-                    backoff_base: Duration::ZERO,
-                    backoff_cap: Duration::ZERO,
-                },
-            )
-            .await?;
-    }
+    record_zero_delay_facts_failure(&store, Uuid::from_u128(0x89_218), &repository, &observation)
+        .await?;
+    record_zero_delay_facts_failure(&store, Uuid::from_u128(0x89_219), &repository, &observation)
+        .await?;
+    record_zero_delay_facts_failure(&store, Uuid::from_u128(0x89_21a), &repository, &observation)
+        .await?;
+    record_zero_delay_facts_failure(&store, Uuid::from_u128(0x89_21b), &repository, &observation)
+        .await?;
+    record_zero_delay_facts_failure(&store, Uuid::from_u128(0x89_21c), &repository, &observation)
+        .await?;
 
     store.reconcile_configured_targets(&[]).await?;
 

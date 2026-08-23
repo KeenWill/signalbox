@@ -14,9 +14,10 @@ use sqlx::{
 };
 
 use crate::mapping::{
-    ConvergenceSweepStateStorageKind, convergence_sweep_decision_to_str,
-    convergence_sweep_failure_from_str, convergence_sweep_failure_outcome_to_str,
-    convergence_sweep_failure_to_str, convergence_sweep_operator_need_to_str,
+    ConvergenceSweepOutcomeStorageKind, ConvergenceSweepStateStorageKind,
+    convergence_sweep_decision_outcome, convergence_sweep_failure_from_str,
+    convergence_sweep_failure_outcome, convergence_sweep_failure_to_str,
+    convergence_sweep_operator_need_to_str, convergence_sweep_outcome_to_str,
     convergence_sweep_state_from_str, convergence_sweep_state_to_str, session_id_from_uuid,
 };
 
@@ -192,13 +193,13 @@ struct TargetStateRow {
     pending_dispatch_id: Option<Uuid>,
     pending_session_id: Option<Uuid>,
     pending_recorded_at: Option<OffsetDateTime>,
-    pending_live: Option<bool>,
-    pending_has_model_activity: Option<bool>,
+    pending_liveness_kind: Option<String>,
+    pending_activity_kind: Option<String>,
     dispatch_id: Option<Uuid>,
     session_id: Option<Uuid>,
     recorded_at: Option<OffsetDateTime>,
-    live: Option<bool>,
-    has_model_activity: Option<bool>,
+    liveness_kind: Option<String>,
+    activity_kind: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -222,6 +223,56 @@ impl Readiness {
         match self {
             Self::Ready => true,
             Self::Waiting => false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DispatchLiveness {
+    Live,
+    Terminal,
+}
+
+impl DispatchLiveness {
+    fn decode(value: &str) -> Result<Self, ConvergenceSweepStoreError> {
+        match value {
+            "live" => Ok(Self::Live),
+            "terminal" => Ok(Self::Terminal),
+            _ => Err(ConvergenceSweepStoreError::Corruption(
+                "invalid dispatch liveness kind",
+            )),
+        }
+    }
+
+    const fn is_live(self) -> bool {
+        match self {
+            Self::Live => true,
+            Self::Terminal => false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModelActivity {
+    Present,
+    Absent,
+}
+
+impl ModelActivity {
+    fn decode(value: &str) -> Result<Self, ConvergenceSweepStoreError> {
+        match value {
+            "present" => Ok(Self::Present),
+            "absent" => Ok(Self::Absent),
+            _ => Err(ConvergenceSweepStoreError::Corruption(
+                "invalid dispatch activity kind",
+            )),
+        }
+    }
+
+    const fn is_present(self) -> bool {
+        match self {
+            Self::Present => true,
+            Self::Absent => false,
         }
     }
 }
@@ -400,10 +451,19 @@ impl PostgresConvergenceSweepStore {
                     pending.dispatch_id AS pending_dispatch_id,
                     pending.session_id AS pending_session_id,
                     pending.recorded_at AS pending_recorded_at,
-                    pending.live AS pending_live,
-                    pending.has_model_activity AS pending_has_model_activity,
+                    CASE WHEN pending.dispatch_id IS NULL THEN NULL
+                         WHEN pending.live THEN 'live' ELSE 'terminal'
+                    END AS pending_liveness_kind,
+                    CASE WHEN pending.dispatch_id IS NULL THEN NULL
+                         WHEN pending.has_model_activity THEN 'present' ELSE 'absent'
+                    END AS pending_activity_kind,
                     latest.dispatch_id, latest.session_id, latest.recorded_at,
-                    latest.live, latest.has_model_activity
+                    CASE WHEN latest.dispatch_id IS NULL THEN NULL
+                         WHEN latest.live THEN 'live' ELSE 'terminal'
+                    END AS liveness_kind,
+                    CASE WHEN latest.dispatch_id IS NULL THEN NULL
+                         WHEN latest.has_model_activity THEN 'present' ELSE 'absent'
+                    END AS activity_kind
                FROM convergence_sweep_target AS target
                LEFT JOIN LATERAL (
                     SELECT dispatch.dispatch_id, dispatch.session_id,
@@ -450,7 +510,8 @@ impl PostgresConvergenceSweepStore {
                               AND event.repository = target.repository
                               AND event.pull_request_number = target.pull_request_number
                       ) AS source
-                     ORDER BY live DESC, source.recorded_at DESC, source.dispatch_id DESC
+                     ORDER BY live DESC, has_model_activity DESC,
+                              source.recorded_at DESC, source.dispatch_id DESC
                      LIMIT 1
                ) AS latest ON true
               WHERE target.repository = $1
@@ -568,7 +629,7 @@ impl PostgresConvergenceSweepStore {
             event_id,
             repository,
             pull_request,
-            "dispatched",
+            convergence_sweep_outcome_to_str(ConvergenceSweepOutcomeStorageKind::Dispatched),
             None,
             Some(observation),
             Some((dispatch_id, session_id)),
@@ -576,8 +637,21 @@ impl PostgresConvergenceSweepStore {
             None,
         )
         .await?;
-        transaction.commit().await?;
-        Ok(())
+        match transaction.commit().await {
+            Ok(()) => Ok(()),
+            Err(error) if crate::commit_failure_is_ambiguous(&error) => {
+                let event_exists = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM convergence_sweep_event WHERE event_id = $1
+                    )",
+                )
+                .bind(event_id)
+                .fetch_one(&self.pool)
+                .await;
+                resolve_ambiguous_event_commit(error, event_exists)
+            }
+            Err(error) => Err(ConvergenceSweepStoreError::Database(error)),
+        }
     }
 
     /// Records a non-failing census decision and resets a transient lineage.
@@ -614,7 +688,7 @@ impl PostgresConvergenceSweepStore {
             event_id,
             repository,
             pull_request,
-            convergence_sweep_decision_to_str(decision),
+            convergence_sweep_outcome_to_str(convergence_sweep_decision_outcome(decision)),
             None,
             Some(observation),
             None,
@@ -633,7 +707,7 @@ impl PostgresConvergenceSweepStore {
                 .bind(event_id)
                 .fetch_one(&self.pool)
                 .await;
-                resolve_ambiguous_decision_commit(error, event_exists)
+                resolve_ambiguous_event_commit(error, event_exists)
             }
             Err(error) => Err(ConvergenceSweepStoreError::Database(error)),
         }
@@ -756,7 +830,8 @@ impl PostgresConvergenceSweepStore {
                           AND event.repository = $1
                           AND event.pull_request_number = $2
                   ) AS target
-                 ORDER BY live DESC, target.recorded_at DESC, target.dispatch_id DESC
+                 ORDER BY live DESC, has_model_activity DESC,
+                          target.recorded_at DESC, target.dispatch_id DESC
                  LIMIT 1
              )
              UPDATE convergence_sweep_target
@@ -849,7 +924,7 @@ impl PostgresConvergenceSweepStore {
             event_id,
             repository,
             pull_request,
-            convergence_sweep_failure_outcome_to_str(failure),
+            convergence_sweep_outcome_to_str(convergence_sweep_failure_outcome(failure)),
             Some(failure),
             observation,
             None,
@@ -979,16 +1054,16 @@ fn decode_target_state(
         row.pending_dispatch_id,
         row.pending_session_id,
         row.pending_recorded_at,
-        row.pending_live,
-        row.pending_has_model_activity,
+        row.pending_liveness_kind,
+        row.pending_activity_kind,
         "partial pending dispatch",
     )?;
     let latest_dispatch = decode_dispatch_state(
         row.dispatch_id,
         row.session_id,
         row.recorded_at,
-        row.live,
-        row.has_model_activity,
+        row.liveness_kind,
+        row.activity_kind,
         "partial latest dispatch",
     )?;
     Ok(ConvergenceSweepTargetState {
@@ -1011,23 +1086,23 @@ fn decode_dispatch_state(
     dispatch_id: Option<Uuid>,
     session_id: Option<Uuid>,
     recorded_at: Option<OffsetDateTime>,
-    live: Option<bool>,
-    activity: Option<bool>,
+    liveness: Option<String>,
+    activity: Option<String>,
     partial: &'static str,
 ) -> Result<Option<ConvergenceSweepDispatchState>, ConvergenceSweepStoreError> {
-    match (dispatch_id, session_id, recorded_at, live, activity) {
+    match (dispatch_id, session_id, recorded_at, liveness, activity) {
         (
             Some(dispatch_id),
             Some(session_id),
             Some(recorded_at),
-            Some(live),
-            Some(has_model_activity),
+            Some(liveness),
+            Some(activity),
         ) => Ok(Some(ConvergenceSweepDispatchState {
             dispatch_id,
             session_id: session_id_from_uuid(session_id),
             dispatched_at: SystemTime::from(recorded_at),
-            live,
-            has_model_activity,
+            live: DispatchLiveness::decode(&liveness)?.is_live(),
+            has_model_activity: ModelActivity::decode(&activity)?.is_present(),
         })),
         (None, None, None, None, None) => Ok(None),
         _ => Err(ConvergenceSweepStoreError::Corruption(partial)),
@@ -1051,7 +1126,7 @@ fn decode_observation(
     }
 }
 
-fn resolve_ambiguous_decision_commit(
+fn resolve_ambiguous_event_commit(
     commit_error: sqlx::Error,
     event_exists: Result<bool, sqlx::Error>,
 ) -> Result<(), ConvergenceSweepStoreError> {
@@ -1064,20 +1139,17 @@ fn resolve_ambiguous_decision_commit(
 
 #[cfg(test)]
 mod tests {
-    use super::{ConvergenceSweepStoreError, resolve_ambiguous_decision_commit};
+    use super::{ConvergenceSweepStoreError, resolve_ambiguous_event_commit};
 
     #[test]
     fn ambiguous_decision_commit_is_resolved_by_event_identity() {
-        assert!(resolve_ambiguous_decision_commit(sqlx::Error::PoolClosed, Ok(true)).is_ok());
+        assert!(resolve_ambiguous_event_commit(sqlx::Error::PoolClosed, Ok(true)).is_ok());
         assert!(matches!(
-            resolve_ambiguous_decision_commit(sqlx::Error::PoolClosed, Ok(false)),
+            resolve_ambiguous_event_commit(sqlx::Error::PoolClosed, Ok(false)),
             Err(ConvergenceSweepStoreError::Database(_))
         ));
         assert!(matches!(
-            resolve_ambiguous_decision_commit(
-                sqlx::Error::PoolClosed,
-                Err(sqlx::Error::PoolClosed),
-            ),
+            resolve_ambiguous_event_commit(sqlx::Error::PoolClosed, Err(sqlx::Error::PoolClosed),),
             Err(ConvergenceSweepStoreError::CommitAmbiguous(_))
         ));
     }
