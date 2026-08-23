@@ -523,7 +523,7 @@ jobs:
     needs: rust-change-scope
     if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: signalbox-docker
-    # Generous by design: this job now absorbs all five suites' compilation,
+    # Generous by design: this job now absorbs all six suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
     # across three.
     timeout-minutes: 35
@@ -587,7 +587,7 @@ jobs:
           shared-key: rust
           save-if: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
+        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
@@ -654,6 +654,13 @@ jobs:
           path: ${{ runner.temp }}/terminal-client.tar.zst
           if-no-files-found: error
           retention-days: 1
+      - name: Upload the approval-judge-eval archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: postgres-integration-archive-approval-judge-eval
+          path: ${{ runner.temp }}/approval-judge-eval.tar.zst
+          if-no-files-found: error
+          retention-days: 1
 
   # The dedicated Docker fleet gives each shard an isolated DinD daemon. The
   # build and run jobs share the same runner image and absolute work-path shape,
@@ -665,11 +672,11 @@ jobs:
   # one runner per shard, so a suite declaring one shard costs one runner and
   # still travels the same archive-and-partition path a sharded suite does.
   # Persistence, runner, and signalboxd are sharded according to their measured
-  # test-execution cost. Program-runtime and terminal-client remain whole
-  # because each finishes in about a minute.
+  # test-execution cost. Program-runtime, terminal-client, and
+  # approval-judge-eval remain whole because each finishes in about a minute.
   #
   # Runner cost, stated plainly: this asks for more runners than the matrix it
-  # replaces. The run matrix currently expands to twelve shards after the one
+  # replaces. The run matrix currently expands to 13 shards after the one
   # shared build. The shards compile nothing and run for minutes; the build's
   # single cache key replaces the old per-suite keys that evicted one another.
       - name: Publish this run's target dir as the cache seed
@@ -721,7 +728,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
+        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
         with:
           tool: cargo-nextest@0.9.143
       - name: Download the ${{ matrix.suite }} archive

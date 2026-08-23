@@ -4787,11 +4787,13 @@ pub enum ToolDecisionSource {
     SessionBlanket,
     SessionOverride,
     Delegate,
+    UserOverride,
 }
 
 pub enum ToolApprovalDecider {
     User { command: DurableCommandId },
     Delegate { model: DirectModelSelection, call: ModelCallId },
+    UserOverride { command: DurableCommandId, denied_request: ToolRequestId },
 }
 
 pub struct ToolDecisionRationale(/* private */);
@@ -4845,7 +4847,8 @@ pub enum ToolApprovalDecision {
     Deny { reason: Option<ToolDenialReason> },
 }
 pub struct ToolApprovalResolution { /* private */ }
-// sealed live producers: user command, registry auto, frozen session blanket, or checked delegate
+// sealed live producers: user command, registry auto, frozen session blanket,
+// checked delegate, or consumed user override
 impl ToolApprovalResolution {
     // accessors: request(), decision(), source(), decider(), rationale(), is_approved()
 }
@@ -4861,6 +4864,12 @@ impl ToolApprovalResolutionReconstitutionInput {
         request: ToolRequestId,
         frozen_posture: DangerousToolAutoApproval,
     ) -> Self;
+    pub const fn user_override(
+        request: ToolRequestId,
+        command: DurableCommandId,
+        denied_request: ToolRequestId,
+        frozen_posture: ToolApprovalPosture,
+    ) -> Self;
     pub fn reconstitute(
         self,
     ) -> Result<ToolApprovalResolution, ToolApprovalResolutionReconstitutionError>;
@@ -4874,6 +4883,7 @@ pub enum InitialToolApproval {
     Delegated,
     PolicyAuto,
     SessionBlanket,
+    UserOverride { command: DurableCommandId, denied_request: ToolRequestId },
 }
 impl InitialToolApproval {
     pub const fn requires_decision(self) -> bool;
@@ -4918,6 +4928,70 @@ pub enum DecideToolRequestRejectedResult {
 pub struct PreparedDecideToolRequest { /* private */ }
 // accessors: command(), result(), into_parts()
 pub struct DecideToolRequestPreparationError { /* private */ }
+// accessors: command(), provided_request(), into_parts()
+
+pub struct RecordedUserOverride { /* private */ }
+impl RecordedUserOverride {
+    pub const fn new(
+        command: DurableCommandId,
+        session: SessionId,
+        denied_request: ToolRequestId,
+        judge_call: ModelCallId,
+        tool: ToolName,
+        arguments: NormalizedToolArguments,
+    ) -> Self;
+    pub fn matches_proposal(&self, proposal: &ToolCallProposal) -> bool;
+    // accessors: command(), session(), denied_request(), judge_call(), tool(),
+    // arguments()
+}
+
+pub struct OverrideDeniedToolRequest { /* private */ }
+// canonical equality and hashing exclude command_id
+impl OverrideDeniedToolRequest {
+    pub fn try_new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        denied_request: ToolRequestId,
+    ) -> Result<Self, OverrideDeniedToolRequestConstructionError>;
+    pub fn prepare(
+        self,
+        request: &ToolRequest,
+        approval: Option<&ToolApprovalResolution>,
+        terminal_resolution: Option<ToolRequestResolution>,
+        existing_override_command: Option<DurableCommandId>,
+    ) -> Result<PreparedOverrideDeniedToolRequest, OverrideDeniedToolRequestPreparationError>;
+    pub fn reconstitute_applied(
+        self,
+        recorded: RecordedUserOverride,
+    ) -> Result<PreparedOverrideDeniedToolRequest, OverrideDeniedToolRequestPreparationError>;
+    pub const fn prepare_request_not_found(self) -> PreparedOverrideDeniedToolRequest;
+    pub const fn prepare_request_not_in_session(self) -> PreparedOverrideDeniedToolRequest;
+    pub const fn prepare_not_delegate_denied(self) -> PreparedOverrideDeniedToolRequest;
+    pub const fn prepare_not_terminally_denied(self) -> PreparedOverrideDeniedToolRequest;
+    pub const fn prepare_already_overridden(self) -> PreparedOverrideDeniedToolRequest;
+    // accessors: command_id(), session(), denied_request()
+}
+pub struct OverrideDeniedToolRequestConstructionError { /* private */ }
+// accessor: command_id()
+pub enum OverrideDeniedToolRequestResult {
+    Applied(OverrideDeniedToolRequestAppliedResult),
+    Rejected(OverrideDeniedToolRequestRejectedResult),
+}
+pub struct OverrideDeniedToolRequestAppliedResult { /* private */ }
+// accessor: recorded()
+pub enum OverrideDeniedToolRequestRejectedResult {
+    RequestNotFound { denied_request: ToolRequestId },
+    RequestNotInSession {
+        session: SessionId,
+        denied_request: ToolRequestId,
+    },
+    NotDelegateDenied { denied_request: ToolRequestId },
+    NotTerminallyDenied { denied_request: ToolRequestId },
+    AlreadyOverridden { denied_request: ToolRequestId },
+}
+pub struct PreparedOverrideDeniedToolRequest { /* private */ }
+// accessors: command(), result(), into_parts()
+pub struct OverrideDeniedToolRequestPreparationError { /* private */ }
 // accessors: command(), provided_request(), into_parts()
 
 pub enum ToolResultContent {
@@ -6590,6 +6664,7 @@ pub enum PrepareModelCallOutcome {
         request: Box<PreparedModelCallRequest>,
         credential_reference: ModelCallCredentialReference,
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        recorded_user_overrides: Box<[RecordedUserOverride]>,
         system_prompt: Option<SessionSystemPrompt>,
         tool_entries: Box<[ResolvedToolConversationEntry]>,
     },
@@ -7086,6 +7161,20 @@ impl<Ids: ToolApprovalIdGenerator + Send, Transaction: DecideToolRequestTransact
         &mut self,
         command: DecideToolRequest,
     ) -> Result<PreparedDecideToolRequest, Transaction::Error>;
+}
+
+pub struct OverrideDeniedToolRequestService<Transaction> { /* private */ }
+impl<Transaction> OverrideDeniedToolRequestService<Transaction> {
+    pub const fn new(transaction: Transaction) -> Self;
+    pub fn into_transaction(self) -> Transaction;
+}
+impl<Transaction: OverrideDeniedToolRequestTransaction>
+    OverrideDeniedToolRequestService<Transaction>
+{
+    pub async fn execute(
+        &mut self,
+        command: OverrideDeniedToolRequest,
+    ) -> Result<PreparedOverrideDeniedToolRequest, Transaction::Error>;
 }
 
 pub struct RetainedToolExecutionState { /* private */ }
@@ -8882,6 +8971,14 @@ pub trait DecideToolRequestTransaction {
     ) -> impl Future<Output = Result<PreparedDecideToolRequest, Self::Error>> + Send
     where
         NextAttempt: FnMut() -> TurnAttemptId + Send;
+}
+
+pub trait OverrideDeniedToolRequestTransaction {
+    type Error: ClassifyOperatorFailure;
+    fn override_denied(
+        &mut self,
+        command: OverrideDeniedToolRequest,
+    ) -> impl Future<Output = Result<PreparedOverrideDeniedToolRequest, Self::Error>> + Send;
 }
 
 pub struct ToolContinuationIdentities { /* private */ }
@@ -11151,7 +11248,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: model_execution                            | 53                               |
 | domain: context_frontier                           | 6                                |
 | domain: semantic_entry                             | 4                                |
-| domain: tool                                       | 45                               |
+| domain: tool                                       | 53                               |
 | domain: tool_attempt                               | 27                               |
 | domain: tool_execution                             | 20                               |
 | domain: provider_evidence                          | 5                                |
@@ -11164,7 +11261,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                               |
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
-| **signalbox-domain total**                         | **806 (+12 free fn)**            |
+| **signalbox-domain total**                         | **814 (+12 free fn)**            |
 | application: attention                             | 12 (+3 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
@@ -11175,7 +11272,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
 | application: model_execution                       | 35 (incl. 8 traits)              |
-| application: tool_loop                             | 26 (incl. 5 traits)              |
+| application: tool_loop                             | 27 (incl. 5 traits)              |
 | application: operator_failure                      | 2 (incl. 1 trait)                |
 | application: session_delegation                    | 1 (incl. 1 trait)                |
 | application: replace_session_defaults              | 5 (incl. 1 trait)                |
@@ -11190,6 +11287,6 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)               |
 | application: tool_dispatch_gate                    | 2                                |
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
-| application: tool_loop_ports                       | 8 (incl. 2 traits)               |
+| application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 7                                |
-| **signalbox-application total**                    | **307 (+9 free fn)**             |
+| **signalbox-application total**                    | **309 (+9 free fn)**             |
