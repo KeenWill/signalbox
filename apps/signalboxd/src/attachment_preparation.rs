@@ -4,7 +4,8 @@ use std::{error::Error, fmt, future::Future, num::NonZeroU64, sync::Arc, time::D
 
 use signalbox_application::{
     AttachmentPreparationFailure, ClassifyOperatorFailure, ModelCallCapabilityPreparation,
-    ModelCallProvider, OperatorFailureClass, PreparedModelOperation, relinquish_scheduler_capacity,
+    ModelCallPreparationErrorStage, ModelCallProvider, OperatorFailureClass,
+    PreparedModelOperation, relinquish_scheduler_capacity,
 };
 use signalbox_blob_store::{BlobObjectKey, BlobStore, BlobStoreFailureKind, ExpectedBlob};
 use signalbox_domain::{
@@ -14,7 +15,7 @@ use signalbox_domain::{
 use signalbox_persistence::blob::{BlobCatalogRepository, BlobCatalogRepositoryError};
 use sqlx::PgPool;
 use tokio::{
-    sync::Semaphore,
+    sync::{OwnedSemaphorePermit, Semaphore},
     time::{Instant, timeout_at},
 };
 
@@ -22,6 +23,18 @@ use crate::BlobStoreRegistry;
 
 const MAX_ACTIVE_ATTACHMENT_PREPARATIONS: usize = 8;
 const ATTACHMENT_PREPARATION_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
+
+async fn release_attachment_permit_after<Work>(
+    permit: OwnedSemaphorePermit,
+    work: Work,
+) -> Work::Output
+where
+    Work: Future,
+{
+    let output = work.await;
+    drop(permit);
+    output
+}
 
 /// Sanitized failure from attachment verification or the wrapped provider.
 #[derive(Debug)]
@@ -104,6 +117,15 @@ where
     type Capability = P::Capability;
     type Error = AttachmentPreparingProviderError<P::Error>;
 
+    fn preparation_error_stage(error: &Self::Error) -> ModelCallPreparationErrorStage {
+        match error {
+            AttachmentPreparingProviderError::Provider(error) => P::preparation_error_stage(error),
+            AttachmentPreparingProviderError::Integrity => {
+                ModelCallPreparationErrorStage::Attachment
+            }
+        }
+    }
+
     async fn prepare_capability<Cancellation>(
         &mut self,
         operation: PreparedModelOperation,
@@ -138,20 +160,17 @@ where
         };
         let deadline = Instant::now() + ATTACHMENT_PREPARATION_DEADLINE;
         let mut cancellation = Box::pin(cancellation);
-        let verification = async {
-            tokio::select! {
+        let repository = &self.repository;
+        let request = operation.request();
+        let verification = release_attachment_permit_after(permit, async move {
+            let outcome = tokio::select! {
                 biased;
                 () = cancellation.as_mut() => None,
-                outcome = verify_attachments(
-                    &self.repository,
-                    registry,
-                    operation.request(),
-                    deadline,
-                ) => Some(outcome),
-            }
-        };
-        let outcome = relinquish_scheduler_capacity(verification).await;
-        drop(permit);
+                outcome = verify_attachments(repository, registry, request, deadline) => Some(outcome),
+            };
+            (outcome, cancellation)
+        });
+        let (outcome, cancellation) = relinquish_scheduler_capacity(verification).await;
         let Some(outcome) = outcome else {
             return Ok(ModelCallCapabilityPreparation::Cancelled);
         };
@@ -323,6 +342,7 @@ async fn verify_replica_candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use signalbox_application::ModelCallExecutionError;
     use signalbox_blob_store::{
         BlobPutOutcome, BlobReader, BlobStoreError, BlobStoreFuture, BlobVerificationFailure,
         OpenedBlob,
@@ -382,6 +402,63 @@ mod tests {
 
     fn key() -> BlobObjectKey {
         BlobObjectKey::for_digest(digest(1))
+    }
+
+    #[derive(Debug)]
+    struct FixtureProviderError;
+
+    impl fmt::Display for FixtureProviderError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("fixture provider error")
+        }
+    }
+
+    impl Error for FixtureProviderError {}
+
+    impl ClassifyOperatorFailure for FixtureProviderError {
+        fn operator_failure_class(&self) -> OperatorFailureClass {
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            }
+        }
+    }
+
+    #[test]
+    fn attachment_integrity_error_retains_stage_and_cause_code() {
+        type ExecutionError = ModelCallExecutionError<
+            FixtureProviderError,
+            FixtureProviderError,
+            FixtureProviderError,
+            AttachmentPreparingProviderError<FixtureProviderError>,
+            FixtureProviderError,
+        >;
+        let error =
+            ExecutionError::AttachmentPreparation(AttachmentPreparingProviderError::Integrity);
+
+        assert!(matches!(
+            error,
+            ModelCallExecutionError::AttachmentPreparation(
+                AttachmentPreparingProviderError::Integrity
+            )
+        ));
+        assert_eq!(
+            error.operator_failure_cause_code(),
+            "attachment_preparation_integrity"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_verification_releases_attachment_permit() {
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&permits)
+            .acquire_owned()
+            .await
+            .expect("fixture semaphore remains open");
+        assert_eq!(permits.available_permits(), 0);
+
+        release_attachment_permit_after(permit, async {}).await;
+
+        assert_eq!(permits.available_permits(), 1);
     }
 
     #[tokio::test]

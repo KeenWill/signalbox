@@ -1130,6 +1130,15 @@ pub enum ModelCallCapabilityPreparation<Capability> {
     AttachmentUnavailable(AttachmentPreparationFailure),
 }
 
+/// Orchestration stage in which provider capability preparation failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModelCallPreparationErrorStage {
+    /// Credential lookup or ordinary provider capability construction failed.
+    Capability,
+    /// Attachment verification failed before send authorization.
+    Attachment,
+}
+
 /// Outcome of one exact provider-native prospective input count.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelCallInputTokenCount {
@@ -1160,6 +1169,11 @@ pub trait ModelCallProvider {
     type Capability;
     /// Sanitized adapter-specific classified failure.
     type Error: ClassifyOperatorFailure;
+
+    /// Identifies the preparation stage represented by one adapter error.
+    fn preparation_error_stage(_error: &Self::Error) -> ModelCallPreparationErrorStage {
+        ModelCallPreparationErrorStage::Capability
+    }
 
     /// Resolves credentials internally and prepares an exact call capability.
     fn prepare_capability<Cancellation>(
@@ -1324,6 +1338,8 @@ pub enum ModelCallExecutionError<
     Render(ModelFrontierRenderingError),
     /// Credential lookup or capability preparation failed as an operator error.
     CapabilityPreparation(ProviderError),
+    /// Attachment preparation failed as an operator error.
+    AttachmentPreparation(ProviderError),
     /// The guarded trustworthy-capability-failure transaction failed.
     CapabilityFailureCommit(FailureError),
     /// Authoritative reread of a retained capability failure failed.
@@ -1371,6 +1387,9 @@ where
             Self::Render(error) => write!(formatter, "model-call render stage failed: {error}"),
             Self::CapabilityPreparation(error) => {
                 write!(formatter, "model-call capability stage failed: {error}")
+            }
+            Self::AttachmentPreparation(error) => {
+                write!(formatter, "model-call attachment stage failed: {error}")
             }
             Self::CapabilityFailureCommit(error) => {
                 write!(
@@ -1444,9 +1463,9 @@ where
         match self {
             Self::Prepare(error) => error.operator_failure_class(),
             Self::Render(error) => error.operator_failure_class(),
-            Self::CapabilityPreparation(error) | Self::Provider(error) => {
-                error.operator_failure_class()
-            }
+            Self::CapabilityPreparation(error)
+            | Self::AttachmentPreparation(error)
+            | Self::Provider(error) => error.operator_failure_class(),
             Self::CapabilityFailureCommit(error) | Self::CapabilityFailureReread(error) => {
                 error.operator_failure_class()
             }
@@ -1462,6 +1481,7 @@ where
             Self::Prepare(_) => "model_call_prepare",
             Self::Render(_) => "model_call_render",
             Self::CapabilityPreparation(_) => "model_call_capability_preparation",
+            Self::AttachmentPreparation(error) => error.operator_failure_cause_code(),
             Self::CapabilityFailureCommit(_) => "model_call_capability_failure_commit",
             Self::CapabilityFailureReread(_) => "model_call_capability_failure_reread",
             Self::Authorization(_) => "model_call_authorization",
@@ -1871,7 +1891,14 @@ where
                     .await;
             }
             Err(error) => {
-                return Err(ModelCallExecutionError::CapabilityPreparation(error));
+                return Err(match Provider::preparation_error_stage(&error) {
+                    ModelCallPreparationErrorStage::Capability => {
+                        ModelCallExecutionError::CapabilityPreparation(error)
+                    }
+                    ModelCallPreparationErrorStage::Attachment => {
+                        ModelCallExecutionError::AttachmentPreparation(error)
+                    }
+                });
             }
         };
 
@@ -3920,6 +3947,43 @@ mod tests {
     #[derive(Debug)]
     struct AttachmentUnavailableProvider;
 
+    #[derive(Debug)]
+    struct AttachmentPreparationErrorProvider;
+
+    impl ModelCallProvider for AttachmentPreparationErrorProvider {
+        type Capability = ();
+        type Error = FakeError;
+
+        fn preparation_error_stage(_error: &Self::Error) -> ModelCallPreparationErrorStage {
+            ModelCallPreparationErrorStage::Attachment
+        }
+
+        async fn prepare_capability<Cancellation>(
+            &mut self,
+            _operation: PreparedModelOperation,
+            _cancellation: Cancellation,
+        ) -> Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>
+        where
+            Cancellation: Future<Output = ()> + Send + 'static,
+        {
+            Err(FakeError::Infrastructure)
+        }
+
+        async fn invoke<AcceptancePossible, Cancellation>(
+            &mut self,
+            _authorized: AuthorizedModelCall,
+            _capability: Self::Capability,
+            _acceptance_possible: AcceptancePossible,
+            _cancellation: Cancellation,
+        ) -> Result<CorrelatedModelCallTerminalObservation, Self::Error>
+        where
+            AcceptancePossible: FnOnce() + Send,
+            Cancellation: Future<Output = ()> + Send + 'static,
+        {
+            panic!("attachment preparation failure must prevent provider interaction")
+        }
+    }
+
     impl ModelCallProvider for AttachmentUnavailableProvider {
         type Capability = ();
         type Error = FakeError;
@@ -5375,6 +5439,31 @@ mod tests {
         assert_eq!(failure.calls, 1);
         assert_eq!(provider.preparation_count, 1);
         assert!(retained.is_none());
+    }
+
+    #[tokio::test]
+    async fn attachment_provider_error_retains_attachment_preparation_stage() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            AttachmentPreparationErrorProvider,
+            InProcessAttemptDispatchGate::default(),
+        );
+
+        assert!(matches!(
+            service.execute(session).await,
+            Err(ModelCallExecutionError::AttachmentPreparation(
+                FakeError::Infrastructure
+            ))
+        ));
     }
 
     /// INV-062: typed attachment evidence survives an ambiguous failure
