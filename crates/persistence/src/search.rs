@@ -35,6 +35,20 @@ WITH lexical_query AS (
 SELECT projection.projection_id, projection.session_id,
        projection.event_sequence, projection.item_kind, projection.item_id,
        projection.source_kind, projection.source_id, turn_id, content_class,
+       NOT EXISTS (
+           SELECT 1
+             FROM web_search_projection AS correlated_chunk
+            WHERE correlated_chunk.source_kind = projection.source_kind
+              AND correlated_chunk.source_id = projection.source_id
+              AND correlated_chunk.content_class = projection.content_class
+              AND (
+                  correlated_chunk.session_id <> projection.session_id
+                  OR correlated_chunk.event_sequence <> projection.event_sequence
+                  OR correlated_chunk.item_kind <> projection.item_kind
+                  OR correlated_chunk.item_id <> projection.item_id
+                  OR correlated_chunk.turn_id IS DISTINCT FROM projection.turn_id
+              )
+       ) AS source_group_valid,
        left(
            ts_headline(
                'simple'::regconfig,
@@ -72,6 +86,11 @@ SELECT projection.projection_id, projection.session_id,
         WHERE candidate.source_kind = projection.source_kind
           AND candidate.source_id = projection.source_id
           AND candidate.content_class = projection.content_class
+          AND candidate.session_id = projection.session_id
+          AND candidate.event_sequence = projection.event_sequence
+          AND candidate.item_kind = projection.item_kind
+          AND candidate.item_id = projection.item_id
+          AND candidate.turn_id IS NOT DISTINCT FROM projection.turn_id
           AND EXISTS (
               SELECT 1
                 FROM query_terms AS term
@@ -384,6 +403,9 @@ fn decode_page(rows: Vec<PgRow>, limit: usize) -> Result<SearchPage, SearchRepos
 }
 
 fn decode_row(row: PgRow) -> Result<(SearchCursor, SearchResult), SearchRepositoryError> {
+    if !row.try_get::<bool, _>("source_group_valid")? {
+        return Err(SearchProjectionCorruption::SourceShape.into());
+    }
     let projection_id: i64 = row.try_get("projection_id")?;
     let projection = u64::try_from(projection_id)
         .ok()
@@ -581,48 +603,77 @@ fn decode_headline(
     marked: String,
 ) -> Result<(String, Vec<SearchHighlight>), SearchProjectionCorruption> {
     let mut plain = String::new();
-    let mut highlights = Vec::new();
+    let mut marked_ranges = Vec::new();
     let mut active_start = None;
     let mut remaining = marked.as_str();
-    while !remaining.is_empty() && plain.len() < max_search_snippet_bytes() {
+    while !remaining.is_empty() {
         if let Some(rest) = remaining.strip_prefix(HEADLINE_START) {
             active_start = Some(plain.len());
             remaining = rest;
             continue;
         }
         if let Some(rest) = remaining.strip_prefix(HEADLINE_END) {
-            append_highlight(&mut highlights, active_start.take(), plain.len())?;
+            append_marked_range(&mut marked_ranges, active_start.take(), plain.len());
             remaining = rest;
             continue;
         }
         let Some(character) = remaining.chars().next() else {
             break;
         };
-        if plain.len() + character.len_utf8() > max_search_snippet_bytes() {
-            break;
-        }
         plain.push(character);
         remaining = &remaining[character.len_utf8()..];
     }
-    append_highlight(&mut highlights, active_start, plain.len())?;
-    Ok((plain, highlights))
+    append_marked_range(&mut marked_ranges, active_start, plain.len());
+
+    let (window_start, window_end) = snippet_window(&plain, marked_ranges.first().copied());
+    let snippet = plain[window_start..window_end].to_owned();
+    let highlights = marked_ranges
+        .into_iter()
+        .filter_map(|(start, end)| {
+            let clipped_start = start.max(window_start);
+            let clipped_end = end.min(window_end);
+            (clipped_start < clipped_end).then_some((clipped_start, clipped_end))
+        })
+        .map(|(start, end)| {
+            Ok(SearchHighlight {
+                start_byte: u16::try_from(start - window_start)
+                    .map_err(|_| SearchProjectionCorruption::Invalid("highlight start"))?,
+                end_byte: u16::try_from(end - window_start)
+                    .map_err(|_| SearchProjectionCorruption::Invalid("highlight end"))?,
+            })
+        })
+        .collect::<Result<Vec<_>, SearchProjectionCorruption>>()?;
+    Ok((snippet, highlights))
 }
 
-fn append_highlight(
-    highlights: &mut Vec<SearchHighlight>,
-    start: Option<usize>,
-    end: usize,
-) -> Result<(), SearchProjectionCorruption> {
+fn append_marked_range(ranges: &mut Vec<(usize, usize)>, start: Option<usize>, end: usize) {
     let Some(start) = start.filter(|start| *start < end) else {
-        return Ok(());
+        return;
     };
-    highlights.push(SearchHighlight {
-        start_byte: u16::try_from(start)
-            .map_err(|_| SearchProjectionCorruption::Invalid("highlight start"))?,
-        end_byte: u16::try_from(end)
-            .map_err(|_| SearchProjectionCorruption::Invalid("highlight end"))?,
-    });
-    Ok(())
+    ranges.push((start, end));
+}
+
+fn snippet_window(plain: &str, first_match: Option<(usize, usize)>) -> (usize, usize) {
+    let bound = max_search_snippet_bytes();
+    if plain.len() <= bound {
+        return (0, plain.len());
+    }
+    let desired_start = first_match
+        .map(|(start, end)| {
+            let match_len = end - start;
+            start.saturating_sub(bound.saturating_sub(match_len) / 2)
+        })
+        .unwrap_or(0)
+        .min(plain.len() - bound);
+    let mut start = desired_start;
+    while !plain.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = (start + bound).min(plain.len());
+    while !plain.is_char_boundary(end) {
+        end -= 1;
+    }
+    (start, end)
 }
 
 #[cfg(test)]
@@ -664,5 +715,23 @@ mod tests {
                     .expect("snippet bound fits highlight offsets"),
             }]
         );
+    }
+
+    #[test]
+    fn headline_decoder_keeps_a_match_after_a_long_unmatched_prefix() {
+        let marked = format!(
+            "{}{HEADLINE_START}needle{HEADLINE_END} after",
+            "x".repeat(max_search_snippet_bytes() + 64)
+        );
+        let (snippet, highlights) = decode_headline(marked).expect("fixture headline decodes");
+
+        assert!(snippet.contains("needle"));
+        assert_eq!(highlights.len(), 1);
+        let highlight = highlights[0];
+        assert_eq!(
+            &snippet[usize::from(highlight.start_byte)..usize::from(highlight.end_byte)],
+            "needle"
+        );
+        assert!(snippet.len() <= max_search_snippet_bytes());
     }
 }
