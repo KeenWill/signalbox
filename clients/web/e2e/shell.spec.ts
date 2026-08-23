@@ -51,6 +51,7 @@ const importsFixture = {
   latestWindowSummary: '249,950–250,000 · 51 loaded',
   arbitraryWindowSummary: '124,975–125,025 · 51 loaded',
   continuedSessionId: '00000000-0000-7000-8000-000009125000',
+  firstEntryId: 'import-entry-00000000-0000-7000-8000-000002000001',
   secondEntryId: 'import-entry-00000000-0000-7000-8000-000002000002',
 } as const
 
@@ -572,13 +573,13 @@ test('suspends imported navigation while the command palette owns focus', async 
   await page.goto(importsFixture.path)
 
   const entries = page.getByRole('listbox', { name: 'Imported source entries' })
-  const selectedBeforeOverlay = await entries.getAttribute('aria-activedescendant')
+  await expect(entries).toHaveAttribute('aria-activedescendant', importsFixture.firstEntryId)
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
   await page.keyboard.press('j')
 
-  await expect(entries).toHaveAttribute('aria-activedescendant', selectedBeforeOverlay ?? '')
+  await expect(entries).toHaveAttribute('aria-activedescendant', importsFixture.firstEntryId)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
