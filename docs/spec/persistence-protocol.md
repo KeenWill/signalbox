@@ -915,12 +915,12 @@ Locks per transaction, in acquisition order:
   attempt ordinal, sets the exact backoff deadline, and inserts the attempt rows
   in the same transaction. No reconciliation path may acquire either cursor row
   while holding a recovery-row lock in the reverse of this order. Applying a
-  claim then takes the session's `session_scheduler` row
-  `FOR UPDATE`, reconstitutes the complete scheduling projection, and uses the
-  existing reconciliation-required write transaction. Operator reconciliation
-  takes the session row before this same scheduler row; it can therefore win
-  before the automatic lock is taken, while the automatic path itself never
-  acquires the session row and introduces no reversed pair.
+  claim then takes the session's `session_scheduler` row `FOR UPDATE`,
+  reconstitutes the complete scheduling projection, and uses the existing
+  reconciliation-required write transaction. Operator reconciliation takes the
+  session row before this same scheduler row; it can therefore win before the
+  automatic lock is taken, while the automatic path itself never acquires the
+  session row and introduces no reversed pair.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
