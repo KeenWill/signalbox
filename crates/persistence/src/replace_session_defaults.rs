@@ -305,6 +305,7 @@ impl ReplaceSessionDefaultsRepository {
                 CommandKind::ReplaceSessionMetadata
                 | CommandKind::SubmitInput
                 | CommandKind::DecideToolRequest
+                | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
@@ -352,6 +353,7 @@ impl ReplaceSessionDefaultsRepository {
                     | CommandKind::ReplaceSessionMetadata
                     | CommandKind::SubmitInput
                     | CommandKind::DecideToolRequest
+                    | CommandKind::OverrideDeniedToolRequest
                     | CommandKind::ReviewWorkflow
                     | CommandKind::ReviewOrchestration
                     | CommandKind::CompactSession
@@ -463,6 +465,7 @@ impl ReplaceSessionDefaultsRepository {
                 CommandKind::ReplaceSessionMetadata
                 | CommandKind::SubmitInput
                 | CommandKind::DecideToolRequest
+                | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
