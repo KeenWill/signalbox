@@ -263,11 +263,14 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
               : 'Original image failed to load. No automatic image view remains available.'}
           </p>
         )}
-        {originalState !== 'failed' && failedAutomaticUrls.size > 0 && !automatic && (
-          <p role="status">
-            No admitted inline image view could be loaded. Metadata and download remain available.
-          </p>
-        )}
+        {originalState !== 'failed' &&
+          !originalRequested &&
+          failedAutomaticUrls.size > 0 &&
+          !automatic && (
+            <p role="status">
+              No admitted inline image view could be loaded. Metadata and download remain available.
+            </p>
+          )}
         {download && (
           <a href={download.content_url} download={artifact.displayName}>
             <Download aria-hidden="true" /> Download

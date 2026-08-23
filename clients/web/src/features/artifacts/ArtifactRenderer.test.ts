@@ -9,6 +9,7 @@ import {
   imageDownloadView,
   imageOriginalView,
   imagePreviewView,
+  jpegDescriptor,
   selectBoundedOriginalView,
 } from './artifactScenario'
 import {
@@ -21,8 +22,11 @@ import { admitRemoteMediaUrl } from './remoteMediaPreference'
 const download = imageArtifact.available_views[0]
 const browserNative = imageArtifact.available_views[1]
 const preview = imageArtifact.available_views[2]
-if (!download || !browserNative || !preview) {
-  throw new Error('the image artifact fixture must contain download, original, and preview views')
+const previewDerivation = preview?.derivations[0]
+if (!download || !browserNative || !preview || !previewDerivation) {
+  throw new Error(
+    'the image artifact fixture must contain download, original, and preview provenance',
+  )
 }
 
 describe('artifact renderer compatibility', () => {
@@ -30,9 +34,10 @@ describe('artifact renderer compatibility', () => {
     expect(artifactPreviewIds).toEqual(['incident-notes', 'renderer-source'])
   })
 
-  it('derives no original-capable ID for an animation-capable PNG representation', () => {
-    expect(artifactOriginalIds).toEqual([])
+  it('derives original-capable IDs only for reachable bounded single-frame artifacts', () => {
+    expect(artifactOriginalIds).toEqual(['bounded-photo'])
     expect(selectBoundedOriginalView(imageArtifact)).toBeUndefined()
+    expect(selectBoundedOriginalView(jpegDescriptor)?.kind).toBe('browser_native')
   })
 
   it('admits a byte-bounded, decode-proven, inherently single-frame JPEG original', () => {
@@ -69,6 +74,29 @@ describe('artifact renderer compatibility', () => {
       ...imageArtifact,
       declared_media_type: 'image/jpeg',
       available_views: [imageDownloadView, jpegOriginal],
+    }
+
+    expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
+  })
+
+  it('requires one exact bounded derivation to bind both input and output', () => {
+    const jpegOriginal = { ...imageOriginalView, media_type: 'image/jpeg' }
+    const unrelatedDigest = `sha256:${'9a'.repeat(32)}`
+    const misleadingPreview = {
+      ...imagePreviewView,
+      derivations: [
+        { ...previewDerivation, input_digests: [unrelatedDigest] },
+        {
+          ...previewDerivation,
+          transformation_name: 'image.thumbnail',
+          input_digests: [imageArtifact.digest],
+        },
+      ],
+    }
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      declared_media_type: 'image/jpeg',
+      available_views: [imageDownloadView, jpegOriginal, misleadingPreview],
     }
 
     expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
