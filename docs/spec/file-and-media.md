@@ -221,6 +221,7 @@ The version-one compiled ceilings are:
 | Minimum worker descriptor override    | 16 descriptors          |
 | One / aggregate executable snapshots  | 64 MiB / 64 MiB         |
 | Worker bindings per processor         | 256                     |
+| Worker tasks                          | 64                      |
 | Worker descendants                    | 0                       |
 
 `FileMediaCeilings` admits only positive effective values at or below its
