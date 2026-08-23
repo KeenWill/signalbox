@@ -58,6 +58,8 @@ pub(crate) fn classify_error(message: &str) -> ProviderErrorKind {
                 "context length exceeded",
                 "context window exceeded",
                 "context_length_exceeded",
+                "ran out of room in the model's context window",
+                "input exceeds the maximum length",
             ],
         ) =>
         {
@@ -207,6 +209,20 @@ mod tests {
         assert_eq!(
             classify_error("permission_denied"),
             ProviderErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn codex_native_context_limit_messages_are_request_too_large() {
+        assert_eq!(
+            classify_error(
+                "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying."
+            ),
+            ProviderErrorKind::RequestTooLarge
+        );
+        assert_eq!(
+            classify_error("Input exceeds the maximum length of this model"),
+            ProviderErrorKind::RequestTooLarge
         );
     }
 
