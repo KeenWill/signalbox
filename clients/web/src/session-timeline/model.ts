@@ -172,8 +172,8 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     const response = await request('/api/bootstrap', { signal })
     if (!response.ok) return throwApiError(response)
     const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
-    if (!bootstrap.capabilities.bounded_session_timeline) {
-      throw new TypeError('bounded session timeline capability is unavailable')
+    if (!bootstrap.capabilities.bounded_json || !bootstrap.capabilities.bounded_session_timeline) {
+      throw new TypeError('bounded JSON session timeline capability is unavailable')
     }
     if (!hasValidSessionTimelineContract(bootstrap)) {
       throw new TypeError('bounded session timeline limits are invalid')
@@ -216,6 +216,8 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
 
 export class BoundedSessionHistory {
   private descriptorValue: WebSessionTimelineDescriptor | undefined
+  private descriptorRequestRevision = 0
+  private descriptorAppliedRevision = 0
   private retainedValue: WebSessionTimelineWindow['items'] = []
   private readonly sessionId: string
 
@@ -235,7 +237,10 @@ export class BoundedSessionHistory {
   }
 
   async describe(signal?: AbortSignal): Promise<WebSessionTimelineDescriptor> {
-    const descriptor = await this.source.readDescriptor(this.sessionId, signal)
+    const requestRevision = ++this.descriptorRequestRevision
+    const descriptor = decodeWebSessionTimelineDescriptor(
+      await this.source.readDescriptor(this.sessionId, signal),
+    )
     if (canonicalSessionId(descriptor.session_id) !== this.sessionId) {
       throw new TypeError('descriptor session mismatch')
     }
@@ -258,6 +263,10 @@ export class BoundedSessionHistory {
     decimalU64(descriptor.sizes.referenced_blob_bytes)
     decimalU64(descriptor.work.active_turn_count)
     decimalU64(descriptor.work.queued_turn_count)
+    if (requestRevision < this.descriptorAppliedRevision && this.descriptorValue) {
+      return cloneTimelineDescriptor(this.descriptorValue)
+    }
+    this.descriptorAppliedRevision = requestRevision
     this.descriptorValue = cloneTimelineDescriptor(descriptor)
     return cloneTimelineDescriptor(descriptor)
   }
@@ -274,9 +283,17 @@ export class BoundedSessionHistory {
     const bounded = boundedLimits(limits, this.source.limits)
     const maxItems = bounded.maxItems
     const maxBytes = bounded.maxBytes
-    const window = decodeWebSessionTimelineWindow(
-      await this.source.readWindow(this.sessionId, sourceAnchor, { maxItems, maxBytes }, signal),
+    const rawWindow = await this.source.readWindow(
+      this.sessionId,
+      sourceAnchor,
+      { maxItems, maxBytes },
+      signal,
     )
+    const rawItems = (rawWindow as unknown as { items?: unknown }).items
+    if (Array.isArray(rawItems) && rawItems.length > maxItems) {
+      throw new TypeError('timeline window exceeds the requested item ceiling')
+    }
+    const window = decodeWebSessionTimelineWindow(rawWindow)
     if (canonicalSessionId(window.session_id) !== this.sessionId)
       throw new TypeError('timeline window session mismatch')
     if (window.items.length > maxItems) {
@@ -353,6 +370,23 @@ export class BoundedSessionHistory {
       decimalAddress(window.continuation_after.event_sequence)
       if (window.continuation_after.event_sequence !== lastItemAddress) {
         throw new TypeError('timeline continuation does not match its returned boundary')
+      }
+    }
+    const cachedDescriptor = this.descriptorValue
+    if (cachedDescriptor && firstItemAddress && lastItemAddress) {
+      if (
+        decimalAddress(firstItemAddress) >
+          decimalAddress(cachedDescriptor.first_address.event_sequence) &&
+        !window.continuation_before
+      ) {
+        throw new TypeError('cached descriptor requires a continuation before this window')
+      }
+      if (
+        decimalAddress(lastItemAddress) <
+          decimalAddress(cachedDescriptor.latest_address.event_sequence) &&
+        !window.continuation_after
+      ) {
+        throw new TypeError('cached descriptor requires a continuation after this window')
       }
     }
     const candidates = [
