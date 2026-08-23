@@ -59,16 +59,22 @@ mod error;
 mod presentation;
 mod transcript;
 
+// numeric-bound: ceiling - protects request memory and durable input storage
 const MAX_INPUT_CONTENT_BYTES: usize = 1_048_576;
+// numeric-bound: ceiling - protects frame memory while decoding review input
 const MAX_REVIEW_JSON_INPUT_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
+// numeric-bound: ceiling - protects frame memory while reading import source
 const MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 /// Bounded memory used while hashing one client-local blob source.
 const BLOB_HASH_BUFFER_BYTES: usize = 64 * 1024;
 /// Smallest bounded metadata page the process protocol admits.
+// numeric-bound: tunable - controls the smallest requested metadata page
 const MIN_METADATA_PAGE_SIZE: u64 = 1;
 /// Largest bounded metadata page the process protocol admits.
+// numeric-bound: tunable - controls the largest requested metadata page
 const MAX_METADATA_PAGE_SIZE: u64 = 100;
 /// Largest finding inventory one review run can own.
+// numeric-bound: ceiling - protects memory and writes from runaway model findings
 const MAX_REVIEW_FINDINGS_PER_RUN: u64 = 32;
 
 #[derive(Deserialize)]
@@ -370,6 +376,9 @@ fn delegation_rejection_matches(
         | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
         | RejectionDetail::SafePointUnavailableWhileStopping { .. }
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
+        | RejectionDetail::ToolRequestNotDelegateDenied { .. }
+        | RejectionDetail::ToolRequestNotTerminallyDenied { .. }
+        | RejectionDetail::ToolDenialAlreadyOverridden { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
         | RejectionDetail::DefaultsVersionMismatch { .. }
         | RejectionDetail::UnknownModelAlias { .. }
@@ -454,6 +463,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
             detail,
         },
         ServerMessage::SessionCreated { .. }
+        | ServerMessage::SessionCommissioned { .. }
         | ServerMessage::SessionPlacementUpdated { .. }
         | ServerMessage::InputSubmitted { .. }
         | ServerMessage::SteeringSubmitted { .. }
@@ -486,6 +496,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::SessionDefaultsReplaced { .. }
         | ServerMessage::SessionDefaults { .. }
         | ServerMessage::ToolRequestDecided { .. }
+        | ServerMessage::ToolDenialOverridden { .. }
         | ServerMessage::SessionCompacted { .. }
         | ServerMessage::ConversationImportBegun { .. }
         | ServerMessage::ConversationImportAppended { .. }
@@ -556,6 +567,7 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
             detail,
         },
         ServerMessage::SessionCreated { .. }
+        | ServerMessage::SessionCommissioned { .. }
         | ServerMessage::SessionSpawned { .. }
         | ServerMessage::SessionAwaitRegistered { .. }
         | ServerMessage::ChildResult { .. }
@@ -592,6 +604,7 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::SessionDefaultsReplaced { .. }
         | ServerMessage::SessionDefaults { .. }
         | ServerMessage::ToolRequestDecided { .. }
+        | ServerMessage::ToolDenialOverridden { .. }
         | ServerMessage::SessionCompacted { .. }
         | ServerMessage::ConversationImportAborted {}
         | ServerMessage::BlobUploadBegun { .. }
@@ -670,6 +683,7 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
             detail,
         },
         ServerMessage::SessionCreated { .. }
+        | ServerMessage::SessionCommissioned { .. }
         | ServerMessage::SessionSpawned { .. }
         | ServerMessage::SessionAwaitRegistered { .. }
         | ServerMessage::ChildResult { .. }
@@ -706,6 +720,7 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::SessionDefaultsReplaced { .. }
         | ServerMessage::SessionDefaults { .. }
         | ServerMessage::ToolRequestDecided { .. }
+        | ServerMessage::ToolDenialOverridden { .. }
         | ServerMessage::SessionCompacted { .. }
         | ServerMessage::ConversationImportBegun { .. }
         | ServerMessage::ConversationImportAppended { .. }
@@ -10103,6 +10118,54 @@ mod tests {
         .await;
         assert!(matches!(result, Err(ClientError::AmbiguousMutation)));
         server.await??;
+        Ok(())
+    }
+
+    /// INV-033: `decide` accepts only its own receipt. A `tool_denial_overridden`
+    /// receipt names a distinct command — it proves a one-shot override was
+    /// recorded for a future re-proposal, never that this pending request was
+    /// decided — so naming the same request cannot make it stand in for one.
+    #[tokio::test]
+    async fn inv033_decide_rejects_a_denial_override_receipt() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let tool_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let server = tokio::spawn(async move {
+            let (stream, mut writer) = listener.accept().await?.0.into_split();
+            let mut reader = BufReader::new(stream);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            let response = ServerFrame::try_new_for_version(
+                request.version(),
+                request.request_id(),
+                ServerMessage::ToolDenialOverridden { tool_request_id },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&response).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let mut client = ProcessClient::new(socket);
+        let result = decide(
+            &mut client,
+            &mut output,
+            session_id,
+            tool_request_id,
+            Some(CommandId::try_from_uuid(Uuid::from_u128(4))?),
+            ToolDecision::Approve {},
+        )
+        .await;
+        assert!(matches!(result, Err(ClientError::AmbiguousMutation)));
+        server.await??;
+        assert_eq!(String::from_utf8(stdout)?, "");
         Ok(())
     }
 

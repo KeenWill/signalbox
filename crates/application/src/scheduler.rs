@@ -36,9 +36,21 @@ use crate::{
 ///
 /// The composition root may supply another nonzero interval after validating
 /// deployment configuration through [`ReconciliationSweepInterval::try_new`].
+// numeric-bound: tunable - controls the baseline reconciliation cadence
 const BASELINE_RECONCILIATION_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+// numeric-bound: tunable - controls baseline scheduler nudge backpressure
 const BASELINE_NUDGE_BUFFER_CAPACITY: usize = 1_024;
-const BASELINE_MAX_IN_FLIGHT_PASSES: usize = 16;
+/// Shared product cap for concurrent authoritative scheduler passes.
+///
+/// This controls simultaneous provider, tool, and database pressure. Deployment
+/// configuration may lower or pause admission but cannot raise this cap.
+// numeric-bound: tunable - controls concurrent authoritative scheduler passes
+const SCHEDULER_PASS_ADMISSION_CAP: usize = 16;
+
+/// Returns the shared product cap for concurrent authoritative passes.
+pub const fn scheduler_pass_admission_cap() -> usize {
+    SCHEDULER_PASS_ADMISSION_CAP
+}
 
 /// A validated nonzero reconciliation-sweep interval.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -626,20 +638,27 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
         Self {
             work_source,
             pass,
-            max_in_flight_passes: BASELINE_MAX_IN_FLIGHT_PASSES,
+            max_in_flight_passes: SCHEDULER_PASS_ADMISSION_CAP,
         }
     }
 
-    /// Composes the ports with an explicit nonzero in-flight pass bound.
+    /// Composes the ports with an explicit nonzero in-flight pass bound capped
+    /// at the shared admission cap.
     pub const fn with_max_in_flight(
         work_source: WorkSource,
         pass: Pass,
         max_in_flight_passes: NonZeroUsize,
     ) -> Self {
+        let requested = max_in_flight_passes.get();
+        let max_in_flight_passes = if requested > SCHEDULER_PASS_ADMISSION_CAP {
+            SCHEDULER_PASS_ADMISSION_CAP
+        } else {
+            requested
+        };
         Self {
             work_source,
             pass,
-            max_in_flight_passes: max_in_flight_passes.get(),
+            max_in_flight_passes,
         }
     }
 
@@ -919,8 +938,8 @@ mod tests {
         ClassifyOperatorFailure, EligibilityNudge, EligibilityNudgeOutcome, EligibilityPass,
         EligibilitySweep, EligibilitySweepBatch, EligibilityWorkSource, GoalAwareEligibilityPass,
         GoalAwareEligibilityPassError, GoalPassDisposition, InProcessEligibilityWorkSource,
-        InvalidReconciliationSweepInterval, ReconciliationSweepInterval, SchedulerLoop,
-        SchedulerLoopExit,
+        InvalidReconciliationSweepInterval, ReconciliationSweepInterval,
+        SCHEDULER_PASS_ADMISSION_CAP, SchedulerLoop, SchedulerLoopExit,
     };
     use crate::{
         OperatorFailureClass, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
@@ -1583,6 +1602,47 @@ mod tests {
         assert_eq!(observed.len(), 2);
         assert!(observed.contains(&first));
         assert!(observed.contains(&second));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inv007_paused_scheduler_admits_no_authoritative_passes() {
+        let selected = session(50);
+        let (unused_pass_shutdown, pass_shutdown_receiver) = oneshot::channel();
+        let pass = FakePass::failing_once(selected, 1, unused_pass_shutdown);
+        let observed = Arc::clone(&pass.state);
+        let mut scheduler = SchedulerLoop::paused(
+            FakeWorkSource {
+                hints: VecDeque::from([Ok(selected)]),
+            },
+            pass,
+        );
+        let outcome = timeout(
+            Duration::from_secs(1),
+            scheduler.run_until(async {
+                pass_shutdown_receiver
+                    .await
+                    .expect("an admitted fake pass signals shutdown");
+            }),
+        )
+        .await;
+
+        assert!(outcome.is_err());
+        assert!(
+            observed
+                .lock()
+                .expect("fake-pass state is not poisoned")
+                .observed
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn inv007_explicit_scheduler_bound_is_capped_at_admission_cap() {
+        let requested = NonZeroUsize::new(SCHEDULER_PASS_ADMISSION_CAP + 1)
+            .expect("the fixture exceeds a positive admission cap");
+        let scheduler = SchedulerLoop::with_max_in_flight((), (), requested);
+
+        assert_eq!(scheduler.max_in_flight_passes, SCHEDULER_PASS_ADMISSION_CAP);
     }
 
     #[tokio::test]

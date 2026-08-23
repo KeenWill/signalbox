@@ -4,7 +4,7 @@
 //! domain aggregates. Reads use one read-only repeatable-read transaction so
 //! the hub can map a complete, stable projection explicitly.
 
-use std::{error::Error, fmt};
+use std::{collections::VecDeque, error::Error, fmt};
 
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -39,6 +39,9 @@ use crate::{
 };
 
 const REPEATABLE_READ_ONLY: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY";
+/// Hard safety ceiling on session identities read ahead by one summary cursor;
+/// it bounds page memory and the number of histories authenticated per query.
+const SESSION_SUMMARY_PAGE_SIZE: i64 = 64;
 
 /// One model-selection request in the process-facing session summary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -284,17 +287,39 @@ fn decode_session_defaults_value(
     })
 }
 
-/// One repeatable-read session-summary cursor that owns at most one decoded row.
+/// One repeatable-read session-summary cursor with bounded read-ahead.
 ///
 /// Call [`Self::next_summary`] until it returns `None`. That terminal call
 /// commits the read-only transaction and makes [`Self::summary_count`]
-/// available. Dropping a reader early rolls its transaction back.
+/// available. Each page batches placement authentication for up to 64 sessions;
+/// dropping a reader early rolls its transaction back.
 #[derive(Debug)]
 pub struct ProcessSessionSummaryReader {
     transaction: Option<Transaction<'static, Postgres>>,
     next_session_after: Option<Uuid>,
+    pending: VecDeque<PendingSessionSummary>,
     summary_count: u64,
     committed_summary_count: Option<u64>,
+}
+
+#[derive(Debug)]
+struct PendingSessionSummary {
+    session: SessionId,
+    defaults_version: u64,
+    model_selection: ProcessModelSelection,
+    placement: VersionedSessionPlacement,
+}
+
+impl PendingSessionSummary {
+    fn with_runner(self, runner: Option<ProcessRunnerProjection>) -> ProcessSessionSummary {
+        ProcessSessionSummary {
+            session: self.session,
+            defaults_version: self.defaults_version,
+            model_selection: self.model_selection,
+            placement: self.placement,
+            runner,
+        }
+    }
 }
 
 impl ProcessSessionSummaryReader {
@@ -313,37 +338,22 @@ impl ProcessSessionSummaryReader {
             return Ok(None);
         }
 
-        let next_session_after = self.next_session_after;
-        let transaction = self.transaction_mut()?;
-        let row = sqlx::query(
-            "SELECT
-                session_row.session_id,
-                current_defaults.current_version AS defaults_version,
-                selected_defaults.model_selection_kind,
-                selected_defaults.direct_model_selection_id,
-                selected_defaults.model_alias_id
-               FROM session AS session_row
-               LEFT JOIN session_current_defaults AS current_defaults
-                 ON current_defaults.session_id = session_row.session_id
-               LEFT JOIN session_defaults_version AS selected_defaults
-                 ON selected_defaults.session_id = current_defaults.session_id
-                AND selected_defaults.version = current_defaults.current_version
-              WHERE ($1::uuid IS NULL OR session_row.session_id > $1)
-              ORDER BY session_row.session_id
-              LIMIT 1",
-        )
-        .bind(next_session_after)
-        .fetch_optional(&mut **transaction)
-        .await?;
+        if self.pending.is_empty() {
+            let next_session_after = self.next_session_after;
+            let (pending, next_session_after) =
+                load_session_summary_page(self.transaction_mut()?, next_session_after).await?;
+            self.pending = pending;
+            self.next_session_after = next_session_after;
+        }
 
-        if let Some(row) = row {
-            let session = session_id_from_uuid(required(&row, "session_id")?);
-            let placement = load_process_session_placement(transaction, session)
-                .await?
-                .ok_or(ProcessReadCorruption::Missing("session placement"))?;
-            let runner = load_process_runner_projection(transaction, session).await?;
-            let summary = decode_session_summary(&row, placement, runner)?;
-            self.next_session_after = Some(session_id_to_uuid(summary.session()));
+        if let Some(pending) = self.pending.front() {
+            let session = pending.session;
+            let runner = load_process_runner_projection(self.transaction_mut()?, session).await?;
+            let summary = self
+                .pending
+                .pop_front()
+                .ok_or(ProcessReadCorruption::Missing("pending session summary"))?
+                .with_runner(runner);
             self.summary_count =
                 self.summary_count
                     .checked_add(1)
@@ -367,6 +377,59 @@ impl ProcessSessionSummaryReader {
             .as_mut()
             .ok_or_else(|| ProcessReadCorruption::Missing("process read transaction").into())
     }
+}
+
+async fn load_session_summary_page(
+    transaction: &mut Transaction<'static, Postgres>,
+    next_session_after: Option<Uuid>,
+) -> Result<(VecDeque<PendingSessionSummary>, Option<Uuid>), ProcessReadError> {
+    let rows = sqlx::query(
+        "SELECT
+            session_row.session_id,
+            current_defaults.current_version AS defaults_version,
+            selected_defaults.model_selection_kind,
+            selected_defaults.direct_model_selection_id,
+            selected_defaults.model_alias_id
+           FROM session AS session_row
+           LEFT JOIN session_current_defaults AS current_defaults
+             ON current_defaults.session_id = session_row.session_id
+           LEFT JOIN session_defaults_version AS selected_defaults
+             ON selected_defaults.session_id = current_defaults.session_id
+            AND selected_defaults.version = current_defaults.current_version
+          WHERE ($1::uuid IS NULL OR session_row.session_id > $1)
+          ORDER BY session_row.session_id
+          LIMIT $2",
+    )
+    .bind(next_session_after)
+    .bind(SESSION_SUMMARY_PAGE_SIZE)
+    .fetch_all(&mut **transaction)
+    .await?;
+    if rows.is_empty() {
+        return Ok((VecDeque::new(), next_session_after));
+    }
+
+    let sessions = rows
+        .iter()
+        .map(|row| required::<Uuid>(row, "session_id").map(session_id_from_uuid))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut placements = crate::session_placement::load_current_batch(transaction, &sessions)
+        .await
+        .map_err(map_session_placement_read_error)?;
+    let mut pending = VecDeque::with_capacity(rows.len());
+    for row in rows {
+        let session_uuid = required(&row, "session_id")?;
+        let placement = placements
+            .remove(&session_uuid)
+            .ok_or(ProcessReadCorruption::Missing("session placement"))?;
+        pending.push_back(decode_pending_session_summary(&row, placement)?);
+    }
+    if !placements.is_empty() {
+        return Err(ProcessReadCorruption::Inconsistent("session placement batch").into());
+    }
+    let next_session_after = pending
+        .back()
+        .map(|summary| session_id_to_uuid(summary.session));
+    Ok((pending, next_session_after))
 }
 
 /// Durable state of the current model call attached to an active turn.
@@ -1648,6 +1711,7 @@ impl ProcessReadRepository {
         Ok(ProcessSessionSummaryReader {
             transaction: Some(transaction),
             next_session_after: None,
+            pending: VecDeque::new(),
             summary_count: 0,
             committed_summary_count: None,
         })
@@ -1851,7 +1915,10 @@ impl ProcessReadRepository {
                 transcript_approval.user_command_id AS transcript_user_command_id,
                 transcript_approval.delegate_model_selection_id AS transcript_delegate_model_selection_id,
                 transcript_approval.delegate_model_call_id AS transcript_delegate_model_call_id,
-                transcript_approval.rationale AS transcript_decision_rationale
+                transcript_approval.rationale AS transcript_decision_rationale,
+                transcript_approval.override_denied_request_id
+                    AS transcript_override_denied_request_id,
+                transcript_override.command_id AS transcript_override_command_id
                FROM UNNEST($1::numeric[], $2::uuid[], $3::uuid[])
                     WITH ORDINALITY AS selected(
                         member_position,
@@ -1880,6 +1947,9 @@ impl ProcessReadRepository {
                 )
                LEFT JOIN tool_approval_decision AS transcript_approval
                  ON transcript_approval.request_id = transcript_request.request_id
+               LEFT JOIN tool_approval_user_override AS transcript_override
+                 ON transcript_override.denied_request_id =
+                    transcript_approval.override_denied_request_id
                LEFT JOIN imported_transcript_entry AS imported
                  ON imported.imported_conversation_id =
                         entry.imported_conversation_id
@@ -2369,11 +2439,10 @@ fn map_seed_validation_error(error: sqlx::Error) -> ProcessReadError {
     }
 }
 
-fn decode_session_summary(
+fn decode_pending_session_summary(
     row: &PgRow,
     placement: VersionedSessionPlacement,
-    runner: Option<ProcessRunnerProjection>,
-) -> Result<ProcessSessionSummary, ProcessReadError> {
+) -> Result<PendingSessionSummary, ProcessReadError> {
     let session = session_id_from_uuid(required(row, "session_id")?);
     let defaults_version = decode_positive(
         required(row, "defaults_version")?,
@@ -2398,12 +2467,11 @@ fn decode_session_summary(
             .into());
         }
     };
-    Ok(ProcessSessionSummary {
+    Ok(PendingSessionSummary {
         session,
         defaults_version,
         model_selection,
         placement,
-        runner,
     })
 }
 
@@ -4182,7 +4250,10 @@ async fn open_transcript_entry_cursor(
             transcript_approval.user_command_id AS transcript_user_command_id,
             transcript_approval.delegate_model_selection_id AS transcript_delegate_model_selection_id,
             transcript_approval.delegate_model_call_id AS transcript_delegate_model_call_id,
-            transcript_approval.rationale AS transcript_decision_rationale
+            transcript_approval.rationale AS transcript_decision_rationale,
+            transcript_approval.override_denied_request_id
+                AS transcript_override_denied_request_id,
+            transcript_override.command_id AS transcript_override_command_id
            FROM (
                 SELECT
                     resolved.*,
@@ -4210,6 +4281,9 @@ async fn open_transcript_entry_cursor(
             )
            LEFT JOIN tool_approval_decision AS transcript_approval
              ON transcript_approval.request_id = transcript_request.request_id
+           LEFT JOIN tool_approval_user_override AS transcript_override
+             ON transcript_override.denied_request_id =
+                transcript_approval.override_denied_request_id
            LEFT JOIN imported_transcript_entry AS imported
              ON imported.imported_conversation_id =
                     entry.imported_conversation_id
@@ -5060,6 +5134,8 @@ fn decode_process_tool_approval(
     let delegate_model: Option<Uuid> = row.try_get("transcript_delegate_model_selection_id")?;
     let delegate_call: Option<Uuid> = row.try_get("transcript_delegate_model_call_id")?;
     let rationale: Option<String> = row.try_get("transcript_decision_rationale")?;
+    let override_denied: Option<Uuid> = row.try_get("transcript_override_denied_request_id")?;
+    let override_command: Option<Uuid> = row.try_get("transcript_override_command_id")?;
     let Some(source) = source else {
         if decision_kind.is_some()
             || denial_reason.is_some()
@@ -5067,6 +5143,8 @@ fn decode_process_tool_approval(
             || delegate_model.is_some()
             || delegate_call.is_some()
             || rationale.is_some()
+            || override_denied.is_some()
+            || override_command.is_some()
         {
             return Err(ProcessReadCorruption::Inconsistent(
                 "tool approval projection without source",
@@ -5093,6 +5171,11 @@ fn decode_process_tool_approval(
             return Err(ProcessReadCorruption::Inconsistent("tool approval decision kind").into());
         }
     };
+    if source_kind != ToolApprovalDecisionSourceStorageKind::UserOverride
+        && (override_denied.is_some() || override_command.is_some())
+    {
+        return Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into());
+    }
     match (
         source_kind,
         user_command,
@@ -5145,11 +5228,32 @@ fn decode_process_tool_approval(
                 rationale: Some(rationale),
             }))
         }
+        (ToolApprovalDecisionSourceStorageKind::UserOverride, None, None, None, None)
+            if decision == ToolApprovalDecision::Approve =>
+        {
+            match (override_denied, override_command) {
+                (Some(denied_request), Some(command)) => Ok(Some(ProcessToolApproval {
+                    decision,
+                    decider: ToolApprovalDecider::UserOverride {
+                        command: durable_command_id_from_uuid(command).map_err(|_| {
+                            ProcessReadCorruption::Inconsistent("tool approval override command")
+                        })?,
+                        denied_request: ToolRequestId::from_uuid(denied_request),
+                    },
+                    rationale: None,
+                })),
+                (None, _) | (_, None) => Err(ProcessReadCorruption::Inconsistent(
+                    "tool approval provenance shape",
+                )
+                .into()),
+            }
+        }
         (
             ToolApprovalDecisionSourceStorageKind::PolicyAuto
             | ToolApprovalDecisionSourceStorageKind::SessionBlanket
             | ToolApprovalDecisionSourceStorageKind::UserCommand
-            | ToolApprovalDecisionSourceStorageKind::Delegate,
+            | ToolApprovalDecisionSourceStorageKind::Delegate
+            | ToolApprovalDecisionSourceStorageKind::UserOverride,
             ..,
         ) => Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into()),
     }

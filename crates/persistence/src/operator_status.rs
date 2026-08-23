@@ -422,6 +422,9 @@ impl ProcessOperatorStatusReader {
         &mut self,
     ) -> Result<Option<ProcessOperatorStatusItem>, ProcessOperatorStatusError> {
         loop {
+            if self.phase == ProcessOperatorStatusPhase::Complete {
+                return Ok(None);
+            }
             let transaction =
                 self.transaction
                     .as_mut()

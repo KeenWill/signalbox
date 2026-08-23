@@ -45,6 +45,28 @@ const REPO_WATCH_EVENT_CONTENT_IDENTITY_DOMAIN_V1: &[u8] =
     b"signalbox/repo-watch/event-content-identity/v1";
 const REPO_WATCH_EVENT_STREAM_IDENTITY_DOMAIN_V1: &[u8] =
     b"signalbox/repo-watch/event-stream-identity/v1";
+const REPO_WATCH_EVENT_IDENTIFIED_CONTENT_DOMAIN_V1: &[u8] =
+    b"signalbox/repo-watch/event-identified-content/v1";
+/// Largest number of recurring occurrence streams one repository's frontier may
+/// carry.
+///
+/// A stream is created by the first occurrence of a recurring event on a
+/// distinct subject: a pull request's own transitions, each of its labels, each
+/// review thread, each base branch it advances onto, and each distinct
+/// reaction. Every entry costs a 32-byte stream identity and an 8-byte
+/// sequence, so this ceiling bounds one repository's frontier at roughly 40 MB
+/// of resident state and a durable frontier of the same order. That is the
+/// point at which a single watched repository's identity state, rather than its
+/// event history, becomes the dominant cost of watching it, and it is far above
+/// what any real repository reaches: GitHub's largest public repositories have
+/// produced fewer than a million pull requests in their lifetimes, and each
+/// contributes streams only for the subjects it actually touches.
+///
+/// Refusing here is the safe direction. The alternative to refusing is reusing
+/// an occurrence number, which mints a content identity that collides with an
+/// already-durable one, so the differ stops rather than emit an identity that
+/// does not identify its occurrence.
+// numeric-bound: ceiling - caps one repository's resident and durable occurrence frontier
 const MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS: usize = 1_000_000;
 
 /// A source-independent SHA-256 identity for one normalized event occurrence.
@@ -52,10 +74,16 @@ const MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS: usize = 1_000_000;
 pub struct RepoWatchEventContentIdentityV1([u8; 32]);
 
 impl RepoWatchEventContentIdentityV1 {
+    /// Rebuilds an identity from its stored 32 bytes.
+    ///
+    /// This is the storage decoder's constructor: it asserts nothing about the
+    /// bytes beyond their length, because a stored identity was computed when
+    /// its occurrence was derived and cannot be recomputed from the row.
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
+    /// The identity's 32 bytes, for storage or comparison.
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -69,6 +97,11 @@ pub struct RepoWatchEventIdentityFrontierEntryV1 {
 }
 
 impl RepoWatchEventIdentityFrontierEntryV1 {
+    /// Pairs one stream identity with the last sequence assigned on it.
+    ///
+    /// Entries are the frontier's durable form. Building one states no
+    /// invariant on its own; the frontier checks uniqueness across entries when
+    /// it is assembled.
     pub const fn new(stream_identity: [u8; 32], sequence: NonZeroU64) -> Self {
         Self {
             stream_identity,
@@ -76,10 +109,15 @@ impl RepoWatchEventIdentityFrontierEntryV1 {
         }
     }
 
+    /// The domain-separated identity of the stream this entry counts.
     pub const fn stream_identity(&self) -> &[u8; 32] {
         &self.stream_identity
     }
 
+    /// The last occurrence number assigned on this stream.
+    ///
+    /// Positive by construction: the first occurrence takes one, so a stored
+    /// zero is a corrupt entry rather than an empty stream.
     pub const fn sequence(&self) -> NonZeroU64 {
         self.sequence
     }
@@ -92,6 +130,11 @@ pub struct RepoWatchEventIdentityFrontierV1 {
 }
 
 impl RepoWatchEventIdentityFrontierV1 {
+    /// Rebuilds a frontier from its stored entries.
+    ///
+    /// Rejects entries that repeat a stream, and entries beyond the stream
+    /// ceiling, so a decoded frontier holds the same invariants as one the
+    /// differ advanced.
     pub fn try_from_entries(
         entries: Vec<RepoWatchEventIdentityFrontierEntryV1>,
     ) -> Result<Self, RepoWatchEventIdentityFrontierError> {
@@ -110,6 +153,10 @@ impl RepoWatchEventIdentityFrontierV1 {
         Ok(Self { sequences })
     }
 
+    /// The frontier's entries in canonical stream-identity order.
+    ///
+    /// Ordering is canonical so an encoded cursor payload is byte-stable, which
+    /// the durable canonicalization check depends on.
     pub fn entries(
         &self,
     ) -> impl ExactSizeIterator<Item = RepoWatchEventIdentityFrontierEntryV1> + '_ {
@@ -143,8 +190,14 @@ impl RepoWatchEventIdentityFrontierV1 {
 /// Why an occurrence frontier could not represent another event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoWatchEventIdentityFrontierError {
+    /// Stored entries named one stream twice, so its sequence is ambiguous.
     DuplicateStream,
+    /// The repository holds the most recurring streams a frontier may carry.
+    ///
+    /// Reached only when assembling a stored frontier or introducing a new
+    /// stream; a stream already counted keeps advancing at the ceiling.
     StreamLimit,
+    /// One stream assigned every occurrence number a `u64` can hold.
     SequenceExhausted,
 }
 
@@ -168,6 +221,15 @@ pub struct RepoWatchEventOccurrenceV1 {
 }
 
 impl RepoWatchEventOccurrenceV1 {
+    /// Pairs an event with an identity that is not derived from it.
+    ///
+    /// Production occurrences are built only by the differ, which computes the
+    /// identity from the occurrence's own evidence; nothing downstream can
+    /// recompute an identity to check it, so a wrong value here would become a
+    /// durable row whose advertised identity does not identify its content.
+    /// Fixtures that need a well-formed occurrence without running the differ
+    /// use this under `test-support`, which no production build enables.
+    #[cfg(feature = "test-support")]
     pub const fn from_parts(
         event: RepoWatchEvent,
         content_identity: RepoWatchEventContentIdentityV1,
@@ -178,14 +240,23 @@ impl RepoWatchEventOccurrenceV1 {
         }
     }
 
+    /// The normalized event this occurrence states.
     pub const fn event(&self) -> &RepoWatchEvent {
         &self.event
     }
 
+    /// The occurrence's source-independent content identity.
+    ///
+    /// Two producers deriving this occurrence produce this same value, which is
+    /// what lets storage recognize a restatement of an already-recorded fact.
     pub const fn content_identity(&self) -> RepoWatchEventContentIdentityV1 {
         self.content_identity
     }
 
+    /// Discards the identity and keeps the event.
+    ///
+    /// For callers that have already recorded or compared the identity; the
+    /// pairing cannot be rebuilt afterwards outside the differ.
     pub fn into_event(self) -> RepoWatchEvent {
         self.event
     }
@@ -199,6 +270,7 @@ pub enum RepoWatchPullRequestLifecycle {
     Merged,
 }
 
+// numeric-bound: tunable - admits the provider check-generation text this accepts
 const MAX_CHECK_COMPLETION_GENERATION_BYTES: usize = 64;
 
 /// Opaque provider generation for one completed check execution.
@@ -1014,14 +1086,30 @@ enum RepoWatchEventStreamKeyV1<'value> {
 }
 
 impl RepoWatchEventStreamKeyV1<'_> {
+    /// Whether this stream can state more than one fact.
+    ///
+    /// A stream is non-recurring only when the differ suppresses re-emission on
+    /// members the stream key already names, so a second occurrence cannot
+    /// arise. Check suites key on suite and completion generation, reviews on
+    /// the provider review identity, and workflow runs on branch, run, and
+    /// attempt; none of those admit a second fact under one key.
+    ///
+    /// Check runs are recurring despite being provider-keyed. The differ
+    /// re-emits when a completed run's conclusion changes under an unchanged
+    /// identity and completion generation, so a run edited back to an earlier
+    /// conclusion would otherwise restate that conclusion's exact content
+    /// identity, and the commit would coalesce the restored conclusion away
+    /// instead of announcing it.
     const fn is_recurring(&self) -> bool {
-        !matches!(
-            self,
-            Self::CheckSuite { .. }
-                | Self::CheckRun { .. }
-                | Self::Review { .. }
-                | Self::Workflow { .. }
-        )
+        match self {
+            Self::PullRequestKind { .. }
+            | Self::Label { .. }
+            | Self::Thread { .. }
+            | Self::BaseAdvance { .. }
+            | Self::Reaction { .. }
+            | Self::CheckRun { .. } => true,
+            Self::CheckSuite { .. } | Self::Review { .. } | Self::Workflow { .. } => false,
+        }
     }
 }
 
@@ -1031,9 +1119,44 @@ enum RepoWatchDifferFailure {
     IdentityFrontier(RepoWatchEventIdentityFrontierError),
 }
 
+/// Which part of derivation failed.
+///
+/// Lets a caller classify a derivation failure without reading `Display` text.
+/// The two carry different operational meaning: event construction indicates a
+/// differ defect on one observation, while an identity-frontier failure is a
+/// property of the frontier the comparison ran against.
+///
+/// An identity-frontier failure is not by itself permanent, and a caller must
+/// not retire a repository on one. `StreamLimit` refuses only a comparison that
+/// introduces a stream the frontier has never counted; streams already counted
+/// keep advancing at the ceiling, so a later observation adding no new stream
+/// succeeds. `SequenceExhausted` is terminal for the single stream that
+/// exhausted it, not for the repository.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchDifferFailureKind {
+    /// The differ assembled an event the domain rejects.
+    EventConstruction,
+    /// The occurrence frontier could not assign the next sequence.
+    IdentityFrontier,
+}
+
 /// Internal coherence failure while deriving a domain event or its identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepoWatchDifferError(RepoWatchDifferFailure);
+
+impl RepoWatchDifferError {
+    /// Which part of derivation failed.
+    pub const fn kind(&self) -> RepoWatchDifferFailureKind {
+        match self.0 {
+            RepoWatchDifferFailure::EventConstruction(_) => {
+                RepoWatchDifferFailureKind::EventConstruction
+            }
+            RepoWatchDifferFailure::IdentityFrontier(_) => {
+                RepoWatchDifferFailureKind::IdentityFrontier
+            }
+        }
+    }
+}
 
 impl fmt::Display for RepoWatchDifferError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1831,12 +1954,51 @@ fn repo_watch_event_stream_identity_v1(key: RepoWatchEventStreamKeyV1<'_>) -> [u
     hash.finish()
 }
 
+/// Whether two events frame identical identifying content.
+///
+/// **This is not identity equality, and equal identities are its precondition.**
+/// The identity digest frames this content and then the stream identity and the
+/// occurrence sequence, so two occurrences of one recurring fact — a label
+/// added, removed, and added again under an unchanged context — frame equal
+/// identified content while carrying different identities. Deciding to coalesce
+/// on this alone would discard a genuine later occurrence.
+///
+/// Its use is to confirm that two occurrences *already known to share an
+/// identity* agree on the content that identity is derived from. Storage looks
+/// an occurrence up by content identity first and only then asks this, which is
+/// the order that makes the answer meaningful.
+///
+/// Both sides come from `hash_identified_content`, the same framing the identity
+/// is computed over, so this cannot disagree with the digest about which members
+/// identify a fact: the random `RepoWatchEventId` and a workflow's mutable
+/// display name are excluded from both.
+pub fn repo_watch_events_have_equal_identified_content(
+    left: &RepoWatchEvent,
+    right: &RepoWatchEvent,
+) -> bool {
+    repo_watch_event_identified_content_v1(left) == repo_watch_event_identified_content_v1(right)
+}
+
+fn repo_watch_event_identified_content_v1(event: &RepoWatchEvent) -> [u8; 32] {
+    let mut hash = RepoWatchIdentityHasher::new(REPO_WATCH_EVENT_IDENTIFIED_CONTENT_DOMAIN_V1);
+    hash_identified_content(&mut hash, event);
+    hash.finish()
+}
+
 fn repo_watch_event_content_identity_v1(
     event: &RepoWatchEvent,
     stream_identity: [u8; 32],
     sequence: NonZeroU64,
 ) -> RepoWatchEventContentIdentityV1 {
     let mut hash = RepoWatchIdentityHasher::new(REPO_WATCH_EVENT_CONTENT_IDENTITY_DOMAIN_V1);
+    hash_identified_content(&mut hash, event);
+    hash.frame(&stream_identity);
+    hash.u64(sequence.get());
+    RepoWatchEventContentIdentityV1::from_bytes(hash.finish())
+}
+
+/// Frames every member of an event that identifies the fact it states.
+fn hash_identified_content(hash: &mut RepoWatchIdentityHasher, event: &RepoWatchEvent) {
     hash.text(event.repository().as_str());
     hash.u64(1);
     match event.target() {
@@ -1864,10 +2026,7 @@ fn repo_watch_event_content_identity_v1(
         }
         RepoWatchEventTarget::Branch => hash.text("branch"),
     }
-    hash_event_kind(&mut hash, event.kind());
-    hash.frame(&stream_identity);
-    hash.u64(sequence.get());
-    RepoWatchEventContentIdentityV1::from_bytes(hash.finish())
+    hash_event_kind(hash, event.kind());
 }
 
 fn hash_event_kind(hash: &mut RepoWatchIdentityHasher, kind: &RepoWatchEventKindV1) {
@@ -1890,13 +2049,22 @@ fn hash_event_kind(hash: &mut RepoWatchIdentityHasher, kind: &RepoWatchEventKind
             hash.text(name.as_str());
             hash.text(check_conclusion_discriminator(*conclusion));
         }
+        // The workflow display name is deliberately excluded. It is
+        // rule-visible payload, not an identifying member: the differ
+        // suppresses a re-observed run attempt by branch, workflow identity,
+        // run identity, and attempt, every one of which the stream identity
+        // already names, and a provider can rename a workflow under all of
+        // them. Hashing the name would mint a new identity for a run that
+        // leaves the observation and returns after a rename, and commit
+        // coalescing could no longer recognize the occurrence already durable
+        // for it. Runs sharing a display name stay distinct through the
+        // workflow identity in the stream.
         RepoWatchEventKindV1::BranchWorkflowRunCompleted {
             branch,
-            workflow,
+            workflow: _,
             conclusion,
         } => {
             hash.text(branch.as_str());
-            hash.text(workflow.as_str());
             hash.text(check_conclusion_discriminator(*conclusion));
         }
         RepoWatchEventKindV1::ReviewSubmitted {
@@ -3789,6 +3957,53 @@ mod tests {
         Ok(())
     }
 
+    /// Equal identified content is not identity equality. A label added,
+    /// removed, and added again restates the first fact exactly, so the two
+    /// occurrences frame equal content, and only the advancing occurrence
+    /// sequence separates their identities. A caller that coalesced on content
+    /// alone would discard the second addition.
+    #[test]
+    fn equal_identified_content_is_not_identity_equality() -> Result<(), Box<dyn Error>> {
+        let ready = label(LABEL_READY)?;
+        let without = observation(
+            vec![pull_request(PullRequestFacts {
+                labels: Vec::new(),
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let with = observation(
+            vec![pull_request(PullRequestFacts {
+                labels: vec![ready.clone()],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let added = derive_occurrences(Some(&without), &with, &mut frontier, 1)?;
+        let removed = derive_occurrences(Some(&with), &without, &mut frontier, 10)?;
+        let added_again = derive_occurrences(Some(&without), &with, &mut frontier, 20)?;
+
+        assert_eq!(added.len(), 1);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(added_again.len(), 1);
+        assert!(repo_watch_events_have_equal_identified_content(
+            added[0].event(),
+            added_again[0].event()
+        ));
+        assert_ne!(
+            added[0].content_identity(),
+            added_again[0].content_identity(),
+            "a repeated label must advance its occurrence sequence"
+        );
+        Ok(())
+    }
+
     #[test]
     fn label_changes_emit_current_context_facts() -> Result<(), Box<dyn Error>> {
         let old_label = label(LABEL_OLD)?;
@@ -4037,6 +4252,123 @@ mod tests {
         let events = derive(Some(&previous), &current)?;
 
         assert!(events.is_empty());
+        Ok(())
+    }
+
+    /// A completed run that leaves the observation and returns after its
+    /// workflow is renamed is the same run: provider identities and attempt are
+    /// unchanged, and the differ already suppresses re-emission on exactly those
+    /// members. Its content identity has to survive the rename, or commit
+    /// coalescing cannot recognize the occurrence already durable for it and the
+    /// run is recorded and dispatched a second time.
+    #[test]
+    fn renamed_workflow_run_reappearance_restates_its_content_identity()
+    -> Result<(), Box<dyn Error>> {
+        let absent = observation(Vec::new(), Vec::new(), Vec::new(), Vec::new())?;
+        let named = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let renamed = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                RENAMED_WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let recorded = derive_occurrences(Some(&absent), &named, &mut frontier, 1)?;
+        // The branch is deleted and recreated, and the workflow is renamed
+        // while the run is out of the observation.
+        let returned = derive_occurrences(Some(&absent), &renamed, &mut frontier, 10)?;
+
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(returned.len(), 1);
+        assert_eq!(
+            recorded[0].content_identity(),
+            returned[0].content_identity(),
+            "a renamed workflow's reappearing run must restate its identity"
+        );
+        // The rename is still visible to rules through the event payload.
+        assert_ne!(recorded[0].event().kind(), returned[0].event().kind());
+        Ok(())
+    }
+
+    /// Storage coalesces on this equivalence, so it has to agree with the
+    /// identity: a renamed workflow's reappearing run restates its identity and
+    /// must therefore state the same fact, while a different conclusion is a
+    /// different fact under both.
+    #[test]
+    fn equal_identified_content_agrees_with_the_identity_under_one_sequence()
+    -> Result<(), Box<dyn Error>> {
+        let absent = observation(Vec::new(), Vec::new(), Vec::new(), Vec::new())?;
+        let named = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let renamed = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                RENAMED_WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let failed = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                WORKFLOW_NAME,
+                CheckConclusion::Failure,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let first = derive_occurrences(Some(&absent), &named, &mut frontier, 1)?;
+        let after_rename = derive_occurrences(Some(&absent), &renamed, &mut frontier, 10)?;
+        let after_failure = derive_occurrences(Some(&absent), &failed, &mut frontier, 20)?;
+
+        assert!(repo_watch_events_have_equal_identified_content(
+            first[0].event(),
+            after_rename[0].event()
+        ));
+        assert_eq!(
+            first[0].content_identity(),
+            after_rename[0].content_identity()
+        );
+        assert!(!repo_watch_events_have_equal_identified_content(
+            first[0].event(),
+            after_failure[0].event()
+        ));
+        assert_ne!(
+            first[0].content_identity(),
+            after_failure[0].content_identity()
+        );
         Ok(())
     }
 
@@ -4379,6 +4711,126 @@ mod tests {
                 223, 185, 48, 253, 187, 59, 190, 103, 33, 168, 251, 14, 111, 116, 146, 49, 83, 238,
                 232, 90, 92, 56, 217, 66, 135, 45, 24, 220, 226, 228, 105, 30,
             ]
+        );
+        Ok(())
+    }
+
+    fn stream_identity_for(index: usize) -> [u8; 32] {
+        let mut identity = [0_u8; 32];
+        identity[..8].copy_from_slice(&(index as u64).to_be_bytes());
+        identity
+    }
+
+    fn distinct_frontier_entries(count: usize) -> Vec<RepoWatchEventIdentityFrontierEntryV1> {
+        (0..count)
+            .map(|index| {
+                RepoWatchEventIdentityFrontierEntryV1::new(
+                    stream_identity_for(index),
+                    NonZeroU64::MIN,
+                )
+            })
+            .collect()
+    }
+
+    /// A completed check run edited back to an earlier conclusion restates that
+    /// conclusion's facts exactly. Its occurrence sequence has to advance, or the
+    /// restored conclusion carries the first event's content identity and commit
+    /// coalescing drops it, announcing no event and dispatching no work.
+    #[test]
+    fn check_run_edited_back_to_an_earlier_conclusion_keeps_a_distinct_identity()
+    -> Result<(), Box<dyn Error>> {
+        let absent = observation_without_check_run()?;
+        let failed = observation_with_completed_check_run(CheckConclusion::Failure)?;
+        let succeeded = observation_with_completed_check_run(CheckConclusion::Success)?;
+        let mut frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let first = derive_occurrences(Some(&absent), &failed, &mut frontier, 1)?;
+        let edited = derive_occurrences(Some(&failed), &succeeded, &mut frontier, 10)?;
+        let restored = derive_occurrences(Some(&succeeded), &failed, &mut frontier, 20)?;
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(edited.len(), 1);
+        assert_eq!(restored.len(), 1);
+        // The restored conclusion states the same facts as the first event, so
+        // only the advancing occurrence sequence keeps their identities apart.
+        assert_ne!(
+            first[0].content_identity(),
+            restored[0].content_identity(),
+            "a restored check-run conclusion must not reuse the first event's identity"
+        );
+        assert_ne!(first[0].content_identity(), edited[0].content_identity());
+        assert_ne!(edited[0].content_identity(), restored[0].content_identity());
+        Ok(())
+    }
+
+    /// The pull request under test with no completed check run observed.
+    fn observation_without_check_run() -> Result<RepoWatchObservation, Box<dyn Error>> {
+        Ok(observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_runs: Vec::new(),
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?)
+    }
+
+    /// The pull request under test with one completed check run at this
+    /// conclusion, keeping the run identity and completion generation fixed so
+    /// only the conclusion distinguishes the observations.
+    fn observation_with_completed_check_run(
+        conclusion: CheckConclusion,
+    ) -> Result<RepoWatchObservation, Box<dyn Error>> {
+        Ok(observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_runs: vec![RepoWatchCheckRunObservation::new(
+                    object_id(CHECK_RUN_ID),
+                    completion_generation(CHECK_COMPLETION_GENERATION)?,
+                    CheckRunName::try_new(String::from(CHECK_NAME))?,
+                    conclusion,
+                )],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?)
+    }
+
+    #[test]
+    fn identity_frontier_holds_exactly_the_stream_ceiling() -> Result<(), Box<dyn Error>> {
+        let mut frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(
+            distinct_frontier_entries(MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS),
+        )?;
+
+        assert_eq!(
+            frontier.entries().len(),
+            MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS
+        );
+        assert_eq!(frontier.advance(stream_identity_for(0))?.get(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn identity_frontier_rejects_one_stream_past_the_ceiling() {
+        let entries = distinct_frontier_entries(MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS + 1);
+
+        assert_eq!(
+            RepoWatchEventIdentityFrontierV1::try_from_entries(entries),
+            Err(RepoWatchEventIdentityFrontierError::StreamLimit)
+        );
+    }
+
+    #[test]
+    fn identity_frontier_at_the_ceiling_refuses_an_unknown_stream() -> Result<(), Box<dyn Error>> {
+        let mut frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(
+            distinct_frontier_entries(MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS),
+        )?;
+
+        assert_eq!(
+            frontier.advance(stream_identity_for(MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS)),
+            Err(RepoWatchEventIdentityFrontierError::StreamLimit)
         );
         Ok(())
     }

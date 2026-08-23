@@ -7,7 +7,7 @@ use std::{
     error::Error,
     fmt,
     num::{NonZeroU16, NonZeroU64},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use rust_decimal::Decimal;
@@ -20,12 +20,21 @@ use sqlx::{
 
 use crate::{
     commit_failure_is_ambiguous,
-    mapping::{positive_u64_from_numeric, repo_watch_event_kind_to_str},
+    mapping::{
+        positive_u64_from_numeric, repo_watch_event_kind_to_str,
+        repo_watch_webhook_disposition_to_str,
+    },
     repo_watch::RepoWatchCursorGeneration,
 };
 
 const CONTENT_IDENTITY_VERSION_V1: i16 = 1;
 const MAX_PENDING_PAGE_SIZE: u16 = 100;
+/// What one pending page may hold in exact payload bytes at once.
+///
+/// The page count alone admits one hundred near-limit bodies, and the startup
+/// drain reads this same durable page, so an accumulated backlog would
+/// otherwise be able to restart the daemon out of memory repeatedly.
+pub const MAX_PENDING_PAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_WEBHOOK_NAME_BYTES: usize = 64;
 const MAX_OUTCOME_CODE_BYTES: usize = 64;
 
@@ -173,6 +182,51 @@ pub enum RepoWatchWebhookAdmissionOutcome {
     Conflict,
 }
 
+/// One recorded terminal disposition, read back as stored.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordedRepoWatchWebhookDisposition {
+    disposition: RepoWatchWebhookDisposition,
+    outcome_code: Option<String>,
+}
+
+#[cfg(feature = "test-support")]
+impl RecordedRepoWatchWebhookDisposition {
+    pub const fn disposition(&self) -> RepoWatchWebhookDisposition {
+        self.disposition
+    }
+
+    pub fn outcome_code(&self) -> Option<&str> {
+        self.outcome_code.as_deref()
+    }
+}
+
+/// A projection fault a composed drain test installed, and can lift again.
+#[cfg(feature = "test-support")]
+pub struct RepoWatchWebhookProjectionFault {
+    pool: PgPool,
+}
+
+#[cfg(feature = "test-support")]
+impl RepoWatchWebhookProjectionFault {
+    /// Restores projection inserts after the failure assertion.
+    pub async fn restore(self) -> Result<(), RepoWatchWebhookStoreError> {
+        sqlx::query(
+            "DROP TRIGGER reject_repo_watch_webhook_projection
+                   ON repo_watch_webhook_projection",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("DROP FUNCTION reject_repo_watch_webhook_projection()")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DROP TABLE repo_watch_webhook_projection_rejected")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+}
+
 /// One bounded pending-delivery page size.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepoWatchWebhookPendingPageSize(NonZeroU16);
@@ -215,6 +269,35 @@ pub struct PendingRepoWatchWebhookDelivery {
     body: Box<[u8]>,
 }
 
+/// One pending delivery's identity, receipt, and age, carrying no payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PendingRepoWatchWebhookReceipt {
+    key: RepoWatchWebhookDeliveryKey,
+    receipt: RepoWatchWebhookReceipt,
+    pending_for: Duration,
+}
+
+impl PendingRepoWatchWebhookReceipt {
+    pub const fn key(&self) -> RepoWatchWebhookDeliveryKey {
+        self.key
+    }
+
+    pub const fn receipt(&self) -> RepoWatchWebhookReceipt {
+        self.receipt
+    }
+
+    /// How long the delivery has been pending, measured wholly on the database
+    /// clock.
+    ///
+    /// The receipt time is written by PostgreSQL, so subtracting it from a
+    /// daemon-local reading would turn clock skew between the two hosts into a
+    /// suppressed or premature stall report — the failure the reading exists to
+    /// surface. Both ends of this subtraction come from the same statement.
+    pub const fn pending_for(&self) -> Duration {
+        self.pending_for
+    }
+}
+
 impl PendingRepoWatchWebhookDelivery {
     pub const fn key(&self) -> RepoWatchWebhookDeliveryKey {
         self.key
@@ -253,22 +336,56 @@ pub enum RepoWatchWebhookTargetedQuery {
     CheckRollup(CommitSha),
 }
 
-/// One audit projection derived from an admitted delivery.
+/// Closed reasons a shadow projection may not match a poll-produced event.
+///
+/// The rollout gate is no unexplained divergence, so every webhook-only or
+/// poll-only parity row must name one of these.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchWebhookParityCauseV1 {
+    /// Polling observed one state where the delivery stream saw several.
+    CompressedTransition,
+    /// A hashed context field differed between the two sources.
+    ContextDrift,
+    /// An event family polling produces and webhooks are not designed to.
+    ///
+    /// Derived by the parity view for poll-side rows only; the projection
+    /// store's constraint rejects it, since no delivery carries this cause.
+    PollOnlyFamily,
+    /// The shadow baseline was re-seeded between the two occurrences.
+    CrossDrainShadowGap,
+}
+
+impl RepoWatchWebhookParityCauseV1 {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::CompressedTransition => "compressed_transition",
+            Self::ContextDrift => "context_drift",
+            Self::PollOnlyFamily => "poll_only_family",
+            Self::CrossDrainShadowGap => "cross_drain_shadow_gap",
+        }
+    }
+}
+
+/// One shadow projection derived from an admitted delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchWebhookProjection {
     Event {
         content_identity: RepoWatchEventContentIdentityV1,
         event_kind: RepoWatchEventKindNameV1,
         occurrence_key: Box<[u8]>,
+        cause: Option<RepoWatchWebhookParityCauseV1>,
     },
     TargetedQuery(RepoWatchWebhookTargetedQuery),
 }
 
 impl RepoWatchWebhookProjection {
+    /// One projected occurrence, with the reason it may not match if the
+    /// producing delivery already knows one.
     pub fn event(
         content_identity: RepoWatchEventContentIdentityV1,
         event_kind: RepoWatchEventKindNameV1,
         occurrence_key: Vec<u8>,
+        cause: Option<RepoWatchWebhookParityCauseV1>,
     ) -> Result<Self, RepoWatchWebhookRequestError> {
         if occurrence_key.is_empty() {
             return Err(RepoWatchWebhookRequestError::EmptyOccurrenceKey);
@@ -277,6 +394,7 @@ impl RepoWatchWebhookProjection {
             content_identity,
             event_kind,
             occurrence_key: occurrence_key.into_boxed_slice(),
+            cause,
         })
     }
 }
@@ -290,6 +408,19 @@ pub enum RepoWatchWebhookDisposition {
     Superseded,
     Ignored,
     Quarantined,
+}
+
+fn encode_disposition(disposition: RepoWatchWebhookDisposition) -> (&'static str, Option<i64>) {
+    match disposition {
+        RepoWatchWebhookDisposition::Projected => ("projected", None),
+        RepoWatchWebhookDisposition::Committed(generation) => {
+            ("committed", Some(generation.get() as i64))
+        }
+        RepoWatchWebhookDisposition::DuplicateState => ("duplicate_state", None),
+        RepoWatchWebhookDisposition::Superseded => ("superseded", None),
+        RepoWatchWebhookDisposition::Ignored => ("ignored", None),
+        RepoWatchWebhookDisposition::Quarantined => ("quarantined", None),
+    }
 }
 
 /// One atomic projection and terminal-disposition request.
@@ -349,6 +480,7 @@ pub enum RepoWatchWebhookStorageCorruption {
     InvalidReceiptSequence,
     InvalidRepository,
     InvalidBodyDigest,
+    InvalidDisposition,
 }
 
 impl fmt::Display for RepoWatchWebhookStorageCorruption {
@@ -358,6 +490,7 @@ impl fmt::Display for RepoWatchWebhookStorageCorruption {
             Self::InvalidReceiptSequence => "invalid stored webhook receipt sequence",
             Self::InvalidRepository => "invalid stored webhook repository",
             Self::InvalidBodyDigest => "invalid stored webhook body digest",
+            Self::InvalidDisposition => "invalid stored webhook terminal disposition",
         })
     }
 }
@@ -476,12 +609,20 @@ impl PostgresRepoWatchWebhookStore {
         }
     }
 
+    /// Loads pending deliveries in receipt order, bounded by both the page size
+    /// and the bytes the page may retain.
+    ///
+    /// Bodies are read one at a time against the page's own snapshot rather than
+    /// materialized together, because a page of near-limit payloads would
+    /// otherwise retain far more than admission itself is allowed to hold.
     pub async fn load_pending(
         &self,
         repository: &RepositorySlug,
         page_size: RepoWatchWebhookPendingPageSize,
+        after_receipt: Option<NonZeroU64>,
     ) -> Result<Vec<PendingRepoWatchWebhookDelivery>, RepoWatchWebhookStoreError> {
-        let rows = sqlx::query_as::<_, PendingRow>(
+        let mut transaction = self.pool.begin().await?;
+        let headers = sqlx::query_as::<_, PendingHeaderRow>(
             "SELECT delivery.hook_id,
                     delivery.delivery_id,
                     delivery.repository,
@@ -490,7 +631,7 @@ impl PostgresRepoWatchWebhookStore {
                     delivery.body_digest,
                     delivery.receipt_sequence,
                     delivery.received_at,
-                    payload.body
+                    octet_length(payload.body)::bigint AS body_bytes
                FROM repo_watch_webhook_delivery AS delivery
                JOIN repo_watch_webhook_payload AS payload
                  ON payload.hook_id = delivery.hook_id
@@ -500,14 +641,241 @@ impl PostgresRepoWatchWebhookStore {
                 AND disposition.delivery_id = delivery.delivery_id
               WHERE delivery.repository = $1
                 AND disposition.delivery_id IS NULL
+                AND ($3::bigint IS NULL OR delivery.receipt_sequence > $3)
               ORDER BY delivery.receipt_sequence
               LIMIT $2",
         )
         .bind(repository.as_str())
         .bind(i64::from(page_size.get()))
-        .fetch_all(&self.pool)
+        .bind(after_receipt.map(|receipt| receipt.get() as i64))
+        .fetch_all(&mut *transaction)
         .await?;
-        rows.into_iter().map(decode_pending).collect()
+        let mut deliveries = Vec::with_capacity(headers.len());
+        let mut retained_bytes = 0_usize;
+        for header in headers {
+            let hook_id = header.hook_id;
+            let delivery_id = header.delivery_id;
+            // The stored length gates the page before the bytes exist in
+            // memory, so two near-limit payloads never coexist just to prove
+            // the second one does not fit.
+            let declared = usize::try_from(header.body_bytes).unwrap_or(usize::MAX);
+            if !deliveries.is_empty()
+                && retained_bytes.saturating_add(declared) > MAX_PENDING_PAGE_BYTES
+            {
+                break;
+            }
+            let body = sqlx::query_scalar::<_, Vec<u8>>(
+                "SELECT body
+                   FROM repo_watch_webhook_payload
+                  WHERE hook_id = $1 AND delivery_id = $2",
+            )
+            .bind(hook_id)
+            .bind(delivery_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let Some(body) = body else {
+                continue;
+            };
+            // The oldest delivery is always kept, so one body at the admission
+            // ceiling still drains instead of wedging the queue head. The
+            // declared length was checked before the fetch; the fetched length
+            // is re-checked in case the payload changed between the two reads.
+            if !deliveries.is_empty()
+                && retained_bytes.saturating_add(body.len()) > MAX_PENDING_PAGE_BYTES
+            {
+                break;
+            }
+            retained_bytes = retained_bytes.saturating_add(body.len());
+            deliveries.push(decode_pending(header, body)?);
+        }
+        transaction.commit().await?;
+        Ok(deliveries)
+    }
+
+    /// The oldest undispositioned delivery's identity and receipt, without its
+    /// payload.
+    ///
+    /// The drain monitor runs on a fixed cadence for every webhook repository
+    /// and reports only identity and pending age, so it must not transfer the
+    /// admitted bodies a pending page carries. This query therefore never joins
+    /// `repo_watch_webhook_payload`, and it answers for a delivery whose body
+    /// has already been purged.
+    pub async fn load_oldest_pending_receipt(
+        &self,
+        repository: &RepositorySlug,
+    ) -> Result<Option<PendingRepoWatchWebhookReceipt>, RepoWatchWebhookStoreError> {
+        let row = sqlx::query_as::<_, PendingReceiptRow>(
+            "SELECT delivery.hook_id,
+                    delivery.delivery_id,
+                    delivery.receipt_sequence,
+                    delivery.received_at,
+                    transaction_timestamp() AS observed_at
+               FROM repo_watch_webhook_delivery AS delivery
+               LEFT JOIN repo_watch_webhook_disposition AS disposition
+                 ON disposition.hook_id = delivery.hook_id
+                AND disposition.delivery_id = delivery.delivery_id
+              WHERE delivery.repository = $1
+                AND disposition.delivery_id IS NULL
+              ORDER BY delivery.receipt_sequence
+              LIMIT 1",
+        )
+        .bind(repository.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(decode_pending_receipt).transpose()
+    }
+
+    /// The terminal disposition recorded for one delivery, if any.
+    ///
+    /// Composed daemon tests assert against the disposition a drain reached,
+    /// and this crate owns the table and its stored spellings, so they read it
+    /// as the closed enum rather than as text to compare against a literal.
+    #[cfg(feature = "test-support")]
+    pub async fn load_disposition(
+        &self,
+        key: RepoWatchWebhookDeliveryKey,
+    ) -> Result<Option<RecordedRepoWatchWebhookDisposition>, RepoWatchWebhookStoreError> {
+        let row = sqlx::query_as::<_, RecordedDispositionRow>(
+            "SELECT disposition, outcome_code
+               FROM repo_watch_webhook_disposition
+              WHERE hook_id = $1 AND delivery_id = $2",
+        )
+        .bind(Decimal::from(key.hook_id.get()))
+        .bind(key.delivery_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let disposition = crate::mapping::repo_watch_webhook_disposition_from_str(&row.disposition)
+            .ok_or(RepoWatchWebhookStorageCorruption::InvalidDisposition)?;
+        Ok(Some(RecordedRepoWatchWebhookDisposition {
+            disposition,
+            outcome_code: row.outcome_code,
+        }))
+    }
+
+    /// Fails every projection insert for `delivery`, for a composed drain test.
+    ///
+    /// The fault is a trigger rather than a dropped table because a drain page
+    /// has to keep reaching the store for its other deliveries: what is being
+    /// exercised is one delivery failing while its page peers succeed.
+    #[cfg(feature = "test-support")]
+    pub async fn inject_projection_rejection(
+        &self,
+        delivery: RepoWatchWebhookDeliveryKey,
+    ) -> Result<RepoWatchWebhookProjectionFault, RepoWatchWebhookStoreError> {
+        sqlx::query(
+            "CREATE TABLE repo_watch_webhook_projection_rejected (
+                delivery_id uuid PRIMARY KEY
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("INSERT INTO repo_watch_webhook_projection_rejected (delivery_id) VALUES ($1)")
+            .bind(delivery.delivery_id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "CREATE FUNCTION reject_repo_watch_webhook_projection()
+             RETURNS trigger
+             LANGUAGE plpgsql
+             AS $$
+             BEGIN
+                 IF EXISTS (
+                     SELECT 1
+                       FROM repo_watch_webhook_projection_rejected
+                      WHERE delivery_id = NEW.delivery_id
+                 ) THEN
+                     RAISE EXCEPTION 'fixture rejects this webhook projection';
+                 END IF;
+                 RETURN NEW;
+             END
+             $$",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE TRIGGER reject_repo_watch_webhook_projection
+             BEFORE INSERT ON repo_watch_webhook_projection
+             FOR EACH ROW
+             EXECUTE FUNCTION reject_repo_watch_webhook_projection()",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(RepoWatchWebhookProjectionFault {
+            pool: self.pool.clone(),
+        })
+    }
+
+    /// Holds every projection insert for `delivery` on `advisory_lock`.
+    ///
+    /// A test takes that lock first, so the drain reaches the insert and stops
+    /// there until the test releases it. Left in place for the container's
+    /// lifetime: the wedge ends when the lock does.
+    #[cfg(feature = "test-support")]
+    pub async fn inject_projection_wedge(
+        &self,
+        delivery: RepoWatchWebhookDeliveryKey,
+        advisory_lock: i64,
+    ) -> Result<(), RepoWatchWebhookStoreError> {
+        sqlx::query(
+            "CREATE TABLE repo_watch_webhook_projection_wedged (
+                delivery_id uuid PRIMARY KEY
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("INSERT INTO repo_watch_webhook_projection_wedged (delivery_id) VALUES ($1)")
+            .bind(delivery.delivery_id)
+            .execute(&self.pool)
+            .await?;
+        // The only interpolated value is the caller's own integer; no provider,
+        // deployment, or test input contributes SQL text.
+        let function = format!(
+            "CREATE FUNCTION wedge_repo_watch_webhook_projection()
+             RETURNS trigger
+             LANGUAGE plpgsql
+             AS $$
+             BEGIN
+                 IF EXISTS (
+                     SELECT 1
+                       FROM repo_watch_webhook_projection_wedged
+                      WHERE delivery_id = NEW.delivery_id
+                 ) THEN
+                     PERFORM pg_advisory_xact_lock({advisory_lock});
+                 END IF;
+                 RETURN NEW;
+             END
+             $$"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(function))
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "CREATE TRIGGER wedge_repo_watch_webhook_projection
+             BEFORE INSERT ON repo_watch_webhook_projection
+             FOR EACH ROW
+             EXECUTE FUNCTION wedge_repo_watch_webhook_projection()",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Whether some session is waiting on an advisory lock.
+    ///
+    /// A test that injected a wedge waits for this before acting on the drain
+    /// being held, so the assertion does not race the drain reaching it.
+    #[cfg(feature = "test-support")]
+    pub async fn projection_wedge_is_reached(&self) -> Result<bool, RepoWatchWebhookStoreError> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM pg_stat_activity WHERE wait_event = 'advisory'
+             )",
+        )
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     pub async fn record_terminal(
@@ -521,8 +889,55 @@ impl PostgresRepoWatchWebhookStore {
             transaction.rollback().await?;
             return Ok(outcome);
         }
+        let already_terminal = sqlx::query_scalar::<_, String>(
+            "SELECT disposition
+               FROM repo_watch_webhook_disposition
+              WHERE hook_id = $1 AND delivery_id = $2",
+        )
+        .bind(Decimal::from(key.hook_id.get()))
+        .bind(key.delivery_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .is_some();
+        if already_terminal {
+            transaction.rollback().await?;
+            return Ok(RepoWatchWebhookTerminalOutcome::AlreadyTerminal);
+        }
+        insert_projections(&mut transaction, key, request.projections()).await?;
+        sqlx::query(
+            "INSERT INTO repo_watch_webhook_disposition (
+                hook_id, delivery_id, disposition, outcome_code
+             ) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(Decimal::from(key.hook_id.get()))
+        .bind(key.delivery_id)
+        .bind(repo_watch_webhook_disposition_to_str(request.disposition()))
+        .bind(request.outcome_code())
+        .execute(&mut *transaction)
+        .await?;
         commit(transaction).await?;
         Ok(outcome)
+    }
+
+    /// Whether one delivery already carries a terminal disposition.
+    ///
+    /// A commit whose result was lost leaves the caller unable to tell whether
+    /// it landed. This read settles that without writing anything, so it cannot
+    /// itself be ambiguous.
+    pub async fn terminal_disposition_exists(
+        &self,
+        key: RepoWatchWebhookDeliveryKey,
+    ) -> Result<bool, RepoWatchWebhookStoreError> {
+        let recorded = sqlx::query_scalar::<_, i64>(
+            "SELECT 1
+               FROM repo_watch_webhook_disposition
+              WHERE hook_id = $1 AND delivery_id = $2",
+        )
+        .bind(Decimal::from(key.hook_id.get()))
+        .bind(key.delivery_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(recorded.is_some())
     }
 
     /// Deletes exact bodies whose deliveries have been terminal for at least seven days.
@@ -606,16 +1021,32 @@ struct ConflictRow {
 }
 
 #[derive(sqlx::FromRow)]
-struct PendingRow {
+struct PendingReceiptRow {
+    hook_id: Decimal,
+    delivery_id: Uuid,
+    receipt_sequence: i64,
+    received_at: OffsetDateTime,
+    observed_at: OffsetDateTime,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(sqlx::FromRow)]
+struct RecordedDispositionRow {
+    disposition: String,
+    outcome_code: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct PendingHeaderRow {
     hook_id: Decimal,
     delivery_id: Uuid,
     repository: String,
+    body_bytes: i64,
     event_name: String,
     action_name: Option<String>,
     body_digest: Vec<u8>,
     receipt_sequence: i64,
     received_at: OffsetDateTime,
-    body: Vec<u8>,
 }
 
 async fn load_conflict_row(
@@ -647,8 +1078,33 @@ fn decode_receipt(row: ReceiptRow) -> Result<RepoWatchWebhookReceipt, RepoWatchW
     })
 }
 
+fn decode_pending_receipt(
+    row: PendingReceiptRow,
+) -> Result<PendingRepoWatchWebhookReceipt, RepoWatchWebhookStoreError> {
+    let hook_id = positive_u64_from_numeric(row.hook_id)
+        .ok()
+        .and_then(NonZeroU64::new)
+        .ok_or(RepoWatchWebhookStorageCorruption::InvalidHookId)?;
+    let receipt = decode_receipt(ReceiptRow {
+        receipt_sequence: row.receipt_sequence,
+        received_at: row.received_at,
+    })?;
+    // A receipt time ahead of the reading is a clock the database moved
+    // backwards, not a delivery from the future; treat it as no age at all
+    // rather than reporting a stall that has not happened.
+    let pending_for = (row.observed_at - row.received_at)
+        .try_into()
+        .unwrap_or(Duration::ZERO);
+    Ok(PendingRepoWatchWebhookReceipt {
+        key: RepoWatchWebhookDeliveryKey::new(hook_id, row.delivery_id),
+        receipt,
+        pending_for,
+    })
+}
+
 fn decode_pending(
-    row: PendingRow,
+    row: PendingHeaderRow,
+    body: Vec<u8>,
 ) -> Result<PendingRepoWatchWebhookDelivery, RepoWatchWebhookStoreError> {
     let hook_id = positive_u64_from_numeric(row.hook_id)
         .ok()
@@ -672,7 +1128,7 @@ fn decode_pending(
         action_name: row.action_name,
         body_digest,
         receipt,
-        body: row.body.into_boxed_slice(),
+        body: body.into_boxed_slice(),
     })
 }
 
@@ -692,8 +1148,9 @@ async fn insert_projections(
             "INSERT INTO repo_watch_webhook_projection (
                 hook_id, delivery_id, projection_ordinal, projection_kind,
                 content_identity_version, content_identity, event_kind,
-                targeted_query_kind, targeted_query_key, occurrence_key
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                targeted_query_kind, targeted_query_key, occurrence_key,
+                cause_code
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(Decimal::from(key.hook_id.get()))
         .bind(key.delivery_id)
@@ -705,6 +1162,7 @@ async fn insert_projections(
         .bind(encoded.targeted_query_kind)
         .bind(encoded.targeted_query_key)
         .bind(encoded.occurrence_key)
+        .bind(encoded.cause_code)
         .execute(&mut **transaction)
         .await?;
     }
@@ -719,6 +1177,7 @@ struct EncodedProjection {
     targeted_query_kind: Option<&'static str>,
     targeted_query_key: Option<String>,
     occurrence_key: Option<Vec<u8>>,
+    cause_code: Option<&'static str>,
 }
 
 impl EncodedProjection {
@@ -728,6 +1187,7 @@ impl EncodedProjection {
                 content_identity,
                 event_kind,
                 occurrence_key,
+                cause,
             } => Self {
                 projection_kind: "event",
                 content_identity_version: Some(CONTENT_IDENTITY_VERSION_V1),
@@ -736,6 +1196,7 @@ impl EncodedProjection {
                 targeted_query_kind: None,
                 targeted_query_key: None,
                 occurrence_key: Some(occurrence_key.to_vec()),
+                cause_code: cause.map(RepoWatchWebhookParityCauseV1::code),
             },
             RepoWatchWebhookProjection::TargetedQuery(
                 RepoWatchWebhookTargetedQuery::PullRequestHydration(number),
@@ -747,6 +1208,7 @@ impl EncodedProjection {
                 targeted_query_kind: Some("pull_request_hydration"),
                 targeted_query_key: Some(number.get().to_string()),
                 occurrence_key: None,
+                cause_code: None,
             },
             RepoWatchWebhookProjection::TargetedQuery(
                 RepoWatchWebhookTargetedQuery::Mergeability(number),
@@ -758,6 +1220,7 @@ impl EncodedProjection {
                 targeted_query_kind: Some("mergeability"),
                 targeted_query_key: Some(number.get().to_string()),
                 occurrence_key: None,
+                cause_code: None,
             },
             RepoWatchWebhookProjection::TargetedQuery(
                 RepoWatchWebhookTargetedQuery::CheckRollup(head),
@@ -769,23 +1232,9 @@ impl EncodedProjection {
                 targeted_query_kind: Some("check_rollup"),
                 targeted_query_key: Some(head.as_str().to_owned()),
                 occurrence_key: None,
+                cause_code: None,
             },
         }
-    }
-}
-
-const fn encode_disposition(
-    disposition: RepoWatchWebhookDisposition,
-) -> (&'static str, Option<i64>) {
-    match disposition {
-        RepoWatchWebhookDisposition::Projected => ("projected", None),
-        RepoWatchWebhookDisposition::Committed(generation) => {
-            ("committed", Some(generation.get() as i64))
-        }
-        RepoWatchWebhookDisposition::DuplicateState => ("duplicate_state", None),
-        RepoWatchWebhookDisposition::Superseded => ("superseded", None),
-        RepoWatchWebhookDisposition::Ignored => ("ignored", None),
-        RepoWatchWebhookDisposition::Quarantined => ("quarantined", None),
     }
 }
 

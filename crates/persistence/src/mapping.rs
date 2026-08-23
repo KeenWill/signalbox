@@ -2,6 +2,7 @@
 
 use std::{error::Error, fmt};
 
+use crate::repo_watch_webhook::RepoWatchWebhookDisposition;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -346,6 +347,35 @@ pub fn delegation_wake_subject_from_str(value: &str) -> Option<DelegationWakeSto
     }
 }
 
+pub(crate) const fn repo_watch_webhook_disposition_to_str(
+    value: RepoWatchWebhookDisposition,
+) -> &'static str {
+    match value {
+        RepoWatchWebhookDisposition::Projected => "projected",
+        RepoWatchWebhookDisposition::Committed(_) => "committed",
+        RepoWatchWebhookDisposition::DuplicateState => "duplicate_state",
+        RepoWatchWebhookDisposition::Superseded => "superseded",
+        RepoWatchWebhookDisposition::Ignored => "ignored",
+        RepoWatchWebhookDisposition::Quarantined => "quarantined",
+    }
+}
+
+/// Paired with the encoder above so a renamed or added disposition cannot
+/// update the writer while leaving a reader interpreting the old spelling.
+#[cfg(feature = "test-support")]
+pub(crate) fn repo_watch_webhook_disposition_from_str(
+    value: &str,
+) -> Option<RepoWatchWebhookDisposition> {
+    match value {
+        "projected" => Some(RepoWatchWebhookDisposition::Projected),
+        "duplicate_state" => Some(RepoWatchWebhookDisposition::DuplicateState),
+        "superseded" => Some(RepoWatchWebhookDisposition::Superseded),
+        "ignored" => Some(RepoWatchWebhookDisposition::Ignored),
+        "quarantined" => Some(RepoWatchWebhookDisposition::Quarantined),
+        _ => None,
+    }
+}
+
 #[allow(
     dead_code,
     reason = "delegation relationship inserts are owned by the deferred placement writer"
@@ -667,6 +697,7 @@ pub(crate) enum ToolApprovalDecisionSourceStorageKind {
     PolicyAuto,
     SessionBlanket,
     Delegate,
+    UserOverride,
 }
 
 pub(crate) const fn tool_approval_decision_source_to_str(
@@ -677,6 +708,7 @@ pub(crate) const fn tool_approval_decision_source_to_str(
         ToolApprovalDecisionSourceStorageKind::PolicyAuto => "policy_auto",
         ToolApprovalDecisionSourceStorageKind::SessionBlanket => "session_blanket",
         ToolApprovalDecisionSourceStorageKind::Delegate => "delegate",
+        ToolApprovalDecisionSourceStorageKind::UserOverride => "user_override",
     }
 }
 
@@ -688,6 +720,7 @@ pub(crate) fn tool_approval_decision_source_from_str(
         "policy_auto" => Some(ToolApprovalDecisionSourceStorageKind::PolicyAuto),
         "session_blanket" => Some(ToolApprovalDecisionSourceStorageKind::SessionBlanket),
         "delegate" => Some(ToolApprovalDecisionSourceStorageKind::Delegate),
+        "user_override" => Some(ToolApprovalDecisionSourceStorageKind::UserOverride),
         _ => None,
     }
 }
@@ -707,6 +740,8 @@ pub(crate) enum DurableCommandKind {
     SubmitInput,
     /// Tool-request decision.
     DecideToolRequest,
+    /// Delegate-denial override.
+    OverrideDeniedToolRequest,
     /// Review-workflow command.
     ReviewWorkflow,
     /// Review-orchestration command.
@@ -736,6 +771,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::ReplaceSessionMetadata => "replace_session_metadata",
         DurableCommandKind::SubmitInput => "submit_input",
         DurableCommandKind::DecideToolRequest => "decide_tool_request",
+        DurableCommandKind::OverrideDeniedToolRequest => "override_denied_tool_request",
         DurableCommandKind::ReviewWorkflow => "review_workflow",
         DurableCommandKind::ReviewOrchestration => "review_orchestration",
         DurableCommandKind::CompactSession => "compact_session",
@@ -758,6 +794,7 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "replace_session_metadata" => Some(DurableCommandKind::ReplaceSessionMetadata),
         "submit_input" => Some(DurableCommandKind::SubmitInput),
         "decide_tool_request" => Some(DurableCommandKind::DecideToolRequest),
+        "override_denied_tool_request" => Some(DurableCommandKind::OverrideDeniedToolRequest),
         "review_workflow" => Some(DurableCommandKind::ReviewWorkflow),
         "review_orchestration" => Some(DurableCommandKind::ReviewOrchestration),
         "compact_session" => Some(DurableCommandKind::CompactSession),
@@ -1141,6 +1178,29 @@ pub(crate) const fn repo_watch_event_target_to_str(
     match value {
         RepoWatchEventTargetStorageKind::PullRequest => "pull_request",
         RepoWatchEventTargetStorageKind::Branch => "branch",
+    }
+}
+
+/// Which producer recorded one repository-watch event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchEventProducerStorageKind {
+    Poll,
+}
+
+pub(crate) const fn repo_watch_event_producer_to_str(
+    value: RepoWatchEventProducerStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchEventProducerStorageKind::Poll => "poll",
+    }
+}
+
+pub(crate) fn repo_watch_event_producer_from_str(
+    value: &str,
+) -> Option<RepoWatchEventProducerStorageKind> {
+    match value {
+        "poll" => Some(RepoWatchEventProducerStorageKind::Poll),
+        _ => None,
     }
 }
 

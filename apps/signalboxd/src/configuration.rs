@@ -13,6 +13,7 @@ use std::{
 };
 
 use rust_decimal::Decimal;
+use signalbox_application::scheduler_pass_admission_cap;
 use signalbox_domain::{
     AnthropicServiceTier, BranchName, CheckConclusion, CodexCliServiceTier, DirectModelSelection,
     FastMode, FastModeOverlay, FastModeSupport, FrozenAliasDefinition, LabelName, MergeableState,
@@ -21,10 +22,10 @@ use signalbox_domain::{
     ModelTargetDefinition, OpenAiServiceTier, ProviderModelIdentity, ReasoningLevel,
     RepoWatchAuthorLogin, RepoWatchEventKindNameV1, RepoWatchLabelMatcher,
     RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
-    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope,
-    RepoWatchTemplateContextDeclaration, RepositorySlug, ResolvedProviderTarget, ServiceTier,
-    SessionTemplateName, SettingOverlay, ToolApprovalPosture, ToolName, UnsupportedModelSetting,
-    ValidatedModelSettings,
+    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion,
+    RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration, RepositorySlug,
+    ResolvedProviderTarget, ServiceTier, SessionTemplateName, SettingOverlay, ToolApprovalPosture,
+    ToolName, UnsupportedModelSetting, ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
 use signalbox_model_runtime::{
@@ -46,6 +47,10 @@ use signalbox_model_runtime_codex_cli::{
 };
 use signalbox_persistence::{
     ModelCredentialFamilyCatalog, SessionCredentialPin, SessionModelCredential,
+    model_execution::{
+        CredentialPoolRuntimeAction, CredentialPoolRuntimeCatalog, CredentialPoolRuntimeExhaustion,
+        CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy,
+    },
     process_read::ProcessModelCallInputTokenSemantics,
 };
 use signalbox_process_protocol::{
@@ -61,9 +66,28 @@ use uuid::Uuid;
 
 use crate::blob_storage_configuration::BlobStorageConfiguration;
 use crate::credential_pools::{
-    CredentialDelivery, CredentialPool, CredentialProfile, parse_credential_pools,
-    parse_credential_profiles,
+    CredentialDelivery, CredentialPool, CredentialPoolAction, CredentialPoolExhaustion,
+    CredentialPoolTrigger, CredentialProfile, parse_credential_pools, parse_credential_profiles,
 };
+
+const fn runtime_pool_action(action: CredentialPoolAction) -> CredentialPoolRuntimeAction {
+    match action {
+        CredentialPoolAction::Stay => CredentialPoolRuntimeAction::Stay,
+        CredentialPoolAction::SwitchNextTurn => CredentialPoolRuntimeAction::SwitchNextTurn,
+        CredentialPoolAction::SwitchNow => CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolAction::AvoidNewSessions => CredentialPoolRuntimeAction::AvoidNewSessions,
+        CredentialPoolAction::Quarantine => CredentialPoolRuntimeAction::Quarantine,
+    }
+}
+
+const fn runtime_pool_exhaustion(
+    exhaustion: CredentialPoolExhaustion,
+) -> CredentialPoolRuntimeExhaustion {
+    match exhaustion {
+        CredentialPoolExhaustion::Park => CredentialPoolRuntimeExhaustion::Park,
+        CredentialPoolExhaustion::Fail => CredentialPoolRuntimeExhaustion::Fail,
+    }
+}
 
 /// Non-secret reference the process binds its Anthropic key file to when no
 /// configured route names that adapter, so a deployment serving Codex alone
@@ -84,8 +108,6 @@ pub const CLAUDE_CLI_CREDENTIAL_REFERENCE: &str = "claude-subscription-primary";
 const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
 const MAX_REPOSITORY_WATCH_RULES: usize = 128;
 const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
-const MAX_SCHEDULER_IN_FLIGHT_PASSES: usize = 1_024;
-
 /// One provider-availability cause a pool trigger can react to.
 ///
 /// Only these three carry proof that the request was not accepted, so only they
@@ -176,10 +198,11 @@ impl ModelAdapter {
     /// (`docs/spec/runtime-substrate.md`); a status-derived fallback carries
     /// none. Anthropic maps `rate_limit_error` and `overloaded_error` but has no
     /// quota token, and OpenAI maps `rate_limit_exceeded`/`rate_limit_error` and
-    /// `insufficient_quota` but reaches overload only by status. Both CLI
-    /// adapters classify from rendered failure prose, which the same contract
-    /// refuses as a derivation, so neither admits any cause until its CLI
-    /// exposes a stable machine-readable discriminator. Listing every pair
+    /// `insufficient_quota` but reaches overload only by status. Codex
+    /// classifies the narrower cause from rendered failure prose only after its
+    /// machine-readable JSONL lifecycle closes the request as `turn.failed`;
+    /// that envelope proves non-acceptance. Claude Code exposes no equivalent
+    /// proof. Listing every pair
     /// rather than matching on a group makes a later adapter state its own
     /// answer.
     pub(crate) const fn proves_non_acceptance(self, cause: AvailabilityCause) -> bool {
@@ -192,7 +215,8 @@ impl ModelAdapter {
                 true
             }
             (Self::OpenAi, AvailabilityCause::Overloaded) => false,
-            (Self::ClaudeCli | Self::CodexCli, _) => false,
+            (Self::CodexCli, _) => true,
+            (Self::ClaudeCli, _) => false,
         }
     }
 
@@ -635,6 +659,13 @@ pub struct HubModelConfiguration {
     model_settings_lower_layers: HashMap<DirectModelSelection, ModelSettingsLowerLayers>,
     billing_rates: HashMap<ResolvedProviderTarget, ModelBillingRates>,
     target_adapters: HashMap<ResolvedProviderTarget, ModelAdapter>,
+    /// Pool name per target that can serve a call, selectable or serving-only.
+    ///
+    /// Selection keys on the target that actually serves the call, so a fast
+    /// alternate target must be indexed here under its mapped family's pool;
+    /// deriving this from selectable routes alone left those targets with no
+    /// policy at all.
+    target_credential_pools: HashMap<ResolvedProviderTarget, Arc<str>>,
     provider_model_adapters: HashMap<String, ModelAdapter>,
     session_credential_pin: SessionCredentialPin,
     fallback_credential_profile: Arc<str>,
@@ -992,6 +1023,7 @@ impl HubModelConfiguration {
         let mut routes = HashMap::with_capacity(models.len());
         let mut target_billing_rates = HashMap::with_capacity(models.len());
         let mut target_adapters = HashMap::with_capacity(models.len());
+        let mut target_credential_pools = HashMap::with_capacity(models.len());
         let mut target_model_families = HashMap::with_capacity(models.len());
         let mut target_fast_targets = HashMap::new();
         let mut target_provider_models = HashMap::with_capacity(models.len());
@@ -1111,6 +1143,12 @@ impl HubModelConfiguration {
             {
                 return Err(HubModelConfigurationError::ConflictingTarget);
             }
+            if let Some(previous) =
+                target_credential_pools.insert(target, Arc::clone(&mapping.credential_pool))
+                && previous != mapping.credential_pool
+            {
+                return Err(HubModelConfigurationError::ConflictingTarget);
+            }
             if let Some(fast_target) = fast_target {
                 target_fast_targets.insert(target, fast_target);
             }
@@ -1199,6 +1237,7 @@ impl HubModelConfiguration {
                 target_provider_models.insert(target, provider_model.clone());
                 target_adapters.insert(target, mapping.adapter);
                 target_model_families.insert(target, Arc::clone(&model_family));
+                target_credential_pools.insert(target, Arc::clone(&mapping.credential_pool));
                 if let Some(previous) =
                     provider_model_adapters.insert(provider_model.clone(), mapping.adapter)
                     && previous != mapping.adapter
@@ -1289,6 +1328,7 @@ impl HubModelConfiguration {
             model_settings_lower_layers,
             billing_rates,
             target_adapters,
+            target_credential_pools,
             provider_model_adapters,
             session_credential_pin,
             fallback_credential_profile,
@@ -1424,6 +1464,36 @@ impl HubModelConfiguration {
     /// Maps each exact target to the family key stored in session snapshots.
     pub fn credential_family_catalog(&self) -> ModelCredentialFamilyCatalog {
         self.credential_families.clone()
+    }
+
+    /// Projects admitted pool policy into the persistence-owned runtime form.
+    pub fn credential_pool_runtime_catalog(&self) -> CredentialPoolRuntimeCatalog {
+        self.target_credential_pools
+            .iter()
+            .filter_map(|(target, pool_name)| {
+                let pool = self.credential_pools.get(pool_name)?;
+                let mut members = pool.members().to_vec();
+                members.sort_by_key(|member| member.priority());
+                let members = members
+                    .into_iter()
+                    .map(|member| {
+                        CredentialPoolRuntimeMember::new(member.profile(), member.priority())
+                    })
+                    .collect::<Vec<_>>();
+                Some((
+                    *target,
+                    CredentialPoolRuntimePolicy::new(
+                        pool.name(),
+                        members,
+                        runtime_pool_exhaustion(pool.on_pool_exhausted()),
+                        runtime_pool_action(pool.action(CredentialPoolTrigger::QuotaExhausted)),
+                        runtime_pool_action(pool.action(CredentialPoolTrigger::RateLimited)),
+                        runtime_pool_action(pool.action(CredentialPoolTrigger::Overloaded)),
+                        runtime_pool_action(pool.action(CredentialPoolTrigger::CredentialRejected)),
+                    ),
+                ))
+            })
+            .collect()
     }
 
     /// Derives a labeled USD figure from exactly the token axes present.
@@ -1910,11 +1980,21 @@ fn parse_repository_watch_webhook_configuration(
     }))
 }
 
+/// Whether the configured path names exactly one literal request path.
+///
+/// Configuration promises one exact path, but `Router::route` reads its argument
+/// as a route pattern: Axum 0.8 treats `{name}` and `{*name}` as captures that
+/// match many paths, and it panics on the legacy `:name` and `*name` forms. Both
+/// are rejected here rather than at listener start.
 fn valid_repository_watch_webhook_path(path: &str) -> bool {
     path.starts_with('/')
         && path.bytes().all(|byte| byte.is_ascii_graphic())
         && !path.contains(['?', '#'])
+        && !path.contains(REPOSITORY_WATCH_WEBHOOK_ROUTE_METACHARACTERS)
 }
+
+/// Characters Axum reads as routing syntax rather than as literal path bytes.
+const REPOSITORY_WATCH_WEBHOOK_ROUTE_METACHARACTERS: [char; 4] = ['*', ':', '{', '}'];
 
 fn parse_repository_watch_rules(
     table: &Table,
@@ -1943,9 +2023,6 @@ fn parse_repository_watch_rules(
             ],
         )
         .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
-        if table.get("version").and_then(Item::as_integer) != Some(1) {
-            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
-        }
         let id = RepoWatchRuleId::try_new(
             required_string(table, "id")
                 .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?
@@ -1955,6 +2032,18 @@ fn parse_repository_watch_rules(
         if !identities.insert(id.clone()) {
             return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
         }
+        let version = table
+            .get("version")
+            .and_then(Item::as_integer)
+            .and_then(|value| u64::try_from(value).ok())
+            .and_then(NonZeroU64::new)
+            .and_then(RepoWatchRuleVersion::new)
+            .ok_or_else(|| HubModelConfigurationError::InvalidRepositoryWatchRule {
+                rule: id.as_str().to_owned(),
+                reason: String::from(
+                    "field `version` must be a positive integer within signed 64-bit range",
+                ),
+            })?;
         let matcher = table
             .get("matcher")
             .and_then(Item::as_table)
@@ -1979,13 +2068,20 @@ fn parse_repository_watch_rules(
             })
             .transpose()?
             .unwrap_or(Duration::ZERO);
-        let rule = RepoWatchRule::try_new(id.clone(), matcher, actions, singleton_per, cooldown)
-            .map_err(
-                |error| HubModelConfigurationError::InvalidRepositoryWatchRule {
-                    rule: id.as_str().to_owned(),
-                    reason: error.to_string(),
-                },
-            )?;
+        let rule = RepoWatchRule::try_new(
+            id.clone(),
+            version,
+            matcher,
+            actions,
+            singleton_per,
+            cooldown,
+        )
+        .map_err(
+            |error| HubModelConfigurationError::InvalidRepositoryWatchRule {
+                rule: id.as_str().to_owned(),
+                reason: error.to_string(),
+            },
+        )?;
         rules.push(rule);
     }
     Ok(rules)
@@ -2620,7 +2716,7 @@ fn parse_scheduler_max_in_flight_passes(
         .get("max_in_flight_passes")
         .and_then(Item::as_integer)
         .and_then(|value| usize::try_from(value).ok())
-        .filter(|value| *value <= MAX_SCHEDULER_IN_FLIGHT_PASSES)
+        .filter(|value| *value <= scheduler_pass_admission_cap())
         .ok_or(HubModelConfigurationError::InvalidSchedulerConfiguration)?;
     Ok(Some(limit))
 }
@@ -3710,8 +3806,8 @@ mod tests {
         AnthropicServiceTier, DirectModelSelection, FastMode, FastModeOverlay, MergeableState,
         ModelAlias, ModelSelectionRequest, ModelSettingSource, ModelSettingsOverlay,
         ReasoningLevel, RepoWatchDispatchContextShape, RepoWatchEventKindNameV1,
-        RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration, ServiceTier,
-        SessionTemplateName, SettingOverlay, ToolApprovalPosture,
+        RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
+        ServiceTier, SessionTemplateName, SettingOverlay, ToolApprovalPosture,
     };
     use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
     use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
@@ -3730,9 +3826,9 @@ mod tests {
         ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES,
         DEFAULT_REPOSITORY_WATCH_WEBHOOK_BIND_ADDRESS, FileCredentialAccess, HubModelConfiguration,
         HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES,
-        MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, ModelCallInputUsage,
-        RepositoryWatchWebhookMode, UnknownSessionModel, absolute_search_entries, credential_bytes,
-        resolved_mcp_bridge_reference, validate_alias_count, validate_model_count,
+        MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, ModelCallInputUsage, UnknownSessionModel,
+        absolute_search_entries, credential_bytes, resolved_mcp_bridge_reference,
+        scheduler_pass_admission_cap, validate_alias_count, validate_model_count,
     };
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
@@ -3784,6 +3880,9 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
     const WATCH_WEBHOOK_PATH: &str = "/";
     const RELATIVE_WATCH_WEBHOOK_PATH: &str = "github/webhooks";
     const QUERY_WATCH_WEBHOOK_PATH: &str = "/github/webhooks?mode=shadow";
+    const CAPTURE_WATCH_WEBHOOK_PATH: &str = "/github/{delivery}";
+    const LEGACY_CAPTURE_WATCH_WEBHOOK_PATH: &str = "/github/:delivery";
+    const WILDCARD_WATCH_WEBHOOK_PATH: &str = "/github/*rest";
     const WATCH_INTERVAL_SECONDS: u64 = 90;
     const SECOND_WATCH_INTERVAL_SECONDS: u64 = 120;
     const SIGNAL_REVIEWER: &str = "signal-reviewer";
@@ -4643,6 +4742,39 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         );
     }
 
+    /// Parses the webhook fixture with `path` replaced, returning any failure.
+    fn repository_watch_webhook_path_failure(path: &str) -> Option<HubModelConfigurationError> {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("path = \"{WATCH_WEBHOOK_PATH}\""),
+            &format!("path = \"{path}\""),
+        );
+        HubModelConfiguration::parse(&configured).err()
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_a_braced_capture_local_path() {
+        assert_eq!(
+            repository_watch_webhook_path_failure(CAPTURE_WATCH_WEBHOOK_PATH),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_a_legacy_capture_local_path() {
+        assert_eq!(
+            repository_watch_webhook_path_failure(LEGACY_CAPTURE_WATCH_WEBHOOK_PATH),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_a_wildcard_local_path() {
+        assert_eq!(
+            repository_watch_webhook_path_failure(WILDCARD_WATCH_WEBHOOK_PATH),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
     #[test]
     fn repository_watch_webhook_rejects_an_invalid_bind_address() {
         let configured = configuration_with_repository_watch_webhook().replace(
@@ -4793,6 +4925,29 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             [MergeableState::Conflicting]
         );
         assert_eq!(rule.actions()[0].template().as_str(), WATCH_TEMPLATE);
+    }
+
+    #[test]
+    fn repository_watch_accepts_a_positive_rule_revision() {
+        let revision =
+            RepoWatchRuleVersion::new(NonZeroU64::new(2).expect("configured revision is positive"))
+                .expect("configured revision is within the durable range");
+        let configured = configuration_with_repository_watch_rule().replace(
+            &format!(
+                "id = \"{WATCH_RULE_ID}\"\nversion = {}",
+                RepoWatchRuleVersion::V1.get()
+            ),
+            &format!("id = \"{WATCH_RULE_ID}\"\nversion = {}", revision.get()),
+        );
+        let configured = HubModelConfiguration::parse(&configured)
+            .expect("repository-watch revision fixture is valid");
+        let rule = &configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .rules()[0];
+
+        assert_eq!(rule.id().as_str(), WATCH_RULE_ID);
+        assert_eq!(rule.version(), revision);
     }
 
     #[test]
@@ -5224,52 +5379,67 @@ selection_id = "10000000-0000-4000-8000-000000000001"
     }
 
     #[test]
-    fn scheduler_pass_limit_is_optional_and_accepts_a_bounded_override() {
+    fn scheduler_pass_limit_is_optional() {
+        let configuration = HubModelConfiguration::parse(CONFIGURATION)
+            .expect("the fixture configuration is valid");
+
+        assert_eq!(configuration.scheduler_max_in_flight_passes(), None);
+    }
+
+    #[test]
+    fn scheduler_pass_limit_accepts_a_bounded_override() {
+        let configured_limit = scheduler_pass_admission_cap();
         let configured = CONFIGURATION.replace(
             "[compaction]",
-            "[scheduler]\nmax_in_flight_passes = 4\n\n[compaction]",
+            &format!("[scheduler]\nmax_in_flight_passes = {configured_limit}\n\n[compaction]"),
         );
-        let default = HubModelConfiguration::parse(CONFIGURATION)
-            .expect("the fixture configuration is valid");
-        let overridden = HubModelConfiguration::parse(&configured)
+        let configuration = HubModelConfiguration::parse(&configured)
             .expect("the bounded scheduler override is valid");
 
-        assert_eq!(default.scheduler_max_in_flight_passes(), None);
-        assert_eq!(overridden.scheduler_max_in_flight_passes(), Some(4));
+        assert_eq!(
+            configuration.scheduler_max_in_flight_passes(),
+            Some(configured_limit)
+        );
     }
 
     #[test]
     fn scheduler_pass_limit_accepts_zero_as_an_explicit_pause() {
+        let configured_limit = 0;
         let paused = CONFIGURATION.replace(
             "[compaction]",
-            "[scheduler]\nmax_in_flight_passes = 0\n\n[compaction]",
+            &format!("[scheduler]\nmax_in_flight_passes = {configured_limit}\n\n[compaction]"),
         );
 
         assert_eq!(
             HubModelConfiguration::parse(&paused)
                 .expect("the paused scheduler setting is valid")
                 .scheduler_max_in_flight_passes(),
-            Some(0)
+            Some(configured_limit)
         );
     }
 
     #[test]
-    fn scheduler_pass_limit_rejects_values_outside_its_closed_table() {
-        let excessive = CONFIGURATION.replace(
+    fn scheduler_pass_limit_rejects_an_excessive_value() {
+        let configured = CONFIGURATION.replace(
             "[compaction]",
-            "[scheduler]\nmax_in_flight_passes = 1025\n\n[compaction]",
+            "[scheduler]\nmax_in_flight_passes = 17\n\n[compaction]",
         );
-        let unknown = CONFIGURATION.replace(
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
+        );
+    }
+
+    #[test]
+    fn scheduler_pass_limit_rejects_an_unknown_field() {
+        let configured = CONFIGURATION.replace(
             "[compaction]",
             "[scheduler]\nmax_in_flight_passes = 4\nextra = 1\n\n[compaction]",
         );
 
         assert_eq!(
-            HubModelConfiguration::parse(&excessive).err(),
-            Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
-        );
-        assert_eq!(
-            HubModelConfiguration::parse(&unknown).err(),
+            HubModelConfiguration::parse(&configured).err(),
             Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
         );
     }
@@ -6035,7 +6205,7 @@ members = [
         let configured = HubModelConfiguration::parse(&configuration_with_anthropic_pool(
             r#"[[credential_pools]]
 name = "anthropic-main"
-tie_break = "round_robin"
+tie_break = "first_listed"
 on_pool_exhausted = "fail"
 members = [{ profile = "anthropic-primary", priority = 1 }]
 on_quota_exhausted = "switch_next_turn"
@@ -6049,7 +6219,7 @@ on_credential_rejected = "quarantine""#,
             .credential_pool("anthropic-main")
             .expect("the fixture declares the pool");
 
-        assert_eq!(pool.tie_break(), CredentialPoolTieBreak::RoundRobin);
+        assert_eq!(pool.tie_break(), CredentialPoolTieBreak::FirstListed);
         assert_eq!(pool.on_pool_exhausted(), CredentialPoolExhaustion::Fail);
         // Anthropic's mapping has no quota token, so only rate limiting can
         // carry the proof `switch_now` requires.
@@ -6312,6 +6482,22 @@ members = [{ profile = "anthropic-primary", priority = 1 }]"#,
     }
 
     #[test]
+    fn configuration_rejects_round_robin_until_its_durable_cursor_exists() {
+        let round_robin = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "round_robin"
+on_pool_exhausted = "fail"
+members = [{ profile = "anthropic-primary", priority = 1 }]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&round_robin).err(),
+            Some(HubModelConfigurationError::InvalidCredentialPoolPolicy)
+        );
+    }
+
+    #[test]
     fn configuration_rejects_an_unknown_exhaustion_behavior() {
         let unknown_exhaustion = configuration_with_anthropic_pool(
             r#"[[credential_pools]]
@@ -6443,18 +6629,14 @@ members = [{ profile = "anthropic-primary", priority = 1, headroom_reserve_perce
     }
 
     #[test]
-    fn configuration_rejects_switch_now_no_cli_adapter_can_prove() {
+    fn configuration_admits_switch_now_for_a_codex_terminal_failure() {
         let substituting = CONFIGURATION.replace(
             CODEX_POOL,
             &format!("{CODEX_POOL}\non_rate_limited = \"switch_now\""),
         );
 
-        assert_eq!(
-            HubModelConfiguration::parse(&substituting).err(),
-            Some(HubModelConfigurationError::UnprovableSubstitutionPolicy {
-                credential_pool: Arc::from("codex-main"),
-            })
-        );
+        HubModelConfiguration::parse(&substituting)
+            .expect("Codex turn.failed proves that a successor cannot duplicate acceptance");
     }
 
     #[test]

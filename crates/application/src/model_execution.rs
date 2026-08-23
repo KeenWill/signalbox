@@ -12,26 +12,25 @@ use std::{
     future::Future,
     num::NonZeroU64,
     sync::{Arc, Weak},
+    time::Duration,
 };
 
-// With the runtime's ten-minute exchange deadline, 256 rounds can already hold
-// one progressing turn in provider work for 42 hours 40 minutes and repeat a
-// full-context spend 256 times. Further work is a latency and spend runaway.
-// numeric-bound: ceiling - protects against multi-day latency and repeated provider spend
-const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 256;
+// numeric-bound: ceiling - protects against an unbounded paid provider loop
+const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 32;
 
 use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
-    AuthorizedModelCall, CompletedModelCallIdentities, ContextCompactionRange, ContextFrontierId,
-    ContextFrontierProjection, ContextFrontierProjectionFailure,
-    CorrelatedModelCallTerminalObservation, DangerousToolAutoApproval, DelegationContent,
+    AuthorizedModelCall, AvailabilitySuccessorModelCallTurn, CompletedModelCallIdentities,
+    ContextCompactionRange, ContextFrontierId, ContextFrontierProjection,
+    ContextFrontierProjectionFailure, CorrelatedModelCallTerminalObservation,
+    CredentialPoolExhaustedModelCallTurn, DangerousToolAutoApproval, DelegationContent,
     DelegationMessageId, DelegationOutcome, DelegationWaitMode, DirectModelSelection,
     FailedModelCallTurn, FailedModelCallTurnIdentities, ImportedSourceAttestation, ImportedSpeaker,
     ImportedText, ImportedTranscriptContent, ImportedTranscriptEntryId, InitialToolApproval,
     ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
     ModelCallTerminalOutcome, PhysicalCancellationModelCallTurnIdentities,
-    PreparedModelCallRequest, RefusedModelCallTurnIdentities, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef,
+    PreparedModelCallRequest, RecordedUserOverride, RefusedModelCallTurnIdentities,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef,
     SessionConfigurationDefaultsVersion, SessionId, SessionSystemPrompt,
     StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
     StoppedToolRoundModelCallIdentities, ToolApprovalDecision, ToolAttemptEnd, ToolDenialReason,
@@ -645,6 +644,10 @@ impl ClassifyOperatorFailure for ModelFrontierRenderingError {
 pub enum PrepareModelCallOutcome {
     /// The scheduling hint no longer identifies runnable work.
     NoWork,
+    /// A durable availability-successor deadline has not elapsed.
+    RetryBackoff(Duration),
+    /// No credential-pool member was available for this call-free attempt.
+    PoolExhausted(Box<CredentialPoolExhaustedModelCallTurn>),
     /// A new exact `Prepared` call committed; this invocation stops here.
     Checkpointed(ModelCallId),
     /// A previously committed `Prepared` request may prepare its capability.
@@ -655,6 +658,9 @@ pub enum PrepareModelCallOutcome {
         credential_reference: ModelCallCredentialReference,
         /// Frozen dangerous blanket posture for initial request decisions.
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
+        /// Recorded, not-yet-consumed user overrides of delegate denials, frozen
+        /// for this call in the same transaction as the blanket posture.
+        recorded_user_overrides: Box<[RecordedUserOverride]>,
         /// Exact optional session system prompt on the turn's frozen epoch.
         system_prompt: Option<SessionSystemPrompt>,
         /// Exact durable authority for every tool-related frontier entry.
@@ -805,6 +811,17 @@ pub enum ModelCallTerminalIdentityCandidates {
         /// Applied-interrupt terminal closure identities.
         stopped: StoppedToolRoundModelCallIdentities,
     },
+    /// Both legal closures for one classified availability failure.
+    ///
+    /// Persistence validates the call-pinned pool policy under its lock. A
+    /// configured `switch_now` consumes the fresh successor attempt; every
+    /// other action consumes the ordinary failed-turn identities.
+    Availability {
+        /// Ordinary terminal failure when policy does not authorize a successor.
+        failed: FailedModelCallTurnIdentities,
+        /// Fresh physical attempt for an authorized availability successor.
+        successor_attempt: TurnAttemptId,
+    },
 }
 
 /// Fresh transaction committing a provider-neutral terminal observation.
@@ -822,7 +839,7 @@ pub trait CommitModelCallObservationTransaction {
         observation: CorrelatedModelCallTerminalObservation,
         identities: ModelCallTerminalIdentityCandidates,
         next_reclassified_turn: NextTurn,
-    ) -> impl Future<Output = Result<Option<ModelCallTerminalOutcome>, Self::Error>> + Send
+    ) -> impl Future<Output = Result<Option<ModelCallObservationCommitOutcome>, Self::Error>> + Send
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
 
@@ -841,6 +858,15 @@ pub enum RetainedModelCallObservationStatus {
     Pending,
     /// The exact observation is already represented durably.
     AlreadyCommitted,
+    /// The observation committed and its availability successor is durable.
+    ///
+    /// Distinct from `AlreadyCommitted` because the turn is still active on
+    /// the successor attempt: the caller must keep driving it after the
+    /// enclosed remaining delay rather than treating the turn as finished.
+    AvailabilitySuccessorCommitted {
+        /// Remaining wait before the successor attempt may prepare.
+        retry_backoff: Duration,
+    },
     /// A newer logical terminal proof made the retained provider result inert.
     DiscardedByLogicalTerminal,
 }
@@ -895,7 +921,7 @@ enum RetainedModelCallExecutionStateKind {
         /// Session owning the exact issued call.
         session: SessionId,
         /// Unchanged correlated observation returned by provider work.
-        observation: CorrelatedModelCallTerminalObservation,
+        observation: Box<CorrelatedModelCallTerminalObservation>,
         /// Frozen policy outcomes for each tool proposal, in proposal order.
         tool_approvals: Box<[InitialToolApproval]>,
     },
@@ -1060,6 +1086,10 @@ impl AttemptDispatchGate for InProcessAttemptDispatchGate {
 pub enum ModelCallExecutionOutcome {
     /// The scheduling hint no longer identifies runnable work.
     NoWork,
+    /// Durable retry backoff remains before the successor may be prepared.
+    RetryBackoff(Duration),
+    /// The pool admitted no member; this is not a member provider failure.
+    PoolExhausted(Box<CredentialPoolExhaustedOutcome>),
     /// A new prepared checkpoint committed and requires a later invocation.
     Checkpointed(ModelCallId),
     /// Target resolution failed before call creation.
@@ -1074,6 +1104,8 @@ pub enum ModelCallExecutionOutcome {
     ToolRoundLimitAlreadyCommitted(ModelCallId),
     /// The provider observation committed its authoritative result.
     ObservationCommitted(Box<ModelCallTerminalOutcome>),
+    /// An availability failure committed and left the turn on a fresh attempt.
+    AvailabilitySuccessor(Box<AvailabilitySuccessorOutcome>),
     /// A retained observation's earlier commit was proven to have landed.
     ObservationAlreadyCommitted(ModelCallId),
 }
@@ -1499,9 +1531,22 @@ where
                             retained.call(),
                         ));
                     }
+                    Ok(RetainedModelCallObservationStatus::AvailabilitySuccessorCommitted {
+                        retry_backoff,
+                    }) => {
+                        // The commit landed with its successor, so the turn is
+                        // active on a new attempt rather than terminal. Waiting
+                        // out the remaining delay returns the caller to ordinary
+                        // preparation, which owns the successor from here.
+                        return Ok(ModelCallExecutionOutcome::RetryBackoff(retry_backoff));
+                    }
                     Ok(RetainedModelCallObservationStatus::Pending) => {
                         return self
-                            .commit_terminal_observation(retained_session, retained, tool_approvals)
+                            .commit_terminal_observation(
+                                retained_session,
+                                *retained,
+                                tool_approvals,
+                            )
                             .await;
                     }
                     Ok(RetainedModelCallObservationStatus::DiscardedByLogicalTerminal) => {
@@ -1517,7 +1562,7 @@ where
                         });
                         return Err(ModelCallExecutionError::ObservationCommit {
                             error,
-                            retained_observation: retained,
+                            retained_observation: *retained,
                         });
                     }
                 },
@@ -1539,6 +1584,19 @@ where
                 Ok(PrepareModelCallOutcome::NoWork) => {
                     return Ok(ModelCallExecutionOutcome::NoWork);
                 }
+                Ok(PrepareModelCallOutcome::RetryBackoff(delay)) => {
+                    return Ok(ModelCallExecutionOutcome::RetryBackoff(delay));
+                }
+                Ok(PrepareModelCallOutcome::PoolExhausted(exhausted)) => {
+                    report_turn_terminalization(
+                        exhausted.failed().session(),
+                        exhausted.failed().turn(),
+                        TurnTerminalOutcome::Failed,
+                    );
+                    return Ok(ModelCallExecutionOutcome::PoolExhausted(Box::new(
+                        CredentialPoolExhaustedOutcome::BeforeCall(exhausted),
+                    )));
+                }
                 Ok(PrepareModelCallOutcome::Checkpointed(call)) => {
                     return Ok(ModelCallExecutionOutcome::Checkpointed(call));
                 }
@@ -1546,6 +1604,7 @@ where
                     request,
                     credential_reference,
                     dangerous_tool_auto_approval,
+                    recorded_user_overrides,
                     system_prompt,
                     tool_entries,
                 }) => {
@@ -1553,6 +1612,7 @@ where
                         request,
                         credential_reference,
                         dangerous_tool_auto_approval,
+                        recorded_user_overrides,
                         system_prompt,
                         tool_entries,
                     );
@@ -1579,6 +1639,7 @@ where
             prepared,
             credential_reference,
             dangerous_tool_auto_approval,
+            recorded_user_overrides,
             system_prompt,
             tool_entries,
         ) = prepared;
@@ -1724,6 +1785,7 @@ where
             observation.observation(),
             dangerous_tool_auto_approval,
             &advertised_tools,
+            &recorded_user_overrides,
         );
         self.commit_terminal_observation(session, observation, tool_approvals)
             .await
@@ -1801,8 +1863,31 @@ where
         >,
     > {
         loop {
-            let identities =
+            let mut identities =
                 self.next_terminal_identities(observation.observation(), &tool_approvals);
+            // Every classified pool trigger evaluates its frozen action, not
+            // only the ones that could substitute a member on this turn.
+            // `switch_next_turn`, `avoid_new_sessions`, and `quarantine`
+            // terminalize the call and persist a durable exclusion, so gating
+            // them on substitution proof silently degraded them to `stay`.
+            // Persistence still requires the proof before creating a successor.
+            if matches!(
+                observation.provider_failure_cause(),
+                Some(
+                    signalbox_domain::ProviderModelCallFailureCause::RateLimited
+                        | signalbox_domain::ProviderModelCallFailureCause::QuotaExhausted
+                        | signalbox_domain::ProviderModelCallFailureCause::Overloaded
+                        | signalbox_domain::ProviderModelCallFailureCause::CredentialRejected
+                )
+            ) && let ModelCallTerminalIdentityCandidates::Exact(
+                signalbox_domain::ModelCallTerminalIdentities::Failed(failed),
+            ) = identities
+            {
+                identities = ModelCallTerminalIdentityCandidates::Availability {
+                    failed,
+                    successor_attempt: self.ids.next_turn_attempt_id(),
+                };
+            }
             let ids = &mut self.ids;
             let next_turn = move |_| ids.next_turn_id();
             match self
@@ -1810,10 +1895,19 @@ where
                 .commit_observation(session, observation.clone(), identities, next_turn)
                 .await
             {
-                Ok(Some(outcome)) => {
+                Ok(Some(ModelCallObservationCommitOutcome::Terminal(outcome))) => {
                     report_model_call_terminalization(&outcome);
-                    return Ok(ModelCallExecutionOutcome::ObservationCommitted(Box::new(
-                        outcome,
+                    return Ok(ModelCallExecutionOutcome::ObservationCommitted(outcome));
+                }
+                Ok(Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(successor))) => {
+                    return Ok(ModelCallExecutionOutcome::AvailabilitySuccessor(successor));
+                }
+                Ok(Some(ModelCallObservationCommitOutcome::PoolExhausted(exhausted))) => {
+                    if let CredentialPoolExhaustedOutcome::AfterCall { terminal, .. } = &exhausted {
+                        report_model_call_terminalization(terminal);
+                    }
+                    return Ok(ModelCallExecutionOutcome::PoolExhausted(Box::new(
+                        exhausted,
                     )));
                 }
                 Ok(None) => return Ok(ModelCallExecutionOutcome::NoWork),
@@ -1827,7 +1921,7 @@ where
                     self.retained_state = Some(RetainedModelCallExecutionState {
                         state: RetainedModelCallExecutionStateKind::TerminalObservation {
                             session,
-                            observation: observation.clone(),
+                            observation: Box::new(observation.clone()),
                             tool_approvals,
                         },
                     });
@@ -1955,15 +2049,27 @@ where
         ModelCallTerminalIdentityCandidates::Exact(exact)
     }
 
+    /// Selects one initial approval per proposal, consuming recorded user
+    /// overrides.
+    ///
+    /// An recorded override substitutes for the judge only where the judge would
+    /// otherwise decide: the base selection must be `Delegated`, and the
+    /// proposal must re-propose the exact denied command. Each recorded override
+    /// is consumed at most once per response — a second identical proposal
+    /// parks for the judge again — mirroring the one-shot uniqueness the
+    /// decision table enforces durably.
     fn tool_approvals(
         &self,
         observation: &ModelCallTerminalObservation,
         posture: DangerousToolAutoApproval,
         advertised_tools: &[ToolDefinition],
+        recorded_user_overrides: &[RecordedUserOverride],
     ) -> Box<[InitialToolApproval]> {
         let ModelCallTerminalObservation::CompletedWithTools { response } = observation else {
             return Box::new([]);
         };
+        let mut remaining_overrides: Vec<&RecordedUserOverride> =
+            recorded_user_overrides.iter().collect();
         response
             .parts()
             .iter()
@@ -1973,10 +2079,75 @@ where
                     let definition = advertised_tools
                         .iter()
                         .find(|definition| definition.name() == proposal.name());
-                    Some(initial_tool_approval(posture, definition))
+                    let base = initial_tool_approval(posture, definition);
+                    if base != InitialToolApproval::Delegated {
+                        return Some(base);
+                    }
+                    let matched = remaining_overrides
+                        .iter()
+                        .position(|recorded| recorded.matches_proposal(proposal));
+                    Some(match matched {
+                        Some(index) => {
+                            let recorded = remaining_overrides.remove(index);
+                            InitialToolApproval::UserOverride {
+                                command: recorded.command(),
+                                denied_request: recorded.denied_request(),
+                            }
+                        }
+                        None => base,
+                    })
                 }
             })
             .collect()
+    }
+}
+
+/// One durable result of committing a correlated model-call observation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelCallObservationCommitOutcome {
+    /// The observation reached an ordinary terminal or durable-wait outcome.
+    Terminal(Box<ModelCallTerminalOutcome>),
+    /// Pool policy authorized a distinct availability successor attempt.
+    AvailabilitySuccessor(Box<AvailabilitySuccessorOutcome>),
+    /// Every member is unavailable; the pool, not one member, terminalized.
+    PoolExhausted(CredentialPoolExhaustedOutcome),
+}
+
+/// Typed pool-wide terminal cause, distinct from one account's failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CredentialPoolExhaustedOutcome {
+    /// Selection found no member before creating a call.
+    BeforeCall(Box<CredentialPoolExhaustedModelCallTurn>),
+    /// A qualifying member failure consumed the last available member.
+    AfterCall {
+        /// Deployment-owned pool name.
+        pool_name: Arc<str>,
+        /// Ordinary terminal projection retaining the last call's evidence.
+        terminal: Box<ModelCallTerminalOutcome>,
+    },
+}
+
+/// One committed availability successor and its capped retry delay.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AvailabilitySuccessorOutcome {
+    successor: AvailabilitySuccessorModelCallTurn,
+    backoff: Duration,
+}
+
+impl AvailabilitySuccessorOutcome {
+    /// Creates the application result after persistence freezes the deadline.
+    pub const fn new(successor: AvailabilitySuccessorModelCallTurn, backoff: Duration) -> Self {
+        Self { successor, backoff }
+    }
+
+    /// Borrows the exact predecessor/successor lifecycle transition.
+    pub const fn successor(&self) -> &AvailabilitySuccessorModelCallTurn {
+        &self.successor
+    }
+
+    /// Returns the capped delay frozen with the durable successor.
+    pub const fn backoff(&self) -> Duration {
+        self.backoff
     }
 }
 
@@ -2511,6 +2682,7 @@ mod tests {
             request: Box::new(request),
             credential_reference: credential_reference(),
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+            recorded_user_overrides: Box::new([]),
             system_prompt: None,
             tool_entries: Box::new([]),
         }
@@ -2526,6 +2698,7 @@ mod tests {
             request: Box::new(request),
             credential_reference: credential_reference(),
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+            recorded_user_overrides: Box::new([]),
             system_prompt: None,
             tool_entries,
         }
@@ -3528,7 +3701,7 @@ mod tests {
             _observation: CorrelatedModelCallTerminalObservation,
             _identities: ModelCallTerminalIdentityCandidates,
             _next_reclassified_turn: NextTurn,
-        ) -> Result<Option<ModelCallTerminalOutcome>, Self::Error>
+        ) -> Result<Option<ModelCallObservationCommitOutcome>, Self::Error>
         where
             NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
         {
@@ -3562,7 +3735,7 @@ mod tests {
             observation: CorrelatedModelCallTerminalObservation,
             _identities: ModelCallTerminalIdentityCandidates,
             _next_reclassified_turn: NextTurn,
-        ) -> Result<Option<ModelCallTerminalOutcome>, Self::Error>
+        ) -> Result<Option<ModelCallObservationCommitOutcome>, Self::Error>
         where
             NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
         {
@@ -3758,6 +3931,161 @@ mod tests {
         );
     }
 
+    /// The seeds of the canonical recorded-override fixture; arbitrary — they
+    /// only need to exist as one recorded override.
+    const OVERRIDE_COMMAND_SEED: u128 = 81;
+    const OVERRIDE_DENIED_REQUEST_SEED: u128 = 82;
+    const OVERRIDE_JUDGE_CALL_SEED: u128 = 83;
+
+    /// One recorded override of a denied `guarded` proposal with `{}` arguments
+    /// in the canonical fixture session.
+    fn recorded_guarded_override() -> signalbox_domain::RecordedUserOverride {
+        signalbox_domain::RecordedUserOverride::new(
+            identity(
+                OVERRIDE_COMMAND_SEED,
+                signalbox_domain::DurableCommandId::from_uuid,
+            ),
+            identity(1, SessionId::from_uuid),
+            identity(OVERRIDE_DENIED_REQUEST_SEED, ToolRequestId::from_uuid),
+            identity(OVERRIDE_JUDGE_CALL_SEED, ModelCallId::from_uuid),
+            signalbox_domain::ToolName::try_new(String::from("guarded"))
+                .expect("fixture tool name is valid"),
+            signalbox_domain::NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("fixture arguments are valid"),
+        )
+    }
+
+    /// One `guarded` proposal with the given provider argument text.
+    fn guarded_proposal(arguments: &str) -> AssistantResponsePart {
+        AssistantResponsePart::ToolCall(signalbox_domain::ToolCallProposal::new(
+            signalbox_domain::ToolName::try_new(String::from("guarded"))
+                .expect("fixture tool name is valid"),
+            signalbox_domain::NormalizedToolArguments::try_from_provider_text(String::from(
+                arguments,
+            ))
+            .expect("fixture arguments are valid"),
+        ))
+    }
+
+    /// One completed tool response containing exactly the supplied parts.
+    fn completed_with_tools(parts: Vec<AssistantResponsePart>) -> ModelCallTerminalObservation {
+        ModelCallTerminalObservation::CompletedWithTools {
+            response: signalbox_domain::ToolUsingAssistantResponse::try_from_parts(parts)
+                .expect("fixture response contains tools"),
+        }
+    }
+
+    /// Selects initial approvals for the parts through a service advertising
+    /// one `guarded` tool frozen at the given posture.
+    #[track_caller]
+    fn guarded_tool_approvals(
+        posture: signalbox_domain::ToolApprovalPosture,
+        parts: Vec<AssistantResponsePart>,
+        recorded: &[signalbox_domain::RecordedUserOverride],
+    ) -> Box<[InitialToolApproval]> {
+        let schema =
+            crate::ToolInputSchema::try_new(String::from(r#"{"properties":{},"type":"object"}"#))
+                .expect("fixture schema is valid");
+        let definition = crate::ToolDefinition::new(
+            signalbox_domain::ToolName::try_new(String::from("guarded"))
+                .expect("fixture name is valid"),
+            String::from("Awaits its frozen approval posture."),
+            schema,
+            signalbox_domain::ToolPermissionDefault::Confirm,
+            signalbox_domain::ToolEffectClass::ExternalEffect,
+        )
+        .with_approval_posture(posture);
+        let catalog = crate::CompiledToolCatalog::try_new([crate::CompiledTool::new(
+            definition,
+            |_: &signalbox_domain::NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one tool is unambiguous");
+        let service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: VecDeque::new(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            UnusedProvider,
+            InProcessAttemptDispatchGate::default(),
+        )
+        .with_tool_catalog(catalog);
+        let advertised_tools = service.catalog.definitions();
+        service.tool_approvals(
+            &completed_with_tools(parts),
+            DangerousToolAutoApproval::Disabled,
+            &advertised_tools,
+            recorded,
+        )
+    }
+
+    /// S10 / INV-020: a recorded override substitutes for the judge only on the
+    /// exact denied command — a proposal with other arguments still parks for
+    /// the judge — and the selected approval carries the override command and
+    /// the overridden denial.
+    #[test]
+    fn s10_inv020_recorded_override_substitutes_for_the_judge_on_the_exact_command() {
+        let recorded = recorded_guarded_override();
+        let approvals = guarded_tool_approvals(
+            signalbox_domain::ToolApprovalPosture::Delegated,
+            vec![
+                guarded_proposal("{}"),
+                guarded_proposal(r#"{"timezone":"UTC"}"#),
+            ],
+            std::slice::from_ref(&recorded),
+        );
+
+        assert_eq!(
+            approvals.as_ref(),
+            [
+                InitialToolApproval::UserOverride {
+                    command: recorded.command(),
+                    denied_request: recorded.denied_request(),
+                },
+                InitialToolApproval::Delegated,
+            ]
+        );
+    }
+
+    /// S10 / INV-020: one recorded override pre-approves at most one proposal
+    /// per response; a second identical proposal parks for the judge again.
+    #[test]
+    fn s10_inv020_recorded_override_is_consumed_at_most_once_per_response() {
+        let recorded = recorded_guarded_override();
+        let approvals = guarded_tool_approvals(
+            signalbox_domain::ToolApprovalPosture::Delegated,
+            vec![guarded_proposal("{}"), guarded_proposal("{}")],
+            std::slice::from_ref(&recorded),
+        );
+
+        assert_eq!(
+            approvals.as_ref(),
+            [
+                InitialToolApproval::UserOverride {
+                    command: recorded.command(),
+                    denied_request: recorded.denied_request(),
+                },
+                InitialToolApproval::Delegated,
+            ]
+        );
+    }
+
+    /// S10 / INV-020: a recorded override substitutes only where the judge
+    /// would decide; a human-frozen selection is never overridden.
+    #[test]
+    fn s10_inv020_recorded_override_never_bypasses_a_human_selection() {
+        let approvals = guarded_tool_approvals(
+            signalbox_domain::ToolApprovalPosture::Human,
+            vec![guarded_proposal("{}")],
+            &[recorded_guarded_override()],
+        );
+
+        assert_eq!(approvals.as_ref(), [InitialToolApproval::Human]);
+    }
+
     /// S10 / INV-001 / INV-020: one identity is minted per ordered response
     /// part/request, approval stays pinned to the advertised catalog snapshot,
     /// mixed auto/confirm policy parks without a continuation attempt, and the
@@ -3800,6 +4128,7 @@ mod tests {
             &observation,
             DangerousToolAutoApproval::Disabled,
             &advertised_tools,
+            &[],
         );
         assert_eq!(
             approvals.as_ref(),
@@ -4745,6 +5074,7 @@ mod tests {
                     request: Box::new(request.clone()),
                     credential_reference: credential_reference(),
                     dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+                    recorded_user_overrides: Box::new([]),
                     system_prompt: Some(prompt.clone()),
                     tool_entries: Box::new([]),
                 })]
@@ -5592,7 +5922,7 @@ mod tests {
                     observation,
                     ..
                 },
-            }) if observation == retained_observation
+            }) if observation.as_ref() == &retained_observation
         ));
     }
 

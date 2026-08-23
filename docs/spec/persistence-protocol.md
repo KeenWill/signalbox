@@ -3,6 +3,10 @@
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
 
+The restore-safety search-path pin on check-reachable functions, and the
+catalogue test holding it, were verified against this PR
+(`agent/restore-safe-check-functions`).
+
 The delegate denial-reason storage — the superseded decision-shape constraint
 and its byte-precise checks — was verified against this PR
 (`agent/judge-denial-reason`).
@@ -12,7 +16,11 @@ fences were verified against the parent slice (`agent/runner-loss-epoch`).
 Placement-relative lease-offer fencing was verified against the parent slice
 (`agent/runner-loss-propagation`). The bounded runner-loss propagation cursor
 and ordered page read were verified against this PR
-(`agent/runner-loss-session-propagation`).
+(`agent/runner-loss-session-propagation`). The atomic per-session runner-loss
+propagation transaction and cursor completion were verified against this PR
+(`agent/runner-loss-session-transaction`). Daemon paging after terminal loss and
+startup resumption of every pending cursor were verified against this PR
+(`agent/runner-loss-daemon-propagation`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -21,7 +29,9 @@ source check was re-verified against this PR
 (`agent/daemon-runner-health-events`).
 
 The runner-recovery turn-phase representation and read boundary were verified
-against this PR (`agent/runner-awaiting-recovery-persistence`).
+against this PR (`agent/runner-awaiting-recovery-persistence`). The
+recorded-migration immutability rule was verified against this PR
+(`agent/mechanical-cleanup-batch`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -148,8 +158,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — eighty-five files, `202607180001` through
-`202608150005` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — ninety-two files, `202607180001` through
+`202608200002` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -162,6 +172,35 @@ The fence migration's first installation is the sole case without a prior fenced
 pool, because no earlier schema can have admitted one. Why: checksummed
 forward-only files make every schema change a reviewed, immutable artifact, so a
 deployed database's history is never silently edited.
+
+A migration becomes immutable as soon as its version is recorded in the
+`_sqlx_migrations` table of any database whose history must remain continuous:
+every deployed database, and every recording once the migration's pull request
+merges. Correct an already-recorded migration with a new forward migration;
+never edit, replace, or renumber the recorded migration file. The sole exception
+is a pre-merge recording by a rehearsal installation when the recorded form
+cannot merge — a form that fails validation on fresh databases has no correct
+forward continuation, so the file is corrected before merge and the rehearsal
+installation's ledger row is corrected at its next deployment as a documented
+step, never silently. Why: the rule exists so no database's history is silently
+edited, and a documented rehearsal-ledger correction preserves that while a
+frozen unmergeable file would instead freeze a defect into every future
+installation.
+
+Every function reachable from a table constraint or index expression pins its
+search path in its catalogue definition, rendered through `current_schema` so
+installations whose migrations run outside the default schema keep the
+`202607310102` pattern. `pg_restore` replays a logical backup under an empty
+search path and evaluates check constraints while copying table data, so an
+unpinned body that names another user function unqualified resolves in normal
+operation and fails only during restore; `202608200001` retrofits the pin onto
+the check-reachable set the earlier migrations create, and the
+`search_path_postgres` catalogue test (INV-070) derives the reachable set from
+the dependency catalogue — including functions reached only through a
+user-defined operator — and fails on any unpinned member or on empty discovery,
+so a future migration cannot reintroduce the gap. Why: a backup that cannot
+restore is a silent failure that surfaces only during recovery, so restorability
+is part of the schema's contract rather than an operational afterthought.
 
 Prefix reservation across concurrent stacks: the bottom pull request of any
 stack that will add migrations declares a reserved prefix block — a date plus a
@@ -348,10 +387,15 @@ Representation rules, all enforced in the schema:
   predecessor instead of inferring history from a revision. The generic
   placement snapshot writer refuses loss, either replacement, and abandonment
   because those transitions require connection/loss, durable-command, scheduler,
-  and outbox authority outside the placement aggregate. **Committed
-  unimplemented functionality.** No present adapter installs those transitions;
-  their dedicated orchestration transactions will install these same checked
-  records, and direct snapshot storage cannot stand in for those transactions.
+  and outbox authority outside the placement aggregate. The connection-loss
+  propagation adapter installs only loss transitions under those authorities;
+  replacement and abandonment remain **committed unimplemented functionality**
+  for their dedicated orchestration transactions. Direct snapshot storage cannot
+  stand in for any of those transactions. `RunnerReplacementTestProjection` and
+  `store_runner_replacement_projection_for_test` are compiled only with
+  `postgres-integration` for integration-test round trips; they are not
+  production authority-bearing adapters. The generic production placement writer
+  rejects `runner_replaced`.
 - Migration `202608110005` records the connection-loss epoch observed when each
   placement selects a known enrollment and carries that baseline through later
   loss or abandonment records. The value is derived while holding scheduler,
@@ -362,8 +406,8 @@ Representation rules, all enforced in the schema:
   reconnecting. Lease insertion compares its pinned placement with the
   enrollment's latest loss and remains fenced across successor physical
   connections until a checked replacement installs a fresh baseline. This is the
-  implemented not-yet-projected placement fence; bounded session propagation
-  remains the committed unimplemented transaction described below.
+  implemented placement fence consumed by the bounded session-propagation
+  transaction described below.
 - Migration `202608110006` gives every new durable connection-loss epoch a
   pending propagation cursor in the same transaction. Migration backfill marks a
   loss completed only when no affected current placement remains: losses already
@@ -376,14 +420,20 @@ Representation rules, all enforced in the schema:
   later loss for its selected runner despite having no enrollment baseline; the
   page and both cursor guards associate it through the runner identity. Cursor
   advancement is monotonic, cannot pass an affected current placement, and
-  cannot complete while one remains. Enrollment insertion, exact-identity
-  placement baseline derivation, and cursor completion share a transaction-level
-  runner-identity fence. An insertion that observes enrollment absence therefore
-  becomes visible before that enrollment can create and complete a loss cursor;
-  a completion that wins the fence becomes visible before a later insertion
-  derives its baseline. The cursor and ordered page are implemented; the
-  per-session transaction that changes placement, lease, turn, release, and
-  runner-event state remains the committed unimplemented propagation step below.
+  cannot complete while one remains. A per-session transaction locks the
+  scheduler, authenticates the exact loss and cursor, then atomically changes
+  placement, any current lease and physical attempt, an active runner-boundary
+  turn, the runner-state outbox, and the cursor. An offered lease records no
+  execution; a claimed pure or idempotent lease remains retryable in flight; a
+  claimed side-effecting lease becomes terminal ambiguous. A separate checked
+  operation completes an exhausted cursor. After an applied terminal connection
+  transition or an exact replay of its current lost state, the daemon pages
+  every pending loss, invokes the per-session transaction in page order, and
+  completes each exhausted cursor. Startup performs the same scan after marking
+  prior-process nonterminal connections lost, so a crash after the short loss
+  transaction cannot strand session projection. **Committed unimplemented
+  functionality.** No present daemon transaction retires an unacknowledged
+  workspace release.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -482,24 +532,23 @@ Representation rules, all enforced in the schema:
   reclassifies the ambiguity. Without this shape the loss transaction has
   nowhere to store the phase and restart cannot rebuild it. The same migration
   adds the optional interrupted-attempt fact to the exact placement-loss record,
-  and the runner persistence read boundary round-trips both nullable arms.
-  **Committed unimplemented functionality.** No present adapter produces the
-  phase: the dedicated runner-loss propagation transaction will install it under
-  the lock order below. Independently of that future writer, a present
-  interrupted-attempt fact on the placement-loss record is admitted only for one
-  of two exact lease-derived shapes: an in-flight retryable attempt whose loss
-  proves no execution or whose pure/idempotent effect permits successor
-  reissuance, or a terminal ambiguous side-effecting attempt whose execution may
-  have occurred. Both carry physical runner-lease lineage to the record's exact
-  lost runner and placement revision, and the same active runner-recovery
-  tool-round boundary names the attempt. Stopping the wait retires retryable
-  authority before releasing the active slot. The claimed-retry reservation
-  writer takes that same scheduler lock and rechecks that the exact
-  lease-derived source attempt remains in flight, so stale authority loaded
-  before the stop cannot be reserved afterward. No-execution and pure work
-  become known crash loss and cancel, while execution-possible idempotent work
-  becomes ambiguous and requires reconciliation. A same-session foreign or older
-  same-placement attempt therefore cannot survive placement readback.
+  and the runner persistence read boundary round-trips both nullable arms. The
+  runner-loss propagation transaction produces this phase under the lock order
+  below. Independently of that writer, a present interrupted-attempt fact on the
+  placement-loss record is admitted only for one of two exact lease-derived
+  shapes: an in-flight retryable attempt whose loss proves no execution or whose
+  pure/idempotent effect permits successor reissuance, or a terminal ambiguous
+  side-effecting attempt whose execution may have occurred. Both carry physical
+  runner-lease lineage to the record's exact lost runner and placement revision,
+  and the same active runner-recovery tool-round boundary names the attempt.
+  Stopping the wait retires retryable authority before releasing the active
+  slot. The claimed-retry reservation writer takes that same scheduler lock and
+  rechecks that the exact lease-derived source attempt remains in flight, so
+  stale authority loaded before the stop cannot be reserved afterward.
+  No-execution and pure work become known crash loss and cancel, while
+  execution-possible idempotent work becomes ambiguous and requires
+  reconciliation. A same-session foreign or older same-placement attempt
+  therefore cannot survive placement readback.
 - The same slice adds the closed `runner_placement_changed` semantic-entry
   payload: one positive placement revision, total only for that kind, with a
   foreign key to the same session's placement record at exactly that revision.
@@ -1010,11 +1059,12 @@ Locks per transaction, in acquisition order:
   its own transaction by locking `session_scheduler` first, then the loss head,
   placement, current lease, and guarded turn rows. Offered leases with no
   durable claim acquire exact no-execution proof; claimed leases follow effect
-  loss law. That same session transaction retires any unacknowledged release the
-  lost connection still owed, since no successor inherits authority to complete
-  it. A crash resumes at the first uncommitted session, while every
-  not-yet-projected placement is already effectively lost through the epoch
-  fence.
+  loss law. Retirement of any unacknowledged release the lost connection still
+  owed remains a daemon-orchestration responsibility outside this persistence
+  transaction; this adapter commits the session projection and advances its
+  cursor without retiring that release. A crash resumes at the first uncommitted
+  session, while every not-yet-projected placement is already effectively lost
+  through the epoch fence.
 
 - **Runner replace, abandon, and release**: an unseen abandonment command owns
   its durable-command claim and terminalizes in one transaction. An unseen
@@ -1972,6 +2022,11 @@ surface provides it.
 
 ## Open edges
 
+- [Graded approval judging](../open-questions.md#graded-approval-judging) owns
+  the unresolved graded fields in the durable audit shape for approval-judge
+  calls and decisions. The existing
+  [goal-mode compatibility constraint](goal-mode.md#compatibility-constraints)
+  owns retention of both the provider-offered and repository-committed outcomes.
 - Deferred outbox retention, pruning, and multiple-daemon fan-out are cataloged
   in [open questions](../open-questions.md#protocols-and-persistence).
 - Attempt continuation is presently admitted only for the tool-loop

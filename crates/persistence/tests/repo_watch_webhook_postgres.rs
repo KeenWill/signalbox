@@ -11,29 +11,24 @@ use std::{
 };
 
 use rust_decimal::Decimal;
+use signalbox_application::RepoWatchEventContentIdentityV1;
 use signalbox_application::{
-    RepoWatchBranchHead, RepoWatchConvergenceAssessment, RepoWatchConvergenceAssessmentInput,
-    RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
-    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewDecision,
+    RepoWatchObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
 };
-use signalbox_domain::{
-    BranchName, CheckConclusion, CommitSha, MergeableState, PullRequestBody,
-    PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
-    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1,
-    RepositorySlug, WorkflowName,
-};
+use signalbox_domain::{CommitSha, PullRequestNumber, RepoWatchEventKindNameV1, RepositorySlug};
 use signalbox_persistence::{
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
     disposable_test_container_labels, local_test_connection_options, migrate,
     repo_watch::{
-        PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest, RepoWatchCursor,
-        RepoWatchCursorCandidate, RepoWatchStoreError,
+        PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
+        RepoWatchCursorCandidate, RepoWatchCursorGeneration,
     },
     repo_watch_webhook::{
-        PostgresRepoWatchWebhookStore, RepoWatchWebhookAdmission, RepoWatchWebhookAdmissionOutcome,
-        RepoWatchWebhookDeliveryKey, RepoWatchWebhookDisposition, RepoWatchWebhookPendingPageSize,
-        RepoWatchWebhookProjection, RepoWatchWebhookStoreError, RepoWatchWebhookTargetedQuery,
-        RepoWatchWebhookTerminalOutcome, RepoWatchWebhookTerminalRequest,
+        MAX_PENDING_PAGE_BYTES, PostgresRepoWatchWebhookStore, RepoWatchWebhookAdmission,
+        RepoWatchWebhookAdmissionOutcome, RepoWatchWebhookDeliveryKey, RepoWatchWebhookDisposition,
+        RepoWatchWebhookParityCauseV1, RepoWatchWebhookPendingPageSize, RepoWatchWebhookProjection,
+        RepoWatchWebhookTargetedQuery, RepoWatchWebhookTerminalOutcome,
+        RepoWatchWebhookTerminalRequest,
     },
 };
 use sqlx::{
@@ -63,10 +58,11 @@ const BODY: &[u8] = br#"{"repository":{"full_name":"signalbox/repository"}}"#;
 const OTHER_BODY: &[u8] = br#"{"repository":{"full_name":"signalbox/other"}}"#;
 const DIGEST: [u8; 32] = [0x11; 32];
 const OTHER_DIGEST: [u8; 32] = [0x22; 32];
+const LARGE_BODY_BYTES: usize = 4 * 1024 * 1024;
+const LARGE_DELIVERY_BASE: u128 = 0x900;
 const MATCHED_IDENTITY: [u8; 32] = [0x31; 32];
 const WEBHOOK_ONLY_IDENTITY: [u8; 32] = [0x32; 32];
 const POLL_ONLY_IDENTITY: [u8; 32] = [0x33; 32];
-const LEGACY_IDENTITY: [u8; 32] = [0x34; 32];
 const HISTORICAL_IDENTITY: [u8; 32] = [0x35; 32];
 const TARGETED_DELIVERY_SEED: u128 = 0x306;
 const TARGETED_PULL_REQUEST: u64 = 41;
@@ -83,7 +79,8 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
-        .with_fsync_enabled()
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -182,6 +179,31 @@ fn admission(
     )?)
 }
 
+/// Admits `count` deliveries whose bodies are each `body_bytes` long.
+///
+/// The loop lives here rather than in a test body so each test stays
+/// straight-line, as `docs/agents/testing-style.md` rule 2 requires.
+async fn seed_sized_pending_deliveries(
+    store: &PostgresRepoWatchWebhookStore,
+    count: usize,
+    body_bytes: usize,
+) -> Result<(), Box<dyn Error>> {
+    for index in 0..count {
+        let body = vec![b'x'; body_bytes];
+        store
+            .admit(&admission(
+                delivery_key(LARGE_DELIVERY_BASE + index as u128),
+                repository()?,
+                EVENT_NAME,
+                Some(ACTION_NAME),
+                DIGEST,
+                &body,
+            )?)
+            .await?;
+    }
+    Ok(())
+}
+
 fn pending_page_size() -> RepoWatchWebhookPendingPageSize {
     RepoWatchWebhookPendingPageSize::try_new(
         NonZeroU16::new(10).expect("fixture page size is positive"),
@@ -215,6 +237,7 @@ fn event_projection(identity: [u8; 32]) -> Result<RepoWatchWebhookProjection, Bo
         RepoWatchEventContentIdentityV1::from_bytes(identity),
         RepoWatchEventKindNameV1::BranchWorkflowRunCompleted,
         vec![0x41],
+        None,
     )?)
 }
 
@@ -267,7 +290,6 @@ async fn seed_poll_parity_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
         &mut transaction,
         Uuid::from_u128(0x901),
         1,
-        1,
         MATCHED_IDENTITY,
         None,
     )
@@ -276,17 +298,7 @@ async fn seed_poll_parity_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
         &mut transaction,
         Uuid::from_u128(0x902),
         2,
-        1,
         POLL_ONLY_IDENTITY,
-        None,
-    )
-    .await?;
-    insert_poll_event(
-        &mut transaction,
-        Uuid::from_u128(0x903),
-        3,
-        0,
-        LEGACY_IDENTITY,
         None,
     )
     .await?;
@@ -294,10 +306,56 @@ async fn seed_poll_parity_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
         &mut transaction,
         Uuid::from_u128(0x904),
         4,
-        1,
         HISTORICAL_IDENTITY,
         Some(OffsetDateTime::UNIX_EPOCH),
     )
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Seeds one poll-produced event. Exactly one content-identity version is
+/// storable, so the version the parity view filters on is not a fixture axis.
+/// Seeds one poll event of a family webhooks are not designed to reproduce.
+async fn seed_poll_only_family_event(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_cursor (
+            repository, generation, storage_version, cursor_payload
+         ) VALUES ($1, 1, 2, $2)",
+    )
+    .bind(REPOSITORY)
+    .bind(sqlx::types::Json(serde_json::json!({
+        "storage_version": 2,
+        "signal_reviewers": [],
+        "event_identity_frontier": [],
+        "state": {
+            "pull_requests": [],
+            "workflow_runs": [],
+            "branch_heads": []
+        }
+    })))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity,
+            producer, target_kind, event_kind, checks_outcome,
+            pull_request_number, head_sha, head_repository, base_branch,
+            head_branch, title, body, labels, draft, recorded_at
+         ) VALUES (
+            $1, $2, 1, 1, 1, 1, $3, 'poll', 'pull_request',
+            'checks_completed', 'success',
+            7, $4, $2, 'main', 'topic', 'fixture', '', ARRAY[]::text[], false,
+            transaction_timestamp()
+         )",
+    )
+    .bind(Uuid::from_u128(0x9F1))
+    .bind(REPOSITORY)
+    .bind(POLL_ONLY_IDENTITY.as_slice())
+    .bind(HEAD_SHA)
+    .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
     Ok(())
@@ -307,7 +365,6 @@ async fn insert_poll_event(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     event_id: Uuid,
     ordinal: i32,
-    content_identity_version: i16,
     identity: [u8; 32],
     recorded_at: Option<OffsetDateTime>,
 ) -> Result<(), Box<dyn Error>> {
@@ -318,15 +375,14 @@ async fn insert_poll_event(
             producer, target_kind, event_kind, conclusion,
             workflow_branch, workflow_name, recorded_at
          ) VALUES (
-            $1, $2, 1, $3, 1, $4, $5, 'poll', 'branch',
+            $1, $2, 1, $3, 1, 1, $4, 'poll', 'branch',
             'branch_workflow_run_completed', 'success', 'main', 'checks',
-            COALESCE($6, transaction_timestamp())
+            COALESCE($5, transaction_timestamp())
          )",
     )
     .bind(event_id)
     .bind(REPOSITORY)
     .bind(ordinal)
-    .bind(content_identity_version)
     .bind(identity.as_slice())
     .bind(recorded_at)
     .execute(&mut **transaction)
@@ -481,7 +537,7 @@ async fn pending_delivery_survives_store_restart() -> Result<(), Box<dyn Error>>
 
     let restarted_store = PostgresRepoWatchWebhookStore::new(pool);
     let pending = restarted_store
-        .load_pending(&repository()?, pending_page_size())
+        .load_pending(&repository()?, pending_page_size(), None)
         .await?;
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].key(), key);
@@ -491,6 +547,114 @@ async fn pending_delivery_survives_store_restart() -> Result<(), Box<dyn Error>>
     assert_eq!(pending[0].body_digest(), &DIGEST);
     assert_eq!(pending[0].body(), BODY);
 
+    Ok(())
+}
+
+/// The drain monitor reads the oldest pending delivery on a fixed cadence for
+/// every webhook repository, so it must not transfer the admitted bodies that a
+/// pending page carries. Taking the payload table out of reach proves the
+/// dependency rather than asserting it: the monitor query still answers where
+/// the page query, which joins that table, can no longer run at all.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn oldest_pending_receipt_is_read_without_its_payload() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let oldest = delivery_key(0x401);
+    let newer = delivery_key(0x402);
+    admit_fixture(&store, oldest).await?;
+    admit_fixture(&store, newer).await?;
+    store
+        .admit(&admission(
+            delivery_key(0x403),
+            other_repository()?,
+            OTHER_EVENT_NAME,
+            Some(OTHER_ACTION_NAME),
+            OTHER_DIGEST,
+            OTHER_BODY,
+        )?)
+        .await?;
+
+    let pending = store
+        .load_oldest_pending_receipt(&repository()?)
+        .await?
+        .expect("an admitted delivery is pending");
+
+    assert_eq!(pending.key(), oldest);
+    let page = store
+        .load_pending(&repository()?, pending_page_size(), None)
+        .await?;
+    assert_eq!(pending.receipt(), page[0].receipt());
+
+    sqlx::query(
+        "ALTER TABLE repo_watch_webhook_payload RENAME TO repo_watch_webhook_payload_hidden",
+    )
+    .execute(&pool)
+    .await?;
+
+    let without_payload = store
+        .load_oldest_pending_receipt(&repository()?)
+        .await?
+        .expect("the monitor query does not depend on the payload");
+    assert_eq!(without_payload.key(), oldest);
+    assert_eq!(without_payload.receipt(), pending.receipt());
+    assert!(
+        store
+            .load_pending(&repository()?, pending_page_size(), None)
+            .await
+            .is_err(),
+        "the drain page joins the payload the monitor deliberately never reads"
+    );
+
+    sqlx::query(
+        "ALTER TABLE repo_watch_webhook_payload_hidden RENAME TO repo_watch_webhook_payload",
+    )
+    .execute(&pool)
+    .await?;
+
+    Ok(())
+}
+
+/// The monitor reads the oldest pending delivery, so a delivery reaching
+/// terminal state has to hand that position to the next one and the last one
+/// has to leave nothing pending at all.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_oldest_pending_receipt_advances_as_deliveries_reach_terminal_state()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool);
+    let oldest = delivery_key(0x411);
+    let newer = delivery_key(0x412);
+    admit_fixture(&store, oldest).await?;
+    admit_fixture(&store, newer).await?;
+    assert_eq!(
+        store
+            .load_oldest_pending_receipt(&repository()?)
+            .await?
+            .map(|pending| pending.key()),
+        Some(oldest)
+    );
+
+    store
+        .record_terminal(oldest, &projected_request(Vec::new())?)
+        .await?;
+    assert_eq!(
+        store
+            .load_oldest_pending_receipt(&repository()?)
+            .await?
+            .map(|pending| pending.key()),
+        Some(newer)
+    );
+
+    store
+        .record_terminal(newer, &projected_request(Vec::new())?)
+        .await?;
+
+    assert_eq!(
+        store.load_oldest_pending_receipt(&repository()?).await?,
+        None
+    );
     Ok(())
 }
 
@@ -545,7 +709,7 @@ async fn terminal_disposition_drains_pending_delivery() -> Result<(), Box<dyn Er
         .await?;
     assert_eq!(repeated, RepoWatchWebhookTerminalOutcome::AlreadyTerminal);
     let drained = store
-        .load_pending(&repository()?, pending_page_size())
+        .load_pending(&repository()?, pending_page_size(), None)
         .await?;
     assert!(drained.is_empty());
     let projection_count: i64 =
@@ -563,323 +727,60 @@ async fn terminal_disposition_drains_pending_delivery() -> Result<(), Box<dyn Er
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn primary_commit_atomically_records_webhook_event_and_terminal_delivery()
--> Result<(), Box<dyn Error>> {
+async fn pending_page_stops_at_the_retained_byte_ceiling() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
-    let event_store = PostgresRepoWatchStore::new(pool.clone());
-    let key = delivery_key(0x303);
-    admit_fixture(&webhook_store, key).await?;
-    let baseline = RepoWatchCursorCandidate::new(RepoWatchObservation::new(
-        Vec::new(),
-        RepoWatchRepositoryState::default(),
-    ));
-    let RepoWatchCommitOutcome::Committed(cursor) = event_store
-        .commit(
-            &repository()?,
-            RepoWatchCommitRequest::new(None, baseline, Vec::new()),
-        )
-        .await?
-    else {
-        panic!("fixture baseline must commit")
-    };
-    let branch = BranchName::try_new("main".to_owned())?;
-    let head = CommitSha::try_new(HEAD_SHA.to_owned())?;
-    let observation = RepoWatchObservation::new(
-        Vec::new(),
-        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
-            pull_requests: Vec::new(),
-            workflow_runs: Vec::new(),
-            branch_heads: vec![RepoWatchBranchHead::new(branch.clone(), head)],
-        })?,
-    );
-    let event = RepoWatchEvent::branch_workflow(
-        RepoWatchEventId::from_uuid(Uuid::from_u128(0x303)),
-        repository()?,
-        branch,
-        WorkflowName::try_new("checks".to_owned())?,
-        CheckConclusion::Success,
-    );
-    let occurrence = RepoWatchEventOccurrenceV1::from_parts(
-        event,
-        RepoWatchEventContentIdentityV1::from_bytes(WEBHOOK_ONLY_IDENTITY),
-    );
-    let outcome = event_store
-        .commit_webhook(
-            &repository()?,
-            RepoWatchCommitRequest::from_webhook(
-                cursor.generation(),
-                RepoWatchCursorCandidate::new(observation),
-                vec![occurrence],
-            ),
-            key,
-            vec![event_projection(WEBHOOK_ONLY_IDENTITY)?],
-        )
-        .await?;
-    let RepoWatchCommitOutcome::Committed(committed) = outcome else {
-        panic!("webhook state and event must commit")
-    };
+    let store = PostgresRepoWatchWebhookStore::new(pool);
+    let admitted = MAX_PENDING_PAGE_BYTES / LARGE_BODY_BYTES + 1;
+    seed_sized_pending_deliveries(&store, admitted, LARGE_BODY_BYTES).await?;
 
-    let producer: String =
-        sqlx::query_scalar("SELECT producer FROM repo_watch_event WHERE event_id = $1")
-            .bind(Uuid::from_u128(0x303))
-            .fetch_one(&pool)
-            .await?;
-    let disposition = sqlx::query_as::<_, (String, i64)>(
-        "SELECT disposition, resulting_cursor_generation
-           FROM repo_watch_webhook_disposition
-          WHERE hook_id = $1 AND delivery_id = $2",
-    )
-    .bind(Decimal::from(key.hook_id().get()))
-    .bind(key.delivery_id())
-    .fetch_one(&pool)
-    .await?;
-    let pending = webhook_store
-        .load_pending(&repository()?, pending_page_size())
+    let page = store
+        .load_pending(&repository()?, pending_page_size(), None)
         .await?;
 
-    assert_eq!(producer, "webhook");
-    assert_eq!(
-        disposition,
-        ("committed".to_owned(), committed.generation().get() as i64)
-    );
-    assert!(pending.is_empty());
+    assert_eq!(page.len(), MAX_PENDING_PAGE_BYTES / LARGE_BODY_BYTES);
+    assert!(page.len() < admitted);
+    assert_eq!(page[0].key(), delivery_key(LARGE_DELIVERY_BASE));
+    assert_eq!(page[0].body().len(), LARGE_BODY_BYTES);
     Ok(())
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn primary_targeted_commit_atomically_records_partial_convergence_evidence()
--> Result<(), Box<dyn Error>> {
+async fn one_body_above_the_page_ceiling_still_drains() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
-    let event_store = PostgresRepoWatchStore::new(pool.clone());
-    let key = delivery_key(0x305);
-    admit_fixture(&webhook_store, key).await?;
-    let baseline = RepoWatchCursorCandidate::new(RepoWatchObservation::new(
-        Vec::new(),
-        RepoWatchRepositoryState::default(),
-    ));
-    let RepoWatchCommitOutcome::Committed(cursor) = event_store
-        .commit(
-            &repository()?,
-            RepoWatchCommitRequest::new(None, baseline, Vec::new()),
-        )
-        .await?
-    else {
-        panic!("fixture baseline must commit")
-    };
-    let observation = RepoWatchObservation::new(
-        Vec::new(),
-        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
-            pull_requests: vec![
-                pull_request(41, HEAD_SHA, "agent/targeted")?,
-                pull_request(42, OTHER_HEAD_SHA, "agent/untouched")?,
-            ],
-            workflow_runs: Vec::new(),
-            branch_heads: vec![RepoWatchBranchHead::new(
-                BranchName::try_new("main".to_owned())?,
-                CommitSha::try_new(BASE_REVISION.to_owned())?,
-            )],
-        })?,
-    );
+    let store = PostgresRepoWatchWebhookStore::new(pool);
+    seed_sized_pending_deliveries(&store, 1, MAX_PENDING_PAGE_BYTES + 1).await?;
 
-    let outcome = event_store
-        .commit_webhook_with_convergence(
-            &repository()?,
-            RepoWatchCommitRequest::from_webhook(
-                cursor.generation(),
-                RepoWatchCursorCandidate::new(observation),
-                Vec::new(),
-            ),
-            key,
-            Vec::new(),
-            &[merge_ready_assessment(41, HEAD_SHA)?],
-        )
+    let page = store
+        .load_pending(&repository()?, pending_page_size(), None)
         .await?;
-    let RepoWatchCommitOutcome::Committed(committed) = outcome else {
-        panic!("targeted webhook state and convergence evidence must commit")
-    };
-    let assessments = sqlx::query_as::<_, (String, Decimal)>(
-        "SELECT head_sha, pull_request_number
-           FROM repo_watch_pull_request_convergence_assessment
-          ORDER BY pull_request_number",
-    )
-    .fetch_all(&pool)
-    .await?;
-    let seal_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence")
-            .fetch_one(&pool)
-            .await?;
-    let disposition_generation: i64 = sqlx::query_scalar(
-        "SELECT resulting_cursor_generation
-           FROM repo_watch_webhook_disposition
-          WHERE hook_id = $1 AND delivery_id = $2",
-    )
-    .bind(Decimal::from(key.hook_id().get()))
-    .bind(key.delivery_id())
-    .fetch_one(&pool)
-    .await?;
 
-    assert_eq!(
-        assessments,
-        vec![(HEAD_SHA.to_owned(), Decimal::from(41_u64))]
-    );
-    assert_eq!(seal_count, 1);
-    assert_eq!(disposition_generation, committed.generation().get() as i64);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].body().len(), MAX_PENDING_PAGE_BYTES + 1);
     Ok(())
 }
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn primary_targeted_commit_records_evidence_before_its_base_branch()
--> Result<(), Box<dyn Error>> {
+async fn committed_disposition_is_refused_by_the_schema() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
-    let event_store = PostgresRepoWatchStore::new(pool.clone());
-    let key = delivery_key(TARGETED_DELIVERY_SEED);
-    admit_fixture(&webhook_store, key).await?;
-    let baseline = RepoWatchCursorCandidate::new(RepoWatchObservation::new(
-        Vec::new(),
-        RepoWatchRepositoryState::default(),
-    ));
-    let cursor = committed_cursor(
-        event_store
-            .commit(
-                &repository()?,
-                RepoWatchCommitRequest::new(None, baseline, Vec::new()),
-            )
-            .await?,
-    );
-    let observation = RepoWatchObservation::new(
-        Vec::new(),
-        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
-            pull_requests: vec![pull_request(
-                TARGETED_PULL_REQUEST,
-                HEAD_SHA,
-                TARGETED_HEAD_BRANCH,
-            )?],
-            workflow_runs: Vec::new(),
-            branch_heads: Vec::new(),
-        })?,
-    );
-    let assessment = merge_ready_assessment(TARGETED_PULL_REQUEST, HEAD_SHA)?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(0x501);
+    admit_fixture(&store, key).await?;
 
-    let committed = committed_cursor(
-        event_store
-            .commit_webhook_with_convergence(
-                &repository()?,
-                RepoWatchCommitRequest::from_webhook(
-                    cursor.generation(),
-                    RepoWatchCursorCandidate::new(observation),
-                    Vec::new(),
-                ),
-                key,
-                Vec::new(),
-                std::slice::from_ref(&assessment),
-            )
-            .await?,
-    );
-    let assessments = sqlx::query_as::<_, PersistedAssessmentFields>(
-        "SELECT head_sha, base_branch
-           FROM repo_watch_pull_request_convergence_assessment",
-    )
-    .fetch_all(&pool)
-    .await?;
-    let disposition_generation: i64 = sqlx::query_scalar(
-        "SELECT resulting_cursor_generation
-           FROM repo_watch_webhook_disposition
-          WHERE hook_id = $1 AND delivery_id = $2",
+    let rejected = sqlx::query(
+        "INSERT INTO repo_watch_webhook_disposition (hook_id, delivery_id, disposition)
+         VALUES ($1, $2, 'committed')",
     )
     .bind(Decimal::from(key.hook_id().get()))
     .bind(key.delivery_id())
-    .fetch_one(&pool)
-    .await?;
+    .execute(&pool)
+    .await;
 
-    assert_eq!(
-        assessments,
-        vec![PersistedAssessmentFields {
-            head_sha: assessment.head_sha().as_str().to_owned(),
-            base_branch: assessment.base_branch().as_str().to_owned(),
-        }]
+    assert!(
+        rejected.is_err(),
+        "shadow mode reserves no committed disposition"
     );
-    assert_eq!(disposition_generation, committed.generation().get() as i64);
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn primary_commit_rolls_back_cursor_and_event_when_terminal_delivery_is_missing()
--> Result<(), Box<dyn Error>> {
-    let (_container, pool) = migrated_postgres().await?;
-    let event_store = PostgresRepoWatchStore::new(pool.clone());
-    let baseline = RepoWatchCursorCandidate::new(RepoWatchObservation::new(
-        Vec::new(),
-        RepoWatchRepositoryState::default(),
-    ));
-    let RepoWatchCommitOutcome::Committed(cursor) = event_store
-        .commit(
-            &repository()?,
-            RepoWatchCommitRequest::new(None, baseline, Vec::new()),
-        )
-        .await?
-    else {
-        panic!("fixture baseline must commit")
-    };
-    let branch = BranchName::try_new("main".to_owned())?;
-    let observation = RepoWatchObservation::new(
-        Vec::new(),
-        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
-            pull_requests: Vec::new(),
-            workflow_runs: Vec::new(),
-            branch_heads: vec![RepoWatchBranchHead::new(
-                branch.clone(),
-                CommitSha::try_new(HEAD_SHA.to_owned())?,
-            )],
-        })?,
-    );
-    let event_id = RepoWatchEventId::from_uuid(Uuid::from_u128(0x304));
-    let event = RepoWatchEvent::branch_workflow(
-        event_id,
-        repository()?,
-        branch,
-        WorkflowName::try_new("checks".to_owned())?,
-        CheckConclusion::Success,
-    );
-    let occurrence = RepoWatchEventOccurrenceV1::from_parts(
-        event,
-        RepoWatchEventContentIdentityV1::from_bytes(POLL_ONLY_IDENTITY),
-    );
-    let result = event_store
-        .commit_webhook(
-            &repository()?,
-            RepoWatchCommitRequest::from_webhook(
-                cursor.generation(),
-                RepoWatchCursorCandidate::new(observation),
-                vec![occurrence],
-            ),
-            delivery_key(0x304),
-            vec![event_projection(POLL_ONLY_IDENTITY)?],
-        )
-        .await;
-    let Err(RepoWatchStoreError::WebhookTerminal(RepoWatchWebhookStoreError::MissingDelivery)) =
-        result
-    else {
-        panic!("a missing delivery must reject the atomic primary commit")
-    };
-
-    let stored_cursor = event_store
-        .load_cursor(&repository()?)
-        .await?
-        .expect("the baseline cursor remains");
-    let event_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM repo_watch_event WHERE event_id = $1")
-            .bind(Uuid::from_u128(0x304))
-            .fetch_one(&pool)
-            .await?;
-
-    assert_eq!(stored_cursor, cursor);
-    assert_eq!(event_count, 0);
     Ok(())
 }
 
@@ -948,6 +849,198 @@ async fn parity_view_classifies_all_four_shadow_statuses() -> Result<(), Box<dyn
     .fetch_all(&pool)
     .await?;
     assert_eq!(refresh, expected_refresh_targets());
+    Ok(())
+}
+
+/// One projected occurrence that already names why it may not match.
+fn caused_event_projection(
+    identity: [u8; 32],
+    cause: RepoWatchWebhookParityCauseV1,
+) -> Result<RepoWatchWebhookProjection, Box<dyn Error>> {
+    Ok(RepoWatchWebhookProjection::event(
+        RepoWatchEventContentIdentityV1::from_bytes(identity),
+        RepoWatchEventKindNameV1::BranchWorkflowRunCompleted,
+        vec![0x41],
+        Some(cause),
+    )?)
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_stored_projection_rejects_the_derived_poll_only_cause() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(0x701);
+    admit_fixture(&store, key).await?;
+
+    let rejected = store
+        .record_terminal(
+            key,
+            &projected_request(vec![caused_event_projection(
+                WEBHOOK_ONLY_IDENTITY,
+                RepoWatchWebhookParityCauseV1::PollOnlyFamily,
+            )?])?,
+        )
+        .await;
+
+    assert!(
+        rejected.is_err(),
+        "poll_only_family is derived for poll-side parity rows and must never be stored"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_webhook_only_row_reports_the_cause_its_delivery_recorded() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(0x601);
+    admit_fixture(&store, key).await?;
+    store
+        .record_terminal(
+            key,
+            &projected_request(vec![caused_event_projection(
+                WEBHOOK_ONLY_IDENTITY,
+                RepoWatchWebhookParityCauseV1::CrossDrainShadowGap,
+            )?])?,
+        )
+        .await?;
+
+    let causes = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT status, cause FROM repo_watch_webhook_parity
+          WHERE projection_kind = 'event'",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    assert_eq!(
+        causes,
+        vec![(
+            "webhook_only".to_owned(),
+            Some("cross_drain_shadow_gap".to_owned())
+        )]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_poll_only_family_row_derives_its_cause() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(0x602);
+    admit_fixture(&store, key).await?;
+    store
+        .record_terminal(key, &projected_request(Vec::new())?)
+        .await?;
+    seed_poll_only_family_event(&pool).await?;
+
+    let unexplained = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM repo_watch_webhook_parity
+          WHERE status IN ('webhook_only', 'poll_only') AND cause IS NULL",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let derived = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT status, cause FROM repo_watch_webhook_parity
+          WHERE status = 'poll_only'",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    assert_eq!(
+        derived,
+        vec![("poll_only".to_owned(), Some("poll_only_family".to_owned()))]
+    );
+    assert_eq!(unexplained, 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_uncaused_divergence_fails_the_parity_gate() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(0x603);
+    admit_fixture(&store, key).await?;
+    store
+        .record_terminal(
+            key,
+            &projected_request(vec![event_projection(WEBHOOK_ONLY_IDENTITY)?])?,
+        )
+        .await?;
+
+    let unexplained = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM repo_watch_webhook_parity
+          WHERE status IN ('webhook_only', 'poll_only') AND cause IS NULL",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(unexplained, 1);
+    Ok(())
+}
+
+/// A cursor commit that loses its generation race, writing nothing.
+fn conflicting_commit_request() -> Result<RepoWatchCommitRequest, Box<dyn Error>> {
+    Ok(RepoWatchCommitRequest::new(
+        Some(RepoWatchCursorGeneration::INITIAL),
+        RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+            Vec::new(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())?,
+        )),
+        Vec::new(),
+    ))
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_failed_cursor_commit_leaves_its_delivery_retryable() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let webhook = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let cursors = PostgresRepoWatchStore::new(pool);
+    let key = delivery_key(0x701);
+    admit_fixture(&webhook, key).await?;
+
+    let outcome = cursors
+        .commit(&repository()?, conflicting_commit_request()?)
+        .await?;
+
+    assert!(matches!(outcome, RepoWatchCommitOutcome::Conflict { .. }));
+    let pending = webhook
+        .load_pending(&repository()?, pending_page_size(), None)
+        .await?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].key(), key);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_delivery_recorded_before_its_cursor_commit_cannot_be_retried()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let webhook = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let cursors = PostgresRepoWatchStore::new(pool);
+    let key = delivery_key(0x702);
+    admit_fixture(&webhook, key).await?;
+    webhook
+        .record_terminal(key, &projected_request(Vec::new())?)
+        .await?;
+
+    let outcome = cursors
+        .commit(&repository()?, conflicting_commit_request()?)
+        .await?;
+
+    // This is what recording a delivery terminal before its cursor commit costs:
+    // the commit writes nothing and the delivery can never be loaded again.
+    assert!(matches!(outcome, RepoWatchCommitOutcome::Conflict { .. }));
+    let pending = webhook
+        .load_pending(&repository()?, pending_page_size(), None)
+        .await?;
+    assert!(pending.is_empty());
     Ok(())
 }
 

@@ -1,7 +1,7 @@
 //! Durable repository-watch cursor and event storage.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     error::Error,
     fmt,
     num::{NonZeroU16, NonZeroU32, NonZeroU64},
@@ -12,13 +12,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use signalbox_application::{
     RepoWatchBranchHead, RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment, RepoWatchConvergenceVerdict,
-    RepoWatchEventContentIdentityV1, RepoWatchEventIdentityFrontierEntryV1,
-    RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
-    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
-    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
+    RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment,
+    RepoWatchConvergenceVerdict, RepoWatchEventContentIdentityV1,
+    RepoWatchEventIdentityFrontierEntryV1, RepoWatchEventIdentityFrontierV1,
+    RepoWatchEventOccurrenceV1, RepoWatchObservation, RepoWatchPullRequestState,
+    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
     RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation,
-    RepoWatchWorkflowRunObservation,
+    RepoWatchWorkflowRunObservation, repo_watch_events_have_equal_identified_content,
 };
 use signalbox_domain::{
     BranchName, CheckRunName, CommitSha, GitHubObjectId, LabelName, PullRequestBody,
@@ -35,20 +36,22 @@ use sqlx::{
 use crate::{
     commit_failure_is_ambiguous,
     mapping::{
-        RepoWatchEventTargetStorageKind, RepoWatchReactionSubjectStorageKind,
-        positive_u64_from_numeric, repo_watch_check_conclusion_from_str,
-        repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
-        repo_watch_checks_outcome_to_str, repo_watch_convergence_verdict_to_str,
+        RepoWatchEventProducerStorageKind, RepoWatchEventTargetStorageKind,
+        RepoWatchReactionSubjectStorageKind, positive_u64_from_numeric,
+        repo_watch_check_conclusion_from_str, repo_watch_check_conclusion_to_str,
+        repo_watch_checks_outcome_from_str, repo_watch_checks_outcome_to_str,
         repo_watch_event_kind_from_str, repo_watch_event_kind_to_str,
+        repo_watch_event_producer_from_str, repo_watch_event_producer_to_str,
         repo_watch_event_target_from_str, repo_watch_event_target_to_str,
-        repo_watch_mergeable_state_from_str, repo_watch_mergeable_state_to_str,
-        repo_watch_observed_review_state_to_str, repo_watch_pull_request_lifecycle_from_str,
-        repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
-        repo_watch_reaction_change_to_str, repo_watch_reaction_subject_kind_from_str,
-        repo_watch_reaction_subject_kind_to_str, repo_watch_reaction_subject_to_storage,
-        repo_watch_review_decision_to_str, repo_watch_review_state_from_str,
-        repo_watch_review_state_to_str, repo_watch_stale_review_clearance_outcome_to_str,
-        repo_watch_thread_state_from_str, repo_watch_thread_state_to_str,
+        repo_watch_convergence_verdict_to_str, repo_watch_mergeable_state_from_str,
+        repo_watch_mergeable_state_to_str, repo_watch_observed_review_state_to_str,
+        repo_watch_pull_request_lifecycle_from_str, repo_watch_pull_request_lifecycle_to_str,
+        repo_watch_reaction_change_from_str, repo_watch_reaction_change_to_str,
+        repo_watch_reaction_subject_kind_from_str, repo_watch_reaction_subject_kind_to_str,
+        repo_watch_reaction_subject_to_storage, repo_watch_review_decision_to_str,
+        repo_watch_review_state_from_str, repo_watch_review_state_to_str,
+        repo_watch_stale_review_clearance_outcome_to_str, repo_watch_thread_state_from_str,
+        repo_watch_thread_state_to_str,
     },
     repo_watch_webhook::{
         RepoWatchWebhookDeliveryKey, RepoWatchWebhookDisposition, RepoWatchWebhookProjection,
@@ -747,14 +750,14 @@ impl PostgresRepoWatchStore {
         .bind(Json(payload))
         .execute(&mut *transaction)
         .await?;
-        insert_events(
-            &mut transaction,
-            repository,
-            generation,
-            request.producer(),
-            request.events(),
-        )
-        .await?;
+        let already_durable =
+            durable_occurrences(&mut transaction, repository, request.events(), None).await?;
+        let fresh = request
+            .events()
+            .iter()
+            .filter(|occurrence| is_new_occurrence(&already_durable, occurrence))
+            .collect::<Vec<_>>();
+        insert_events(&mut transaction, repository, generation, &fresh).await?;
         let cursor = RepoWatchCursor {
             repository: repository.clone(),
             generation,
@@ -1335,19 +1338,114 @@ async fn exact_replay(
     let stored =
         load_generation_events_in_transaction(transaction, repository, expected_replay_generation)
             .await?;
-    let exact_events = stored.len() == request.events().len()
-        && stored
-            .iter()
-            .zip(request.events())
-            .all(|(stored, requested)| {
-                stored.event == *requested.event()
-                    && stored.content_identity == requested.content_identity()
-            });
+    // A commit coalesces occurrences already durable when it runs, so the replayed
+    // generation holds the requested batch minus those. Comparing against the raw
+    // request would read a coalesced replay as a conflict.
+    let coalesced = durable_occurrences(
+        transaction,
+        repository,
+        request.events(),
+        Some(expected_replay_generation),
+    )
+    .await?;
+    let expected = request
+        .events()
+        .iter()
+        .filter(|occurrence| is_new_occurrence(&coalesced, occurrence))
+        .collect::<Vec<_>>();
+    // Every requested occurrence is accounted for: one this generation stored is
+    // compared on its whole event value, candidate identity included, while one
+    // it coalesced was just proven durable in an earlier generation under the
+    // same identity and identified content. A coalesced occurrence's own
+    // candidate identity is not compared, because it was never written — the
+    // fact is durable under the identity of the occurrence that first recorded
+    // it, so a fresh candidate has nothing to be checked against.
+    let exact_events = stored.len() == expected.len()
+        && stored.iter().zip(expected).all(|(stored, requested)| {
+            stored.event == *requested.event()
+                && stored.content_identity == requested.content_identity()
+        });
     if exact_events {
         Ok(Some(replayed))
     } else {
         Ok(None)
     }
+}
+
+/// Whether this occurrence still has to be written.
+///
+/// An occurrence already durable under the same identity *and* the same content
+/// is the one that was recorded before, so writing it again would mint a second
+/// row for a single occurrence. A provider entity that leaves the observation
+/// and returns re-derives exactly that, and before this check the duplicate
+/// aborted the whole cursor-and-event transaction and stalled the repository.
+///
+/// An occurrence whose identity is durable under different content is not that
+/// occurrence. It stays in the batch and the durable unique constraint rejects
+/// it, because a content identity that does not identify its content is the
+/// failure this design exists to prevent.
+fn is_new_occurrence(
+    durable: &HashMap<RepoWatchEventContentIdentityV1, RepoWatchEvent>,
+    occurrence: &RepoWatchEventOccurrenceV1,
+) -> bool {
+    match durable.get(&occurrence.content_identity()) {
+        Some(stored) => !is_same_occurrence(stored, occurrence.event()),
+        None => true,
+    }
+}
+
+/// Whether two events already known to share a content identity agree on the
+/// content that identity is derived from.
+///
+/// Only ever asked after a lookup by content identity, which is the precondition
+/// that makes the answer meaningful: identified content alone does not separate
+/// two occurrences of one recurring fact, because their sequences do.
+///
+/// Delegated to the application crate, which frames this content with the same
+/// function the identity is computed over. Comparing whole events here instead
+/// would let storage disagree with the identity it is coalescing on — a workflow
+/// renamed while its run was out of the observation restates its identity but
+/// not its display name, and the disagreement would abort the commit on the
+/// durable unique constraint.
+fn is_same_occurrence(stored: &RepoWatchEvent, derived: &RepoWatchEvent) -> bool {
+    repo_watch_events_have_equal_identified_content(stored, derived)
+}
+
+/// The already-durable occurrences among these, by content identity.
+///
+/// `before` bounds the search to generations earlier than the given one, which
+/// is how replay detection reconstructs the batch a past commit would have
+/// stored rather than reading a coalesced replay as a conflict.
+async fn durable_occurrences(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &RepositorySlug,
+    events: &[RepoWatchEventOccurrenceV1],
+    before: Option<RepoWatchCursorGeneration>,
+) -> Result<HashMap<RepoWatchEventContentIdentityV1, RepoWatchEvent>, RepoWatchStoreError> {
+    if events.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let requested = events
+        .iter()
+        .map(|occurrence| occurrence.content_identity().as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query_as::<_, EventRow>(EVENT_BY_CONTENT_IDENTITY_SQL)
+        .bind(repository.as_str())
+        .bind(EVENT_CONTENT_IDENTITY_VERSION_V1)
+        .bind(&requested)
+        .bind(before.map(generation_to_i64))
+        .fetch_all(&mut **transaction)
+        .await?;
+    let mut durable = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let bytes: [u8; 32] = row.content_identity.as_slice().try_into().map_err(|_| {
+            RepoWatchStoreError::from(RepoWatchPersistenceCorruption::InvalidEventContentIdentity)
+        })?;
+        let identity = RepoWatchEventContentIdentityV1::from_bytes(bytes);
+        let positioned = decode_positioned_event(repository, row)?;
+        durable.insert(identity, positioned.event);
+    }
+    Ok(durable)
 }
 
 fn validate_event_batch(
@@ -2117,8 +2215,7 @@ async fn insert_events(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &RepositorySlug,
     generation: RepoWatchCursorGeneration,
-    producer: RepoWatchEventProducer,
-    events: &[RepoWatchEventOccurrenceV1],
+    events: &[&RepoWatchEventOccurrenceV1],
 ) -> Result<(), RepoWatchStoreError> {
     for (index, occurrence) in events.iter().enumerate() {
         let ordinal =
@@ -2153,7 +2250,9 @@ async fn insert_events(
         .bind(encoded.event_version)
         .bind(EVENT_CONTENT_IDENTITY_VERSION_V1)
         .bind(occurrence.content_identity().as_bytes().as_slice())
-        .bind(producer.as_str())
+        .bind(repo_watch_event_producer_to_str(
+            RepoWatchEventProducerStorageKind::Poll,
+        ))
         .bind(encoded.target_kind)
         .bind(encoded.event_kind)
         .bind(encoded.pull_request_number)
@@ -2203,12 +2302,10 @@ async fn record_committed_webhook_terminal(
         None,
     )
     .map_err(|_| RepoWatchStoreError::InvalidWebhookCommit)?;
-    if record_terminal_in_transaction(transaction, delivery, &request).await?
-        != RepoWatchWebhookTerminalOutcome::Recorded
-    {
-        return Err(RepoWatchStoreError::InvalidWebhookCommit);
+    match record_terminal_in_transaction(transaction, delivery, &request).await? {
+        RepoWatchWebhookTerminalOutcome::Recorded
+        | RepoWatchWebhookTerminalOutcome::AlreadyTerminal => Ok(()),
     }
-    Ok(())
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -2289,6 +2386,23 @@ const EVENT_GENERATION_SQL: &str = "SELECT event_id, repository, cursor_generati
    FROM repo_watch_event
   WHERE repository = $1 AND cursor_generation = $2
   ORDER BY event_ordinal";
+
+const EVENT_BY_CONTENT_IDENTITY_SQL: &str = "SELECT event_id, repository, cursor_generation,
+        event_ordinal, event_version, content_identity_version, content_identity, producer,
+        target_kind, event_kind,
+        pull_request_number, head_sha, head_repository, base_branch,
+        head_branch, title, body, labels, draft, author,
+        previous_sha, current_sha, mergeable_state, checks_outcome,
+        check_run_name, conclusion, workflow_branch, workflow_name,
+        review_reviewer, review_state, review_commit, thread_id,
+        label_name, advanced_branch, reaction_subject_kind,
+        reaction_subject_id, reaction_reactor, reaction_content,
+        reaction_change
+   FROM repo_watch_event
+  WHERE repository = $1
+    AND content_identity_version = $2
+    AND content_identity = ANY($3)
+    AND ($4::bigint IS NULL OR cursor_generation < $4)";
 
 const EVENT_BY_ID_SQL: &str = "SELECT event_id, repository, cursor_generation, event_ordinal,
         event_version, content_identity_version, content_identity, producer,
@@ -2372,17 +2486,15 @@ fn decode_positioned_event(
     if row.event_version != EVENT_VERSION_V1 {
         return Err(RepoWatchPersistenceCorruption::UnsupportedEventVersion.into());
     }
-    if !matches!(
-        row.content_identity_version,
-        0 | EVENT_CONTENT_IDENTITY_VERSION_V1
-    ) {
+    if row.content_identity_version != EVENT_CONTENT_IDENTITY_VERSION_V1 {
         return Err(RepoWatchPersistenceCorruption::UnsupportedEventContentIdentityVersion.into());
     }
     if row.content_identity.len() != 32 {
         return Err(RepoWatchPersistenceCorruption::InvalidEventContentIdentity.into());
     }
-    if !matches!(row.producer.as_str(), "poll" | "webhook") {
-        return Err(RepoWatchPersistenceCorruption::UnknownEventProducer.into());
+    match repo_watch_event_producer_from_str(&row.producer) {
+        Some(RepoWatchEventProducerStorageKind::Poll) => {}
+        None => return Err(RepoWatchPersistenceCorruption::UnknownEventProducer.into()),
     }
     let target = repo_watch_event_target_from_str(&row.target_kind).ok_or(
         RepoWatchPersistenceCorruption::UnknownEventDiscriminator("target_kind"),
