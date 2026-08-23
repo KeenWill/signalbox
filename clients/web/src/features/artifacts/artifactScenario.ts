@@ -5,6 +5,32 @@ const sourceDigest = 'sha256:3729b2319da081a0710ba27da7af330c1236325cf8ed0a619cf
 const previewDigest = 'sha256:071d25f582ba9e6a8725e198dab884d70a3d7ce3ea84a74c66e65a1443c41a8e'
 type BlobView = WebBlobDescriptor['available_views'][number]
 
+// Hard inline-original byte ceiling. A qualifying preview/thumbnail derivation additionally proves
+// that the exact source digest passed the owning service's bounded image decoder (16,384 px per
+// axis, 67,108,864 total pixels, and 320 MiB decoder allocation). Originals without both proofs
+// remain ordinary-download only.
+export const INLINE_ORIGINAL_MAX_BYTES = 16n * 1024n * 1024n
+const BOUNDED_IMAGE_TRANSFORMATIONS = new Set(['image.preview', 'image.thumbnail'])
+
+export const selectBoundedOriginalView = (descriptor: WebBlobDescriptor): BlobView | undefined => {
+  const original = descriptor.available_views.find((view) => view.kind === 'browser_native')
+  if (original === undefined || BigInt(original.byte_length) > INLINE_ORIGINAL_MAX_BYTES) {
+    return undefined
+  }
+
+  const boundedDecodeProven = descriptor.available_views
+    .filter((view) => view.kind === 'preview' || view.kind === 'thumbnail')
+    .some((view) =>
+      view.derivations.some(
+        (derivation) =>
+          BOUNDED_IMAGE_TRANSFORMATIONS.has(derivation.transformation_name) &&
+          derivation.input_digests.includes(descriptor.digest),
+      ),
+    )
+
+  return boundedDecodeProven ? original : undefined
+}
+
 export const imageDownloadView: BlobView = {
   kind: 'download',
   media_type: 'image/png',
@@ -132,6 +158,10 @@ export const artifactPreviewIds = artifactScenario
       boundArtifactText(artifact.content, artifact.characterCount, 'preview').omittedCharacters > 0,
   )
   .map((artifact) => artifact.id)
-// Browser-native descriptors do not carry an enforceable decoded-dimension ceiling, so no
-// original is currently eligible for inline rendering. Originals remain available for download.
-export const artifactOriginalIds: ReadonlyArray<string> = []
+export const artifactOriginalIds = artifactScenario.flatMap((artifact) =>
+  artifact.kind === 'image' &&
+  artifact.source.kind === 'signalbox_blob' &&
+  selectBoundedOriginalView(artifact.source.descriptor) !== undefined
+    ? [artifact.id]
+    : [],
+)

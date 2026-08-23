@@ -40,16 +40,17 @@ const watchBrowser = (page: Page): BrowserProblems => {
   return problems
 }
 
-const expectOnlyFailedResourceConsoleErrors = (problems: BrowserProblems) => {
+const expectOnlyFailedResourceConsoleError = (
+  problems: BrowserProblems,
+  failedResponsePaths: readonly string[],
+  expectedPath: string,
+) => {
   expect(problems.pageErrors).toEqual([])
-  expect(
-    problems.consoleErrors.filter(
-      (message) =>
-        !/^Failed to load resource: the server responded with a status of 500(?: |$)/u.test(
-          message,
-        ),
-    ),
-  ).toEqual([])
+  expect(failedResponsePaths).toEqual([expectedPath])
+  expect(problems.consoleErrors).toHaveLength(1)
+  expect(problems.consoleErrors[0]).toMatch(
+    /^Failed to load resource: the server responded with a status of 500(?: |$)/u,
+  )
 }
 
 const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
@@ -77,7 +78,7 @@ test.afterEach(async ({ page }, testInfo) => {
   })
 })
 
-test('selects bounded image views while keeping originals download-only', async ({ page }) => {
+test('selects bounded image views and explicitly loads an admitted original', async ({ page }) => {
   const problems = watchBrowser(page)
 
   const previewResponse = page.waitForResponse(
@@ -95,16 +96,27 @@ test('selects bounded image views while keeping originals download-only', async 
   ).toBe(0)
 
   const artifact = page.getByRole('article', { name: 'Artifact orbital-map.png' })
-  await expect(artifact.getByRole('button', { name: 'Load original' })).toHaveCount(0)
-  await expect(
-    artifact.getByText(/Original inline rendering requires enforced byte and decode bounds/),
-  ).toBeVisible()
+  const originalResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === originalPath,
+  )
+  const loadOriginal = artifact.getByRole('button', { name: 'Load original' })
+  await loadOriginal.focus()
+  await page.keyboard.press('Enter')
+  await expect(artifact.getByRole('button', { name: 'Original loaded' })).toBeFocused()
+  const original = artifact.getByRole('img', { name: 'Original of orbital-map.png' })
+  await expect(original).toBeVisible()
+  await expect(original).toHaveAttribute('src', originalPath)
+  expect((await originalResponse).headers()['content-type']).toContain('image/png')
   await expect(artifact.getByRole('link', { name: 'Download' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
 test('falls back to metadata when automatic image views fail', async ({ page }) => {
   const problems = watchBrowser(page)
+  const failedResponsePaths: string[] = []
+  page.on('response', (response) => {
+    if (response.status() >= 400) failedResponsePaths.push(new URL(response.url()).pathname)
+  })
   await page.unroute('**/api/blobs/**/content/image-png')
   await page.route(`**${previewPath}`, async (route) => {
     await route.fulfill({ status: 500, body: 'unavailable' })
@@ -118,7 +130,7 @@ test('falls back to metadata when automatic image views fail', async ({ page }) 
     'No admitted inline image view could be loaded. Metadata and download remain available.',
   )
   await expect(artifact.getByRole('link', { name: 'Download' })).toBeVisible()
-  expectOnlyFailedResourceConsoleErrors(problems)
+  expectOnlyFailedResourceConsoleError(problems, failedResponsePaths, previewPath)
 })
 
 test('expands text through a bounded keyboard action', async ({ page }) => {

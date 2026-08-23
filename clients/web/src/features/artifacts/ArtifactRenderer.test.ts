@@ -4,10 +4,12 @@ import { imageViewLabel, registeredArtifactKinds, selectImageView } from './Arti
 import {
   artifactOriginalIds,
   artifactPreviewIds,
+  INLINE_ORIGINAL_MAX_BYTES,
   imageArtifact,
   imageDownloadView,
   imageOriginalView,
   imagePreviewView,
+  selectBoundedOriginalView,
 } from './artifactScenario'
 import {
   ARTIFACT_EXPANDED_CHARACTERS,
@@ -28,8 +30,33 @@ describe('artifact renderer compatibility', () => {
     expect(artifactPreviewIds).toEqual(['incident-notes', 'renderer-source'])
   })
 
-  it('keeps browser-native originals ineligible without decoded-size bounds', () => {
-    expect(artifactOriginalIds).toEqual([])
+  it('derives original-capable IDs only from byte-bounded, decode-proven descriptors', () => {
+    expect(artifactOriginalIds).toEqual(['orbital-map'])
+    expect(selectBoundedOriginalView(imageArtifact)).toBe(imageOriginalView)
+  })
+
+  it('keeps oversized originals download-only', () => {
+    const oversizedLength = (INLINE_ORIGINAL_MAX_BYTES + 1n).toString()
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      byte_length: oversizedLength,
+      available_views: [
+        imageDownloadView,
+        { ...imageOriginalView, byte_length: oversizedLength },
+        imagePreviewView,
+      ],
+    }
+
+    expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
+  })
+
+  it('keeps originals without bounded decode provenance download-only', () => {
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      available_views: [imageDownloadView, imageOriginalView],
+    }
+
+    expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
   })
 
   it('registers the closed text, code, and image renderer set', () => {
