@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -19,6 +21,7 @@ from review_driver import (  # noqa: E402
     TranscriptSnapshot,
     attempt_identities,
     parser,
+    run_process,
     transcript_snapshot,
 )
 
@@ -208,6 +211,20 @@ class ReviewDriverTests(unittest.TestCase):
             parser().parse_args(["missing-owner", "41", "/tmp/signalbox.sock"])
         with self.assertRaises(SystemExit):
             parser().parse_args([REPOSITORY, "0", "/tmp/signalbox.sock"])
+        with self.assertRaises(SystemExit):
+            parser().parse_args(["sample-owner/.", "41", "/tmp/signalbox.sock"])
+        with self.assertRaises(SystemExit):
+            parser().parse_args(["sample-owner/..", "41", "/tmp/signalbox.sock"])
+
+    def test_external_command_timeout_is_typed(self) -> None:
+        timeout = subprocess.TimeoutExpired(["signalbox"], 0.25)
+
+        with patch("review_driver.subprocess.run", side_effect=timeout):
+            with self.assertRaises(DriverFailure) as caught:
+                run_process(["signalbox"], "start-run", 0.25)
+
+        self.assertEqual(caught.exception.code, "stage-timeout")
+        self.assertEqual(caught.exception.stage, "start-run")
 
     def test_resume_after_interrupted_activation_reuses_session_and_attempt(self) -> None:
         facts = pull_request_facts(HEAD_ONE)

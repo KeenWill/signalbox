@@ -206,8 +206,9 @@ def pass_identities(facts: PullRequestFacts, stage: str) -> PassIdentities:
 
 
 class GitHubCli:
-    def __init__(self, executable: str = "gh") -> None:
+    def __init__(self, executable: str = "gh", timeout_seconds: float = 1800.0) -> None:
         self.executable = executable
+        self.timeout_seconds = timeout_seconds
 
     def read_pull_request(self, repository: str, number: int) -> PullRequestFacts:
         command = [
@@ -215,7 +216,7 @@ class GitHubCli:
             "api",
             f"repos/{repository}/pulls/{number}",
         ]
-        result = run_process(command, "github-facts")
+        result = run_process(command, "github-facts", self.timeout_seconds)
         try:
             payload = json.loads(result.stdout)
             head = payload["head"]
@@ -238,9 +239,15 @@ class GitHubCli:
 
 
 class SignalboxCli:
-    def __init__(self, socket_path: Path, executable: str = "signalbox") -> None:
+    def __init__(
+        self,
+        socket_path: Path,
+        executable: str = "signalbox",
+        timeout_seconds: float = 1800.0,
+    ) -> None:
         self.socket_path = socket_path
         self.executable = executable
+        self.timeout_seconds = timeout_seconds
 
     def _review(self, arguments: Sequence[str], stage: str) -> str:
         command = [
@@ -250,7 +257,7 @@ class SignalboxCli:
             "review",
             *arguments,
         ]
-        return run_process(command, stage).stdout
+        return run_process(command, stage, self.timeout_seconds).stdout
 
     def create_target(self, facts: PullRequestFacts, target_id: str, command_id: str) -> None:
         self._review(
@@ -426,8 +433,9 @@ class SignalboxCli:
 
 
 class UnixSessionClient:
-    def __init__(self, socket_path: Path) -> None:
+    def __init__(self, socket_path: Path, timeout_seconds: float = 1800.0) -> None:
         self.socket_path = socket_path
+        self.timeout_seconds = timeout_seconds
 
     def _request(self, request: dict[str, object], *, sequence: bool) -> list[dict[str, object]]:
         frame = {"version": 1, "request_id": "1", "request": request}
@@ -435,40 +443,62 @@ class UnixSessionClient:
         messages: list[dict[str, object]] = []
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(self.timeout_seconds)
                 connection.connect(str(self.socket_path))
                 connection.sendall(encoded)
-                reader = connection.makefile("rb")
-                while True:
-                    line = reader.readline()
-                    if not line:
-                        raise DriverFailure(
-                            "socket-response-incomplete",
-                            "session-socket",
-                            "daemon closed the socket before the response completed",
-                        )
-                    response = json.loads(line)
-                    if response.get("version") != 1 or response.get("request_id") != "1":
-                        raise DriverFailure(
-                            "socket-response-invalid",
-                            "session-socket",
-                            "daemon response version or request identity did not match",
-                        )
-                    message = response.get("message")
-                    if not isinstance(message, dict) or not isinstance(message.get("type"), str):
-                        raise DriverFailure(
-                            "socket-response-invalid",
-                            "session-socket",
-                            "daemon response did not contain a typed message",
-                        )
-                    if message["type"] == "error":
-                        raise DriverFailure(
-                            "socket-command-rejected",
-                            "session-socket",
-                            f"daemon rejected request with {message.get('code', 'unknown')}",
-                        )
-                    messages.append(message)
-                    if not sequence or message["type"] == "transcript_snapshot_end":
-                        return messages
+                with connection.makefile("rb") as reader:
+                    while True:
+                        line = reader.readline()
+                        if not line:
+                            raise DriverFailure(
+                                "socket-response-incomplete",
+                                "session-socket",
+                                "daemon closed the socket before the response completed",
+                            )
+                        response = json.loads(line)
+                        if not isinstance(response, dict):
+                            raise DriverFailure(
+                                "socket-response-invalid",
+                                "session-socket",
+                                "daemon response was not an object",
+                            )
+                        if (
+                            response.get("version") != 1
+                            or response.get("request_id") != "1"
+                        ):
+                            raise DriverFailure(
+                                "socket-response-invalid",
+                                "session-socket",
+                                "daemon response version or request identity did not match",
+                            )
+                        message = response.get("message")
+                        if not isinstance(message, dict) or not isinstance(
+                            message.get("type"), str
+                        ):
+                            raise DriverFailure(
+                                "socket-response-invalid",
+                                "session-socket",
+                                "daemon response did not contain a typed message",
+                            )
+                        if message["type"] == "error":
+                            raise DriverFailure(
+                                "socket-command-rejected",
+                                "session-socket",
+                                "daemon rejected request with "
+                                f"{message.get('code', 'unknown')}",
+                            )
+                        messages.append(message)
+                        if (
+                            not sequence
+                            or message["type"] == "transcript_snapshot_end"
+                        ):
+                            return messages
+        except TimeoutError as error:
+            raise DriverFailure(
+                "stage-timeout",
+                "session-socket",
+                f"daemon request exceeded {self.timeout_seconds:g} seconds",
+            ) from error
         except OSError as error:
             raise DriverFailure("socket-io", "session-socket", str(error)) from error
         except json.JSONDecodeError as error:
@@ -866,14 +896,23 @@ def pass_outcome(turn_state: str) -> str:
     return "failed"
 
 
-def run_process(command: Sequence[str], stage: str) -> subprocess.CompletedProcess[str]:
+def run_process(
+    command: Sequence[str], stage: str, timeout_seconds: float
+) -> subprocess.CompletedProcess[str]:
     try:
         result = subprocess.run(
             command,
             check=False,
             capture_output=True,
             text=True,
+            timeout=timeout_seconds,
         )
+    except subprocess.TimeoutExpired as error:
+        raise DriverFailure(
+            "stage-timeout",
+            stage,
+            f"external command exceeded {timeout_seconds:g} seconds",
+        ) from error
     except OSError as error:
         raise DriverFailure("command-exec", stage, str(error)) from error
     if result.returncode != 0:
@@ -885,6 +924,11 @@ def run_process(command: Sequence[str], stage: str) -> subprocess.CompletedProce
 def repository_argument(value: str) -> str:
     if REPOSITORY_PATTERN.fullmatch(value) is None:
         raise argparse.ArgumentTypeError("repository must be an OWNER/NAME slug")
+    owner, name = value.split("/", 1)
+    if owner in {".", ".."} or name in {".", ".."}:
+        raise argparse.ArgumentTypeError(
+            "repository owner and name must not be relative path segments"
+        )
     return value
 
 
@@ -932,9 +976,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
     parsed = parser().parse_args(arguments)
     try:
         driver = ReviewDriver(
-            GitHubCli(parsed.gh_bin),
-            SignalboxCli(parsed.socket, parsed.signalbox_bin),
-            UnixSessionClient(parsed.socket),
+            GitHubCli(parsed.gh_bin, parsed.timeout_seconds),
+            SignalboxCli(
+                parsed.socket, parsed.signalbox_bin, parsed.timeout_seconds
+            ),
+            UnixSessionClient(parsed.socket, parsed.timeout_seconds),
             parsed.timeout_seconds,
             parsed.poll_seconds,
         )
