@@ -377,6 +377,7 @@ impl RunnerWorkspaceStore {
             Err(error) => {
                 staging
                     .cleanup()
+                    .await
                     .map_err(PrepareRepositoryWorkspaceError::Storage)?;
                 return Err(PrepareRepositoryWorkspaceError::Preparation(error));
             }
@@ -455,6 +456,7 @@ impl RunnerWorkspaceStore {
             }
             staging
                 .cleanup()
+                .await
                 .map_err(PrepareRepositoryWorkspaceError::Storage)?;
             let placement = open_directory(&session, &placement_name)
                 .map_err(RunnerWorkspaceError::Io)
@@ -904,35 +906,56 @@ impl UnpublishedDirectory {
             .ok_or(RunnerWorkspaceError::ManifestConflict)
     }
 
-    fn cleanup(mut self) -> Result<(), RunnerWorkspaceError> {
-        self.remove()?;
-        self.parent
-            .sync_all()
-            .map_err(RunnerWorkspaceError::CommitAmbiguous)
+    async fn cleanup(mut self) -> Result<(), RunnerWorkspaceError> {
+        let cleanup = self.take_cleanup()?;
+        tokio::task::spawn_blocking(move || cleanup.remove_and_sync())
+            .await
+            .map_err(|error| RunnerWorkspaceError::Io(io::Error::other(error)))?
     }
 
     fn disarm(&mut self) {
         self.directory = None;
     }
 
-    fn remove(&mut self) -> Result<(), RunnerWorkspaceError> {
-        for directory in &self.cleanup_directories {
-            fchmod(directory, Mode::RUSR | Mode::WUSR | Mode::XUSR).map_err(rustix_io)?;
-        }
+    fn take_cleanup(&mut self) -> Result<UnpublishedDirectoryCleanup, RunnerWorkspaceError> {
         let directory = self
             .directory
             .take()
             .ok_or(RunnerWorkspaceError::ManifestConflict)?;
-        remove_open_directory_tree(&self.parent, &self.name, directory)
+        Ok(UnpublishedDirectoryCleanup {
+            parent: self.parent.try_clone().map_err(RunnerWorkspaceError::Io)?,
+            name: self.name.clone(),
+            directory,
+            cleanup_directories: std::mem::take(&mut self.cleanup_directories),
+        })
     }
 }
 
 impl Drop for UnpublishedDirectory {
     fn drop(&mut self) {
-        if self.directory.is_some() {
-            let _ = self.remove();
-            let _ = self.parent.sync_all();
+        if let Ok(cleanup) = self.take_cleanup() {
+            let _ =
+                std::thread::scope(|scope| scope.spawn(move || cleanup.remove_and_sync()).join());
         }
+    }
+}
+
+struct UnpublishedDirectoryCleanup {
+    parent: File,
+    name: OsString,
+    directory: File,
+    cleanup_directories: Vec<File>,
+}
+
+impl UnpublishedDirectoryCleanup {
+    fn remove_and_sync(self) -> Result<(), RunnerWorkspaceError> {
+        for directory in &self.cleanup_directories {
+            fchmod(directory, Mode::RUSR | Mode::WUSR | Mode::XUSR).map_err(rustix_io)?;
+        }
+        remove_open_directory_tree(&self.parent, &self.name, self.directory)?;
+        self.parent
+            .sync_all()
+            .map_err(RunnerWorkspaceError::CommitAmbiguous)
     }
 }
 
