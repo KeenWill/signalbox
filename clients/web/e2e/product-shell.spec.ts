@@ -63,6 +63,7 @@ const sessionWorkspaceFixture = {
           kind: 'tool_batch_transition',
           body: {
             type: 'tool_batch',
+            projected_member_index: 0,
             turn_id: '00000000-0000-0000-0000-000000000042',
             producing_model_call_id: '00000000-0000-0000-0000-000000000142',
             state: {
@@ -109,6 +110,7 @@ const sessionWorkspaceFixture = {
           kind: 'tool_batch_transition',
           body: {
             type: 'tool_batch',
+            projected_member_index: 0,
             turn_id: '00000000-0000-0000-0000-000000000042',
             producing_model_call_id: '00000000-0000-0000-0000-000000000142',
             state: {
@@ -162,6 +164,7 @@ const sessionWorkspaceFixture = {
           kind: 'tool_batch_transition',
           body: {
             type: 'tool_batch',
+            projected_member_index: 0,
             turn_id: '00000000-0000-0000-0000-000000000042',
             producing_model_call_id: '00000000-0000-0000-0000-000000000142',
             state: {
