@@ -289,6 +289,34 @@ test('keeps an oversized automatic derivative metadata-only', async ({ page }) =
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('retries a transient automatic preview failure', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useArtifactScenario(page)
+  const preview = imageArtifact.available_views.find((view) => view.kind === 'preview')
+  let previewAttempts = 0
+  await page.route('**/api/blobs/**/content/image-png', (route) => {
+    if (
+      route.request().headers().range &&
+      new URL(route.request().url()).pathname === preview?.content_url
+    ) {
+      previewAttempts += 1
+      if (previewAttempts === 1) return route.fulfill({ status: 503 })
+    }
+    return route.fallback()
+  })
+  await page.goto('/sessions')
+
+  await submitArtifactWithoutMouse(page)
+  const retry = page.getByRole('button', { name: 'Retry preview check' })
+  await expect(retry).toBeEnabled()
+  await retry.click()
+  await expect(
+    page.getByRole('img', { name: `Preview of ${imageArtifact.display_filename[0]}` }),
+  ).toBeVisible()
+  expect(previewAttempts).toBe(2)
+  expect(problems.pageErrors).toEqual([])
+})
+
 test('retries a transient original header failure', async ({ page }) => {
   const problems = watchBrowser(page)
   await useArtifactScenario(page, admittedOriginalArtifact)

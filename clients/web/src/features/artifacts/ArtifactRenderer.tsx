@@ -51,9 +51,13 @@ const viewByKind = (
 const displayName = (descriptor: WebBlobDescriptor): string =>
   descriptor.display_filename[0] ?? descriptor.digest
 
-const derivativeDigest = (view: WebBlobAvailableView): string | undefined => {
-  const digests = view.derivations.flatMap((derivation) => derivation.output_digests)
-  return digests.length === 1 ? digests[0] : undefined
+export const derivativeDigest = (view: WebBlobAvailableView): string | undefined => {
+  const match = /^\/api\/blobs\/([^/]+)\/content\//.exec(view.content_url)
+  if (!match?.[1]) return undefined
+  const contentDigest = decodeURIComponent(match[1])
+  return view.derivations
+    .flatMap((derivation) => derivation.output_digests)
+    .find((digest) => digest === contentDigest)
 }
 
 const readAsciiTag = (bytes: Uint8Array, offset: number, length = 4): string =>
@@ -245,43 +249,51 @@ export function ArtifactRenderer({
         : undefined
   const derivation = rendered?.derivations[0]
 
-  const admitAutomatic = useCallback(() => {
-    if (!automatic || !automaticDigest || !automaticWithinByteLimit || automaticStatus !== 'idle') {
-      return
-    }
-    automaticProbeController.current?.abort()
-    const controller = new AbortController()
-    automaticProbeController.current = controller
-    setAutomaticStatus('checking')
-    void productTransport
-      .readBlobHeader(
-        {
-          contentUrl: automatic.content_url,
-          digest: automaticDigest,
-          byteLength: automatic.byte_length,
-          maxBytes: MAX_INLINE_DERIVATIVE_BYTES,
-        },
-        controller.signal,
-      )
-      .then((bytes) => {
-        if (controller.signal.aborted) return
-        const dimensions = readImageDimensions(bytes)
-        if (
-          !dimensions ||
-          !isAnimationSafeImageHeader(bytes) ||
-          dimensions.width <= 0 ||
-          dimensions.height <= 0 ||
-          dimensions.width * dimensions.height > MAX_INLINE_ORIGINAL_PIXELS
-        ) {
-          setAutomaticStatus('rejected')
-          return
-        }
-        setAutomaticStatus('admitted')
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) setAutomaticStatus('failed')
-      })
-  }, [automatic, automaticDigest, automaticStatus, automaticWithinByteLimit])
+  const admitAutomatic = useCallback(
+    (retry = false) => {
+      if (
+        !automatic ||
+        !automaticDigest ||
+        !automaticWithinByteLimit ||
+        (automaticStatus !== 'idle' && !(retry && automaticStatus === 'failed'))
+      ) {
+        return
+      }
+      automaticProbeController.current?.abort()
+      const controller = new AbortController()
+      automaticProbeController.current = controller
+      setAutomaticStatus('checking')
+      void productTransport
+        .readBlobHeader(
+          {
+            contentUrl: automatic.content_url,
+            digest: automaticDigest,
+            byteLength: automatic.byte_length,
+            maxBytes: MAX_INLINE_DERIVATIVE_BYTES,
+          },
+          controller.signal,
+        )
+        .then((bytes) => {
+          if (controller.signal.aborted) return
+          const dimensions = readImageDimensions(bytes)
+          if (
+            !dimensions ||
+            !isAnimationSafeImageHeader(bytes) ||
+            dimensions.width <= 0 ||
+            dimensions.height <= 0 ||
+            dimensions.width * dimensions.height > MAX_INLINE_ORIGINAL_PIXELS
+          ) {
+            setAutomaticStatus('rejected')
+            return
+          }
+          setAutomaticStatus('admitted')
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) setAutomaticStatus('failed')
+        })
+    },
+    [automatic, automaticDigest, automaticStatus, automaticWithinByteLimit],
+  )
 
   const admitOriginal = useCallback(() => {
     if (!original || !originalWithinByteLimit || originalStatus === 'checking') return
@@ -387,6 +399,11 @@ export function ArtifactRenderer({
             <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
               Original admitted for {displayName(descriptor)}
             </span>
+          )}
+          {automatic && automaticStatus === 'failed' && (
+            <button type="button" onClick={() => admitAutomatic(true)}>
+              Retry preview check
+            </button>
           )}
           {original && (
             <button

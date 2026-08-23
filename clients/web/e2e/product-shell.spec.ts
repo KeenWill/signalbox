@@ -171,6 +171,21 @@ test('uses a navigation sheet on a phone viewport and unwinds it with Escape', a
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('restores desktop navigation dismissal to the visible main region', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /^Open navigation/ }).click()
+  const navigation = page.getByRole('dialog', { name: 'Product navigation' })
+  await navigation.getByRole('button', { name: 'Close navigation' }).click()
+  await expect(navigation).toBeHidden()
+  await expect(page.getByRole('main')).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('closes the phone navigation sheet after route selection', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -234,6 +249,7 @@ test('retries a transient bootstrap failure without reloading', async ({ page })
   await expect(
     page.getByText(`${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`),
   ).toBeVisible()
+  await expect(page.getByRole('status')).toBeFocused()
   expect(problems.pageErrors).toEqual([])
   expect(
     problems.consoleErrors.every(

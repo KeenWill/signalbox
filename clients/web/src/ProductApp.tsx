@@ -366,6 +366,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const primaryRef = useRef<HTMLElement>(null)
   const artifactButtonRef = useRef<HTMLButtonElement>(null)
   const artifactDigestRef = useRef<HTMLInputElement>(null)
+  const bootstrapStatusRef = useRef<HTMLSpanElement>(null)
   const artifactSideWasOpen = useRef(false)
   const inspectorWasInSheet = useRef(false)
   const navigationSelectedRoute = useRef(false)
@@ -511,10 +512,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         <div className="surface-question">
           <p>{copy.question}</p>
           <span
+            ref={bootstrapStatusRef}
             className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
             role="status"
             aria-live="polite"
             aria-atomic="true"
+            tabIndex={-1}
           >
             {bootstrap.isSuccess
               ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
@@ -523,7 +526,17 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
                 : 'Checking contract…'}
           </span>
           {bootstrap.isError && (
-            <button type="button" onClick={() => void bootstrap.refetch()}>
+            <button
+              type="button"
+              onClick={(event) => {
+                const restoreFocus = document.activeElement === event.currentTarget
+                void bootstrap.refetch().then((result) => {
+                  if (result.isSuccess && restoreFocus) {
+                    requestAnimationFrame(() => bootstrapStatusRef.current?.focus())
+                  }
+                })
+              }}
+            >
               Retry bootstrap
             </button>
           )}
@@ -564,7 +577,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
                 requestAnimationFrame(() => primaryRef.current?.focus())
                 return
               }
-              document.querySelector<HTMLElement>('[aria-label="Open navigation"]')?.focus()
+              const opener = document.querySelector<HTMLElement>('[aria-label="Open navigation"]')
+              if (opener && opener.getClientRects().length > 0) opener.focus()
+              else primaryRef.current?.focus()
             }}
           >
             <Dialog.Title className="sr-only">Product navigation</Dialog.Title>

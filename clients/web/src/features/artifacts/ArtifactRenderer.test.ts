@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import {
+  derivativeDigest,
   imageViewLabel,
   isAnimationSafeImageHeader,
   isInlineDerivativeByteLengthAdmitted,
@@ -83,6 +84,19 @@ describe('artifact renderer compatibility', () => {
 
   it('rejects an automatic derivative beyond the inline byte ceiling', () => {
     expect(isInlineDerivativeByteLengthAdmitted(String(MAX_INLINE_ORIGINAL_BYTES + 1))).toBe(false)
+  })
+
+  it('correlates a derivative URL with one matching output among several', () => {
+    const extraDigest = `sha256:${'a'.repeat(64)}`
+    const multiOutputPreview = {
+      ...preview,
+      derivations: preview.derivations.map((derivation) => ({
+        ...derivation,
+        output_digests: [extraDigest, ...derivation.output_digests],
+      })),
+    }
+
+    expect(derivativeDigest(multiOutputPreview)).toBe(preview.derivations[0]?.output_digests[0])
   })
 
   it('rejects an original whose view length differs from the immutable blob length', () => {
