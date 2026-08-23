@@ -671,6 +671,34 @@ async fn pull_request_dispatch_census_has_its_target_ordering_index() -> Result<
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_watch_dispatch_census_has_its_target_indexes() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let event_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND indexname = 'repo_watch_event_pull_request_target'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let action_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND indexname = 'repo_watch_dispatch_action_event_target'",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(event_definition.contains("(repository, pull_request_number, event_id)"));
+    assert!(event_definition.contains("target_kind = 'pull_request'"));
+    assert!(
+        action_definition
+            .contains("(event_id, recorded_at DESC, dispatch_id DESC, session_id DESC)")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn generic_failure_recording_rejects_no_model_activity() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
     let store = PostgresConvergenceSweepStore::new(pool.clone());

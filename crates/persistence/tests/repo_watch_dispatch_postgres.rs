@@ -5882,7 +5882,6 @@ const COMMISSION_COMMAND_ID: u128 = 0x60_100;
 const COMMISSION_AFTER_WATCH_COMMAND_ID: u128 = 0x60_110;
 const STOP_WATCH_DISPATCH_COMMAND_ID: u128 = 0x60_111;
 const INACTIVITY_COMMISSION_COMMAND_ID: u128 = 0x60_112;
-const STOP_INACTIVITY_WATCH_COMMAND_ID: u128 = 0x60_113;
 const STOP_INACTIVITY_COMMISSION_COMMAND_ID: u128 = 0x60_114;
 const RESUME_INACTIVITY_WATCH_COMMAND_ID: u128 = 0x60_115;
 const REPLACEMENT_COMMISSION_COMMAND_ID: u128 = 0x60_116;
@@ -6053,17 +6052,21 @@ async fn repository_watch_session_prevents_inactivity_parking() -> Result<(), Bo
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
     let watch_session = fixture.session(0);
     let goal_store = GoalRepository::new(fixture.pool.clone());
-    let stopped_watch = goal_store
-        .handle_user_command(
-            GoalUserCommand::new(
-                DurableCommandId::from_uuid(Uuid::from_u128(STOP_INACTIVITY_WATCH_COMMAND_ID)),
-                watch_session,
-                GoalUserAction::Stop {
-                    descendant_scope: DescendantTerminationScope::ParentAlone,
-                },
-            ),
-            None,
-            |_| None,
+    let watch_turn = TurnId::from_uuid(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT turn_id FROM repo_watch_dispatch_delivery WHERE dispatch_id = $1",
+        )
+        .bind(fixture.dispatch_id.as_uuid())
+        .fetch_one(&fixture.pool)
+        .await?,
+    );
+    mark_queued_turn_failed(&fixture.pool, watch_session, watch_turn, 0x60_116).await?;
+    let blocked_watch = goal_store
+        .block_execution_failure(
+            watch_session,
+            GoalNeed::try_new(String::from("retry repository-watch work"))
+                .expect("fixture goal need is valid"),
+            GoalSchedulerProvenance::new(watch_turn),
         )
         .await?;
     let commissioned =
@@ -6103,7 +6106,10 @@ async fn repository_watch_session_prevents_inactivity_parking() -> Result<(), Bo
                 watch_session,
                 GoalUserAction::Resume(None),
             ),
-            None,
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x60_119)),
+                TurnId::from_uuid(Uuid::from_u128(0x60_11a)),
+            )),
             |_| None,
         )
         .await?;
@@ -6119,7 +6125,7 @@ async fn repository_watch_session_prevents_inactivity_parking() -> Result<(), Bo
         )
         .await?;
 
-    assert_applied_goal_command(stopped_watch);
+    assert_applied_goal_transition(blocked_watch);
     assert_applied_goal_command(stopped_commission);
     assert_applied_goal_command(resumed_watch);
     assert_eq!(

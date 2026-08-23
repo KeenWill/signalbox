@@ -439,6 +439,9 @@ impl ConvergenceSweepRuntime {
                             cause = %error,
                             "convergence sweep inactivity decision could not be recorded"
                         );
+                        if error.commit_ambiguous() {
+                            return;
+                        }
                         self.record_failure(
                             target,
                             Some(&observation),
@@ -751,6 +754,7 @@ impl ConvergenceSweepRuntime {
         let head_branch = branch_at(pull, "headRefName")?;
         let base_branch = branch_at(pull, "baseRefName")?;
         let base_sha = commit_at(pull, "baseRefOid")?;
+        let head_repository = head_repository_at(pull)?;
         let checked_head_sha = checked_head_at(pull)?;
         let mergeable_state = mergeable_state_at(pull)?;
         let mut thread_states = review_thread_states(
@@ -874,17 +878,15 @@ impl ConvergenceSweepRuntime {
             if mergeable_state_at(revalidated_pull)? != mergeable_state {
                 return Err(CensusError::State);
             }
+            ensure_head_repository_stable(
+                &head_repository,
+                &head_repository_at(revalidated_pull)?,
+            )?;
         }
         Ok(FetchedPullRequest {
             base_branch,
             head_branch,
-            head_repository: RepositorySlug::try_new(
-                pull.pointer("/headRepository/name_with_owner")
-                    .and_then(Value::as_str)
-                    .ok_or(CensusError::Shape)?
-                    .to_lowercase(),
-            )
-            .map_err(|_| CensusError::Shape)?,
+            head_repository,
             facts: PullRequestConvergenceFacts::new(
                 head_sha,
                 checked_head_sha,
@@ -1318,6 +1320,27 @@ fn commission_content(
     .map_err(|_| ())
 }
 
+fn head_repository_at(pull: &Value) -> Result<RepositorySlug, CensusError> {
+    RepositorySlug::try_new(
+        pull.pointer("/headRepository/name_with_owner")
+            .and_then(Value::as_str)
+            .ok_or(CensusError::Shape)?
+            .to_lowercase(),
+    )
+    .map_err(|_| CensusError::Shape)
+}
+
+fn ensure_head_repository_stable(
+    observed: &RepositorySlug,
+    revalidated: &RepositorySlug,
+) -> Result<(), CensusError> {
+    if observed == revalidated {
+        Ok(())
+    } else {
+        Err(CensusError::State)
+    }
+}
+
 fn blocker_text(blocker: &PullRequestConvergenceBlocker) -> String {
     match blocker {
         PullRequestConvergenceBlocker::UnresolvedReviewThreads(count) => {
@@ -1653,6 +1676,20 @@ mod tests {
             ensure_threads_stable(&[true, false], &[true, false]),
             Ok(())
         );
+    }
+
+    #[test]
+    fn paginated_census_rejects_a_head_repository_transfer() {
+        let observed = RepositorySlug::try_new(String::from("contributor/repository"))
+            .expect("fixture repository is valid");
+        let transferred = RepositorySlug::try_new(String::from("successor/repository"))
+            .expect("fixture repository is valid");
+
+        assert_eq!(
+            ensure_head_repository_stable(&observed, &transferred),
+            Err(CensusError::State)
+        );
+        assert_eq!(ensure_head_repository_stable(&observed, &observed), Ok(()));
     }
 
     #[test]

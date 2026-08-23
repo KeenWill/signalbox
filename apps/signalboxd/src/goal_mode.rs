@@ -735,7 +735,7 @@ fn commit_is_ambiguous(error: &PostgresGoalPassDispositionError) -> bool {
 enum ResumeAttempt {
     /// The attempt resumed, was refused, or found nothing left to answer.
     Settled,
-    /// Another live target owner deferred the attempt without spending a retry.
+    /// Another live target session deferred the attempt without spending a retry.
     OwnershipDeferred,
     /// Infrastructure prevented any answer, so the bounded retry is still owed.
     InfrastructureUnsettled,

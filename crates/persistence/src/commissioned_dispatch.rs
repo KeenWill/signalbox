@@ -509,6 +509,11 @@ async fn live_pull_request_session(
                  WHERE event.target_kind = 'pull_request'
                    AND event.repository = $1
                    AND event.pull_request_number = $2
+                   AND NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_dispatch_release AS released
+                         WHERE released.dispatch_id = action.dispatch_id
+                   )
            ) AS target
           WHERE ($3::uuid IS NULL OR target.session_id <> $3)
             AND ($4::uuid IS NULL
