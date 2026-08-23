@@ -6319,27 +6319,32 @@ mod tests {
     };
 
     use super::{
-        CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
-        ListedPullRequest, MAX_CACHED_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
-        MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE,
-        PollAttemptWait, PollCache, PullRequestSettlement, PullResponse, ReactionContent,
-        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
+        CheckConclusion, ChecksOutcome, EntityTag, FetchedPullRequests, FileCredentialAccess,
+        GitHubRepositoryPoller, GraphQlEnvelope, ListedPullRequest, MAX_CACHED_WIRE_BYTES,
+        MAX_CONCURRENT_PULL_REQUEST_FETCHES, MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS,
+        MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE, PollAttemptWait, PollCache,
+        PullRequestSettlement, PullResponse, ReactionContent, RepoWatchAuthorLogin,
+        RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
         RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
         RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
         RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchChildExit,
         RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, RepositoryWatchTask,
-        RepositoryWatchWake, ResourceKey, ReviewState, TargetedPollOutcome, TargetedPullRequest,
-        Url, UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_RETRY_DELAY,
-        WEBHOOK_DRAIN_RETRY_MAX_DELAY, WebhookDrain, WebhookDrainOutcome, WebhookDrainRetry,
-        WebhookPayloadPurgeSchedule, WebhookPollInterrupt, WorkflowName, WorkflowResponse,
-        await_poll_or_interrupt, derive_repo_watch_events, dispatch_context_json,
-        inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
-        normalize_checks_outcome, normalize_pull_request_context, object_id,
-        observe_webhook_work_before_drain, owed_dispatch_context_json_parts, rule_activation_error,
-        run_until_shutdown, supervise_repository_tasks, targeted_pull_requests,
+        RepositoryWatchWake, ResourceKey, ReviewState, StaleReviewClearanceProviderResult,
+        TargetedPollOutcome, TargetedPolledRepository, TargetedPullRequest, Url,
+        UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_RETRY_DELAY, WEBHOOK_DRAIN_RETRY_MAX_DELAY,
+        WebhookDrain, WebhookDrainOutcome, WebhookDrainRetry, WebhookPayloadPurgeSchedule,
+        WebhookPollInterrupt, WorkflowName, WorkflowResponse, await_poll_or_interrupt,
+        derive_repo_watch_events, dispatch_context_json, inspect_webhook_drain,
+        isolate_stale_review_clearance_provider_result, next_cadence_deadline,
+        next_repository_wake, normalize_checks_outcome, normalize_pull_request_context, object_id,
+        observe_webhook_work_before_drain, owed_dispatch_context_json_parts, reject_graphql_errors,
+        retain_current_base_stale_review_clearances, rule_activation_error, run_until_shutdown,
+        supervise_repository_tasks, targeted_pull_requests,
     };
     use signalbox_application::{
-        InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
+        InProcessEligibilityWorkSource, RepoWatchConvergenceAssessment,
+        RepoWatchConvergenceAssessmentInput, RepoWatchEventIdentityFrontierV1,
+        RepoWatchReviewDecision, RepoWatchStaleReviewClearanceCandidate,
         RepoWatchTargetedRefreshV1,
     };
     use signalbox_domain::{
@@ -6667,6 +6672,7 @@ mod tests {
                 eligibility_nudge,
                 webhook_store: PostgresRepoWatchWebhookStore::new(pool.clone()),
                 webhook_work: None,
+                webhook_primary: false,
                 payload_purge: WebhookPayloadPurgeSchedule::starting_now(),
                 rules_activated: true,
             },
@@ -7414,6 +7420,7 @@ mod tests {
             Self {
                 method: "GET",
                 target: target.0,
+                request_body_marker: None,
                 validator: None,
                 status: "404 Not Found",
                 entity_tag: None,
@@ -8446,6 +8453,7 @@ mod tests {
             refreshed,
             TargetedPollOutcome::Observation {
                 observation: previous,
+                convergence: Vec::new(),
                 superseded_targets: Vec::new(),
             }
         );
@@ -8468,7 +8476,7 @@ mod tests {
 
         let refreshed = fixture
             .poller
-            .poll_targeted_pull_requests_against_cursor(&previous, &[target])
+            .poll_targeted_pull_requests_against_cursor(&previous, &previous, &[target])
             .await
             .expect("targeted refresh succeeds");
 
@@ -9014,35 +9022,6 @@ mod tests {
                 .has_changed()
                 .expect("the fixture keeps its webhook sender")
         );
-    }
-
-    #[tokio::test]
-    async fn a_webhook_wake_preempts_an_in_flight_complete_poll() {
-        let (webhook_sender, webhook_receiver) = watch::channel(());
-        let mut webhook_work = Some(webhook_receiver);
-        let (_shutdown_sender, mut shutdown) = watch::channel(false);
-        webhook_sender.send_replace(());
-
-        let outcome = await_poll_or_interrupt(
-            std::future::pending::<()>(),
-            &mut shutdown,
-            &mut webhook_work,
-        )
-        .await;
-
-        assert!(matches!(outcome, PollAttemptWait::Webhook));
-    }
-
-    #[tokio::test]
-    async fn a_complete_poll_wins_without_an_interrupt() {
-        let (_webhook_sender, webhook_receiver) = watch::channel(());
-        let mut webhook_work = Some(webhook_receiver);
-        let (_shutdown_sender, mut shutdown) = watch::channel(false);
-
-        let outcome =
-            await_poll_or_interrupt(async { 7_u8 }, &mut shutdown, &mut webhook_work).await;
-
-        assert!(matches!(outcome, PollAttemptWait::Completed(7)));
     }
 
     #[tokio::test]

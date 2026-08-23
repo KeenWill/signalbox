@@ -3826,9 +3826,10 @@ mod tests {
         ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES,
         DEFAULT_REPOSITORY_WATCH_WEBHOOK_BIND_ADDRESS, FileCredentialAccess, HubModelConfiguration,
         HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES,
-        MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, ModelCallInputUsage, UnknownSessionModel,
-        absolute_search_entries, credential_bytes, resolved_mcp_bridge_reference,
-        scheduler_pass_admission_cap, validate_alias_count, validate_model_count,
+        MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, ModelCallInputUsage,
+        RepositoryWatchWebhookMode, UnknownSessionModel, absolute_search_entries, credential_bytes,
+        resolved_mcp_bridge_reference, scheduler_pass_admission_cap, validate_alias_count,
+        validate_model_count,
     };
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
