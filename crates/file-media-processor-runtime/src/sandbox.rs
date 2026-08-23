@@ -228,6 +228,13 @@ impl SandboxedFileMediaProcessor {
             .stdout
             .take()
             .ok_or(ProcessorFailure::Unavailable)?;
+        let stderr = running
+            .child_mut()?
+            .stderr
+            .take()
+            .ok_or(ProcessorFailure::Unavailable)?;
+        let stderr_limit = self.ceilings.stderr_bytes();
+        let mut stderr_task = tokio::spawn(read_and_discard_diagnostics(stderr, stderr_limit));
         let expected = declaration_fingerprint(declarations);
         let output_limit = u64::try_from(expected.len())
             .map_err(|_| ProcessorFailure::Unavailable)?
@@ -258,6 +265,17 @@ impl SandboxedFileMediaProcessor {
         };
         if result.is_err() {
             running.terminate().await;
+        }
+        if let Ok(Ok(Ok(diagnostics))) =
+            tokio::time::timeout(CLEANUP_TIMEOUT, &mut stderr_task).await
+            && result.is_err()
+            && std::env::var_os("CI").is_some()
+            && !diagnostics.is_empty()
+        {
+            eprintln!(
+                "file-media sandbox probe stderr: {}",
+                String::from_utf8_lossy(&diagnostics)
+            );
         }
         result
     }
@@ -397,7 +415,7 @@ impl SandboxedFileMediaProcessor {
             .env_clear()
             .stdin(if probe { Stdio::null() } else { Stdio::piped() })
             .stdout(Stdio::piped())
-            .stderr(if probe { Stdio::null() } else { Stdio::piped() })
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         let seccomp_fd = seccomp.as_raw_fd();
         let block_fd = block_read.as_raw_fd();
