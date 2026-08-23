@@ -5497,7 +5497,7 @@ async fn authorize_issued_model_call(
 ) -> Result<
     (
         PostgresModelCallRepository,
-        signalbox_domain::AuthorizedModelCall,
+        Box<signalbox_domain::AuthorizedModelCall>,
         ModelCallId,
     ),
     Box<dyn Error>,
@@ -5536,7 +5536,7 @@ async fn authorize_issued_model_call(
     else {
         return Err(io::Error::other("the fixture call must authorize send").into());
     };
-    Ok((calls, *authorized, call))
+    Ok((calls, authorized, call))
 }
 
 /// Commits a confirm-classified tool round over the issued fixture call, so
@@ -5797,7 +5797,8 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
     let session_id = create_alias_session(&mut connection).await?;
     let (_, stopped_turn_id) =
         submit_first_input(&mut connection, session_id, String::from("first request")).await?;
-    let (_, _, issued_call) = authorize_issued_model_call(&runtime.pool, session_id).await?;
+    let (_, _, issued_call) =
+        Box::pin(authorize_issued_model_call(&runtime.pool, session_id)).await?;
     let first_stop_command = command()?;
 
     connection

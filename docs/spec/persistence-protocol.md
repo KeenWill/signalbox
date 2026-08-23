@@ -158,8 +158,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — ninety files, `202607180001` through
-`202608200001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — ninety-two files, `202607180001` through
+`202608200002` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -2022,6 +2022,11 @@ surface provides it.
 
 ## Open edges
 
+- [Graded approval judging](../open-questions.md#graded-approval-judging) owns
+  the unresolved graded fields in the durable audit shape for approval-judge
+  calls and decisions. The existing
+  [goal-mode compatibility constraint](goal-mode.md#compatibility-constraints)
+  owns retention of both the provider-offered and repository-committed outcomes.
 - Deferred outbox retention, pruning, and multiple-daemon fan-out are cataloged
   in [open questions](../open-questions.md#protocols-and-persistence).
 - Attempt continuation is presently admitted only for the tool-loop
