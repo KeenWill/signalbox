@@ -18,7 +18,7 @@ use crate::{
     mapping::{session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid},
     model_execution::{
         ModelCallRepositoryError, load_delegated_model_call_recovery,
-        persist_automatic_reconciliation,
+        lock_delegated_child_endpoint_sessions, persist_automatic_reconciliation,
     },
     session::{SessionRepositoryError, load_session_from_connection},
     submit_input::{SubmitInputRepositoryError, load_scheduling_projection},
@@ -215,6 +215,9 @@ impl PostgresModelCallReconciliationRepository {
         claimed: ClaimedModelCallReconciliation,
     ) -> Result<ModelCallReconciliationOutcome, ModelCallReconciliationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
+        lock_delegated_child_endpoint_sessions(&mut transaction, claimed.session())
+            .await
+            .map_err(ModelCallReconciliationRepositoryError::Model)?;
         sqlx::query(crate::lock_inventory::STARTUP_RECOVERY)
             .bind(session_id_to_uuid(claimed.session()))
             .fetch_optional(&mut *transaction)
