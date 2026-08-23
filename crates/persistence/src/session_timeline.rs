@@ -117,6 +117,12 @@ impl SessionTimelineRepository {
             transaction.commit().await?;
             return Ok(None);
         };
+        let requires_nonempty_window = matches!(
+            &anchor,
+            TimelineWindowAnchor::First
+                | TimelineWindowAnchor::Latest
+                | TimelineWindowAnchor::Around(_)
+        );
         let fetch_limit = i64::from(limits.max_items()) + 1;
         let rows = match anchor {
             TimelineWindowAnchor::First => {
@@ -185,6 +191,9 @@ impl SessionTimelineRepository {
             items.push(item);
         }
         items.sort_by_key(|item| item.address);
+        if requires_nonempty_window && items.is_empty() {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window items").into());
+        }
         let first = items.first().map(|item| item.address);
         let latest = items.last().map(|item| item.address);
         if first.is_some_and(|loaded| descriptor.bounds.first.is_none_or(|bound| loaded < bound))
