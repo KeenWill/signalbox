@@ -48,6 +48,7 @@ const WORKER_SANDBOX_PATH: &str = "/signalbox-file-media-worker";
 const BWRAP_PROBE_ARGUMENT: &str = "--signalbox-file-media-isolation-probe";
 const CANCELLATION_POLL: Duration = Duration::from_millis(5);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+const CGROUP_CLEANUP_POLL: Duration = Duration::from_millis(10);
 const WRITABLE_TMPFS_BUDGET_DIVISOR: u64 = 2;
 /// Maximum worker bindings retained by one processor.
 const MAX_WORKER_BINDINGS: usize = 256;
@@ -213,7 +214,7 @@ impl SandboxedFileMediaProcessor {
         let mut running = self.spawn(worker, Some(declarations)).await?;
         running.release_startup()?;
         let stdout = running
-            .child
+            .child_mut()?
             .stdout
             .take()
             .ok_or(ProcessorFailure::Unavailable)?;
@@ -296,17 +297,17 @@ impl SandboxedFileMediaProcessor {
         let mut running = self.spawn(worker, None).await?;
         running.release_startup()?;
         let stdin = running
-            .child
+            .child_mut()?
             .stdin
             .take()
             .ok_or(ProcessorFailure::Unavailable)?;
         let stdout = running
-            .child
+            .child_mut()?
             .stdout
             .take()
             .ok_or(ProcessorFailure::Unavailable)?;
         let stderr = running
-            .child
+            .child_mut()?
             .stderr
             .take()
             .ok_or(ProcessorFailure::Unavailable)?;
@@ -408,11 +409,11 @@ impl SandboxedFileMediaProcessor {
         let pid =
             rustix::process::Pid::from_raw(raw_pid as i32).ok_or(ProcessorFailure::Unavailable)?;
         Ok(RunningWorker {
-            child,
+            child: Some(child),
             process_group: pid,
             startup: Some(block_write),
             _seccomp: seccomp,
-            task_cgroup,
+            task_cgroup: Some(task_cgroup),
             armed: true,
         })
     }
@@ -711,15 +712,19 @@ enum CompletedOutput {
 }
 
 struct RunningWorker {
-    child: Child,
+    child: Option<Child>,
     process_group: rustix::process::Pid,
     startup: Option<rustix::fd::OwnedFd>,
     _seccomp: fs::File,
-    task_cgroup: InvocationTaskCgroup,
+    task_cgroup: Option<InvocationTaskCgroup>,
     armed: bool,
 }
 
 impl RunningWorker {
+    fn child_mut(&mut self) -> Result<&mut Child, ProcessorFailure> {
+        self.child.as_mut().ok_or(ProcessorFailure::Unavailable)
+    }
+
     fn release_startup(&mut self) -> Result<(), ProcessorFailure> {
         let startup = self.startup.take().ok_or(ProcessorFailure::Unavailable)?;
         rustix::io::write(&startup, &[1]).map_err(|_| ProcessorFailure::Unavailable)?;
@@ -731,15 +736,33 @@ impl RunningWorker {
             return;
         }
         self.kill_tree();
-        if let Ok(Ok(_)) = tokio::time::timeout(CLEANUP_TIMEOUT, self.child.wait()).await {
+        let reaped = if let Some(child) = self.child.as_mut() {
+            matches!(
+                tokio::time::timeout(CLEANUP_TIMEOUT, child.wait()).await,
+                Ok(Ok(_))
+            )
+        } else {
+            true
+        };
+        if reaped {
             self.armed = false;
+            if let Some(task_cgroup) = self.task_cgroup.as_mut() {
+                task_cgroup.cleanup_after_reap().await;
+            }
         }
     }
 
     async fn wait(&mut self) -> Result<std::process::ExitStatus, std::io::Error> {
-        let status = self.child.wait().await?;
+        let status = self
+            .child
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("worker child is unavailable"))?
+            .wait()
+            .await?;
         self.armed = false;
-        self.task_cgroup.cleanup();
+        if let Some(task_cgroup) = self.task_cgroup.as_mut() {
+            task_cgroup.cleanup_after_reap().await;
+        }
         Ok(status)
     }
 
@@ -750,7 +773,9 @@ impl RunningWorker {
         }
         let _ =
             rustix::process::kill_process_group(self.process_group, rustix::process::Signal::KILL);
-        let _ = self.child.start_kill();
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.start_kill();
+        }
     }
 }
 
@@ -758,8 +783,23 @@ impl Drop for RunningWorker {
     fn drop(&mut self) {
         if self.armed {
             self.kill_tree();
+            if let (Some(mut child), Some(mut task_cgroup)) =
+                (self.child.take(), self.task_cgroup.take())
+            {
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    drop(runtime.spawn(async move {
+                        let _ = child.wait().await;
+                        task_cgroup.cleanup_after_reap().await;
+                    }));
+                    return;
+                }
+                self.child = Some(child);
+                self.task_cgroup = Some(task_cgroup);
+            }
         }
-        self.task_cgroup.cleanup();
+        if let Some(task_cgroup) = self.task_cgroup.as_mut() {
+            task_cgroup.cleanup();
+        }
     }
 }
 
@@ -807,6 +847,29 @@ impl InvocationTaskCgroup {
             self.cleaned = true;
         }
     }
+
+    async fn cleanup_after_reap(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        let _ = fs::write(self.path.join("cgroup.kill"), "1");
+        loop {
+            let empty = fs::read_to_string(self.path.join("cgroup.events"))
+                .is_ok_and(|events| !cgroup_is_populated(&events));
+            if empty && fs::remove_dir(&self.path).is_ok() {
+                self.cleaned = true;
+                return;
+            }
+            tokio::time::sleep(CGROUP_CLEANUP_POLL).await;
+        }
+    }
+}
+
+fn cgroup_is_populated(events: &str) -> bool {
+    events
+        .lines()
+        .find_map(|line| line.strip_prefix("populated "))
+        .is_none_or(|value| value != "0")
 }
 
 impl Drop for InvocationTaskCgroup {
@@ -1393,9 +1456,9 @@ mod tests {
         MAX_EXECUTABLE_SNAPSHOT_BYTES, MAX_PROBE_CUMULATIVE_BYTES, MAX_PROBE_PREFIX_BYTES,
         MAX_READ_OPTIONS_BYTES, MAX_READ_RANGES, MAX_READ_SOURCE_BYTES, MAX_WORKER_BINDINGS,
         admit_completed, admit_executable_snapshot_bytes, admit_worker_binding_count,
-        direct_read_input_fits, open_executable_snapshot, open_worker_executable,
-        probe_envelope_fits, read_envelope_fits, sandbox_arguments, seccomp_instructions,
-        startup_pipe, worker_memory_budget,
+        cgroup_is_populated, direct_read_input_fits, open_executable_snapshot,
+        open_worker_executable, probe_envelope_fits, read_envelope_fits, sandbox_arguments,
+        seccomp_instructions, startup_pipe, worker_memory_budget,
     };
 
     struct Cancelled;
@@ -1404,6 +1467,13 @@ mod tests {
         fn is_cancelled(&self) -> bool {
             true
         }
+    }
+
+    #[test]
+    fn cgroup_events_distinguish_populated_and_empty_groups() {
+        assert!(cgroup_is_populated("populated 1\nfrozen 0\n"));
+        assert!(!cgroup_is_populated("populated 0\nfrozen 0\n"));
+        assert!(cgroup_is_populated("frozen 0\n"));
     }
 
     #[test]
