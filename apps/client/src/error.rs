@@ -396,6 +396,14 @@ impl fmt::Display for RejectionDisplay {
             RejectionDetail::SessionNotFound { session_id } => {
                 write!(formatter, "session_not_found session={session_id}")
             }
+            RejectionDetail::AttachmentBlobNotFound { digest } => {
+                write!(formatter, "attachment_blob_not_found digest={digest}")
+            }
+            RejectionDetail::AttachmentByteBudgetExceeded { maximum_bytes } => write!(
+                formatter,
+                "attachment_byte_budget_exceeded maximum_bytes={}",
+                maximum_bytes.value()
+            ),
             RejectionDetail::SessionPlacementCurrentVersionMismatch {
                 session_id,
                 expected_placement_version,
