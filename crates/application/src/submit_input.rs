@@ -322,16 +322,19 @@ where
                 SubmitInputAppliedResult::TurnOrigin(_)
             )))
         ) {
-            let nudge_outcome = self.nudge.nudge(session);
-            if nudge_outcome != EligibilityNudgeOutcome::Enqueued {
-                tracing::warn!(
-                    failure_class = ?OperatorFailureClass::Infrastructure {
-                        commit_ambiguous: false,
-                    },
-                    ?nudge_outcome,
-                    "eligibility nudge was lost after command handling; \
-                     the reconciliation sweep will recover it"
-                );
+            match self.nudge.nudge(session) {
+                EligibilityNudgeOutcome::Enqueued | EligibilityNudgeOutcome::Coalesced => {}
+                nudge_outcome @ (EligibilityNudgeOutcome::DroppedAtCapacity
+                | EligibilityNudgeOutcome::WorkSourceClosed) => {
+                    tracing::warn!(
+                        failure_class = ?OperatorFailureClass::Infrastructure {
+                            commit_ambiguous: false,
+                        },
+                        ?nudge_outcome,
+                        "eligibility nudge was lost after command handling; \
+                         the reconciliation sweep will recover it"
+                    );
+                }
             }
         }
         outcome
@@ -601,15 +604,25 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     struct FakeNudge {
         observed: RefCell<Vec<SessionId>>,
+        outcome: EligibilityNudgeOutcome,
+    }
+
+    impl Default for FakeNudge {
+        fn default() -> Self {
+            Self {
+                observed: RefCell::new(Vec::new()),
+                outcome: EligibilityNudgeOutcome::Enqueued,
+            }
+        }
     }
 
     impl EligibilityNudge for FakeNudge {
         fn nudge(&self, session: SessionId) -> EligibilityNudgeOutcome {
             self.observed.borrow_mut().push(session);
-            EligibilityNudgeOutcome::Enqueued
+            self.outcome
         }
     }
 
@@ -787,6 +800,30 @@ mod tests {
         assert_eq!(command.delivery(), request.delivery());
         assert_eq!(*observed_input, accepted_input);
         assert_eq!(*observed_turn, Some(turn));
+        assert_eq!(nudge.observed.into_inner(), vec![request.session()]);
+    }
+
+    #[test]
+    fn inv007_coalesced_turn_origin_nudge_is_a_successful_handoff() {
+        let request = request(1);
+        let accepted_input = accepted_input_id(4);
+        let turn = turn_id(5);
+        let expected = SubmitInputOutcome::Recorded(applied_result(&request, accepted_input, turn));
+        let mut service = SubmitInputService::new(
+            FakeIds::new([accepted_input], [turn]),
+            FakeTransaction::returning([Ok(expected.clone())]),
+            FakeNudge {
+                observed: RefCell::new(Vec::new()),
+                outcome: EligibilityNudgeOutcome::Coalesced,
+            },
+            InProcessToolDispatchGate::default(),
+        );
+
+        assert_eq!(
+            run_ready(service.execute(request.clone())).expect("fake transaction succeeds"),
+            expected
+        );
+        let (_, _, nudge, _) = service.into_parts();
         assert_eq!(nudge.observed.into_inner(), vec![request.session()]);
     }
 

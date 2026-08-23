@@ -771,6 +771,14 @@ impl PostgresModelCallRepository {
         let result = async {
             lock_delegated_child_endpoint_sessions(&mut transaction, session).await?;
             lock_session(&mut transaction, session).await?;
+            let dispatch_start_lease_expired: bool =
+                sqlx::query_scalar(crate::lock_inventory::EXPIRED_DISPATCH_START_LEASE)
+                    .bind(session_id_to_uuid(session))
+                    .fetch_one(&mut *transaction)
+                    .await?;
+            if dispatch_start_lease_expired {
+                return Ok((false, PrepareInitialModelCallOutcome::NoWork));
+            }
             let execution =
                 require_live_execution(&mut transaction, session, &self.targets).await?;
             if execution.current_call().is_none()

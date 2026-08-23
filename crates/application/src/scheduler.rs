@@ -187,6 +187,11 @@ pub trait EligibilityWorkSource {
     fn take_returned_dispatch_start(&mut self, _session: SessionId) -> bool {
         false
     }
+
+    /// Takes one buffered dispatch-start hint without consuming ordinary work.
+    fn take_pending_dispatch_start(&mut self) -> Option<SessionId> {
+        None
+    }
 }
 
 /// Runs one authoritative per-session eligibility pass.
@@ -213,6 +218,18 @@ pub trait EligibilityPass {
         &mut self,
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
+
+    /// Runs a hint carrying reserved dispatch-start admission.
+    ///
+    /// Implementations that can encounter long-lived already-active work
+    /// override this boundary so stale priority hints release the reserved
+    /// lane before that work resumes through an ordinary rerun.
+    fn run_dispatch_start(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.run(session)
+    }
 }
 
 impl<Generator, Transaction> EligibilityPass for StartEligibleTurnService<Generator, Transaction>
@@ -388,6 +405,32 @@ where
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let pass = self.pass.run(session);
+        let disposition = self.disposition.clone();
+        async move {
+            match pass.await {
+                Ok(()) => disposition
+                    .reconcile_success(session)
+                    .await
+                    .map_err(GoalAwareEligibilityPassError::Reconciliation),
+                Err(source) => {
+                    let blocking = match Pass::failure_turn(&source) {
+                        Some(turn) => disposition
+                            .block_execution_failure(session, turn)
+                            .await
+                            .err(),
+                        None => None,
+                    };
+                    Err(GoalAwareEligibilityPassError::Pass { source, blocking })
+                }
+            }
+        }
+    }
+
+    fn run_dispatch_start(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let pass = self.pass.run_dispatch_start(session);
         let disposition = self.disposition.clone();
         async move {
             match pass.await {
@@ -587,18 +630,16 @@ where
         }
     }
 
-    fn take_nudge(&mut self, session: SessionId) -> SessionId {
+    fn take_nudge(&mut self, session: SessionId) -> Option<SessionId> {
         let priority = {
             let mut pending = match self.pending_nudges.lock() {
                 Ok(pending) => pending,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            pending
-                .remove(&session)
-                .unwrap_or(EligibilityHintPriority::Ordinary)
+            pending.remove(&session)?
         };
         self.returned_priority = Some((session, priority));
-        session
+        Some(session)
     }
 
     fn take_interleaved_pending_hint(&mut self) -> Option<SessionId> {
@@ -606,7 +647,9 @@ where
             match self.nudges.try_recv() {
                 Ok(session) => {
                     self.nudge_preferred_over_sweep_hint = false;
-                    return Some(self.take_nudge(session));
+                    if let Some(session) = self.take_nudge(session) {
+                        return Some(session);
+                    }
                 }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
             }
@@ -652,7 +695,7 @@ where
     type Error = Sweep::Error;
 
     async fn next(&mut self) -> Result<SessionId, Self::Error> {
-        loop {
+        'source: loop {
             if self.initial_sweep_due {
                 self.initial_sweep_due = false;
                 self.start_sweep();
@@ -706,14 +749,24 @@ where
                     biased;
 
                     completion = sweep_in_progress => completion,
-                    Some(session) = self.nudges.recv() => return Ok(self.take_nudge(session)),
+                    Some(session) = self.nudges.recv() => {
+                        if let Some(session) = self.take_nudge(session) {
+                            return Ok(session);
+                        }
+                        continue 'source;
+                    },
                 };
                 self.complete_sweep(completion)?;
                 continue;
             }
 
             select! {
-                Some(session) = self.nudges.recv() => return Ok(self.take_nudge(session)),
+                Some(session) = self.nudges.recv() => {
+                    if let Some(session) = self.take_nudge(session) {
+                        return Ok(session);
+                    }
+                    continue 'source;
+                },
                 _ = self.sweep_interval.tick() => {
                     self.start_sweep();
                 }
@@ -726,6 +779,18 @@ where
             .take()
             .filter(|(returned, _)| *returned == session)
             .is_some_and(|(_, priority)| priority == EligibilityHintPriority::DispatchStart)
+    }
+
+    fn take_pending_dispatch_start(&mut self) -> Option<SessionId> {
+        let mut pending = match self.pending_nudges.lock() {
+            Ok(pending) => pending,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let session = pending.iter().find_map(|(session, priority)| {
+            (*priority == EligibilityHintPriority::DispatchStart).then_some(*session)
+        })?;
+        pending.remove(&session);
+        Some(session)
     }
 }
 
@@ -821,12 +886,16 @@ where
 
         'scheduler: loop {
             if let Some((session, priority)) = take_admissible_hint(
-                &mut pending_dispatch_starts,
-                &mut pending_ordinary,
-                &mut pending_hints,
-                task_sessions.len(),
-                ordinary_in_flight,
-                self.max_in_flight_passes,
+                PendingHintQueues {
+                    dispatch_starts: &mut pending_dispatch_starts,
+                    ordinary: &mut pending_ordinary,
+                    priorities: &mut pending_hints,
+                },
+                AdmissionState {
+                    total_in_flight: task_sessions.len(),
+                    ordinary_in_flight,
+                    max_in_flight_passes: self.max_in_flight_passes,
+                },
             ) {
                 select! {
                     biased;
@@ -834,11 +903,18 @@ where
                     () = &mut shutdown => break,
                     () = ready(()) => {
                         if in_flight_sessions.insert(session) {
-                            let task = passes.spawn(
-                                self.pass
-                                    .run(session)
-                                    .instrument(session_work_span(session)),
-                            );
+                            let task = match priority {
+                                EligibilityHintPriority::Ordinary => passes.spawn(
+                                    self.pass
+                                        .run(session)
+                                        .instrument(session_work_span(session)),
+                                ),
+                                EligibilityHintPriority::DispatchStart => passes.spawn(
+                                    self.pass
+                                        .run_dispatch_start(session)
+                                        .instrument(session_work_span(session)),
+                                ),
+                            };
                             task_sessions.insert(task.id(), (session, priority));
                             if priority == EligibilityHintPriority::Ordinary {
                                 ordinary_in_flight += 1;
@@ -860,7 +936,7 @@ where
             // consumed its interval tick. Keep the same next-hint future
             // pinned until it yields a hint, a visible failure, an admission
             // opening for queued work, or shutdown.
-            let hint = {
+            let hint = if pending_hints.is_empty() {
                 let next_hint = self.work_source.next();
                 pin!(next_hint);
                 loop {
@@ -872,7 +948,7 @@ where
                             if !task_sessions.is_empty() =>
                         {
                             if let Some(completed) = completed
-                                && let Some((session, completed_priority)) =
+                                && let Some((session, completed_priority, succeeded)) =
                                     observe_pass_completion::<Pass>(
                                         completed,
                                         &mut task_sessions,
@@ -881,6 +957,19 @@ where
                             {
                                 if completed_priority == EligibilityHintPriority::Ordinary {
                                     ordinary_in_flight = ordinary_in_flight.saturating_sub(1);
+                                }
+                                if succeeded
+                                    && completed_priority == EligibilityHintPriority::DispatchStart
+                                {
+                                    enqueue_pending_hint(
+                                        session,
+                                        EligibilityHintPriority::Ordinary,
+                                        &in_flight_sessions,
+                                        &mut pending_reruns,
+                                        &mut pending_hints,
+                                        &mut pending_dispatch_starts,
+                                        &mut pending_ordinary,
+                                    );
                                 }
                                 if let Some(priority) = pending_reruns.remove(&session) {
                                     enqueue_pending_hint(
@@ -895,15 +984,78 @@ where
                                 }
                                 if has_admissible_hint(
                                     &pending_hints,
-                                    task_sessions.len(),
-                                    ordinary_in_flight,
-                                    self.max_in_flight_passes,
+                                    AdmissionState {
+                                        total_in_flight: task_sessions.len(),
+                                        ordinary_in_flight,
+                                        max_in_flight_passes: self.max_in_flight_passes,
+                                    },
                                 ) {
                                     break None;
                                 }
                             }
                         }
                         hint = &mut next_hint => break Some(hint),
+                    }
+                }
+            } else {
+                if let Some(session) = self.work_source.take_pending_dispatch_start() {
+                    enqueue_pending_hint(
+                        session,
+                        EligibilityHintPriority::DispatchStart,
+                        &in_flight_sessions,
+                        &mut pending_reruns,
+                        &mut pending_hints,
+                        &mut pending_dispatch_starts,
+                        &mut pending_ordinary,
+                    );
+                    continue;
+                }
+                loop {
+                    select! {
+                        biased;
+
+                        () = &mut shutdown => break 'scheduler,
+                        completed = passes.join_next_with_id(),
+                            if !task_sessions.is_empty() =>
+                        {
+                            if let Some(completed) = completed
+                                && let Some((session, completed_priority, succeeded)) =
+                                    observe_pass_completion::<Pass>(
+                                        completed,
+                                        &mut task_sessions,
+                                        &mut in_flight_sessions,
+                                    )
+                            {
+                                if completed_priority == EligibilityHintPriority::Ordinary {
+                                    ordinary_in_flight = ordinary_in_flight.saturating_sub(1);
+                                }
+                                if succeeded
+                                    && completed_priority == EligibilityHintPriority::DispatchStart
+                                {
+                                    enqueue_pending_hint(
+                                        session,
+                                        EligibilityHintPriority::Ordinary,
+                                        &in_flight_sessions,
+                                        &mut pending_reruns,
+                                        &mut pending_hints,
+                                        &mut pending_dispatch_starts,
+                                        &mut pending_ordinary,
+                                    );
+                                }
+                                if let Some(priority) = pending_reruns.remove(&session) {
+                                    enqueue_pending_hint(
+                                        session,
+                                        priority,
+                                        &in_flight_sessions,
+                                        &mut pending_reruns,
+                                        &mut pending_hints,
+                                        &mut pending_dispatch_starts,
+                                        &mut pending_ordinary,
+                                    );
+                                }
+                                break None;
+                            }
+                        }
                     }
                 }
             };
@@ -1003,47 +1155,54 @@ fn ordinary_pass_limit(max_in_flight_passes: usize) -> usize {
     }
 }
 
-fn has_admissible_hint(
-    pending_hints: &HashMap<SessionId, EligibilityHintPriority>,
+struct PendingHintQueues<'a> {
+    dispatch_starts: &'a mut VecDeque<SessionId>,
+    ordinary: &'a mut VecDeque<SessionId>,
+    priorities: &'a mut HashMap<SessionId, EligibilityHintPriority>,
+}
+
+#[derive(Clone, Copy)]
+struct AdmissionState {
     total_in_flight: usize,
     ordinary_in_flight: usize,
     max_in_flight_passes: usize,
+}
+
+fn has_admissible_hint(
+    pending_hints: &HashMap<SessionId, EligibilityHintPriority>,
+    admission: AdmissionState,
 ) -> bool {
-    total_in_flight < max_in_flight_passes
+    admission.total_in_flight < admission.max_in_flight_passes
         && (pending_hints
             .values()
             .any(|priority| *priority == EligibilityHintPriority::DispatchStart)
-            || (ordinary_in_flight < ordinary_pass_limit(max_in_flight_passes)
+            || (admission.ordinary_in_flight < ordinary_pass_limit(admission.max_in_flight_passes)
                 && pending_hints
                     .values()
                     .any(|priority| *priority == EligibilityHintPriority::Ordinary)))
 }
 
 fn take_admissible_hint(
-    pending_dispatch_starts: &mut VecDeque<SessionId>,
-    pending_ordinary: &mut VecDeque<SessionId>,
-    pending_hints: &mut HashMap<SessionId, EligibilityHintPriority>,
-    total_in_flight: usize,
-    ordinary_in_flight: usize,
-    max_in_flight_passes: usize,
+    queues: PendingHintQueues<'_>,
+    admission: AdmissionState,
 ) -> Option<(SessionId, EligibilityHintPriority)> {
-    if total_in_flight == max_in_flight_passes {
+    if admission.total_in_flight == admission.max_in_flight_passes {
         return None;
     }
     if let Some(hint) = pop_pending_hint(
-        pending_dispatch_starts,
+        queues.dispatch_starts,
         EligibilityHintPriority::DispatchStart,
-        pending_hints,
+        queues.priorities,
     ) {
         return Some(hint);
     }
-    if ordinary_in_flight == ordinary_pass_limit(max_in_flight_passes) {
+    if admission.ordinary_in_flight == ordinary_pass_limit(admission.max_in_flight_passes) {
         return None;
     }
     pop_pending_hint(
-        pending_ordinary,
+        queues.ordinary,
         EligibilityHintPriority::Ordinary,
-        pending_hints,
+        queues.priorities,
     )
 }
 
@@ -1059,7 +1218,7 @@ fn observe_pass_completion<Pass>(
     completed: Result<(Id, Result<(), Pass::Error>), JoinError>,
     task_sessions: &mut HashMap<Id, (SessionId, EligibilityHintPriority)>,
     in_flight_sessions: &mut HashSet<SessionId>,
-) -> Option<(SessionId, EligibilityHintPriority)>
+) -> Option<(SessionId, EligibilityHintPriority, bool)>
 where
     Pass: EligibilityPass,
     Pass::Error: ClassifyOperatorFailure,
@@ -1077,8 +1236,8 @@ where
     };
     in_flight_sessions.remove(&session);
 
-    match completed {
-        Ok((_, Ok(()))) => {}
+    let succeeded = match completed {
+        Ok((_, Ok(()))) => true,
         Ok((_, Err(error))) => {
             let failure_class = error.operator_failure_class();
             let cause_code = error.operator_failure_cause_code();
@@ -1101,6 +1260,7 @@ where
                     "authoritative eligibility pass failed"
                 ),
             };
+            false
         }
         Err(_) => {
             tracing::error!(
@@ -1110,9 +1270,10 @@ where
                 session_id = %session.as_uuid(),
                 "authoritative eligibility pass task terminated unexpectedly"
             );
+            false
         }
-    }
-    Some((session, priority))
+    };
+    Some((session, priority, succeeded))
 }
 
 /// Creates the root of one session's scheduler work.
@@ -1172,12 +1333,12 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        ClassifyOperatorFailure, EligibilityHintPriority, EligibilityNudge,
+        AdmissionState, ClassifyOperatorFailure, EligibilityHintPriority, EligibilityNudge,
         EligibilityNudgeOutcome, EligibilityPass, EligibilitySweep, EligibilitySweepBatch,
         EligibilityWorkSource, GoalAwareEligibilityPass, GoalAwareEligibilityPassError,
         GoalPassDisposition, InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
-        ReconciliationSweepInterval, SCHEDULER_PASS_ADMISSION_CAP, SchedulerLoop,
-        SchedulerLoopExit, enqueue_pending_hint, take_admissible_hint,
+        PendingHintQueues, ReconciliationSweepInterval, SCHEDULER_PASS_ADMISSION_CAP,
+        SchedulerLoop, SchedulerLoopExit, enqueue_pending_hint, take_admissible_hint,
     };
     use crate::{
         OperatorFailureClass, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
@@ -1945,12 +2106,16 @@ mod tests {
 
         assert_eq!(
             take_admissible_hint(
-                &mut dispatch_starts,
-                &mut ordinary_hints,
-                &mut pending,
-                in_flight.len(),
-                in_flight.len(),
-                SCHEDULER_PASS_ADMISSION_CAP,
+                PendingHintQueues {
+                    dispatch_starts: &mut dispatch_starts,
+                    ordinary: &mut ordinary_hints,
+                    priorities: &mut pending,
+                },
+                AdmissionState {
+                    total_in_flight: in_flight.len(),
+                    ordinary_in_flight: in_flight.len(),
+                    max_in_flight_passes: SCHEDULER_PASS_ADMISSION_CAP,
+                },
             ),
             Some((dispatch_start, EligibilityHintPriority::DispatchStart))
         );

@@ -680,6 +680,41 @@ where
             }
         }
     }
+
+    fn run_dispatch_start(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let activation = self.activation.execute_with_cloned_transaction(session);
+        let execution = self.execution.clone();
+        async move {
+            let outcome = match activation.await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    report_ambiguous_commit(&execution, &error);
+                    return Err(ActivatedTurnPassError::Activation(error));
+                }
+            };
+            match outcome {
+                StartEligibleTurnOutcome::NoEligibleTurn => Ok(()),
+                StartEligibleTurnOutcome::Activated(activated) => {
+                    let turn = activated.turn();
+                    if !activation_session_matches(&execution, session, activated.session()) {
+                        return Err(ActivatedTurnPassError::ActivationSessionMismatch);
+                    }
+                    execution
+                        .execute(activated)
+                        .instrument(turn_work_span(session, turn))
+                        .await
+                        .map_err(|source| ActivatedTurnPassError::Execution {
+                            stage: TurnPassExecutionStage::Execution,
+                            turn: Some(turn),
+                            source,
+                        })
+                }
+            }
+        }
+    }
 }
 /// Creates one turn child span beneath the scheduler's session span.
 ///
@@ -947,8 +982,8 @@ where
                     ModelCallExecutionOutcome::RetryBackoff(delay) => {
                         tokio::time::sleep(delay).await;
                     }
-                    ModelCallExecutionOutcome::Checkpointed(_)
-                    | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
+                    ModelCallExecutionOutcome::Checkpointed(_) => return Ok(()),
+                    ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
                     ModelCallExecutionOutcome::NoWork
                     | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
@@ -1593,8 +1628,8 @@ where
                     ModelCallExecutionOutcome::RetryBackoff(delay) => {
                         tokio::time::sleep(delay).await;
                     }
-                    ModelCallExecutionOutcome::Checkpointed(_)
-                    | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => {}
+                    ModelCallExecutionOutcome::Checkpointed(_) => return Ok(()),
+                    ModelCallExecutionOutcome::AvailabilitySuccessor(_) => {}
                     ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
@@ -1747,8 +1782,8 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
                     ModelCallExecutionOutcome::RetryBackoff(delay) => {
                         tokio::time::sleep(delay).await;
                     }
-                    ModelCallExecutionOutcome::Checkpointed(_)
-                    | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
+                    ModelCallExecutionOutcome::Checkpointed(_) => return Ok(()),
+                    ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
                     ModelCallExecutionOutcome::NoWork
                     | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::TargetUnavailable(_)

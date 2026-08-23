@@ -1207,7 +1207,7 @@ pub(crate) async fn lock_session(
     )
 }
 
-async fn lock_scheduler(
+pub(crate) async fn lock_scheduler(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<(), GoalRepositoryError> {

@@ -349,6 +349,9 @@ impl PostgresRepoWatchDispatchStore {
                 "expired dispatch start lease references a missing session",
             ));
         }
+        crate::goal::lock_scheduler(&mut transaction, session)
+            .await
+            .map_err(RepoWatchDispatchRepositoryError::GoalCutoff)?;
         let model_call_exists: bool = sqlx::query_scalar(
             "SELECT EXISTS (
                 SELECT 1 FROM model_call WHERE session_id = $1
