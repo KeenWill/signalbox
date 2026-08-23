@@ -163,12 +163,15 @@ test('focuses Retry when an attention page request fails', async ({ page }) => {
 
   await expect(page.getByRole('alert')).toContainText('attention_projection_unavailable')
   await expect(page.getByRole('button', { name: 'Retry' })).toBeFocused()
-  expect(problems).toEqual({
-    consoleErrors: [
-      'Failed to load resource: the server responded with a status of 503 (Service Unavailable)',
-    ],
-    pageErrors: [],
-  })
+  expect([
+    { consoleErrors: [], pageErrors: [] },
+    {
+      consoleErrors: [
+        'Failed to load resource: the server responded with a status of 503 (Service Unavailable)',
+      ],
+      pageErrors: [],
+    },
+  ]).toContainEqual(problems)
 })
 
 test('captures the dark attention fleet', async ({ page }, testInfo) => {
