@@ -992,11 +992,13 @@ impl PostgresModelCallRepository {
     /// A successor can use that typed terminal evidence to compact once, but a
     /// later provider-accepted ordinary call or completed compaction on the
     /// prospective lineage supersedes the failure so it cannot trigger forever.
+    /// The supplied frontier is the durable immediate prefix of an uncommitted
+    /// activation preview, so lineage checks never depend on a speculative ID.
     pub async fn request_too_large_requires_compaction(
         &self,
         session: SessionId,
         target: ResolvedProviderTarget,
-        prospective_frontier: ContextFrontierId,
+        persisted_prospective_prefix: ContextFrontierId,
     ) -> Result<bool, ModelCallRepositoryError> {
         let requires_compaction = sqlx::query_scalar(
             "WITH latest_failure AS MATERIALIZED (
@@ -1056,7 +1058,7 @@ impl PostgresModelCallRepository {
         )
         .bind(session_id_to_uuid(session))
         .bind(target.identity().into_uuid())
-        .bind(prospective_frontier.into_uuid())
+        .bind(persisted_prospective_prefix.into_uuid())
         .fetch_one(&self.pool)
         .await?;
         Ok(requires_compaction)

@@ -8,7 +8,8 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputTurnActivationIdentities, ContextFrontierId, FailedModelCallTurnIdentities,
-    ModelCallId, SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId,
+    ModelCallId, ResolvedContextFrontierSnapshot, SemanticTranscriptEntryId, SessionId,
+    TurnAttemptId, TurnId,
 };
 use signalbox_model_provider_runtime::{ContextCompactionModel, RuntimeModelCatalog};
 use signalbox_persistence::{
@@ -331,15 +332,15 @@ impl ReportedUsageCompaction {
         });
         let failure_requires_compaction = if reported_requires_compaction {
             false
-        } else {
+        } else if let Some(persisted_prefix) =
+            persisted_preflight_prefix(preview.prepared().starting_snapshot())
+        {
             self.model_calls
-                .request_too_large_requires_compaction(
-                    session,
-                    target,
-                    operation.request().call().frontier().snapshot(),
-                )
+                .request_too_large_requires_compaction(session, target, persisted_prefix)
                 .await
                 .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?
+        } else {
+            false
         };
         if !reported_requires_compaction && !failure_requires_compaction {
             return Ok(None);
@@ -868,6 +869,14 @@ fn activation_identities() -> AcceptedInputTurnActivationIdentities {
     )
 }
 
+fn persisted_preflight_prefix(
+    prospective: &ResolvedContextFrontierSnapshot,
+) -> Option<ContextFrontierId> {
+    prospective
+        .immediate_semantic_prefix()
+        .map(|prefix| prefix.snapshot())
+}
+
 async fn close_failed_compaction_turn(
     activation: &StartEligibleTurnRepository,
     model_calls: &PostgresModelCallRepository,
@@ -903,7 +912,10 @@ mod tests {
     };
 
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
-    use signalbox_domain::{ActivatedTurn, TurnId};
+    use signalbox_domain::{
+        ActivatedTurn, ContextFrontierId, ResolvedContextFrontierReconstitutionInput, SessionId,
+        TurnId,
+    };
     use signalbox_persistence::{
         context_compaction::ContextCompactionRepositoryError,
         model_execution::{ModelCallIdentityCollision, ModelCallRepositoryError},
@@ -915,7 +927,7 @@ mod tests {
 
     use super::{
         ContextGuardedTurnPassError, compaction_failure_closure_collision_is_retryable,
-        guarded_failure_stage, report_guarded_ambiguity,
+        guarded_failure_stage, persisted_preflight_prefix, report_guarded_ambiguity,
     };
     use crate::{
         ActivatedTurnExecution, FatalExecutionSignal, FatalExecutionSupervisor,
@@ -990,6 +1002,19 @@ mod tests {
 
     fn turn() -> TurnId {
         TurnId::from_uuid(uuid::Uuid::from_u128(1))
+    }
+
+    #[test]
+    fn request_failure_preflight_uses_the_durable_immediate_prefix() {
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(2));
+        let persisted = ContextFrontierId::from_uuid(uuid::Uuid::from_u128(3));
+        let prospective = ContextFrontierId::from_uuid(uuid::Uuid::from_u128(4));
+        let snapshot = ResolvedContextFrontierReconstitutionInput::new(session, persisted, vec![])
+            .derive_appending(prospective, vec![])
+            .reconstitute()
+            .expect("derived prospective frontier is valid");
+
+        assert_eq!(persisted_preflight_prefix(&snapshot), Some(persisted));
     }
 
     /// The exact lost-acknowledgement failure the activation repository reports
