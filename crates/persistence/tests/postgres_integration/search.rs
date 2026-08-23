@@ -212,6 +212,49 @@ async fn derived_text_is_searchable_only_after_its_durable_publisher_runs()
                 .expect("fixture projection text is admitted"),
         })
         .await?;
+    let after = repository
+        .search(lexical_query(
+            "quartz derivation",
+            SearchScope::Global,
+            10,
+            None,
+        ))
+        .await?;
+
+    assert!(before.results.is_empty());
+    assert_eq!(after.results.len(), 1);
+    assert_eq!(
+        after.results[0].content_class,
+        SearchContentClass::DerivedTextArtifact
+    );
+    assert_eq!(
+        after.results[0].source,
+        SearchResultSource::DerivedArtifact { artifact }
+    );
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn conflicting_artifact_republication_is_atomic() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x210).await?;
+    let repository = SearchRepository::new(pool.clone());
+    let artifact = SearchArtifactId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x211));
+    let address = session_created_address(&pool, session).await?;
+    repository
+        .publish(SearchArtifactProjection {
+            session,
+            address,
+            artifact,
+            class: SearchArtifactProjectionClass::DerivedText,
+            text: SearchProjectionText::try_new(String::from("quartz-derivation"))
+                .expect("fixture projection text is admitted"),
+        })
+        .await?;
+
     let conflict = repository
         .publish(SearchArtifactProjection {
             session,
@@ -225,26 +268,6 @@ async fn derived_text_is_searchable_only_after_its_durable_publisher_runs()
             .expect("fixture conflicting projection is admitted"),
         })
         .await;
-    let after = repository
-        .search(lexical_query(
-            "quartz derivation",
-            SearchScope::Global,
-            10,
-            None,
-        ))
-        .await?;
-
-    assert!(before.results.is_empty());
-    assert!(conflict.is_err());
-    assert_eq!(after.results.len(), 1);
-    assert_eq!(
-        after.results[0].content_class,
-        SearchContentClass::DerivedTextArtifact
-    );
-    assert_eq!(
-        after.results[0].source,
-        SearchResultSource::DerivedArtifact { artifact }
-    );
     let stored_chunks: i64 = sqlx::query_scalar(
         "SELECT count(*)
            FROM web_search_projection
@@ -255,21 +278,36 @@ async fn derived_text_is_searchable_only_after_its_durable_publisher_runs()
     .bind(artifact.into_uuid())
     .fetch_one(&pool)
     .await?;
+
+    assert!(conflict.is_err());
     assert_eq!(stored_chunks, 1);
 
-    let other_session = create_search_session(&pool, 0x220).await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn artifact_identity_rejects_cross_session_cross_class_publication()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x220).await?;
+    let other_session = create_search_session(&pool, 0x230).await?;
+    let repository = SearchRepository::new(pool.clone());
     let attachment = SearchArtifactId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x221));
     repository
         .publish(SearchArtifactProjection {
             session,
-            address,
+            address: session_created_address(&pool, session).await?,
             artifact: attachment,
             class: SearchArtifactProjectionClass::AttachmentFilename,
             text: SearchProjectionText::try_new(String::from("fixture.txt"))
                 .expect("fixture filename is admitted"),
         })
         .await?;
-    let cross_class_conflict = repository
+
+    let conflict = repository
         .publish(SearchArtifactProjection {
             session: other_session,
             address: session_created_address(&pool, other_session).await?,
@@ -279,7 +317,6 @@ async fn derived_text_is_searchable_only_after_its_durable_publisher_runs()
                 .expect("fixture media metadata is admitted"),
         })
         .await;
-    assert!(cross_class_conflict.is_err());
     let attachment_sessions: i64 = sqlx::query_scalar(
         "SELECT count(DISTINCT session_id)
            FROM web_search_projection
@@ -288,6 +325,8 @@ async fn derived_text_is_searchable_only_after_its_durable_publisher_runs()
     .bind(attachment.into_uuid())
     .fetch_one(&pool)
     .await?;
+
+    assert!(conflict.is_err());
     assert_eq!(attachment_sessions, 1);
 
     pool.close().await;
@@ -474,6 +513,52 @@ async fn headline_keeps_a_match_after_a_token_beyond_the_former_sql_cap()
     let result = page.results.first().expect("fixture projection matches");
 
     assert!(result.snippet.contains("needle"));
+    assert!(result.highlights.iter().any(|highlight| {
+        &result.snippet[usize::from(highlight.start_byte)..usize::from(highlight.end_byte)]
+            == "needle"
+    }));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn headline_preserves_literal_private_use_marker_characters() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x2f0).await?;
+    let source = Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x2f1);
+    let address = session_created_address(&pool, session).await?;
+    let content = "before \u{e000} needle \u{e001} after";
+
+    sqlx::query(
+        "INSERT INTO web_search_projection (
+             source_kind, source_id, session_id, event_sequence, item_kind, item_id,
+             turn_id, content_class, projection_ordinal, content_text
+         ) VALUES (
+             'derived_artifact', $1, $2, $3, 'derived_artifact', $1,
+             NULL, 'derived_text_artifact', 0, $4
+         )",
+    )
+    .bind(source)
+    .bind(session.into_uuid())
+    .bind(rust_decimal::Decimal::from(address.sequence().get()))
+    .bind(content)
+    .execute(&pool)
+    .await?;
+
+    let page = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "needle",
+            SearchScope::Session(session),
+            10,
+            None,
+        ))
+        .await?;
+    let result = page.results.first().expect("fixture projection matches");
+
+    assert_eq!(result.snippet, content);
     assert!(result.highlights.iter().any(|highlight| {
         &result.snippet[usize::from(highlight.start_byte)..usize::from(highlight.end_byte)]
             == "needle"
