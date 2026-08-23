@@ -83,31 +83,31 @@ describe('BoundedSessionHistory', () => {
     await expect(new BoundedSessionHistory(sessionId, source).describe()).rejects.toThrow()
   })
 
-  it('does not let an older descriptor request replace newer cached state', async () => {
+  it('orders overlapping descriptor results by observation cursor', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const older = await scenario.readDescriptor(sessionId)
     const newer = {
       ...older,
       observed_through: String(SESSION_FOUNDATION_TOTAL + 38),
     }
-    let resolveOlder: (descriptor: typeof older) => void = () => undefined
-    const delayedOlder = new Promise<typeof older>((resolve) => {
-      resolveOlder = resolve
+    let resolveNewer: (descriptor: typeof newer) => void = () => undefined
+    const delayedNewer = new Promise<typeof newer>((resolve) => {
+      resolveNewer = resolve
     })
     const source: SessionTimelineSource = {
       limits: scenario.limits,
       readDescriptor: vi
         .fn<SessionTimelineSource['readDescriptor']>()
-        .mockReturnValueOnce(delayedOlder)
-        .mockResolvedValueOnce(newer),
+        .mockReturnValueOnce(delayedNewer)
+        .mockResolvedValueOnce(older),
       readWindow: scenario.readWindow.bind(scenario),
     }
     const history = new BoundedSessionHistory(sessionId, source)
 
-    const olderRequest = history.describe()
+    const newerRequest = history.describe()
     await history.describe()
-    resolveOlder(older)
-    await olderRequest
+    resolveNewer(newer)
+    await newerRequest
 
     expect(history.descriptor?.observed_through).toBe(newer.observed_through)
   })
