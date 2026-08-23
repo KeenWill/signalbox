@@ -1316,10 +1316,14 @@ pub(crate) async fn finish_projection(
         .raws
         .into_iter()
         .map(|raw| {
-            let bytes = bytes_by_digest
+            let stored_bytes = bytes_by_digest
                 .get(&raw.expected.digest())
-                .cloned()
                 .ok_or(ImportedConversationCorruption::Missing("raw blob bytes"))?;
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(stored_bytes.len())
+                .map_err(|_| ImportedRawBlobStorageError::Unavailable)?;
+            bytes.extend_from_slice(stored_bytes);
             Ok(ImportedRawSourceRecordReconstitutionInput::new(
                 raw.position,
                 raw.hash,

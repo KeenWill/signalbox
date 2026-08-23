@@ -169,6 +169,19 @@ BEGIN
            )
     ON CONFLICT DO NOTHING;
 
+    -- Review-workflow commands are session-owned indirectly through the pass
+    -- named by their durable result. Capture their registry identities before
+    -- deleting the imported-rooted review graph and its passes.
+    INSERT INTO imported_reset_command (command_id)
+    SELECT command.command_id
+      FROM review_workflow_command AS command
+      JOIN review_pass AS pass
+        ON pass.pass_id = command.result_pass_id
+     WHERE pass.session_id IN (
+               SELECT session_id FROM imported_reset_session
+           )
+    ON CONFLICT DO NOTHING;
+
     DELETE FROM session
      WHERE session_id IN (SELECT session_id FROM imported_reset_session);
     DELETE FROM durable_command
