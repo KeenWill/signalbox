@@ -55,7 +55,7 @@ mod linux {
     const DISPATCH_ENVIRONMENT_MODE: &str = "--dispatch-with-environment";
     const DISPATCH_HTTPS_PROXY_ENVIRONMENT_MODE: &str =
         "--dispatch-with-https-proxy-and-environment";
-    const RESTRICTED_ENVIRONMENT_FILE: &str = "/run/signalbox/restricted-environment";
+    const RESTRICTED_ENVIRONMENT_FILE: &str = crate::limits::SANDBOX_ENVIRONMENT_DELIVERY_PATH;
     const RESTRICTED_ENVIRONMENT_DESCRIPTOR_PLACEHOLDER: &str =
         "signalbox-private-environment-descriptor";
     const MAX_RESTRICTED_ENVIRONMENT_BYTES: usize =

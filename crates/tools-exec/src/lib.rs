@@ -64,6 +64,7 @@ pub use diagnostics::{
     CargoDiagnosticsToolConstructionError, CargoEvidenceProvenance, CargoFailureDetail,
     CargoTestOutcome, CargoTestRecords, CargoTestResult, InvalidCargoDiagnosticsArguments,
 };
+pub use limits::SANDBOX_ENVIRONMENT_DELIVERY_PATH;
 pub use process::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecExecutor, ExecExecutorError,
     ExecResult, ExecToolConstructionError, ExecutionConfinement, InvalidExecArguments,

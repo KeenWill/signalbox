@@ -13,7 +13,7 @@ use serde::Deserialize;
 use signalbox_runner_wire::{Advertisement, ProfileName, RepositoryKey, ValueError};
 #[cfg(feature = "runner-execution-proof")]
 use signalbox_runner_wire::{SandboxProfile, WireToolName};
-use signalbox_tools_exec::SandboxEnvironmentName;
+use signalbox_tools_exec::{SANDBOX_ENVIRONMENT_DELIVERY_PATH, SandboxEnvironmentName};
 use url::Url;
 
 const CONFIGURATION_VERSION: u64 = 1;
@@ -367,6 +367,7 @@ fn validate_read_only_paths(
     paths: &[PathBuf],
     runner_root: &Path,
 ) -> Result<(), RunnerConfigurationError> {
+    let environment_delivery_path = Path::new(SANDBOX_ENVIRONMENT_DELIVERY_PATH);
     if paths.is_empty() || paths.iter().any(|path| !valid_absolute_path(path)) {
         return Err(RunnerConfigurationError::InvalidReadOnlyPaths);
     }
@@ -375,6 +376,8 @@ fn validate_read_only_paths(
         || paths.iter().any(|path| {
             path.starts_with(runner_root)
                 || runner_root.starts_with(path)
+                || path.starts_with(environment_delivery_path)
+                || environment_delivery_path.starts_with(path)
                 || paths.iter().any(|other| {
                     path != other && (path.starts_with(other) || other.starts_with(path))
                 })
@@ -955,6 +958,39 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
 
         let error = RunnerConfiguration::parse(&document)
             .expect_err("nested read-only paths must fail closed");
+
+        assert_eq!(
+            error.to_string(),
+            "runner read-only path inventory is invalid"
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_read_only_ancestor_of_the_environment_delivery_path() {
+        let document = EMPTY_CONFIGURATION.replace(
+            "read_only_paths = [\"/usr\"]",
+            "read_only_paths = [\"/run\"]",
+        );
+
+        let error = RunnerConfiguration::parse(&document)
+            .expect_err("a delivery-path ancestor must fail closed at startup");
+
+        assert_eq!(
+            error.to_string(),
+            "runner read-only path inventory is invalid"
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_read_only_descendant_of_the_environment_delivery_path() {
+        let descendant = Path::new(SANDBOX_ENVIRONMENT_DELIVERY_PATH).join("cache");
+        let document = EMPTY_CONFIGURATION.replace(
+            "read_only_paths = [\"/usr\"]",
+            &format!("read_only_paths = [\"{}\"]", descendant.display()),
+        );
+
+        let error = RunnerConfiguration::parse(&document)
+            .expect_err("a delivery-path descendant must fail closed at startup");
 
         assert_eq!(
             error.to_string(),
