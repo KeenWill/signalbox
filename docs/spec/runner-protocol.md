@@ -1780,10 +1780,10 @@ complete target argv, fixed cleared environment, optional HTTPS proxy entries,
 and injected name/value must fit the process core's conservative 128 KiB Linux
 launch budget. Target admission also reserves Linux's maximum shebang
 interpreter and optional-argument expansion. The fully constructed outer
-bubblewrap dispatch request,
-including every configured mount argument, must independently fit the same
-budget. The actual availability-probe request, including the selected sandbox
-shell, probe arguments, configured mounts, and non-secret delivery payload, must
+bubblewrap dispatch request, including every configured mount argument, must
+independently fit the same budget. The actual availability-probe request,
+including the selected sandbox shell, probe arguments, configured mounts, and
+non-secret delivery payload, must
 independently fit it as well. All three checks include terminators and pointer
 arrays, and an oversized request is rejected before the availability probe. The
 caller value is written to a private anonymous descriptor, materialized as a
