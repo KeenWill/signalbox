@@ -462,7 +462,9 @@ test('Escape closes the command palette', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('the command palette opens keyboard help without closing it', async ({ page }) => {
+test('the command palette opens keyboard help with available product navigation', async ({
+  page,
+}) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
   await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
@@ -472,9 +474,9 @@ test('the command palette opens keyboard help without closing it', async ({ page
   await page.getByRole('button', { name: /Open keyboard help/ }).click()
   const help = page.getByRole('dialog', { name: 'Keyboard help' })
   await expect(help).toBeVisible()
-  await expect(help.getByText('Go to Attention', { exact: true })).toHaveCount(0)
-  await expect(help.getByText('Go to Sessions', { exact: true })).toHaveCount(0)
-  await expect(help.getByText('Go to Settings', { exact: true })).toHaveCount(0)
+  await expect(help.getByText('Go to Attention', { exact: true })).toBeVisible()
+  await expect(help.getByText('Go to Sessions', { exact: true })).toBeVisible()
+  await expect(help.getByText('Go to Settings', { exact: true })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
