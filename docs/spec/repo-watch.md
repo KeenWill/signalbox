@@ -33,9 +33,9 @@ termination is verified against PR #894
 configuration diagnostics are verified against PR #863
 (`agent/repo-watch-rule-robustness`). Bounded dispatch-start leases, priority
 nudges, expiry retirement, and nudge outcome telemetry are verified against this
-PR (`agent/dispatch-start-lease`). The dispatch attempt budget, the
-delay between attempts, the parked state, and both ways out of it are verified
-against PR #980 (`agent/dispatch-retry-budget`). The source-independent event occurrence
+PR (`agent/dispatch-start-lease`). The dispatch attempt budget, the delay
+between attempts, the parked state, and both ways out of it are verified against
+PR #980 (`agent/dispatch-retry-budget`). The source-independent event occurrence
 identity, its durable frontier, the commit-time coalescing of a restated
 occurrence, and the storage migration are verified against PR #870
 (`agent/repo-watch-content-identity`). The authenticated webhook intake, its

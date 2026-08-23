@@ -4806,6 +4806,7 @@ async fn inv069_expiry_retires_releases_and_rearms_the_dispatch() -> Result<(), 
             &fixture.repository,
             fixture.rule.id(),
             fixture.rule.version(),
+            immediate_retry_policy(),
         )
         .await?;
 
