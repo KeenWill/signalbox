@@ -326,6 +326,18 @@ export class BoundedSessionHistory {
       const appendGrowthContradiction =
         latestAddressAdvanced !== itemCountAdvanced ||
         (itemCountAdvanced && projectedStructuredBytes <= cachedProjectedStructuredBytes)
+      const retainedAppendItems = this.retainedValue.filter(
+        (item) => decimalAddress(item.address.event_sequence) > cachedLatestAddress,
+      )
+      const minimumRetainedItemGrowth = BigInt(retainedAppendItems.length)
+      const minimumRetainedStructuredByteGrowth = retainedAppendItems.reduce(
+        (total, item) => total + BigInt(item.projected_structured_bytes),
+        0n,
+      )
+      const retainedAppendContradiction =
+        itemCount - cachedItemCount < minimumRetainedItemGrowth ||
+        projectedStructuredBytes - cachedProjectedStructuredBytes <
+          minimumRetainedStructuredByteGrowth
       const equalCursorFactsChanged =
         observedThrough === cachedObservedThrough &&
         (latestAddress !== cachedLatestAddress ||
@@ -334,7 +346,12 @@ export class BoundedSessionHistory {
           projectedStructuredBytes !== cachedProjectedStructuredBytes ||
           referencedBlobCount !== cachedReferencedBlobCount ||
           referencedBlobBytes !== cachedReferencedBlobBytes)
-      if (durableFactsRegressed || appendGrowthContradiction || equalCursorFactsChanged) {
+      if (
+        durableFactsRegressed ||
+        appendGrowthContradiction ||
+        retainedAppendContradiction ||
+        equalCursorFactsChanged
+      ) {
         throw new TypeError('descriptor append-only facts are contradictory')
       }
     }

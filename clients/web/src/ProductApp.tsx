@@ -360,6 +360,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
+  const mainRef = useRef<HTMLElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const paletteOpenerRef = useRef<HTMLElement | null>(null)
   const navigationOpenerRef = useRef<HTMLElement | null>(null)
@@ -390,7 +391,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       focusTimeline: () => timelineRef.current?.focus(),
       loadTimelineWindow: (anchor) =>
         setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 })),
-      navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      navigate: (path) => {
+        void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() => {
+          requestAnimationFrame(() => mainRef.current?.focus())
+        })
+      },
       openNavigation: () => {
         const activeElement = document.activeElement
         const opener =
@@ -492,7 +497,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <aside className="product-navigation-pane">
         <ProductNavigation active={surface} context={context} />
       </aside>
-      <main className="product-main" tabIndex={-1}>
+      <main className="product-main" ref={mainRef} tabIndex={-1}>
         <header className="product-header">
           <div>
             <span className="eyebrow">{copy.eyebrow}</span>

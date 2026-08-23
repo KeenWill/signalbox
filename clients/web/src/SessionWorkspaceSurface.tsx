@@ -155,17 +155,34 @@ export function SessionWorkspaceSurface({
         descriptor.work.active_turn_count,
         descriptor.work.queued_turn_count,
       )
-      const anchor: SessionWindowAnchor =
+      let anchor: SessionWindowAnchor =
         manualAnchorRef.current ??
         (!active && openingPosition
           ? { kind: 'around', eventSequence: openingPosition }
           : { kind: 'latest' })
-      const timelineWindow = await history.load(
+      let timelineWindow = await history.load(
         anchor,
         { maxItems: SESSION_WINDOW_ITEMS, maxBytes: SESSION_WINDOW_BYTES },
         signal,
       )
-      const reconciledDescriptor = await history.describe(signal)
+      let reconciledDescriptor = await history.describe(signal)
+      let reconciledActive = sessionHasLiveWork(
+        reconciledDescriptor.work.active_turn_count,
+        reconciledDescriptor.work.queued_turn_count,
+      )
+      if (manualAnchorRef.current === null && anchor.kind === 'around' && reconciledActive) {
+        anchor = { kind: 'latest' }
+        timelineWindow = await history.load(
+          anchor,
+          { maxItems: SESSION_WINDOW_ITEMS, maxBytes: SESSION_WINDOW_BYTES },
+          signal,
+        )
+        reconciledDescriptor = await history.describe(signal)
+        reconciledActive = sessionHasLiveWork(
+          reconciledDescriptor.work.active_turn_count,
+          reconciledDescriptor.work.queued_turn_count,
+        )
+      }
       const latestWindowAddress = timelineWindow.items.at(-1)?.address.event_sequence
       if (
         latestWindowAddress !== undefined &&
@@ -174,10 +191,7 @@ export function SessionWorkspaceSurface({
         throw new TypeError('timeline window exceeds the reconciled descriptor')
       }
       return {
-        active: sessionHasLiveWork(
-          reconciledDescriptor.work.active_turn_count,
-          reconciledDescriptor.work.queued_turn_count,
-        ),
+        active: reconciledActive,
         anchor,
         descriptor: reconciledDescriptor,
         history,
