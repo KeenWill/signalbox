@@ -340,7 +340,7 @@ impl ImportedConversationDiscoveryRepository {
               LIMIT $5",
             )
             .bind(after)
-            .bind(source_format.as_deref())
+            .bind(source_format)
             .bind(converter_version)
             .bind(source_session_id)
             .bind(limit)
@@ -363,7 +363,7 @@ impl ImportedConversationDiscoveryRepository {
               LIMIT $4",
             )
             .bind(after)
-            .bind(source_format.as_deref())
+            .bind(source_format)
             .bind(converter_version)
             .bind(limit)
             .bind(source_session_maximum_bytes)
