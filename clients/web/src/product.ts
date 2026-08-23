@@ -303,6 +303,29 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
     if (page.repository !== repository) {
       throw new TypeError('pull-request page repository does not match the requested repository')
     }
+    if (afterPullRequest) {
+      const requested = canonicalPositiveBigInt(afterPullRequest, 'requested pull-request cursor')
+      let previous = requested
+      for (const pullRequest of page.pull_requests) {
+        const number = canonicalPositiveBigInt(pullRequest.number, 'pull-request page number')
+        if (number <= previous) {
+          throw new TypeError('pull-request page does not advance beyond the requested cursor')
+        }
+        previous = number
+      }
+      const continuationCursor = page.continuation_after_pull_request
+      if (continuationCursor != null) {
+        const continuation = canonicalPositiveBigInt(
+          continuationCursor,
+          'pull-request continuation',
+        )
+        if (continuation <= requested || continuation < previous) {
+          throw new TypeError(
+            'pull-request continuation does not advance beyond the requested cursor',
+          )
+        }
+      }
+    }
     return page
   }
 

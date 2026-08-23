@@ -86,6 +86,11 @@ const surfaceCopy: Record<
   },
 }
 
+export const isEditableTarget = (target: EventTarget | null) => {
+  if (!(target instanceof HTMLElement)) return false
+  return target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
+}
+
 function ProductNavigation({
   active,
   onNavigate,
@@ -305,7 +310,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
-      callback: () => invokeCommand(binding.commandId, context),
+      callback: (event) => {
+        if (binding.commandId === 'surface.escape' && isEditableTarget(event.target)) return
+        invokeCommand(binding.commandId, context)
+      },
     })),
   )
   useHotkeySequences(

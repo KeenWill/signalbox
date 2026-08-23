@@ -554,6 +554,7 @@ export function ActivitySurface() {
         signal,
       ),
     enabled: repository !== null,
+    gcTime: 0,
   })
 
   useEffect(() => {

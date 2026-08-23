@@ -232,6 +232,26 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('does not match the requested repository')
   })
 
+  it('rejects a non-advancing pull-request continuation', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              repository: 'example/repository',
+              pull_requests: [],
+              continuation_after_pull_request: '64',
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readRepoWatchPullRequests('example/repository', '64'),
+    ).rejects.toThrow('continuation does not advance beyond the requested cursor')
+  })
+
   it('rejects an activity feed beyond its generated page ceiling', async () => {
     const webhook = {
       action_name: 'opened',

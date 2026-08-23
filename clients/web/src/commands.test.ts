@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { globalHotkeySequenceBindings, invokeCommand } from './commands'
+import { commandRegistry, globalHotkeySequenceBindings, invokeCommand } from './commands'
 import { actions, selectApp, store } from './state'
 
 describe('command registry', () => {
@@ -11,6 +11,12 @@ describe('command registry', () => {
         { commandId: 'navigate.activity', sequence: ['G', 'T'] },
         { commandId: 'navigate.settings', sequence: ['G', ','] },
       ]),
+    )
+  })
+
+  it('describes Activity as bounded repository operations', () => {
+    expect(commandRegistry.find((command) => command.id === 'navigate.activity')?.description).toBe(
+      'Open bounded repository ingestion and automation reads.',
     )
   })
 
