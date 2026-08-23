@@ -806,6 +806,13 @@ function assertSchema(root, schema, value, path) {{
   if (typeof value !== schema.type) {{
     fail(path, schema.type);
   }}
+  if (
+    schema.type === "string" &&
+    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+    value.length > 20
+  ) {{
+    fail(path, "an unsigned 64-bit integer");
+  }}
   if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {{
     fail(path, `a string matching ${{schema.pattern}}`);
   }}
