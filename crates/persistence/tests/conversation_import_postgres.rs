@@ -762,8 +762,12 @@ async fn inv064_one_time_import_migration_installs_only_the_final_schema()
              DROP CONSTRAINT session_spawning_request_fk;
          ALTER TABLE session_delegation
              DROP CONSTRAINT session_delegation_parent_request_fk;
+         ALTER TABLE tool_request
+             DROP CONSTRAINT tool_request_round_fk;
          ALTER TABLE session_delegation_event DISABLE TRIGGER USER;
          ALTER TABLE session_delegation_initial_task DISABLE TRIGGER USER;
+         ALTER TABLE decide_tool_request_command DISABLE TRIGGER USER;
+         ALTER TABLE tool_approval_decision DISABLE TRIGGER USER;
          DO $$
          DECLARE
              foreign_key record;
@@ -943,7 +947,31 @@ async fn inv064_one_time_import_migration_installs_only_the_final_schema()
                  'goal', 1,
                  '40000000-0000-4000-8000-000000000066',
                  'attach', 'delegated fixture goal',
-                 'rejected', 'session_not_found');",
+                 'rejected', 'session_not_found');
+         INSERT INTO tool_request
+            (request_id, session_id, turn_id, producing_model_call_id,
+             request_ordinal, tool_name, arguments_kind, arguments_text)
+         VALUES ('80000000-0000-4000-8000-000000000068',
+                 '40000000-0000-4000-8000-000000000039',
+                 '90000000-0000-4000-8000-000000000068',
+                 'a0000000-0000-4000-8000-000000000068',
+                 0, 'fixture_tool', 'json', '{}');
+         INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ('30000000-0000-4000-8000-000000000068',
+                 'decide_tool_request', 1, transaction_timestamp());
+         INSERT INTO decide_tool_request_command
+            (command_id, command_kind, storage_version, request_id,
+             decision_kind, result_kind)
+         VALUES ('30000000-0000-4000-8000-000000000068',
+                 'decide_tool_request', 1,
+                 '80000000-0000-4000-8000-000000000068',
+                 'approve', 'applied');
+         INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source, user_command_id)
+         VALUES ('80000000-0000-4000-8000-000000000068',
+                 'approve', 'user_command',
+                 '30000000-0000-4000-8000-000000000068');",
     )
     .execute(&mut *transaction)
     .await?;
@@ -951,6 +979,19 @@ async fn inv064_one_time_import_migration_installs_only_the_final_schema()
     sqlx::raw_sql(
         "ALTER TABLE session_delegation_event ENABLE TRIGGER USER;
          ALTER TABLE session_delegation_initial_task ENABLE TRIGGER USER;
+         ALTER TABLE decide_tool_request_command ENABLE TRIGGER USER;
+         ALTER TABLE tool_approval_decision ENABLE TRIGGER USER;
+         ALTER TABLE tool_request
+             ADD CONSTRAINT tool_request_round_fk
+             FOREIGN KEY (producing_model_call_id, turn_id, session_id)
+             REFERENCES tool_round(producing_model_call_id, turn_id, session_id)
+             ON UPDATE RESTRICT ON DELETE RESTRICT
+             DEFERRABLE INITIALLY DEFERRED NOT VALID;
+         ALTER TABLE tool_request
+             ADD CONSTRAINT tool_request_fixture_session_fk
+             FOREIGN KEY (session_id) REFERENCES session(session_id)
+             ON UPDATE RESTRICT ON DELETE RESTRICT
+             DEFERRABLE INITIALLY DEFERRED NOT VALID;
          ALTER TABLE session
              ADD CONSTRAINT session_spawning_request_fk
              FOREIGN KEY (spawning_tool_request_id)
@@ -993,14 +1034,18 @@ async fn inv064_one_time_import_migration_installs_only_the_final_schema()
 
     apply_exact_migration(&pool, 202608110019).await?;
     sqlx::raw_sql(
-        "ALTER TABLE session
+        "ALTER TABLE tool_request
+             DROP CONSTRAINT tool_request_fixture_session_fk;
+         ALTER TABLE session
              VALIDATE CONSTRAINT session_spawning_request_fk;
          ALTER TABLE session_delegation
              VALIDATE CONSTRAINT session_delegation_parent_request_fk;
          ALTER TABLE session_delegation_event
              VALIDATE CONSTRAINT session_delegation_event_provenance_tool_request_fk;
          ALTER TABLE session_delegation_event
-             VALIDATE CONSTRAINT session_delegation_event_provenance_turn_fk;",
+             VALIDATE CONSTRAINT session_delegation_event_provenance_turn_fk;
+         ALTER TABLE tool_request
+             VALIDATE CONSTRAINT tool_request_round_fk;",
     )
     .execute(&pool)
     .await?;
@@ -1029,6 +1074,20 @@ async fn inv064_one_time_import_migration_installs_only_the_final_schema()
     .fetch_one(&pool)
     .await?;
     assert_eq!(after, (0, 0, 0, 1, 1, 0, 0, 0, 0, 0));
+    let decision_after: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM tool_request
+              WHERE request_id = '80000000-0000-4000-8000-000000000068'),
+            (SELECT count(*) FROM tool_approval_decision
+              WHERE request_id = '80000000-0000-4000-8000-000000000068'),
+            (SELECT count(*) FROM decide_tool_request_command
+              WHERE command_id = '30000000-0000-4000-8000-000000000068'),
+            (SELECT count(*) FROM durable_command
+              WHERE command_id = '30000000-0000-4000-8000-000000000068')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(decision_after, (0, 0, 0, 0));
     let raw_bytes_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1

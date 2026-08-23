@@ -155,6 +155,20 @@ BEGIN
         );
     END LOOP;
 
+    -- Applied tool-decision commands are session-owned through their request
+    -- and approval rather than a literal session_id on the typed command row.
+    -- Capture their registry identities before the request graph cascades.
+    INSERT INTO imported_reset_command (command_id)
+    SELECT approval.user_command_id
+      FROM tool_approval_decision AS approval
+      JOIN tool_request AS request
+        ON request.request_id = approval.request_id
+     WHERE approval.user_command_id IS NOT NULL
+       AND request.session_id IN (
+               SELECT session_id FROM imported_reset_session
+           )
+    ON CONFLICT DO NOTHING;
+
     DELETE FROM session
      WHERE session_id IN (SELECT session_id FROM imported_reset_session);
     DELETE FROM durable_command

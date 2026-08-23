@@ -238,7 +238,7 @@ async fn read_and_verify(
     let capacity = usize::try_from(expected.byte_length())
         .map_err(|_| ImportedRawBlobStorageError::Integrity)?;
     let mut reader = opened.into_reader();
-    let mut bytes = Vec::with_capacity(capacity);
+    let mut bytes = allocate_blob_buffer(capacity)?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; VERIFICATION_BUFFER_BYTES];
     loop {
@@ -263,6 +263,14 @@ async fn read_and_verify(
     if bytes.len() != capacity || observed != expected.digest() {
         return Err(ImportedRawBlobStorageError::Integrity);
     }
+    Ok(bytes)
+}
+
+fn allocate_blob_buffer(capacity: usize) -> Result<Vec<u8>, ImportedRawBlobStorageError> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(|_| ImportedRawBlobStorageError::Unavailable)?;
     Ok(bytes)
 }
 
@@ -292,7 +300,7 @@ mod tests {
     use signalbox_blob_store::ExpectedBlob;
     use signalbox_domain::BlobDigest;
 
-    use super::{ImportedRawBlobStorageError, enforce_cumulative_bound};
+    use super::{ImportedRawBlobStorageError, allocate_blob_buffer, enforce_cumulative_bound};
 
     fn expected(byte: u8, length: u64) -> ExpectedBlob {
         ExpectedBlob::try_new(BlobDigest::from_bytes([byte; 32]), length)
@@ -313,6 +321,14 @@ mod tests {
         assert_eq!(
             enforce_cumulative_bound(blobs, 4),
             Err(ImportedRawBlobStorageError::Integrity),
+        );
+    }
+
+    #[test]
+    fn imported_blob_buffer_reports_reservation_failure() {
+        assert_eq!(
+            allocate_blob_buffer(usize::MAX),
+            Err(ImportedRawBlobStorageError::Unavailable),
         );
     }
 }
