@@ -515,11 +515,10 @@ describe('BoundedSessionHistory', () => {
   })
 
   it('checks an HTTP response item ceiling before generated decoding', async () => {
-    let requestCount = 0
-    const request = async () => {
-      requestCount += 1
-      if (requestCount === 1) {
-        return new Response(
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
           JSON.stringify({
             contract: { name: 'signalbox.web-http', version: '1' },
             capabilities: {
@@ -535,34 +534,81 @@ describe('BoundedSessionHistory', () => {
               max_timeline_window_bytes: 64 * 1024,
             },
           }),
-        )
-      }
-      return new Response(
-        JSON.stringify({
-          session_id: sessionId,
-          items: [
-            {
-              address: { event_sequence: 'invalid-before-generated-decoding' },
-              kind: 'input_accepted',
-              projected_structured_bytes: 78,
-            },
-            {
-              address: { event_sequence: '2' },
-              kind: 'input_accepted',
-              projected_structured_bytes: 78,
-            },
-          ],
-          projected_structured_bytes: 156,
-          continuation_before: null,
-          continuation_after: null,
-        }),
+        ),
       )
-    }
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: sessionId,
+            items: [
+              {
+                address: { event_sequence: 'invalid-before-generated-decoding' },
+                kind: 'input_accepted',
+                projected_structured_bytes: 78,
+              },
+              {
+                address: { event_sequence: '2' },
+                kind: 'input_accepted',
+                projected_structured_bytes: 78,
+              },
+            ],
+            projected_structured_bytes: 156,
+            continuation_before: null,
+            continuation_after: null,
+          }),
+        ),
+      )
     const source = await HttpSessionTimelineSource.connect(request)
 
     await expect(
       source.readWindow(sessionId, { kind: 'first' }, { maxItems: 1, maxBytes: 256 }),
     ).rejects.toThrow('requested item ceiling')
+  })
+
+  it('enforces the requested byte ceiling in the HTTP source', async () => {
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            contract: { name: 'signalbox.web-http', version: '1' },
+            capabilities: {
+              bounded_json: true,
+              same_origin_json_mutations: true,
+              ndjson_streaming: true,
+              bounded_session_timeline: true,
+            },
+            limits: {
+              max_json_body_bytes: 64 * 1024,
+              max_ndjson_item_bytes: 64 * 1024,
+              max_timeline_window_items: 256,
+              max_timeline_window_bytes: 64 * 1024,
+            },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: sessionId,
+            items: [
+              {
+                address: { event_sequence: '1' },
+                kind: 'input_accepted',
+                projected_structured_bytes: 257,
+              },
+            ],
+            projected_structured_bytes: 0,
+            continuation_before: null,
+            continuation_after: null,
+          }),
+        ),
+      )
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    await expect(
+      source.readWindow(sessionId, { kind: 'first' }, { maxItems: 1, maxBytes: 256 }),
+    ).rejects.toThrow('requested byte ceiling')
   })
 
   it('does not expose mutable retained items', async () => {
