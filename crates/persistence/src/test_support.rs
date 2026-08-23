@@ -84,6 +84,7 @@ impl FleetSoakCensusRepository {
         &self,
         model_calls: &[ModelCallId],
     ) -> Result<FleetSoakCensus, sqlx::Error> {
+        let model_call_ids: Vec<Uuid> = model_calls.iter().map(|call| call.into_uuid()).collect();
         let lifecycle: FleetLifecycleCensusRow = sqlx::query_as(
             "SELECT count(*) FILTER (WHERE state_kind = 'active') AS active_turns,
                     count(*) FILTER (WHERE state_kind = 'terminal') AS terminal_turns,
@@ -91,11 +92,16 @@ impl FleetSoakCensusRepository {
                         WHERE state_kind = 'active'
                           AND active_phase_kind = 'awaiting_model_call_recovery'
                     ) AS awaiting_model_call_recovery_turns
-               FROM turn_lifecycle",
+               FROM turn_lifecycle
+              WHERE turn_id IN (
+                    SELECT turn_id
+                      FROM model_call
+                     WHERE model_call_id = ANY($1)
+              )",
         )
+        .bind(&model_call_ids)
         .fetch_one(&self.pool)
         .await?;
-        let model_call_ids: Vec<Uuid> = model_calls.iter().map(|call| call.into_uuid()).collect();
         let calls: FleetModelCallCensusRow = sqlx::query_as(
             "SELECT count(*) FILTER (
                         WHERE terminal_disposition_kind IS NOT NULL
