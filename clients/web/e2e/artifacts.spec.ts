@@ -40,17 +40,24 @@ const watchBrowser = (page: Page): BrowserProblems => {
   return problems
 }
 
-const expectOnlyFailedResourceConsoleError = (
+const expectOnlyExpectedFailedResourceError = (
   problems: BrowserProblems,
   failedResponsePaths: readonly string[],
   expectedPath: string,
 ) => {
   expect(problems.pageErrors).toEqual([])
   expect(failedResponsePaths).toEqual([expectedPath])
-  expect(problems.consoleErrors).toHaveLength(1)
-  expect(problems.consoleErrors[0]).toMatch(
-    /^Failed to load resource: the server responded with a status of 500(?: |$)/u,
-  )
+  expect(
+    problems.consoleErrors.filter(
+      (message) =>
+        !/^Failed to load resource: the server responded with a status of 500(?: |$)/u.test(
+          message,
+        ),
+    ),
+  ).toEqual([])
+  // Chromium emits one generic failed-resource diagnostic; Firefox emits none. The exact failed
+  // response assertion above correlates either behavior with only the intentional preview request.
+  expect(problems.consoleErrors.length).toBeLessThanOrEqual(1)
 }
 
 const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
@@ -130,7 +137,7 @@ test('falls back to metadata when automatic image views fail', async ({ page }) 
     'No admitted inline image view could be loaded. Metadata and download remain available.',
   )
   await expect(artifact.getByRole('link', { name: 'Download' })).toBeVisible()
-  expectOnlyFailedResourceConsoleError(problems, failedResponsePaths, previewPath)
+  expectOnlyExpectedFailedResourceError(problems, failedResponsePaths, previewPath)
 })
 
 test('expands text through a bounded keyboard action', async ({ page }) => {
