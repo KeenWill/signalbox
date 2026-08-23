@@ -142,6 +142,35 @@ test('replaces the current bounded page instead of accumulating attention histor
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('focuses Retry when an attention page request fails', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await installAttentionScenario(page)
+  await page.route('**/api/attention?after_session_id=*', (route) =>
+    route.fulfill({
+      status: 503,
+      json: {
+        error: {
+          code: 'attention_projection_unavailable',
+          kind: 'application',
+          message: 'attention projection is not configured',
+        },
+      },
+    }),
+  )
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: /Next page/ }).click()
+
+  await expect(page.getByRole('alert')).toContainText('attention_projection_unavailable')
+  await expect(page.getByRole('button', { name: 'Retry' })).toBeFocused()
+  expect(problems).toEqual({
+    consoleErrors: [
+      'Failed to load resource: the server responded with a status of 503 (Service Unavailable)',
+    ],
+    pageErrors: [],
+  })
+})
+
 test('captures the dark attention fleet', async ({ page }, testInfo) => {
   skipUnlessLinuxChromium(testInfo)
   const problems = watchBrowser(page)

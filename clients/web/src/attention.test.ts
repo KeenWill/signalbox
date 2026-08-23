@@ -212,4 +212,23 @@ describe('attention projection recovery', () => {
 
     expect(phases.at(-1)).toBe('stale')
   })
+
+  it('resets the immediate resync budget after each valid forward snapshot', async () => {
+    const phases: string[] = []
+    const resync = { kind: 'resync_required', cursor: '18' } as const
+
+    await synchronizeAttention({
+      transport: streamTransport([
+        [{ kind: 'snapshot', snapshot }, resync],
+        [{ kind: 'snapshot', snapshot: { ...snapshot, cursor: '19' } }, resync],
+        [{ kind: 'snapshot', snapshot: { ...snapshot, cursor: '20' } }, resync],
+        [{ kind: 'snapshot', snapshot: { ...snapshot, cursor: '21' } }],
+      ]),
+      signal: new AbortController().signal,
+      onPhase: (phase) => phases.push(phase),
+      onProjection: () => undefined,
+    })
+
+    expect(phases.at(-1)).toBe('stale')
+  })
 })

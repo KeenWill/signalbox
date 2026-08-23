@@ -8,6 +8,7 @@ import {
   type RemoteMediaPolicy,
   saveBrowserPreferences,
 } from './preferences'
+import type { RepoWatchHeldCursor, RepoWatchObligationCursor } from './product'
 
 export type LayoutMode = 'focus' | 'workbench'
 export type DensityMode = 'compact' | 'comfortable'
@@ -18,6 +19,14 @@ export type Overlay = 'palette' | 'help' | 'navigation' | null
 export interface VisibleRange {
   start: number
   end: number
+}
+
+export interface ActivityControls {
+  repositoryAfter: string | null
+  repository: string | null
+  pullRequestAfter: string | null
+  heldAfter?: RepoWatchHeldCursor
+  obligationAfter?: RepoWatchObligationCursor
 }
 
 interface AppState extends BrowserPreferences {
@@ -31,6 +40,7 @@ interface AppState extends BrowserPreferences {
   transcriptRange: VisibleRange
   tableRange: VisibleRange
   activitySequence: number
+  activityControls: ActivityControls
 }
 
 const initialState: AppState = {
@@ -41,6 +51,11 @@ const initialState: AppState = {
   transcriptRange: { start: 0, end: 0 },
   tableRange: { start: 0, end: 0 },
   activitySequence: 0,
+  activityControls: {
+    repositoryAfter: null,
+    repository: null,
+    pullRequestAfter: null,
+  },
 }
 
 // Tunable effective ceiling: diagnostics retain a concise Redux activity tail for local triage.
@@ -102,6 +117,29 @@ const appSlice = createSlice({
     },
     tableRangeSet(state, action: { payload: VisibleRange }) {
       state.tableRange = action.payload
+    },
+    activityRepositoryPageSet(state, action: { payload: string | null }) {
+      state.activityControls.repositoryAfter = action.payload
+      state.activitySequence += 1
+    },
+    activityRepositorySelected(state, action: { payload: string | null }) {
+      state.activityControls.repository = action.payload
+      state.activityControls.pullRequestAfter = null
+      state.activityControls.heldAfter = undefined
+      state.activityControls.obligationAfter = undefined
+      state.activitySequence += 1
+    },
+    activityPullRequestPageSet(state, action: { payload: string | null }) {
+      state.activityControls.pullRequestAfter = action.payload
+      state.activitySequence += 1
+    },
+    activityHeldPageSet(state, action: { payload: RepoWatchHeldCursor | undefined }) {
+      state.activityControls.heldAfter = action.payload
+      state.activitySequence += 1
+    },
+    activityObligationPageSet(state, action: { payload: RepoWatchObligationCursor | undefined }) {
+      state.activityControls.obligationAfter = action.payload
+      state.activitySequence += 1
     },
   },
 })

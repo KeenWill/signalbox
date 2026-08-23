@@ -253,11 +253,26 @@ const watchBrowser = (page: Page) => {
 
 const installActivityScenario = async (page: Page) => {
   const apiRequests: string[] = []
+  const emptyAttentionFixture = {
+    continuation_after_session_id: null,
+    cursor: '1',
+    summaries: [],
+  }
   page.on('request', (request) => {
     const url = new URL(request.url())
     if (url.pathname.startsWith('/api/')) apiRequests.push(`${url.pathname}${url.search}`)
   })
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/attention**', (route) => {
+    const requestUrl = new URL(route.request().url())
+    if (requestUrl.pathname.endsWith('/follow')) {
+      return route.fulfill({
+        body: `${JSON.stringify({ kind: 'snapshot', snapshot: emptyAttentionFixture })}\n`,
+        contentType: 'application/x-ndjson',
+      })
+    }
+    return route.fulfill({ json: emptyAttentionFixture })
+  })
   await page.route('**/api/repository-watch/repositories**', (route) =>
     route.fulfill({ json: repositoriesFixture }),
   )
@@ -288,9 +303,9 @@ const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
   )
 }
 
-test('pages a 101-delivery burst and preserves semantic session evidence', async ({ page }) => {
+test('renders and virtualizes a 101-delivery repository activity burst', async ({ page }) => {
   const problems = watchBrowser(page)
-  const apiRequests = await installActivityScenario(page)
+  await installActivityScenario(page)
   await page.goto('/activity')
 
   await expect(page.getByRole('heading', { name: repository })).toBeVisible()
@@ -309,6 +324,13 @@ test('pages a 101-delivery burst and preserves semantic session evidence', async
   await expect(historyViewport).toBeFocused()
   await historyViewport.press('End')
   await expect(page.getByText('delivery 2', { exact: true })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('toggles authoritative commissioned-session evidence', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await installActivityScenario(page)
+  await page.goto('/activity')
 
   await page.getByRole('button', { name: /#103 Non-converged checks/ }).click()
   const sessionPanel = page.getByRole('region', { name: 'Commissioned sessions' })
@@ -319,7 +341,13 @@ test('pages a 101-delivery burst and preserves semantic session evidence', async
   await expect(sessionEvidence).not.toHaveAttribute('href')
   await page.getByRole('button', { name: /#103 Non-converged checks/ }).click()
   await expect(page.getByRole('region', { name: 'Commissioned sessions' })).toBeHidden()
-  await page.getByRole('button', { name: /#103 Non-converged checks/ }).click()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('pages older activity without exposing storage details in requests', async ({ page }) => {
+  const problems = watchBrowser(page)
+  const apiRequests = await installActivityScenario(page)
+  await page.goto('/activity')
 
   await page.getByRole('button', { name: 'Load older window' }).click()
   await expect(page.getByText('106 loaded in browser window')).toBeVisible()
@@ -331,6 +359,13 @@ test('pages a 101-delivery burst and preserves semantic session evidence', async
   )
   expect(apiRequests.every((request) => request.startsWith('/api/'))).toBe(true)
   expect(apiRequests.join(' ')).not.toMatch(/postgres|database|sql/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('navigates to Activity through the registered command', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await installActivityScenario(page)
+  await page.goto('/attention')
 
   await page.keyboard.press('g')
   await page.keyboard.press('t')

@@ -24,6 +24,7 @@ const MAX_ATTENTION_EVENT_BYTES = 65_536
 const EXPECTED_CONTRACT_NAME = 'signalbox.web-http'
 const EXPECTED_CONTRACT_VERSION = '1'
 const MAX_POSTGRES_BIGINT = 9_223_372_036_854_775_807n
+const MAX_UNSIGNED_BIGINT = 18_446_744_073_709_551_615n
 const MAX_POSTGRES_INTEGER = 2_147_483_647
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
@@ -81,17 +82,16 @@ const validateRepositoryPage = (
   afterRepository: string | undefined,
   page: WebRepoWatchRepositoryStatusPage,
 ): WebRepoWatchRepositoryStatusPage => {
-  if (!afterRepository) return page
   let previous = afterRepository
   for (const status of page.repositories) {
-    if (status.repository <= previous) {
+    if (previous !== undefined && status.repository <= previous) {
       throw new TypeError('repository page does not advance beyond the requested cursor')
     }
     previous = status.repository
   }
   const continuation = page.continuation_after_repository
-  if (continuation != null && (continuation <= afterRepository || continuation < previous)) {
-    throw new TypeError('repository continuation does not advance beyond the requested cursor')
+  if (continuation != null && (page.repositories.length === 0 || continuation !== previous)) {
+    throw new TypeError('repository continuation does not equal the returned page boundary')
   }
   return page
 }
@@ -101,84 +101,72 @@ const validateWorkPage = (
   obligationAfter: RepoWatchObligationCursor | undefined,
   page: WebRepoWatchWorkPage,
 ): WebRepoWatchWorkPage => {
-  if (heldAfter) {
-    let previousTime = heldAfter.heldSinceUnixMicroseconds
-    let previousId = heldAfter.dispatchId
-    for (const slot of page.held_slots) {
+  let previousHeldTime = heldAfter?.heldSinceUnixMicroseconds
+  let previousHeldId = heldAfter?.dispatchId
+  for (const slot of page.held_slots) {
+    if (previousHeldTime !== undefined && previousHeldId !== undefined) {
       if (
         compareCursorPair(
           slot.held_since_unix_microseconds,
           slot.dispatch_id,
-          previousTime,
-          previousId,
+          previousHeldTime,
+          previousHeldId,
           'held-work cursor',
         ) <= 0
       ) {
         throw new TypeError('held-work page does not advance beyond the requested cursor')
       }
-      previousTime = slot.held_since_unix_microseconds
-      previousId = slot.dispatch_id
     }
-    const continuation = page.held_continuation_after
-    if (
-      continuation &&
-      (compareCursorPair(
-        continuation.held_since_unix_microseconds,
-        continuation.dispatch_id,
-        heldAfter.heldSinceUnixMicroseconds,
-        heldAfter.dispatchId,
+    previousHeldTime = slot.held_since_unix_microseconds
+    previousHeldId = slot.dispatch_id
+  }
+  const heldContinuation = page.held_continuation_after
+  if (
+    heldContinuation &&
+    (page.held_slots.length === 0 ||
+      compareCursorPair(
+        heldContinuation.held_since_unix_microseconds,
+        heldContinuation.dispatch_id,
+        previousHeldTime ?? '',
+        previousHeldId ?? '',
         'held-work continuation',
-      ) <= 0 ||
-        compareCursorPair(
-          continuation.held_since_unix_microseconds,
-          continuation.dispatch_id,
-          previousTime,
-          previousId,
-          'held-work continuation',
-        ) < 0)
-    ) {
-      throw new TypeError('held-work continuation does not advance beyond the requested cursor')
-    }
+      ) !== 0)
+  ) {
+    throw new TypeError('held-work continuation does not equal the returned page boundary')
   }
 
-  if (obligationAfter) {
-    let previousTime = obligationAfter.owedSinceUnixMicroseconds
-    let previousId = obligationAfter.obligationId
-    for (const obligation of page.queued_obligations) {
+  let previousObligationTime = obligationAfter?.owedSinceUnixMicroseconds
+  let previousObligationId = obligationAfter?.obligationId
+  for (const obligation of page.queued_obligations) {
+    if (previousObligationTime !== undefined && previousObligationId !== undefined) {
       if (
         compareCursorPair(
           obligation.owed_since_unix_microseconds,
           obligation.id,
-          previousTime,
-          previousId,
+          previousObligationTime,
+          previousObligationId,
           'queued-work cursor',
         ) <= 0
       ) {
         throw new TypeError('queued-work page does not advance beyond the requested cursor')
       }
-      previousTime = obligation.owed_since_unix_microseconds
-      previousId = obligation.id
     }
-    const continuation = page.obligation_continuation_after
-    if (
-      continuation &&
-      (compareCursorPair(
-        continuation.owed_since_unix_microseconds,
-        continuation.obligation_id,
-        obligationAfter.owedSinceUnixMicroseconds,
-        obligationAfter.obligationId,
+    previousObligationTime = obligation.owed_since_unix_microseconds
+    previousObligationId = obligation.id
+  }
+  const obligationContinuation = page.obligation_continuation_after
+  if (
+    obligationContinuation &&
+    (page.queued_obligations.length === 0 ||
+      compareCursorPair(
+        obligationContinuation.owed_since_unix_microseconds,
+        obligationContinuation.obligation_id,
+        previousObligationTime ?? '',
+        previousObligationId ?? '',
         'queued-work continuation',
-      ) <= 0 ||
-        compareCursorPair(
-          continuation.owed_since_unix_microseconds,
-          continuation.obligation_id,
-          previousTime,
-          previousId,
-          'queued-work continuation',
-        ) < 0)
-    ) {
-      throw new TypeError('queued-work continuation does not advance beyond the requested cursor')
-    }
+      ) !== 0)
+  ) {
+    throw new TypeError('queued-work continuation does not equal the returned page boundary')
   }
   return page
 }
@@ -187,12 +175,18 @@ const validateSessionPage = (
   before: RepoWatchSessionCursor | undefined,
   page: WebRepoWatchPullRequestSessionPage,
 ): WebRepoWatchPullRequestSessionPage => {
-  if (!before) return page
-  let previousTime = before.commissionedAtUnixMicroseconds
-  let previousId = before.sessionId
+  let previousTime = before?.commissionedAtUnixMicroseconds
+  let previousId = before?.sessionId
   for (const session of page.sessions) {
     const sessionId = session.attention.session_id
+    canonicalNonnegativeBigInt(
+      session.commissioned_at_unix_microseconds,
+      'session cursor timestamp',
+    )
+    canonicalUuid(sessionId, 'session cursor identity')
     if (
+      previousTime !== undefined &&
+      previousId !== undefined &&
       compareCursorPair(
         session.commissioned_at_unix_microseconds,
         sessionId,
@@ -209,22 +203,16 @@ const validateSessionPage = (
   const continuation = page.continuation_before
   if (
     continuation &&
-    (compareCursorPair(
-      continuation.commissioned_at_unix_microseconds,
-      continuation.session_id,
-      before.commissionedAtUnixMicroseconds,
-      before.sessionId,
-      'session continuation',
-    ) >= 0 ||
+    (page.sessions.length === 0 ||
       compareCursorPair(
         continuation.commissioned_at_unix_microseconds,
         continuation.session_id,
-        previousTime,
-        previousId,
+        previousTime ?? '',
+        previousId ?? '',
         'session continuation',
-      ) > 0)
+      ) !== 0)
   ) {
-    throw new TypeError('session continuation does not advance to older history')
+    throw new TypeError('session continuation does not equal the returned page boundary')
   }
   return page
 }
@@ -233,6 +221,13 @@ const canonicalPositiveBigInt = (value: string, field: string): bigint => {
   if (!/^[1-9][0-9]*$/.test(value)) throw new TypeError(`${field} is not canonical`)
   const parsed = BigInt(value)
   if (parsed > MAX_POSTGRES_BIGINT) throw new TypeError(`${field} exceeds its database range`)
+  return parsed
+}
+
+const canonicalPositiveUnsignedBigInt = (value: string, field: string): bigint => {
+  if (!/^[1-9][0-9]*$/.test(value)) throw new TypeError(`${field} is not canonical`)
+  const parsed = BigInt(value)
+  if (parsed > MAX_UNSIGNED_BIGINT) throw new TypeError(`${field} exceeds the unsigned range`)
   return parsed
 }
 
@@ -308,17 +303,10 @@ const validateActivityContinuations = (
       }
     }
     const last = page.events.at(-1)
-    if (last) {
-      const lastGeneration = canonicalPositiveBigInt(
-        last.cursor_generation,
-        'last event generation',
-      )
-      if (
-        generation > lastGeneration ||
-        (generation === lastGeneration && event.event_ordinal > last.event_ordinal)
-      ) {
-        throw new TypeError('event continuation does not advance beyond returned rows')
-      }
+    if (!last) throw new TypeError('event continuation has no returned page boundary')
+    const lastGeneration = canonicalPositiveBigInt(last.cursor_generation, 'last event generation')
+    if (generation !== lastGeneration || event.event_ordinal !== last.event_ordinal) {
+      throw new TypeError('event continuation does not equal the returned page boundary')
     }
   }
 
@@ -332,8 +320,9 @@ const validateActivityContinuations = (
       throw new TypeError('webhook continuation does not advance to older history')
     }
     const last = page.webhooks.at(-1)
-    if (last && sequence > canonicalPositiveBigInt(last.receipt_sequence, 'last webhook cursor')) {
-      throw new TypeError('webhook continuation does not advance beyond returned rows')
+    if (!last) throw new TypeError('webhook continuation has no returned page boundary')
+    if (sequence !== canonicalPositiveBigInt(last.receipt_sequence, 'last webhook cursor')) {
+      throw new TypeError('webhook continuation does not equal the returned page boundary')
     }
   }
   return page
@@ -580,26 +569,29 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
     if (page.repository !== repository) {
       throw new TypeError('pull-request page repository does not match the requested repository')
     }
-    if (afterPullRequest) {
-      const requested = canonicalPositiveBigInt(afterPullRequest, 'requested pull-request cursor')
+    {
+      const requested = afterPullRequest
+        ? canonicalPositiveUnsignedBigInt(afterPullRequest, 'requested pull-request cursor')
+        : undefined
       let previous = requested
       for (const pullRequest of page.pull_requests) {
-        const number = canonicalPositiveBigInt(pullRequest.number, 'pull-request page number')
-        if (number <= previous) {
+        const number = canonicalPositiveUnsignedBigInt(
+          pullRequest.number,
+          'pull-request page number',
+        )
+        if (previous !== undefined && number <= previous) {
           throw new TypeError('pull-request page does not advance beyond the requested cursor')
         }
         previous = number
       }
       const continuationCursor = page.continuation_after_pull_request
       if (continuationCursor != null) {
-        const continuation = canonicalPositiveBigInt(
+        const continuation = canonicalPositiveUnsignedBigInt(
           continuationCursor,
           'pull-request continuation',
         )
-        if (continuation <= requested || continuation < previous) {
-          throw new TypeError(
-            'pull-request continuation does not advance beyond the requested cursor',
-          )
+        if (page.pull_requests.length === 0 || continuation !== previous) {
+          throw new TypeError('pull-request continuation does not equal the returned page boundary')
         }
       }
     }

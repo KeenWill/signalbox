@@ -98,6 +98,7 @@ export const synchronizeAttention = async ({
     while (!signal.aborted) {
       let restart = false
       for await (const event of transport.followAttention(signal)) {
+        const previousProjection = projection
         const reduction = reduceAttentionEvent(projection, event)
         if (reduction.kind === 'resync') {
           resyncs += 1
@@ -110,7 +111,17 @@ export const synchronizeAttention = async ({
           break
         }
         projection = reduction.snapshot
-        if (event.kind === 'update') resyncs = 0
+        const previousCursor = previousProjection ? cursorValue(previousProjection.cursor) : null
+        const projectionCursor = cursorValue(projection.cursor)
+        if (
+          event.kind === 'update' ||
+          (event.kind === 'snapshot' &&
+            previousCursor !== null &&
+            projectionCursor !== null &&
+            projectionCursor > previousCursor)
+        ) {
+          resyncs = 0
+        }
         onProjection(projection)
         transition('live')
       }

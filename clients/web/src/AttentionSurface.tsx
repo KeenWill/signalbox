@@ -42,6 +42,7 @@ export function AttentionSurface() {
   const returnFocus = useRef<HTMLButtonElement>(null)
   const closeFocus = useRef<HTMLButtonElement>(null)
   const pageHeadingFocus = useRef<HTMLHeadingElement>(null)
+  const pageErrorFocus = useRef<HTMLButtonElement>(null)
   const pageFocusPending = useRef<string | null | undefined>(undefined)
   const selectionEvictedFocus = useRef(false)
   const attention = useQuery({
@@ -90,10 +91,16 @@ export function AttentionSurface() {
   }, [attention.data, selected, selectedId])
 
   useLayoutEffect(() => {
-    if (pageFocusPending.current !== after || !attention.data) return
+    if (pageFocusPending.current !== after) return
+    if (attention.isError) {
+      pageFocusPending.current = undefined
+      pageErrorFocus.current?.focus()
+      return
+    }
+    if (!attention.data) return
     pageFocusPending.current = undefined
     pageHeadingFocus.current?.focus()
-  }, [after, attention.data])
+  }, [after, attention.data, attention.isError])
 
   const open = (summary: AttentionSummary, button: HTMLButtonElement) => {
     returnFocus.current = button
@@ -139,7 +146,7 @@ export function AttentionSurface() {
                 ? `${attention.error.code}: ${attention.error.message}`
                 : 'The response did not match the generated web contract.'}
             </p>
-            <button type="button" onClick={() => void attention.refetch()}>
+            <button ref={pageErrorFocus} type="button" onClick={() => void attention.refetch()}>
               Retry
             </button>
           </div>

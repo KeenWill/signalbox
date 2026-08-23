@@ -19,7 +19,7 @@ import {
   type RepoWatchObligationCursor,
   type RepoWatchSessionCursor,
 } from './product'
-import { actions, useAppDispatch } from './state'
+import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
 import { displayUnixMicroseconds, displayUnixMilliseconds } from './time'
 
 type RepositoryStatus = WebRepoWatchRepositoryStatusPage['repositories'][number]
@@ -265,7 +265,11 @@ function RepositoryHealth({ status }: { status: RepositoryStatus }) {
         </div>
         <div>
           <dt>Latest webhook</dt>
-          <dd>{time(status.latest_webhook?.received_at_unix_milliseconds)}</dd>
+          <dd>
+            {status.latest_webhook
+              ? `${time(status.latest_webhook.received_at_unix_milliseconds)} · delivery ${status.latest_webhook.receipt_sequence} · ${status.latest_webhook.action_name ? `${status.latest_webhook.event_name}.${status.latest_webhook.action_name}` : status.latest_webhook.event_name}`
+              : '—'}
+          </dd>
         </div>
         {[status.previous_five_minutes, status.previous_hour].map((window) => (
           <div key={window.seconds}>
@@ -542,11 +546,9 @@ function SessionPanel({
 }
 
 export function ActivitySurface() {
-  const [repositoryAfter, setRepositoryAfter] = useState<string | null>(null)
-  const [repository, setRepository] = useState<string | null>(null)
-  const [pullRequestAfter, setPullRequestAfter] = useState<string | null>(null)
-  const [heldAfter, setHeldAfter] = useState<RepoWatchHeldCursor | undefined>()
-  const [obligationAfter, setObligationAfter] = useState<RepoWatchObligationCursor | undefined>()
+  const dispatch = useAppDispatch()
+  const { repositoryAfter, repository, pullRequestAfter, heldAfter, obligationAfter } =
+    useAppSelector(selectApp).activityControls
   const [selectedPullRequest, setSelectedPullRequest] = useState<string | null>(null)
   const [sessionBefore, setSessionBefore] = useState<RepoWatchSessionCursor | undefined>()
   const [eventBefore, setEventBefore] = useState<RepoWatchEventCursor | undefined>()
@@ -576,17 +578,26 @@ export function ActivitySurface() {
     gcTime: 0,
   })
   useEffect(() => {
+    if (!repositories.data) return
     const first = repositories.data?.repositories[0]?.repository
     const selectedIsLoaded = repositories.data?.repositories.some(
       (item) => item.repository === repository,
     )
-    if (first && !selectedIsLoaded) {
-      if (repository !== null) repositorySelectFocus.current?.focus()
-      setRepository(first)
-      setPullRequestAfter(null)
+    if (!first && repository !== null) {
+      repositorySelectFocus.current?.focus()
+      dispatch(actions.activityRepositorySelected(null))
       setSelectedPullRequest(null)
-      setHeldAfter(undefined)
-      setObligationAfter(undefined)
+      setSessionBefore(undefined)
+      setEventBefore(undefined)
+      setWebhookBefore(undefined)
+      setIncludeEvents(true)
+      setIncludeWebhooks(true)
+      setActivityPaging(false)
+      setActivityPages([])
+    } else if (first && !selectedIsLoaded) {
+      if (repository !== null) repositorySelectFocus.current?.focus()
+      dispatch(actions.activityRepositorySelected(first))
+      setSelectedPullRequest(null)
       setSessionBefore(undefined)
       setEventBefore(undefined)
       setWebhookBefore(undefined)
@@ -595,7 +606,7 @@ export function ActivitySurface() {
       setActivityPaging(false)
       setActivityPages([])
     }
-  }, [repositories.data, repository])
+  }, [dispatch, repositories.data, repository])
 
   useLayoutEffect(() => {
     if (repositoryFocusPending.current !== repositoryAfter || !repositories.data) return
@@ -752,11 +763,8 @@ export function ActivitySurface() {
   }, [activityPages, filter, repository, sort])
 
   const chooseRepository = (next: string) => {
-    setRepository(next)
-    setPullRequestAfter(null)
+    dispatch(actions.activityRepositorySelected(next))
     setSelectedPullRequest(null)
-    setHeldAfter(undefined)
-    setObligationAfter(undefined)
     setSessionBefore(undefined)
     setEventBefore(undefined)
     setWebhookBefore(undefined)
@@ -769,19 +777,19 @@ export function ActivitySurface() {
     setSelectedPullRequest(null)
     setSessionBefore(undefined)
     pullRequestFocusPending.current = after
-    setPullRequestAfter(after)
+    dispatch(actions.activityPullRequestPageSet(after))
   }
   const changeRepositoryPage = (after: string | null) => {
     repositoryFocusPending.current = after
-    setRepositoryAfter(after)
+    dispatch(actions.activityRepositoryPageSet(after))
   }
   const changeHeldPage = (after: RepoWatchHeldCursor | undefined) => {
     workFocusPending.current = 'held'
-    setHeldAfter(after)
+    dispatch(actions.activityHeldPageSet(after))
   }
   const changeQueuedPage = (after: RepoWatchObligationCursor | undefined) => {
     workFocusPending.current = 'queued'
-    setObligationAfter(after)
+    dispatch(actions.activityObligationPageSet(after))
   }
   const changeSessionPage = (before: RepoWatchSessionCursor | undefined) => {
     sessionFocusPending.current = true
@@ -856,6 +864,13 @@ export function ActivitySurface() {
       {pullRequests.isError && (
         <p role="alert">Pull requests: {errorMessage(pullRequests.error)}</p>
       )}
+      {pullRequestAfter && (
+        <div className="activity-page-controls">
+          <button type="button" onClick={() => changePullRequestPage(null)}>
+            First PR page
+          </button>
+        </div>
+      )}
 
       {pullRequests.data && repository && (
         <>
@@ -870,11 +885,6 @@ export function ActivitySurface() {
             headingRef={pullRequestHeadingFocus}
           />
           <div className="activity-page-controls">
-            {pullRequestAfter && (
-              <button type="button" onClick={() => changePullRequestPage(null)}>
-                First PR page
-              </button>
-            )}
             {pullRequests.data.continuation_after_pull_request && (
               <button
                 type="button"

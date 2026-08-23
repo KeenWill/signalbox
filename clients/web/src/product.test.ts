@@ -43,7 +43,16 @@ const errorFixture = {
 
 const activityFixture = {
   event_continuation_before: { cursor_generation: '8', event_ordinal: 41 },
-  events: [],
+  events: [
+    {
+      cursor_generation: '8',
+      event_ordinal: 41,
+      id: 'event-41',
+      kind: 'head_changed',
+      observed_at_unix_milliseconds: '1724200000000',
+      pull_request: null,
+    },
+  ],
   webhook_continuation_before_receipt_sequence: null,
   webhooks: [],
 } as const
@@ -273,6 +282,25 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('event rows do not advance to older history')
   })
 
+  it('rejects an activity continuation that does not equal the final row', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...activityFixture,
+              event_continuation_before: { cursor_generation: '8', event_ordinal: 40 },
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readRepoWatchActivity('example/repository'),
+    ).rejects.toThrow('event continuation does not equal the returned page boundary')
+  })
+
   it('rejects duplicate event identities in one activity page', async () => {
     const event = {
       cursor_generation: '9',
@@ -359,7 +387,7 @@ describe('SameOriginProductTransport', () => {
 
     await expect(
       new SameOriginProductTransport().readRepoWatchRepositories('example/repository'),
-    ).rejects.toThrow('repository continuation does not advance beyond the requested cursor')
+    ).rejects.toThrow('repository continuation does not equal the returned page boundary')
   })
 
   it('rejects a repeated held-work cursor', async () => {
@@ -387,7 +415,7 @@ describe('SameOriginProductTransport', () => {
         dispatchId,
         heldSinceUnixMicroseconds: '1724200000000000',
       }),
-    ).rejects.toThrow('held-work continuation does not advance')
+    ).rejects.toThrow('held-work continuation does not equal the returned page boundary')
   })
 
   it('rejects sessions that do not advance to older history', async () => {
@@ -440,7 +468,34 @@ describe('SameOriginProductTransport', () => {
 
     await expect(
       new SameOriginProductTransport().readRepoWatchPullRequests('example/repository', '64'),
-    ).rejects.toThrow('continuation does not advance beyond the requested cursor')
+    ).rejects.toThrow('pull-request continuation does not equal the returned page boundary')
+  })
+
+  it('accepts the maximum unsigned pull-request cursor', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              repository: 'example/repository',
+              pull_requests: [],
+              continuation_after_pull_request: null,
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readRepoWatchPullRequests(
+        'example/repository',
+        '18446744073709551615',
+      ),
+    ).resolves.toEqual({
+      repository: 'example/repository',
+      pull_requests: [],
+      continuation_after_pull_request: null,
+    })
   })
 
   it('rejects an activity feed beyond its generated page ceiling', async () => {
