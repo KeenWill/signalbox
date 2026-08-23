@@ -1073,6 +1073,10 @@ enum RemovalStep {
         parent: Rc<File>,
         name: OsString,
     },
+    Unlink {
+        parent: Rc<File>,
+        name: OsString,
+    },
     RemoveDirectory {
         parent: Rc<File>,
         name: OsString,
@@ -1175,7 +1179,14 @@ fn remove_directory_steps(
                     });
                     push_directory_entries(&mut steps, child)?;
                 } else {
-                    unlinkat(parent.as_ref(), &name, AtFlags::empty()).map_err(rustix_io)?;
+                    steps.push(RemovalStep::Unlink { parent, name });
+                }
+            }
+            RemovalStep::Unlink { parent, name } => {
+                match unlinkat(parent.as_ref(), &name, AtFlags::empty()) {
+                    Ok(()) => {}
+                    Err(error) if error == rustix::io::Errno::NOENT => {}
+                    Err(error) => return Err(rustix_io(error)),
                 }
             }
             RemovalStep::RemoveDirectory {
@@ -1709,6 +1720,42 @@ mod tests {
 
         remove_directory_steps(steps, CLEANUP_DIRECTORY_RESCAN_LIMIT)
             .expect("cleanup ignores the entry that already disappeared");
+
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn directory_cleanup_ignores_an_entry_that_disappears_before_unlink() {
+        let parent = tempfile::tempdir().expect("the cleanup fixture parent exists");
+        let staging_name = "staging";
+        let entry_name = "disappearing";
+        let staging = parent.path().join(staging_name);
+        fs::create_dir(&staging).expect("the cleanup fixture staging directory exists");
+        fs::write(staging.join(entry_name), LATE_REPOSITORY_WRITE_BYTES)
+            .expect("the cleanup fixture entry exists before unlink");
+        let parent_descriptor =
+            Rc::new(fs::File::open(parent.path()).expect("the cleanup fixture parent opens"));
+        let staging_descriptor =
+            Rc::new(fs::File::open(&staging).expect("the cleanup fixture staging directory opens"));
+        let identity = DirectoryIdentity::from_file(staging_descriptor.as_ref())
+            .expect("the cleanup fixture staging identity is available");
+        let steps = vec![
+            RemovalStep::RemoveDirectory {
+                parent: parent_descriptor,
+                name: OsString::from(staging_name),
+                identity,
+                directory: Rc::clone(&staging_descriptor),
+            },
+            RemovalStep::Unlink {
+                parent: staging_descriptor,
+                name: OsString::from(entry_name),
+            },
+        ];
+        fs::remove_file(staging.join(entry_name))
+            .expect("the preparer removes the inspected entry before unlink");
+
+        remove_directory_steps(steps, CLEANUP_DIRECTORY_RESCAN_LIMIT)
+            .expect("cleanup ignores the entry that already disappeared before unlink");
 
         assert!(!staging.exists());
     }

@@ -8,6 +8,11 @@ use std::{
 };
 
 const AT_EMPTY_PATH: c_int = 0x1000;
+#[cfg(target_arch = "mips")]
+const SYS_FCHMODAT2: c_long = 4452;
+#[cfg(target_arch = "mips64")]
+const SYS_FCHMODAT2: c_long = 5452;
+#[cfg(not(any(target_arch = "mips", target_arch = "mips64")))]
 const SYS_FCHMODAT2: c_long = 452;
 const INVALID_DESCRIPTOR: c_int = -1;
 const EBADF: c_int = 9;
