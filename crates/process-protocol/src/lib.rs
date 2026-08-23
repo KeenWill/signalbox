@@ -4441,6 +4441,16 @@ pub enum RejectionDetail {
         /// Absent target.
         session_id: CanonicalUuid,
     },
+    /// An attachment digest had no catalogued verified replica.
+    AttachmentBlobNotFound {
+        /// The unavailable immutable byte identity.
+        digest: CanonicalBlobDigest,
+    },
+    /// Distinct attachment bytes exceeded the deployment admission ceiling.
+    AttachmentByteBudgetExceeded {
+        /// Configured maximum aggregate byte count.
+        maximum_bytes: CanonicalU64,
+    },
     /// The placement head advanced beyond the caller-observed version.
     SessionPlacementCurrentVersionMismatch {
         session_id: CanonicalUuid,
@@ -4771,6 +4781,8 @@ impl RejectionDetail {
             | Self::BlobReadRangeOutOfBounds { .. }
             | Self::BulkIngestAlreadyInProgress { .. }
             | Self::SessionNotFound { .. }
+            | Self::AttachmentBlobNotFound { .. }
+            | Self::AttachmentByteBudgetExceeded { .. }
             | Self::UnsupportedReasoningLevel { .. }
             | Self::UnsupportedFastMode { .. }
             | Self::UnsupportedServiceTier { .. }
@@ -8266,6 +8278,8 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
             last.value() == u64::MAX
         }
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::AttachmentBlobNotFound { .. }
+        | RejectionDetail::AttachmentByteBudgetExceeded { .. }
         | RejectionDetail::UnsupportedReasoningLevel { .. }
         | RejectionDetail::UnsupportedFastMode { .. }
         | RejectionDetail::UnsupportedServiceTier { .. }
@@ -8367,6 +8381,8 @@ fn validate_conversation_import_detail(
             }
         },
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::AttachmentBlobNotFound { .. }
+        | RejectionDetail::AttachmentByteBudgetExceeded { .. }
         | RejectionDetail::UnsupportedReasoningLevel { .. }
         | RejectionDetail::UnsupportedFastMode { .. }
         | RejectionDetail::UnsupportedServiceTier { .. }

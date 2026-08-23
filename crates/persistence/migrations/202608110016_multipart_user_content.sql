@@ -2,6 +2,128 @@
 -- Existing text rows are converted once in SQL; no runtime compatibility
 -- decoder or startup upgrade path exists.
 
+ALTER TABLE submit_input_command
+    ADD COLUMN content_parts_creation_xid xid8 NOT NULL
+        DEFAULT pg_current_xact_id();
+
+ALTER TABLE submit_input_command
+    ADD COLUMN result_attachment_digest bytea,
+    ADD COLUMN result_attachment_maximum_bytes numeric(20, 0),
+    ADD CONSTRAINT submit_input_command_result_attachment_digest_shape
+        CHECK (
+            result_attachment_digest IS NULL
+            OR octet_length(result_attachment_digest) = 32
+        ),
+    ADD CONSTRAINT submit_input_command_result_attachment_maximum_bytes_u64
+        CHECK (
+            result_attachment_maximum_bytes IS NULL
+            OR (
+                result_attachment_maximum_bytes >= 1
+                AND result_attachment_maximum_bytes <= 18446744073709551615
+            )
+        );
+
+ALTER TABLE submit_input_command
+    DROP CONSTRAINT submit_input_command_rejection_kind_closed;
+
+ALTER TABLE submit_input_command
+    ADD CONSTRAINT submit_input_command_rejection_kind_closed
+        CHECK (
+            rejection_kind IS NULL
+            OR rejection_kind IN (
+                'attachment_blob_not_found',
+                'attachment_byte_budget_exceeded',
+                'session_not_found',
+                'no_active_turn',
+                'active_turn_present',
+                'active_turn_mismatch',
+                'session_defaults_version_mismatch',
+                'unknown_model_alias',
+                'acceptance_position_exhausted',
+                'safe_point_unavailable_while_stopping',
+                'interrupt_already_applied',
+                'interrupt_unavailable_while_awaiting_approval'
+            )
+        ),
+    ADD CONSTRAINT submit_input_command_attachment_result_evidence_shape
+        CHECK (
+            (
+                rejection_kind = 'attachment_blob_not_found'
+                AND result_kind = 'rejected'
+                AND result_accepted_input_id IS NULL
+                AND result_turn_id IS NULL
+                AND result_actual_active_turn_id IS NULL
+                AND result_expected_active_turn_id IS NULL
+                AND result_expected_defaults_version IS NULL
+                AND result_current_defaults_version IS NULL
+                AND result_unknown_alias_id IS NULL
+                AND result_selected_defaults_version IS NULL
+                AND result_last_position IS NULL
+                AND result_existing_interrupt_command_id IS NULL
+                AND result_attachment_digest IS NOT NULL
+                AND result_attachment_maximum_bytes IS NULL
+            )
+            OR
+            (
+                rejection_kind = 'attachment_byte_budget_exceeded'
+                AND result_kind = 'rejected'
+                AND result_accepted_input_id IS NULL
+                AND result_turn_id IS NULL
+                AND result_actual_active_turn_id IS NULL
+                AND result_expected_active_turn_id IS NULL
+                AND result_expected_defaults_version IS NULL
+                AND result_current_defaults_version IS NULL
+                AND result_unknown_alias_id IS NULL
+                AND result_selected_defaults_version IS NULL
+                AND result_last_position IS NULL
+                AND result_existing_interrupt_command_id IS NULL
+                AND result_attachment_digest IS NULL
+                AND result_attachment_maximum_bytes IS NOT NULL
+            )
+            OR
+            (
+                (
+                    rejection_kind IS NULL
+                    OR rejection_kind NOT IN (
+                        'attachment_blob_not_found',
+                        'attachment_byte_budget_exceeded'
+                    )
+                )
+                AND result_attachment_digest IS NULL
+                AND result_attachment_maximum_bytes IS NULL
+            )
+        );
+
+-- Preserve every inherited terminal-result correlation while admitting only
+-- the two claim-first attachment-authority rejection shapes.
+DO $$
+DECLARE
+    inherited_result_shape text;
+BEGIN
+    SELECT pg_get_expr(conbin, conrelid)
+      INTO inherited_result_shape
+      FROM pg_constraint
+     WHERE conrelid = 'submit_input_command'::regclass
+       AND conname = 'submit_input_command_result_shape';
+
+    IF inherited_result_shape IS NULL THEN
+        RAISE EXCEPTION 'submit-input result-shape constraint is absent';
+    END IF;
+
+    ALTER TABLE submit_input_command
+        DROP CONSTRAINT submit_input_command_result_shape;
+
+    EXECUTE format(
+        'ALTER TABLE submit_input_command ADD CONSTRAINT submit_input_command_result_shape CHECK ((%s) OR (result_kind = ''rejected'' AND rejection_kind = ''attachment_blob_not_found'' AND result_accepted_input_id IS NULL AND result_turn_id IS NULL AND result_actual_active_turn_id IS NULL AND result_expected_active_turn_id IS NULL AND result_expected_defaults_version IS NULL AND result_current_defaults_version IS NULL AND result_unknown_alias_id IS NULL AND result_selected_defaults_version IS NULL AND result_last_position IS NULL AND result_existing_interrupt_command_id IS NULL AND result_attachment_digest IS NOT NULL AND result_attachment_maximum_bytes IS NULL) OR (result_kind = ''rejected'' AND rejection_kind = ''attachment_byte_budget_exceeded'' AND result_accepted_input_id IS NULL AND result_turn_id IS NULL AND result_actual_active_turn_id IS NULL AND result_expected_active_turn_id IS NULL AND result_expected_defaults_version IS NULL AND result_current_defaults_version IS NULL AND result_unknown_alias_id IS NULL AND result_selected_defaults_version IS NULL AND result_last_position IS NULL AND result_existing_interrupt_command_id IS NULL AND result_attachment_digest IS NULL AND result_attachment_maximum_bytes IS NOT NULL))',
+        inherited_result_shape
+    );
+END;
+$$;
+
+ALTER TABLE accepted_input
+    ADD COLUMN content_parts_creation_xid xid8 NOT NULL
+        DEFAULT pg_current_xact_id();
+
 CREATE TABLE submit_input_command_content_part (
     command_id uuid NOT NULL,
     position smallint NOT NULL,
@@ -27,10 +149,13 @@ CREATE TABLE submit_input_command_content_part (
         OR
         (part_kind = 'attachment'
             AND text_value IS NULL
+            AND blob_digest IS NOT NULL
             AND octet_length(blob_digest) = 32
+            AND attachment_kind IS NOT NULL
             AND attachment_kind IN ('image', 'document', 'file')
+            AND declared_media_type IS NOT NULL
             AND octet_length(declared_media_type) BETWEEN 1 AND 255
-            AND declared_media_type ~ '^[!-~]+$'
+            AND declared_media_type COLLATE "C" ~ '^[!-~]+$'
             AND (display_filename IS NULL OR (
                 octet_length(convert_to(display_filename, 'UTF8')) BETWEEN 1 AND 255
                 AND display_filename NOT IN ('.', '..')
@@ -39,9 +164,6 @@ CREATE TABLE submit_input_command_content_part (
     ),
     CONSTRAINT submit_input_command_content_part_command_fk
         FOREIGN KEY (command_id) REFERENCES submit_input_command(command_id)
-        ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
-    CONSTRAINT submit_input_command_content_part_blob_fk
-        FOREIGN KEY (blob_digest) REFERENCES blob(digest)
         ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
 );
 
@@ -70,10 +192,13 @@ CREATE TABLE accepted_input_content_part (
         OR
         (part_kind = 'attachment'
             AND text_value IS NULL
+            AND blob_digest IS NOT NULL
             AND octet_length(blob_digest) = 32
+            AND attachment_kind IS NOT NULL
             AND attachment_kind IN ('image', 'document', 'file')
+            AND declared_media_type IS NOT NULL
             AND octet_length(declared_media_type) BETWEEN 1 AND 255
-            AND declared_media_type ~ '^[!-~]+$'
+            AND declared_media_type COLLATE "C" ~ '^[!-~]+$'
             AND (display_filename IS NULL OR (
                 octet_length(convert_to(display_filename, 'UTF8')) BETWEEN 1 AND 255
                 AND display_filename NOT IN ('.', '..')
@@ -288,6 +413,42 @@ CREATE CONSTRAINT TRIGGER accepted_input_content_parts_are_valid
 AFTER INSERT OR UPDATE OR DELETE ON accepted_input_content_part
 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
 EXECUTE FUNCTION require_accepted_input_parts();
+
+CREATE FUNCTION reject_content_part_insert_after_parent_transaction()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE parent_creation_xid xid8;
+BEGIN
+    IF TG_TABLE_NAME = 'submit_input_command_content_part' THEN
+        SELECT parent.content_parts_creation_xid
+          INTO parent_creation_xid
+          FROM submit_input_command AS parent
+         WHERE parent.command_id = NEW.command_id;
+    ELSE
+        SELECT parent.content_parts_creation_xid
+          INTO parent_creation_xid
+          FROM accepted_input AS parent
+         WHERE parent.accepted_input_id = NEW.accepted_input_id;
+    END IF;
+
+    IF parent_creation_xid IS DISTINCT FROM pg_current_xact_id() THEN
+        RAISE EXCEPTION 'content parts are immutable after parent creation'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER submit_input_command_content_part_insert_is_creation_local
+BEFORE INSERT ON submit_input_command_content_part
+FOR EACH ROW EXECUTE FUNCTION reject_content_part_insert_after_parent_transaction();
+
+CREATE TRIGGER accepted_input_content_part_insert_is_creation_local
+BEFORE INSERT ON accepted_input_content_part
+FOR EACH ROW EXECUTE FUNCTION reject_content_part_insert_after_parent_transaction();
+
+CREATE TRIGGER accepted_input_content_parts_creation_is_immutable
+BEFORE UPDATE OF content_parts_creation_xid ON accepted_input
+FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
 
 CREATE TRIGGER submit_input_command_content_part_is_append_only
 BEFORE UPDATE OR DELETE ON submit_input_command_content_part

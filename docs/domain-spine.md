@@ -2421,6 +2421,14 @@ impl SubmitInput {
         delivery: DeliveryRequest,
     ) -> Self;
     pub fn prepare_session_not_found(self) -> PreparedSubmitInput;
+    pub fn prepare_attachment_blob_not_found(
+        self,
+        digest: BlobDigest,
+    ) -> PreparedSubmitInput;
+    pub fn prepare_attachment_byte_budget_exceeded(
+        self,
+        maximum_bytes: u64,
+    ) -> PreparedSubmitInput;
     pub fn prepare_when_no_active_turn(
         self,
         session: &Session,
@@ -2499,6 +2507,12 @@ impl SubmitInputPendingSteeringAppliedResult {
 }
 
 pub enum SubmitInputRejectedResult {
+    AttachmentBlobNotFound {
+        digest: BlobDigest,
+    },
+    AttachmentByteBudgetExceeded {
+        maximum_bytes: u64,
+    },
     SessionNotFound {
         session: SessionId,
     },
@@ -2628,6 +2642,12 @@ pub struct SubmitInputAppliedTurnOriginReconstitutionInput {
 pub struct SubmitInputAppliedPendingSteeringReconstitutionInput {
     /* public named command, result, source-turn, and accepted-input facts */
 }
+pub struct SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput {
+    /* public named command, actor, session, and unavailable-digest facts */
+}
+pub struct SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput {
+    /* public named command, actor, session, and maximum-byte facts */
+}
 pub struct SubmitInputRejectedSessionNotFoundReconstitutionInput {
     /* public named command, actor, and absent-session facts */
 }
@@ -2665,6 +2685,12 @@ impl SubmitInputReconstitutionInput {
     ) -> Self;
     pub fn applied_pending_steering(
         input: SubmitInputAppliedPendingSteeringReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_attachment_blob_not_found(
+        input: SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_attachment_byte_budget_exceeded(
+        input: SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput,
     ) -> Self;
     pub fn rejected_safe_point_unavailable_while_stopping(
         input: SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput,
@@ -2706,6 +2732,8 @@ pub enum SubmitInputReconstitutionFailure {
     AppliedDeliveryIsNotTurnOrigin,
     AppliedDeliveryIsNotNextSafePoint,
     ResultSessionMismatch,
+    AttachmentDigestMismatch,
+    AttachmentBudgetMismatch,
     AcceptedCommandMismatch,
     AcceptedInputMismatch,
     AcceptedSessionMismatch,
@@ -11115,7 +11143,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: accepted_input                             | 5                                |
 | domain: delivery_request                           | 2                                |
 | domain: user_content                               | 14                               |
-| domain: submit_input                               | 34                               |
+| domain: submit_input                               | 36                               |
 | domain: queue_order                                | 5 (+1 free fn)                   |
 | domain: repo_watch                                 | 51                               |
 | domain: turn_lifecycle                             | 10                               |
@@ -11139,7 +11167,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                               |
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
-| **signalbox-domain total**                         | **816 (+12 free fn)**            |
+| **signalbox-domain total**                         | **818 (+12 free fn)**            |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
