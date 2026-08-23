@@ -133,6 +133,7 @@ export function SearchSurface({
     gcTime: 0,
   })
   const searchData = requestIsValid ? results.data : undefined
+  const searchIsFetching = requestIsValid && results.isFetching
   useEffect(() => {
     if (!restoreResultsFocusRef.current) return
     if (searchData !== undefined) {
@@ -210,14 +211,20 @@ export function SearchSurface({
         </section>
       )}
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {requestIsValid && results.isLoading
-          ? 'Searching the durable projection.'
+        {searchIsFetching
+          ? results.isLoading
+            ? 'Searching the durable projection.'
+            : 'Refreshing the durable projection.'
           : searchData
             ? `${searchData.results.length} results loaded on this page.`
             : ''}
       </p>
-      {requestIsValid && results.isLoading && (
-        <p className="search-notice">Searching the durable projection…</p>
+      {searchIsFetching && (
+        <p className="search-notice">
+          {results.isLoading
+            ? 'Searching the durable projection…'
+            : 'Refreshing the durable projection…'}
+        </p>
       )}
       {requestIsValid && results.isError && (
         <section className="surface-empty" role="alert">

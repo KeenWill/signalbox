@@ -175,6 +175,12 @@ test('reports browser-local authority for Settings', async ({ page }) => {
   await page.goto('/settings')
 
   await expect(page.getByText('Browser local', { exact: true })).toBeVisible()
+  await expect(page.getByText('Browser storage', { exact: true })).toBeVisible()
+  await expect(
+    page.getByText('Inspect browser-local workstation presentation preferences.'),
+  ).toBeVisible()
+  await expect(page.getByText('server-provided evidence', { exact: false })).toHaveCount(0)
+  await expect(page.getByText('Bounded query', { exact: true })).toHaveCount(0)
   await expect(page.getByRole('heading', { name: 'Workstation presentation' })).toBeVisible()
   await expect(
     page.getByRole('heading', { name: 'Operational data is not exposed by this daemon contract' }),

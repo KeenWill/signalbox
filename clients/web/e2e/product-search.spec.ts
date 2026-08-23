@@ -117,8 +117,9 @@ const useFailingPaginationFixture = async (page: Page) => {
 const useRefreshingSearchFixture = async (page: Page) => {
   let attempts = 0
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
-  await page.route('**/api/search?**', (route) => {
+  await page.route('**/api/search?**', async (route) => {
     attempts += 1
+    if (attempts > 1) await new Promise((resolve) => setTimeout(resolve, 250))
     return route.fulfill({ json: attempts === 1 ? firstPage : secondPage })
   })
 }
@@ -274,7 +275,9 @@ test('refetches when resubmitting the current first-page search', async ({ page 
 
   await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
 
+  await expect(page.getByRole('status')).toHaveText('Refreshing the durable projection.')
   await expect(page.getByRole('heading', { name: '1 results on this page' })).toBeVisible()
+  await expect(page.getByRole('status')).toHaveText('1 results loaded on this page.')
   await expect(page.getByText('release planning')).toBeVisible()
 })
 

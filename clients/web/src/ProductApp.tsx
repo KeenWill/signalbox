@@ -438,6 +438,7 @@ export function ProductApp({
   }, [bootstrap.isSuccess])
 
   const copy = surfaceCopy[surface]
+  const inspectorIsBrowserLocal = surface === 'settings'
   const updateSearch = (next: ProductSearchState) =>
     void navigate({ to: '/$surface', params: { surface }, search: next })
   const content =
@@ -506,7 +507,11 @@ export function ProductApp({
         <aside className="product-inspector" aria-label="Inspector">
           <span className="eyebrow">Inspector</span>
           <h2>Selection details</h2>
-          <p>Select an available operational record to inspect its server-provided evidence.</p>
+          <p>
+            {inspectorIsBrowserLocal
+              ? 'Inspect browser-local workstation presentation preferences.'
+              : 'Select an available operational record to inspect its server-provided evidence.'}
+          </p>
           <dl>
             <div>
               <dt>Surface</dt>
@@ -514,11 +519,11 @@ export function ProductApp({
             </div>
             <div>
               <dt>Authority</dt>
-              <dd>{surface === 'settings' ? 'Browser local' : 'Daemon'}</dd>
+              <dd>{inspectorIsBrowserLocal ? 'Browser local' : 'Daemon'}</dd>
             </div>
             <div>
               <dt>Cache</dt>
-              <dd>Bounded query</dd>
+              <dd>{inspectorIsBrowserLocal ? 'Browser storage' : 'Bounded query'}</dd>
             </div>
           </dl>
         </aside>
