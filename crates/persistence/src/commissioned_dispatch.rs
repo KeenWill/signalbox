@@ -792,8 +792,9 @@ async fn insert_commissioned_dispatch(
             (dispatch_id, session_id, create_command_id, template_name,
              template_content_digest, initial_content_digest, target_kind,
              repository, pull_request_number, head_sha, head_repository,
-             head_branch, base_branch, branch)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+             head_branch, base_branch, branch, recorded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                 clock_timestamp())",
     )
     .bind(dispatch.as_uuid())
     .bind(session_id_to_uuid(session))

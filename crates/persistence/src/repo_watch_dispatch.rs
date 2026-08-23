@@ -1550,8 +1550,9 @@ async fn insert_batch(
         "INSERT INTO repo_watch_dispatch_batch
             (dispatch_id, event_id, rule_id, rule_version, singleton_scope,
              singleton_repository, singleton_pull_request_number,
-             singleton_stack_root_pull_request_number, cooldown_seconds, action_count)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+             singleton_stack_root_pull_request_number, cooldown_seconds, action_count,
+             admitted_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,clock_timestamp())",
     )
     .bind(batch.dispatch_id.as_uuid())
     .bind(batch.event.id().as_uuid())

@@ -6007,8 +6007,12 @@ async fn resume_started_before_release_retains_target_ownership() -> Result<(), 
     let session = fixture.session(0);
     let turn = TurnId::from_uuid(
         sqlx::query_scalar::<_, Uuid>(
-            "SELECT turn_id FROM repo_watch_dispatch_delivery
-              WHERE dispatch_id = $1 AND session_id = $2",
+            "SELECT delivery.turn_id
+               FROM repo_watch_dispatch_delivery AS delivery
+               JOIN repo_watch_dispatch_action AS action
+                 ON action.dispatch_id = delivery.dispatch_id
+                AND action.action_ordinal = delivery.action_ordinal
+              WHERE delivery.dispatch_id = $1 AND action.session_id = $2",
         )
         .bind(fixture.dispatch_id.as_uuid())
         .bind(session.as_uuid())

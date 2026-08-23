@@ -768,6 +768,7 @@ impl ConvergenceSweepRuntime {
         let head_repository = head_repository_at(pull)?;
         let checked_head_sha = checked_head_at(pull)?;
         let mergeable_state = mergeable_state_at(pull)?;
+        let draft_state = draft_state_at(pull)?;
         let initial_thread_states = review_thread_states(
             pull.pointer("/reviewThreads/nodes")
                 .and_then(Value::as_array)
@@ -893,6 +894,7 @@ impl ConvergenceSweepRuntime {
             if mergeable_state_at(revalidated_pull)? != mergeable_state {
                 return Err(CensusError::State);
             }
+            ensure_draft_state_stable(draft_state, draft_state_at(revalidated_pull)?)?;
             ensure_head_repository_stable(
                 &head_repository,
                 &head_repository_at(revalidated_pull)?,
@@ -912,14 +914,7 @@ impl ConvergenceSweepRuntime {
             facts: PullRequestConvergenceFacts::new(
                 head_sha,
                 checked_head_sha,
-                match pull
-                    .get("isDraft")
-                    .and_then(Value::as_bool)
-                    .ok_or(CensusError::Shape)?
-                {
-                    true => signalbox_application::PullRequestDraftState::Draft,
-                    false => signalbox_application::PullRequestDraftState::ReadyForReview,
-                },
+                draft_state,
                 unresolved,
                 mergeable_state,
                 checks,
@@ -1181,6 +1176,27 @@ fn mergeable_state_at(pull: &Value) -> Result<MergeableState, CensusError> {
         Some("CONFLICTING") => Ok(MergeableState::Conflicting),
         Some("UNKNOWN") => Ok(MergeableState::Unknown),
         _ => Err(CensusError::Shape),
+    }
+}
+
+fn draft_state_at(
+    pull: &Value,
+) -> Result<signalbox_application::PullRequestDraftState, CensusError> {
+    match pull.get("isDraft").and_then(Value::as_bool) {
+        Some(true) => Ok(signalbox_application::PullRequestDraftState::Draft),
+        Some(false) => Ok(signalbox_application::PullRequestDraftState::ReadyForReview),
+        None => Err(CensusError::Shape),
+    }
+}
+
+fn ensure_draft_state_stable(
+    observed: signalbox_application::PullRequestDraftState,
+    revalidated: signalbox_application::PullRequestDraftState,
+) -> Result<(), CensusError> {
+    if observed == revalidated {
+        Ok(())
+    } else {
+        Err(CensusError::State)
     }
 }
 
@@ -1509,6 +1525,24 @@ mod tests {
         assert_eq!(
             mergeable_state_at(&json!({"mergeable": "UNKNOWN"})),
             Ok(MergeableState::Unknown)
+        );
+    }
+
+    #[test]
+    fn paginated_census_rejects_draft_state_drift() {
+        assert_eq!(
+            ensure_draft_state_stable(
+                signalbox_application::PullRequestDraftState::ReadyForReview,
+                signalbox_application::PullRequestDraftState::Draft,
+            ),
+            Err(CensusError::State)
+        );
+        assert_eq!(
+            ensure_draft_state_stable(
+                signalbox_application::PullRequestDraftState::Draft,
+                signalbox_application::PullRequestDraftState::Draft,
+            ),
+            Ok(())
         );
     }
 

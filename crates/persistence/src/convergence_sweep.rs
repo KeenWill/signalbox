@@ -511,9 +511,12 @@ impl PostgresConvergenceSweepStore {
                               AND dispatch.repository = target.repository
                               AND dispatch.pull_request_number = target.pull_request_number
                            UNION ALL
-                           SELECT action.dispatch_id, action.session_id, action.recorded_at
+                           SELECT action.dispatch_id, action.session_id,
+                                  batch.admitted_at AS recorded_at
                              FROM repo_watch_dispatch_action AS action
                              JOIN repo_watch_event AS event ON event.event_id = action.event_id
+                             JOIN repo_watch_dispatch_batch AS batch
+                               ON batch.dispatch_id = action.dispatch_id
                             WHERE event.target_kind = 'pull_request'
                               AND event.repository = target.repository
                               AND event.pull_request_number = target.pull_request_number
@@ -574,8 +577,32 @@ impl PostgresConvergenceSweepStore {
         .bind(content_digest.to_vec())
         .fetch_one(&mut *transaction)
         .await?;
-        transaction.commit().await?;
-        Ok(DurableCommandId::from_uuid(command))
+        match transaction.commit().await {
+            Ok(()) => Ok(DurableCommandId::from_uuid(command)),
+            Err(error) if crate::commit_failure_is_ambiguous(&error) => {
+                let fence_landed = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM convergence_sweep_target
+                         WHERE repository = $1 AND pull_request_number = $2
+                           AND pending_command_id = $3
+                           AND pending_head_sha = $4
+                           AND pending_unresolved_threads = $5
+                           AND pending_content_digest = $6
+                    )",
+                )
+                .bind(repository.as_str())
+                .bind(Decimal::from(pull_request.get()))
+                .bind(command)
+                .bind(observation.head_sha().as_str())
+                .bind(Decimal::from(observation.unresolved_threads()))
+                .bind(content_digest.to_vec())
+                .fetch_one(&self.pool)
+                .await;
+                resolve_ambiguous_fence_commit(error, fence_landed)
+                    .map(|()| DurableCommandId::from_uuid(command))
+            }
+            Err(error) => Err(ConvergenceSweepStoreError::Database(error)),
+        }
     }
 
     /// Records a committed or replayed atomic commissioned dispatch.
@@ -929,9 +956,12 @@ impl PostgresConvergenceSweepStore {
                           AND dispatch.repository = $1
                           AND dispatch.pull_request_number = $2
                        UNION ALL
-                       SELECT action.session_id, action.recorded_at, action.dispatch_id
+                       SELECT action.session_id, batch.admitted_at AS recorded_at,
+                              action.dispatch_id
                          FROM repo_watch_dispatch_action AS action
                          JOIN repo_watch_event AS event ON event.event_id = action.event_id
+                         JOIN repo_watch_dispatch_batch AS batch
+                           ON batch.dispatch_id = action.dispatch_id
                         WHERE event.target_kind = 'pull_request'
                           AND event.repository = $1
                           AND event.pull_request_number = $2
@@ -1303,9 +1333,22 @@ fn resolve_ambiguous_event_commit(
     }
 }
 
+fn resolve_ambiguous_fence_commit(
+    commit_error: sqlx::Error,
+    fence_landed: Result<bool, sqlx::Error>,
+) -> Result<(), ConvergenceSweepStoreError> {
+    match fence_landed {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(ConvergenceSweepStoreError::Database(commit_error)),
+        Err(_) => Err(ConvergenceSweepStoreError::CommitAmbiguous(commit_error)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ConvergenceSweepStoreError, resolve_ambiguous_event_commit};
+    use super::{
+        ConvergenceSweepStoreError, resolve_ambiguous_event_commit, resolve_ambiguous_fence_commit,
+    };
 
     #[test]
     fn ambiguous_decision_commit_is_resolved_by_event_identity() {
@@ -1316,6 +1359,19 @@ mod tests {
         ));
         assert!(matches!(
             resolve_ambiguous_event_commit(sqlx::Error::PoolClosed, Err(sqlx::Error::PoolClosed),),
+            Err(ConvergenceSweepStoreError::CommitAmbiguous(_))
+        ));
+    }
+
+    #[test]
+    fn ambiguous_commission_fence_commit_is_resolved_by_exact_intent() {
+        assert!(resolve_ambiguous_fence_commit(sqlx::Error::PoolClosed, Ok(true)).is_ok());
+        assert!(matches!(
+            resolve_ambiguous_fence_commit(sqlx::Error::PoolClosed, Ok(false)),
+            Err(ConvergenceSweepStoreError::Database(_))
+        ));
+        assert!(matches!(
+            resolve_ambiguous_fence_commit(sqlx::Error::PoolClosed, Err(sqlx::Error::PoolClosed),),
             Err(ConvergenceSweepStoreError::CommitAmbiguous(_))
         ));
     }
