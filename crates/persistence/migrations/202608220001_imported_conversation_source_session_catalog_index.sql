@@ -58,6 +58,11 @@ BEFORE UPDATE OR DELETE ON imported_conversation_size_totals
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE TRIGGER imported_conversation_size_totals_cannot_be_truncated
+BEFORE TRUNCATE ON imported_conversation_size_totals
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_imported_table_truncate();
+
 -- Imported entries are immutable. Validate their complete encoding once when
 -- this migration backfills existing rows and whenever a new row is inserted,
 -- then retain only the compact validated kind needed by bounded discovery. The
