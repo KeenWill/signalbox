@@ -2657,11 +2657,27 @@ def workflow_ignored_test_runs(root: Path) -> list[IgnoredTestRun]:
         if workflow_path.is_file()
         else ""
     )
-    isolation_command = (
-        "cargo test --no-fail-fast -p signalbox-file-media-processor-runtime"
-    )
-    isolation_selection = "--features test-worker --test isolation -- --ignored"
-    if isolation_command in workflow and isolation_selection in workflow:
+    isolation_command = [
+        "cargo",
+        "test",
+        "--no-fail-fast",
+        "-p",
+        "signalbox-file-media-processor-runtime",
+        "--features",
+        "test-worker",
+        "--test",
+        "isolation",
+        "--",
+        "--ignored",
+    ]
+    executed_commands = [
+        tokens
+        for command, _, _ in postgres_integration_suites.workflow_shell_commands(
+            workflow
+        )
+        for tokens in postgres_integration_suites.simple_commands(command)
+    ]
+    if isolation_command in executed_commands:
         runs.append(
             IgnoredTestRun(
                 package="signalbox-file-media-processor-runtime",

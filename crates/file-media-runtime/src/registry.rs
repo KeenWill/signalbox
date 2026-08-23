@@ -1193,6 +1193,17 @@ mod tests {
         })
     }
 
+    fn binary_json_tree(null_leaves: usize) -> serde_json::Value {
+        let mut level = vec![serde_json::Value::Null; null_leaves];
+        while level.len() > 1 {
+            level = level
+                .chunks(2)
+                .map(|pair| serde_json::Value::Array(pair.to_vec()))
+                .collect();
+        }
+        level.pop().expect("the fixture has at least one leaf")
+    }
+
     #[test]
     fn malformed_ambiguity_includes_structural_and_strong_claims() {
         assert!(recognized_probe_strength(
@@ -1255,15 +1266,16 @@ mod tests {
     }
 
     #[test]
+    fn binary_json_tree_preserves_odd_leaf_groups() {
+        assert_eq!(
+            binary_json_tree(3),
+            serde_json::json!([[null, null], [null]])
+        );
+    }
+
+    #[test]
     fn read_options_reject_balanced_work_with_a_small_frontier() {
-        let mut level = vec![serde_json::Value::Null; 32_769];
-        while level.len() > 1 {
-            level = level
-                .chunks(2)
-                .map(|pair| serde_json::Value::Array(pair.to_vec()))
-                .collect();
-        }
-        let options = serde_json::json!({ "tree": level.pop().unwrap() });
+        let options = serde_json::json!({ "tree": binary_json_tree(32_769) });
 
         assert!(!json_value_work_fits(
             &options,
