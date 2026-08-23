@@ -91,6 +91,12 @@ const time = (unixMilliseconds: string | null | undefined) => {
   }).format(new Date(value))
 }
 
+const durationLabel = (seconds: number) => {
+  if (seconds % 3_600 === 0) return `${seconds / 3_600}h`
+  if (seconds % 60 === 0) return `${seconds / 60}m`
+  return `${seconds}s`
+}
+
 const errorMessage = (error: unknown) =>
   error instanceof ProductRequestError
     ? `${error.code}: ${error.message}`
@@ -198,7 +204,10 @@ function RepositoryHealth({ status }: { status: RepositoryStatus }) {
           <dd>{time(status.latest_webhook?.received_at_unix_milliseconds)}</dd>
         </div>
         <div>
-          <dt>Delivery volume · 5m / 1h</dt>
+          <dt>
+            Delivery volume · {durationLabel(status.previous_five_minutes.seconds)} /{' '}
+            {durationLabel(status.previous_hour.seconds)}
+          </dt>
           <dd>
             {status.previous_five_minutes.received} / {status.previous_hour.received}
           </dd>
@@ -470,6 +479,8 @@ export function ActivitySurface() {
   const [sort, setSort] = useState<'newest' | 'oldest'>('newest')
   const pullRequestHeadingFocus = useRef<HTMLHeadingElement>(null)
   const pullRequestFocusPending = useRef<string | null | undefined>(undefined)
+  const repositorySelectFocus = useRef<HTMLSelectElement>(null)
+  const repositoryFocusPending = useRef<string | null | undefined>(undefined)
 
   const repositories = useQuery({
     queryKey: ['production', 'repository-watch', 'repositories', repositoryAfter],
@@ -496,6 +507,12 @@ export function ActivitySurface() {
       setActivityPages([])
     }
   }, [repositories.data, repository])
+
+  useLayoutEffect(() => {
+    if (repositoryFocusPending.current !== repositoryAfter || !repositories.data) return
+    repositoryFocusPending.current = undefined
+    repositorySelectFocus.current?.focus()
+  }, [repositories.data, repositoryAfter])
 
   const pullRequests = useQuery({
     queryKey: ['production', 'repository-watch', 'pull-requests', repository, pullRequestAfter],
@@ -637,6 +654,10 @@ export function ActivitySurface() {
     pullRequestFocusPending.current = after
     setPullRequestAfter(after)
   }
+  const changeRepositoryPage = (after: string | null) => {
+    repositoryFocusPending.current = after
+    setRepositoryAfter(after)
+  }
   const nextActivityPage = () => {
     const page = activity.data
     if (!page) return
@@ -662,6 +683,7 @@ export function ActivitySurface() {
         <label>
           Repository
           <select
+            ref={repositorySelectFocus}
             value={repository ?? ''}
             onChange={(event) => chooseRepository(event.target.value)}
           >
@@ -849,7 +871,7 @@ export function ActivitySurface() {
 
       <div className="activity-page-controls">
         {repositoryAfter && (
-          <button type="button" onClick={() => setRepositoryAfter(null)}>
+          <button type="button" onClick={() => changeRepositoryPage(null)}>
             First repository page
           </button>
         )}
@@ -857,7 +879,7 @@ export function ActivitySurface() {
           <button
             type="button"
             onClick={() =>
-              setRepositoryAfter(repositories.data?.continuation_after_repository ?? null)
+              changeRepositoryPage(repositories.data?.continuation_after_repository ?? null)
             }
           >
             Next repository page

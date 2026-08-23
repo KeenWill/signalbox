@@ -30,6 +30,27 @@ const canonicalUuid = (value: string, field: string): string => {
   return value
 }
 
+const canonicalNonnegativeBigInt = (value: string, field: string): bigint => {
+  if (!/^(0|[1-9][0-9]*)$/.test(value)) throw new TypeError(`${field} is not canonical`)
+  return BigInt(value)
+}
+
+const compareCursorPair = (
+  leftTime: string,
+  leftId: string,
+  rightTime: string,
+  rightId: string,
+  field: string,
+): number => {
+  const left = canonicalNonnegativeBigInt(leftTime, `${field} timestamp`)
+  const right = canonicalNonnegativeBigInt(rightTime, `${field} timestamp`)
+  if (left < right) return -1
+  if (left > right) return 1
+  const canonicalLeftId = canonicalUuid(leftId, `${field} identity`)
+  const canonicalRightId = canonicalUuid(rightId, `${field} identity`)
+  return canonicalLeftId < canonicalRightId ? -1 : canonicalLeftId > canonicalRightId ? 1 : 0
+}
+
 const validateAttentionPage = (
   afterSessionId: string | undefined,
   page: WebAttentionSnapshot,
@@ -73,6 +94,139 @@ const validateRepositoryPage = (
   return page
 }
 
+const validateWorkPage = (
+  heldAfter: RepoWatchHeldCursor | undefined,
+  obligationAfter: RepoWatchObligationCursor | undefined,
+  page: WebRepoWatchWorkPage,
+): WebRepoWatchWorkPage => {
+  if (heldAfter) {
+    let previousTime = heldAfter.heldSinceUnixMilliseconds
+    let previousId = heldAfter.dispatchId
+    for (const slot of page.held_slots) {
+      if (
+        compareCursorPair(
+          slot.held_since_unix_milliseconds,
+          slot.dispatch_id,
+          previousTime,
+          previousId,
+          'held-work cursor',
+        ) <= 0
+      ) {
+        throw new TypeError('held-work page does not advance beyond the requested cursor')
+      }
+      previousTime = slot.held_since_unix_milliseconds
+      previousId = slot.dispatch_id
+    }
+    const continuation = page.held_continuation_after
+    if (
+      continuation &&
+      (compareCursorPair(
+        continuation.held_since_unix_milliseconds,
+        continuation.dispatch_id,
+        heldAfter.heldSinceUnixMilliseconds,
+        heldAfter.dispatchId,
+        'held-work continuation',
+      ) <= 0 ||
+        compareCursorPair(
+          continuation.held_since_unix_milliseconds,
+          continuation.dispatch_id,
+          previousTime,
+          previousId,
+          'held-work continuation',
+        ) < 0)
+    ) {
+      throw new TypeError('held-work continuation does not advance beyond the requested cursor')
+    }
+  }
+
+  if (obligationAfter) {
+    let previousTime = obligationAfter.owedSinceUnixMilliseconds
+    let previousId = obligationAfter.obligationId
+    for (const obligation of page.queued_obligations) {
+      if (
+        compareCursorPair(
+          obligation.owed_since_unix_milliseconds,
+          obligation.id,
+          previousTime,
+          previousId,
+          'queued-work cursor',
+        ) <= 0
+      ) {
+        throw new TypeError('queued-work page does not advance beyond the requested cursor')
+      }
+      previousTime = obligation.owed_since_unix_milliseconds
+      previousId = obligation.id
+    }
+    const continuation = page.obligation_continuation_after
+    if (
+      continuation &&
+      (compareCursorPair(
+        continuation.owed_since_unix_milliseconds,
+        continuation.obligation_id,
+        obligationAfter.owedSinceUnixMilliseconds,
+        obligationAfter.obligationId,
+        'queued-work continuation',
+      ) <= 0 ||
+        compareCursorPair(
+          continuation.owed_since_unix_milliseconds,
+          continuation.obligation_id,
+          previousTime,
+          previousId,
+          'queued-work continuation',
+        ) < 0)
+    ) {
+      throw new TypeError('queued-work continuation does not advance beyond the requested cursor')
+    }
+  }
+  return page
+}
+
+const validateSessionPage = (
+  before: RepoWatchSessionCursor | undefined,
+  page: WebRepoWatchPullRequestSessionPage,
+): WebRepoWatchPullRequestSessionPage => {
+  if (!before) return page
+  let previousTime = before.commissionedAtUnixMilliseconds
+  let previousId = before.sessionId
+  for (const session of page.sessions) {
+    const sessionId = session.attention.session_id
+    if (
+      compareCursorPair(
+        session.commissioned_at_unix_milliseconds,
+        sessionId,
+        previousTime,
+        previousId,
+        'session cursor',
+      ) >= 0
+    ) {
+      throw new TypeError('session page does not advance to older history')
+    }
+    previousTime = session.commissioned_at_unix_milliseconds
+    previousId = sessionId
+  }
+  const continuation = page.continuation_before
+  if (
+    continuation &&
+    (compareCursorPair(
+      continuation.commissioned_at_unix_milliseconds,
+      continuation.session_id,
+      before.commissionedAtUnixMilliseconds,
+      before.sessionId,
+      'session continuation',
+    ) >= 0 ||
+      compareCursorPair(
+        continuation.commissioned_at_unix_milliseconds,
+        continuation.session_id,
+        previousTime,
+        previousId,
+        'session continuation',
+      ) > 0)
+  ) {
+    throw new TypeError('session continuation does not advance to older history')
+  }
+  return page
+}
+
 const canonicalPositiveBigInt = (value: string, field: string): bigint => {
   if (!/^[1-9][0-9]*$/.test(value)) throw new TypeError(`${field} is not canonical`)
   const parsed = BigInt(value)
@@ -84,6 +238,39 @@ const validateActivityContinuations = (
   window: RepoWatchActivityWindow | undefined,
   page: WebRepoWatchActivityPage,
 ): WebRepoWatchActivityPage => {
+  const requestedEvent = window?.eventBefore
+  if (requestedEvent) {
+    let previousGeneration = canonicalPositiveBigInt(
+      requestedEvent.cursorGeneration,
+      'requested event generation',
+    )
+    let previousOrdinal = requestedEvent.eventOrdinal
+    for (const row of page.events) {
+      const generation = canonicalPositiveBigInt(row.cursor_generation, 'event row generation')
+      if (row.event_ordinal < 1 || row.event_ordinal > MAX_POSTGRES_INTEGER) {
+        throw new TypeError('event row ordinal exceeds its database range')
+      }
+      if (
+        generation > previousGeneration ||
+        (generation === previousGeneration && row.event_ordinal >= previousOrdinal)
+      ) {
+        throw new TypeError('event rows do not advance to older history')
+      }
+      previousGeneration = generation
+      previousOrdinal = row.event_ordinal
+    }
+  }
+
+  const requestedWebhook = window?.webhookBeforeReceiptSequence
+  if (requestedWebhook) {
+    let previous = canonicalPositiveBigInt(requestedWebhook, 'requested webhook cursor')
+    for (const row of page.webhooks) {
+      const sequence = canonicalPositiveBigInt(row.receipt_sequence, 'webhook row cursor')
+      if (sequence >= previous) throw new TypeError('webhook rows do not advance to older history')
+      previous = sequence
+    }
+  }
+
   const event = page.event_continuation_before
   if (event) {
     const generation = canonicalPositiveBigInt(
@@ -93,17 +280,29 @@ const validateActivityContinuations = (
     if (event.event_ordinal < 1 || event.event_ordinal > MAX_POSTGRES_INTEGER) {
       throw new TypeError('event continuation ordinal exceeds its database range')
     }
-    const requested = window?.eventBefore
-    if (requested) {
+    if (requestedEvent) {
       const requestedGeneration = canonicalPositiveBigInt(
-        requested.cursorGeneration,
+        requestedEvent.cursorGeneration,
         'requested event generation',
       )
       if (
         generation > requestedGeneration ||
-        (generation === requestedGeneration && event.event_ordinal >= requested.eventOrdinal)
+        (generation === requestedGeneration && event.event_ordinal >= requestedEvent.eventOrdinal)
       ) {
         throw new TypeError('event continuation does not advance to older history')
+      }
+    }
+    const last = page.events.at(-1)
+    if (last) {
+      const lastGeneration = canonicalPositiveBigInt(
+        last.cursor_generation,
+        'last event generation',
+      )
+      if (
+        generation > lastGeneration ||
+        (generation === lastGeneration && event.event_ordinal > last.event_ordinal)
+      ) {
+        throw new TypeError('event continuation does not advance beyond returned rows')
       }
     }
   }
@@ -111,9 +310,15 @@ const validateActivityContinuations = (
   const webhook = page.webhook_continuation_before_receipt_sequence
   if (webhook) {
     const sequence = canonicalPositiveBigInt(webhook, 'webhook continuation')
-    const requested = window?.webhookBeforeReceiptSequence
-    if (requested && sequence >= canonicalPositiveBigInt(requested, 'requested webhook cursor')) {
+    if (
+      requestedWebhook &&
+      sequence >= canonicalPositiveBigInt(requestedWebhook, 'requested webhook cursor')
+    ) {
       throw new TypeError('webhook continuation does not advance to older history')
+    }
+    const last = page.webhooks.at(-1)
+    if (last && sequence > canonicalPositiveBigInt(last.receipt_sequence, 'last webhook cursor')) {
+      throw new TypeError('webhook continuation does not advance beyond returned rows')
     }
   }
   return page
@@ -397,11 +602,12 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
       query.set('obligation_after_unix_milliseconds', obligationAfter.owedSinceUnixMilliseconds)
       query.set('obligation_after_id', obligationAfter.obligationId)
     }
-    return this.readJson(
+    const page = await this.readJson(
       this.queryPath('/api/repository-watch/work', query),
       decodeWebRepoWatchWorkPage,
       signal,
     )
+    return validateWorkPage(heldAfter, obligationAfter, page)
   }
 
   async readRepoWatchPullRequestSessions(
@@ -415,11 +621,12 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
       query.set('before_unix_milliseconds', before.commissionedAtUnixMilliseconds)
       query.set('before_session_id', before.sessionId)
     }
-    return this.readJson(
+    const page = await this.readJson(
       this.queryPath('/api/repository-watch/sessions', query),
       decodeWebRepoWatchPullRequestSessionPage,
       signal,
     )
+    return validateSessionPage(before, page)
   }
 
   async readRepoWatchActivity(

@@ -202,6 +202,39 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('does not advance to older history')
   })
 
+  it('rejects activity rows outside the requested older window', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...activityFixture,
+              event_continuation_before: null,
+              events: [
+                {
+                  cursor_generation: '9',
+                  event_ordinal: 42,
+                  id: 'event-42',
+                  kind: 'head_changed',
+                  observed_at_unix_milliseconds: '1724200000000',
+                  pull_request: null,
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readRepoWatchActivity('example/repository', {
+        eventBefore: { cursorGeneration: '9', eventOrdinal: 42 },
+        includeEvents: true,
+        includeWebhooks: false,
+      }),
+    ).rejects.toThrow('event rows do not advance to older history')
+  })
+
   it('fails closed when a repository-watch response carries an unknown field', async () => {
     vi.stubGlobal(
       'fetch',
@@ -261,6 +294,67 @@ describe('SameOriginProductTransport', () => {
     await expect(
       new SameOriginProductTransport().readRepoWatchRepositories('example/repository'),
     ).rejects.toThrow('repository continuation does not advance beyond the requested cursor')
+  })
+
+  it('rejects a repeated held-work cursor', async () => {
+    const dispatchId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              held_continuation_after: {
+                dispatch_id: dispatchId,
+                held_since_unix_milliseconds: '1724200000000',
+              },
+              held_slots: [],
+              obligation_continuation_after: null,
+              queued_obligations: [],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readRepoWatchWork('example/repository', {
+        dispatchId,
+        heldSinceUnixMilliseconds: '1724200000000',
+      }),
+    ).rejects.toThrow('held-work continuation does not advance')
+  })
+
+  it('rejects sessions that do not advance to older history', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              continuation_before: null,
+              sessions: [
+                {
+                  attention: attentionFixture.summaries[0],
+                  commissioned_at_unix_milliseconds: '1724200000000',
+                  purpose: {
+                    dispatch_id: 'dispatch-1',
+                    kind: 'operator_commission',
+                    template: 'review',
+                  },
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readRepoWatchPullRequestSessions(
+        'example/repository',
+        '17',
+        { commissionedAtUnixMilliseconds: '1724200000000', sessionId: previousSessionId },
+      ),
+    ).rejects.toThrow('session page does not advance to older history')
   })
 
   it('rejects a non-advancing pull-request continuation', async () => {
