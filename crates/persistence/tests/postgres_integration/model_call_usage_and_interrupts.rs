@@ -239,7 +239,8 @@ async fn context_compaction_usage_is_available_to_pre_activation_compaction()
 
     let seed = 0x6d78;
     let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
-    let assistant = AssistantText::try_new(String::from("context before compaction"))
+    let retained_source_suffix = "context before compaction";
+    let assistant = AssistantText::try_new(String::from(retained_source_suffix))
         .expect("fixture assistant text is admitted");
     let observation = authorized
         .observation_correlation()
@@ -268,7 +269,7 @@ async fn context_compaction_usage_is_available_to_pre_activation_compaction()
         .prepare(PrepareContextCompactionRequest {
             command: DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x30)),
             session: fixture.session,
-            requested_through_position: None,
+            requested_through_position: Some(1),
             automatic_for_turn: None,
             automatic_content_byte_target: None,
             defaults_version: SessionConfigurationDefaultsVersion::first(),
@@ -338,7 +339,7 @@ async fn context_compaction_usage_is_available_to_pre_activation_compaction()
     assert!(retained.output_is_retained());
     assert_eq!(
         retained.projected_unreported_content_bytes(),
-        u64::try_from(suffix.len())?
+        u64::try_from(retained_source_suffix.len() + suffix.len())?
     );
 
     let mutation_error = sqlx::query(

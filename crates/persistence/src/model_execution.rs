@@ -615,13 +615,15 @@ impl PostgresModelCallRepository {
         prospective_frontier: ContextFrontierId,
     ) -> Result<Option<ReportedModelCallUsage>, ModelCallRepositoryError> {
         // An ordinary successor normally extends the reported frontier through
-        // its immutable header chain. Stop at that header and inspect only the
-        // appended deltas; compaction and independently assembled frontiers
-        // retain the exact complete-membership comparison below.
+        // its immutable header chain. A compaction successor extends the
+        // compaction result frontier while retaining only the unsummarized
+        // source suffix. Read those bounded pieces directly; independently
+        // assembled frontiers retain the exact complete-membership comparison.
         let row = sqlx::query(
             "WITH RECURSIVE latest_compaction AS MATERIALIZED (
                 SELECT compaction.context_compaction_id,
                        compaction.source_frontier_id,
+                       compaction.result_frontier_id,
                        compaction.summary_entry_id,
                        compaction.through_source_session_id,
                        compaction.through_entry_id,
@@ -652,6 +654,7 @@ impl PostgresModelCallRepository {
                 SELECT 'ordinary'::text AS call_kind,
                        model_call.model_call_id,
                        model_call.context_frontier_id,
+                       NULL::uuid AS compaction_result_frontier_id,
                        model_call.usage_input_includes_cache_tokens,
                        model_call.terminal_disposition_kind = 'completed' AS output_is_retained,
                        model_call.usage_input_tokens,
@@ -687,6 +690,7 @@ impl PostgresModelCallRepository {
                 SELECT 'context_compaction'::text AS call_kind,
                        latest.model_call_id,
                        latest.source_frontier_id AS context_frontier_id,
+                       latest.result_frontier_id AS compaction_result_frontier_id,
                        latest.usage_input_includes_cache_tokens,
                        true AS output_is_retained,
                        latest.usage_input_tokens,
@@ -735,19 +739,60 @@ impl PostgresModelCallRepository {
                        chain.prefix_context_frontier_id
                  WHERE chain.context_frontier_id <>
                        latest_call.context_frontier_id
-             ), ordinary_header_prefix AS MATERIALIZED (
-                SELECT latest_call.call_kind = 'ordinary'
-                       AND EXISTS (
-                           SELECT 1
-                             FROM prospective_chain AS chain
-                            WHERE chain.context_frontier_id =
-                                  latest_call.context_frontier_id
+             ), compaction_source_suffix_chain (
+                    context_frontier_id,
+                    prefix_context_frontier_id
+                ) AS MATERIALIZED (
+                SELECT frontier.context_frontier_id,
+                       frontier.prefix_context_frontier_id
+                  FROM latest_call
+                  JOIN context_frontier AS frontier
+                    ON frontier.owning_session_id = $1
+                   AND frontier.context_frontier_id =
+                       latest_call.context_frontier_id
+                   AND frontier.member_count >
+                       latest_call.reported_through_position
+                 WHERE latest_call.call_kind = 'context_compaction'
+                UNION
+                SELECT prefix.context_frontier_id,
+                       prefix.prefix_context_frontier_id
+                  FROM compaction_source_suffix_chain AS chain
+                  JOIN latest_call ON true
+                  JOIN context_frontier AS prefix
+                    ON prefix.owning_session_id = $1
+                   AND prefix.context_frontier_id =
+                       chain.prefix_context_frontier_id
+                   AND prefix.member_count >
+                       latest_call.reported_through_position
+             ), preserved_header_prefix AS MATERIALIZED (
+                SELECT (
+                           latest_call.call_kind = 'ordinary'
+                           AND EXISTS (
+                               SELECT 1
+                                 FROM prospective_chain AS chain
+                                WHERE chain.context_frontier_id =
+                                      latest_call.context_frontier_id
+                           )
+                       ) OR (
+                           latest_call.call_kind = 'context_compaction'
+                           AND EXISTS (
+                               SELECT 1
+                                 FROM prospective_chain AS chain
+                                WHERE chain.context_frontier_id =
+                                      latest_call.context_frontier_id
+                           )
+                           AND EXISTS (
+                               SELECT 1
+                                 FROM prospective_chain AS chain
+                                WHERE chain.context_frontier_id =
+                                      latest_call.compaction_result_frontier_id
+                           )
                        ) AS preserved
                   FROM latest_call
              ), unreported_member AS MATERIALIZED (
                 SELECT delta.source_session_id, delta.semantic_entry_id
                   FROM latest_call
-                  JOIN ordinary_header_prefix AS header ON header.preserved
+                  JOIN preserved_header_prefix AS header ON header.preserved
                   JOIN prospective_chain AS chain
                     ON chain.context_frontier_id <>
                        latest_call.context_frontier_id
@@ -755,9 +800,21 @@ impl PostgresModelCallRepository {
                     ON delta.owning_session_id = $1
                    AND delta.context_frontier_id = chain.context_frontier_id
                 UNION ALL
+                SELECT retained.source_session_id, retained.semantic_entry_id
+                  FROM latest_call
+                  JOIN preserved_header_prefix AS header ON header.preserved
+                  JOIN compaction_source_suffix_chain AS chain ON true
+                  JOIN context_frontier_delta AS retained
+                    ON retained.owning_session_id = $1
+                   AND retained.context_frontier_id =
+                       chain.context_frontier_id
+                   AND retained.member_position >
+                       latest_call.reported_through_position
+                 WHERE latest_call.call_kind = 'context_compaction'
+                UNION ALL
                 SELECT fallback.source_session_id,
                        fallback.semantic_entry_id
-                  FROM ordinary_header_prefix AS header
+                  FROM preserved_header_prefix AS header
                   CROSS JOIN LATERAL (
                       SELECT prospective.source_session_id,
                              prospective.semantic_entry_id
