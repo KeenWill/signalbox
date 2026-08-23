@@ -274,10 +274,80 @@ async fn window_outside_projection_facts_is_corruption() -> Result<(), Box<dyn E
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn window_exceeding_projection_totals_is_corruption() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x999);
+    create_session(&pool, identity).await?;
+    commission_fixture_session_goal(&pool, identity, 0x0009_9900).await?;
+    sqlx::query("UPDATE session_timeline_fact SET item_count = 1 WHERE session_id = $1")
+        .bind(identity.into_uuid())
+        .execute(&pool)
+        .await?;
+    let limits = TimelineWindowLimits::new(256, 64 * 1024).expect("fixture limits are bounded");
+    let error = SessionTimelineRepository::new(pool.clone())
+        .read_window(identity, TimelineWindowAnchor::First, limits)
+        .await
+        .expect_err("a window exceeding descriptor totals is durable corruption");
+
+    assert!(matches!(
+        error,
+        SessionTimelineRepositoryError::Corruption(SessionTimelineCorruption::InvalidOrdinal(
+            "window totals"
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn first_window_must_reach_stored_first_address() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    create_session(&pool, session(0x99a)).await?;
+    let identity = session(0x99b);
+    create_session(&pool, identity).await?;
+    sqlx::query(
+        "UPDATE session_timeline_fact SET first_sequence = first_sequence - 1 WHERE session_id = $1",
+    )
+    .bind(identity.into_uuid())
+    .execute(&pool)
+    .await?;
+    let limits = TimelineWindowLimits::new(1, 256).expect("fixture limits are bounded");
+    let error = SessionTimelineRepository::new(pool.clone())
+        .read_window(identity, TimelineWindowAnchor::First, limits)
+        .await
+        .expect_err("a first window missing the stored bound is durable corruption");
+
+    assert!(matches!(
+        error,
+        SessionTimelineRepositoryError::Corruption(SessionTimelineCorruption::InvalidOrdinal(
+            "window bounds"
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn empty_endpoint_and_around_windows_are_corruption() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let identity = session(0x998);
     create_session(&pool, identity).await?;
+    // This disposable isolated container may bypass the immutable parent-row guard
+    // and typed-record foreign key to simulate missing durable event headers.
+    sqlx::query("DROP TRIGGER outbox_event_is_append_only ON outbox_event")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE session_created_outbox_event DROP CONSTRAINT session_created_outbox_event_header_fk",
+    )
+    .execute(&pool)
+    .await?;
     sqlx::query("DELETE FROM outbox_event WHERE session_id = $1")
         .bind(identity.into_uuid())
         .execute(&pool)
