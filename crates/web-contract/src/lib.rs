@@ -509,7 +509,6 @@ pub struct WebSearchResult {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSearchPage {
-    #[schemars(length(max = 100))]
     pub results: Vec<WebSearchResult>,
     pub continuation: Option<WebSearchCursor>,
 }
@@ -597,7 +596,9 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
         canonical_schema(schemars::schema_for!(WebSessionTimelineDescriptor).to_value());
     let window_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
-    let search_page_schema = canonical_schema(schemars::schema_for!(WebSearchPage).to_value());
+    let mut search_page_schema = schemars::schema_for!(WebSearchPage).to_value();
+    search_page_schema["properties"]["results"]["maxItems"] = json!(max_search_page_items());
+    let search_page_schema = canonical_schema(search_page_schema);
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
