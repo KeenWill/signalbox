@@ -125,7 +125,7 @@ describe('attention projection recovery', () => {
     expect(phases).toEqual(['connecting', 'resyncing', 'failed'])
   })
 
-  it('resets the immediate resync budget after a recovered projection', async () => {
+  it('preserves the immediate resync budget across replacement snapshots', async () => {
     const phases: string[] = []
     const resync = { kind: 'resync_required', cursor: '18' } as const
     const recovered = { kind: 'snapshot', snapshot: { ...snapshot, cursor: '19' } } as const
@@ -137,6 +137,32 @@ describe('attention projection recovery', () => {
         [recovered, resync],
         [recovered, resync],
         [recovered],
+      ]),
+      signal: new AbortController().signal,
+      onPhase: (phase) => phases.push(phase),
+      onProjection: () => undefined,
+    })
+
+    expect(phases.at(-1)).toBe('failed')
+  })
+
+  it('resets the immediate resync budget after a forward update', async () => {
+    const phases: string[] = []
+    const resync = { kind: 'resync_required', cursor: '18' } as const
+    const recovered = { kind: 'snapshot', snapshot: { ...snapshot, cursor: '19' } } as const
+    const recoveredAfterUpdate = {
+      kind: 'snapshot',
+      snapshot: { ...snapshot, cursor: '20' },
+    } as const
+    const update = { kind: 'update', cursor: '20', summaries: [replacement] } as const
+
+    await synchronizeAttention({
+      transport: streamTransport([
+        [resync],
+        [recovered, update, resync],
+        [recoveredAfterUpdate, resync],
+        [recoveredAfterUpdate, resync],
+        [recoveredAfterUpdate],
       ]),
       signal: new AbortController().signal,
       onPhase: (phase) => phases.push(phase),

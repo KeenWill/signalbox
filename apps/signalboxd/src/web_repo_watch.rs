@@ -130,10 +130,13 @@ struct ActivityQuery {
     include_webhooks: Option<bool>,
 }
 
-fn typed_query<T>(query: Result<Query<T>, QueryRejection>) -> Result<T, Response> {
-    query
-        .map(|Query(query)| query)
-        .map_err(|_| invalid_query("invalid_query", "query parameters are invalid"))
+fn typed_query<T>(query: Result<Query<T>, QueryRejection>) -> Result<T, Box<Response>> {
+    query.map(|Query(query)| query).map_err(|_| {
+        Box::new(invalid_query(
+            "invalid_query",
+            "query parameters are invalid",
+        ))
+    })
 }
 
 async fn repository_statuses(
@@ -142,7 +145,7 @@ async fn repository_statuses(
 ) -> Response {
     let query = match typed_query(query) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(operations) = state.operations.clone() else {
         return unavailable();
@@ -170,7 +173,7 @@ async fn pull_requests(
 ) -> Response {
     let query = match typed_query(query) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(operations) = state.operations.clone() else {
         return unavailable();
@@ -206,7 +209,7 @@ async fn work(
 ) -> Response {
     let query = match typed_query(query) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(operations) = state.operations.clone() else {
         return unavailable();
@@ -259,7 +262,7 @@ async fn pull_request_sessions(
 ) -> Response {
     let query = match typed_query(query) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(operations) = state.operations.clone() else {
         return unavailable();
@@ -300,7 +303,7 @@ async fn activity(
 ) -> Response {
     let query = match typed_query(query) {
         Ok(query) => query,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(operations) = state.operations.clone() else {
         return unavailable();
