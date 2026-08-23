@@ -176,7 +176,20 @@ public struct SignalboxUserInputContent: Codable, Equatable, Sendable {
   }
 
   public init(from decoder: Decoder) throws {
-    let parts = try decoder.singleValueContainer().decode([SignalboxUserInputPart].self)
+    var container = try decoder.unkeyedContainer()
+    var parts: [SignalboxUserInputPart] = []
+    parts.reserveCapacity(SignalboxProcessProtocol.maximumUserInputParts)
+    while !container.isAtEnd && parts.count < SignalboxProcessProtocol.maximumUserInputParts {
+      parts.append(try container.decode(SignalboxUserInputPart.self))
+    }
+    guard container.isAtEnd else {
+      throw DecodingError.dataCorrupted(
+        .init(
+          codingPath: decoder.codingPath,
+          debugDescription: "User input part count is invalid."
+        )
+      )
+    }
     try Self.validate(parts, codingPath: decoder.codingPath)
     self.parts = parts
   }

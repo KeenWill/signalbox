@@ -47,6 +47,8 @@ use signalbox_domain::{
     SubmitInputRejectedAcceptancePositionExhaustedReconstitutionInput,
     SubmitInputRejectedActiveTurnMismatchReconstitutionInput,
     SubmitInputRejectedActiveTurnPresentReconstitutionInput,
+    SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput,
+    SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput,
     SubmitInputRejectedDefaultsVersionMismatchReconstitutionInput,
     SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput,
     SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput,
@@ -554,6 +556,7 @@ struct PreparedAgainstLockedState {
 pub struct SubmitInputRepository {
     pool: PgPool,
     model_capabilities: Option<ModelCapabilityCatalog>,
+    attachment_maximum_bytes: Option<u64>,
 }
 
 impl SubmitInputRepository {
@@ -562,6 +565,7 @@ impl SubmitInputRepository {
         Self {
             pool,
             model_capabilities: None,
+            attachment_maximum_bytes: None,
         }
     }
 
@@ -574,7 +578,16 @@ impl SubmitInputRepository {
         Self {
             pool,
             model_capabilities: Some(model_capabilities),
+            attachment_maximum_bytes: None,
         }
+    }
+
+    /// Installs the deployment ceiling used for claim-first attachment
+    /// catalog admission.
+    #[must_use]
+    pub const fn with_attachment_maximum_bytes(mut self, maximum_bytes: u64) -> Self {
+        self.attachment_maximum_bytes = Some(maximum_bytes);
+        self
     }
 
     /// Handles an unseen command or resolves its immutable recorded meaning.
@@ -645,6 +658,7 @@ impl SubmitInputRepository {
             next_tool_cancellation,
             select_definition,
             self.model_capabilities.as_ref(),
+            self.attachment_maximum_bytes,
         )
         .await;
 
@@ -755,6 +769,7 @@ async fn handle_in_transaction<NextTurn, NextToolCancellation>(
     mut next_tool_cancellation: NextToolCancellation,
     select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     model_capabilities: Option<&ModelCapabilityCatalog>,
+    attachment_maximum_bytes: Option<u64>,
 ) -> Result<TransactionDecision, SubmitInputRepositoryError>
 where
     NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
@@ -834,6 +849,17 @@ where
             )),
             None => Err(SubmitInputCorruption::Inconsistent("winner claim disappeared").into()),
         };
+    }
+
+    if let Some(prepared) =
+        prepare_attachment_authority_rejection(connection, &command, attachment_maximum_bytes)
+            .await?
+    {
+        let recorded = prepared.result().clone();
+        insert_prepared_command(connection, &prepared).await?;
+        return Ok(TransactionDecision::Commit(
+            SubmitInputHandlingOutcome::Recorded(recorded),
+        ));
     }
 
     if matches!(
@@ -1632,6 +1658,75 @@ where
     ))
 }
 
+async fn prepare_attachment_authority_rejection(
+    connection: &mut PgConnection,
+    command: &SubmitInput,
+    maximum_bytes: Option<u64>,
+) -> Result<Option<PreparedSubmitInput>, SubmitInputRepositoryError> {
+    let digests = command
+        .content()
+        .parts()
+        .iter()
+        .filter_map(|part| match part {
+            UserContentPart::Attachment { digest, .. } => Some(*digest),
+            UserContentPart::Text { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if digests.is_empty() {
+        return Ok(None);
+    }
+
+    let maximum_bytes = maximum_bytes.ok_or(SubmitInputCorruption::Inconsistent(
+        "attachment authority maximum is unavailable",
+    ))?;
+    let mut total_bytes = 0_u64;
+    for digest in digests {
+        let row = sqlx::query(
+            "SELECT blob.byte_length,
+                    EXISTS (
+                        SELECT 1
+                          FROM blob_replica
+                         WHERE blob_replica.digest = blob.digest
+                    ) AS has_verified_replica
+               FROM blob
+              WHERE blob.digest = $1",
+        )
+        .bind(digest.as_bytes().as_slice())
+        .fetch_optional(&mut *connection)
+        .await?;
+        let Some(row) = row else {
+            return Ok(Some(
+                command.clone().prepare_attachment_blob_not_found(digest),
+            ));
+        };
+        let has_verified_replica: bool = required(&row, "has_verified_replica")?;
+        if !has_verified_replica {
+            return Ok(Some(
+                command.clone().prepare_attachment_blob_not_found(digest),
+            ));
+        }
+        let byte_length = positive_u64_from_numeric(required(&row, "byte_length")?)
+            .map_err(|_| SubmitInputCorruption::Inconsistent("attachment blob byte length"))?;
+        let Some(next_total) = total_bytes.checked_add(byte_length) else {
+            return Ok(Some(
+                command
+                    .clone()
+                    .prepare_attachment_byte_budget_exceeded(maximum_bytes),
+            ));
+        };
+        total_bytes = next_total;
+    }
+
+    if total_bytes > maximum_bytes {
+        return Ok(Some(
+            command
+                .clone()
+                .prepare_attachment_byte_budget_exceeded(maximum_bytes),
+        ));
+    }
+    Ok(None)
+}
+
 async fn terminalize_retryable_runner_recovery_attempt(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1845,6 +1940,7 @@ pub(crate) async fn insert_fresh_initial_input(
         |_| turn,
         |_| (Vec::new(), cancellation_frontier),
         select_definition,
+        None,
         None,
     )
     .await?;
@@ -5753,7 +5849,7 @@ async fn insert_prepared_command(
     let command = prepared.command();
     let actor = encode_actor(command.actor());
     let delivery = encode_delivery(command.delivery());
-    let result = encode_result(prepared.result(), command.delivery());
+    let result = encode_result(prepared.result(), command.delivery(), command.session());
 
     sqlx::query(
         "INSERT INTO submit_input_command
@@ -5769,11 +5865,12 @@ async fn insert_prepared_command(
              result_expected_active_turn_id, result_expected_defaults_version,
              result_current_defaults_version, result_unknown_alias_id,
              result_selected_defaults_version, result_last_position,
-             result_existing_interrupt_command_id)
+             result_existing_interrupt_command_id,
+             result_attachment_digest, result_attachment_maximum_bytes)
          VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
              $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
-             $24, $25, $26, $27, $28, $29)",
+             $24, $25, $26, $27, $28, $29, $30, $31)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(SUBMIT_INPUT_KIND)
@@ -5804,6 +5901,8 @@ async fn insert_prepared_command(
     .bind(result.selected_defaults_version)
     .bind(result.last_position)
     .bind(result.existing_interrupt_command)
+    .bind(result.attachment_digest)
+    .bind(result.attachment_maximum_bytes)
     .execute(&mut *connection)
     .await?;
 
@@ -6250,9 +6349,15 @@ struct EncodedResult {
     selected_defaults_version: Option<Decimal>,
     last_position: Option<Decimal>,
     existing_interrupt_command: Option<Uuid>,
+    attachment_digest: Option<Vec<u8>>,
+    attachment_maximum_bytes: Option<Decimal>,
 }
 
-fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> EncodedResult {
+fn encode_result(
+    result: &SubmitInputResult,
+    delivery: DeliveryRequest,
+    command_session: SessionId,
+) -> EncodedResult {
     match result {
         SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(result)) => EncodedResult {
             kind: APPLIED,
@@ -6268,6 +6373,8 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             selected_defaults_version: None,
             last_position: None,
             existing_interrupt_command: None,
+            attachment_digest: None,
+            attachment_maximum_bytes: None,
         },
         SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(result)) => {
             EncodedResult {
@@ -6284,8 +6391,48 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
                 selected_defaults_version: None,
                 last_position: None,
                 existing_interrupt_command: None,
+                attachment_digest: None,
+                attachment_maximum_bytes: None,
             }
         }
+        SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentBlobNotFound {
+            digest,
+        }) => EncodedResult {
+            kind: REJECTED,
+            rejection_kind: Some("attachment_blob_not_found"),
+            session: command_session,
+            accepted_input: None,
+            turn: None,
+            actual_active_turn: None,
+            expected_active_turn: None,
+            expected_defaults_version: None,
+            current_defaults_version: None,
+            unknown_alias: None,
+            selected_defaults_version: None,
+            last_position: None,
+            existing_interrupt_command: None,
+            attachment_digest: Some(digest.as_bytes().to_vec()),
+            attachment_maximum_bytes: None,
+        },
+        SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+            maximum_bytes,
+        }) => EncodedResult {
+            kind: REJECTED,
+            rejection_kind: Some("attachment_byte_budget_exceeded"),
+            session: command_session,
+            accepted_input: None,
+            turn: None,
+            actual_active_turn: None,
+            expected_active_turn: None,
+            expected_defaults_version: None,
+            current_defaults_version: None,
+            unknown_alias: None,
+            selected_defaults_version: None,
+            last_position: None,
+            existing_interrupt_command: None,
+            attachment_digest: None,
+            attachment_maximum_bytes: Some(Decimal::from(*maximum_bytes)),
+        },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnPresent {
             session,
             active_turn,
@@ -6303,6 +6450,8 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             selected_defaults_version: None,
             last_position: None,
             existing_interrupt_command: None,
+            attachment_digest: None,
+            attachment_maximum_bytes: None,
         },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnMismatch {
             session,
@@ -6322,6 +6471,8 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             selected_defaults_version: None,
             last_position: None,
             existing_interrupt_command: None,
+            attachment_digest: None,
+            attachment_maximum_bytes: None,
         },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::SessionNotFound { session }) => {
             EncodedResult {
@@ -6338,6 +6489,8 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
                 selected_defaults_version: None,
                 last_position: None,
                 existing_interrupt_command: None,
+                attachment_digest: None,
+                attachment_maximum_bytes: None,
             }
         }
         SubmitInputResult::Rejected(SubmitInputRejectedResult::NoActiveTurn {
@@ -6357,6 +6510,8 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             selected_defaults_version: None,
             last_position: None,
             existing_interrupt_command: None,
+            attachment_digest: None,
+            attachment_maximum_bytes: None,
         },
         SubmitInputResult::Rejected(
             SubmitInputRejectedResult::SessionDefaultsVersionMismatch {
@@ -6378,6 +6533,8 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             selected_defaults_version: None,
             last_position: None,
             existing_interrupt_command: None,
+            attachment_digest: None,
+            attachment_maximum_bytes: None,
         },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::UnknownModelAlias {
             session,
@@ -6397,6 +6554,8 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
                 .map(defaults_version_to_numeric),
             last_position: None,
             existing_interrupt_command: None,
+            attachment_digest: None,
+            attachment_maximum_bytes: None,
         },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::AcceptancePositionExhausted {
             session,
@@ -6415,6 +6574,8 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             selected_defaults_version: None,
             last_position: Some(input_position_to_numeric(*last)),
             existing_interrupt_command: None,
+            attachment_digest: None,
+            attachment_maximum_bytes: None,
         },
         SubmitInputResult::Rejected(
             SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
@@ -6436,6 +6597,8 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             selected_defaults_version: None,
             last_position: None,
             existing_interrupt_command: Some(durable_command_id_to_uuid(*existing_command)),
+            attachment_digest: None,
+            attachment_maximum_bytes: None,
         },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::InterruptAlreadyApplied {
             session,
@@ -6455,6 +6618,8 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             selected_defaults_version: None,
             last_position: None,
             existing_interrupt_command: Some(durable_command_id_to_uuid(*existing_command)),
+            attachment_digest: None,
+            attachment_maximum_bytes: None,
         },
         SubmitInputResult::Rejected(
             SubmitInputRejectedResult::InterruptUnavailableWhileAwaitingApproval {
@@ -6475,6 +6640,8 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             selected_defaults_version: None,
             last_position: None,
             existing_interrupt_command: None,
+            attachment_digest: None,
+            attachment_maximum_bytes: None,
         },
     }
 }
@@ -6564,6 +6731,8 @@ async fn load_complete_rows(
             typed.result_selected_defaults_version,
             typed.result_last_position,
             typed.result_existing_interrupt_command_id,
+            typed.result_attachment_digest,
+            typed.result_attachment_maximum_bytes,
             accepted.accepting_command_id,
             accepted.accepted_input_id,
             accepted.session_id AS accepted_session_id,
@@ -7672,6 +7841,9 @@ fn decode_complete(
     let result_last_position: Option<Decimal> = row.try_get("result_last_position")?;
     let result_existing_interrupt: Option<Uuid> =
         row.try_get("result_existing_interrupt_command_id")?;
+    let result_attachment_digest: Option<Vec<u8>> = row.try_get("result_attachment_digest")?;
+    let result_attachment_maximum_bytes: Option<Decimal> =
+        row.try_get("result_attachment_maximum_bytes")?;
     let accepted_effect_count: i64 = required(&row, "accepted_effect_count")?;
     let queued_effect_count: i64 = required(&row, "queued_effect_count")?;
 
@@ -7684,6 +7856,8 @@ fn decode_complete(
                 || result_selected_defaults.is_some()
                 || result_last_position.is_some()
                 || result_existing_interrupt.is_some()
+                || result_attachment_digest.is_some()
+                || result_attachment_maximum_bytes.is_some()
             {
                 return Err(SubmitInputCorruption::Inconsistent("applied result fields").into());
             }
@@ -7770,6 +7944,8 @@ fn decode_complete(
                 result_selected_defaults,
                 result_last_position,
                 result_existing_interrupt,
+                result_attachment_digest,
+                result_attachment_maximum_bytes,
                 existing_interrupt,
             )?
         }
@@ -8042,6 +8218,8 @@ fn decode_rejected(
     selected_defaults: Option<Decimal>,
     last_position: Option<Decimal>,
     existing_interrupt_command: Option<Uuid>,
+    attachment_digest: Option<Vec<u8>>,
+    attachment_maximum_bytes: Option<Decimal>,
     existing_interrupt: Option<AppliedInterruptCommandResult>,
 ) -> Result<SubmitInputReconstitutionInput, SubmitInputRepositoryError> {
     if !matches!(
@@ -8053,7 +8231,80 @@ fn decode_rejected(
             SubmitInputCorruption::Inconsistent("unexpected existing interrupt result").into(),
         );
     }
+    if !matches!(
+        rejection_kind,
+        "attachment_blob_not_found" | "attachment_byte_budget_exceeded"
+    ) && (attachment_digest.is_some() || attachment_maximum_bytes.is_some())
+    {
+        return Err(
+            SubmitInputCorruption::Inconsistent("unexpected attachment result evidence").into(),
+        );
+    }
     match rejection_kind {
+        "attachment_blob_not_found" => {
+            require_all_absent(
+                actual_turn,
+                expected_turn,
+                expected_defaults,
+                current_defaults,
+                unknown_alias,
+                selected_defaults,
+                last_position,
+                "attachment-blob-not-found result fields",
+            )?;
+            if attachment_maximum_bytes.is_some() {
+                return Err(SubmitInputCorruption::Inconsistent(
+                    "attachment-blob-not-found maximum bytes",
+                )
+                .into());
+            }
+            let digest = attachment_digest
+                .ok_or(SubmitInputCorruption::Missing("result_attachment_digest"))?;
+            let digest = <[u8; 32]>::try_from(digest)
+                .map_err(|_| SubmitInputCorruption::Inconsistent("result attachment digest"))?;
+            Ok(
+                SubmitInputReconstitutionInput::rejected_attachment_blob_not_found(
+                    SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput {
+                        command,
+                        stored_actor,
+                        result_session,
+                        result_digest: signalbox_domain::BlobDigest::from_bytes(digest),
+                    },
+                ),
+            )
+        }
+        "attachment_byte_budget_exceeded" => {
+            require_all_absent(
+                actual_turn,
+                expected_turn,
+                expected_defaults,
+                current_defaults,
+                unknown_alias,
+                selected_defaults,
+                last_position,
+                "attachment-byte-budget-exceeded result fields",
+            )?;
+            if attachment_digest.is_some() {
+                return Err(SubmitInputCorruption::Inconsistent(
+                    "attachment-byte-budget-exceeded digest",
+                )
+                .into());
+            }
+            let maximum_bytes = positive_u64_from_numeric(attachment_maximum_bytes.ok_or(
+                SubmitInputCorruption::Missing("result_attachment_maximum_bytes"),
+            )?)
+            .map_err(|_| SubmitInputCorruption::Inconsistent("result attachment maximum bytes"))?;
+            Ok(
+                SubmitInputReconstitutionInput::rejected_attachment_byte_budget_exceeded(
+                    SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput {
+                        command,
+                        stored_actor,
+                        result_session,
+                        result_maximum_bytes: maximum_bytes,
+                    },
+                ),
+            )
+        }
         "session_not_found" => {
             require_all_absent(
                 actual_turn,

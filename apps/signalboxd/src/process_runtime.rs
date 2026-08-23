@@ -1743,6 +1743,7 @@ where
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
                 services.model_configuration.as_ref(),
+                services.blob_store_registry.as_deref(),
             )
             .await
         }
@@ -1768,6 +1769,7 @@ where
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
                 services.model_configuration.as_ref(),
+                services.blob_store_registry.as_deref(),
             )
             .await
         }
@@ -2413,6 +2415,7 @@ where
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
                 services.model_configuration.as_ref(),
+                services.blob_store_registry.as_deref(),
             )
             .await
         }
@@ -10614,6 +10617,7 @@ async fn handle_submit_input<Writer>(
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
+    blob_store_registry: Option<&BlobStoreRegistry>,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -10633,6 +10637,10 @@ where
         pool.clone(),
         model_configuration.model_capability_catalog(),
     );
+    let repository = match blob_store_registry {
+        Some(registry) => repository.with_attachment_maximum_bytes(registry.max_blob_bytes()),
+        None => repository,
+    };
     let expected_version = expected_defaults_version
         .and_then(|version| SessionConfigurationDefaultsVersion::try_from_u64(version.value()));
     let model_settings = domain_model_settings_overlay(model_settings);
@@ -10724,6 +10732,7 @@ async fn handle_reconcile_turn<Writer>(
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
+    blob_store_registry: Option<&BlobStoreRegistry>,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -10735,6 +10744,10 @@ where
         pool.clone(),
         model_configuration.model_capability_catalog(),
     );
+    let repository = match blob_store_registry {
+        Some(registry) => repository.with_attachment_maximum_bytes(registry.max_blob_bytes()),
+        None => repository,
+    };
     // A command identity that already names durable intent must reach the
     // replay boundary unconditionally (INV-012): the first handling already
     // released the wait, so re-applying the current-state precondition would
@@ -10902,6 +10915,7 @@ async fn handle_stop_turn<Writer>(
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
+    blob_store_registry: Option<&BlobStoreRegistry>,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -10913,6 +10927,10 @@ where
         pool.clone(),
         model_configuration.model_capability_catalog(),
     );
+    let repository = match blob_store_registry {
+        Some(registry) => repository.with_attachment_maximum_bytes(registry.max_blob_bytes()),
+        None => repository,
+    };
     let Some(expected_version) =
         SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
     else {
@@ -12588,6 +12606,16 @@ fn map_rejection(
     rejected: SubmitInputRejectedResult,
 ) -> Result<RejectionDetail, ProcessConnectionError> {
     Ok(match rejected {
+        SubmitInputRejectedResult::AttachmentBlobNotFound { digest } => {
+            RejectionDetail::AttachmentBlobNotFound {
+                digest: signalbox_process_protocol::CanonicalBlobDigest::from_digest(digest),
+            }
+        }
+        SubmitInputRejectedResult::AttachmentByteBudgetExceeded { maximum_bytes } => {
+            RejectionDetail::AttachmentByteBudgetExceeded {
+                maximum_bytes: CanonicalU64::new(maximum_bytes),
+            }
+        }
         SubmitInputRejectedResult::SessionNotFound { session } => {
             RejectionDetail::SessionNotFound {
                 session_id: wire_uuid(session.into_uuid()),
