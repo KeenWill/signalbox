@@ -552,9 +552,12 @@ is decided by repeated observation instead. Each pass records, per candidate
 turn, its session's turn-progress frontier — the greatest `event_sequence` the
 session has emitted for an event that a turn's own execution produces — and the
 turn's current attempt. A turn is due only once that evidence has been observed
-unchanged for at least the staleness bound. Any progress at all restarts the
-bound, so a turn that resumed cannot be ended on the strength of its earlier
-silence.
+unchanged for at least the bound governing its watchdog. The composed
+`staleness_bound` governs only the quiescent watchdog; the slot-held watchdog
+always uses the separate thirty-minute hard ceiling so lowering the quiescent
+bound cannot classify live model-call, tool, or stop work as stale early. Any
+progress at all restarts the applicable bound, so a turn that resumed cannot be
+ended on the strength of its earlier silence.
 
 The frontier is the outbox's rather than the transcript's because the outbox
 assigns its sequence in commit order, and every session-scoped transition kind
@@ -659,15 +662,17 @@ slow to finish; it may not stop watching. What deferral does not cost is the
 turn: one left alone had nothing change, so it is observed unchanged and comes
 due again on a later scan, waiting rather than being forgotten.
 
-**Constants.** The staleness bound is a hard safety ceiling of 30 minutes and
-the scan interval is one minute; both are compiled in. The bound the pass runs
-with is supplied at its composition site rather than reloaded from the ceiling,
-so whichever bound decides turns is also the bound the audit line reports. A
-shorter one is constructible only through a checked constructor that refuses
-zero, refuses precision finer than a whole second, and refuses anything above
-the compiled ceiling — the single place the ceiling is enforced as the only
-maximum, and the reason no caller can raise it. signalboxd composes the ceiling
-itself: no operator setting lowers it, and whether one should exist is an
+**Constants.** The staleness hard safety ceiling is 30 minutes and the scan
+interval is one minute; both are compiled in. The quiescent bound is supplied at
+the runtime's composition site rather than reloaded from the ceiling, so the
+bound that decides quiescent turns is also the bound its audit line reports. The
+slot-held watchdog does not use that parameter: it always runs at the separate
+30-minute hard ceiling. A shorter quiescent bound is constructible only through
+a checked constructor that refuses zero, refuses precision finer than a whole
+second, and refuses anything above the compiled ceiling — the single place the
+ceiling is enforced as the only maximum, and the reason no caller can raise it.
+signalboxd composes the ceiling itself: no operator setting lowers it, and
+whether one should exist is an
 [open question](../open-questions.md#turn-lifecycle) it shares with the other
 scheduling cadences.
 
