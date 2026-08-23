@@ -231,8 +231,6 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
 
 export class BoundedSessionHistory {
   private descriptorValue: WebSessionTimelineDescriptor | undefined
-  private descriptorRequestRevision = 0
-  private descriptorAppliedRevision = 0
   private retainedValue: WebSessionTimelineWindow['items'] = []
   private readonly sessionId: string
 
@@ -252,7 +250,6 @@ export class BoundedSessionHistory {
   }
 
   async describe(signal?: AbortSignal): Promise<WebSessionTimelineDescriptor> {
-    const requestRevision = ++this.descriptorRequestRevision
     const descriptor = decodeWebSessionTimelineDescriptor(
       await this.source.readDescriptor(this.sessionId, signal),
     )
@@ -284,10 +281,12 @@ export class BoundedSessionHistory {
     decimalU64(descriptor.sizes.referenced_blob_bytes)
     decimalU64(descriptor.work.active_turn_count)
     decimalU64(descriptor.work.queued_turn_count)
-    if (requestRevision < this.descriptorAppliedRevision && this.descriptorValue) {
+    if (
+      this.descriptorValue &&
+      observedThrough < decimalU64(this.descriptorValue.observed_through)
+    ) {
       return cloneTimelineDescriptor(this.descriptorValue)
     }
-    this.descriptorAppliedRevision = requestRevision
     this.descriptorValue = cloneTimelineDescriptor(descriptor)
     return cloneTimelineDescriptor(descriptor)
   }
