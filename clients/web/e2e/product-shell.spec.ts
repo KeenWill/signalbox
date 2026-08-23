@@ -84,6 +84,19 @@ test('moves focus when browser history changes the product route', async ({ page
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('preserves focus when focus layout hides the navigation pane', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+  await page.getByRole('link', { name: /Sessions/ }).focus()
+
+  await page.keyboard.press('Shift+W')
+
+  await expect(page.locator('.product-shell')).toHaveClass(/layout-focus/)
+  await expect(page.locator('.product-main')).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('completes route switching from the command palette without a mouse', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -241,6 +254,7 @@ test('clears scenario-only keyboard help when browser history returns to the pro
   await page.goBack()
 
   await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.locator('.product-main')).toBeFocused()
   await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toHaveCount(0)
   await page.keyboard.press(`${modifier}+K`)
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()

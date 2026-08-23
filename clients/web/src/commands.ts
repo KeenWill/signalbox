@@ -7,6 +7,7 @@ export interface CommandContext {
   getState: () => RootState
   timelineIds: readonly string[]
   focusTimeline: () => void
+  focusPrimaryWhenNavigationHides?: () => void
   importEntryIds?: readonly string[]
   selectedImportEntry?: string | null
   requestedImportEntry?: string
@@ -353,6 +354,7 @@ export const commandRegistry = [
     available: always,
     run: (context) => {
       const current = context.getState().app.layout
+      if (current === 'workbench') context.focusPrimaryWhenNavigationHides?.()
       context.dispatch(actions.layoutSet(current === 'focus' ? 'workbench' : 'focus'))
     },
   },

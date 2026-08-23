@@ -319,7 +319,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
-  const previousSurfaceRef = useRef(surface)
+  const navigationRef = useRef<HTMLElement>(null)
+  const previousSurfaceRef = useRef<ProductRouteId | null>(null)
   const restoreNavigationFocusRef = useRef(true)
   const [importsCommandContext, setImportsCommandContext] = useState<CommandContext | null>(null)
   const [navigationDisabled, setNavigationDisabled] = useState(false)
@@ -363,6 +364,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       getState: store.getState,
       timelineIds: surfaceContext?.timelineIds ?? [],
       focusTimeline: surfaceContext?.focusTimeline ?? (() => primaryRef.current?.focus()),
+      focusPrimaryWhenNavigationHides: () => {
+        if (navigationRef.current?.contains(document.activeElement)) focusDestination()
+      },
       transcriptPreferences: surface === 'settings',
       presentationPreferences: surface === 'settings',
       navigate: navigationDisabled
@@ -438,7 +442,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
 
   return (
     <div className={`product-shell layout-${app.layout}`} style={shellStyle}>
-      <aside className="product-navigation-pane">
+      <aside className="product-navigation-pane" ref={navigationRef}>
         <ProductNavigation
           active={surface}
           disabled={navigationDisabled}
