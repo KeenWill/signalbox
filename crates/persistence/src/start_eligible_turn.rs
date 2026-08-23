@@ -27,7 +27,10 @@ use crate::{
         defaults_version_to_numeric, input_position_to_numeric, positive_u64_from_numeric,
         session_id_to_uuid, turn_id_to_uuid,
     },
-    model_execution::{SnapshotAppend, SnapshotAppendError, insert_snapshot_append},
+    model_execution::{
+        SnapshotAppend, SnapshotAppendError, insert_snapshot_append,
+        lock_delegated_child_endpoint_sessions,
+    },
     outbox::{self, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{
@@ -417,6 +420,12 @@ impl StartEligibleTurnRepository {
             .await
             .map_err(StartEligibleTurnRepositoryError::from)
             .map_err(CommitActivationPreviewError::Activation)?;
+        // A delegated-child failure publishes into its parent session. Keep
+        // that endpoint pair ahead of the child scheduler in the global lock
+        // order, matching every other delegated terminalization path.
+        lock_delegated_child_endpoint_sessions(&mut transaction, session)
+            .await
+            .map_err(CommitActivationPreviewError::ModelCall)?;
         let session_uuid = session_id_to_uuid(session);
         let (session_exists, scheduler_session) =
             sqlx::query_as::<_, (bool, Option<Uuid>)>(crate::lock_inventory::START_ELIGIBLE_TURN)

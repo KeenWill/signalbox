@@ -828,15 +828,17 @@ async fn close_failed_compaction_turn(
             .commit_compaction_failure_preview(preview.clone(), model_calls, identities)
             .await
         {
-            Err(CommitActivationPreviewError::Activation(
-                StartEligibleTurnRepositoryError::IdentityCollision(_),
-            ))
-            | Err(CommitActivationPreviewError::ModelCall(
-                ModelCallRepositoryError::IdentityCollision(_),
-            )) => {}
+            Err(error) if compaction_failure_closure_collision_is_retryable(&error) => {}
             outcome => return outcome,
         }
     }
+}
+
+fn compaction_failure_closure_collision_is_retryable(error: &CommitActivationPreviewError) -> bool {
+    matches!(
+        error,
+        CommitActivationPreviewError::ModelCall(ModelCallRepositoryError::IdentityCollision(_))
+    )
 }
 
 #[cfg(test)]
@@ -850,10 +852,17 @@ mod tests {
     use signalbox_domain::{ActivatedTurn, TurnId};
     use signalbox_persistence::{
         context_compaction::ContextCompactionRepositoryError,
-        start_eligible_turn::StartEligibleTurnRepositoryError,
+        model_execution::{ModelCallIdentityCollision, ModelCallRepositoryError},
+        start_eligible_turn::{
+            CommitActivationPreviewError, StartEligibleTurnIdentityCollision,
+            StartEligibleTurnRepositoryError,
+        },
     };
 
-    use super::{ContextGuardedTurnPassError, guarded_failure_stage, report_guarded_ambiguity};
+    use super::{
+        ContextGuardedTurnPassError, compaction_failure_closure_collision_is_retryable,
+        guarded_failure_stage, report_guarded_ambiguity,
+    };
     use crate::{
         ActivatedTurnExecution, FatalExecutionSignal, FatalExecutionSupervisor,
         TurnPassExecutionStage, process_runtime::AutomaticContextCompactionError,
@@ -862,6 +871,26 @@ mod tests {
     /// A classified failure whose durable commit outcome is unknown.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     struct CommitAmbiguousFailure;
+
+    #[test]
+    fn reminted_compaction_failure_identity_collision_is_retryable() {
+        let error = CommitActivationPreviewError::ModelCall(
+            ModelCallRepositoryError::IdentityCollision(ModelCallIdentityCollision::SemanticEntry),
+        );
+
+        assert!(compaction_failure_closure_collision_is_retryable(&error));
+    }
+
+    #[test]
+    fn immutable_activation_identity_collision_is_not_retryable() {
+        let error = CommitActivationPreviewError::Activation(
+            StartEligibleTurnRepositoryError::IdentityCollision(
+                StartEligibleTurnIdentityCollision::StartingFrontier,
+            ),
+        );
+
+        assert!(!compaction_failure_closure_collision_is_retryable(&error));
+    }
 
     impl fmt::Display for CommitAmbiguousFailure {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

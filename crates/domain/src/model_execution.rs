@@ -8132,7 +8132,14 @@ mod tests {
     #[test]
     fn s03_inv015_automatic_compaction_failure_closes_call_free_turn() {
         let failure_entry = semantic_transcript_entry_id(10);
-        let failed = active_execution()
+        let execution = active_execution();
+        let session = execution.session();
+        let starting_entry = execution
+            .current_snapshot
+            .ordered_entries()
+            .next()
+            .expect("fixture activation carries its origin");
+        let failed = execution
             .fail_automatic_context_compaction(FailedModelCallTurnIdentities::new(
                 failure_entry,
                 context_frontier_id(11),
@@ -8152,11 +8159,8 @@ mod tests {
                 .ordered_entries()
                 .collect::<Vec<_>>(),
             vec![
-                SemanticTranscriptEntryRef::from_source(
-                    session_id(1),
-                    semantic_transcript_entry_id(5),
-                ),
-                SemanticTranscriptEntryRef::from_source(session_id(1), failure_entry),
+                starting_entry,
+                SemanticTranscriptEntryRef::from_source(session, failure_entry),
             ]
         );
     }
