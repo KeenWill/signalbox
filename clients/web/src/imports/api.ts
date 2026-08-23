@@ -74,12 +74,21 @@ const correlateListPage = (
   searchCorrelation?: string,
   exactSourceSessionDigest?: string,
 ): WebImportListPage => {
+  const requestedLimit = request.limit ?? DEFAULT_IMPORT_LIST_ITEMS
   if ((page.search_correlation ?? undefined) !== searchCorrelation) {
     throw new ImportListCorrelationError()
   }
   if (
     searchCorrelation !== undefined &&
     page.exact_source_session_id_sha256 !== exactSourceSessionDigest
+  ) {
+    throw new ImportListCorrelationError()
+  }
+  if (
+    page.items.length > requestedLimit ||
+    (page.next_cursor !== undefined &&
+      page.next_cursor !== null &&
+      page.items.length !== requestedLimit)
   ) {
     throw new ImportListCorrelationError()
   }
@@ -123,6 +132,7 @@ const sha256 = async (value: string): Promise<string> => {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
+const DEFAULT_IMPORT_LIST_ITEMS = 50
 const DEFAULT_IMPORT_WINDOW_RADIUS = 25
 
 const correlateEntryWindow = (
@@ -140,6 +150,7 @@ const correlateEntryWindow = (
       : normalizedAnchor === 'latest'
         ? knownLatestPosition
         : request.position
+  const entryIdentities = new Set(window.items.map((entry) => entry.frontier.imported_entry_id))
   const positionsCorrelate = window.items.every(
     (entry, index) =>
       entry.frontier.imported_conversation_id === importedConversationId &&
@@ -155,6 +166,7 @@ const correlateEntryWindow = (
     window.anchor_position - window.first_position > requestedBefore ||
     window.last_position - window.anchor_position > requestedAfter ||
     window.last_position - window.first_position + 1 !== window.items.length ||
+    entryIdentities.size !== window.items.length ||
     !positionsCorrelate ||
     !window.items.some((entry) => entry.frontier.position === window.anchor_position)
   ) {
@@ -239,7 +251,13 @@ export class HttpImportApi implements ImportApi {
       signal,
     })
     const descriptor = await decodeResponse(response, decodeWebImportDescriptor)
-    if (descriptor.imported_conversation_id !== importedConversationId) {
+    if (
+      descriptor.imported_conversation_id !== importedConversationId ||
+      descriptor.timeline.first.imported_conversation_id !== importedConversationId ||
+      descriptor.timeline.latest.imported_conversation_id !== importedConversationId ||
+      descriptor.timeline.first.position !== 1 ||
+      descriptor.timeline.latest.position !== descriptor.entry_count
+    ) {
       throw new ImportDescriptorCorrelationError()
     }
     return descriptor

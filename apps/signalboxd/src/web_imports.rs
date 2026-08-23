@@ -247,7 +247,7 @@ async fn read_entry_window(
         Ok(None) => import_not_found(),
         Err(ImportedConversationDiscoveryError::Request(
             ImportedConversationDiscoveryRequestError::PositionOutOfRange,
-        )) => invalid_request("imported entry-window position is outside the timeline"),
+        )) => import_position_out_of_range(),
         Err(error) => discovery_error(error),
     }
 }
@@ -620,7 +620,7 @@ fn discovery_error(error: ImportedConversationDiscoveryError) -> Response {
         ),
         ImportedConversationDiscoveryError::Request(
             ImportedConversationDiscoveryRequestError::PositionOutOfRange,
-        ) => invalid_request("imported entry-window position is outside the timeline"),
+        ) => import_position_out_of_range(),
         ImportedConversationDiscoveryError::Request(
             ImportedConversationDiscoveryRequestError::WindowTooLarge,
         ) => invalid_request("imported entry window exceeds the contract bound"),
@@ -678,6 +678,14 @@ fn import_not_found() -> Response {
         StatusCode::NOT_FOUND,
         "import_not_found",
         "imported conversation does not exist",
+    )
+}
+
+fn import_position_out_of_range() -> Response {
+    application_error(
+        StatusCode::BAD_REQUEST,
+        "import_position_out_of_range",
+        "imported entry-window position is outside the timeline",
     )
 }
 
@@ -771,5 +779,20 @@ mod tests {
             web_window_anchor(Some(WebImportWindowAnchor::Latest), Some(7)),
             Err("entry-window position is present exactly for the position anchor")
         );
+    }
+
+    #[tokio::test]
+    async fn out_of_range_position_is_an_application_error() {
+        let response = import_position_out_of_range();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 4_096)
+            .await
+            .expect("the bounded error body is readable");
+        let decoded: serde_json::Value =
+            serde_json::from_slice(&body).expect("the application error is JSON");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(decoded["error"]["kind"], "application");
+        assert_eq!(decoded["error"]["code"], "import_position_out_of_range");
     }
 }
