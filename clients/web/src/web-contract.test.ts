@@ -360,6 +360,114 @@ describe('generated timeline detail decoder', () => {
     })
   })
 
+  it('rejects an unknown tool sandbox posture', () => {
+    expectTimelineBodyRejected('tool_batch_transition', {
+      type: 'tool_batch',
+      turn_id: '00000000-0000-0000-0000-000000000002',
+      producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+      state: 'results_projected',
+      tools: [
+        {
+          request_id: '00000000-0000-0000-0000-000000000004',
+          tool_name: 'exec',
+          approval_posture: 'auto',
+          approval_judge_escalated: false,
+          operator_required: false,
+          sandbox_posture: 'future_sandbox',
+        },
+      ],
+      goal_events: [],
+    })
+  })
+
+  it('accepts closed reconciliation operations', () => {
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '19' },
+          kind: 'turn_reconciliation_required',
+          body: {
+            type: 'reconciliation',
+            turn_id: '00000000-0000-0000-0000-000000000002',
+            operation: {
+              type: 'model_call',
+              model_call_id: '00000000-0000-0000-0000-000000000003',
+            },
+            attempt_count: '2',
+            exhausted: true,
+            operator_required: true,
+            cause_code: 'ambiguous_operation',
+          },
+          projected_body_bytes: 128,
+        },
+      ],
+      projected_body_bytes: 128,
+    }
+
+    expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
+  })
+
+  it('rejects an unknown reconciliation operation', () => {
+    expectTimelineBodyRejected('turn_reconciliation_required', {
+      type: 'reconciliation',
+      turn_id: '00000000-0000-0000-0000-000000000002',
+      operation: {
+        type: 'future',
+        operation_id: '00000000-0000-0000-0000-00000000000c',
+      },
+      attempt_count: '2',
+      exhausted: true,
+      operator_required: true,
+      cause_code: 'ambiguous_operation',
+    })
+  })
+
+  it('accepts a continued tool argument with exact byte accounting', () => {
+    const continuation = {
+      address: { event_sequence: '20' },
+      field: 'tool_arguments',
+      member_index: 0,
+      offset_bytes: '4',
+    }
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: continuation.address,
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000002',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+            state: 'proposed',
+            tools: [
+              {
+                request_id: '00000000-0000-0000-0000-000000000004',
+                tool_name: 'exec',
+                arguments: {
+                  text: 'abcd',
+                  offset_bytes: '0',
+                  total_bytes: '8',
+                  continuation,
+                },
+                approval_posture: 'auto',
+                approval_judge_escalated: false,
+                operator_required: false,
+              },
+            ],
+            goal_events: [],
+          },
+          projected_body_bytes: 132,
+        },
+      ],
+      projected_body_bytes: 132,
+      continuation: { type: 'more_body', body: continuation },
+    }
+
+    expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
+  })
+
   it('rejects an unknown approval decision', () => {
     expectTimelineBodyRejected('tool_approval_decided', {
       type: 'tool_approval_decision',
@@ -538,8 +646,10 @@ describe('generated timeline detail decoder', () => {
     const body = {
       type: 'reconciliation',
       turn_id: '00000000-0000-0000-0000-000000000002',
-      operation_kind: 'tool_attempt',
-      operation_id: '00000000-0000-0000-0000-00000000000c',
+      operation: {
+        type: 'tool_attempt',
+        tool_attempt_id: '00000000-0000-0000-0000-00000000000c',
+      },
       exhausted: true,
       operator_required: true,
       cause_code: 'ambiguous_operation',

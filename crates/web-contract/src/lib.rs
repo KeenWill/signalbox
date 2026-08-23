@@ -439,6 +439,13 @@ pub enum WebTimelineToolEffectPosture {
     ExternalEffect,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineToolSandboxPosture {
+    Unsandboxed,
+    Sandboxed,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineToolAttempt {
@@ -452,7 +459,7 @@ pub struct WebTimelineToolAttempt {
     pub approval_judge_escalated: bool,
     pub operator_required: bool,
     pub effect_posture: Option<WebTimelineToolEffectPosture>,
-    pub sandbox_posture: Option<String>,
+    pub sandbox_posture: Option<WebTimelineToolSandboxPosture>,
     pub state: Option<WebTimelineToolState>,
     pub cause_code: Option<String>,
 }
@@ -655,6 +662,13 @@ pub struct WebTimelineImportedEvidence {
     pub imported_position: WebU64,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineReconciliationOperation {
+    ModelCall { model_call_id: String },
+    ToolAttempt { tool_attempt_id: String },
+}
+
 /// Typed browser body, distinct from application and persistence projections.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
@@ -719,8 +733,7 @@ pub enum WebSessionTimelineDetailBody {
     },
     Reconciliation {
         turn_id: String,
-        operation_kind: String,
-        operation_id: String,
+        operation: WebTimelineReconciliationOperation,
         attempt_count: WebU64,
         exhausted: bool,
         operator_required: bool,
@@ -1126,9 +1139,19 @@ function assertTimelineDetailPage(value) {{
     "turn_reconciliation_required",
   ]);
   const bodyOwnedKinds = new Set([
+    "session_created",
+    "session_model_settings_changed",
+    "turn_model_settings_resolved",
     "input_accepted",
+    "goal_turn_retired",
     "model_call_transition",
+    "tool_batch_transition",
+    "tool_approval_decided",
+    "context_compacted",
     "turn_activated",
+    "runner_state_transition",
+    "delegation_update",
+    "delegation_wake",
     ...terminalKinds,
   ]);
   let expectedBodyContinuation = null;
@@ -1195,6 +1218,131 @@ function assertTimelineDetailPage(value) {{
           item.body.detail.content !== null
         ) {{
           excerpts.push([item.body.detail.content, "delegation_content", 0, `${{path}}.body.detail.content`]);
+        }}
+        break;
+      case "tool_batch": {{
+        if (item.kind !== "tool_batch_transition") {{
+          fail(`${{path}}.kind`, "tool_batch_transition for a tool_batch body");
+        }}
+        const tool = item.body.tools[0];
+        const goal = item.body.goal_events[0];
+        if (tool !== undefined) {{
+          const excerpts = [
+            [tool.arguments, "tool_arguments", `${{path}}.body.tools[0].arguments`],
+            [tool.result, "tool_result", `${{path}}.body.tools[0].result`],
+            [tool.failure, "tool_failure", `${{path}}.body.tools[0].failure`],
+          ].filter(([excerpt]) => excerpt !== undefined && excerpt !== null);
+          if (excerpts.length > 1) {{
+            fail(`${{path}}.body.tools[0]`, "at most one projected text field");
+          }}
+          if (excerpts.length === 1) {{
+            const [excerpt, field, excerptPath] = excerpts[0];
+            continuation = assertTimelineExcerpt(excerpt, item.address, field, excerptPath);
+            textBytes = new TextEncoder().encode(excerpt.text).byteLength;
+          }}
+        }}
+        if (goal !== undefined && goal.text !== undefined && goal.text !== null) {{
+          if (tool !== undefined) {{
+            fail(`${{path}}.body`, "one projected tool or goal member");
+          }}
+          continuation = assertTimelineExcerpt(
+            goal.text,
+            item.address,
+            "goal_text",
+            `${{path}}.body.goal_events[0].text`,
+          );
+          textBytes = new TextEncoder().encode(goal.text.text).byteLength;
+        }}
+        break;
+      }}
+      case "tool_approval_decision":
+        if (item.kind !== "tool_approval_decided") {{
+          fail(`${{path}}.kind`, "tool_approval_decided for a tool_approval_decision body");
+        }}
+        if (item.body.rationale !== undefined && item.body.rationale !== null) {{
+          continuation = assertTimelineExcerpt(
+            item.body.rationale,
+            item.address,
+            "approval_rationale",
+            `${{path}}.body.rationale`,
+          );
+          textBytes = new TextEncoder().encode(item.body.rationale.text).byteLength;
+        }}
+        break;
+      case "goal_event":
+        if (item.kind !== "goal_turn_retired") {{
+          fail(`${{path}}.kind`, "goal_turn_retired for a goal_event body");
+        }}
+        if (item.body.event.text !== undefined && item.body.event.text !== null) {{
+          continuation = assertTimelineExcerpt(
+            item.body.event.text,
+            item.address,
+            "goal_text",
+            `${{path}}.body.event.text`,
+          );
+          textBytes = new TextEncoder().encode(item.body.event.text).byteLength;
+        }}
+        break;
+      case "context_compaction":
+        if (item.kind !== "context_compacted") {{
+          fail(`${{path}}.kind`, "context_compacted for a context_compaction body");
+        }}
+        continuation = assertTimelineExcerpt(
+          item.body.summary,
+          item.address,
+          "compaction_summary",
+          `${{path}}.body.summary`,
+        );
+        textBytes = new TextEncoder().encode(item.body.summary.text).byteLength;
+        break;
+      case "reconciliation":
+        if (item.kind !== "turn_reconciliation_required") {{
+          fail(`${{path}}.kind`, "turn_reconciliation_required for a reconciliation body");
+        }}
+        break;
+      case "runner":
+        if (item.kind !== "runner_state_transition") {{
+          fail(`${{path}}.kind`, "runner_state_transition for a runner body");
+        }}
+        break;
+      case "delegation": {{
+        const wake =
+          item.body.detail.type === "result_wake" ||
+          item.body.detail.type === "message_wake";
+        if (wake && item.kind !== "delegation_wake") {{
+          fail(`${{path}}.kind`, "delegation_wake for a delegation wake body");
+        }}
+        if (!wake && item.kind !== "delegation_update") {{
+          fail(`${{path}}.kind`, "delegation_update for a delegation update body");
+        }}
+        const content =
+          item.body.detail.type === "child_result"
+            ? item.body.detail.content
+            : item.body.detail.type === "session_message"
+              ? item.body.detail.content
+              : null;
+        if (content !== undefined && content !== null) {{
+          continuation = assertTimelineExcerpt(
+            content,
+            item.address,
+            "delegation_content",
+            `${{path}}.body.detail.content`,
+          );
+          textBytes = new TextEncoder().encode(content.text).byteLength;
+        }}
+        break;
+      }}
+      case "session_created":
+        if (item.kind !== "session_created") {{
+          fail(`${{path}}.kind`, "session_created for a session_created body");
+        }}
+        break;
+      case "model_settings":
+        if (
+          item.kind !== "session_model_settings_changed" &&
+          item.kind !== "turn_model_settings_resolved"
+        ) {{
+          fail(`${{path}}.kind`, "a model-settings event for a model_settings body");
         }}
         break;
       case "turn_lifecycle":

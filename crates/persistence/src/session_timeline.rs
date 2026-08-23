@@ -16,11 +16,11 @@ use signalbox_application::{
     TimelineImportedEvidence, TimelineModelCallDisposition, TimelineModelCallState,
     TimelineModelUsage, TimelineReconciliationOperation, TimelineRunnerSandboxPosture,
     TimelineRunnerState, TimelineTextExcerpt, TimelineToolApprovalPosture, TimelineToolAttempt,
-    TimelineToolBatchState, TimelineToolEffectPosture, TimelineToolState,
-    TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
+    TimelineToolBatchState, TimelineToolEffectPosture, TimelineToolSandboxPosture,
+    TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::{
-    ModelCallId, ProviderModelIdentity, RunnerSandboxProfile, SemanticTranscriptEntryId, SessionId,
+    ImportedTranscriptEntryId, ModelCallId, ProviderModelIdentity, RunnerSandboxProfile, SessionId,
     ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution, ToolAttemptId,
     ToolDecisionSource, ToolRequestId, TurnId,
 };
@@ -1107,7 +1107,7 @@ async fn load_imported_evidence(
     match (entry, position) {
         (None, None) => Ok(None),
         (Some(entry), Some(position)) => Ok(Some(TimelineImportedEvidence {
-            imported_entry_id: SemanticTranscriptEntryId::from_uuid(entry),
+            imported_entry_id: ImportedTranscriptEntryId::from_uuid(entry),
             imported_position: nonnegative(position, "imported frontier position")?,
         })),
         _ => Err(SessionTimelineCorruption::Missing("imported frontier evidence").into()),
@@ -1366,7 +1366,11 @@ async fn project_tool_batch(
                 .as_deref()
                 .map(tool_effect_posture)
                 .transpose()?,
-            sandbox_posture: row.try_get("sandbox_posture")?,
+            sandbox_posture: row
+                .try_get::<Option<String>, _>("sandbox_posture")?
+                .as_deref()
+                .map(tool_sandbox_posture)
+                .transpose()?,
             state: tool_state(
                 attempt_id.is_some(),
                 state_kind.as_deref(),
@@ -1705,6 +1709,18 @@ fn tool_effect_posture(
         "external_effect" => Ok(TimelineToolEffectPosture::ExternalEffect),
         _ => Err(SessionTimelineCorruption::InvalidStoredValue(
             "tool effect posture",
+        )),
+    }
+}
+
+fn tool_sandbox_posture(
+    value: &str,
+) -> Result<TimelineToolSandboxPosture, SessionTimelineCorruption> {
+    match value {
+        "unsandboxed" => Ok(TimelineToolSandboxPosture::Unsandboxed),
+        "sandboxed" => Ok(TimelineToolSandboxPosture::Sandboxed),
+        _ => Err(SessionTimelineCorruption::InvalidStoredValue(
+            "tool sandbox posture",
         )),
     }
 }
