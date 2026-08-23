@@ -798,8 +798,29 @@ async fn live_session_without_model_activity_is_parked() -> Result<(), Box<dyn E
             session,
         )
         .await?;
-    let parked_session: Uuid = sqlx::query_scalar(
-        "SELECT last_session_id FROM convergence_sweep_parked_target
+    let parked_identity: (Uuid, Uuid, sqlx::types::time::OffsetDateTime) = sqlx::query_as(
+        "SELECT last_dispatch_id, last_session_id, last_dispatched_at
+           FROM convergence_sweep_parked_target
+          WHERE repository = $1 AND pull_request_number = $2",
+    )
+    .bind(repository.as_str())
+    .bind(rust_decimal::Decimal::from(pull_request().get()))
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE convergence_sweep_target
+            SET census_dispatch_id = $3, census_session_id = $4
+          WHERE repository = $1 AND pull_request_number = $2",
+    )
+    .bind(repository.as_str())
+    .bind(rust_decimal::Decimal::from(pull_request().get()))
+    .bind(Uuid::from_u128(0x89_2f0))
+    .bind(Uuid::from_u128(0x89_2f1))
+    .execute(&pool)
+    .await?;
+    let retained_identity: (Uuid, Uuid, sqlx::types::time::OffsetDateTime) = sqlx::query_as(
+        "SELECT last_dispatch_id, last_session_id, last_dispatched_at
+           FROM convergence_sweep_parked_target
           WHERE repository = $1 AND pull_request_number = $2",
     )
     .bind(repository.as_str())
@@ -808,13 +829,71 @@ async fn live_session_without_model_activity_is_parked() -> Result<(), Box<dyn E
     .await?;
 
     assert_eq!(disposition, ConvergenceSweepFailureDisposition::Parked);
-    assert_eq!(parked_session, session.into_uuid());
+    assert_eq!(parked_identity.0, dispatch);
+    assert_eq!(parked_identity.1, session.into_uuid());
+    assert_eq!(retained_identity, parked_identity);
     assert!(
         store
             .load_target(&repository, pull_request())
             .await?
             .is_some_and(|state| state.is_parked())
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stale_inactive_session_cannot_park_a_newer_dispatch() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
+    let repository = repository()?;
+    let observation = observation()?;
+    let (_, stale_session) = dispatched(
+        commissioned
+            .commission(prepared_commission(0x89_230)?, |_| None)
+            .await?,
+    );
+    let stopped = GoalRepository::new(pool)
+        .handle_user_command(
+            GoalUserCommand::new(
+                pending_command(0x89_231),
+                stale_session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    let (_, latest_session) = dispatched(
+        commissioned
+            .commission(prepared_commission(0x89_232)?, |_| None)
+            .await?,
+    );
+
+    let disposition = store
+        .record_no_model_activity_failure(
+            Uuid::from_u128(0x89_233),
+            &repository,
+            pull_request(),
+            &observation,
+            stale_session,
+        )
+        .await?;
+    let state = store
+        .load_target(&repository, pull_request())
+        .await?
+        .expect("the target remains enrolled");
+
+    assert!(matches!(stopped, GoalCommandHandlingOutcome::Recorded(_)));
+    assert_ne!(latest_session, stale_session);
+    assert_eq!(
+        disposition,
+        ConvergenceSweepFailureDisposition::ActivityObserved
+    );
+    assert!(!state.is_parked());
     Ok(())
 }
 

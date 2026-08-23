@@ -6002,6 +6002,83 @@ async fn commissioned_fixture() -> Result<CommissionedFixture, Box<dyn Error>> {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn resume_started_before_release_retains_target_ownership() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let session = fixture.session(0);
+    let turn = TurnId::from_uuid(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT turn_id FROM repo_watch_dispatch_delivery
+              WHERE dispatch_id = $1 AND session_id = $2",
+        )
+        .bind(fixture.dispatch_id.as_uuid())
+        .bind(session.as_uuid())
+        .fetch_one(&fixture.pool)
+        .await?,
+    );
+    mark_queued_turn_failed(&fixture.pool, session, turn, 0x60_150).await?;
+    let blocked = GoalRepository::new(fixture.pool.clone())
+        .block_execution_failure(
+            session,
+            GoalNeed::try_new(String::from("resume after repository-watch release"))
+                .expect("fixture goal need is valid"),
+            GoalSchedulerProvenance::new(turn),
+        )
+        .await?;
+    let mut target_lock = fixture.pool.begin().await?;
+    let target_key = format!(
+        "commissioned-dispatch:{}:{}",
+        fixture.repository.as_str(),
+        BOTTOM_PULL_REQUEST_NUMBER
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(target_key)
+        .execute(&mut *target_lock)
+        .await?;
+    let pool = fixture.pool.clone();
+    let resume = tokio::spawn(async move {
+        GoalRepository::new(pool)
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0x60_160)),
+                    session,
+                    GoalUserAction::Resume(None),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0x60_161)),
+                    TurnId::from_uuid(Uuid::from_u128(0x60_162)),
+                )),
+                |_| None,
+            )
+            .await
+    });
+
+    wait_for_advisory_lock(&fixture.pool).await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_dispatch_release (dispatch_id, released_at)
+         VALUES ($1, clock_timestamp())",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    target_lock.commit().await?;
+    let resumed = resume.await??;
+    let store = PostgresCommissionedDispatchStore::new(fixture.pool.clone(), credential_pin());
+    let (provenance, defaults) = commissioned_template();
+    let prepared = commission_request_with_fence(0x60_170, commissioned_fence()?)?.prepare(
+        &mut UuidV7CommissionedDispatchIdGenerator,
+        provenance,
+        defaults,
+    )?;
+    let ownership = store.commission(prepared, |_| None).await?;
+
+    assert_applied_goal_transition(blocked);
+    assert_applied_goal_command(resumed);
+    assert_eq!(ownership, CommissionDispatchOutcome::TargetBusy { session });
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn operator_commission_observes_repository_watch_target_ownership()
 -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
@@ -6145,6 +6222,124 @@ async fn repository_watch_session_prevents_inactivity_parking() -> Result<(), Bo
     assert_applied_goal_transition(blocked_watch);
     assert_applied_goal_command(stopped_commission);
     assert_applied_goal_command(resumed_watch);
+    assert_eq!(
+        disposition,
+        ConvergenceSweepFailureDisposition::ActivityObserved
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inactive_repository_watch_sibling_allows_inactivity_parking() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture().await?;
+    let expected_session = fixture.session(0);
+    let inactive_sibling = fixture.session(1);
+    let goal_store = GoalRepository::new(fixture.pool.clone());
+    let expected_stopped = goal_store
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x60_120)),
+                expected_session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    let sibling_stopped = goal_store
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x60_121)),
+                inactive_sibling,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    let observation =
+        ConvergenceSweepObservation::new(CommitSha::try_new(FIRST_HEAD.to_owned())?, 0);
+
+    let disposition = PostgresConvergenceSweepStore::new(fixture.pool.clone())
+        .record_no_model_activity_failure(
+            Uuid::from_u128(0x60_122),
+            &fixture.repository,
+            PullRequestNumber::new(BOTTOM_PULL_REQUEST_NUMBER.try_into()?),
+            &observation,
+            expected_session,
+        )
+        .await?;
+
+    assert_applied_goal_command(expected_stopped);
+    assert_applied_goal_command(sibling_stopped);
+    assert_ne!(inactive_sibling, expected_session);
+    assert_eq!(disposition, ConvergenceSweepFailureDisposition::Parked);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn productive_repository_watch_sibling_prevents_inactivity_parking()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let expected_session = fixture.session(0);
+    let productive_sibling = fixture.session(1);
+    let (_model_repository, _prepared, _turn, _requests) = checkpoint_delegated_approval_at(
+        &fixture.pool,
+        productive_sibling,
+        0x60_130,
+        &[("exec", r#"{"cmd":"git status"}"#)],
+    )
+    .await?;
+    let goal_store = GoalRepository::new(fixture.pool.clone());
+    let expected_stopped = goal_store
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x60_140)),
+                expected_session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    let sibling_stopped = goal_store
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x60_141)),
+                productive_sibling,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    let observation =
+        ConvergenceSweepObservation::new(CommitSha::try_new(FIRST_HEAD.to_owned())?, 0);
+
+    let disposition = PostgresConvergenceSweepStore::new(fixture.pool.clone())
+        .record_no_model_activity_failure(
+            Uuid::from_u128(0x60_142),
+            &fixture.repository,
+            PullRequestNumber::new(BOTTOM_PULL_REQUEST_NUMBER.try_into()?),
+            &observation,
+            expected_session,
+        )
+        .await?;
+
+    assert_applied_goal_command(expected_stopped);
+    assert_applied_goal_command(sibling_stopped);
+    assert_ne!(productive_sibling, expected_session);
     assert_eq!(
         disposition,
         ConvergenceSweepFailureDisposition::ActivityObserved

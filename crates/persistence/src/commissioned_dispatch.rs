@@ -108,6 +108,29 @@ impl Error for CommissionedDispatchRepositoryError {
     }
 }
 
+impl CommissionedDispatchRepositoryError {
+    /// Whether this failure may have committed the complete commission.
+    pub const fn commit_ambiguous(&self) -> bool {
+        match self {
+            Self::Database {
+                commit_ambiguous, ..
+            } => *commit_ambiguous,
+            Self::SessionCreation(error) => matches!(
+                error,
+                crate::create_session::CreateSessionRepositoryError::CommitAmbiguous(_)
+            ),
+            Self::InitialInput(error) => matches!(
+                error,
+                crate::submit_input::SubmitInputRepositoryError::CommitAmbiguous(_)
+            ),
+            Self::GoalCommission(error) => {
+                matches!(error, crate::goal::GoalRepositoryError::CommitAmbiguous(_))
+            }
+            Self::Corruption(_) => false,
+        }
+    }
+}
+
 impl From<sqlx::Error> for CommissionedDispatchRepositoryError {
     fn from(source: sqlx::Error) -> Self {
         Self::Database {
@@ -526,16 +549,10 @@ async fn live_pull_request_session(
                       FROM repo_watch_dispatch_release AS released
                      WHERE released.dispatch_id = target.repo_watch_dispatch_id
                 )
-                OR EXISTS (
-                    SELECT 1
+                OR (
+                    SELECT event.event_kind IN ('resumed', 'superseded')
                       FROM goal_event AS event
-                      JOIN durable_command AS command
-                        ON command.command_id = event.user_command_id
-                      JOIN repo_watch_dispatch_release AS released
-                        ON released.dispatch_id = target.repo_watch_dispatch_id
                      WHERE event.session_id = target.session_id
-                       AND event.event_kind IN ('resumed', 'superseded')
-                       AND command.claimed_at >= released.released_at
                      ORDER BY event.event_ordinal DESC
                      LIMIT 1
                 )

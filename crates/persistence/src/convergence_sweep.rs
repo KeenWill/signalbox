@@ -384,7 +384,9 @@ impl PostgresConvergenceSweepStore {
             "UPDATE convergence_sweep_target
                 SET state_kind = $3, failure_kind = NULL,
                     consecutive_failures = 0, retry_not_before = NULL,
-                    parked_at = NULL, operator_need = NULL
+                    parked_at = NULL, operator_need = NULL,
+                    parked_dispatch_id = NULL, parked_session_id = NULL,
+                    parked_dispatched_at = NULL
               WHERE repository = $1 AND pull_request_number = $2
                 AND state_kind = $4",
         )
@@ -593,6 +595,8 @@ impl PostgresConvergenceSweepStore {
                 SET state_kind = $7, failure_kind = NULL,
                     consecutive_failures = 0, retry_not_before = NULL,
                     parked_at = NULL, operator_need = NULL,
+                    parked_dispatch_id = NULL, parked_session_id = NULL,
+                    parked_dispatched_at = NULL,
                     last_head_sha = $3, last_unresolved_threads = $4,
                     last_observed_at = clock_timestamp(),
                     pending_command_id = NULL, pending_head_sha = NULL,
@@ -676,6 +680,8 @@ impl PostgresConvergenceSweepStore {
                 SET state_kind = $5, failure_kind = NULL,
                     consecutive_failures = 0, retry_not_before = NULL,
                     parked_at = NULL, operator_need = NULL,
+                    parked_dispatch_id = NULL, parked_session_id = NULL,
+                    parked_dispatched_at = NULL,
                     last_head_sha = $3, last_unresolved_threads = $4,
                     last_observed_at = clock_timestamp()
               WHERE repository = $1 AND pull_request_number = $2",
@@ -737,6 +743,8 @@ impl PostgresConvergenceSweepStore {
                 SET state_kind = $7, failure_kind = NULL,
                     consecutive_failures = 0, retry_not_before = NULL,
                     parked_at = NULL, operator_need = NULL,
+                    parked_dispatch_id = NULL, parked_session_id = NULL,
+                    parked_dispatched_at = NULL,
                     last_head_sha = $3, last_unresolved_threads = $4,
                     last_observed_at = clock_timestamp(),
                     census_dispatch_id = $5, census_session_id = $6,
@@ -928,11 +936,21 @@ impl PostgresConvergenceSweepStore {
                           AND event.repository = $1
                           AND event.pull_request_number = $2
                   ) AS target
-             ), expected_dispatch AS (
-                SELECT dispatch_id
+             ), latest_dispatch AS (
+                SELECT dispatch_id, recorded_at
                   FROM target_dispatch
-                 WHERE session_id = $11
                  ORDER BY recorded_at DESC, dispatch_id DESC
+                 LIMIT 1
+             ), expected_dispatch AS (
+                SELECT candidate.dispatch_id, candidate.session_id,
+                       candidate.recorded_at
+                  FROM target_dispatch AS candidate
+                  JOIN latest_dispatch AS latest
+                    ON latest.dispatch_id = candidate.dispatch_id
+                   AND latest.recorded_at = candidate.recorded_at
+                 WHERE candidate.session_id = $11
+                   AND NOT candidate.has_model_activity
+                 ORDER BY candidate.session_id DESC
                  LIMIT 1
              )
              UPDATE convergence_sweep_target
@@ -974,25 +992,46 @@ impl PostgresConvergenceSweepStore {
                                 THEN least(consecutive_failures + 1, $5)
                             ELSE 1::smallint END) >= $5
                         THEN $8 ELSE NULL END,
+                    parked_dispatch_id = CASE WHEN $4 AND
+                        (CASE WHEN $4 THEN $5
+                            WHEN failure_kind = $3
+                                THEN least(consecutive_failures + 1, $5)
+                            ELSE 1::smallint END) >= $5
+                        THEN (SELECT dispatch_id FROM expected_dispatch)
+                        ELSE NULL END,
+                    parked_session_id = CASE WHEN $4 AND
+                        (CASE WHEN $4 THEN $5
+                            WHEN failure_kind = $3
+                                THEN least(consecutive_failures + 1, $5)
+                            ELSE 1::smallint END) >= $5
+                        THEN (SELECT session_id FROM expected_dispatch)
+                        ELSE NULL END,
+                    parked_dispatched_at = CASE WHEN $4 AND
+                        (CASE WHEN $4 THEN $5
+                            WHEN failure_kind = $3
+                                THEN least(consecutive_failures + 1, $5)
+                            ELSE 1::smallint END) >= $5
+                        THEN (SELECT recorded_at FROM expected_dispatch)
+                        ELSE NULL END,
                     last_head_sha = coalesce($9, last_head_sha),
                     last_unresolved_threads = coalesce($10, last_unresolved_threads),
                     last_observed_at = CASE WHEN $9 IS NULL THEN last_observed_at
                         ELSE clock_timestamp() END
               WHERE repository = $1 AND pull_request_number = $2
                 AND ($11::uuid IS NULL OR (
-                    EXISTS (
-                        SELECT 1 FROM target_dispatch
-                         WHERE session_id = $11
-                           AND NOT has_model_activity
-                    )
+                    EXISTS (SELECT 1 FROM expected_dispatch)
                     AND NOT EXISTS (
-                        SELECT 1 FROM target_dispatch
-                         WHERE session_id <> $11
+                        SELECT 1
+                          FROM target_dispatch AS competitor
+                         WHERE competitor.session_id <> $11
                            AND (
-                               live
-                               OR (has_model_activity AND dispatch_id = (
-                                   SELECT dispatch_id FROM expected_dispatch
-                               ))
+                               competitor.live
+                               OR (
+                                   competitor.has_model_activity
+                                   AND competitor.dispatch_id = (
+                                       SELECT dispatch_id FROM latest_dispatch
+                                   )
+                               )
                            )
                     )
                 ))

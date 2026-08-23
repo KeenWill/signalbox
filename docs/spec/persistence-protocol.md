@@ -158,8 +158,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — ninety-five files, `202607180001` through
-`202608210403` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — ninety-six files, `202607180001` through
+`202608210404` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -239,6 +239,9 @@ repository-watch event-to-action path used to census sessions by pull-request
 target. Migration `202608210403_convergence_sweep_parked_session.sql` projects
 the exact inactive census dispatch and session through the parked-target
 operator view, including repository-watch sessions not dispatched by the sweep.
+Migration `202608210404_convergence_sweep_immutable_parked_session.sql` persists
+that selected identity and timestamp in the guarded parking transition, so later
+censuses cannot change the operator-visible parked session.
 
 ## Relational representation
 

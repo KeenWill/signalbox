@@ -608,6 +608,11 @@ impl ConvergenceSweepRuntime {
                 self.record_decision(target, &observation, ConvergenceSweepDecision::CoolingOff)
                     .await;
             }
+            Err(error) if error.commit_ambiguous() => {
+                tracing::error!(repository = %target.repository.as_str(),
+                    pull_request = target.pull_request.get(), cause = %error,
+                    "convergence sweep commission outcome is commit-ambiguous");
+            }
             Ok(CommissionDispatchOutcome::ConflictingReuse) | Err(_) => {
                 self.record_failure(
                     target,
