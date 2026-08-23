@@ -903,7 +903,7 @@ impl PostgresConvergenceSweepStore {
             .unwrap_or((None, None));
         let updated: Option<FailureTransitionRow> = sqlx::query_as(
             "WITH target_dispatch AS (
-                SELECT target.session_id,
+                SELECT target.dispatch_id, target.session_id, target.recorded_at,
                        coalesce((
                            SELECT event.event_kind IN ('commissioned', 'resumed', 'superseded')
                              FROM goal_event AS event
@@ -928,6 +928,12 @@ impl PostgresConvergenceSweepStore {
                           AND event.repository = $1
                           AND event.pull_request_number = $2
                   ) AS target
+             ), expected_dispatch AS (
+                SELECT dispatch_id
+                  FROM target_dispatch
+                 WHERE session_id = $11
+                 ORDER BY recorded_at DESC, dispatch_id DESC
+                 LIMIT 1
              )
              UPDATE convergence_sweep_target
                 SET state_kind = CASE WHEN
@@ -982,7 +988,12 @@ impl PostgresConvergenceSweepStore {
                     AND NOT EXISTS (
                         SELECT 1 FROM target_dispatch
                          WHERE session_id <> $11
-                           AND (live OR has_model_activity)
+                           AND (
+                               live
+                               OR (has_model_activity AND dispatch_id = (
+                                   SELECT dispatch_id FROM expected_dispatch
+                               ))
+                           )
                     )
                 ))
           RETURNING consecutive_failures AS consecutive_failures,

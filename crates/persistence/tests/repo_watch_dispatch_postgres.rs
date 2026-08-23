@@ -2719,6 +2719,17 @@ async fn a_released_dispatch_escalates_resumed_work_to_its_operator() -> Result<
             )
             .await?,
     );
+    let commissioned =
+        PostgresCommissionedDispatchStore::new(fixture.pool.clone(), credential_pin());
+    let (provenance, defaults) = commissioned_template();
+    let competing =
+        commission_request_with_fence(COMMISSION_AFTER_WATCH_COMMAND_ID, commissioned_fence()?)?
+            .prepare(
+                &mut UuidV7CommissionedDispatchIdGenerator,
+                provenance,
+                defaults,
+            )?;
+    let ownership = commissioned.commission(competing, |_| None).await?;
     let (resumed_repository, resumed_prepared, resumed_turn, _resumed_requests) =
         checkpoint_dispatched_delegated_approval(&fixture, 0x50_300).await?;
     let resumed_approvals = resumed_repository.approval_judge_repository();
@@ -2761,6 +2772,12 @@ async fn a_released_dispatch_escalates_resumed_work_to_its_operator() -> Result<
         CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
     );
     assert_eq!(released, 1);
+    assert_eq!(
+        ownership,
+        CommissionDispatchOutcome::TargetBusy {
+            session: fixture.session(0),
+        }
+    );
     assert_eq!(
         resumed_turn,
         TurnId::from_uuid(Uuid::from_u128(RESUMED_DISPATCH_TURN_ID))

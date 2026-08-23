@@ -352,6 +352,9 @@ impl ConvergenceSweepRuntime {
                     tracing::error!(repository = %target.repository.as_str(),
                         pull_request = target.pull_request.get(), cause = %error,
                         "convergence sweep could not repair a committed dispatch projection");
+                    if error.commit_ambiguous() {
+                        return;
+                    }
                     self.record_failure(
                         target,
                         Some(observation),
@@ -584,6 +587,9 @@ impl ConvergenceSweepRuntime {
                     tracing::error!(repository = %target.repository.as_str(),
                         pull_request = target.pull_request.get(), cause = %error,
                         "convergence sweep committed a session but could not record its local projection");
+                    if error.commit_ambiguous() {
+                        return;
+                    }
                     self.record_failure(
                         target,
                         Some(&observation),
@@ -757,13 +763,17 @@ impl ConvergenceSweepRuntime {
         let head_repository = head_repository_at(pull)?;
         let checked_head_sha = checked_head_at(pull)?;
         let mergeable_state = mergeable_state_at(pull)?;
-        let mut thread_states = review_thread_states(
+        let initial_thread_states = review_thread_states(
             pull.pointer("/reviewThreads/nodes")
                 .and_then(Value::as_array)
                 .ok_or(CensusError::Shape)?,
         )?;
-        let (mut checks, mut check_page) = initial_checks(pull)?;
-        let mut thread_page = page_info(pull.pointer("/reviewThreads/pageInfo"))?;
+        let mut thread_states = initial_thread_states.clone();
+        let (initial_checks, initial_check_page) = initial_checks(pull)?;
+        let mut checks = initial_checks.clone();
+        let mut check_page = initial_check_page.clone();
+        let initial_thread_page = page_info(pull.pointer("/reviewThreads/pageInfo"))?;
+        let mut thread_page = initial_thread_page.clone();
         let mut thread_pages = 1usize;
         while thread_page.has_next {
             thread_pages += 1;
@@ -882,6 +892,13 @@ impl ConvergenceSweepRuntime {
                 &head_repository,
                 &head_repository_at(revalidated_pull)?,
             )?;
+            ensure_final_connections_stable(
+                revalidated_pull,
+                &initial_thread_states,
+                &initial_thread_page,
+                &initial_checks,
+                &initial_check_page,
+            )?;
         }
         Ok(FetchedPullRequest {
             base_branch,
@@ -981,6 +998,7 @@ struct FetchedPullRequest {
     facts: PullRequestConvergenceFacts,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct PageInfo {
     has_next: bool,
     cursor: Option<String>,
@@ -1030,6 +1048,30 @@ fn ensure_threads_stable(observed: &[bool], revalidated: &[bool]) -> Result<(), 
     } else {
         Err(CensusError::State)
     }
+}
+
+fn ensure_final_connections_stable(
+    pull: &Value,
+    observed_threads: &[bool],
+    observed_thread_page: &PageInfo,
+    observed_checks: &[PullRequestCheck],
+    observed_check_page: &PageInfo,
+) -> Result<(), CensusError> {
+    let revalidated_threads = review_thread_states(
+        pull.pointer("/reviewThreads/nodes")
+            .and_then(Value::as_array)
+            .ok_or(CensusError::Shape)?,
+    )?;
+    let revalidated_thread_page = page_info(pull.pointer("/reviewThreads/pageInfo"))?;
+    let (revalidated_checks, revalidated_check_page) = initial_checks(pull)?;
+    ensure_threads_stable(observed_threads, &revalidated_threads)?;
+    ensure_checks_stable(observed_checks, &revalidated_checks)?;
+    if observed_thread_page != &revalidated_thread_page
+        || observed_check_page != &revalidated_check_page
+    {
+        return Err(CensusError::State);
+    }
+    Ok(())
 }
 
 const fn checks_require_revalidation(thread_pages: usize, check_pages: usize) -> bool {
@@ -1676,6 +1718,47 @@ mod tests {
             ensure_threads_stable(&[true, false], &[true, false]),
             Ok(())
         );
+    }
+
+    #[test]
+    fn final_details_reject_changed_initial_connection_contents() {
+        let observed_check = PullRequestCheck::new(
+            String::from("test"),
+            PullRequestCheckState::CheckRunCompleted {
+                conclusion: Some(String::from("SUCCESS")),
+            },
+        );
+        let pull = json!({
+            "reviewThreads": {
+                "nodes": [{"isResolved": false}],
+                "pageInfo": {"hasNextPage": true, "endCursor": "threads-1"}
+            },
+            "commits": {"nodes": [{"commit": {
+                "oid": sha('a').as_str(),
+                "statusCheckRollup": {"contexts": {
+                    "nodes": [{
+                        "__typename": "CheckRun",
+                        "name": "test",
+                        "status": "COMPLETED",
+                        "conclusion": "FAILURE"
+                    }],
+                    "pageInfo": {"hasNextPage": false, "endCursor": null}
+                }}
+            }}]}
+        });
+
+        let result = ensure_final_connections_stable(
+            &pull,
+            &[true],
+            &PageInfo {
+                has_next: true,
+                cursor: Some(String::from("threads-1")),
+            },
+            &[observed_check],
+            &PageInfo::done(),
+        );
+
+        assert_eq!(result, Err(CensusError::State));
     }
 
     #[test]

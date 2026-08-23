@@ -770,14 +770,24 @@ async fn configured_target_reenrollment_clears_a_durable_park() -> Result<(), Bo
 async fn live_session_without_model_activity_is_parked() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
     let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
-    let store = PostgresConvergenceSweepStore::new(pool);
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
     let repository = repository()?;
     let observation = observation()?;
-    let (_, session) = dispatched(
+    let (dispatch, session) = dispatched(
         commissioned
             .commission(prepared_commission(0x89_208)?, |_| None)
             .await?,
     );
+    store
+        .record_dispatch_decision(
+            Uuid::from_u128(0x89_216),
+            &repository,
+            pull_request(),
+            &observation,
+            (dispatch, session),
+            ConvergenceSweepDecision::LiveSession,
+        )
+        .await?;
 
     let disposition = store
         .record_no_model_activity_failure(
@@ -788,8 +798,17 @@ async fn live_session_without_model_activity_is_parked() -> Result<(), Box<dyn E
             session,
         )
         .await?;
+    let parked_session: Uuid = sqlx::query_scalar(
+        "SELECT last_session_id FROM convergence_sweep_parked_target
+          WHERE repository = $1 AND pull_request_number = $2",
+    )
+    .bind(repository.as_str())
+    .bind(rust_decimal::Decimal::from(pull_request().get()))
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(disposition, ConvergenceSweepFailureDisposition::Parked);
+    assert_eq!(parked_session, session.into_uuid());
     assert!(
         store
             .load_target(&repository, pull_request())
