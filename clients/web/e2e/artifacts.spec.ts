@@ -85,7 +85,9 @@ test.afterEach(async ({ page }, testInfo) => {
   })
 })
 
-test('selects bounded image views and explicitly loads an admitted original', async ({ page }) => {
+test('selects a bounded image view and keeps an animation-capable original download-only', async ({
+  page,
+}) => {
   const problems = watchBrowser(page)
 
   const previewResponse = page.waitForResponse(
@@ -103,17 +105,13 @@ test('selects bounded image views and explicitly loads an admitted original', as
   ).toBe(0)
 
   const artifact = page.getByRole('article', { name: 'Artifact orbital-map.png' })
-  const originalResponse = page.waitForResponse(
-    (response) => new URL(response.url()).pathname === originalPath,
-  )
-  const loadOriginal = artifact.getByRole('button', { name: 'Load original' })
-  await loadOriginal.focus()
-  await page.keyboard.press('Enter')
-  await expect(artifact.getByRole('button', { name: 'Original loaded' })).toBeFocused()
-  const original = artifact.getByRole('img', { name: 'Original of orbital-map.png' })
-  await expect(original).toBeVisible()
-  await expect(original).toHaveAttribute('src', originalPath)
-  expect((await originalResponse).headers()['content-type']).toContain('image/png')
+  await expect(artifact.getByRole('button', { name: 'Load original' })).toHaveCount(0)
+  expect(
+    await page.evaluate(
+      (path) => performance.getEntriesByName(new URL(path, location.href).href).length,
+      originalPath,
+    ),
+  ).toBe(0)
   await expect(artifact.getByRole('link', { name: 'Download' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

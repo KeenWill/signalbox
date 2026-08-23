@@ -7,14 +7,20 @@ type BlobView = WebBlobDescriptor['available_views'][number]
 
 // Hard inline-original byte ceiling. A qualifying preview/thumbnail derivation additionally proves
 // that the exact source digest passed the owning service's bounded image decoder (16,384 px per
-// axis, 67,108,864 total pixels, and 320 MiB decoder allocation). Originals without both proofs
-// remain ordinary-download only.
+// axis, 67,108,864 total pixels, and 320 MiB decoder allocation). Until the descriptor carries an
+// aggregate animation-decode bound, only inherently single-frame JPEG originals can use that proof;
+// animation-capable formats and originals without every proof remain ordinary-download only.
 export const INLINE_ORIGINAL_MAX_BYTES = 16n * 1024n * 1024n
 const BOUNDED_IMAGE_TRANSFORMATIONS = new Set(['image.preview', 'image.thumbnail'])
+const SINGLE_FRAME_ORIGINAL_MEDIA_TYPES = new Set(['image/jpeg'])
 
 export const selectBoundedOriginalView = (descriptor: WebBlobDescriptor): BlobView | undefined => {
   const original = descriptor.available_views.find((view) => view.kind === 'browser_native')
-  if (original === undefined || BigInt(original.byte_length) > INLINE_ORIGINAL_MAX_BYTES) {
+  if (
+    original === undefined ||
+    BigInt(original.byte_length) > INLINE_ORIGINAL_MAX_BYTES ||
+    !SINGLE_FRAME_ORIGINAL_MEDIA_TYPES.has(original.media_type.toLowerCase())
+  ) {
     return undefined
   }
 
