@@ -369,9 +369,13 @@ jobs:
           persist-credentials: false
       - name: Install Bubblewrap
         run: |
-          sudo apt-get install --yes bubblewrap
+          sudo apt-get install --yes bubblewrap keyutils
           bwrap --version
           bwrap --help | grep -E -- '--size|--disable-userns|--assert-userns-disabled'
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          sudo setpriv --reuid="$runner_uid" --regid="$runner_gid" --init-groups \
+            keyctl new_session
       - name: Enable unprivileged user namespaces for Bubblewrap
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Delegate the file-media task controller
