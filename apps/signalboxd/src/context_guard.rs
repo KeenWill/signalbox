@@ -310,7 +310,7 @@ impl ReportedUsageCompaction {
                 operation.request().model_settings().effective().fast_mode(),
             )
             .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
-        let Some(reported) = self
+        let reported = self
             .model_calls
             .latest_reported_usage(
                 session,
@@ -318,18 +318,30 @@ impl ReportedUsageCompaction {
                 operation.request().call().frontier().snapshot(),
             )
             .await
-            .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?
-        else {
-            return Ok(None);
+            .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?;
+        let reported_requires_compaction = reported.is_some_and(|reported| {
+            reported_usage_requires_compaction(
+                reported.usage(),
+                reported.input_includes_cache_tokens(),
+                reported.output_is_retained(),
+                reported.projected_unreported_content_bytes(),
+                u64::from(definition.max_output_tokens()),
+                u64::from(definition.context_window_tokens()),
+            )
+        });
+        let failure_requires_compaction = if reported_requires_compaction {
+            false
+        } else {
+            self.model_calls
+                .request_too_large_requires_compaction(
+                    session,
+                    target,
+                    operation.request().call().frontier().snapshot(),
+                )
+                .await
+                .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?
         };
-        if !reported_usage_requires_compaction(
-            reported.usage(),
-            reported.input_includes_cache_tokens(),
-            reported.output_is_retained(),
-            reported.projected_unreported_content_bytes(),
-            u64::from(definition.max_output_tokens()),
-            u64::from(definition.context_window_tokens()),
-        ) {
+        if !reported_requires_compaction && !failure_requires_compaction {
             return Ok(None);
         }
         Ok(Some(ReportedUsageCompactionCandidate { preview, turn }))

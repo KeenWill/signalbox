@@ -56,6 +56,7 @@ pub(crate) fn classify_error(message: &str) -> ProviderErrorKind {
             &[
                 "request too large",
                 "context length exceeded",
+                "context window exceeded",
                 "context_length_exceeded",
             ],
         ) =>
@@ -158,6 +159,10 @@ mod tests {
         );
         assert_eq!(
             classify_error("request too large"),
+            ProviderErrorKind::RequestTooLarge
+        );
+        assert_eq!(
+            classify_error("Context window exceeded for this request"),
             ProviderErrorKind::RequestTooLarge
         );
         assert_eq!(

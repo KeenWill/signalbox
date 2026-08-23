@@ -362,6 +362,83 @@ async fn context_compaction_usage_is_available_to_pre_activation_compaction()
     Ok(())
 }
 
+/// A provider can reject an oversized request before reporting usage. The
+/// preserved failure frontier forces one successor compaction, while the
+/// completed compaction result supersedes that pressure evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn request_too_large_failure_forces_one_successor_compaction() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x6d7c;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let target = authorized.observation_correlation().target();
+    let failed_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x22));
+    let observation = authorized
+        .observation_correlation()
+        .bind_provider_failure_observation_with_usage(
+            ProviderModelCallFailureCause::RequestTooLarge,
+            ProviderReportedTokenUsage::unreported(),
+        );
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                failed_frontier,
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    assert!(
+        repository
+            .request_too_large_requires_compaction(fixture.session, target, failed_frontier)
+            .await?
+    );
+
+    let compaction_repository = ContextCompactionRepository::new(pool.clone());
+    let result_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x34));
+    let prepared = compaction_repository
+        .prepare(PrepareContextCompactionRequest {
+            command: DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x30)),
+            session: fixture.session,
+            requested_through_position: Some(1),
+            automatic_for_turn: None,
+            defaults_version: SessionConfigurationDefaultsVersion::first(),
+            selection: DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5)),
+            target,
+            input_includes_cache_tokens: false,
+            credential_reference: String::from("request-size recovery fixture credential"),
+            call: ModelCallId::from_uuid(Uuid::from_u128(seed + 0x31)),
+            compaction: ContextCompactionId::from_uuid(Uuid::from_u128(seed + 0x32)),
+            summary_entry: SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x33)),
+            result_frontier,
+        })
+        .await?;
+    let PrepareContextCompactionOutcome::Prepared(prepared) = prepared else {
+        panic!("the failed turn retains a compactable frontier")
+    };
+    compaction_repository.authorize(&prepared).await?;
+    compaction_repository
+        .complete(
+            &prepared,
+            "bounded request-size recovery summary",
+            ContextCompactionTokenUsage::unreported(),
+        )
+        .await?;
+
+    assert!(
+        !repository
+            .request_too_large_requires_compaction(fixture.session, target, result_frontier)
+            .await?
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-006: cancellation evidence cannot carry provider usage because neither
 /// cancellation-confirmed nor pre-send cancellation reports token evidence.
 #[tokio::test(flavor = "multi_thread")]

@@ -985,6 +985,83 @@ impl PostgresModelCallRepository {
         }))
     }
 
+    /// Whether a preserved request-size failure still lacks later evidence that
+    /// the same target accepted a call after it or that compaction replaced it.
+    ///
+    /// The provider may reject an oversized call without reporting token usage.
+    /// A successor can use that typed terminal evidence to compact once, but a
+    /// later provider-accepted ordinary call or completed compaction on the
+    /// prospective lineage supersedes the failure so it cannot trigger forever.
+    pub async fn request_too_large_requires_compaction(
+        &self,
+        session: SessionId,
+        target: ResolvedProviderTarget,
+        prospective_frontier: ContextFrontierId,
+    ) -> Result<bool, ModelCallRepositoryError> {
+        let requires_compaction = sqlx::query_scalar(
+            "WITH latest_failure AS MATERIALIZED (
+                SELECT failed.model_call_id
+                  FROM model_call AS failed
+                 WHERE failed.session_id = $1
+                   AND failed.resolved_provider_model_identity_id = $2
+                   AND failed.state_kind = 'terminal'
+                   AND failed.terminal_provider_failure_cause =
+                       'request_too_large'
+                   AND context_frontier_preserves_prefix(
+                           $1,
+                           failed.context_frontier_id,
+                           $3
+                       )
+                 ORDER BY failed.model_call_id DESC
+                 LIMIT 1
+             )
+             SELECT EXISTS (
+                 SELECT 1
+                   FROM latest_failure AS failed
+                  WHERE NOT EXISTS (
+                      SELECT 1
+                        FROM model_call AS accepted
+                       WHERE accepted.session_id = $1
+                         AND accepted.resolved_provider_model_identity_id = $2
+                         AND accepted.model_call_id > failed.model_call_id
+                         AND accepted.state_kind = 'terminal'
+                         AND (
+                                accepted.terminal_disposition_kind = 'completed'
+                             OR accepted.usage_input_tokens IS NOT NULL
+                         )
+                         AND context_frontier_preserves_prefix(
+                                 $1,
+                                 accepted.context_frontier_id,
+                                 $3
+                             )
+                      UNION ALL
+                      SELECT 1
+                        FROM context_compaction AS compaction
+                        JOIN context_compaction_model_call AS accepted
+                          ON accepted.session_id = compaction.session_id
+                         AND accepted.model_call_id =
+                             compaction.producing_call_id
+                       WHERE compaction.session_id = $1
+                         AND accepted.resolved_provider_model_identity_id = $2
+                         AND accepted.model_call_id > failed.model_call_id
+                         AND accepted.state_kind = 'terminal'
+                         AND accepted.terminal_disposition_kind = 'completed'
+                         AND context_frontier_preserves_prefix(
+                                 $1,
+                                 compaction.result_frontier_id,
+                                 $3
+                             )
+                  )
+             )",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(target.identity().into_uuid())
+        .bind(prospective_frontier.into_uuid())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(requires_compaction)
+    }
+
     /// Resolves the credential currently pinned for one session and exact
     /// provider target through the same family catalog used by model calls.
     pub async fn resolve_session_credential_reference(
