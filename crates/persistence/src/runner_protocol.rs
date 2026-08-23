@@ -2466,10 +2466,8 @@ impl RunnerProtocolStore {
                 | "pre_pin_replaced"
                 | "runner_lost"
                 | "runner_replaced"
-                | "profile_replaced"
                 | "abandoned"
-        ) && !((authority.admits_runner_replacement() && event_kind == "runner_replaced")
-            || (authority.admits_profile_replacement() && event_kind == "profile_replaced"))
+        ) && !(authority.admits_runner_replacement() && event_kind == "runner_replaced")
         {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,
@@ -2606,6 +2604,11 @@ impl RunnerProtocolStore {
                 grant_origin.ok_or(RunnerProtocolCorruption::MissingCanonicalGrant)?,
             )
             .await?;
+        }
+        if event_kind == "profile_replaced" && !authority.admits_profile_replacement() {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
         }
         sqlx::query(
             "INSERT INTO runner_current_session_placement

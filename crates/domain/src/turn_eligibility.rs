@@ -507,7 +507,7 @@ pub struct ActiveTurnSchedulingReconstitutionInput {
     owning_turn: TurnId,
     current_attempt: Option<TurnAttemptId>,
     state: StoredActiveTurnPhase,
-    executing_tool_batch: Option<ExecutingToolBatchReconstitutionFacts>,
+    executing_tool_batch: Option<Box<ExecutingToolBatchReconstitutionFacts>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -574,7 +574,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
     /// Attaches independently reconstituted evidence for an executing tool
     /// batch without changing the stored turn-attempt state.
     pub fn with_executing_tool_batch(mut self, batch: &crate::ToolBatch) -> Self {
-        self.executing_tool_batch = Some(ExecutingToolBatchReconstitutionFacts {
+        self.executing_tool_batch = Some(Box::new(ExecutingToolBatchReconstitutionFacts {
             session: batch.session(),
             producing_call: batch.producing_call(),
             yielded_snapshot: batch.yielded_snapshot().clone(),
@@ -591,7 +591,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                 .iter()
                 .map(crate::ToolRequest::id)
                 .collect(),
-        });
+        }));
         self
     }
 
@@ -618,7 +618,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
             owning_turn,
             current_attempt: None,
             state: StoredActiveTurnPhase::AwaitingApproval { wait },
-            executing_tool_batch: Some(ExecutingToolBatchReconstitutionFacts {
+            executing_tool_batch: Some(Box::new(ExecutingToolBatchReconstitutionFacts {
                 session: batch.session(),
                 producing_call: batch.producing_call(),
                 yielded_snapshot: batch.yielded_snapshot().clone(),
@@ -630,7 +630,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                     .iter()
                     .map(crate::ToolRequest::id)
                     .collect(),
-            }),
+            })),
         })
     }
 
@@ -651,7 +651,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
             owning_turn,
             current_attempt: None,
             state: StoredActiveTurnPhase::AwaitingChild { wait },
-            executing_tool_batch: Some(ExecutingToolBatchReconstitutionFacts {
+            executing_tool_batch: Some(Box::new(ExecutingToolBatchReconstitutionFacts {
                 session: batch.session(),
                 producing_call: batch.producing_call(),
                 yielded_snapshot: batch.yielded_snapshot().clone(),
@@ -663,7 +663,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                     .iter()
                     .map(crate::ToolRequest::id)
                     .collect(),
-            }),
+            })),
         })
     }
 
@@ -4554,11 +4554,11 @@ fn reconstitute_inner(
         );
     }
     let runner_placement_frontier = runner_placement_frontiers.last().copied();
-    if input.runner_placement_frontier != runner_placement_frontier {
-        let snapshot = input
+    if input.runner_placement_frontier != runner_placement_frontier
+        && let Some(snapshot) = input
             .runner_placement_frontier
             .or(runner_placement_frontier)
-            .expect("a mismatched placement head names a frontier");
+    {
         return Err(
             AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMismatch {
                 snapshot,
