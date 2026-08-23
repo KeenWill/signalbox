@@ -392,7 +392,15 @@ impl RunnerWorkspaceStore {
             &manifest,
         )
         .map_err(PrepareRepositoryWorkspaceError::Storage)?;
-        sync_directory_tree(&repository).map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let durability_repository = repository
+            .try_clone()
+            .map_err(RunnerWorkspaceError::Io)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        tokio::task::spawn_blocking(move || sync_directory_tree(&durability_repository))
+            .await
+            .map_err(|error| RunnerWorkspaceError::Io(io::Error::other(error)))
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         manifest.lifecycle = ManifestLifecycle::Ready;
         write_manifest(
             staging
@@ -1305,6 +1313,7 @@ mod tests {
     const ARBITRARY_SECOND_CONCURRENT_REPOSITORY_BYTES: &[u8] = b"second\n";
     const NESTED_REPOSITORY_DIRECTORY: &str = "nested";
     const PARTIAL_REPOSITORY_BYTES: &[u8] = b"partial repository\n";
+    const ARBITRARY_NESTED_REPOSITORY_BYTES: &[u8] = b"prepared repository\n";
 
     fn fixture_root() -> (TempDir, RunnerStateRoot) {
         let parent = tempfile::tempdir().expect("the workspace fixture parent exists");
@@ -1505,7 +1514,7 @@ mod tests {
             .workspace_store()
             .expect("the locked root forms a workspace store")
             .prepare_repository_workspace(&expected, |target| async move {
-                fs::write(target.path().join("partial"), b"partial repository\n")?;
+                fs::write(target.path().join("partial"), PARTIAL_REPOSITORY_BYTES)?;
                 Err::<Recovery, std::io::Error>(std::io::Error::other(
                     "the fixture preparation fails",
                 ))
@@ -1941,7 +1950,7 @@ mod tests {
         let repository = tempfile::tempdir().expect("the repository fixture exists");
         let nested = repository.path().join("objects").join("pack");
         fs::create_dir_all(&nested).expect("the nested repository fixture exists");
-        fs::write(nested.join("pack"), b"prepared repository\n")
+        fs::write(nested.join("pack"), ARBITRARY_NESTED_REPOSITORY_BYTES)
             .expect("the nested repository file exists");
         std::os::unix::fs::symlink("objects/pack/pack", repository.path().join("HEAD"))
             .expect("the repository symlink fixture exists");
