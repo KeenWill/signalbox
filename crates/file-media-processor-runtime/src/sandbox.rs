@@ -413,7 +413,12 @@ impl SandboxedFileMediaProcessor {
                 cgroup_procs_fd,
             },
         );
-        let child = command.spawn().map_err(|_| ProcessorFailure::Unavailable)?;
+        let child = command.spawn().map_err(|error| {
+            if std::env::var_os("CI").is_some() {
+                eprintln!("file-media sandbox spawn failed: {error}");
+            }
+            ProcessorFailure::Unavailable
+        })?;
         drop(block_read);
         let raw_pid = child.id().ok_or(ProcessorFailure::Unavailable)?;
         let pid =
