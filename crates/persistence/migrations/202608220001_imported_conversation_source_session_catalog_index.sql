@@ -297,6 +297,33 @@ BEGIN
     RETURN content_kind::smallint;
 END; $$;
 
+-- pg_restore evaluates the generated expression with an empty search path.
+-- Pin the complete helper chain to the migration-selected schema so every
+-- unqualified helper call remains resolvable while stored values are rebuilt.
+DO $$
+DECLARE
+    signature text;
+BEGIN
+    FOREACH signature IN ARRAY ARRAY[
+        'imported_encoding_length_at(bytea,integer)',
+        'imported_encoding_skip_text(bytea,integer)',
+        'imported_encoding_skip_number(bytea,integer)',
+        'imported_encoding_skip_boolean(bytea,integer)',
+        'imported_encoding_skip_structured(bytea,integer,integer)',
+        'imported_encoding_skip_media_source(bytea,integer)',
+        'imported_encoding_skip_attestation(bytea,integer,text,integer)',
+        'imported_encoding_skip_tool_result(bytea,integer,integer)',
+        'imported_content_encoding_kind(bytea)'
+    ] LOOP
+        EXECUTE format(
+            'ALTER FUNCTION %s SET search_path TO %I, pg_catalog, pg_temp',
+            signature,
+            current_schema
+        );
+    END LOOP;
+END
+$$;
+
 ALTER TABLE imported_transcript_entry
     ADD COLUMN content_kind smallint GENERATED ALWAYS AS (
         imported_content_encoding_kind(content_encoding)

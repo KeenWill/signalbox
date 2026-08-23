@@ -19,7 +19,7 @@ import type {
 } from '../generated/web-contract.mjs'
 import { ScenarioNavigation } from '../ScenarioNavigation'
 import { type DiagnosticSnapshot, IconCommand, OverlaySurfaces } from '../Surfaces'
-import { store } from '../state'
+import { store, useAppSelector } from '../state'
 import { type ImportApi, ImportApiError, ImportReceiptCorrelationError } from './api'
 import { ImportedEntries } from './ImportedEntries'
 import { ImportsTable } from './ImportsTable'
@@ -56,6 +56,7 @@ const byteLabel = (bytes: number): string => {
 
 export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: boolean }) {
   const queryClient = useQueryClient()
+  const overlay = useAppSelector((state) => state.app.overlay)
   const queryScope = scenario ? 'scenario' : 'production'
   const [format, setFormat] = useState<FormatFilter>(EMPTY_FILTER)
   const [sourceSession, setSourceSession] = useState('')
@@ -100,7 +101,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     queryFn: ({ signal }) => api.list(listRequest, signal),
     gcTime: 0,
   })
-  const imports = importsQuery.data
+  const imports = importsQuery.isError ? undefined : importsQuery.data
   const firstImport = imports?.items[0]?.imported_conversation_id ?? null
 
   useEffect(() => {
@@ -120,7 +121,10 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     queryKey: ['imports', queryScope, selectedImport, 'descriptor'],
     queryFn: ({ signal }) => api.descriptor(selectedImport ?? '', signal),
     enabled: selectedImport !== null,
+    gcTime: 0,
   })
+  const descriptor =
+    importsQuery.isError || descriptorQuery.isError ? undefined : descriptorQuery.data
   const windowQuery = useQuery({
     queryKey: ['imports', queryScope, selectedImport, 'entries', windowRequest],
     queryFn: ({ signal }) =>
@@ -128,14 +132,15 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
         selectedImport ?? '',
         windowRequest,
         signal,
-        descriptorQuery.data?.timeline.latest.position,
+        descriptor?.timeline.latest.position,
       ),
     gcTime: 0,
-    enabled:
-      selectedImport !== null &&
-      ((windowRequest.anchor ?? 'first') !== 'latest' || descriptorQuery.data !== undefined),
+    enabled: selectedImport !== null && descriptor !== undefined,
   })
-  const entryWindow = windowQuery.data
+  const entryWindow =
+    importsQuery.isError || descriptorQuery.isError || windowQuery.isError
+      ? undefined
+      : windowQuery.data
   const anchorFrontier =
     entryWindow?.items.find((entry) => entry.frontier.position === entryWindow.anchor_position)
       ?.frontier ?? null
@@ -165,22 +170,25 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   const resetContinuation = continuation.reset
   const selectImportEntry = useCallback(
     (id: string) => {
-      if (hasRetainedCommand) return
+      if (hasRetainedCommand || overlay !== null) return
       resetContinuation()
       setSelectedFrontier(
         entryWindow?.items.find((entry) => entry.frontier.imported_entry_id === id)?.frontier ??
           null,
       )
     },
-    [entryWindow?.items, hasRetainedCommand, resetContinuation],
+    [entryWindow?.items, hasRetainedCommand, overlay, resetContinuation],
   )
   const modelSelectionMissing = modelSelectionId.trim().length === 0
   const canContinueImport =
     selectedFrontier !== null &&
     !modelSelectionMissing &&
+    !importsQuery.isError &&
     !descriptorQuery.isError &&
+    !windowQuery.isError &&
     !continuation.isPending &&
-    !hasRetainedCommand
+    !hasRetainedCommand &&
+    overlay === null
   const continueAt = useCallback(
     (relationship: WebImportedSessionRelationship) => {
       if (!canContinueImport || !selectedFrontier) return
@@ -221,9 +229,9 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       timelineIds: [],
       focusTimeline: () =>
         document.querySelector<HTMLElement>('[aria-label="Imported source entries"]')?.focus(),
-      importEntryIds,
+      importEntryIds: overlay === null ? importEntryIds : [],
       selectedImportEntry: selectedFrontier?.imported_entry_id ?? null,
-      canSelectImportEntry: !hasRetainedCommand,
+      canSelectImportEntry: !hasRetainedCommand && overlay === null,
       selectImportEntry,
       canContinueImport,
       continueImport: continueAt,
@@ -239,6 +247,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       continueAt,
       hasRetainedCommand,
       importEntryIds,
+      overlay,
       retryExactCommand,
       selectImportEntry,
       selectedFrontier?.imported_entry_id,
@@ -329,7 +338,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     if (
       !Number.isSafeInteger(position) ||
       position <= 0 ||
-      position > (descriptorQuery.data?.entry_count ?? 0)
+      position > (descriptor?.entry_count ?? 0)
     )
       return
     showWindow({
@@ -467,7 +476,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
               <div>
                 <span className="eyebrow">Descriptor and selected source frontier</span>
                 <h2 id="import-inspector-heading">
-                  {descriptorQuery.data?.display_title ?? 'Import inspector'}
+                  {descriptor?.display_title ?? 'Import inspector'}
                 </h2>
               </div>
               <div className="window-controls">
@@ -509,23 +518,22 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
             </header>
             <div className="import-inspector-body">
               <div className="import-evidence">
-                {descriptorQuery.data && (
+                {descriptor && (
                   <dl>
                     <div>
                       <dt>Import identity</dt>
-                      <dd>{descriptorQuery.data.imported_conversation_id}</dd>
+                      <dd>{descriptor.imported_conversation_id}</dd>
                     </div>
                     <div>
                       <dt>Format</dt>
-                      <dd>{descriptorQuery.data.source.format}</dd>
+                      <dd>{descriptor.source.format}</dd>
                     </div>
                     <div>
                       <dt>Source session</dt>
                       <dd>
-                        {descriptorQuery.data.source.source_session_id
-                          ? `${descriptorQuery.data.source.source_session_id.leading_text}${
-                              descriptorQuery.data.source.source_session_id.completeness ===
-                              'truncated'
+                        {descriptor.source.source_session_id
+                          ? `${descriptor.source.source_session_id.leading_text}${
+                              descriptor.source.source_session_id.completeness === 'truncated'
                                 ? '…'
                                 : ''
                             }`
@@ -534,33 +542,31 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                     </div>
                     <div>
                       <dt>Source digest</dt>
-                      <dd>{descriptorQuery.data.source.source_digest_sha256}</dd>
+                      <dd>{descriptor.source.source_digest_sha256}</dd>
                     </div>
                     <div>
                       <dt>Raw records</dt>
-                      <dd>{descriptorQuery.data.raw_record_count.toLocaleString()}</dd>
+                      <dd>{descriptor.raw_record_count.toLocaleString()}</dd>
                     </div>
                     <div>
                       <dt>Entries</dt>
-                      <dd>{descriptorQuery.data.entry_count.toLocaleString()}</dd>
+                      <dd>{descriptor.entry_count.toLocaleString()}</dd>
                     </div>
                     <div>
                       <dt>Raw source size</dt>
-                      <dd>{byteLabel(descriptorQuery.data.sizes.raw_source_bytes)}</dd>
+                      <dd>{byteLabel(descriptor.sizes.raw_source_bytes)}</dd>
                     </div>
                     <div>
                       <dt>Normalized records</dt>
-                      <dd>
-                        {byteLabel(descriptorQuery.data.sizes.normalized_source_record_bytes)}
-                      </dd>
+                      <dd>{byteLabel(descriptor.sizes.normalized_source_record_bytes)}</dd>
                     </div>
                     <div>
                       <dt>Normalized entries</dt>
-                      <dd>{byteLabel(descriptorQuery.data.sizes.normalized_entry_bytes)}</dd>
+                      <dd>{byteLabel(descriptor.sizes.normalized_entry_bytes)}</dd>
                     </div>
                     <div>
                       <dt>Timeline</dt>
-                      <dd>1–{descriptorQuery.data.timeline.latest.position.toLocaleString()}</dd>
+                      <dd>1–{descriptor.timeline.latest.position.toLocaleString()}</dd>
                     </div>
                   </dl>
                 )}
@@ -697,9 +703,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                 {entryWindow && (
                   <ImportedEntries
                     entries={entryWindow.items}
-                    logicalEntryCount={
-                      descriptorQuery.data?.entry_count ?? entryWindow.last_position
-                    }
+                    logicalEntryCount={descriptor?.entry_count ?? entryWindow.last_position}
                     selected={selectedFrontier}
                     commandContext={commandContext}
                   />

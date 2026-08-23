@@ -148,10 +148,19 @@ const DESCRIPTOR_RESPONSE_BYTES = 128 * 1024
 const ENTRY_WINDOW_RESPONSE_BYTES = 2 * 1024 * 1024
 const CONTINUATION_RESPONSE_BYTES = 128 * 1024
 const BOOTSTRAP_VALIDATION_TTL_MS = 30_000
+const MAX_IMPORT_TEXT_PREVIEW_BYTES = 512
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const SHA256_HEX = /^[0-9a-f]{64}$/
 const NIL_UUID = '00000000-0000-0000-0000-000000000000'
 
 const isCanonicalUuid = (value: string): boolean => CANONICAL_UUID.test(value) && value !== NIL_UUID
+
+const textPreviewIsBounded = (entry: WebImportEntryWindow['items'][number]): boolean => {
+  if (entry.text?.kind !== 'attested') return true
+  return (
+    new TextEncoder().encode(entry.text.leading_text).byteLength <= MAX_IMPORT_TEXT_PREVIEW_BYTES
+  )
+}
 
 const correlateEntryWindow = (
   importedConversationId: string,
@@ -173,17 +182,22 @@ const correlateEntryWindow = (
     (entry, index) =>
       entry.frontier.imported_conversation_id === importedConversationId &&
       isCanonicalUuid(entry.frontier.imported_entry_id) &&
+      entry.frontier.position > 0 &&
       entry.frontier.position === window.first_position + index &&
-      (entry.content_kind === 'text') === (entry.text !== undefined && entry.text !== null),
+      (entry.content_kind === 'text') === (entry.text !== undefined && entry.text !== null) &&
+      textPreviewIsBounded(entry),
   )
   if (
     expectedAnchor === undefined ||
+    knownLatestPosition === undefined ||
     window.items.length === 0 ||
+    window.first_position <= 0 ||
     window.anchor_position !== expectedAnchor ||
     window.first_position > window.anchor_position ||
     window.last_position < window.anchor_position ||
     window.anchor_position - window.first_position > requestedBefore ||
     window.last_position - window.anchor_position > requestedAfter ||
+    window.last_position > knownLatestPosition ||
     window.last_position - window.first_position + 1 !== window.items.length ||
     entryIdentities.size !== window.items.length ||
     !positionsCorrelate ||
@@ -330,7 +344,8 @@ export class HttpImportApi implements ImportApi {
       descriptor.timeline.first.imported_conversation_id !== importedConversationId ||
       descriptor.timeline.latest.imported_conversation_id !== importedConversationId ||
       descriptor.timeline.first.position !== 1 ||
-      descriptor.timeline.latest.position !== descriptor.entry_count
+      descriptor.timeline.latest.position !== descriptor.entry_count ||
+      !SHA256_HEX.test(descriptor.source.source_digest_sha256)
     ) {
       throw new ImportDescriptorCorrelationError()
     }

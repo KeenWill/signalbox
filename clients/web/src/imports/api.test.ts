@@ -142,10 +142,12 @@ describe('HttpImportApi correlation', () => {
       ),
     )
 
-    const window = await new HttpImportApi(() => Promise.resolve()).entries(firstId, {
-      before: 0,
-      after: 0,
-    })
+    const window = await new HttpImportApi(() => Promise.resolve()).entries(
+      firstId,
+      { before: 0, after: 0 },
+      undefined,
+      1,
+    )
 
     expect(window.anchor_position).toBe(1)
   })

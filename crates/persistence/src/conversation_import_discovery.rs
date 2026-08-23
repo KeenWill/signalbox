@@ -318,33 +318,58 @@ impl ImportedConversationDiscoveryRepository {
             .map_or((None, None), |(format, version)| {
                 (Some(format), Some(version))
             });
-        let rows = sqlx::query(
-            "SELECT imported_conversation_id, source_format, converter_version,
+        let after = request.after.map(ImportedConversationId::into_uuid);
+        let limit = i64::from(request.limit.get()) + 1;
+        let source_session_maximum_bytes =
+            i64::from(request.source_session_maximum_bytes.get()) + 3;
+        let rows = if let Some(source_session_id) = request.source_session_id {
+            sqlx::query(
+                "SELECT imported_conversation_id, source_format, converter_version,
                     substring(source_session_id FROM 1 FOR $6::integer) AS source_session_prefix,
                     octet_length(source_session_id)::bigint AS source_session_bytes,
-                    CASE WHEN $4::bytea IS NOT NULL
-                         THEN sha256(source_session_id) END AS source_session_digest,
+                    sha256(source_session_id) AS source_session_digest,
                     $6::bigint AS source_session_maximum_bytes,
                     declared_entry_count, display_title, display_title_state
                FROM imported_conversation
               WHERE ($1::uuid IS NULL OR imported_conversation_id > $1)
                 AND ($2::text IS NULL OR source_format = $2)
                 AND ($3::smallint IS NULL OR converter_version = $3)
-                AND ($4::bytea IS NULL OR (
-                    sha256(source_session_id) = sha256($4)
-                    AND source_session_id = $4
-                ))
+                AND sha256(source_session_id) = sha256($4)
+                AND source_session_id = $4
               ORDER BY imported_conversation_id
               LIMIT $5",
-        )
-        .bind(request.after.map(ImportedConversationId::into_uuid))
-        .bind(source_format)
-        .bind(converter_version)
-        .bind(request.source_session_id)
-        .bind(i64::from(request.limit.get()) + 1)
-        .bind(i64::from(request.source_session_maximum_bytes.get()) + 3)
-        .fetch_all(&self.pool)
-        .await?;
+            )
+            .bind(after)
+            .bind(source_format.as_deref())
+            .bind(converter_version)
+            .bind(source_session_id)
+            .bind(limit)
+            .bind(source_session_maximum_bytes)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT imported_conversation_id, source_format, converter_version,
+                    substring(source_session_id FROM 1 FOR $5::integer) AS source_session_prefix,
+                    octet_length(source_session_id)::bigint AS source_session_bytes,
+                    NULL::bytea AS source_session_digest,
+                    $5::bigint AS source_session_maximum_bytes,
+                    declared_entry_count, display_title, display_title_state
+               FROM imported_conversation
+              WHERE ($1::uuid IS NULL OR imported_conversation_id > $1)
+                AND ($2::text IS NULL OR source_format = $2)
+                AND ($3::smallint IS NULL OR converter_version = $3)
+              ORDER BY imported_conversation_id
+              LIMIT $4",
+            )
+            .bind(after)
+            .bind(source_format.as_deref())
+            .bind(converter_version)
+            .bind(limit)
+            .bind(source_session_maximum_bytes)
+            .fetch_all(&self.pool)
+            .await?
+        };
         let mut items = rows
             .iter()
             .map(decode_summary)
