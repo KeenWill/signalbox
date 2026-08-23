@@ -6960,7 +6960,7 @@ mod tests {
         complete_typed_observation_responses()
             .into_iter()
             .skip(1)
-            .take(11)
+            .take(12)
             .collect()
     }
 
@@ -7265,6 +7265,11 @@ mod tests {
                     ScriptedResponse::ok(
                         RequestTarget(PULL_DETAIL_TARGET.to_owned()),
                         ResponseBody(pull_detail_with_pending_mergeability()),
+                    )
+                } else if response.target == THREADS_TARGET && response.body == convergence() {
+                    ScriptedResponse::post(
+                        RequestTarget(THREADS_TARGET.to_owned()),
+                        ResponseBody(convergence_with_mergeability("UNKNOWN")),
                     )
                 } else {
                     response
