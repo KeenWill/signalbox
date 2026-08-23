@@ -25,6 +25,7 @@ type TimelineContractLimits = Pick<
 >
 
 export const hasValidSessionTimelineContract = (bootstrap: WebContractBootstrap): boolean =>
+  bootstrap.capabilities.bounded_json &&
   bootstrap.capabilities.bounded_session_timeline &&
   bootstrap.limits.max_timeline_window_items >= 1 &&
   bootstrap.limits.max_timeline_window_items <= MAX_CONTRACT_TIMELINE_WINDOW_ITEMS &&

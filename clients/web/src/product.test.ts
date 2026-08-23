@@ -71,6 +71,15 @@ describe('SameOriginProductTransport', () => {
 })
 
 describe('product surface availability', () => {
+  it('requires bounded JSON before enabling timeline reads', () => {
+    expect(
+      hasValidSessionTimelineContract({
+        ...bootstrapFixture,
+        capabilities: { ...bootstrapFixture.capabilities, bounded_json: false },
+      }),
+    ).toBe(false)
+  })
+
   it('rejects timeline capability with unusable semantic limits', () => {
     expect(hasValidSessionTimelineContract(bootstrapFixture)).toBe(true)
     expect(
