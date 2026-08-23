@@ -1324,7 +1324,7 @@ SELECT selected.pull_request_number,
        latest.released_at AS latest_released_at,
        latest.achieved AS latest_achieved,
        COALESCE(counts.held_count, 0) AS held_count,
-       COALESCE(counts.queued_count, 0) AS queued_count,
+       COALESCE(counts.obligation_count, 0) AS queued_count,
        COALESCE(sessions.session_count, 0) AS session_count
   FROM selected
   LEFT JOIN LATERAL (
@@ -1408,16 +1408,9 @@ SELECT selected.pull_request_number,
            AND batch.pull_request_number = selected.pull_request_number
          ORDER BY batch.admitted_at DESC, batch.dispatch_id DESC LIMIT 1
   ) AS latest ON true
-  LEFT JOIN LATERAL (
-        SELECT (SELECT count(*) FROM repo_watch_current_held_dispatch
-                 WHERE repository = $1 AND pull_request_number = selected.pull_request_number) AS held_count,
-               (SELECT count(*)
-                  FROM repo_watch_outstanding_dispatch_obligation AS obligation
-                  JOIN repo_watch_event AS latest_event
-                    ON latest_event.event_id = obligation.latest_event_id
-                 WHERE latest_event.repository = $1
-                   AND latest_event.pull_request_number = selected.pull_request_number) AS queued_count
-  ) AS counts ON true
+  LEFT JOIN repo_watch_current_pull_request_work_count AS counts
+    ON counts.repository = $1
+   AND counts.pull_request_number = selected.pull_request_number
   LEFT JOIN repo_watch_current_pull_request_session_count AS sessions
     ON sessions.repository = $1
    AND sessions.pull_request_number = selected.pull_request_number
