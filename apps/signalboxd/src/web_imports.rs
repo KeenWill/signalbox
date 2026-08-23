@@ -390,7 +390,11 @@ async fn execute_continuation(
             import_not_found()
         }
         Ok(CreateSessionFromImportedFrontierOutcome::ImportedFrontierNotFound { .. }) => {
-            invalid_request("selected imported frontier no longer resolves")
+            application_error(
+                StatusCode::BAD_REQUEST,
+                "import_frontier_not_found",
+                "selected imported frontier no longer resolves",
+            )
         }
         Ok(CreateSessionFromImportedFrontierOutcome::ConflictingReuse { .. }) => {
             conflicting_reuse()

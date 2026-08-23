@@ -148,6 +148,87 @@ describe('HttpImportApi correlation', () => {
     ).rejects.toBeInstanceOf(ImportWindowCorrelationError)
   })
 
+  it('rejects a latest entry window before the known timeline bound', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              anchor_position: 1,
+              first_position: 1,
+              last_position: 1,
+              has_before: false,
+              has_after: true,
+              items: [
+                {
+                  frontier: {
+                    imported_conversation_id: firstId,
+                    imported_entry_id: secondId,
+                    position: 1,
+                  },
+                  raw_record_position: 1,
+                  record_entry_position: 1,
+                  source_speaker: 'not_attested',
+                  content_kind: 'message_content_absent',
+                  text: null,
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).entries(
+        firstId,
+        { anchor: 'latest', before: 0, after: 0 },
+        undefined,
+        1_000,
+      ),
+    ).rejects.toBeInstanceOf(ImportWindowCorrelationError)
+  })
+
+  it('rejects text evidence attached to a non-text content kind', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              anchor_position: 1,
+              first_position: 1,
+              last_position: 1,
+              has_before: false,
+              has_after: false,
+              items: [
+                {
+                  frontier: {
+                    imported_conversation_id: firstId,
+                    imported_entry_id: secondId,
+                    position: 1,
+                  },
+                  raw_record_position: 1,
+                  record_entry_position: 1,
+                  source_speaker: 'not_attested',
+                  content_kind: 'tool_result',
+                  text: { kind: 'not_attested' },
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).entries(firstId, {
+        anchor: 'first',
+        before: 0,
+        after: 0,
+      }),
+    ).rejects.toBeInstanceOf(ImportWindowCorrelationError)
+  })
+
   it('rejects a catalog page outside the requested cursor and format', async () => {
     vi.stubGlobal(
       'fetch',

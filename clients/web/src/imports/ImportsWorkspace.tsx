@@ -44,7 +44,9 @@ const formatOptions: ReadonlyArray<{ value: FormatFilter; label: string }> = [
 const isRetryableContinuationError = (error: unknown): boolean =>
   error instanceof ImportReceiptCorrelationError ||
   !(error instanceof ImportApiError) ||
-  ['continuation_commit_ambiguous', 'continuation_unavailable'].includes(error.detail.error.code)
+  ['continuation_commit_ambiguous', 'continuation_unavailable', 'continuation_corrupt'].includes(
+    error.detail.error.code,
+  )
 
 const byteLabel = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`
@@ -121,8 +123,16 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   })
   const windowQuery = useQuery({
     queryKey: ['imports', queryScope, selectedImport, 'entries', windowRequest],
-    queryFn: ({ signal }) => api.entries(selectedImport ?? '', windowRequest, signal),
-    enabled: selectedImport !== null,
+    queryFn: ({ signal }) =>
+      api.entries(
+        selectedImport ?? '',
+        windowRequest,
+        signal,
+        descriptorQuery.data?.timeline.latest.position,
+      ),
+    enabled:
+      selectedImport !== null &&
+      ((windowRequest.anchor ?? 'first') !== 'latest' || descriptorQuery.data !== undefined),
   })
   const entryWindow = windowQuery.data
   const anchorFrontier =
@@ -192,6 +202,17 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     },
     [canContinueImport, continuation, modelKind, modelSelectionId, queryScope, selectedFrontier],
   )
+  const retryExactCommand = useCallback(() => {
+    if (!pendingCommand || continuation.isPending) return
+    continuation.mutate(pendingCommand)
+  }, [continuation, pendingCommand])
+  const abandonExactCommand = useCallback(() => {
+    if (!pendingCommand || continuation.isPending) return
+    storeRetainedCommand(queryScope, null)
+    setPendingCommand(null)
+    continuation.reset()
+  }, [continuation, pendingCommand, queryScope])
+  const canRecoverRetainedCommand = pendingCommand !== null && !continuation.isPending
   const commandContext = useMemo<CommandContext>(
     () => ({
       dispatch: store.dispatch,
@@ -204,11 +225,18 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       selectImportEntry,
       canContinueImport,
       continueImport: continueAt,
+      canRetryImport: canRecoverRetainedCommand,
+      retryImport: retryExactCommand,
+      canAbandonImport: canRecoverRetainedCommand,
+      abandonImport: abandonExactCommand,
     }),
     [
+      abandonExactCommand,
       canContinueImport,
+      canRecoverRetainedCommand,
       continueAt,
       importEntryIds,
+      retryExactCommand,
       selectImportEntry,
       selectedFrontier?.imported_entry_id,
     ],
@@ -227,8 +255,9 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   )
 
   useEffect(() => {
+    if (!scenario) return
     const snapshot: DiagnosticSnapshot = {
-      scenario: scenario ? 'imports' : 'production-imports',
+      scenario: 'imports',
       connection:
         importsQuery.isError || descriptorQuery.isError || windowQuery.isError ? 'failed' : 'ready',
       loadedTimeline: 0,
@@ -588,16 +617,15 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                     </button>
                     {retainedCommandNeedsAction && pendingCommand && (
                       <>
-                        <button type="button" onClick={() => continuation.mutate(pendingCommand)}>
+                        <button
+                          type="button"
+                          onClick={() => invokeCommand('imports.continue.retry', commandContext)}
+                        >
                           Retry exact command
                         </button>
                         <button
                           type="button"
-                          onClick={() => {
-                            storeRetainedCommand(queryScope, null)
-                            setPendingCommand(null)
-                            continuation.reset()
-                          }}
+                          onClick={() => invokeCommand('imports.continue.abandon', commandContext)}
                         >
                           Abandon exact retry
                         </button>

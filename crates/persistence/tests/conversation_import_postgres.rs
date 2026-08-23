@@ -1852,7 +1852,7 @@ async fn inv001_late_entry_identity_constraint_is_typed_collision() -> Result<()
     )
     .bind(Uuid::from_u128(0xa10))
     .bind(existing_entry.into_uuid())
-    .bind(vec![1_u8])
+    .bind(vec![2_u8, 1, 1, 0])
     .bind(vec![1_u8])
     .execute(&mut *transaction)
     .await

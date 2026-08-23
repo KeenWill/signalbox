@@ -22,6 +22,7 @@ export interface ImportApi {
     importedConversationId: string,
     request: WebImportEntryWindowRequest,
     signal?: AbortSignal,
+    knownLatestPosition?: number,
   ): Promise<WebImportEntryWindow>
   continueImport(
     importedConversationId: string,
@@ -119,6 +120,7 @@ const correlateEntryWindow = (
   importedConversationId: string,
   request: WebImportEntryWindowRequest,
   window: WebImportEntryWindow,
+  knownLatestPosition?: number,
 ): WebImportEntryWindow => {
   const normalizedAnchor = request.anchor ?? 'first'
   const requestedBefore = request.before ?? DEFAULT_IMPORT_WINDOW_RADIUS
@@ -127,12 +129,13 @@ const correlateEntryWindow = (
     normalizedAnchor === 'first'
       ? 1
       : normalizedAnchor === 'latest'
-        ? window.last_position
+        ? knownLatestPosition
         : request.position
   const positionsCorrelate = window.items.every(
     (entry, index) =>
       entry.frontier.imported_conversation_id === importedConversationId &&
-      entry.frontier.position === window.first_position + index,
+      entry.frontier.position === window.first_position + index &&
+      (entry.content_kind === 'text') === (entry.text !== undefined && entry.text !== null),
   )
   if (
     expectedAnchor === undefined ||
@@ -235,6 +238,7 @@ export class HttpImportApi implements ImportApi {
     importedConversationId: string,
     request: WebImportEntryWindowRequest,
     signal?: AbortSignal,
+    knownLatestPosition?: number,
   ): Promise<WebImportEntryWindow> {
     await this.validateBootstrap()
     const response = await fetch(
@@ -242,7 +246,7 @@ export class HttpImportApi implements ImportApi {
       { signal },
     )
     const window = await decodeResponse(response, decodeWebImportEntryWindow)
-    return correlateEntryWindow(importedConversationId, request, window)
+    return correlateEntryWindow(importedConversationId, request, window, knownLatestPosition)
   }
 
   async continueImport(
