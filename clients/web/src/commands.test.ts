@@ -12,6 +12,19 @@ describe('command registry', () => {
     )
   })
 
+  it('registers preference reset as a central command', () => {
+    store.dispatch(actions.themeSet('light'))
+
+    invokeCommand('preferences.reset', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+    })
+
+    expect(selectApp(store.getState()).theme).toBe('dark')
+  })
+
   it('selects the first timeline item when next starts from a missing selection', () => {
     const timelineIds = ['event-0', 'event-1'] as const
     store.dispatch(actions.timelineSelected('filtered-out-event'))

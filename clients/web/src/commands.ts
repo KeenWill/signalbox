@@ -196,6 +196,15 @@ export const commandRegistry = [
     available: always,
     run: (context) => context.dispatch(actions.detailSet('results')),
   },
+  {
+    id: 'preferences.reset',
+    title: 'Restore preference defaults',
+    description: 'Restore browser-local workstation preferences to their defaults.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.preferencesReset()),
+  },
 ] as const satisfies readonly CommandDefinitionShape[]
 
 export type CommandDefinition = (typeof commandRegistry)[number]

@@ -298,7 +298,13 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   )
 }
 
-function ProductToolbar({ context }: { context: ProductCommandContext }) {
+function ProductToolbar({
+  context,
+  onOpenPalette,
+}: {
+  context: ProductCommandContext
+  onOpenPalette: (opener: HTMLElement) => void
+}) {
   const app = useAppSelector(selectApp)
   return (
     <div className="toolbar" role="toolbar" aria-label="Application controls">
@@ -338,7 +344,10 @@ function ProductToolbar({ context }: { context: ProductCommandContext }) {
         className="icon-button"
         type="button"
         aria-label="Open command palette"
-        onClick={() => invokeProductCommand('palette.open', context)}
+        onClick={(event) => {
+          onOpenPalette(event.currentTarget)
+          invokeProductCommand('palette.open', context)
+        }}
       >
         <Command />
       </button>
@@ -351,6 +360,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const timelineRef = useRef<HTMLDivElement>(null)
+  const paletteOpenerRef = useRef<HTMLElement | null>(null)
+  const navigationOpenerRef = useRef<HTMLElement | null>(null)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
   const [selectionEvidence, setSelectionEvidence] = useState<SessionSelectionEvidence | null>(null)
@@ -379,6 +390,17 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       loadTimelineWindow: (anchor) =>
         setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 })),
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      openNavigation: () => {
+        const activeElement = document.activeElement
+        const opener =
+          activeElement instanceof HTMLElement && activeElement.closest('[role="dialog"]')
+            ? paletteOpenerRef.current
+            : activeElement instanceof HTMLElement
+              ? activeElement
+              : null
+        navigationOpenerRef.current = opener?.isConnected ? opener : null
+        dispatch(actions.overlaySet('navigation'))
+      },
     }),
     [dispatch, navigate, surface, timelineIds, timelineWindowAvailable],
   )
@@ -387,6 +409,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       hotkey: binding.hotkey,
       callback: () => {
         if (store.getState().app.overlay === null || binding.commandId === 'surface.escape') {
+          if (binding.commandId === 'palette.open') {
+            const activeElement = document.activeElement
+            paletteOpenerRef.current = activeElement instanceof HTMLElement ? activeElement : null
+          }
           if (
             binding.commandId.startsWith('selection.') &&
             productCommandAvailable(binding.commandId, context)
@@ -471,7 +497,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <span className="eyebrow">{copy.eyebrow}</span>
             <h1>{copy.title}</h1>
           </div>
-          <ProductToolbar context={context} />
+          <ProductToolbar
+            context={context}
+            onOpenPalette={(opener) => {
+              paletteOpenerRef.current = opener
+            }}
+          />
         </header>
         <div className="surface-question">
           <p>{copy.question}</p>
@@ -557,8 +588,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             className="mobile-navigation"
             aria-describedby="mobile-navigation-description"
             onCloseAutoFocus={(event) => {
-              event.preventDefault()
-              document.querySelector<HTMLElement>('[aria-label="Open navigation"]')?.focus()
+              const opener = navigationOpenerRef.current
+              navigationOpenerRef.current = null
+              if (opener?.isConnected) {
+                event.preventDefault()
+                opener.focus()
+              }
             }}
           >
             <Dialog.Title className="sr-only">Product navigation</Dialog.Title>

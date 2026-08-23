@@ -18,7 +18,7 @@ export function SettingsSurface() {
   const invokeSettingsCommand = (
     command: Extract<
       CommandId,
-      `detail.${string}` | 'layout.toggle' | 'density.toggle' | 'theme.toggle'
+      `detail.${string}` | 'layout.toggle' | 'density.toggle' | 'theme.toggle' | 'preferences.reset'
     >,
   ) =>
     invokeCommand(command, {
@@ -180,7 +180,7 @@ export function SettingsSurface() {
       </div>
 
       <div className="settings-actions">
-        <button type="button" onClick={() => dispatch(actions.preferencesReset())}>
+        <button type="button" onClick={() => invokeSettingsCommand('preferences.reset')}>
           Restore defaults
         </button>
         <small>

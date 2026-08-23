@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
 import {
   type FormEvent,
@@ -104,6 +104,7 @@ export function SessionWorkspaceSurface({
   windowRequest: { anchor: 'first' | 'latest'; attempt: number } | null
 }) {
   const dispatch = useAppDispatch()
+  const queryClient = useQueryClient()
   const app = useAppSelector(selectApp)
   const [draftId, setDraftId] = useState('')
   const [sessionId, setSessionId] = useState<string | null>(null)
@@ -118,8 +119,16 @@ export function SessionWorkspaceSurface({
   const session = useQuery({
     queryKey: sessionWorkspaceQueryKey(sessionId),
     queryFn: async ({ signal }) => {
-      const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window), signal)
-      const history = new BoundedSessionHistory(sessionId ?? '', source)
+      const requestedSessionId = sessionId ?? ''
+      const cached = queryClient.getQueryData<{ history: BoundedSessionHistory }>(
+        sessionWorkspaceQueryKey(requestedSessionId),
+      )
+      const history =
+        cached?.history ??
+        new BoundedSessionHistory(
+          requestedSessionId,
+          await HttpSessionTimelineSource.connect(window.fetch.bind(window), signal),
+        )
       const descriptor = await history.describe(signal)
       const active = sessionHasLiveWork(
         descriptor.work.active_turn_count,
@@ -135,7 +144,7 @@ export function SessionWorkspaceSurface({
         { maxItems: SESSION_WINDOW_ITEMS, maxBytes: SESSION_WINDOW_BYTES },
         signal,
       )
-      return { active, anchor, descriptor, window: timelineWindow }
+      return { active, anchor, descriptor, history, window: timelineWindow }
     },
     enabled: sessionId !== null && timelineCapability === 'available',
   })

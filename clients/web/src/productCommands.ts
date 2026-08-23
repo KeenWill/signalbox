@@ -1,10 +1,10 @@
 import type { HotkeySequence } from '@tanstack/react-hotkeys'
 import type { CommandBinding, CommandContext, CommandId } from './commands'
 import { commandRegistry, invokeCommand } from './commands'
-import { actions } from './state'
 
 export interface ProductCommandContext extends CommandContext {
   navigate: (path: string) => void
+  openNavigation: () => void
 }
 
 const productNavigationCommands = [
@@ -14,7 +14,7 @@ const productNavigationCommands = [
     description: 'Choose a Signalbox product surface.',
     category: 'Surface',
     bindings: [],
-    run: (context: ProductCommandContext) => context.dispatch(actions.overlaySet('navigation')),
+    run: (context: ProductCommandContext) => context.openNavigation(),
   },
   {
     id: 'navigate.attention',

@@ -37,6 +37,11 @@ const useDeterministicBootstrap = (page: Page) =>
 const useDeterministicSession = async (
   page: Page,
   shouldFailTimeline: (sessionId: string) => boolean = () => false,
+  timelineKind: (
+    sessionId: string,
+    address: string,
+  ) => 'input_accepted' | 'turn_activated' | 'turn_completed' | 'turn_cancelled' | undefined = () =>
+    undefined,
 ) => {
   await page.route('**/api/sessions/**', (route) => {
     const pathname = new URL(route.request().url()).pathname
@@ -51,17 +56,17 @@ const useDeterministicSession = async (
           items: [
             {
               address: { event_sequence: '41' },
-              kind: 'input_accepted',
+              kind: timelineKind(requestedSessionId, '41') ?? 'input_accepted',
               projected_structured_bytes: 78,
             },
             {
               address: { event_sequence: '42' },
-              kind: 'turn_activated',
+              kind: timelineKind(requestedSessionId, '42') ?? 'turn_activated',
               projected_structured_bytes: 78,
             },
             {
               address: { event_sequence: '43' },
-              kind: 'turn_completed',
+              kind: timelineKind(requestedSessionId, '43') ?? 'turn_completed',
               projected_structured_bytes: 78,
             },
           ],
@@ -250,6 +255,21 @@ test('uses a navigation sheet on a phone viewport with a semantic close control'
   await page.getByRole('button', { name: 'Close navigation' }).click()
   await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeHidden()
   await expect(openNavigation).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('returns focus to the desktop command that opened product navigation', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const openPalette = page.getByRole('button', { name: 'Open command palette' })
+  await openPalette.click()
+  await page.getByRole('button', { name: /Open product navigation/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeVisible()
+  await page.getByRole('button', { name: 'Close navigation' }).click()
+
+  await expect(openPalette).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -480,6 +500,32 @@ test('clears cached Session projections after a refetch error', async ({ page })
       message.includes('Failed to load resource: the server responded with a status of 503'),
     ),
   ).toBe(true)
+})
+
+test('rejects conflicting retained Session evidence after a boundary refetch', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let contradictRetainedEvent = false
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(
+    page,
+    () => false,
+    (_sessionId, address) =>
+      contradictRetainedEvent && address === '43' ? 'turn_cancelled' : undefined,
+  )
+  await page.goto('/sessions')
+
+  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  await sessionId.fill(sessionWorkspaceFixture.id)
+  await sessionId.press('Enter')
+  await expect(page.getByRole('option', { name: /43 turn completed/ })).toBeVisible()
+
+  contradictRetainedEvent = true
+  await page.getByRole('button', { name: /Latest/ }).click()
+
+  await expect(page.getByRole('alert')).toContainText(
+    'timeline source returned conflicting data for a retained address',
+  )
+  expect(problems.pageErrors).toEqual([])
 })
 
 test('keeps maximum pane widths inside the viewport', async ({ page }) => {
