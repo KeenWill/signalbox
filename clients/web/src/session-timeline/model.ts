@@ -62,6 +62,10 @@ const decimalAddress = (value: string): bigint => {
 const projectedItemBytes = (kind: string): number =>
   PROJECTED_ITEM_ENVELOPE_BYTES + new TextEncoder().encode(kind).byteLength
 
+// Shortest and longest spellings in the generated closed event-kind union.
+const MIN_PROJECTED_ITEM_BYTES = projectedItemBytes('turn_failed')
+const MAX_PROJECTED_ITEM_BYTES = projectedItemBytes('session_model_settings_changed')
+
 const boundedLimit = (value: number, minimum: number, maximum: number): number =>
   Number.isFinite(value) ? Math.min(Math.max(Math.trunc(value), minimum), maximum) : minimum
 
@@ -180,11 +184,16 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     sessionId: string,
     signal?: AbortSignal,
   ): Promise<WebSessionTimelineDescriptor> {
-    const response = await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    const requestedSessionId = canonicalSessionId(sessionId)
+    const response = await this.request(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
       signal,
     })
     if (!response.ok) return throwApiError(response)
-    return decodeWebSessionTimelineDescriptor(await readBoundedJson(response))
+    const descriptor = decodeWebSessionTimelineDescriptor(await readBoundedJson(response))
+    if (canonicalSessionId(descriptor.session_id) !== requestedSessionId) {
+      throw new TypeError('descriptor session mismatch')
+    }
+    return descriptor
   }
 
   async readWindow(
@@ -193,6 +202,7 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     limits: SessionWindowLimits,
     signal?: AbortSignal,
   ): Promise<WebSessionTimelineWindow> {
+    const requestedSessionId = canonicalSessionId(sessionId)
     const bounded = boundedLimits(limits, this.limits)
     const query = new URLSearchParams({
       anchor: anchor.kind,
@@ -201,11 +211,15 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     })
     if ('eventSequence' in anchor) query.set('address', anchor.eventSequence)
     const response = await this.request(
-      `/api/sessions/${encodeURIComponent(sessionId)}/timeline?${query}`,
+      `/api/sessions/${encodeURIComponent(requestedSessionId)}/timeline?${query}`,
       { signal },
     )
     if (!response.ok) return throwApiError(response)
-    return decodeWebSessionTimelineWindow(await readBoundedJson(response))
+    const window = decodeWebSessionTimelineWindow(await readBoundedJson(response))
+    if (canonicalSessionId(window.session_id) !== requestedSessionId) {
+      throw new TypeError('timeline window session mismatch')
+    }
+    return window
   }
 }
 
@@ -253,7 +267,13 @@ export class BoundedSessionHistory {
       throw new TypeError('descriptor timeline boundaries are contradictory')
     }
     decimalU64(descriptor.sizes.projected_text_bytes)
-    decimalU64(descriptor.sizes.projected_structured_bytes)
+    const projectedStructuredBytes = decimalU64(descriptor.sizes.projected_structured_bytes)
+    if (
+      projectedStructuredBytes < itemCount * BigInt(MIN_PROJECTED_ITEM_BYTES) ||
+      projectedStructuredBytes > itemCount * BigInt(MAX_PROJECTED_ITEM_BYTES)
+    ) {
+      throw new TypeError('descriptor structured byte total is contradictory')
+    }
     decimalU64(descriptor.sizes.referenced_blob_count)
     decimalU64(descriptor.sizes.referenced_blob_bytes)
     decimalU64(descriptor.work.active_turn_count)
@@ -369,6 +389,12 @@ export class BoundedSessionHistory {
     }
     const cachedDescriptor = this.descriptorValue
     if (cachedDescriptor && firstItemAddress && lastItemAddress) {
+      if (
+        decimalAddress(firstItemAddress) <
+        decimalAddress(cachedDescriptor.first_address.event_sequence)
+      ) {
+        throw new TypeError('timeline window precedes the cached first address')
+      }
       if (
         decimalAddress(firstItemAddress) >
           decimalAddress(cachedDescriptor.first_address.event_sequence) &&
