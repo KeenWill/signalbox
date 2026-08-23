@@ -524,6 +524,77 @@ describe('generated timeline detail decoder', () => {
     })
   })
 
+  it('rejects a page containing both a projected tool and goal member', () => {
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '21' },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000002',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+            state: 'proposed',
+            tools: [
+              {
+                request_id: '00000000-0000-0000-0000-000000000004',
+                tool_name: 'exec',
+                approval_posture: 'auto',
+                approval_judge_escalated: false,
+                operator_required: false,
+              },
+            ],
+            goal_events: [{ generation: '1', event_kind: 'achieved' }],
+          },
+          projected_body_bytes: 128,
+        },
+      ],
+      projected_body_bytes: 128,
+    }
+
+    expect(() => decodeWebSessionTimelineDetailPage(page)).toThrow(
+      'timeline_detail_page.items[0].body must be at most one projected tool or goal member',
+    )
+  })
+
+  it('rejects a tool member containing arguments and result text', () => {
+    const excerpt = { text: '', offset_bytes: '0', total_bytes: '0' }
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '22' },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000002',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+            state: 'results_projected',
+            tools: [
+              {
+                request_id: '00000000-0000-0000-0000-000000000004',
+                tool_name: 'exec',
+                arguments: excerpt,
+                result: excerpt,
+                approval_posture: 'auto',
+                approval_judge_escalated: false,
+                operator_required: false,
+              },
+            ],
+            goal_events: [],
+          },
+          projected_body_bytes: 128,
+        },
+      ],
+      projected_body_bytes: 128,
+    }
+
+    expect(() => decodeWebSessionTimelineDetailPage(page)).toThrow(
+      'timeline_detail_page.items[0].body.tools[0] must be at most one projected text field',
+    )
+  })
+
   it('accepts delegation wait mode and lifecycle provenance', () => {
     const page = {
       session_id: ambiguousModelCallPage.session_id,

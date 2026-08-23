@@ -325,6 +325,15 @@ describe('Session Workspace projection', () => {
         usage: {},
       }),
     ).toBe(true)
+    expect(
+      isCompatibleDetailBody('model_call_transition', {
+        ...modelCall,
+        state: { type: 'in_flight' },
+        cause_code: null,
+        usage: {},
+        response: { text: 'premature', offset_bytes: '0', total_bytes: '9' },
+      }),
+    ).toBe(false)
 
     expect(
       isCompatibleDetailBody('tool_batch_transition', {
@@ -368,6 +377,37 @@ describe('Session Workspace projection', () => {
             cause_code: null,
           },
         ],
+      }),
+    ).toBe(false)
+
+    const issuedTool = {
+      request_id: '00000000-0000-0000-0000-000000000043',
+      tool_name: 'workspace_read',
+      approval_posture: 'auto',
+      approval_judge_escalated: false,
+      operator_required: false,
+      arguments: null,
+      attempt_id: '00000000-0000-0000-0000-000000000044',
+      state: 'known_failed',
+      effect_posture: 'effect_free',
+      sandbox_posture: 'sandboxed',
+      result: null,
+      failure: { text: 'failed', offset_bytes: '0', total_bytes: '6' },
+      cause_code: 'execution_failed',
+    } as const
+    expect(
+      isCompatibleDetailBody('tool_batch_transition', { ...toolBatch, tools: [issuedTool] }),
+    ).toBe(true)
+    expect(
+      isCompatibleDetailBody('tool_batch_transition', {
+        ...toolBatch,
+        tools: [{ ...issuedTool, state: 'completed' }],
+      }),
+    ).toBe(false)
+    expect(
+      isCompatibleDetailBody('tool_batch_transition', {
+        ...toolBatch,
+        tools: [{ ...issuedTool, cause_code: 'invented' }],
       }),
     ).toBe(false)
 

@@ -1181,7 +1181,19 @@ function assertTimelineDetailPage(value) {{
         }}
         break;
       case "tool_batch":
+        if (item.kind !== "tool_batch_transition") {{
+          fail(`${{path}}.kind`, "tool_batch_transition for a tool_batch body");
+        }}
+        if (item.body.tools.length + item.body.goal_events.length > 1) {{
+          fail(`${{path}}.body`, "at most one projected tool or goal member");
+        }}
         item.body.tools.forEach((tool, memberIndex) => {{
+          const projectedTextFields = [tool.arguments, tool.result, tool.failure].filter(
+            (excerpt) => excerpt !== undefined && excerpt !== null,
+          );
+          if (projectedTextFields.length > 1) {{
+            fail(`${{path}}.body.tools[${{memberIndex}}]`, "at most one projected text field");
+          }}
           if (tool.arguments !== undefined && tool.arguments !== null) {{
             excerpts.push([tool.arguments, "tool_arguments", memberIndex, `${{path}}.body.tools[${{memberIndex}}].arguments`]);
           }}
@@ -1220,41 +1232,6 @@ function assertTimelineDetailPage(value) {{
           excerpts.push([item.body.detail.content, "delegation_content", 0, `${{path}}.body.detail.content`]);
         }}
         break;
-      case "tool_batch": {{
-        if (item.kind !== "tool_batch_transition") {{
-          fail(`${{path}}.kind`, "tool_batch_transition for a tool_batch body");
-        }}
-        const tool = item.body.tools[0];
-        const goal = item.body.goal_events[0];
-        if (tool !== undefined) {{
-          const excerpts = [
-            [tool.arguments, "tool_arguments", `${{path}}.body.tools[0].arguments`],
-            [tool.result, "tool_result", `${{path}}.body.tools[0].result`],
-            [tool.failure, "tool_failure", `${{path}}.body.tools[0].failure`],
-          ].filter(([excerpt]) => excerpt !== undefined && excerpt !== null);
-          if (excerpts.length > 1) {{
-            fail(`${{path}}.body.tools[0]`, "at most one projected text field");
-          }}
-          if (excerpts.length === 1) {{
-            const [excerpt, field, excerptPath] = excerpts[0];
-            continuation = assertTimelineExcerpt(excerpt, item.address, field, excerptPath);
-            textBytes = new TextEncoder().encode(excerpt.text).byteLength;
-          }}
-        }}
-        if (goal !== undefined && goal.text !== undefined && goal.text !== null) {{
-          if (tool !== undefined) {{
-            fail(`${{path}}.body`, "one projected tool or goal member");
-          }}
-          continuation = assertTimelineExcerpt(
-            goal.text,
-            item.address,
-            "goal_text",
-            `${{path}}.body.goal_events[0].text`,
-          );
-          textBytes = new TextEncoder().encode(goal.text.text).byteLength;
-        }}
-        break;
-      }}
       case "tool_approval_decision":
         if (item.kind !== "tool_approval_decided") {{
           fail(`${{path}}.kind`, "tool_approval_decided for a tool_approval_decision body");

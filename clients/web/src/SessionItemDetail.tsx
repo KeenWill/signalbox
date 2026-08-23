@@ -58,6 +58,13 @@ const modelFailureCauses = new Set([
   'provider_internal',
   'unrecognized',
 ])
+const toolFailureCauses = new Set([
+  'unknown_tool',
+  'invalid_arguments',
+  'execution_failed',
+  'result_too_large',
+  'crash_lost',
+])
 const hasCompatibleGoalReason = (event: GoalEvent): boolean =>
   goalEventKinds.has(event.event_kind) &&
   (event.event_kind === 'blocked'
@@ -114,10 +121,12 @@ export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): bool
   if (body.type === 'model_call') {
     const knownFailure = body.state.type === 'terminal' && body.state.disposition === 'known_failed'
     const terminal = body.state.type === 'terminal'
-    const usageIsCompatible = terminal || Object.values(body.usage).every((value) => value == null)
+    const terminalEvidenceIsCompatible =
+      terminal ||
+      (body.response == null && Object.values(body.usage).every((value) => value == null))
     return (
       kind === 'model_call_transition' &&
-      usageIsCompatible &&
+      terminalEvidenceIsCompatible &&
       (knownFailure
         ? body.cause_code == null || modelFailureCauses.has(body.cause_code)
         : body.cause_code == null)
@@ -131,13 +140,21 @@ export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): bool
       kind === 'tool_batch_transition' &&
       body.goal_events.every(hasCompatibleGoalReason) &&
       body.tools.every((tool) => {
+        const completed = tool.state === 'completed'
+        const knownFailed = tool.state === 'known_failed'
+        const terminalFactsMatch =
+          (tool.result == null || completed) &&
+          (tool.failure == null || knownFailed) &&
+          (knownFailed
+            ? typeof tool.cause_code === 'string' && toolFailureCauses.has(tool.cause_code)
+            : tool.cause_code == null)
         const attemptFactsMatch =
           tool.attempt_id === null
             ? tool.state === null &&
               tool.effect_posture === null &&
               tool.sandbox_posture === null &&
               tool.cause_code === null
-            : tool.state !== null
+            : tool.state !== null && terminalFactsMatch
         return (
           attemptFactsMatch &&
           tool.operator_required ===
