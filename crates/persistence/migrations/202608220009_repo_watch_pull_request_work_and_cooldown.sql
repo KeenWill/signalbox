@@ -265,22 +265,20 @@ SELECT obligation.obligation_id, obligation.repository, obligation.rule_id,
        obligation.failed_attempts, obligation.last_failed_attempt_at, obligation.parked_at
   FROM repo_watch_dispatch_obligation AS obligation
   LEFT JOIN LATERAL (
-        SELECT batch.dispatch_id,
+        SELECT held.dispatch_id,
                array_agg(action.session_id ORDER BY action.action_ordinal) AS session_ids
-          FROM repo_watch_dispatch_batch AS batch
+          FROM repo_watch_current_held_dispatch AS held
           JOIN repo_watch_dispatch_action AS action USING (dispatch_id)
-         WHERE batch.rule_id = obligation.rule_id
-           AND batch.rule_version = obligation.rule_version
-           AND batch.singleton_scope = obligation.singleton_scope
-           AND batch.singleton_repository IS NOT DISTINCT FROM obligation.singleton_repository
-           AND batch.singleton_pull_request_number
+         WHERE held.rule_id = obligation.rule_id
+           AND held.rule_version = obligation.rule_version
+           AND held.singleton_scope = obligation.singleton_scope
+           AND held.singleton_repository IS NOT DISTINCT FROM obligation.singleton_repository
+           AND held.singleton_pull_request_number
                 IS NOT DISTINCT FROM obligation.singleton_pull_request_number
-           AND batch.singleton_stack_root_pull_request_number
+           AND held.singleton_stack_root_pull_request_number
                 IS NOT DISTINCT FROM obligation.singleton_stack_root_pull_request_number
-           AND NOT EXISTS (SELECT 1 FROM repo_watch_dispatch_release AS released
-                            WHERE released.dispatch_id = batch.dispatch_id)
-         GROUP BY batch.dispatch_id, batch.admitted_at
-         ORDER BY batch.admitted_at
+         GROUP BY held.dispatch_id, held.held_since
+         ORDER BY held.held_since
          LIMIT 1
   ) AS occupying ON true
   LEFT JOIN repo_watch_current_singleton_cooldown AS cooldown

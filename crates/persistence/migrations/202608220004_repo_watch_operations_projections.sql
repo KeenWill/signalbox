@@ -49,10 +49,17 @@ SELECT latest.repository,
 ALTER TABLE repo_watch_rule_evaluation
     ADD COLUMN pull_request_number numeric(20, 0);
 
+DROP TRIGGER repo_watch_rule_evaluation_is_append_only
+    ON repo_watch_rule_evaluation;
+
 UPDATE repo_watch_rule_evaluation AS evaluation
    SET pull_request_number = event.pull_request_number
   FROM repo_watch_event AS event
  WHERE event.event_id = evaluation.event_id;
+
+CREATE TRIGGER repo_watch_rule_evaluation_is_append_only
+BEFORE UPDATE OR DELETE ON repo_watch_rule_evaluation
+FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
 
 ALTER TABLE repo_watch_rule_evaluation
     ADD CONSTRAINT repo_watch_rule_evaluation_pull_request_number_check
