@@ -605,6 +605,7 @@ fn canonical_schema(mut schema: Value) -> Value {
 }
 
 fn runtime_module(schemas: &[ContractSchema]) -> Result<String, GenerateWebContractError> {
+    let current_bootstrap = WebContractBootstrap::current();
     let mut schema_values = serde_json::Map::new();
     for schema in schemas {
         schema_values.insert(schema.name.to_owned(), schema.schema.clone());
@@ -749,9 +750,16 @@ function assertSchema(root, schema, value, path) {{
         ));
         if schema.name == "WebContractBootstrap" {
             output.push_str(&format!(
-                "  if (value.contract.name !== {name:?} || value.contract.version !== {version:?}) {{\n    throw new TypeError(\"bootstrap carries an incompatible web contract\");\n  }}\n",
+                "  if (value.contract.name !== {name:?} || value.contract.version !== {version:?} ||\n      value.capabilities.bounded_json !== {bounded_json} ||\n      value.capabilities.same_origin_json_mutations !== {same_origin_json_mutations} ||\n      value.capabilities.ndjson_streaming !== {ndjson_streaming} ||\n      value.capabilities.import_discovery !== {import_discovery} ||\n      value.capabilities.imported_continuations !== {imported_continuations} ||\n      value.limits.max_json_body_bytes !== {max_json_body_bytes} ||\n      value.limits.max_ndjson_item_bytes !== {max_ndjson_item_bytes}) {{\n    throw new TypeError(\"bootstrap carries an incompatible web contract\");\n  }}\n",
                 name = WEB_CONTRACT_NAME,
                 version = WEB_CONTRACT_VERSION,
+                bounded_json = current_bootstrap.capabilities.bounded_json,
+                same_origin_json_mutations = current_bootstrap.capabilities.same_origin_json_mutations,
+                ndjson_streaming = current_bootstrap.capabilities.ndjson_streaming,
+                import_discovery = current_bootstrap.capabilities.import_discovery,
+                imported_continuations = current_bootstrap.capabilities.imported_continuations,
+                max_json_body_bytes = current_bootstrap.limits.max_json_body_bytes,
+                max_ndjson_item_bytes = current_bootstrap.limits.max_ndjson_item_bytes,
             ));
         }
         output.push_str("  return value;\n}\n\n");

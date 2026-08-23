@@ -52,6 +52,48 @@ test("generated bootstrap decoder rejects another contract version", () => {
   );
 });
 
+test("generated bootstrap decoder rejects a disabled required capability", () => {
+  assert.throws(
+    () =>
+      decodeWebContractBootstrap({
+        contract: { name: "signalbox.web-http", version: "2" },
+        capabilities: {
+          bounded_json: true,
+          same_origin_json_mutations: true,
+          ndjson_streaming: true,
+          import_discovery: false,
+          imported_continuations: true,
+        },
+        limits: {
+          max_json_body_bytes: 65536,
+          max_ndjson_item_bytes: 65536,
+        },
+      }),
+    /incompatible web contract/,
+  );
+});
+
+test("generated bootstrap decoder rejects incompatible limits", () => {
+  assert.throws(
+    () =>
+      decodeWebContractBootstrap({
+        contract: { name: "signalbox.web-http", version: "2" },
+        capabilities: {
+          bounded_json: true,
+          same_origin_json_mutations: true,
+          ndjson_streaming: true,
+          import_discovery: true,
+          imported_continuations: true,
+        },
+        limits: {
+          max_json_body_bytes: 1,
+          max_ndjson_item_bytes: 65536,
+        },
+      }),
+    /incompatible web contract/,
+  );
+});
+
 test("generated error decoder preserves the transport application boundary", () => {
   const transport = decodeWebApiErrorResponse({
     error: {

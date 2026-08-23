@@ -582,6 +582,21 @@ test('discovers imported navigation bindings through the command palette', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('suspends imported navigation while the command palette owns focus', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto(importsFixture.path)
+
+  const entries = page.getByRole('listbox', { name: 'Imported source entries' })
+  const selectedBeforeOverlay = await entries.getAttribute('aria-activedescendant')
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
+  await page.keyboard.press('j')
+
+  await expect(entries).toHaveAttribute('aria-activedescendant', selectedBeforeOverlay ?? '')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('continues an exact arbitrary imported frontier as a native session', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto(importsFixture.path)

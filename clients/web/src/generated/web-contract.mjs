@@ -1273,7 +1273,14 @@ function assertSchema(root, schema, value, path) {
 
 export function decodeWebContractBootstrap(value) {
   assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "webcontractbootstrap");
-  if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "2") {
+  if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "2" ||
+      value.capabilities.bounded_json !== true ||
+      value.capabilities.same_origin_json_mutations !== true ||
+      value.capabilities.ndjson_streaming !== true ||
+      value.capabilities.import_discovery !== true ||
+      value.capabilities.imported_continuations !== true ||
+      value.limits.max_json_body_bytes !== 65536 ||
+      value.limits.max_ndjson_item_bytes !== 65536) {
     throw new TypeError("bootstrap carries an incompatible web contract");
   }
   return value;
