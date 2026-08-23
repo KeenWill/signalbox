@@ -174,7 +174,12 @@ function CommandPalette({
           </div>
           <div className="command-list">
             {commandRegistry
-              .filter((command) => command.id !== 'surface.escape' && command.available(context))
+              .filter(
+                (command) =>
+                  command.id !== 'surface.escape' &&
+                  command.id !== 'palette.open' &&
+                  command.available(context),
+              )
               .map((command) => (
                 <button
                   key={command.id}

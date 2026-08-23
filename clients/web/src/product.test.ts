@@ -197,7 +197,7 @@ describe('SameOriginProductTransport', () => {
       sessionId: searchPageFixture.results[0].session_id,
       maxItems: 100,
       maxSnippetBytes: 512,
-      after: { address: '500', projectionId: '42' },
+      after: { address: '1000', projectionId: '42' },
     }
     const expectedSearch = new URLSearchParams({
       strategy: 'lexical',
@@ -572,6 +572,97 @@ describe('SameOriginProductTransport', () => {
         maxSnippetBytes: 512,
       }),
     ).rejects.toThrow('strictly descending search result key')
+  })
+
+  it('rejects a result address above u64', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...searchPageFixture,
+              results: [
+                {
+                  ...searchPageFixture.results[0],
+                  address: { event_sequence: '18446744073709551616' },
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 1,
+        maxSnippetBytes: 512,
+      }),
+    ).rejects.toThrow('unsigned 64-bit integer')
+  })
+
+  it('rejects a result projection ID above positive i64', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...searchPageFixture,
+              results: [
+                {
+                  ...searchPageFixture.results[0],
+                  projection_id: '9223372036854775808',
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 1,
+        maxSnippetBytes: 512,
+      }),
+    ).rejects.toThrow('positive signed 64-bit integer')
+  })
+
+  it('rejects a page that repeats the request cursor', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(searchPageFixture))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 1,
+        maxSnippetBytes: 512,
+        after: {
+          address: searchPageFixture.results[0].address.event_sequence,
+          projectionId: searchPageFixture.results[0].projection_id,
+        },
+      }),
+    ).rejects.toThrow('does not advance past the request cursor')
+  })
+
+  it('rejects a page newer than the request cursor', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(searchPageFixture))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 1,
+        maxSnippetBytes: 512,
+        after: { address: '900', projectionId: '42' },
+      }),
+    ).rejects.toThrow('does not advance past the request cursor')
   })
 
   const rejectContinuation = async (

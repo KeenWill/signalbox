@@ -144,8 +144,10 @@ const validateSearchPageBounds = (
   const encoder = new TextEncoder()
   const requestedSession =
     request.sessionId === undefined ? undefined : canonicalUuid(request.sessionId)
-  let previousAddress: bigint | undefined
-  let previousProjectionId: bigint | undefined
+  let previousAddress = request.after === undefined ? undefined : BigInt(request.after.address)
+  let previousProjectionId =
+    request.after === undefined ? undefined : BigInt(request.after.projectionId)
+  let firstResult = true
   for (const result of page.results) {
     const resultSession = canonicalUuid(result.session_id)
     if (
@@ -175,8 +177,13 @@ const validateSearchPageBounds = (
           previousProjectionId !== undefined &&
           projectionId >= previousProjectionId))
     ) {
-      throw new TypeError('search page is not ordered newest first')
+      throw new TypeError(
+        firstResult && request.after !== undefined
+          ? 'search page does not advance past the request cursor'
+          : 'search page is not ordered newest first',
+      )
     }
+    firstResult = false
     previousAddress = address
     previousProjectionId = projectionId
     const snippetBytes = encoder.encode(result.snippet)

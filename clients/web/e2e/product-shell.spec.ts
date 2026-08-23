@@ -110,6 +110,16 @@ test('restores focus after closing the command palette', async ({ page }) => {
   await expect(trigger).toBeFocused()
 })
 
+test('does not offer the palette opener inside the open palette', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+
+  await expect(palette.getByRole('button', { name: /Open command palette/ })).toHaveCount(0)
+})
+
 test('sets route-aware product document titles', async ({ page }) => {
   await useDeterministicBootstrap(page)
   await page.goto('/search')
