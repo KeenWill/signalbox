@@ -377,21 +377,9 @@ impl ImportedConversationDiscoveryRepository {
                     imported.declared_raw_record_count,
                     imported.declared_entry_count, imported.display_title,
                     imported.display_title_state,
-                    (SELECT COALESCE(SUM(octet_length(blob.raw_bytes)), 0)::numeric
-                       FROM imported_conversation_raw_record AS occurrence
-                       JOIN imported_raw_source_record AS blob
-                         ON blob.content_hash = occurrence.content_hash
-                      WHERE occurrence.imported_conversation_id =
-                            imported.imported_conversation_id) AS raw_source_bytes,
-                    (SELECT COALESCE(SUM(octet_length(normalized_value_encoding)), 0)::numeric
-                       FROM imported_conversation_raw_record AS occurrence
-                      WHERE occurrence.imported_conversation_id =
-                            imported.imported_conversation_id) AS normalized_source_record_bytes,
-                    (SELECT COALESCE(SUM(octet_length(content_encoding)
-                                         + octet_length(source_metadata_encoding)), 0)::numeric
-                       FROM imported_transcript_entry AS entry
-                      WHERE entry.imported_conversation_id =
-                            imported.imported_conversation_id) AS normalized_entry_bytes,
+                    sizes.raw_source_bytes,
+                    sizes.normalized_source_record_bytes,
+                    sizes.normalized_entry_bytes,
                     (SELECT imported_transcript_entry_id
                        FROM imported_transcript_entry AS first_entry
                       WHERE first_entry.imported_conversation_id =
@@ -413,6 +401,8 @@ impl ImportedConversationDiscoveryRepository {
                             imported.imported_conversation_id
                       ORDER BY imported_entry_position DESC LIMIT 1) AS latest_entry_position
                FROM imported_conversation AS imported
+               JOIN imported_conversation_size_totals AS sizes
+                 ON sizes.imported_conversation_id = imported.imported_conversation_id
               WHERE imported.imported_conversation_id = $1",
         )
         .bind(conversation.into_uuid())
