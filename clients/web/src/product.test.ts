@@ -229,7 +229,7 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
-      'attention snapshot exceeds the contract item ceiling',
+      `attention_snapshot.summaries must be at most ${MAX_ATTENTION_SNAPSHOT_ITEMS} items`,
     )
   })
 
@@ -290,7 +290,7 @@ describe('SameOriginProductTransport', () => {
     await expect(events.next()).rejects.toThrow('attention summary state and action are incoherent')
   })
 
-  it('rejects attention summaries that are not ordered by session identity', async () => {
+  it('accepts an actionless approval wait', async () => {
     const actionless = { ...attentionFixture.summaries[0], action: null }
     vi.stubGlobal(
       'fetch',
@@ -349,9 +349,7 @@ describe('SameOriginProductTransport', () => {
     )
     const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
 
-    await expect(events.next()).rejects.toThrow(
-      'attention update exceeds the contract item ceiling',
-    )
+    await expect(events.next()).rejects.toThrow('attention_event must be one recognized variant')
   })
 
   it('rejects attention summaries that are not ordered by session identity', async () => {

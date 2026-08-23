@@ -12,7 +12,7 @@ import {
 const MAX_ATTENTION_EVENT_BYTES = 65_536
 export const MAX_BOOTSTRAP_BYTES = 65_536
 export const MAX_ATTENTION_SNAPSHOT_BYTES = 65_536
-export const MAX_ATTENTION_SNAPSHOT_ITEMS = 64
+export const MAX_ATTENTION_SNAPSHOT_ITEMS = 32
 const MAX_UNSIGNED_64 = 18_446_744_073_709_551_615n
 const SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/

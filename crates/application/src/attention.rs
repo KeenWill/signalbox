@@ -6,13 +6,13 @@ use signalbox_domain::{SessionId, TurnId};
 
 /// Maximum session summaries returned by one coherent fleet snapshot.
 // numeric-bound: ceiling - caps one fleet response's rows and projected bytes
-const ATTENTION_SNAPSHOT_ITEM_CEILING: u16 = 64;
+const ATTENTION_SNAPSHOT_ITEM_CEILING: u16 = 32;
 /// Maximum Unicode scalar values retained from blocked-goal need text.
 // numeric-bound: ceiling - prevents one fleet summary from carrying unbounded goal text
 const ATTENTION_GOAL_SUMMARY_CHARACTER_CEILING: u16 = 128;
 /// Maximum journal records consumed by one incremental follow read.
 // numeric-bound: ceiling - bounds one follower database read and replacement batch
-const ATTENTION_CHANGE_ITEM_CEILING: u16 = 64;
+const ATTENTION_CHANGE_ITEM_CEILING: u16 = 32;
 
 /// Returns the hard safety ceiling for one coherent fleet snapshot.
 #[must_use]
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn fleet_snapshot_bound_is_pinned() {
-        assert_eq!(max_attention_snapshot_items(), 64);
+        assert_eq!(max_attention_snapshot_items(), 32);
     }
 
     #[test]
@@ -182,6 +182,6 @@ mod tests {
 
     #[test]
     fn change_batch_bound_is_pinned() {
-        assert_eq!(max_attention_change_items(), 64);
+        assert_eq!(max_attention_change_items(), 32);
     }
 }

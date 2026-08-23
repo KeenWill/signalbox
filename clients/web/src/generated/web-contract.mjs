@@ -113,6 +113,7 @@ const schemas = {
           },
           "need_summary": {
             "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
             "type": "string"
           },
           "reason": {
@@ -231,6 +232,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebAttentionSummary"
         },
+        "maxItems": 32,
         "type": "array"
       }
     },
@@ -295,6 +297,7 @@ const schemas = {
           },
           "need_summary": {
             "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
             "type": "string"
           },
           "reason": {
@@ -348,6 +351,7 @@ const schemas = {
             "items": {
               "$ref": "#/$defs/WebAttentionSummary"
             },
+            "maxItems": 32,
             "type": "array"
           }
         },
@@ -455,6 +459,7 @@ const schemas = {
             "items": {
               "$ref": "#/$defs/WebAttentionSummary"
             },
+            "maxItems": 32,
             "type": "array"
           }
         },
@@ -709,6 +714,9 @@ function assertSchema(root, schema, value, path) {
     if (!Array.isArray(value)) {
       fail(path, "an array");
     }
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+      fail(path, `at most ${schema.maxItems} items`);
+    }
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${path}[${index}]`));
     return;
   }
@@ -724,6 +732,15 @@ function assertSchema(root, schema, value, path) {
     }
     if (schema.maximum !== undefined && value > schema.maximum) {
       fail(path, `at most ${schema.maximum}`);
+    }
+    return;
+  }
+  if (schema.type === "string") {
+    if (typeof value !== "string") {
+      fail(path, "string");
+    }
+    if (schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) {
+      fail(path, `at most ${schema.maxLength} Unicode scalar values`);
     }
     return;
   }

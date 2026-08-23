@@ -180,13 +180,13 @@ ceilings. The generated browser decoder rejects an unknown field, wrong shape,
 different family, or different version rather than interpreting it as the local
 process protocol. No process-protocol frame is a browser DTO.
 
-`GET /api/attention` returns at most 64 session summaries from one read-only
+`GET /api/attention` returns at most 32 session summaries from one read-only
 repeatable-read snapshot, ordered by session identity. A continuation names the
 last session identity and opens the next keyset page; it is not a count-based or
 fixed-tail feed. Each summary carries the current turn classification, exact
 operator action when one is owed, a typed blocked-goal reason and a need summary
 of at most 128 Unicode scalar values, approval-judge outcome counts, and the
-last transaction-timestamped durable activity fact. Exact blocked-goal need text
+last publication-timestamped durable activity fact. Exact blocked-goal need text
 remains available from the session detail read rather than entering the hot
 fleet page.
 
@@ -198,7 +198,7 @@ never constructs the fleet by following individual sessions.
 
 `GET /api/attention/follow` begins with the first coherent attention page and
 its durable change-journal cursor, then emits summary replacements only for
-changed session identities. One incremental read examines at most 64 journal
+changed session identities. One incremental read examines at most 32 journal
 records. A larger cursor gap emits `resync_required` with the current cursor and
 ends that stream; it never skips records or continues from a partial gap. The
 HTTP producer retains only the item currently being encoded and waits between
