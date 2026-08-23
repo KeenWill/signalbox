@@ -1,5 +1,7 @@
 //! Durable, singleton-collapsed work owed after repository-watch refusal.
 
+use std::time::Duration;
+
 use rust_decimal::Decimal;
 use signalbox_application::RepoWatchRuleEvaluationOutcome;
 use signalbox_domain::{
@@ -18,6 +20,88 @@ use crate::repo_watch_dispatch::{
     stored_rule_version,
 };
 
+// Delay after the first failed attempt, doubling per further consecutive
+// failure. Below the interval at which a watched repository is polled the delay
+// would not separate attempts at all; well above it, a lineage recovering from
+// one transient failure would stall behind a delay nothing else needs.
+const DISPATCH_RETRY_BACKOFF_BASE: Duration = Duration::from_secs(10 * 60);
+// The doubling stops here, within three doublings of the base, so the last
+// attempts of an exhausting lineage are spaced by this rather than by an
+// interval that keeps growing past the point of parking. The attempt budget the
+// doubling runs out against is owned by the schema, in
+// repo_watch_dispatch_attempt_budget().
+const DISPATCH_RETRY_BACKOFF_CAP: Duration = Duration::from_secs(60 * 60);
+// Doublings are clamped so the shift the load query applies cannot overflow its
+// bigint, whatever attempt count storage holds.
+const DISPATCH_RETRY_MAX_DOUBLINGS: i64 = 30;
+// Longest operator identifier the park journal accepts, matching its column
+// constraint so an over-long value is refused before it reaches the database.
+const MAX_PARK_RELEASE_ACTOR_CHARS: usize = 200;
+
+/// Delay one obligation lineage waits out between redispatches.
+///
+/// Both fields are ceilings: [`Self::lowered_to`] reduces one, nothing raises
+/// one, so no caller can widen what production runs under. The attempt budget
+/// these delays run out against is not here — the schema owns it, so that
+/// parking, the readiness projection, and the dispatch loader cannot disagree.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepoWatchDispatchRetryPolicy {
+    backoff_base: Duration,
+    backoff_cap: Duration,
+}
+
+impl RepoWatchDispatchRetryPolicy {
+    pub const fn production() -> Self {
+        Self {
+            backoff_base: DISPATCH_RETRY_BACKOFF_BASE,
+            backoff_cap: DISPATCH_RETRY_BACKOFF_CAP,
+        }
+    }
+
+    /// Takes the lower of each field and the argument.
+    #[must_use]
+    pub fn lowered_to(self, backoff_base: Duration, backoff_cap: Duration) -> Self {
+        Self {
+            backoff_base: self.backoff_base.min(backoff_base),
+            backoff_cap: self.backoff_cap.min(backoff_cap),
+        }
+    }
+
+    pub const fn backoff_base(&self) -> Duration {
+        self.backoff_base
+    }
+
+    pub const fn backoff_cap(&self) -> Duration {
+        self.backoff_cap
+    }
+
+    fn stored_backoff_base_seconds(&self) -> i64 {
+        stored_seconds(self.backoff_base)
+    }
+
+    fn stored_backoff_cap_seconds(&self) -> i64 {
+        stored_seconds(self.backoff_cap)
+    }
+}
+
+impl Default for RepoWatchDispatchRetryPolicy {
+    fn default() -> Self {
+        Self::production()
+    }
+}
+
+fn stored_seconds(value: Duration) -> i64 {
+    i64::try_from(value.as_secs()).unwrap_or(i64::MAX)
+}
+
+/// Outcome of an operator's request to return a parked obligation to dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchObligationParkRelease {
+    Released,
+    NotParked,
+    ActorRejected,
+}
+
 /// One latest-state delivery obligation retained after singleton refusal.
 #[derive(Clone, Debug)]
 pub struct RepoWatchDispatchObligation {
@@ -25,6 +109,7 @@ pub struct RepoWatchDispatchObligation {
     first_event_id: RepoWatchEventId,
     latest_event: RepoWatchEvent,
     matched_event_count: u64,
+    failed_attempts: u64,
     singleton: StoredSingletonKey,
 }
 
@@ -45,6 +130,11 @@ impl RepoWatchDispatchObligation {
         self.matched_event_count
     }
 
+    /// Consecutive dispatches of this lineage that ended without meeting it.
+    pub const fn failed_attempts(&self) -> u64 {
+        self.failed_attempts
+    }
+
     pub(crate) fn into_parts(self) -> (Uuid, RepoWatchEvent, StoredSingletonKey) {
         (self.id, self.latest_event, self.singleton)
     }
@@ -53,20 +143,46 @@ impl RepoWatchDispatchObligation {
 pub(crate) enum ObligationAdmission {
     Pending,
     Superseded,
+    Parked,
     Settled(RepoWatchRuleEvaluationOutcome),
 }
 
 impl PostgresRepoWatchDispatchStore {
+    /// Returns one parked obligation to dispatch on an operator's say-so.
+    pub async fn release_parked_dispatch_obligation(
+        &self,
+        obligation: Uuid,
+        actor: &str,
+    ) -> Result<RepoWatchObligationParkRelease, RepoWatchDispatchRepositoryError> {
+        let actor_chars = actor.chars().count();
+        if actor_chars == 0 || actor_chars > MAX_PARK_RELEASE_ACTOR_CHARS {
+            return Ok(RepoWatchObligationParkRelease::ActorRejected);
+        }
+        let released: bool =
+            sqlx::query_scalar("SELECT repo_watch_release_parked_dispatch_obligation($1, $2)")
+                .bind(obligation)
+                .bind(actor)
+                .fetch_one(self.pool())
+                .await?;
+        if released {
+            Ok(RepoWatchObligationParkRelease::Released)
+        } else {
+            Ok(RepoWatchObligationParkRelease::NotParked)
+        }
+    }
+
     /// Loads the oldest outstanding obligation whose singleton and cooldown are free.
     pub async fn load_next_dispatch_obligation(
         &self,
         repository: &RepositorySlug,
         rule_id: &RepoWatchRuleId,
         rule_version: RepoWatchRuleVersion,
+        policy: RepoWatchDispatchRetryPolicy,
     ) -> Result<Option<RepoWatchDispatchObligation>, RepoWatchDispatchRepositoryError> {
         let row = sqlx::query(
             "SELECT obligation.obligation_id, obligation.first_event_id,
                     obligation.latest_event_id, obligation.matched_event_count,
+                    obligation.failed_attempts,
                     obligation.singleton_scope, obligation.singleton_repository,
                     obligation.singleton_pull_request_number,
                     obligation.singleton_stack_root_pull_request_number
@@ -75,6 +191,21 @@ impl PostgresRepoWatchDispatchStore {
                 AND obligation.rule_id = $2
                 AND obligation.rule_version = $3
                 AND obligation.settled_kind IS NULL
+                AND obligation.parked_at IS NULL
+                AND obligation.failed_attempts
+                     < repo_watch_dispatch_attempt_budget()
+                AND (
+                    obligation.last_failed_attempt_at IS NULL
+                    OR extract(epoch FROM (
+                            clock_timestamp() - obligation.last_failed_attempt_at
+                       )) >= LEAST(
+                            $4::bigint << LEAST(
+                                GREATEST(obligation.failed_attempts - 1, 0),
+                                $6::bigint
+                            )::integer,
+                            $5::bigint
+                       )
+                )
                 AND NOT EXISTS (
                     SELECT 1
                       FROM repo_watch_rule_deactivation AS deactivation
@@ -123,6 +254,9 @@ impl PostgresRepoWatchDispatchStore {
         .bind(repository.as_str())
         .bind(rule_id.as_str())
         .bind(stored_rule_version(rule_version)?)
+        .bind(policy.stored_backoff_base_seconds())
+        .bind(policy.stored_backoff_cap_seconds())
+        .bind(DISPATCH_RETRY_MAX_DOUBLINGS)
         .fetch_optional(self.pool())
         .await?;
         let Some(row) = row else {
@@ -137,6 +271,7 @@ impl PostgresRepoWatchDispatchStore {
                 "owed repository-watch event disappeared",
             ))?;
         let matched_event_count: i64 = row.try_get("matched_event_count")?;
+        let failed_attempts: i64 = row.try_get("failed_attempts")?;
         Ok(Some(RepoWatchDispatchObligation {
             id: row.try_get("obligation_id")?,
             first_event_id: RepoWatchEventId::from_uuid(row.try_get("first_event_id")?),
@@ -144,6 +279,11 @@ impl PostgresRepoWatchDispatchStore {
             matched_event_count: u64::try_from(matched_event_count).map_err(|_| {
                 RepoWatchDispatchRepositoryError::Corruption(
                     "owed repository-watch match count is invalid",
+                )
+            })?,
+            failed_attempts: u64::try_from(failed_attempts).map_err(|_| {
+                RepoWatchDispatchRepositoryError::Corruption(
+                    "owed repository-watch attempt count is invalid",
                 )
             })?,
             singleton: StoredSingletonKey {
@@ -200,34 +340,32 @@ pub(crate) async fn record_dispatch_obligation(
     rule_version: RepoWatchRuleVersion,
     singleton: &StoredSingletonKey,
 ) -> Result<(), RepoWatchDispatchRepositoryError> {
-    let updated = sqlx::query(
-        "UPDATE repo_watch_dispatch_obligation
-            SET repository = $1,
-                latest_event_id = $2,
-                matched_event_count = matched_event_count + 1,
-                blocking_dispatch_id = COALESCE($3, blocking_dispatch_id),
-                latest_match_at = clock_timestamp()
-          WHERE rule_id = $4
-            AND rule_version = $5
-            AND singleton_scope = $6
-            AND singleton_repository IS NOT DISTINCT FROM $7
-            AND singleton_pull_request_number IS NOT DISTINCT FROM $8
-            AND singleton_stack_root_pull_request_number IS NOT DISTINCT FROM $9
-            AND settled_kind IS NULL",
-    )
-    .bind(event.repository().as_str())
-    .bind(event.id().as_uuid())
-    .bind(blocking_dispatch.map(|value| *value.as_uuid()))
-    .bind(rule_id.as_str())
-    .bind(stored_rule_version(rule_version)?)
-    .bind(repo_watch_singleton_scope_to_str(singleton.scope))
-    .bind(singleton.repository.as_deref())
-    .bind(singleton.pull_request)
-    .bind(singleton.stack_root_pull_request)
-    .execute(&mut **transaction)
-    .await?
-    .rows_affected();
-    if updated == 1 {
+    let active = sqlx::query(crate::lock_inventory::REPO_WATCH_ACTIVE_DISPATCH_OBLIGATION)
+        .bind(rule_id.as_str())
+        .bind(stored_rule_version(rule_version)?)
+        .bind(repo_watch_singleton_scope_to_str(singleton.scope))
+        .bind(singleton.repository.as_deref())
+        .bind(singleton.pull_request)
+        .bind(singleton.stack_root_pull_request)
+        .fetch_optional(&mut **transaction)
+        .await?;
+    if let Some(active) = active {
+        let obligation_id: Uuid = active.try_get("obligation_id")?;
+        sqlx::query(
+            "UPDATE repo_watch_dispatch_obligation
+                SET repository = $1,
+                    latest_event_id = $2,
+                    matched_event_count = matched_event_count + 1,
+                    blocking_dispatch_id = COALESCE($3, blocking_dispatch_id),
+                    latest_match_at = clock_timestamp()
+              WHERE obligation_id = $4",
+        )
+        .bind(event.repository().as_str())
+        .bind(event.id().as_uuid())
+        .bind(blocking_dispatch.map(|value| *value.as_uuid()))
+        .bind(obligation_id)
+        .execute(&mut **transaction)
+        .await?;
         return Ok(());
     }
     let blocking_dispatch =
@@ -273,8 +411,19 @@ pub(crate) async fn load_obligation_admission(
     if latest_event != *event.as_uuid() {
         return Ok(ObligationAdmission::Superseded);
     }
+    // Settlement before parking. A settled obligation keeps its parking stamp
+    // as the record of why it stopped being dispatched, so reading the stamp
+    // first would answer "not now" for work that is already finished and would
+    // lose the outcome a settled obligation carries, including the sessions a
+    // dispatched one replays.
     let settled_kind: Option<String> = row.try_get("settled_kind")?;
     let Some(settled_kind) = settled_kind else {
+        // The handle admission holds was read before this transaction opened,
+        // so the parked state is rechecked here rather than trusted from the
+        // load.
+        if row.try_get::<bool, _>("parked")? {
+            return Ok(ObligationAdmission::Parked);
+        }
         return Ok(ObligationAdmission::Pending);
     };
     match repo_watch_obligation_settlement_from_str(&settled_kind) {
@@ -351,16 +500,49 @@ pub(crate) async fn settle_terminal_target_obligations(
     pull_request: Decimal,
     cutoff_event: RepoWatchEventId,
 ) -> Result<(), RepoWatchDispatchRepositoryError> {
+    // Taken in obligation order before the settlement writes, because the
+    // progress-release scan takes the same rows in the same order and runs
+    // outside the repository key this holds. An unordered multi-row update
+    // could meet that scan from the other end.
+    sqlx::query(crate::lock_inventory::REPO_WATCH_TERMINAL_TARGET_OBLIGATIONS)
+        .bind(repository.as_str())
+        .bind(pull_request)
+        .bind(cutoff_event.as_uuid())
+        .fetch_all(&mut **transaction)
+        .await?;
     sqlx::query(
         "UPDATE repo_watch_dispatch_obligation AS obligation
             SET settled_kind = $3,
                 settled_at = clock_timestamp()
-           FROM repo_watch_event AS event
-          WHERE obligation.latest_event_id = event.event_id
-            AND obligation.settled_kind IS NULL
-            AND event.repository = $1
-            AND event.pull_request_number = $2
-            AND event.event_id <> $4",
+          WHERE obligation.settled_kind IS NULL
+            -- An obligation stalled on this cutoff owes the close automation
+            -- and an operator release is what lets it run, so it survives the
+            -- cutoff whatever else has matched since. Checked outside the
+            -- disjunction below: a later match on the same pull request
+            -- advances the latest-event projection, and the arm reading that
+            -- projection would otherwise settle it anyway.
+            AND obligation.parked_state_event_id IS DISTINCT FROM $4
+            AND (
+                EXISTS (
+                    SELECT 1
+                      FROM repo_watch_event AS event
+                     WHERE event.event_id = obligation.latest_event_id
+                       AND event.repository = $1
+                       AND event.pull_request_number = $2
+                       AND event.event_id <> $4
+                )
+                -- A parked lineage keeps the target it stalled on while its
+                -- latest-event projection follows whatever matched since, which
+                -- under a collapsed singleton can be another pull request, so
+                -- the close of the stalled target has to reach it here.
+                OR EXISTS (
+                    SELECT 1
+                      FROM repo_watch_event AS parked_state
+                     WHERE parked_state.event_id = obligation.parked_state_event_id
+                       AND parked_state.repository = $1
+                       AND parked_state.pull_request_number = $2
+                )
+            )",
     )
     .bind(repository.as_str())
     .bind(pull_request)
@@ -403,4 +585,44 @@ pub(crate) async fn settle_dispatch_obligation(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::RepoWatchDispatchRetryPolicy;
+
+    #[test]
+    fn a_lower_argument_replaces_every_production_bound() {
+        let lowered = RepoWatchDispatchRetryPolicy::production()
+            .lowered_to(Duration::from_secs(1), Duration::from_secs(4));
+
+        assert_eq!(lowered.backoff_base(), Duration::from_secs(1));
+        assert_eq!(lowered.backoff_cap(), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn a_higher_argument_leaves_every_production_bound_in_place() {
+        let production = RepoWatchDispatchRetryPolicy::production();
+
+        let raised = production.lowered_to(
+            Duration::from_secs(u64::from(u32::MAX)),
+            Duration::from_secs(u64::from(u32::MAX)),
+        );
+
+        assert_eq!(raised, production);
+    }
+
+    /// A cap the doubling never reaches is not a cap. Three doublings is well
+    /// inside the attempt budget the schema holds, so the last attempts of an
+    /// exhausting lineage are spaced by the cap rather than by a delay that
+    /// keeps growing.
+    #[test]
+    fn the_backoff_cap_binds_within_three_doublings_of_the_base() {
+        let production = RepoWatchDispatchRetryPolicy::production();
+
+        assert!(production.backoff_cap() > production.backoff_base());
+        assert!(production.backoff_cap() < production.backoff_base() * 8);
+    }
 }
