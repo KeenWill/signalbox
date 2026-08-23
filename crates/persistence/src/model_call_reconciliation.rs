@@ -397,62 +397,6 @@ async fn discover_recoveries(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::CLAIM_WINDOW;
-    use crate::lock_inventory::{
-        AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY,
-        AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION,
-    };
-
-    #[test]
-    fn discovery_is_a_bounded_keyset_page() {
-        assert!(CLAIM_WINDOW > 0);
-        assert!(
-            AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY
-                .contains("turn_id > bounds.after_turn_id")
-        );
-        assert!(
-            !AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY
-                .contains("origin_kind = 'accepted_input'")
-        );
-        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("ORDER BY turn_id"));
-        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("LIMIT $1"));
-        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("SET after_turn_id"));
-        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("ORDER BY turn_id DESC"));
-        assert!(
-            AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY
-                .contains("turn_id <= bounds.high_turn_id")
-        );
-        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("high_turn_id = CASE"));
-        assert!(
-            AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY
-                .contains("NOT delegation_runtime_terminal")
-        );
-    }
-
-    #[test]
-    fn supersession_is_an_independent_bounded_keyset_page() {
-        assert!(
-            AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION
-                .contains("recovery.turn_id > cursor.after_turn_id")
-        );
-        assert!(
-            AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION.contains("ORDER BY recovery.turn_id")
-        );
-        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION.contains("LIMIT $1"));
-        assert!(
-            !AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION
-                .contains("origin_kind = 'accepted_input'")
-        );
-        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION.contains("SET after_turn_id"));
-        assert!(
-            AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION
-                .contains("NOT lifecycle.delegation_runtime_terminal")
-        );
-    }
-}
-
 async fn settle_abandoned_attempts(
     connection: &mut PgConnection,
     window: i64,
@@ -560,4 +504,58 @@ async fn finish_attempt(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::lock_inventory::{
+        AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY,
+        AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION,
+    };
+
+    #[test]
+    fn discovery_is_a_bounded_keyset_page() {
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY
+                .contains("turn_id > bounds.after_turn_id")
+        );
+        assert!(
+            !AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY
+                .contains("origin_kind = 'accepted_input'")
+        );
+        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("ORDER BY turn_id"));
+        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("LIMIT $1"));
+        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("SET after_turn_id"));
+        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("ORDER BY turn_id DESC"));
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY
+                .contains("turn_id <= bounds.high_turn_id")
+        );
+        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("high_turn_id = CASE"));
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY
+                .contains("NOT delegation_runtime_terminal")
+        );
+    }
+
+    #[test]
+    fn supersession_is_an_independent_bounded_keyset_page() {
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION
+                .contains("recovery.turn_id > cursor.after_turn_id")
+        );
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION.contains("ORDER BY recovery.turn_id")
+        );
+        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION.contains("LIMIT $1"));
+        assert!(
+            !AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION
+                .contains("origin_kind = 'accepted_input'")
+        );
+        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION.contains("SET after_turn_id"));
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION
+                .contains("NOT lifecycle.delegation_runtime_terminal")
+        );
+    }
 }

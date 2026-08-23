@@ -998,7 +998,9 @@ async fn recover_expired_scheduler_pass(
                 continue;
             }
         }
-        let candidate = candidate.expect("candidate was established above");
+        let Some(candidate) = candidate else {
+            continue;
+        };
         let repository = PostgresStartupScanRepository::new(recovery.pool.clone());
         let mut ids = UuidV7StartupScanIdGenerator;
         let identities = signalbox_domain::AcceptedInputTurnFailureIdentities::new(
