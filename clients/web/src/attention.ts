@@ -79,7 +79,10 @@ export const synchronizeAttention = async ({
       let restart = false
       let firstEvent = true
       for await (const event of transport.followAttention(signal)) {
-        if (firstEvent && event.kind !== 'snapshot') {
+        if (
+          (firstEvent && event.kind !== 'snapshot') ||
+          (!firstEvent && event.kind === 'snapshot')
+        ) {
           transition('failed')
           return
         }

@@ -128,12 +128,17 @@ describe('SameOriginProductTransport', () => {
   })
 
   it('decodes one bounded attention page and preserves its typed continuation', async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify(attentionFixture)))
+    const pagedFixture = {
+      ...attentionFixture,
+      continuation_after_session_id: laterSessionId,
+      summaries: [{ ...attentionFixture.summaries[0], session_id: laterSessionId }],
+    }
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(pagedFixture)))
     vi.stubGlobal('fetch', fetchMock)
 
     const snapshot = await new SameOriginProductTransport().readAttention(sessionId)
 
-    expect(snapshot).toEqual(attentionFixture)
+    expect(snapshot).toEqual(pagedFixture)
     expect(fetchMock).toHaveBeenCalledWith(
       `/api/attention?after_session_id=${sessionId}`,
       expect.objectContaining({ credentials: 'same-origin' }),
@@ -305,6 +310,25 @@ describe('SameOriginProductTransport', () => {
     })
   })
 
+  it('accepts an actionless runner-loss summary', async () => {
+    const runnerLost = {
+      ...attentionFixture.summaries[0],
+      action: null,
+      state: 'runner_lost',
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () => new Response(JSON.stringify({ ...attentionFixture, summaries: [runnerLost] })),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).resolves.toEqual({
+      ...attentionFixture,
+      summaries: [runnerLost],
+    })
+  })
+
   it('rejects malformed session identities and judge counts', async () => {
     const malformedIdentity = { ...attentionFixture.summaries[0], session_id: 'not-a-uuid' }
     const malformedCount = {
@@ -380,6 +404,17 @@ describe('SameOriginProductTransport', () => {
 
     await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
       'attention snapshot continuation does not match its last session identity',
+    )
+  })
+
+  it('rejects paged summaries at or before the requested keyset cursor', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(attentionFixture))),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention(sessionId)).rejects.toThrow(
+      'attention snapshot contains an identity at or before its keyset cursor',
     )
   })
 

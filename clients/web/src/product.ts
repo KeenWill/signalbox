@@ -62,7 +62,7 @@ const validateAttentionSummary = (summary: AttentionSummary): void => {
       case 'awaiting_reconciliation':
         return 'reconcile_turn'
       case 'runner_lost':
-        return 'restore_runner'
+        return null
       case 'active':
       case 'queued':
       case 'idle':
@@ -74,7 +74,10 @@ const validateAttentionSummary = (summary: AttentionSummary): void => {
   }
 }
 
-const validateAttentionSnapshot = (snapshot: WebAttentionSnapshot): WebAttentionSnapshot => {
+const validateAttentionSnapshot = (
+  snapshot: WebAttentionSnapshot,
+  afterSessionId?: string,
+): WebAttentionSnapshot => {
   validateCursor(snapshot.cursor)
   if (snapshot.summaries.length > MAX_ATTENTION_SNAPSHOT_ITEMS) {
     throw new TypeError('attention snapshot exceeds the contract item ceiling')
@@ -84,6 +87,12 @@ const validateAttentionSnapshot = (snapshot: WebAttentionSnapshot): WebAttention
     throw new TypeError('attention snapshot contains duplicate session identities')
   }
   for (const summary of snapshot.summaries) validateAttentionSummary(summary)
+  if (
+    afterSessionId !== undefined &&
+    snapshot.summaries.some((summary) => summary.session_id <= afterSessionId)
+  ) {
+    throw new TypeError('attention snapshot contains an identity at or before its keyset cursor')
+  }
   for (let index = 1; index < snapshot.summaries.length; index += 1) {
     const previous = snapshot.summaries[index - 1]
     const current = snapshot.summaries[index]
@@ -100,8 +109,11 @@ const validateAttentionSnapshot = (snapshot: WebAttentionSnapshot): WebAttention
   return snapshot
 }
 
-const decodeBoundedAttentionSnapshot = (value: unknown): WebAttentionSnapshot =>
-  validateAttentionSnapshot(decodeWebAttentionSnapshot(value))
+const decodeBoundedAttentionSnapshot = (
+  value: unknown,
+  afterSessionId?: string,
+): WebAttentionSnapshot =>
+  validateAttentionSnapshot(decodeWebAttentionSnapshot(value), afterSessionId)
 
 const readBoundedJson = async (
   response: Response,
@@ -284,6 +296,7 @@ export class SameOriginProductTransport implements ProductTransport {
     if (!response.ok) throw await this.requestError(response, signal)
     return decodeBoundedAttentionSnapshot(
       await readBoundedJson(response, MAX_ATTENTION_SNAPSHOT_BYTES, 'attention snapshot', signal),
+      afterSessionId,
     )
   }
 

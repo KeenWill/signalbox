@@ -187,6 +187,24 @@ describe('attention projection recovery', () => {
     expect(phases).toEqual(['connecting', 'failed'])
   })
 
+  it('fails closed when a follow response emits a later snapshot', async () => {
+    const phases: string[] = []
+
+    await synchronizeAttention({
+      transport: streamTransport([
+        [
+          { kind: 'snapshot', snapshot },
+          { kind: 'snapshot', snapshot: { ...snapshot, cursor: '18' } },
+        ],
+      ]),
+      signal: new AbortController().signal,
+      onPhase: (phase) => phases.push(phase),
+      onProjection: (projection) => ({ snapshot: projection, accepted: true }),
+    })
+
+    expect(phases).toEqual(['connecting', 'live', 'failed'])
+  })
+
   it('resets the immediate resync budget after accepted incremental progress', async () => {
     const phases: string[] = []
     const resync = { kind: 'resync_required', cursor: '18' } as const
