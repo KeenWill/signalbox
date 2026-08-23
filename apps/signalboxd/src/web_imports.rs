@@ -363,7 +363,11 @@ async fn execute_continuation(
         .resolve_session_model(request.model_selection)
         .is_err()
     {
-        return invalid_request("initial model selection is not configured");
+        return application_error(
+            StatusCode::BAD_REQUEST,
+            "model_not_configured",
+            "initial model selection is not configured",
+        );
     }
     let application_request = match CreateSessionFromImportedFrontierRequest::try_new(
         request.command_id,
@@ -468,9 +472,6 @@ fn web_content(
     content: &ImportedEntryContentProjection,
 ) -> (WebImportedContentKind, Option<WebImportTextEvidence>) {
     match content {
-        ImportedEntryContentProjection::OpaqueNonText => {
-            (WebImportedContentKind::OpaqueNonText, None)
-        }
         ImportedEntryContentProjection::SourceEvent => (WebImportedContentKind::SourceEvent, None),
         ImportedEntryContentProjection::SourceMessageBlock => {
             (WebImportedContentKind::SourceMessageBlock, None)

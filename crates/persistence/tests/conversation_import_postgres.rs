@@ -306,13 +306,13 @@ async fn insert_imported_source_scaffolding(
          VALUES
             ('10000000-0000-4000-8000-000000000039', 1,
              '20000000-0000-4000-8000-000000000039', 1, 1,
-             'attested_user', decode('01', 'hex'), decode('01', 'hex')),
+             'attested_user', decode('02010100', 'hex'), decode('01', 'hex')),
             ('10000000-0000-4000-8000-000000000039', 2,
              '20000000-0000-4000-8000-000000000040', 1, 2,
-             'attested_assistant', decode('02', 'hex'), decode('02', 'hex')),
+             'attested_assistant', decode('02010100', 'hex'), decode('02', 'hex')),
             ('10000000-0000-4000-8000-000000000039', 3,
              '20000000-0000-4000-8000-000000000041', 1, 3,
-             'attested_user', decode('03', 'hex'), decode('03', 'hex'));",
+             'attested_user', decode('02010100', 'hex'), decode('03', 'hex'));",
     )
     .execute(&mut **transaction)
     .await?;

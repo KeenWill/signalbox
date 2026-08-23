@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { HttpImportApi, ImportListCorrelationError } from './api'
+import { HttpImportApi, ImportListCorrelationError, ImportWindowCorrelationError } from './api'
 
 const firstId = '00000000-0000-7000-8000-000000000001'
 const secondId = '00000000-0000-7000-8000-000000000002'
@@ -94,6 +94,58 @@ describe('HttpImportApi correlation', () => {
     })
 
     expect(window.anchor_position).toBe(1)
+  })
+
+  it('rejects an entry window outside the requested radius', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              anchor_position: 1,
+              first_position: 1,
+              last_position: 2,
+              has_before: false,
+              has_after: true,
+              items: [
+                {
+                  frontier: {
+                    imported_conversation_id: firstId,
+                    imported_entry_id: firstId,
+                    position: 1,
+                  },
+                  raw_record_position: 1,
+                  record_entry_position: 1,
+                  source_speaker: 'not_attested',
+                  content_kind: 'message_content_absent',
+                  text: null,
+                },
+                {
+                  frontier: {
+                    imported_conversation_id: firstId,
+                    imported_entry_id: secondId,
+                    position: 2,
+                  },
+                  raw_record_position: 1,
+                  record_entry_position: 2,
+                  source_speaker: 'not_attested',
+                  content_kind: 'message_content_absent',
+                  text: null,
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).entries(firstId, {
+        anchor: 'first',
+        before: 0,
+        after: 0,
+      }),
+    ).rejects.toBeInstanceOf(ImportWindowCorrelationError)
   })
 
   it('rejects a catalog page outside the requested cursor and format', async () => {

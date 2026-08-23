@@ -293,8 +293,6 @@ pub enum WebImportedSpeakerEvidence {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebImportedContentKind {
-    /// Bounded evidence for a non-text value too large to classify without full decoding.
-    OpaqueNonText,
     /// Non-message source record.
     SourceEvent,
     /// Source-defined message block.

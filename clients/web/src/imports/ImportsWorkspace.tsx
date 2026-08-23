@@ -624,9 +624,15 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                     </p>
                   )}
                   {continuation.data && (
-                    <p className="continuation-result">
-                      Session created: {continuation.data.session_id}
-                    </p>
+                    <>
+                      <p className="continuation-result">
+                        Session created: {continuation.data.session_id}
+                      </p>
+                      <p className="continuation-result">
+                        Receipt source: import {continuation.data.frontier.imported_conversation_id}
+                        , position {continuation.data.frontier.position.toLocaleString()}
+                      </p>
+                    </>
                   )}
                 </div>
               </div>

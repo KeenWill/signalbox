@@ -692,11 +692,6 @@ const schemas = {
         "description": "Closed normalized imported content kind.",
         "oneOf": [
           {
-            "const": "opaque_non_text",
-            "description": "Bounded evidence for a non-text value too large to classify without full decoding.",
-            "type": "string"
-          },
-          {
             "const": "source_event",
             "description": "Non-message source record.",
             "type": "string"

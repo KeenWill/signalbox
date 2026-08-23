@@ -143,8 +143,6 @@ pub struct ImportedEntryProjection {
 /// Browser discovery facts decoded from a byte-bounded stored-content projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ImportedEntryContentProjection {
-    /// A non-text encoding whose complete value exceeds the validation bound.
-    OpaqueNonText,
     /// A source event whose potentially large details are not projected.
     SourceEvent,
     /// Text attestation with a byte-bounded UTF-8 projection.

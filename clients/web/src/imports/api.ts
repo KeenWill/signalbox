@@ -113,12 +113,16 @@ const correlateListPage = (
   return page
 }
 
+const DEFAULT_IMPORT_WINDOW_RADIUS = 25
+
 const correlateEntryWindow = (
   importedConversationId: string,
   request: WebImportEntryWindowRequest,
   window: WebImportEntryWindow,
 ): WebImportEntryWindow => {
   const normalizedAnchor = request.anchor ?? 'first'
+  const requestedBefore = request.before ?? DEFAULT_IMPORT_WINDOW_RADIUS
+  const requestedAfter = request.after ?? DEFAULT_IMPORT_WINDOW_RADIUS
   const expectedAnchor =
     normalizedAnchor === 'first'
       ? 1
@@ -136,6 +140,8 @@ const correlateEntryWindow = (
     window.anchor_position !== expectedAnchor ||
     window.first_position > window.anchor_position ||
     window.last_position < window.anchor_position ||
+    window.anchor_position - window.first_position > requestedBefore ||
+    window.last_position - window.anchor_position > requestedAfter ||
     window.last_position - window.first_position + 1 !== window.items.length ||
     !positionsCorrelate ||
     !window.items.some((entry) => entry.frontier.position === window.anchor_position)
