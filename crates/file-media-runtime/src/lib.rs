@@ -39,7 +39,8 @@ pub use limits::{
 };
 pub use registry::{
     FileMediaRegistry, FileMediaRegistryConstructionError, MAX_READERS_PER_PROVIDER,
-    MAX_REGISTRY_READERS, ProcessorIsolation, read_options_fit,
+    MAX_REGISTRY_READERS, ProcessorIsolation, provider_declaration_inventory_fits,
+    read_options_fit,
 };
 pub use value::{
     AttachmentKind, BoundedMetadata, CanonicalJsonObjectSchema, CanonicalMediaType,

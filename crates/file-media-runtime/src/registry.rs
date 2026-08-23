@@ -38,6 +38,10 @@ const MAX_REGISTRY_REASON_CODES: usize = 4_096;
 const MAX_INSPECTION_PROBE_BYTES: u64 = 16 * 1_024 * 1_024;
 // numeric-bound: ceiling - bounds one inspection's aggregate probe request fan-out
 const MAX_INSPECTION_PROBE_READS: u32 = 1_024;
+// numeric-bound: ceiling - the tool contract permits this many input containers
+const MAX_READ_INPUT_CONTAINERS: u32 = 256;
+// numeric-bound: ceiling - every JSON node emits at least one serialized byte
+const MAX_READ_OPTIONS_NODES: usize = MAX_READ_OPTIONS_BYTES;
 /// Immutable process-lifetime registry snapshot.
 #[derive(Clone, Debug)]
 pub struct FileMediaRegistry {
@@ -507,7 +511,8 @@ impl FileMediaRegistry {
 
 /// Checks read options against their object, nesting, and encoded-byte bounds.
 pub fn read_options_fit(options: &serde_json::Value) -> bool {
-    if !options.is_object() || !json_value_depth_fits(options, crate::MAX_STRUCTURED_DEPTH) {
+    // The outer file_read argument object consumes one contract container.
+    if !options.is_object() || !json_value_work_fits(options, MAX_READ_INPUT_CONTAINERS - 1) {
         return false;
     }
     serde_json::to_writer(
@@ -520,29 +525,51 @@ pub fn read_options_fit(options: &serde_json::Value) -> bool {
     .is_ok()
 }
 
-fn json_value_depth_fits(value: &serde_json::Value, maximum: u32) -> bool {
+fn json_value_work_fits(value: &serde_json::Value, maximum_containers: u32) -> bool {
     let mut pending = vec![(value, 0_u32)];
+    let mut visited = 0_usize;
     while let Some((value, depth)) = pending.pop() {
-        match value {
+        visited += 1;
+        if visited > MAX_READ_OPTIONS_NODES {
+            return false;
+        }
+        let (children, next_depth): (usize, Option<u32>) = match value {
             serde_json::Value::Array(values) => {
-                let Some(next) = depth.checked_add(1).filter(|next| *next <= maximum) else {
+                let Some(next) = depth
+                    .checked_add(1)
+                    .filter(|next| *next <= maximum_containers)
+                else {
                     return false;
                 };
-                pending.extend(values.iter().map(|child| (child, next)));
+                (values.len(), Some(next))
             }
             serde_json::Value::Object(values) => {
-                let Some(next) = depth.checked_add(1).filter(|next| *next <= maximum) else {
+                let Some(next) = depth
+                    .checked_add(1)
+                    .filter(|next| *next <= maximum_containers)
+                else {
                     return false;
                 };
-                pending.extend(values.values().map(|child| (child, next)));
+                (values.len(), Some(next))
             }
             serde_json::Value::Null
             | serde_json::Value::Bool(_)
             | serde_json::Value::Number(_)
-            | serde_json::Value::String(_) => {}
-        }
-        if pending.len() > MAX_READ_OPTIONS_BYTES {
+            | serde_json::Value::String(_) => (0, None),
+        };
+        if children > MAX_READ_OPTIONS_NODES.saturating_sub(visited + pending.len()) {
             return false;
+        }
+        if let Some(next) = next_depth {
+            match value {
+                serde_json::Value::Array(values) => {
+                    pending.extend(values.iter().map(|child| (child, next)));
+                }
+                serde_json::Value::Object(values) => {
+                    pending.extend(values.values().map(|child| (child, next)));
+                }
+                _ => {}
+            }
         }
     }
     true
@@ -949,48 +976,76 @@ const fn inspection_output_kind(kind: crate::ReadOutputKind) -> &'static str {
     }
 }
 
-fn validate_aggregate_inventory(
-    providers: &[FileMediaProviderDeclaration],
-) -> Result<(), FileMediaRegistryConstructionError> {
+/// Checks provider declarations against registry-compatible inventory bounds.
+pub fn provider_declaration_inventory_fits<'a>(
+    providers: impl IntoIterator<Item = &'a FileMediaProviderDeclaration>,
+) -> bool {
     let mut readers = 0_usize;
     let mut media_types = 0_usize;
     let mut views = 0_usize;
     let mut schema_bytes = 0_usize;
     let mut reason_codes = 0_usize;
     for provider in providers {
-        readers = readers
-            .checked_add(provider.readers().len())
-            .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+        if provider.readers().len() > MAX_READERS_PER_PROVIDER {
+            return false;
+        }
+        let Some(next_readers) = readers.checked_add(provider.readers().len()) else {
+            return false;
+        };
+        readers = next_readers;
         if readers > MAX_REGISTRY_READERS {
-            return Err(FileMediaRegistryConstructionError::Inventory);
+            return false;
         }
         for reader in provider.readers() {
-            media_types = media_types
-                .checked_add(reader.media_types().len())
-                .ok_or(FileMediaRegistryConstructionError::Inventory)?;
-            views = views
-                .checked_add(reader.views().len())
-                .ok_or(FileMediaRegistryConstructionError::Inventory)?;
-            reason_codes = reason_codes
-                .checked_add(reader.reason_codes().len())
-                .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+            if reader.media_types().len() > MAX_MEDIA_TYPES_PER_READER
+                || reader.views().len() > MAX_VIEWS_PER_READER
+                || reader.reason_codes().len() > MAX_REASON_CODES_PER_READER
+            {
+                return false;
+            }
+            let Some(next_media_types) = media_types.checked_add(reader.media_types().len()) else {
+                return false;
+            };
+            media_types = next_media_types;
+            let Some(next_views) = views.checked_add(reader.views().len()) else {
+                return false;
+            };
+            views = next_views;
+            let Some(next_reason_codes) = reason_codes.checked_add(reader.reason_codes().len())
+            else {
+                return false;
+            };
+            reason_codes = next_reason_codes;
             if media_types > MAX_REGISTRY_MEDIA_TYPES
                 || views > MAX_REGISTRY_VIEWS
                 || reason_codes > MAX_REGISTRY_REASON_CODES
             {
-                return Err(FileMediaRegistryConstructionError::Inventory);
+                return false;
             }
             for view in reader.views() {
-                schema_bytes = schema_bytes
-                    .checked_add(view.arguments_schema().as_str().len())
-                    .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+                let Some(next_schema_bytes) =
+                    schema_bytes.checked_add(view.arguments_schema().as_str().len())
+                else {
+                    return false;
+                };
+                schema_bytes = next_schema_bytes;
                 if schema_bytes > MAX_REGISTRY_SCHEMA_BYTES {
-                    return Err(FileMediaRegistryConstructionError::Inventory);
+                    return false;
                 }
             }
         }
     }
-    Ok(())
+    true
+}
+
+fn validate_aggregate_inventory(
+    providers: &[FileMediaProviderDeclaration],
+) -> Result<(), FileMediaRegistryConstructionError> {
+    if provider_declaration_inventory_fits(providers) {
+        Ok(())
+    } else {
+        Err(FileMediaRegistryConstructionError::Inventory)
+    }
 }
 
 fn validate_aggregate_probe_budget(
@@ -1175,11 +1230,44 @@ mod tests {
     }
 
     #[test]
-    fn read_options_reject_nesting_before_serialization() {
+    fn read_options_honor_the_input_container_boundary() {
         let options = serde_json::json!({
-            "nested": nested_arrays(crate::MAX_STRUCTURED_DEPTH)
+            "nested": nested_arrays(MAX_READ_INPUT_CONTAINERS - 2)
+        });
+        assert!(read_options_fit(&options));
+
+        let options = serde_json::json!({
+            "nested": nested_arrays(MAX_READ_INPUT_CONTAINERS - 1)
+        });
+        assert!(!read_options_fit(&options));
+    }
+
+    #[test]
+    fn read_options_reject_broad_work_before_growing_the_frontier() {
+        let options = serde_json::json!({
+            "values": vec![serde_json::Value::Null; MAX_READ_OPTIONS_NODES]
         });
 
-        assert!(!read_options_fit(&options));
+        assert!(!json_value_work_fits(
+            &options,
+            MAX_READ_INPUT_CONTAINERS - 1
+        ));
+    }
+
+    #[test]
+    fn read_options_reject_balanced_work_with_a_small_frontier() {
+        let mut level = vec![serde_json::Value::Null; 32_769];
+        while level.len() > 1 {
+            level = level
+                .chunks(2)
+                .map(|pair| serde_json::Value::Array(pair.to_vec()))
+                .collect();
+        }
+        let options = serde_json::json!({ "tree": level.pop().unwrap() });
+
+        assert!(!json_value_work_fits(
+            &options,
+            MAX_READ_INPUT_CONTAINERS - 1
+        ));
     }
 }

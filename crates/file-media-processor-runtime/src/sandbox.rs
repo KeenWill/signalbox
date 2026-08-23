@@ -27,7 +27,8 @@ use signalbox_file_media_runtime::{
     MAX_REGISTRY_READERS, MAX_VALIDATION_RANGES, MAX_VALIDATION_SOURCE_BYTES, MAX_WORKER_TASKS,
     ProbeDeclaration, ProcessorBoundaryFailure, ProcessorFailure, ProcessorIsolation,
     ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
-    ReadViewDeclaration, ReaderDeclaration, ReaderIdentity, VerifiedBlobSource, read_options_fit,
+    ReadViewDeclaration, ReaderDeclaration, ReaderIdentity, VerifiedBlobSource,
+    provider_declaration_inventory_fits, read_options_fit,
 };
 use tokio::{
     io::AsyncReadExt as _,
@@ -123,6 +124,10 @@ impl SandboxedFileMediaProcessor {
                 .iter()
                 .map(|binding| binding.declaration.readers().len()),
         )?;
+        if !provider_declaration_inventory_fits(bindings.iter().map(|binding| &binding.declaration))
+        {
+            return Err(SandboxedFileMediaProcessorConstructionError::ReaderInventory);
+        }
         let task_cgroup_root = delegated_task_cgroup_root()?;
         if !FileMediaProcessCeilings::version_one().admits(ceilings) {
             return Err(SandboxedFileMediaProcessorConstructionError::Ceilings);
@@ -787,12 +792,12 @@ struct InvocationTaskCgroup {
 
 impl InvocationTaskCgroup {
     fn create(root: &Path, memory_bytes: u64) -> Result<Self, std::io::Error> {
-        let sequence = NEXT_TASK_CGROUP.fetch_add(1, Ordering::Relaxed);
-        let path = root.join(format!(
-            "signalbox-file-media-{}-{sequence}",
-            std::process::id()
-        ));
-        fs::create_dir(&path)?;
+        let path = create_unique_cgroup_directory(
+            root,
+            "signalbox-file-media",
+            std::process::id(),
+            &NEXT_TASK_CGROUP,
+        )?;
         let configured = (|| {
             fs::write(path.join("pids.max"), MAX_WORKER_TASKS.to_string())?;
             fs::write(path.join("memory.max"), memory_bytes.to_string())?;
@@ -876,13 +881,14 @@ fn delegated_task_cgroup_root() -> Result<PathBuf, SandboxedFileMediaProcessorCo
         return Err(SandboxedFileMediaProcessorConstructionError::TaskController);
     }
 
-    let sequence = NEXT_TASK_CGROUP.fetch_add(1, Ordering::Relaxed);
-    let probe = root.join(format!(
-        "signalbox-file-media-admission-{}-{sequence}",
-        std::process::id()
-    ));
-    let admitted = fs::create_dir(&probe)
-        .and_then(|()| fs::write(probe.join("pids.max"), MAX_WORKER_TASKS.to_string()))
+    let probe = create_unique_cgroup_directory(
+        &root,
+        "signalbox-file-media-admission",
+        std::process::id(),
+        &NEXT_TASK_CGROUP,
+    )
+    .map_err(|_| SandboxedFileMediaProcessorConstructionError::TaskController)?;
+    let admitted = fs::write(probe.join("pids.max"), MAX_WORKER_TASKS.to_string())
         .and_then(|()| fs::write(probe.join("memory.max"), "1"))
         .and_then(|()| {
             fs::OpenOptions::new()
@@ -895,6 +901,23 @@ fn delegated_task_cgroup_root() -> Result<PathBuf, SandboxedFileMediaProcessorCo
         return Err(SandboxedFileMediaProcessorConstructionError::TaskController);
     }
     Ok(root)
+}
+
+fn create_unique_cgroup_directory(
+    root: &Path,
+    prefix: &str,
+    process_id: u32,
+    sequence: &AtomicU64,
+) -> Result<PathBuf, std::io::Error> {
+    loop {
+        let sequence = sequence.fetch_add(1, Ordering::Relaxed);
+        let path = root.join(format!("{prefix}-{process_id}-{sequence}"));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn process_descendants(root: rustix::process::Pid) -> Vec<rustix::process::Pid> {
@@ -1441,7 +1464,9 @@ impl Error for SandboxedFileMediaProcessorConstructionError {}
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsStr, fs, os::unix::fs::PermissionsExt as _, path::Path};
+    use std::{
+        ffi::OsStr, fs, os::unix::fs::PermissionsExt as _, path::Path, sync::atomic::AtomicU64,
+    };
 
     use signalbox_file_media_runtime::{
         CancellationSignal, CanonicalJsonObjectSchema, FileReadInput, MAX_READ_OPTIONS_BYTES,
@@ -1455,9 +1480,9 @@ mod tests {
         MAX_READ_RANGES, MAX_READ_SOURCE_BYTES, MAX_READERS_PER_PROVIDER, MAX_REGISTRY_READERS,
         MAX_WORKER_BINDINGS, admit_completed, admit_executable_snapshot_bytes,
         admit_reader_inventory, admit_worker_binding_count, cgroup_is_populated,
-        direct_read_input_fits, open_executable_snapshot, open_worker_executable,
-        probe_envelope_fits, read_envelope_fits, sandbox_arguments, seccomp_instructions,
-        startup_pipe, worker_memory_budget,
+        create_unique_cgroup_directory, direct_read_input_fits, open_executable_snapshot,
+        open_worker_executable, probe_envelope_fits, read_envelope_fits, sandbox_arguments,
+        seccomp_instructions, startup_pipe, worker_memory_budget,
     };
 
     struct Cancelled;
@@ -1473,6 +1498,19 @@ mod tests {
         assert!(cgroup_is_populated("populated 1\nfrozen 0\n"));
         assert!(!cgroup_is_populated("populated 0\nfrozen 0\n"));
         assert!(cgroup_is_populated("frozen 0\n"));
+    }
+
+    #[test]
+    fn cgroup_directory_creation_retries_stale_name_collisions() {
+        let directory = tempfile::tempdir().expect("temporary directory is available");
+        fs::create_dir(directory.path().join("fixture-42-1"))
+            .expect("stale fixture directory is created");
+        let sequence = AtomicU64::new(1);
+
+        let created = create_unique_cgroup_directory(directory.path(), "fixture", 42, &sequence)
+            .expect("a later unique directory is created");
+
+        assert_eq!(created, directory.path().join("fixture-42-2"));
     }
 
     #[test]
@@ -1554,10 +1592,11 @@ mod tests {
 
     #[test]
     fn direct_read_input_rejects_excessive_option_nesting_before_framing() {
-        let nested = (0..signalbox_file_media_runtime::MAX_STRUCTURED_DEPTH)
-            .fold(serde_json::Value::Null, |value, _| {
-                serde_json::Value::Array(vec![value])
-            });
+        // The outer invocation argument and options objects consume two of the
+        // 256 input-container slots, so 255 nested arrays exceed the contract.
+        let nested = (0..255).fold(serde_json::Value::Null, |value, _| {
+            serde_json::Value::Array(vec![value])
+        });
         let input = FileReadInput::Initial {
             options: serde_json::json!({ "nested": nested }),
         };

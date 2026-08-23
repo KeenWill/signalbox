@@ -397,9 +397,11 @@ jobs:
           runner_uid="$(id -u)"
           runner_gid="$(id -g)"
           runner_home="$HOME"
-          test_command='cargo test --no-fail-fast --workspace --all-targets --all-features &&
-            cargo test -p signalbox-file-media-processor-runtime \
-              --features test-worker --test isolation -- --ignored'
+          test_command='status=0
+            cargo test --no-fail-fast --workspace --all-targets --all-features || status=$?
+            cargo test --no-fail-fast -p signalbox-file-media-processor-runtime \
+              --features test-worker --test isolation -- --ignored || status=$?
+            exit "$status"'
           sudo --preserve-env=CI,PATH,CARGO_HOME,RUSTUP_HOME,RUSTFLAGS,CARGO_INCREMENTAL,CARGO_PROFILE_DEV_DEBUG,CARGO_PROFILE_TEST_DEBUG,SIGNALBOX_RUN_BWRAP_INTEGRATION,SIGNALBOX_FILE_MEDIA_CGROUP_ROOT \
             sh -c '
               echo $$ > "$SIGNALBOX_FILE_MEDIA_CGROUP_ROOT/runner/cgroup.procs"
