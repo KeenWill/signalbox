@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     error::Error,
     fmt, fs, io,
+    num::NonZeroU64,
     path::{Component, Path, PathBuf},
     str::FromStr,
     sync::Arc,
@@ -19,10 +20,10 @@ use signalbox_domain::{
     ModelTargetDefinition, OpenAiServiceTier, ProviderModelIdentity, ReasoningLevel,
     RepoWatchAuthorLogin, RepoWatchEventKindNameV1, RepoWatchLabelMatcher,
     RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
-    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope,
-    RepoWatchTemplateContextDeclaration, RepositorySlug, ResolvedProviderTarget, ServiceTier,
-    SessionTemplateName, SettingOverlay, ToolApprovalPosture, ToolName, UnsupportedModelSetting,
-    ValidatedModelSettings,
+    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion,
+    RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration, RepositorySlug,
+    ResolvedProviderTarget, ServiceTier, SessionTemplateName, SettingOverlay, ToolApprovalPosture,
+    ToolName, UnsupportedModelSetting, ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
 use signalbox_model_runtime::{
@@ -44,6 +45,10 @@ use signalbox_model_runtime_codex_cli::{
 };
 use signalbox_persistence::{
     ModelCredentialFamilyCatalog, SessionCredentialPin, SessionModelCredential,
+    model_execution::{
+        CredentialPoolRuntimeAction, CredentialPoolRuntimeCatalog, CredentialPoolRuntimeExhaustion,
+        CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy,
+    },
     process_read::ProcessModelCallInputTokenSemantics,
 };
 use signalbox_process_protocol::{
@@ -59,9 +64,28 @@ use uuid::Uuid;
 
 use crate::blob_storage_configuration::BlobStorageConfiguration;
 use crate::credential_pools::{
-    CredentialDelivery, CredentialPool, CredentialProfile, parse_credential_pools,
-    parse_credential_profiles,
+    CredentialDelivery, CredentialPool, CredentialPoolAction, CredentialPoolExhaustion,
+    CredentialPoolTrigger, CredentialProfile, parse_credential_pools, parse_credential_profiles,
 };
+
+const fn runtime_pool_action(action: CredentialPoolAction) -> CredentialPoolRuntimeAction {
+    match action {
+        CredentialPoolAction::Stay => CredentialPoolRuntimeAction::Stay,
+        CredentialPoolAction::SwitchNextTurn => CredentialPoolRuntimeAction::SwitchNextTurn,
+        CredentialPoolAction::SwitchNow => CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolAction::AvoidNewSessions => CredentialPoolRuntimeAction::AvoidNewSessions,
+        CredentialPoolAction::Quarantine => CredentialPoolRuntimeAction::Quarantine,
+    }
+}
+
+const fn runtime_pool_exhaustion(
+    exhaustion: CredentialPoolExhaustion,
+) -> CredentialPoolRuntimeExhaustion {
+    match exhaustion {
+        CredentialPoolExhaustion::Park => CredentialPoolRuntimeExhaustion::Park,
+        CredentialPoolExhaustion::Fail => CredentialPoolRuntimeExhaustion::Fail,
+    }
+}
 
 /// Non-secret reference the process binds its Anthropic key file to when no
 /// configured route names that adapter, so a deployment serving Codex alone
@@ -173,10 +197,11 @@ impl ModelAdapter {
     /// (`docs/spec/runtime-substrate.md`); a status-derived fallback carries
     /// none. Anthropic maps `rate_limit_error` and `overloaded_error` but has no
     /// quota token, and OpenAI maps `rate_limit_exceeded`/`rate_limit_error` and
-    /// `insufficient_quota` but reaches overload only by status. Both CLI
-    /// adapters classify from rendered failure prose, which the same contract
-    /// refuses as a derivation, so neither admits any cause until its CLI
-    /// exposes a stable machine-readable discriminator. Listing every pair
+    /// `insufficient_quota` but reaches overload only by status. Codex
+    /// classifies the narrower cause from rendered failure prose only after its
+    /// machine-readable JSONL lifecycle closes the request as `turn.failed`;
+    /// that envelope proves non-acceptance. Claude Code exposes no equivalent
+    /// proof. Listing every pair
     /// rather than matching on a group makes a later adapter state its own
     /// answer.
     pub(crate) const fn proves_non_acceptance(self, cause: AvailabilityCause) -> bool {
@@ -189,7 +214,8 @@ impl ModelAdapter {
                 true
             }
             (Self::OpenAi, AvailabilityCause::Overloaded) => false,
-            (Self::ClaudeCli | Self::CodexCli, _) => false,
+            (Self::CodexCli, _) => true,
+            (Self::ClaudeCli, _) => false,
         }
     }
 
@@ -540,6 +566,13 @@ pub struct HubModelConfiguration {
     model_settings_lower_layers: HashMap<DirectModelSelection, ModelSettingsLowerLayers>,
     billing_rates: HashMap<ResolvedProviderTarget, ModelBillingRates>,
     target_adapters: HashMap<ResolvedProviderTarget, ModelAdapter>,
+    /// Pool name per target that can serve a call, selectable or serving-only.
+    ///
+    /// Selection keys on the target that actually serves the call, so a fast
+    /// alternate target must be indexed here under its mapped family's pool;
+    /// deriving this from selectable routes alone left those targets with no
+    /// policy at all.
+    target_credential_pools: HashMap<ResolvedProviderTarget, Arc<str>>,
     provider_model_adapters: HashMap<String, ModelAdapter>,
     session_credential_pin: SessionCredentialPin,
     fallback_credential_profile: Arc<str>,
@@ -893,6 +926,7 @@ impl HubModelConfiguration {
         let mut routes = HashMap::with_capacity(models.len());
         let mut target_billing_rates = HashMap::with_capacity(models.len());
         let mut target_adapters = HashMap::with_capacity(models.len());
+        let mut target_credential_pools = HashMap::with_capacity(models.len());
         let mut target_model_families = HashMap::with_capacity(models.len());
         let mut target_fast_targets = HashMap::new();
         let mut target_provider_models = HashMap::with_capacity(models.len());
@@ -1012,6 +1046,12 @@ impl HubModelConfiguration {
             {
                 return Err(HubModelConfigurationError::ConflictingTarget);
             }
+            if let Some(previous) =
+                target_credential_pools.insert(target, Arc::clone(&mapping.credential_pool))
+                && previous != mapping.credential_pool
+            {
+                return Err(HubModelConfigurationError::ConflictingTarget);
+            }
             if let Some(fast_target) = fast_target {
                 target_fast_targets.insert(target, fast_target);
             }
@@ -1100,6 +1140,7 @@ impl HubModelConfiguration {
                 target_provider_models.insert(target, provider_model.clone());
                 target_adapters.insert(target, mapping.adapter);
                 target_model_families.insert(target, Arc::clone(&model_family));
+                target_credential_pools.insert(target, Arc::clone(&mapping.credential_pool));
                 if let Some(previous) =
                     provider_model_adapters.insert(provider_model.clone(), mapping.adapter)
                     && previous != mapping.adapter
@@ -1190,6 +1231,7 @@ impl HubModelConfiguration {
             model_settings_lower_layers,
             billing_rates,
             target_adapters,
+            target_credential_pools,
             provider_model_adapters,
             session_credential_pin,
             fallback_credential_profile,
@@ -1324,6 +1366,36 @@ impl HubModelConfiguration {
     /// Maps each exact target to the family key stored in session snapshots.
     pub fn credential_family_catalog(&self) -> ModelCredentialFamilyCatalog {
         self.credential_families.clone()
+    }
+
+    /// Projects admitted pool policy into the persistence-owned runtime form.
+    pub fn credential_pool_runtime_catalog(&self) -> CredentialPoolRuntimeCatalog {
+        self.target_credential_pools
+            .iter()
+            .filter_map(|(target, pool_name)| {
+                let pool = self.credential_pools.get(pool_name)?;
+                let mut members = pool.members().to_vec();
+                members.sort_by_key(|member| member.priority());
+                let members = members
+                    .into_iter()
+                    .map(|member| {
+                        CredentialPoolRuntimeMember::new(member.profile(), member.priority())
+                    })
+                    .collect::<Vec<_>>();
+                Some((
+                    *target,
+                    CredentialPoolRuntimePolicy::new(
+                        pool.name(),
+                        members,
+                        runtime_pool_exhaustion(pool.on_pool_exhausted()),
+                        runtime_pool_action(pool.action(CredentialPoolTrigger::QuotaExhausted)),
+                        runtime_pool_action(pool.action(CredentialPoolTrigger::RateLimited)),
+                        runtime_pool_action(pool.action(CredentialPoolTrigger::Overloaded)),
+                        runtime_pool_action(pool.action(CredentialPoolTrigger::CredentialRejected)),
+                    ),
+                ))
+            })
+            .collect()
     }
 
     /// Derives a labeled USD figure from exactly the token axes present.
@@ -1726,9 +1798,6 @@ fn parse_repository_watch_rules(
             ],
         )
         .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
-        if table.get("version").and_then(Item::as_integer) != Some(1) {
-            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
-        }
         let id = RepoWatchRuleId::try_new(
             required_string(table, "id")
                 .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?
@@ -1738,6 +1807,18 @@ fn parse_repository_watch_rules(
         if !identities.insert(id.clone()) {
             return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
         }
+        let version = table
+            .get("version")
+            .and_then(Item::as_integer)
+            .and_then(|value| u64::try_from(value).ok())
+            .and_then(NonZeroU64::new)
+            .and_then(RepoWatchRuleVersion::new)
+            .ok_or_else(|| HubModelConfigurationError::InvalidRepositoryWatchRule {
+                rule: id.as_str().to_owned(),
+                reason: String::from(
+                    "field `version` must be a positive integer within signed 64-bit range",
+                ),
+            })?;
         let matcher = table
             .get("matcher")
             .and_then(Item::as_table)
@@ -1762,13 +1843,20 @@ fn parse_repository_watch_rules(
             })
             .transpose()?
             .unwrap_or(Duration::ZERO);
-        let rule = RepoWatchRule::try_new(id.clone(), matcher, actions, singleton_per, cooldown)
-            .map_err(
-                |error| HubModelConfigurationError::InvalidRepositoryWatchRule {
-                    rule: id.as_str().to_owned(),
-                    reason: error.to_string(),
-                },
-            )?;
+        let rule = RepoWatchRule::try_new(
+            id.clone(),
+            version,
+            matcher,
+            actions,
+            singleton_per,
+            cooldown,
+        )
+        .map_err(
+            |error| HubModelConfigurationError::InvalidRepositoryWatchRule {
+                rule: id.as_str().to_owned(),
+                reason: error.to_string(),
+            },
+        )?;
         rules.push(rule);
     }
     Ok(rules)
@@ -3450,6 +3538,7 @@ async fn read_bounded_credential_file(path: &Path, maximum_bytes: usize) -> io::
 mod tests {
     use std::{
         collections::HashSet,
+        num::NonZeroU64,
         path::{Path, PathBuf},
         sync::Arc,
         time::Duration,
@@ -3460,8 +3549,8 @@ mod tests {
         AnthropicServiceTier, DirectModelSelection, FastMode, FastModeOverlay, MergeableState,
         ModelAlias, ModelSelectionRequest, ModelSettingSource, ModelSettingsOverlay,
         ReasoningLevel, RepoWatchDispatchContextShape, RepoWatchEventKindNameV1,
-        RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration, ServiceTier,
-        SessionTemplateName, SettingOverlay, ToolApprovalPosture,
+        RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
+        ServiceTier, SessionTemplateName, SettingOverlay, ToolApprovalPosture,
     };
     use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
     use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
@@ -3530,7 +3619,9 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
     const DUPLICATE_PROVIDER_WATCH_REPOSITORY: &str = "NAMESPACE/PROJECT";
     const DUPLICATE_PROVIDER_SIGNAL_REVIEWER: &str = "SIGNAL-REVIEWER";
     const RELATIVE_WATCH_CREDENTIAL_FILE: &str = "relative/watch-token";
-    const WATCH_RULE_ID: &str = "merge-forward-on-conflict";
+    const WATCH_RULE_ID: &str = "watch-forward";
+    const EAGER_WATCH_RULE_ID: &str = "merge-forward-on-base-advance";
+    const EAGER_WATCH_HEAD_PATTERN: &str = "^agent/.+$";
     const WATCH_TEMPLATE: &str = "merge-forward";
     const CONFIGURATION: &str = r#"
 version = 1
@@ -3902,6 +3993,29 @@ template = "{WATCH_TEMPLATE}"
         )
     }
 
+    fn configuration_with_eager_merge_forward_rule() -> String {
+        format!(
+            r#"{}
+
+[[repository_watch.rules]]
+id = "{EAGER_WATCH_RULE_ID}"
+version = 1
+singleton_per = "pull_request"
+cooldown_seconds = 0
+
+[repository_watch.rules.matcher]
+event_kinds = ["base_advanced"]
+repo = "{PROVIDER_WATCH_REPOSITORY}"
+head_branch_regex = "{EAGER_WATCH_HEAD_PATTERN}"
+
+[[repository_watch.rules.actions]]
+kind = "dispatch_session"
+template = "{WATCH_TEMPLATE}"
+"#,
+            configuration_with_repository_watch()
+        )
+    }
+
     fn watch_interval_fixture() -> Duration {
         Duration::from_secs(WATCH_INTERVAL_SECONDS)
     }
@@ -4080,7 +4194,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
     }
 
     #[test]
-    fn repository_watch_parses_the_conflict_only_live_rule() {
+    fn repository_watch_parses_the_structured_rule_fields() {
         let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_rule())
             .expect("repository-watch rule fixture is valid");
         let rule = &configured
@@ -4100,6 +4214,60 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             rule.matcher().mergeable_state(),
             [MergeableState::Conflicting]
         );
+        assert_eq!(rule.actions()[0].template().as_str(), WATCH_TEMPLATE);
+    }
+
+    #[test]
+    fn repository_watch_accepts_a_positive_rule_revision() {
+        let revision =
+            RepoWatchRuleVersion::new(NonZeroU64::new(2).expect("configured revision is positive"))
+                .expect("configured revision is within the durable range");
+        let configured = configuration_with_repository_watch_rule().replace(
+            &format!(
+                "id = \"{WATCH_RULE_ID}\"\nversion = {}",
+                RepoWatchRuleVersion::V1.get()
+            ),
+            &format!("id = \"{WATCH_RULE_ID}\"\nversion = {}", revision.get()),
+        );
+        let configured = HubModelConfiguration::parse(&configured)
+            .expect("repository-watch revision fixture is valid");
+        let rule = &configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .rules()[0];
+
+        assert_eq!(rule.id().as_str(), WATCH_RULE_ID);
+        assert_eq!(rule.version(), revision);
+    }
+
+    #[test]
+    fn repository_watch_parses_the_eager_merge_forward_rule() {
+        let configured =
+            HubModelConfiguration::parse(&configuration_with_eager_merge_forward_rule())
+                .expect("eager merge-forward rule fixture is valid");
+        let rule = &configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .rules()[0];
+
+        assert_eq!(rule.id().as_str(), EAGER_WATCH_RULE_ID);
+        assert_eq!(rule.version().get(), 1);
+        assert_eq!(rule.singleton_per(), RepoWatchSingletonScope::PullRequest);
+        assert_eq!(rule.cooldown(), Duration::ZERO);
+        assert_eq!(
+            rule.matcher().event_kinds(),
+            [RepoWatchEventKindNameV1::BaseAdvanced]
+        );
+        assert_eq!(
+            rule.matcher()
+                .head_branch()
+                .expect("live rule narrows dispatched pull requests")
+                .as_str(),
+            EAGER_WATCH_HEAD_PATTERN
+        );
+        assert_eq!(rule.matcher().base_branch(), None);
+        assert!(rule.matcher().mergeable_state().is_empty());
+        assert!(rule.matcher().conclusion().is_empty());
         assert_eq!(rule.actions()[0].template().as_str(), WATCH_TEMPLATE);
     }
 
@@ -5261,7 +5429,7 @@ members = [
         let configured = HubModelConfiguration::parse(&configuration_with_anthropic_pool(
             r#"[[credential_pools]]
 name = "anthropic-main"
-tie_break = "round_robin"
+tie_break = "first_listed"
 on_pool_exhausted = "fail"
 members = [{ profile = "anthropic-primary", priority = 1 }]
 on_quota_exhausted = "switch_next_turn"
@@ -5275,7 +5443,7 @@ on_credential_rejected = "quarantine""#,
             .credential_pool("anthropic-main")
             .expect("the fixture declares the pool");
 
-        assert_eq!(pool.tie_break(), CredentialPoolTieBreak::RoundRobin);
+        assert_eq!(pool.tie_break(), CredentialPoolTieBreak::FirstListed);
         assert_eq!(pool.on_pool_exhausted(), CredentialPoolExhaustion::Fail);
         // Anthropic's mapping has no quota token, so only rate limiting can
         // carry the proof `switch_now` requires.
@@ -5538,6 +5706,22 @@ members = [{ profile = "anthropic-primary", priority = 1 }]"#,
     }
 
     #[test]
+    fn configuration_rejects_round_robin_until_its_durable_cursor_exists() {
+        let round_robin = configuration_with_anthropic_pool(
+            r#"[[credential_pools]]
+name = "anthropic-main"
+tie_break = "round_robin"
+on_pool_exhausted = "fail"
+members = [{ profile = "anthropic-primary", priority = 1 }]"#,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&round_robin).err(),
+            Some(HubModelConfigurationError::InvalidCredentialPoolPolicy)
+        );
+    }
+
+    #[test]
     fn configuration_rejects_an_unknown_exhaustion_behavior() {
         let unknown_exhaustion = configuration_with_anthropic_pool(
             r#"[[credential_pools]]
@@ -5669,18 +5853,14 @@ members = [{ profile = "anthropic-primary", priority = 1, headroom_reserve_perce
     }
 
     #[test]
-    fn configuration_rejects_switch_now_no_cli_adapter_can_prove() {
+    fn configuration_admits_switch_now_for_a_codex_terminal_failure() {
         let substituting = CONFIGURATION.replace(
             CODEX_POOL,
             &format!("{CODEX_POOL}\non_rate_limited = \"switch_now\""),
         );
 
-        assert_eq!(
-            HubModelConfiguration::parse(&substituting).err(),
-            Some(HubModelConfigurationError::UnprovableSubstitutionPolicy {
-                credential_pool: Arc::from("codex-main"),
-            })
-        );
+        HubModelConfiguration::parse(&substituting)
+            .expect("Codex turn.failed proves that a successor cannot duplicate acceptance");
     }
 
     #[test]

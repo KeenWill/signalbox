@@ -1,6 +1,6 @@
 //! Append-only session-placement history and explicit update replay.
 
-use std::{error::Error, fmt};
+use std::{collections::BTreeMap, error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_application::{UpdateSessionPlacementOutcome, UpdateSessionPlacementTransaction};
@@ -374,6 +374,193 @@ pub(crate) async fn load_current(
     authenticate_loaded_current(connection, session, current, history_head_state)
         .await
         .map(Some)
+}
+
+/// Loads and authenticates the complete current placement histories for one
+/// bounded session-summary page in bounded event pages.
+pub(crate) async fn load_current_batch(
+    connection: &mut PgConnection,
+    sessions: &[SessionId],
+) -> Result<BTreeMap<sqlx::types::Uuid, VersionedSessionPlacement>, SessionPlacementRepositoryError>
+{
+    if sessions.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let session_ids = sessions
+        .iter()
+        .map(|session| session_id_to_uuid(*session))
+        .collect::<Vec<_>>();
+    let mut after_session = None;
+    let mut after_version = Decimal::ZERO;
+    let mut placements = BTreeMap::new();
+    let mut current_session = None;
+    let mut current_head = None;
+    let mut authenticated = None;
+    loop {
+        let rows = sqlx::query(
+            "SELECT session_row.session_id AS batch_session_id,
+                head.current_version AS head_current_version,
+                event.session_id AS event_session_id,
+                session_row.ancestry_kind,
+                event.version, event.prior_version, event.event_kind,
+                event.placement_path, event.root_global_read_intent,
+                native_registry.command_id AS native_creation_command_id,
+                imported_registry.command_id AS imported_creation_command_id,
+                placement_update_registry.command_id AS placement_update_command_id
+           FROM session AS session_row
+           LEFT JOIN session_current_placement AS head
+             ON head.session_id = session_row.session_id
+           LEFT JOIN session_placement_event AS event
+             ON event.session_id = session_row.session_id
+           LEFT JOIN create_session_command AS native_creation
+             ON native_creation.command_id = event.provenance_command_id
+            AND native_creation.created_session_id = event.session_id
+            AND native_creation.command_kind = 'create_session'
+            AND native_creation.storage_version IN (1, 2, 3, 4, 6, 7)
+            AND (native_creation.storage_version IN (6, 7)
+                 OR (native_creation.storage_version IN (1, 2, 3, 4)
+                     AND event.placement_path IS NULL
+                     AND NOT event.root_global_read_intent))
+            AND native_creation.result_kind = 'applied'
+            AND native_creation.placement_path IS NOT DISTINCT FROM event.placement_path
+            AND native_creation.root_global_read_intent = event.root_global_read_intent
+           LEFT JOIN durable_command AS native_registry
+             ON native_registry.command_id = native_creation.command_id
+            AND native_registry.command_kind = native_creation.command_kind
+            AND native_registry.storage_version = native_creation.storage_version
+           LEFT JOIN create_session_from_imported_frontier_command AS imported_creation
+             ON imported_creation.command_id = event.provenance_command_id
+            AND imported_creation.created_session_id = event.session_id
+            AND imported_creation.command_kind = 'create_session_from_imported_frontier'
+            AND imported_creation.storage_version IN (1, 2, 3, 5)
+            AND imported_creation.result_kind = 'applied'
+            AND event.placement_path IS NULL
+            AND NOT event.root_global_read_intent
+           LEFT JOIN durable_command AS imported_registry
+             ON imported_registry.command_id = imported_creation.command_id
+            AND imported_registry.command_kind = imported_creation.command_kind
+            AND imported_registry.storage_version = imported_creation.storage_version
+           LEFT JOIN update_session_placement_command AS placement_update
+             ON placement_update.command_id = event.provenance_command_id
+            AND placement_update.session_id = event.session_id
+            AND placement_update.command_kind = 'update_session_placement'
+            AND placement_update.storage_version = 1
+            AND placement_update.result_kind = 'applied'
+            AND placement_update.rejection_kind IS NULL
+            AND placement_update.result_version = event.version
+            AND placement_update.result_current_version IS NULL
+            AND placement_update.expected_version = event.prior_version
+            AND placement_update.replacement_path IS NOT DISTINCT FROM event.placement_path
+            AND placement_update.root_global_read_intent = event.root_global_read_intent
+           LEFT JOIN durable_command AS placement_update_registry
+             ON placement_update_registry.command_id = placement_update.command_id
+            AND placement_update_registry.command_kind = placement_update.command_kind
+            AND placement_update_registry.storage_version = placement_update.storage_version
+          WHERE session_row.session_id = ANY($1::uuid[])
+            AND (
+                    $2::uuid IS NULL
+                    OR session_row.session_id > $2
+                    OR (session_row.session_id = $2 AND event.version > $3)
+                )
+          ORDER BY session_row.session_id, event.version
+          LIMIT $4",
+        )
+        .bind(&session_ids)
+        .bind(after_session)
+        .bind(after_version)
+        .bind(AUTHENTICATION_PAGE_SIZE)
+        .fetch_all(&mut *connection)
+        .await?;
+        if rows.is_empty() {
+            break;
+        }
+        for row in rows {
+            let session: sqlx::types::Uuid = row.try_get("batch_session_id")?;
+            let head: Option<Decimal> = row.try_get("head_current_version")?;
+            if current_session != Some(session) {
+                finish_batched_current(
+                    &mut placements,
+                    current_session,
+                    current_head,
+                    authenticated.take(),
+                )?;
+                current_session = Some(session);
+                current_head = head;
+            } else if current_head != head {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "session placement head changed within snapshot",
+                ));
+            }
+            if row
+                .try_get::<Option<sqlx::types::Uuid>, _>("event_session_id")?
+                .is_none()
+            {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "session placement event missing",
+                ));
+            }
+            let stored_version: Decimal = row.try_get("version")?;
+            after_session = Some(session);
+            after_version = stored_version;
+            let placement = decode_authenticated_placement(row)?;
+            let expected_version = authenticated.as_ref().map_or(
+                Some(SessionPlacementVersion::INITIAL),
+                |predecessor: &VersionedSessionPlacement| predecessor.version().next(),
+            );
+            if expected_version != Some(placement.version()) {
+                return Err(SessionPlacementRepositoryError::Corruption(
+                    "session placement predecessor chain",
+                ));
+            }
+            authenticated = Some(placement);
+        }
+    }
+    finish_batched_current(
+        &mut placements,
+        current_session,
+        current_head,
+        authenticated,
+    )?;
+    if placements.len() != session_ids.len() {
+        return Err(SessionPlacementRepositoryError::Corruption(
+            "session placement batch incomplete",
+        ));
+    }
+    Ok(placements)
+}
+
+fn finish_batched_current(
+    placements: &mut BTreeMap<sqlx::types::Uuid, VersionedSessionPlacement>,
+    session: Option<sqlx::types::Uuid>,
+    head: Option<Decimal>,
+    authenticated: Option<VersionedSessionPlacement>,
+) -> Result<(), SessionPlacementRepositoryError> {
+    let Some(session) = session else {
+        return Ok(());
+    };
+    let head = head.ok_or(SessionPlacementRepositoryError::Corruption(
+        "session placement head missing",
+    ))?;
+    let head = decode_version(head)?;
+    let authenticated = authenticated.ok_or(SessionPlacementRepositoryError::Corruption(
+        "session placement predecessor chain",
+    ))?;
+    if authenticated.version() < head {
+        return Err(SessionPlacementRepositoryError::Corruption(
+            "session placement predecessor chain",
+        ));
+    }
+    if authenticated.version() > head {
+        return Err(SessionPlacementRepositoryError::Corruption(
+            "session placement head behind event history",
+        ));
+    }
+    if placements.insert(session, authenticated).is_some() {
+        return Err(SessionPlacementRepositoryError::Corruption(
+            "duplicate session placement batch row",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn load_authenticated_version(

@@ -214,6 +214,7 @@ pub struct PostgresToolLoopRepository {
     continuation_targets: Option<signalbox_domain::ModelTargetCatalog>,
     continuation_credential: Option<ModelCallCredentialReference>,
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
+    credential_pools: crate::model_execution::CredentialPoolRuntimeCatalog,
     cache_inclusive_input_targets: HashSet<signalbox_domain::ResolvedProviderTarget>,
 }
 
@@ -225,6 +226,7 @@ impl PostgresToolLoopRepository {
             continuation_targets: None,
             continuation_credential: None,
             credential_families: None,
+            credential_pools: Default::default(),
             cache_inclusive_input_targets: HashSet::new(),
         }
     }
@@ -241,6 +243,7 @@ impl PostgresToolLoopRepository {
             continuation_targets: Some(targets),
             continuation_credential: Some(credential_reference),
             credential_families: None,
+            credential_pools: Default::default(),
             cache_inclusive_input_targets: HashSet::new(),
         }
     }
@@ -259,6 +262,15 @@ impl PostgresToolLoopRepository {
         credential_families: Option<crate::ModelCredentialFamilyCatalog>,
     ) -> Self {
         self.credential_families = credential_families;
+        self
+    }
+
+    /// Enables pool selection for every same-turn continuation call.
+    pub fn with_credential_pools(
+        mut self,
+        credential_pools: crate::model_execution::CredentialPoolRuntimeCatalog,
+    ) -> Self {
+        self.credential_pools = credential_pools;
         self
     }
 
@@ -1041,6 +1053,7 @@ impl PostgresToolLoopRepository {
                 &mut transaction,
                 prepared,
                 credential_reference,
+                None,
                 self.cache_inclusive_input_targets
                     .contains(&prepared.call().target()),
             )
@@ -1179,6 +1192,7 @@ impl PostgresToolLoopRepository {
                 targets,
                 credential_reference,
                 self.credential_families.as_ref(),
+                &self.credential_pools,
                 &self.cache_inclusive_input_targets,
                 &projection,
                 identities.call(),
@@ -1706,40 +1720,50 @@ async fn load_tool_round_result_window(
     trailing_member_count: Decimal,
 ) -> Result<Option<(Decimal, Decimal)>, ToolLoopRepositoryError> {
     let candidate_rounds = sqlx::query(
-        "SELECT round.producing_model_call_id,
-                boundary.member_count AS boundary_member_count,
-                round.request_count
-           FROM tool_round AS round
-           JOIN context_frontier AS boundary
-             ON boundary.owning_session_id = round.session_id
-            AND boundary.context_frontier_id = round.boundary_frontier_id
-           JOIN context_frontier AS terminal
-             ON terminal.owning_session_id = round.session_id
-            AND terminal.context_frontier_id = $3
-          WHERE round.session_id = $1
-            AND round.turn_id = $2
-            AND round.boundary_kind = 'continuing'
-            AND terminal.member_count =
-                    boundary.member_count + round.request_count + $4
-            AND NOT EXISTS (
-                SELECT 1
-                  FROM context_frontier_member AS boundary_member
-                  LEFT JOIN context_frontier_member AS terminal_member
-                    ON terminal_member.owning_session_id =
-                            boundary_member.owning_session_id
-                   AND terminal_member.context_frontier_id = $3
-                   AND terminal_member.member_position =
-                            boundary_member.member_position
-                   AND terminal_member.source_session_id =
-                            boundary_member.source_session_id
-                   AND terminal_member.semantic_entry_id =
-                            boundary_member.semantic_entry_id
-                 WHERE boundary_member.owning_session_id = round.session_id
-                   AND boundary_member.context_frontier_id =
-                            round.boundary_frontier_id
-                   AND terminal_member.semantic_entry_id IS NULL
+        "WITH candidate_round AS MATERIALIZED (
+            SELECT round.producing_model_call_id,
+                   round.session_id,
+                   round.boundary_frontier_id,
+                   boundary.member_count AS boundary_member_count,
+                   round.request_count
+              FROM tool_round AS round
+              JOIN context_frontier AS boundary
+                ON boundary.owning_session_id = round.session_id
+               AND boundary.context_frontier_id = round.boundary_frontier_id
+              JOIN context_frontier AS terminal
+                ON terminal.owning_session_id = round.session_id
+               AND terminal.context_frontier_id = $3
+             WHERE round.session_id = $1
+               AND round.turn_id = $2
+               AND round.boundary_kind = 'continuing'
+               AND terminal.member_count =
+                       boundary.member_count + round.request_count + $4
+         ), terminal_member AS MATERIALIZED (
+            SELECT member_position,
+                   source_session_id,
+                   semantic_entry_id
+              FROM context_frontier_member
+             WHERE owning_session_id = $1
+               AND context_frontier_id = $3
+         )
+         SELECT candidate.producing_model_call_id,
+                candidate.boundary_member_count,
+                candidate.request_count
+           FROM candidate_round AS candidate
+          WHERE NOT EXISTS (
+                (SELECT member_position,
+                        source_session_id,
+                        semantic_entry_id
+                   FROM context_frontier_member
+                  WHERE owning_session_id = candidate.session_id
+                    AND context_frontier_id = candidate.boundary_frontier_id)
+                EXCEPT
+                (SELECT member_position,
+                        source_session_id,
+                        semantic_entry_id
+                   FROM terminal_member)
             )
-          ORDER BY round.producing_model_call_id",
+          ORDER BY candidate.producing_model_call_id",
     )
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
@@ -2231,17 +2255,16 @@ async fn decode_approval(
                 .ok_or(ToolLoopCorruption::Missing("delegate approval request"))?;
             let recommendation = match decision {
                 ToolApprovalDecision::Approve => DelegateApprovalRecommendation::Approve,
-                ToolApprovalDecision::Deny { ref reason } if reason.is_none() => {
-                    DelegateApprovalRecommendation::Deny
-                }
-                ToolApprovalDecision::Deny { .. } => {
-                    return Err(ToolLoopCorruption::Inconsistent("delegate denial payload").into());
-                }
+                ToolApprovalDecision::Deny { .. } => DelegateApprovalRecommendation::Deny,
             };
             let rationale = signalbox_domain::ToolDecisionRationale::try_new(
                 rationale.ok_or(ToolLoopCorruption::Missing("delegate rationale"))?,
             )
             .map_err(|_| ToolLoopCorruption::Inconsistent("delegate rationale"))?;
+            let stored_denial_reason = match &decision {
+                ToolApprovalDecision::Approve => None,
+                ToolApprovalDecision::Deny { reason } => reason.clone(),
+            };
             let approval = DelegateToolApproval::try_new(
                 request_record,
                 DirectModelSelection::from_uuid(
@@ -2254,7 +2277,7 @@ async fn decode_approval(
                 rationale,
             )
             .map_err(|_| ToolLoopCorruption::Inconsistent("delegate authority"))?;
-            ToolApprovalResolutionReconstitutionInput::delegate(approval)
+            ToolApprovalResolutionReconstitutionInput::delegate(approval, stored_denial_reason)
         }
         ToolApprovalDecisionSourceStorageKind::PolicyAuto
         | ToolApprovalDecisionSourceStorageKind::SessionBlanket => {

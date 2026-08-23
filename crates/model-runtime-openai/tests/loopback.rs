@@ -425,6 +425,7 @@ async fn buffered_error_type_classifies_when_code_is_absent() {
         panic!("a complete error envelope is definitive provider evidence");
     };
     assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
+    assert!(error.non_acceptance_proven);
     assert_eq!(
         error.native.error_token.as_deref(),
         Some("insufficient_quota")
@@ -473,6 +474,7 @@ async fn assert_openai_error_body_falls_back_to_status(body: &[u8]) {
         panic!("a complete terminal error status remains definitive");
     };
     assert_eq!(error.kind, ProviderErrorKind::Overloaded);
+    assert!(!error.non_acceptance_proven);
     assert_eq!(error.native.error_code, None);
     assert_eq!(error.exchange.http_status, Some(status));
 }

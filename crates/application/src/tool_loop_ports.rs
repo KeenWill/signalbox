@@ -208,6 +208,8 @@ pub enum PrepareToolContinuationOutcome {
     Checkpointed(ModelCallId),
     /// Target resolution failed and the turn closed in the same transaction.
     TargetUnavailable(Box<FailedModelCallTurn>),
+    /// Every member was unavailable before the continuation could issue a call.
+    PoolExhausted(Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
 }
 
 /// Authoritative status of one unchanged in-memory executor observation.

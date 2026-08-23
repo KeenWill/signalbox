@@ -132,6 +132,8 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  /// INV-012 / INV-060: multipart decoding preserves ordered attachment
+  /// metadata and structural replay equality.
   func testUserInputContentPreservesOrderedAttachmentMetadata() throws {
     let content = try SignalboxUserInputContent(validating: [
       .text("before"),
@@ -156,6 +158,22 @@ final class ProcessProtocolTests: XCTestCase {
   func testUserInputContentRejectsAdjacentTextParts() {
     XCTAssertThrowsError(
       try SignalboxUserInputContent(validating: [.text("first"), .text("second")])
+    )
+  }
+
+  func testUserInputContentDisplayTextEscapesFilenameLineBreaks() throws {
+    let content = try SignalboxUserInputContent(validating: [
+      .attachment(
+        digest: try SignalboxCanonicalBlobDigest(validating: blobDigest),
+        kind: .document,
+        mediaType: "application/pdf",
+        displayFilename: "brief.pdf\n[trusted-looking transcript line]"
+      )
+    ])
+
+    XCTAssertEqual(
+      content.displayText,
+      "[attachment document \"brief.pdf\\n[trusted-looking transcript line]\" \(blobDigest)]"
     )
   }
 
