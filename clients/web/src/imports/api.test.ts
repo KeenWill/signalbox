@@ -5,6 +5,16 @@ const firstId = '00000000-0000-7000-8000-000000000001'
 const secondId = '00000000-0000-7000-8000-000000000002'
 const searchCorrelation = '00000000-0000-7000-8000-000000000003'
 const exactSourceSessionDigest = '74bfe0749655154b0b89f676aa1d2f6c9498857529bac49b09715f969d3b4bfc'
+const sharedPrefixDigest = 'deb6692d8ef606728f1f744b760fd43ae56d502f7111d6601e82b05186ca437b'
+
+const stubCrypto = (digest: string) =>
+  vi.stubGlobal('crypto', {
+    randomUUID: () => searchCorrelation,
+    subtle: {
+      digest: async () =>
+        Uint8Array.from(digest.match(/../g) ?? [], (byte) => Number.parseInt(byte, 16)).buffer,
+    },
+  })
 
 const summary = (id: string) => ({
   imported_conversation_id: id,
@@ -255,7 +265,7 @@ describe('HttpImportApi correlation', () => {
 
   it('carries an exact source session as a raw bounded body', async () => {
     const exact = ' source session '
-    vi.stubGlobal('crypto', { randomUUID: () => searchCorrelation })
+    stubCrypto(exactSourceSessionDigest)
     const fetch = vi.fn(
       async () =>
         new Response(
@@ -283,8 +293,8 @@ describe('HttpImportApi correlation', () => {
     )
   })
 
-  it('rejects truncated evidence whose full-value digest does not match the search', async () => {
-    vi.stubGlobal('crypto', { randomUUID: () => searchCorrelation })
+  it('rejects a response-controlled digest that does not match the exact search request', async () => {
+    stubCrypto(sharedPrefixDigest)
     vi.stubGlobal(
       'fetch',
       vi.fn(
@@ -295,7 +305,7 @@ describe('HttpImportApi correlation', () => {
                 {
                   ...summary(firstId),
                   source_session_id: { leading_text: 'shared prefix', completeness: 'truncated' },
-                  source_session_id_sha256: '0'.repeat(64),
+                  source_session_id_sha256: exactSourceSessionDigest,
                 },
               ],
               next_cursor: null,
