@@ -39,6 +39,12 @@ const oversizedOriginalArtifact = decodeWebBlobDescriptor({
       : view,
   ),
 })
+const oversizedDerivativeArtifact = decodeWebBlobDescriptor({
+  ...imageArtifact,
+  available_views: imageArtifact.available_views.map((view) =>
+    view.kind === 'preview' ? { ...view, byte_length: '16777217' } : view,
+  ),
+})
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
@@ -57,14 +63,20 @@ const useArtifactScenario = async (page: Page, descriptor = imageArtifact) => {
   await page.route('**/api/blobs/**/descriptor?*', (route) => route.fulfill({ json: descriptor }))
   await page.route('**/api/blobs/**/content/image-png', (route) => {
     if (route.request().headers().range) {
-      const requested = Number(descriptor.byte_length)
+      const pathname = new URL(route.request().url()).pathname
+      const contentView = descriptor.available_views.find((view) => view.content_url === pathname)
+      if (!contentView) return route.abort()
+      const requested = Number(contentView.byte_length)
+      const body = Buffer.alloc(requested)
+      previewFixture.copy(body, 0, 0, requested)
+      const digest = decodeURIComponent(pathname.split('/')[3] ?? '')
       return route.fulfill({
         status: 206,
-        body: previewFixture.subarray(0, requested),
+        body,
         contentType: 'image/png',
         headers: {
-          etag: `"${descriptor.digest}"`,
-          'content-range': `bytes 0-${requested - 1}/${descriptor.byte_length}`,
+          etag: `"${digest}"`,
+          'content-range': `bytes 0-${requested - 1}/${contentView.byte_length}`,
           'content-length': String(requested),
         },
       })
@@ -262,12 +274,32 @@ test('keeps an oversized browser-native original download-only', async ({ page }
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('keeps an oversized automatic derivative metadata-only', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useArtifactScenario(page, oversizedDerivativeArtifact)
+  await page.goto('/sessions')
+
+  await submitArtifactWithoutMouse(page)
+  const artifact = page.getByRole('article', {
+    name: `Artifact ${imageArtifact.display_filename[0]}`,
+  })
+  await expect(artifact).toBeVisible()
+  await expect(artifact.getByText('metadata fallback', { exact: true })).toBeVisible()
+  await expect(artifact.locator('img')).toHaveCount(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('retries a transient original header failure', async ({ page }) => {
   const problems = watchBrowser(page)
   await useArtifactScenario(page, admittedOriginalArtifact)
   let headerAttempts = 0
   await page.route('**/api/blobs/**/content/image-png', (route) => {
-    if (route.request().headers().range) {
+    if (
+      route.request().headers().range &&
+      new URL(route.request().url()).pathname ===
+        admittedOriginalArtifact.available_views.find((view) => view.kind === 'browser_native')
+          ?.content_url
+    ) {
       headerAttempts += 1
       if (headerAttempts === 1) return route.fulfill({ status: 503 })
       return route.fulfill({
@@ -281,7 +313,7 @@ test('retries a transient original header failure', async ({ page }) => {
         },
       })
     }
-    return route.fulfill({ body: previewFixture, contentType: 'image/png' })
+    return route.fallback()
   })
   await page.goto('/sessions')
 
@@ -310,7 +342,12 @@ test('does not steal focus when an original header probe completes', async ({ pa
     releaseHeader = resolve
   })
   await page.route('**/api/blobs/**/content/image-png', async (route) => {
-    if (route.request().headers().range) {
+    if (
+      route.request().headers().range &&
+      new URL(route.request().url()).pathname ===
+        admittedOriginalArtifact.available_views.find((view) => view.kind === 'browser_native')
+          ?.content_url
+    ) {
       await headerBlocked
       return route.fulfill({
         status: 206,
@@ -323,7 +360,7 @@ test('does not steal focus when an original header probe completes', async ({ pa
         },
       })
     }
-    return route.fulfill({ body: previewFixture, contentType: 'image/png' })
+    return route.fallback()
   })
   await page.goto('/sessions')
 
@@ -333,6 +370,9 @@ test('does not steal focus when an original header probe completes', async ({ pa
   await download.focus()
   releaseHeader?.()
   await expect(page.getByRole('button', { name: 'Original loaded' })).toBeVisible()
+  await expect(
+    page.getByText(`Original admitted for ${imageArtifact.display_filename[0]}`, { exact: true }),
+  ).toHaveAttribute('role', 'status')
   await expect(download).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

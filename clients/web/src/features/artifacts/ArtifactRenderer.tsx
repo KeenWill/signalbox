@@ -14,6 +14,7 @@ const IMAGE_VIEW_PRIORITY: ReadonlyArray<WebBlobViewKind> = ['preview', 'thumbna
 // browser to fetch and decode deployment-sized blob content.
 export const MAX_INLINE_ORIGINAL_BYTES = 16 * 1024 * 1024
 export const MAX_INLINE_ORIGINAL_PIXELS = 40_000_000
+export const MAX_INLINE_DERIVATIVE_BYTES = MAX_INLINE_ORIGINAL_BYTES
 const MAX_IMAGE_INSPECTION_BYTES = MAX_INLINE_ORIGINAL_BYTES
 
 export const isInlineOriginalByteLengthAdmitted = (byteLength: string): boolean =>
@@ -25,6 +26,9 @@ export const isInlineOriginalLengthAdmitted = (
 ): boolean =>
   descriptorByteLength === originalByteLength &&
   isInlineOriginalByteLengthAdmitted(originalByteLength)
+
+export const isInlineDerivativeByteLengthAdmitted = (byteLength: string): boolean =>
+  BigInt(byteLength) <= BigInt(MAX_INLINE_DERIVATIVE_BYTES)
 
 export const selectImageView = (descriptor: WebBlobDescriptor): WebBlobAvailableView | undefined =>
   IMAGE_VIEW_PRIORITY.map((kind) =>
@@ -46,6 +50,11 @@ const viewByKind = (
 
 const displayName = (descriptor: WebBlobDescriptor): string =>
   descriptor.display_filename[0] ?? descriptor.digest
+
+const derivativeDigest = (view: WebBlobAvailableView): string | undefined => {
+  const digests = view.derivations.flatMap((derivation) => derivation.output_digests)
+  return digests.length === 1 ? digests[0] : undefined
+}
 
 const readAsciiTag = (bytes: Uint8Array, offset: number, length = 4): string =>
   String.fromCharCode(...bytes.subarray(offset, offset + length))
@@ -210,6 +219,10 @@ export function ArtifactRenderer({
   onOriginalRequested?: (digest: string) => void
 }) {
   const automatic = selectImageView(descriptor)
+  const automaticDigest = automatic ? derivativeDigest(automatic) : undefined
+  const automaticWithinByteLimit = automatic
+    ? isInlineDerivativeByteLengthAdmitted(automatic.byte_length)
+    : false
   const original = viewByKind(descriptor, 'browser_native')
   const originalWithinByteLimit = original
     ? isInlineOriginalLengthAdmitted(descriptor.byte_length, original.byte_length)
@@ -217,11 +230,58 @@ export function ArtifactRenderer({
   const [originalStatus, setOriginalStatus] = useState<
     'idle' | 'checking' | 'admitted' | 'rejected' | 'failed'
   >('idle')
+  const [automaticStatus, setAutomaticStatus] = useState<
+    'idle' | 'checking' | 'admitted' | 'rejected' | 'failed'
+  >('idle')
   const probeController = useRef<AbortController | null>(null)
+  const automaticProbeController = useRef<AbortController | null>(null)
   const originalAdmitted = originalStatus === 'admitted'
   const download = viewByKind(descriptor, 'download')
-  const rendered = originalRequested && originalAdmitted ? original : automatic
+  const rendered =
+    originalRequested && originalAdmitted
+      ? original
+      : automaticStatus === 'admitted'
+        ? automatic
+        : undefined
   const derivation = rendered?.derivations[0]
+
+  const admitAutomatic = useCallback(() => {
+    if (!automatic || !automaticDigest || !automaticWithinByteLimit || automaticStatus !== 'idle') {
+      return
+    }
+    automaticProbeController.current?.abort()
+    const controller = new AbortController()
+    automaticProbeController.current = controller
+    setAutomaticStatus('checking')
+    void productTransport
+      .readBlobHeader(
+        {
+          contentUrl: automatic.content_url,
+          digest: automaticDigest,
+          byteLength: automatic.byte_length,
+          maxBytes: MAX_INLINE_DERIVATIVE_BYTES,
+        },
+        controller.signal,
+      )
+      .then((bytes) => {
+        if (controller.signal.aborted) return
+        const dimensions = readImageDimensions(bytes)
+        if (
+          !dimensions ||
+          !isAnimationSafeImageHeader(bytes) ||
+          dimensions.width <= 0 ||
+          dimensions.height <= 0 ||
+          dimensions.width * dimensions.height > MAX_INLINE_ORIGINAL_PIXELS
+        ) {
+          setAutomaticStatus('rejected')
+          return
+        }
+        setAutomaticStatus('admitted')
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setAutomaticStatus('failed')
+      })
+  }, [automatic, automaticDigest, automaticStatus, automaticWithinByteLimit])
 
   const admitOriginal = useCallback(() => {
     if (!original || !originalWithinByteLimit || originalStatus === 'checking') return
@@ -268,8 +328,15 @@ export function ArtifactRenderer({
   ])
 
   useEffect(() => {
-    return () => probeController.current?.abort()
+    return () => {
+      probeController.current?.abort()
+      automaticProbeController.current?.abort()
+    }
   }, [])
+
+  useEffect(() => {
+    admitAutomatic()
+  }, [admitAutomatic])
 
   useEffect(() => {
     if (originalRequested && originalWithinByteLimit && originalStatus === 'idle') {
@@ -316,6 +383,11 @@ export function ArtifactRenderer({
           </div>
         </dl>
         <div className="artifact-actions">
+          {originalRequested && originalAdmitted && (
+            <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+              Original admitted for {displayName(descriptor)}
+            </span>
+          )}
           {original && (
             <button
               type="button"

@@ -3,6 +3,7 @@ import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import {
   imageViewLabel,
   isAnimationSafeImageHeader,
+  isInlineDerivativeByteLengthAdmitted,
   isInlineOriginalByteLengthAdmitted,
   isInlineOriginalLengthAdmitted,
   MAX_INLINE_ORIGINAL_BYTES,
@@ -78,6 +79,10 @@ describe('artifact renderer compatibility', () => {
 
   it('rejects an original beyond the inline byte ceiling', () => {
     expect(isInlineOriginalByteLengthAdmitted(String(MAX_INLINE_ORIGINAL_BYTES + 1))).toBe(false)
+  })
+
+  it('rejects an automatic derivative beyond the inline byte ceiling', () => {
+    expect(isInlineDerivativeByteLengthAdmitted(String(MAX_INLINE_ORIGINAL_BYTES + 1))).toBe(false)
   })
 
   it('rejects an original whose view length differs from the immutable blob length', () => {
