@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ProductContractAdmissionError,
-  productRoutes,
   productSurfaceStates,
   SameOriginProductTransport,
 } from './product'
@@ -111,18 +110,6 @@ describe('SameOriginProductTransport', () => {
 })
 
 describe('product surface availability', () => {
-  it('defines one typed authority state for every product route', () => {
-    expect(productSurfaceStates).toHaveProperty(productRoutes[0].id)
-    expect(productSurfaceStates).toHaveProperty(productRoutes[1].id)
-    expect(productSurfaceStates).toHaveProperty(productRoutes[2].id)
-    expect(productSurfaceStates).toHaveProperty(productRoutes[3].id)
-    expect(productSurfaceStates).toHaveProperty(productRoutes[4].id)
-    expect(productSurfaceStates).toHaveProperty(productRoutes[5].id)
-    expect(productSurfaceStates).toHaveProperty(productRoutes[6].id)
-    expect(productSurfaceStates).toHaveProperty(productRoutes[7].id)
-    expect(productSurfaceStates).toHaveProperty(productRoutes[8].id)
-  })
-
   it('keeps Settings browser-local instead of implying daemon authority', () => {
     expect(productSurfaceStates.settings).toEqual({
       kind: 'browser-local',

@@ -50,7 +50,9 @@ test('opens the product at Attention with generated-contract transport status', 
 
   await expect(page).toHaveURL(/\/attention$/)
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
-  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
+  await expect(
+    page.getByText(`${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`),
+  ).toBeVisible()
   await expect(page.getByRole('link', { name: /Attention/ })).toHaveAttribute(
     'aria-current',
     'page',
@@ -278,7 +280,7 @@ test('applies saved presentation preferences on a direct Imports scenario load',
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('changes and restores a Settings preference without a mouse', async ({ page }) => {
+test('persists a Settings preference changed without a mouse', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto(settingsPreferenceFixture.path)
@@ -288,6 +290,20 @@ test('changes and restores a Settings preference without a mouse', async ({ page
   await page.keyboard.press('Space')
   await expect(lightTheme).toBeChecked()
   await page.reload()
+  await expect(
+    page.getByRole('radio', { name: settingsPreferenceFixture.changedTheme }),
+  ).toBeChecked()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('restores default Settings preferences without a mouse', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.addInitScript(() => {
+    localStorage.setItem('signalbox.web.preferences.v1', JSON.stringify({ theme: 'light' }))
+  })
+  await page.goto(settingsPreferenceFixture.path)
+
   await expect(
     page.getByRole('radio', { name: settingsPreferenceFixture.changedTheme }),
   ).toBeChecked()
