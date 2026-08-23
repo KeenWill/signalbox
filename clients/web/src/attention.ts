@@ -18,6 +18,9 @@ export const reduceAttentionEvent = (
 ): AttentionReduction => {
   if (event.kind === 'snapshot') return { kind: 'projection', snapshot: event.snapshot }
   if (event.kind === 'resync_required' || !current) return { kind: 'resync' }
+  if (event.cursor === current.cursor && event.summaries.length === 0) {
+    return { kind: 'projection', snapshot: current }
+  }
   if (BigInt(event.cursor) <= BigInt(current.cursor)) return { kind: 'resync' }
 
   const updateSessionIds = new Set(event.summaries.map((summary) => summary.session_id))

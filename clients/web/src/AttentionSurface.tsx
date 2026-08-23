@@ -46,6 +46,7 @@ export function AttentionSurface({
   const [monitorGeneration, setMonitorGeneration] = useState(0)
   const returnFocus = useRef<HTMLButtonElement>(null)
   const closeFocus = useRef<HTMLButtonElement>(null)
+  const errorFocus = useRef<HTMLButtonElement>(null)
   const pageHeading = useRef<HTMLHeadingElement>(null)
   const focusReplacement = useRef(false)
   const focusRevealedList = useRef(false)
@@ -115,11 +116,13 @@ export function AttentionSurface({
   }, [registerEscapeHandler, selectedId])
 
   useEffect(() => {
-    if (!attention.data || !focusReplacement.current) return
+    if (!focusReplacement.current) return
+    const target = attention.data ? pageHeading : attention.isError ? errorFocus : null
+    if (!target) return
     focusReplacement.current = false
-    const frame = requestAnimationFrame(() => pageHeading.current?.focus())
+    const frame = requestAnimationFrame(() => target.current?.focus())
     return () => cancelAnimationFrame(frame)
-  }, [attention.data])
+  }, [attention.data, attention.isError])
 
   useEffect(() => {
     if (!selectedId || !attention.data || selected) return
@@ -177,7 +180,7 @@ export function AttentionSurface({
                 ? `${attention.error.code}: ${attention.error.message}`
                 : 'The response did not match the generated web contract.'}
             </p>
-            <button type="button" onClick={() => void attention.refetch()}>
+            <button ref={errorFocus} type="button" onClick={() => void attention.refetch()}>
               Retry
             </button>
             {after && (

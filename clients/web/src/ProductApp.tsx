@@ -443,6 +443,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               ;(visibleNavigationTrigger ?? fallbackTrigger)?.focus()
             }}
           >
+            <Dialog.Close asChild>
+              <button className="icon-button" type="button" aria-label="Close product navigation">
+                <X aria-hidden="true" />
+              </button>
+            </Dialog.Close>
             <Dialog.Title className="sr-only">Product navigation</Dialog.Title>
             <Dialog.Description id="mobile-navigation-description" className="sr-only">
               Choose a Signalbox surface.

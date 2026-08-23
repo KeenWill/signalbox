@@ -97,6 +97,26 @@ describe('attention projection recovery', () => {
     expect(reduction).toEqual({ kind: 'resync' })
   })
 
+  it('ignores an empty update at the current cursor', () => {
+    const reduction = reduceAttentionEvent(snapshot, {
+      kind: 'update',
+      cursor: snapshot.cursor,
+      summaries: [],
+    })
+
+    expect(reduction).toEqual({ kind: 'projection', snapshot })
+  })
+
+  it('requests resynchronization for replacements at the current cursor', () => {
+    const reduction = reduceAttentionEvent(snapshot, {
+      kind: 'update',
+      cursor: snapshot.cursor,
+      summaries: [replacement],
+    })
+
+    expect(reduction).toEqual({ kind: 'resync' })
+  })
+
   it('requests resynchronization for duplicate identities in an update', () => {
     const reduction = reduceAttentionEvent(snapshot, {
       kind: 'update',

@@ -185,6 +185,30 @@ test('uses a navigation sheet on a phone viewport and unwinds it with Escape', a
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('closes the phone navigation sheet with its semantic close control', async ({ page }) => {
+  await useDeterministicProductTransport(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+
+  const openNavigation = page.getByRole('button', { name: 'Open navigation' })
+  await openNavigation.click()
+  await page.getByRole('button', { name: 'Close product navigation' }).click()
+
+  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeHidden()
+  await expect(openNavigation).toBeFocused()
+})
+
+test('moves focus before focus layout hides the product navigation', async ({ page }) => {
+  await useDeterministicProductTransport(page)
+  await page.goto('/attention')
+
+  await page.getByRole('link', { name: /Attention/ }).focus()
+  await page.keyboard.press('Shift+W')
+
+  await expect(page.getByRole('main')).toBeFocused()
+  await expect(page.getByRole('button', { name: 'Switch to workbench layout' })).toBeVisible()
+})
+
 test('closes the phone navigation sheet after route selection', async ({ page }) => {
   await useDeterministicProductTransport(page)
   await page.setViewportSize({ width: 390, height: 844 })

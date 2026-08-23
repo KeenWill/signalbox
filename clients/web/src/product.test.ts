@@ -291,6 +291,70 @@ describe('SameOriginProductTransport', () => {
   })
 
   it('rejects attention summaries that are not ordered by session identity', async () => {
+    const actionless = { ...attentionFixture.summaries[0], action: null }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () => new Response(JSON.stringify({ ...attentionFixture, summaries: [actionless] })),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).resolves.toEqual({
+      ...attentionFixture,
+      summaries: [actionless],
+    })
+  })
+
+  it('rejects malformed session identities and judge counts', async () => {
+    const malformedIdentity = { ...attentionFixture.summaries[0], session_id: 'not-a-uuid' }
+    const malformedCount = {
+      ...attentionFixture.summaries[0],
+      judge: { ...attentionFixture.summaries[0].judge, failed: '-1' },
+    }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ...attentionFixture,
+            continuation_after_session_id: 'not-a-uuid',
+            summaries: [malformedIdentity],
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ...attentionFixture, summaries: [malformedCount] })),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
+      'attention summary session identity must be a canonical UUID',
+    )
+    await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
+      'attention cursor must be a canonical unsigned 64-bit integer',
+    )
+  })
+
+  it('rejects streamed updates beyond the contract item ceiling', async () => {
+    const summaries = Array.from({ length: MAX_ATTENTION_SNAPSHOT_ITEMS + 1 }, (_, index) => ({
+      ...attentionFixture.summaries[0],
+      session_id: `018f1840-6f3d-7a8b-9c1d-${index.toString(16).padStart(12, '0')}`,
+    }))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(`${JSON.stringify({ kind: 'update', cursor: '18', summaries })}\n`),
+      ),
+    )
+    const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
+
+    await expect(events.next()).rejects.toThrow(
+      'attention update exceeds the contract item ceiling',
+    )
+  })
+
+  it('rejects attention summaries that are not ordered by session identity', async () => {
     const unordered = {
       ...attentionFixture,
       summaries: [

@@ -14,6 +14,8 @@ export const MAX_BOOTSTRAP_BYTES = 65_536
 export const MAX_ATTENTION_SNAPSHOT_BYTES = 65_536
 export const MAX_ATTENTION_SNAPSHOT_ITEMS = 64
 const MAX_UNSIGNED_64 = 18_446_744_073_709_551_615n
+const SESSION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
 const validateCursor = (cursor: string): void => {
   if (!/^(0|[1-9]\d*)$/.test(cursor) || BigInt(cursor) > MAX_UNSIGNED_64) {
@@ -39,12 +41,23 @@ const validateBootstrap = (bootstrap: WebContractBootstrap): WebContractBootstra
 type AttentionSummary = WebAttentionSnapshot['summaries'][number]
 
 const validateAttentionSummary = (summary: AttentionSummary): void => {
+  if (!SESSION_ID_PATTERN.test(summary.session_id)) {
+    throw new TypeError('attention summary session identity must be a canonical UUID')
+  }
+  for (const count of [
+    summary.judge.actionable,
+    summary.judge.completed,
+    summary.judge.escalated,
+    summary.judge.failed,
+  ]) {
+    validateCursor(count)
+  }
   const expectedAction = (() => {
     switch (summary.state) {
       case 'blocked':
         return 'provide_goal_need'
       case 'awaiting_approval':
-        return 'decide_approval'
+        return summary.action === null || summary.action === undefined ? null : 'decide_approval'
       case 'ambiguous':
       case 'awaiting_reconciliation':
         return 'reconcile_turn'
@@ -168,6 +181,9 @@ const decodeAttentionLines = async function* (
           else {
             validateCursor(event.cursor)
             if (event.kind === 'update') {
+              if (event.summaries.length > MAX_ATTENTION_SNAPSHOT_ITEMS) {
+                throw new TypeError('attention update exceeds the contract item ceiling')
+              }
               for (const summary of event.summaries) validateAttentionSummary(summary)
             }
           }

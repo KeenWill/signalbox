@@ -239,6 +239,7 @@ test('returns to the live page after a paged read fails', async ({ page }) => {
 
   await page.getByRole('button', { name: /Next page/ }).click()
   await expect(page.getByRole('heading', { name: 'Attention could not be read' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Retry' })).toBeFocused()
   await page.getByRole('button', { name: 'Return to live page' }).click()
 
   await expect(page.getByText(approvalSessionId)).toBeVisible()
