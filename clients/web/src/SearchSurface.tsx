@@ -14,6 +14,21 @@ type SearchResult = WebSearchPage['results'][number]
 const displayClass = (value: string) => value.replaceAll('_', ' ')
 const MAX_U64 = 18_446_744_073_709_551_615n
 const MAX_I64 = 9_223_372_036_854_775_807n
+const MAX_SESSION_DRAFT_LENGTH = 45
+
+const boundedUtf8Prefix = (value: string, maximumBytes: number) => {
+  let bytes = 0
+  let prefix = ''
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0
+    const characterBytes =
+      codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4
+    if (bytes + characterBytes > maximumBytes) break
+    bytes += characterBytes
+    prefix += character
+  }
+  return prefix
+}
 
 const validUuid = (value: string) => {
   const simple = /^[0-9a-f]{32}$/i
@@ -71,6 +86,7 @@ export function SearchSurface({
   const [draftIsInvalid, setDraftIsInvalid] = useState(false)
   const resultsHeadingRef = useRef<HTMLHeadingElement>(null)
   const errorHeadingRef = useRef<HTMLHeadingElement>(null)
+  const routeValidationRef = useRef<HTMLParagraphElement>(null)
   const restoreResultsFocusRef = useRef(false)
   const submittedRouteChangeRef = useRef(false)
   const activeAfter =
@@ -148,6 +164,7 @@ export function SearchSurface({
   })
   const searchData = requestIsValid ? results.data : undefined
   const searchIsFetching = requestIsValid && results.isFetching
+  const routeValidationIsVisible = bootstrap !== undefined && Boolean(queryText) && !requestIsValid
   useEffect(() => {
     if (!restoreResultsFocusRef.current) return
     if (searchData !== undefined) {
@@ -156,8 +173,11 @@ export function SearchSurface({
     } else if (requestIsValid && results.isError) {
       restoreResultsFocusRef.current = false
       errorHeadingRef.current?.focus()
+    } else if (routeValidationIsVisible) {
+      restoreResultsFocusRef.current = false
+      routeValidationRef.current?.focus()
     }
-  }, [requestIsValid, results.isError, searchData])
+  }, [requestIsValid, results.isError, routeValidationIsVisible, searchData])
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -202,7 +222,7 @@ export function SearchSurface({
               name="q"
               value={draftQuery}
               onChange={(event) => {
-                setDraftQuery(event.currentTarget.value)
+                setDraftQuery(boundedUtf8Prefix(event.currentTarget.value, queryLimit))
                 setDraftIsInvalid(false)
               }}
               placeholder="Natural language terms"
@@ -218,9 +238,10 @@ export function SearchSurface({
             name="session"
             value={draftSession}
             onChange={(event) => {
-              setDraftSession(event.currentTarget.value)
+              setDraftSession(event.currentTarget.value.slice(0, MAX_SESSION_DRAFT_LENGTH))
               setDraftIsInvalid(false)
             }}
+            maxLength={MAX_SESSION_DRAFT_LENGTH}
             placeholder="Session UUID"
           />
         </label>
@@ -233,8 +254,13 @@ export function SearchSurface({
           Search parameters are malformed or outside the contract bounds.
         </p>
       )}
-      {bootstrap !== undefined && queryText && !requestIsValid && (
-        <p className="search-notice" role="alert">
+      {routeValidationIsVisible && (
+        <p
+          className="search-notice"
+          ref={routeValidationRef}
+          role="alert"
+          tabIndex={-1}
+        >
           Search parameters are malformed or outside the contract bounds. Search text uses{' '}
           {queryBytes} of {queryLimit} allowed UTF-8 bytes.
         </p>
