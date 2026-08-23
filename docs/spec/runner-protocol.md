@@ -1783,19 +1783,19 @@ interpreter and optional-argument expansion. The fully constructed outer
 bubblewrap dispatch request, including every configured mount argument, must
 independently fit the same budget. The actual availability-probe request,
 including the selected sandbox shell, probe arguments, configured mounts, and
-non-secret delivery payload, must
-independently fit it as well. All three checks include terminators and pointer
-arrays, and an oversized request is rejected before the availability probe. The
-caller value is written to a private anonymous descriptor, materialized as a
-mode-`0600` file inside the namespace after configured mounts, read and removed
-by the namespace-local dispatcher, and added only to the final target
-environment. The outer supervisor and bubblewrap process never receive the
-caller value in argv or environment. The availability probe exercises the same
-descriptor/file shape with a fixed non-secret value rather than the caller
-value. Debug output retains only the name and a redaction marker. The
-daemon-local sandbox profile cannot use this channel. This core does not resolve
-credential files or redact captured command output; the runner preparer that
-owns a selected credential must do both before and after this boundary.
+non-secret delivery payload, must independently fit it as well. All three checks
+include terminators and pointer arrays, and an oversized request is rejected
+before the availability probe. The caller value is written to a private
+anonymous descriptor, materialized as a mode-`0600` file inside the namespace
+after configured mounts, read and removed by the namespace-local dispatcher, and
+added only to the final target environment. The outer supervisor and bubblewrap
+process never receive the caller value in argv or environment. The availability
+probe exercises the same descriptor/file shape with a fixed non-secret value
+rather than the caller value. Debug output retains only the name and a redaction
+marker. The daemon-local sandbox profile cannot use this channel. This core does
+not resolve credential files or redact captured command output; the runner
+preparer that owns a selected credential must do both before and after this
+boundary.
 
 Confinement is defined over that writable root, which need not be a repository.
 The root is the provisioned repository when the placement requires a worktree,
