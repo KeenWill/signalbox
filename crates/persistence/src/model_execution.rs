@@ -655,8 +655,13 @@ impl PostgresModelCallRepository {
                        model_call.usage_cache_creation_input_tokens,
                        model_call.usage_cache_read_input_tokens,
                        NULL::numeric AS reported_through_position,
-                       NULL::uuid AS reported_summary_entry_id
+                       NULL::uuid AS reported_summary_entry_id,
+                       headroom.projected_result_content_bytes AS
+                           proven_unreported_content_bytes
                   FROM model_call
+                  LEFT JOIN tool_continuation_context_headroom AS headroom
+                    ON headroom.session_id = model_call.session_id
+                   AND headroom.producing_model_call_id = model_call.model_call_id
                  WHERE model_call.session_id = $1
                    AND model_call.resolved_provider_model_identity_id = $2
                    AND model_call.state_kind = 'terminal'
@@ -685,7 +690,8 @@ impl PostgresModelCallRepository {
                        latest.usage_cache_creation_input_tokens,
                        latest.usage_cache_read_input_tokens,
                        member.member_position AS reported_through_position,
-                       latest.summary_entry_id AS reported_summary_entry_id
+                       latest.summary_entry_id AS reported_summary_entry_id,
+                       NULL::numeric AS proven_unreported_content_bytes
                   FROM latest_compaction AS latest
                   JOIN context_frontier_member AS member
                     ON member.owning_session_id = $1
@@ -733,7 +739,9 @@ impl PostgresModelCallRepository {
                     usage_input_tokens, usage_output_tokens,
                     usage_cache_creation_input_tokens,
                     usage_cache_read_input_tokens,
-                    (
+                    GREATEST(
+                        COALESCE(latest_call.proven_unreported_content_bytes, 0),
+                        (
                         SELECT COALESCE(SUM(
                             CASE entry.payload_kind
                                 WHEN 'imported_entry' THEN
@@ -810,6 +818,7 @@ impl PostgresModelCallRepository {
                                       )
                                )
                            )
+                        )
                     ) AS projected_unreported_content_bytes
                FROM latest_call",
         )

@@ -315,6 +315,26 @@ async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Resul
         reported.projected_unreported_content_bytes(),
         result_content_bytes
     );
+    let producing_frontier: Uuid = sqlx::query_scalar(
+        "SELECT context_frontier_id
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let successor_reported = model_repository
+        .latest_reported_usage(
+            fixture.session,
+            target,
+            ContextFrontierId::from_uuid(producing_frontier),
+        )
+        .await?
+        .expect("the durable headroom proof remains authoritative for a successor frontier");
+    assert_eq!(
+        successor_reported.projected_unreported_content_bytes(),
+        result_content_bytes
+    );
 
     let stored: (String, Option<Uuid>, Uuid, Decimal, Decimal, Decimal, i64) = sqlx::query_as(
         "SELECT lifecycle.terminal_disposition_kind,
