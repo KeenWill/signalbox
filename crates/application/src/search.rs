@@ -436,15 +436,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn search_text_rejects_empty_nul_and_over_bound_expressions() {
+    fn search_text_rejects_whitespace_only_expressions() {
         assert_eq!(
             SearchText::try_new(String::from("  \n")),
             Err(SearchTextError::Empty)
         );
+    }
+
+    #[test]
+    fn search_text_rejects_nul_containing_expressions() {
         assert_eq!(
             SearchText::try_new(String::from("a\0b")),
             Err(SearchTextError::ContainsNul)
         );
+    }
+
+    #[test]
+    fn search_text_rejects_expressions_above_the_byte_ceiling() {
         assert_eq!(
             SearchText::try_new("x".repeat(max_search_query_bytes() + 1)),
             Err(SearchTextError::TooLong)
@@ -452,8 +460,12 @@ mod tests {
     }
 
     #[test]
-    fn search_page_limit_rejects_zero_and_values_above_the_hard_ceiling() {
+    fn search_page_limit_rejects_zero() {
         assert_eq!(SearchPageLimit::new(0), Err(SearchPageLimitError));
+    }
+
+    #[test]
+    fn search_page_limit_rejects_values_above_the_hard_ceiling() {
         assert_eq!(
             SearchPageLimit::new(max_search_page_items() + 1),
             Err(SearchPageLimitError)
@@ -461,15 +473,23 @@ mod tests {
     }
 
     #[test]
-    fn explicit_projection_text_rejects_empty_nul_and_over_bound_values() {
+    fn explicit_projection_text_rejects_empty_values() {
         assert_eq!(
             SearchProjectionText::try_new(String::new()),
             Err(SearchProjectionTextError::Empty)
         );
+    }
+
+    #[test]
+    fn explicit_projection_text_rejects_nul_containing_values() {
         assert_eq!(
             SearchProjectionText::try_new(String::from("a\0b")),
             Err(SearchProjectionTextError::ContainsNul)
         );
+    }
+
+    #[test]
+    fn explicit_projection_text_rejects_values_above_the_byte_ceiling() {
         assert_eq!(
             SearchProjectionText::try_new("x".repeat(max_search_projection_text_bytes() + 1)),
             Err(SearchProjectionTextError::TooLong)
