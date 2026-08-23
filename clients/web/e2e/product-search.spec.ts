@@ -297,7 +297,11 @@ test('does not search without the bounded JSON capability', async ({ page }) => 
   })
   await page.goto('/search?q=release')
 
-  await expect(page.getByText('This surface is intentionally deferred')).toBeVisible()
+  await expect(
+    page.getByRole('heading', {
+      name: 'Operational data is not exposed by this daemon contract',
+    }),
+  ).toBeVisible()
   expect(searchRequests).toBe(0)
 })
 
@@ -308,9 +312,13 @@ test('refetches when resubmitting the current first-page search', async ({ page 
 
   await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
 
-  await expect(page.getByRole('status')).toHaveText('Refreshing the durable projection.')
+  await expect(page.getByText('Refreshing the durable projection.', { exact: true })).toHaveText(
+    'Refreshing the durable projection.',
+  )
   await expect(page.getByRole('heading', { name: '1 results on this page' })).toBeVisible()
-  await expect(page.getByRole('status')).toHaveText('1 results loaded on this page.')
+  await expect(page.getByText('1 results loaded on this page.', { exact: true })).toHaveText(
+    '1 results loaded on this page.',
+  )
   await expect(page.getByText('release planning')).toBeVisible()
 })
 
