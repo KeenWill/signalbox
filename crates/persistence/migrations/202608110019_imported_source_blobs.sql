@@ -62,19 +62,21 @@ BEGIN
                    SELECT session_id FROM imported_reset_session
                )
         UNION
-        SELECT event.finding_run_id
+        SELECT adjacent.run_id
           FROM affected_run AS affected
-          JOIN review_finding AS referenced
-            ON referenced.run_id = affected.run_id
-          JOIN review_finding_event AS event
-            ON event.referenced_finding_id = referenced.finding_id
-        UNION
-        SELECT event.event_pass_run_id
-          FROM affected_run AS affected
-          JOIN review_finding AS finding
-            ON finding.run_id = affected.run_id
-          JOIN review_finding_event AS event
-            ON event.finding_id = finding.finding_id
+          JOIN LATERAL (
+                   SELECT event.finding_run_id AS run_id
+                     FROM review_finding AS referenced
+                     JOIN review_finding_event AS event
+                       ON event.referenced_finding_id = referenced.finding_id
+                    WHERE referenced.run_id = affected.run_id
+                   UNION
+                   SELECT event.event_pass_run_id AS run_id
+                     FROM review_finding AS finding
+                     JOIN review_finding_event AS event
+                       ON event.finding_id = finding.finding_id
+                    WHERE finding.run_id = affected.run_id
+               ) AS adjacent ON true
     )
     SELECT run_id FROM affected_run;
 
