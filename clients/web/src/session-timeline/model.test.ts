@@ -174,6 +174,23 @@ describe('BoundedSessionHistory', () => {
     )
   })
 
+  it('rejects a descriptor structured total impossible for its item count', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        sizes: { ...descriptor.sizes, projected_structured_bytes: '0' },
+      }),
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+
+    await expect(new BoundedSessionHistory(sessionId, source).describe()).rejects.toThrow(
+      'structured byte total is contradictory',
+    )
+  })
+
   it('normalizes non-finite limits to their safe minima', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const window = await new BoundedSessionHistory(sessionId, scenario).load(
@@ -567,6 +584,43 @@ describe('BoundedSessionHistory', () => {
     )
   })
 
+  it('rejects a window preceding the cached first address', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        sizes: {
+          ...descriptor.sizes,
+          item_count: '101',
+          projected_structured_bytes: '8000',
+        },
+        first_address: { event_sequence: '100' },
+        latest_address: { event_sequence: '200' },
+      }),
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '1' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 78,
+        continuation_before: null,
+        continuation_after: { event_sequence: '1' },
+      }),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(history.load({ kind: 'first' }, { maxItems: 1, maxBytes: 256 })).rejects.toThrow(
+      'precedes the cached first address',
+    )
+  })
+
   it('rejects a timeline window whose addresses decrease', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const source: SessionTimelineSource = {
@@ -900,6 +954,47 @@ describe('BoundedSessionHistory', () => {
     await expect(
       source.readWindow(sessionId, { kind: 'first' }, { maxItems: 1, maxBytes: 256 }),
     ).rejects.toThrow('encoded byte ceiling')
+  })
+
+  it('rejects HTTP timeline responses for another session', async () => {
+    const otherSessionId = '00000000-0000-0000-0000-000000000992'
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(otherSessionId)
+    const window = await scenario.readWindow(
+      otherSessionId,
+      { kind: 'first' },
+      { maxItems: 1, maxBytes: 256 },
+    )
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            contract: { name: 'signalbox.web-http', version: '1' },
+            capabilities: {
+              bounded_json: true,
+              same_origin_json_mutations: true,
+              ndjson_streaming: true,
+              bounded_session_timeline: true,
+            },
+            limits: {
+              max_json_body_bytes: 1024,
+              max_ndjson_item_bytes: 1024,
+              max_timeline_window_items: 256,
+              max_timeline_window_bytes: 64 * 1024,
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(descriptor), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(window), { status: 200 }))
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    await expect(source.readDescriptor(sessionId)).rejects.toThrow('descriptor session mismatch')
+    await expect(
+      source.readWindow(sessionId, { kind: 'first' }, { maxItems: 1, maxBytes: 256 }),
+    ).rejects.toThrow('timeline window session mismatch')
   })
 
   it('rejects invalid UTF-8 before JSON decoding', async () => {
