@@ -411,7 +411,7 @@ export function SessionWorkspaceSurface({
         <p className="session-load-state" role="alert">
           The daemon could not provide this bounded session window: {session.error.message}
         </p>
-      ) : !session.data ? (
+      ) : displayedSession === undefined ? (
         <p className="session-load-state">Loading descriptor and bounded history…</p>
       ) : (
         <section className="session-workspace" aria-labelledby="session-workspace-heading">
@@ -420,10 +420,10 @@ export function SessionWorkspaceSurface({
               <span className="eyebrow">Stable timeline identity</span>
               <h2 id="session-workspace-heading">{sessionId}</h2>
               <p>
-                {session.data.active ? 'Active' : 'Inactive'} ·{' '}
-                {session.data.anchor.kind === 'first'
+                {displayedSession.active ? 'Active' : 'Inactive'} ·{' '}
+                {displayedSession.anchor.kind === 'first'
                   ? 'opened at first'
-                  : session.data.anchor.kind === 'latest'
+                  : displayedSession.anchor.kind === 'latest'
                     ? 'opened near latest'
                     : 'restored logical position'}
               </p>
@@ -431,19 +431,19 @@ export function SessionWorkspaceSurface({
             <dl className="session-telemetry">
               <div>
                 <dt>Items</dt>
-                <dd>{session.data.descriptor.sizes.item_count}</dd>
+                <dd>{displayedSession.descriptor.sizes.item_count}</dd>
               </div>
               <div>
                 <dt>Active</dt>
-                <dd>{session.data.descriptor.work.active_turn_count}</dd>
+                <dd>{displayedSession.descriptor.work.active_turn_count}</dd>
               </div>
               <div>
                 <dt>Queued</dt>
-                <dd>{session.data.descriptor.work.queued_turn_count}</dd>
+                <dd>{displayedSession.descriptor.work.queued_turn_count}</dd>
               </div>
               <div>
                 <dt>Observed</dt>
-                <dd>{session.data.descriptor.observed_through}</dd>
+                <dd>{displayedSession.descriptor.observed_through}</dd>
               </div>
             </dl>
           </header>
@@ -455,8 +455,8 @@ export function SessionWorkspaceSurface({
               <SkipForward aria-hidden="true" /> Latest <kbd>G</kbd>
             </button>
             <span>
-              {session.data.window.items.length} bounded items ·{' '}
-              {session.data.window.projected_structured_bytes} B
+              {displayedSession.window.items.length} bounded items ·{' '}
+              {displayedSession.window.projected_structured_bytes} B
             </span>
           </div>
           <div
