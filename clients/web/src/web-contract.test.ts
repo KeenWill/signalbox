@@ -77,9 +77,9 @@ describe('generated timeline detail decoder', () => {
             turn_id: '00000000-0000-0000-0000-000000000002',
             producing_model_call_id: '00000000-0000-0000-0000-000000000003',
             state: {
-        type: 'results_projected',
-        frontier_id: '00000000-0000-0000-0000-000000000008',
-      },
+              type: 'results_projected',
+              frontier_id: '00000000-0000-0000-0000-000000000008',
+            },
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000004',
@@ -224,9 +224,9 @@ describe('generated timeline detail decoder', () => {
             turn_id: '00000000-0000-0000-0000-000000000002',
             producing_model_call_id: '00000000-0000-0000-0000-000000000003',
             state: {
-        type: 'results_projected',
-        frontier_id: '00000000-0000-0000-0000-000000000008',
-      },
+              type: 'results_projected',
+              frontier_id: '00000000-0000-0000-0000-000000000008',
+            },
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000004',
@@ -456,9 +456,9 @@ describe('generated timeline detail decoder', () => {
             turn_id: '00000000-0000-0000-0000-000000000002',
             producing_model_call_id: '00000000-0000-0000-0000-000000000003',
             state: {
-        type: 'proposed',
-        frontier_id: '00000000-0000-0000-0000-000000000008',
-      },
+              type: 'proposed',
+              frontier_id: '00000000-0000-0000-0000-000000000008',
+            },
             tools: [
               {
                 request_id: '00000000-0000-0000-0000-000000000004',
