@@ -988,7 +988,6 @@ fn sandbox_arguments(
     probe_declarations: Option<&[FileMediaProviderDeclaration]>,
 ) -> Vec<std::ffi::OsString> {
     let memory = worker_memory_budget(memory_bytes);
-    let worker = PathBuf::from(format!("/proc/self/fd/{worker_fd}"));
     let mut arguments = [
         "--die-with-parent",
         "--new-session",
@@ -1032,8 +1031,8 @@ fn sandbox_arguments(
         std::ffi::OsString::from(memory.shared_memory_bytes.to_string()),
         std::ffi::OsString::from("--tmpfs"),
         std::ffi::OsString::from("/dev/shm"),
-        std::ffi::OsString::from("--ro-bind"),
-        worker.into_os_string(),
+        std::ffi::OsString::from("--ro-bind-fd"),
+        std::ffi::OsString::from(worker_fd.to_string()),
         std::ffi::OsString::from(WORKER_SANDBOX_PATH),
         std::ffi::OsString::from("--seccomp"),
         std::ffi::OsString::from(seccomp_fd.to_string()),
@@ -1625,8 +1624,8 @@ mod tests {
         assert!(arguments.windows(3).any(|window| {
             window
                 == [
-                    OsStr::new("--ro-bind"),
-                    OsStr::new("/proc/self/fd/7"),
+                    OsStr::new("--ro-bind-fd"),
+                    OsStr::new("7"),
                     OsStr::new("/signalbox-file-media-worker"),
                 ]
         }));
