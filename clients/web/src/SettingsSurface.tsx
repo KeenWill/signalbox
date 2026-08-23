@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { type CommandId, invokeCommand } from './commands'
 import { defaultBrowserPreferences } from './preferences'
-import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
+import { selectApp, store, useAppDispatch, useAppSelector } from './state'
 
 function PreferenceGroup({ legend, children }: { legend: string; children: ReactNode }) {
   return (
@@ -18,14 +18,21 @@ export function SettingsSurface() {
   const invokeSettingsCommand = (
     command: Extract<
       CommandId,
-      `detail.${string}` | 'layout.toggle' | 'density.toggle' | 'theme.toggle' | 'preferences.reset'
+      | `detail.${string}`
+      | `pane.${string}.resize`
+      | 'layout.toggle'
+      | 'density.toggle'
+      | 'theme.toggle'
+      | 'preferences.reset'
     >,
+    paneSize?: number,
   ) =>
     invokeCommand(command, {
       dispatch,
       getState: store.getState,
       timelineIds: [],
       focusTimeline: () => {},
+      paneSize,
     })
   return (
     <div className="surface-body settings-surface">
@@ -148,12 +155,7 @@ export function SettingsSurface() {
               max="360"
               value={app.paneSizes.navigation}
               onChange={(event) =>
-                dispatch(
-                  actions.paneSizesSet({
-                    ...app.paneSizes,
-                    navigation: event.currentTarget.valueAsNumber,
-                  }),
-                )
+                invokeSettingsCommand('pane.navigation.resize', event.currentTarget.valueAsNumber)
               }
             />
           </label>
@@ -167,12 +169,7 @@ export function SettingsSurface() {
               max="480"
               value={app.paneSizes.inspector}
               onChange={(event) =>
-                dispatch(
-                  actions.paneSizesSet({
-                    ...app.paneSizes,
-                    inspector: event.currentTarget.valueAsNumber,
-                  }),
-                )
+                invokeSettingsCommand('pane.inspector.resize', event.currentTarget.valueAsNumber)
               }
             />
           </label>

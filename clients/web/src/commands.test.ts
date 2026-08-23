@@ -25,6 +25,25 @@ describe('command registry', () => {
     expect(selectApp(store.getState()).theme).toBe('dark')
   })
 
+  it('routes pane resizing through parameterized central commands', () => {
+    invokeCommand('pane.navigation.resize', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      paneSize: 320,
+    })
+    invokeCommand('pane.inspector.resize', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      paneSize: 440,
+    })
+
+    expect(selectApp(store.getState()).paneSizes).toEqual({ navigation: 320, inspector: 440 })
+  })
+
   it('selects the first timeline item when next starts from a missing selection', () => {
     const timelineIds = ['event-0', 'event-1'] as const
     store.dispatch(actions.timelineSelected('filtered-out-event'))

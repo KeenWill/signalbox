@@ -6,6 +6,7 @@ export interface CommandContext {
   dispatch: AppDispatch
   getState: () => RootState
   timelineIds: readonly string[]
+  paneSize?: number
   timelineWindowAvailable?: boolean
   focusTimeline: () => void
   loadTimelineWindow?: (anchor: 'first' | 'latest') => void
@@ -217,6 +218,40 @@ export const commandRegistry = [
     bindings: [],
     available: always,
     run: (context) => context.dispatch(actions.preferencesReset()),
+  },
+  {
+    id: 'pane.navigation.resize',
+    title: 'Resize navigation pane',
+    description: 'Set the browser-local Workbench navigation pane width.',
+    category: 'View',
+    bindings: [],
+    available: (context) => context.paneSize !== undefined,
+    run: (context) => {
+      if (context.paneSize === undefined) return
+      context.dispatch(
+        actions.paneSizesSet({
+          ...context.getState().app.paneSizes,
+          navigation: context.paneSize,
+        }),
+      )
+    },
+  },
+  {
+    id: 'pane.inspector.resize',
+    title: 'Resize inspector pane',
+    description: 'Set the browser-local Workbench inspector pane width.',
+    category: 'View',
+    bindings: [],
+    available: (context) => context.paneSize !== undefined,
+    run: (context) => {
+      if (context.paneSize === undefined) return
+      context.dispatch(
+        actions.paneSizesSet({
+          ...context.getState().app.paneSizes,
+          inspector: context.paneSize,
+        }),
+      )
+    },
   },
 ] as const satisfies readonly CommandDefinitionShape[]
 

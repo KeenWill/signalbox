@@ -165,7 +165,24 @@ export function SessionWorkspaceSurface({
         { maxItems: SESSION_WINDOW_ITEMS, maxBytes: SESSION_WINDOW_BYTES },
         signal,
       )
-      return { active, anchor, descriptor, history, window: timelineWindow }
+      const reconciledDescriptor = await history.describe(signal)
+      const latestWindowAddress = timelineWindow.items.at(-1)?.address.event_sequence
+      if (
+        latestWindowAddress !== undefined &&
+        BigInt(latestWindowAddress) > BigInt(reconciledDescriptor.latest_address.event_sequence)
+      ) {
+        throw new TypeError('timeline window exceeds the reconciled descriptor')
+      }
+      return {
+        active: sessionHasLiveWork(
+          reconciledDescriptor.work.active_turn_count,
+          reconciledDescriptor.work.queued_turn_count,
+        ),
+        anchor,
+        descriptor: reconciledDescriptor,
+        history,
+        window: timelineWindow,
+      }
     },
     enabled: sessionId !== null && timelineCapability === 'available',
   })
