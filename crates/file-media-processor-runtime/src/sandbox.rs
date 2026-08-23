@@ -69,7 +69,7 @@ pub struct WorkerBinding {
 
 #[derive(Debug)]
 struct PinnedExecutable {
-    file: fs::File,
+    _file: fs::File,
     proc_path: PathBuf,
     byte_length: u64,
 }
@@ -228,13 +228,6 @@ impl SandboxedFileMediaProcessor {
             .stdout
             .take()
             .ok_or(ProcessorFailure::Unavailable)?;
-        let stderr = running
-            .child_mut()?
-            .stderr
-            .take()
-            .ok_or(ProcessorFailure::Unavailable)?;
-        let stderr_limit = self.ceilings.stderr_bytes();
-        let mut stderr_task = tokio::spawn(read_and_discard_diagnostics(stderr, stderr_limit));
         let expected = declaration_fingerprint(declarations);
         let output_limit = u64::try_from(expected.len())
             .map_err(|_| ProcessorFailure::Unavailable)?
@@ -265,17 +258,6 @@ impl SandboxedFileMediaProcessor {
         };
         if result.is_err() {
             running.terminate().await;
-        }
-        if let Ok(Ok(Ok(diagnostics))) =
-            tokio::time::timeout(CLEANUP_TIMEOUT, &mut stderr_task).await
-            && result.is_err()
-            && std::env::var_os("CI").is_some()
-            && !diagnostics.is_empty()
-        {
-            eprintln!(
-                "file-media sandbox probe stderr: {}",
-                String::from_utf8_lossy(&diagnostics)
-            );
         }
         result
     }
@@ -392,6 +374,8 @@ impl SandboxedFileMediaProcessor {
         worker: &PinnedExecutable,
         probe_declarations: Option<&[FileMediaProviderDeclaration]>,
     ) -> Result<RunningWorker, ProcessorFailure> {
+        let worker_input =
+            fs::File::open(&worker.proc_path).map_err(|_| ProcessorFailure::Unavailable)?;
         let seccomp = process_creation_filter().map_err(|_| ProcessorFailure::Unavailable)?;
         let (block_read, block_write) =
             startup_pipe().map_err(|_| ProcessorFailure::Unavailable)?;
@@ -399,7 +383,7 @@ impl SandboxedFileMediaProcessor {
             InvocationTaskCgroup::create(&self.task_cgroup_root, self.ceilings.memory_bytes())
                 .map_err(|_| ProcessorFailure::Unavailable)?;
         let profile = sandbox_arguments(
-            worker.file.as_raw_fd(),
+            worker_input.as_raw_fd(),
             seccomp.as_raw_fd(),
             block_read.as_raw_fd(),
             self.ceilings.memory_bytes(),
@@ -413,7 +397,7 @@ impl SandboxedFileMediaProcessor {
             .env_clear()
             .stdin(if probe { Stdio::null() } else { Stdio::piped() })
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(if probe { Stdio::null() } else { Stdio::piped() })
             .kill_on_drop(true);
         let seccomp_fd = seccomp.as_raw_fd();
         let block_fd = block_read.as_raw_fd();
@@ -428,7 +412,7 @@ impl SandboxedFileMediaProcessor {
                 file_descriptors: self.ceilings.file_descriptors(),
                 seccomp_fd,
                 startup_gate_fd: block_fd,
-                worker_fd: worker.file.as_raw_fd(),
+                worker_fd: worker_input.as_raw_fd(),
                 cgroup_procs_fd,
             },
         );
@@ -1049,7 +1033,9 @@ fn sandbox_arguments(
         std::ffi::OsString::from(memory.shared_memory_bytes.to_string()),
         std::ffi::OsString::from("--tmpfs"),
         std::ffi::OsString::from("/dev/shm"),
-        std::ffi::OsString::from("--ro-bind-fd"),
+        std::ffi::OsString::from("--perms"),
+        std::ffi::OsString::from("0500"),
+        std::ffi::OsString::from("--ro-bind-data"),
         std::ffi::OsString::from(worker_fd.to_string()),
         std::ffi::OsString::from(WORKER_SANDBOX_PATH),
         std::ffi::OsString::from("--seccomp"),
@@ -1387,7 +1373,7 @@ fn open_executable_snapshot(
         file.as_raw_fd()
     ));
     Ok(PinnedExecutable {
-        file,
+        _file: file,
         proc_path,
         byte_length: copied,
     })
@@ -1639,10 +1625,12 @@ mod tests {
             &arguments[..expected_prefix.len()],
             expected_prefix.map(std::ffi::OsString::from)
         );
-        assert!(arguments.windows(3).any(|window| {
+        assert!(arguments.windows(5).any(|window| {
             window
                 == [
-                    OsStr::new("--ro-bind-fd"),
+                    OsStr::new("--perms"),
+                    OsStr::new("0500"),
+                    OsStr::new("--ro-bind-data"),
                     OsStr::new("7"),
                     OsStr::new("/signalbox-file-media-worker"),
                 ]
