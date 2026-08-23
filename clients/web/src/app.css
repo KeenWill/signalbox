@@ -486,7 +486,7 @@ kbd {
 
 @media (max-width: 1260px) {
   .product-shell {
-    grid-template-columns: 205px minmax(400px, 1fr);
+    grid-template-columns: var(--product-navigation-width, 218px) minmax(400px, 1fr);
   }
   .product-inspector {
     display: none;

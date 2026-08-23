@@ -70,6 +70,20 @@ test('navigates from Attention to Sessions with the shared semantic link', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('moves focus when browser history changes the product route', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+  await page.getByRole('link', { name: /Settings/ }).click()
+  await page.getByRole('radio', { name: 'Light' }).focus()
+
+  await page.goBack()
+
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.locator('.product-main')).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('completes route switching from the command palette without a mouse', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -268,6 +282,24 @@ test('changes and restores a Settings preference without a mouse', async ({ page
   await expect(
     page.getByRole('radio', { name: settingsPreferenceFixture.defaultTheme }),
   ).toBeChecked()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('honors the configured navigation width below the inspector breakpoint', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 1000, height: 844 })
+  await page.goto('/settings')
+
+  await page.getByRole('slider', { name: 'Navigation width' }).fill('360')
+
+  await expect
+    .poll(() =>
+      page
+        .locator('.product-navigation-pane')
+        .evaluate((element) => element.getBoundingClientRect().width),
+    )
+    .toBe(360)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

@@ -319,6 +319,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
+  const previousSurfaceRef = useRef(surface)
   const restoreNavigationFocusRef = useRef(true)
   const [importsCommandContext, setImportsCommandContext] = useState<CommandContext | null>(null)
   const [navigationDisabled, setNavigationDisabled] = useState(false)
@@ -342,6 +343,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const focusDestination = useCallback(() => {
     requestAnimationFrame(() => primaryRef.current?.focus())
   }, [])
+  useEffect(() => {
+    if (previousSurfaceRef.current !== surface) {
+      previousSurfaceRef.current = surface
+      focusDestination()
+    }
+  }, [focusDestination, surface])
   useEffect(() => {
     if (app.overlay === 'navigation') restoreNavigationFocusRef.current = true
   }, [app.overlay])
@@ -503,7 +510,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <Dialog.Root
         open={app.overlay === 'navigation'}
         onOpenChange={(open) => {
-          if (!open) dispatch(actions.overlaySet(null))
+          if (!open) invokeCommand('surface.escape', context)
         }}
       >
         <Dialog.Portal>
@@ -534,7 +541,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               disabled={navigationDisabled}
               onNavigate={(destination) => {
                 restoreNavigationFocusRef.current = false
-                dispatch(actions.overlaySet(null))
+                invokeCommand('surface.escape', context)
                 if (destination === 'product') focusDestination()
               }}
             />
