@@ -60,12 +60,13 @@ pub use model_execution::{
     ModelAttachmentStub, ModelCallAuthorizationReread, ModelCallCapabilityPreparation,
     ModelCallCredentialReference, ModelCallExecutionError, ModelCallExecutionIdGenerator,
     ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallInputTokenCount,
-    ModelCallInputTokenCounter, ModelCallProvider, ModelCallTerminalIdentityCandidates,
-    ModelConversationMessage, ModelFrontierRenderingError, ModelToolResultContent,
-    ModelUserContent, ModelUserContentPart, PrepareModelCallOutcome, PrepareModelCallTransaction,
-    PreparedModelOperation, RetainedCapabilityFailureStatus, RetainedModelCallExecutionState,
-    RetainedModelCallObservationStatus, ScriptedModelCallCapability, ScriptedModelCallError,
-    ScriptedModelCallProvider, ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
+    ModelCallInputTokenCounter, ModelCallPreparationErrorStage, ModelCallProvider,
+    ModelCallTerminalIdentityCandidates, ModelConversationMessage, ModelFrontierRenderingError,
+    ModelToolResultContent, ModelUserContent, ModelUserContentPart, PrepareModelCallOutcome,
+    PrepareModelCallTransaction, PreparedModelOperation, RetainedCapabilityFailureStatus,
+    RetainedModelCallExecutionState, RetainedModelCallObservationStatus,
+    ScriptedModelCallCapability, ScriptedModelCallError, ScriptedModelCallProvider,
+    ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
 };
 pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use replace_session_defaults::{

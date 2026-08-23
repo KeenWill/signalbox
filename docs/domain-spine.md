@@ -6359,6 +6359,11 @@ pub enum ModelCallCapabilityPreparation<Capability> {
     AttachmentUnavailable(AttachmentPreparationFailure),
 }
 
+pub enum ModelCallPreparationErrorStage {
+    Capability,
+    Attachment,
+}
+
 pub enum ModelCallInputTokenCount {
     Counted(u64),
     Cancelled,
@@ -6378,6 +6383,7 @@ pub trait ModelCallInputTokenCounter {
 pub trait ModelCallProvider {
     type Capability;
     type Error: ClassifyOperatorFailure;
+    fn preparation_error_stage(error: &Self::Error) -> ModelCallPreparationErrorStage;
     fn prepare_capability<Cancellation>(
         &mut self,
         operation: PreparedModelOperation,
@@ -6446,6 +6452,7 @@ pub enum ModelCallExecutionError<
     Prepare(PrepareError),
     Render(ModelFrontierRenderingError),
     CapabilityPreparation(ProviderError),
+    AttachmentPreparation(ProviderError),
     CapabilityFailureCommit(FailureError),
     CapabilityFailureReread(FailureError),
     Authorization(AuthorizationError),
@@ -10492,7 +10499,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)               |
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
-| application: model_execution                       | 36 (incl. 8 traits)              |
+| application: model_execution                       | 37 (incl. 8 traits)              |
 | application: tool_loop                             | 27 (incl. 5 traits)              |
 | application: operator_failure                      | 2 (incl. 1 trait)                |
 | application: session_delegation                    | 1 (incl. 1 trait)                |
@@ -10508,4 +10515,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                                |
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 9 (incl. 2 traits)               |
-| **signalbox-application total**                    | **255 (+2 free fn)**             |
+| **signalbox-application total**                    | **256 (+2 free fn)**             |

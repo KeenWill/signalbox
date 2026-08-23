@@ -1251,6 +1251,37 @@ async fn s04_inv029_inv034_user_reconciliation_releases_a_restart_parked_ambiguo
     Ok(())
 }
 
+/// S03 / INV-014: a prepared model call remains discoverable for ordinary
+/// active-turn resumption even when no tool round is active.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s03_inv014_prepared_model_call_is_resumable_without_tool_round()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0xc700, false).await?;
+    let active_tool_round = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT active_tool_round_call_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(active_tool_round, None);
+    assert_eq!(
+        PostgresToolLoopRepository::new(pool.clone())
+            .find_resumable_turn(fixture.session)
+            .await?,
+        Some(fixture.turn)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S03 / S04 / S08 / INV-006 / INV-014 / INV-016 / INV-034: the production
 /// startup repository applies call-aware recovery under its session lock:
 /// Prepared is known-failed with exact terminal execution provenance while
