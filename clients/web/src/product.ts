@@ -62,6 +62,7 @@ const validateAttentionSummary = (summary: AttentionSummary): void => {
       case 'awaiting_reconciliation':
         return 'reconcile_turn'
       case 'runner_lost':
+      case 'awaiting_tool_recovery':
         return null
       case 'active':
       case 'queued':
@@ -71,6 +72,12 @@ const validateAttentionSummary = (summary: AttentionSummary): void => {
   })()
   if ((summary.action ?? null) !== expectedAction) {
     throw new TypeError('attention summary state and action are incoherent')
+  }
+  if (
+    summary.state === 'blocked' &&
+    (summary.goal_block === null || summary.goal_block === undefined)
+  ) {
+    throw new TypeError('blocked attention summary must include goal-block evidence')
   }
 }
 

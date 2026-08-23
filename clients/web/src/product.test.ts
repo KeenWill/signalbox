@@ -329,6 +329,48 @@ describe('SameOriginProductTransport', () => {
     })
   })
 
+  it('accepts an actionless tool-recovery summary', async () => {
+    const awaitingToolRecovery = {
+      ...attentionFixture.summaries[0],
+      action: null,
+      state: 'awaiting_tool_recovery',
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ ...attentionFixture, summaries: [awaitingToolRecovery] })),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).resolves.toEqual({
+      ...attentionFixture,
+      summaries: [awaitingToolRecovery],
+    })
+  })
+
+  it('rejects a blocked summary without goal-block evidence', async () => {
+    const blockedWithoutEvidence = {
+      ...attentionFixture.summaries[0],
+      action: 'provide_goal_need',
+      goal_block: null,
+      state: 'blocked',
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ ...attentionFixture, summaries: [blockedWithoutEvidence] }),
+          ),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
+      'blocked attention summary must include goal-block evidence',
+    )
+  })
+
   it('rejects malformed session identities and judge counts', async () => {
     const malformedIdentity = { ...attentionFixture.summaries[0], session_id: 'not-a-uuid' }
     const malformedCount = {
