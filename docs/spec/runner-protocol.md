@@ -1778,7 +1778,9 @@ environment identifier of at most 4,096 UTF-8 bytes and cannot replace `HOME`,
 The byte-preserving value is nonempty, NUL-free, and at most 65,536 bytes. The
 complete target argv, fixed cleared environment, optional HTTPS proxy entries,
 and injected name/value must fit the process core's conservative 128 KiB Linux
-launch budget. The fully constructed outer bubblewrap dispatch request,
+launch budget. Target admission also reserves Linux's maximum shebang
+interpreter and optional-argument expansion. The fully constructed outer
+bubblewrap dispatch request,
 including every configured mount argument, must independently fit the same
 budget. The actual availability-probe request, including the selected sandbox
 shell, probe arguments, configured mounts, and non-secret delivery payload, must

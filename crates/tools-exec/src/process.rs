@@ -74,6 +74,8 @@ const MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES: usize =
 #[cfg(target_os = "linux")]
 const MIN_LINUX_ARG_MAX_BYTES: usize = 128 * 1024;
 #[cfg(target_os = "linux")]
+const MAX_LINUX_SHEBANG_EXPANSION_BYTES: usize = 256;
+#[cfg(target_os = "linux")]
 const SANDBOX_ENVIRONMENT_PROBE_NAME: &str = "SIGNALBOX_ENVIRONMENT_PROBE";
 #[cfg(target_os = "linux")]
 const SANDBOX_ENVIRONMENT_PROBE_VALUE: &str = "probe";
@@ -2053,6 +2055,11 @@ fn sandbox_environment_fits_linux_arg_max(
             arguments.program.as_bytes(),
             executable_path,
         ))
+        // Linux may replace a script launch with an interpreter pathname and
+        // one optional shebang argument. Reserve the complete kernel shebang
+        // buffer plus both additional argv pointers before admitting a target.
+        .saturating_add(MAX_LINUX_SHEBANG_EXPANSION_BYTES)
+        .saturating_add(2_usize.saturating_mul(std::mem::size_of::<usize>()))
         .saturating_add(environment_strings)
         .saturating_add(pointer_bytes)
         < MIN_LINUX_ARG_MAX_BYTES
@@ -5801,6 +5808,39 @@ mod tests {
             &arguments,
             &environment,
             &long_path,
+            false,
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_target_launch_budget_reserves_shebang_expansion() {
+        let environment = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        )
+        .expect("the synthetic environment fixture is valid");
+        let admitted = ExecArguments {
+            program: String::from("p"),
+            arguments: vec!["a".repeat(MIN_LINUX_ARG_MAX_BYTES - 512)],
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+        let rejected = ExecArguments {
+            arguments: vec!["a".repeat(MIN_LINUX_ARG_MAX_BYTES - 400)],
+            ..admitted.clone()
+        };
+
+        assert!(sandbox_environment_fits_linux_arg_max(
+            &admitted,
+            &environment,
+            std::ffi::OsStr::new("/bin"),
+            false,
+        ));
+        assert!(!sandbox_environment_fits_linux_arg_max(
+            &rejected,
+            &environment,
+            std::ffi::OsStr::new("/bin"),
             false,
         ));
     }
