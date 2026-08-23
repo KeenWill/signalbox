@@ -987,6 +987,20 @@ impl DirectoryIdentity {
         let status = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(rustix_io)?;
         Ok(self.device == status.st_dev && self.inode == status.st_ino)
     }
+
+    fn names_if_present(
+        self,
+        parent: &File,
+        name: &OsStr,
+    ) -> Result<Option<bool>, RunnerWorkspaceError> {
+        match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(status) => Ok(Some(
+                self.device == status.st_dev && self.inode == status.st_ino,
+            )),
+            Err(error) if error == rustix::io::Errno::NOENT => Ok(None),
+            Err(error) => Err(rustix_io(error)),
+        }
+    }
 }
 
 enum DurabilityStep {
@@ -1195,17 +1209,24 @@ fn remove_directory_steps(
                 identity,
                 directory,
             } => {
-                if !identity.names(parent.as_ref(), &name)? {
-                    return Err(RunnerWorkspaceError::ManifestConflict);
+                match identity.names_if_present(parent.as_ref(), &name)? {
+                    None => continue,
+                    Some(true) => {}
+                    Some(false) => return Err(RunnerWorkspaceError::ManifestConflict),
                 }
                 match unlinkat(parent.as_ref(), &name, AtFlags::REMOVEDIR) {
                     Ok(()) => {}
+                    Err(error) if error == rustix::io::Errno::NOENT => {}
                     Err(error) if error == rustix::io::Errno::NOTEMPTY => {
                         if rescans_remaining == 0 {
                             return Err(rustix_io(error));
                         }
-                        if !identity.names(parent.as_ref(), &name)? {
-                            return Err(RunnerWorkspaceError::ManifestConflict);
+                        match identity.names_if_present(parent.as_ref(), &name)? {
+                            None => continue,
+                            Some(true) => {}
+                            Some(false) => {
+                                return Err(RunnerWorkspaceError::ManifestConflict);
+                            }
                         }
                         steps.push(RemovalStep::RemoveDirectory {
                             parent,
@@ -1756,6 +1777,48 @@ mod tests {
 
         remove_directory_steps(steps, CLEANUP_DIRECTORY_RESCAN_LIMIT)
             .expect("cleanup ignores the entry that already disappeared before unlink");
+
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn directory_cleanup_ignores_a_child_directory_that_disappears_after_scan() {
+        let parent = tempfile::tempdir().expect("the cleanup fixture parent exists");
+        let staging_name = "staging";
+        let child_name = "disappearing";
+        let staging = parent.path().join(staging_name);
+        let child = staging.join(child_name);
+        fs::create_dir(&staging).expect("the cleanup fixture staging directory exists");
+        fs::create_dir(&child).expect("the cleanup fixture child directory exists");
+        let parent_descriptor =
+            Rc::new(fs::File::open(parent.path()).expect("the cleanup fixture parent opens"));
+        let staging_descriptor =
+            Rc::new(fs::File::open(&staging).expect("the cleanup fixture staging directory opens"));
+        let child_descriptor =
+            Rc::new(fs::File::open(&child).expect("the cleanup fixture child directory opens"));
+        let staging_identity = DirectoryIdentity::from_file(staging_descriptor.as_ref())
+            .expect("the cleanup fixture staging identity is available");
+        let child_identity = DirectoryIdentity::from_file(child_descriptor.as_ref())
+            .expect("the cleanup fixture child identity is available");
+        let steps = vec![
+            RemovalStep::RemoveDirectory {
+                parent: parent_descriptor,
+                name: OsString::from(staging_name),
+                identity: staging_identity,
+                directory: Rc::clone(&staging_descriptor),
+            },
+            RemovalStep::RemoveDirectory {
+                parent: staging_descriptor,
+                name: OsString::from(child_name),
+                identity: child_identity,
+                directory: child_descriptor,
+            },
+        ];
+        fs::remove_dir(&child)
+            .expect("the preparer removes the scanned child before identity validation");
+
+        remove_directory_steps(steps, CLEANUP_DIRECTORY_RESCAN_LIMIT)
+            .expect("cleanup ignores the child directory that already disappeared");
 
         assert!(!staging.exists());
     }
