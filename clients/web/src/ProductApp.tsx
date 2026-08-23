@@ -275,6 +275,21 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   )
 }
 
+function SettingsSurface() {
+  return (
+    <div className="surface-body">
+      <section className="surface-intro" aria-labelledby="settings-local-heading">
+        <span className="eyebrow">Browser-local authority</span>
+        <h2 id="settings-local-heading">Workstation presentation</h2>
+        <p>
+          Theme, density, and layout preferences are controlled from the application toolbar and
+          retained in this browser. They do not depend on daemon operational data.
+        </p>
+      </section>
+    </div>
+  )
+}
+
 function ProductToolbar({
   context,
   paletteReturnFocusRef,
@@ -434,6 +449,8 @@ export function ProductApp({
       <DeferredSurface surface="search" />
     ) : surface === 'search' ? (
       <SearchSurface bootstrap={bootstrap.data} state={search} onStateChange={updateSearch} />
+    ) : surface === 'settings' ? (
+      <SettingsSurface />
     ) : (
       <DeferredSurface surface={surface} />
     )

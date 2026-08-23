@@ -175,6 +175,10 @@ test('reports browser-local authority for Settings', async ({ page }) => {
   await page.goto('/settings')
 
   await expect(page.getByText('Browser local', { exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Workstation presentation' })).toBeVisible()
+  await expect(
+    page.getByRole('heading', { name: 'Operational data is not exposed by this daemon contract' }),
+  ).toHaveCount(0)
 })
 
 test('runs product navigation sequences but leaves Mod+K to an editing field', async ({ page }) => {
