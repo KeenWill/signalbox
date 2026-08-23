@@ -619,6 +619,8 @@ impl PostgresModelCallRepository {
         // compaction result frontier while retaining only the unsummarized
         // source suffix. Read those bounded pieces directly; independently
         // assembled frontiers retain the exact complete-membership comparison.
+        // Calls no newer than the latest compaction cannot win the final call-ID
+        // ordering, so discard them before the exact summary-membership probe.
         let row = sqlx::query(
             "WITH RECURSIVE latest_compaction AS MATERIALIZED (
                 SELECT compaction.context_compaction_id,
@@ -673,6 +675,11 @@ impl PostgresModelCallRepository {
                    AND model_call.resolved_provider_model_identity_id = $2
                    AND model_call.state_kind = 'terminal'
                    AND model_call.usage_input_tokens IS NOT NULL
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM latest_compaction AS latest
+                        WHERE model_call.model_call_id <= latest.model_call_id
+                   )
                    AND NOT EXISTS (
                        SELECT 1
                          FROM latest_compaction AS latest
