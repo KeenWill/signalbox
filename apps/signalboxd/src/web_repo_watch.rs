@@ -703,17 +703,41 @@ fn pull_request_dto(
 fn pull_request_page_dto(
     page: RepoWatchPullRequestPage,
 ) -> Result<WebRepoWatchPullRequestPage, ()> {
-    Ok(WebRepoWatchPullRequestPage {
-        repository: page.repository.into_string(),
-        pull_requests: page
-            .pull_requests
-            .into_iter()
-            .map(pull_request_dto)
-            .collect::<Result<Vec<_>, _>>()?,
-        continuation_after_pull_request: page
-            .continuation_after
-            .map(|number| number.get().to_string()),
-    })
+    let repository = page.repository.into_string();
+    let continuation_after_pull_request = page
+        .continuation_after
+        .map(|number| number.get().to_string());
+    let mut pull_requests = page
+        .pull_requests
+        .into_iter()
+        .map(pull_request_dto)
+        .collect::<Result<Vec<_>, _>>()?;
+    let complete_page_len = pull_requests.len();
+
+    loop {
+        let continuation = if pull_requests.len() < complete_page_len {
+            pull_requests
+                .last()
+                .map(|pull_request| pull_request.number.clone())
+        } else {
+            continuation_after_pull_request.clone()
+        };
+        let candidate = WebRepoWatchPullRequestPage {
+            repository: repository.clone(),
+            pull_requests: pull_requests.clone(),
+            continuation_after_pull_request: continuation,
+        };
+        if serde_json::to_vec(&candidate)
+            .map(|encoded| encoded.len() <= MAX_JSON_BODY_BYTES)
+            .unwrap_or(false)
+        {
+            return Ok(candidate);
+        }
+        if pull_requests.len() <= 1 {
+            return Err(());
+        }
+        pull_requests.pop();
+    }
 }
 
 fn singleton_scope(singleton: RepoWatchSingletonKey) -> WebRepoWatchSingletonScope {

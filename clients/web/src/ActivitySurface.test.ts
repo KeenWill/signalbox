@@ -32,14 +32,22 @@ describe('retained activity pages', () => {
 describe('work singleton labels', () => {
   it('keeps pull-request, stack, rule, and repository scopes distinct', () => {
     expect(
-      singletonScopeLabel({ kind: 'pull_request', repository: 'owner/repo', number: '17' }),
-    ).toBe('PR owner/repo#17')
+      singletonScopeLabel({
+        kind: 'pull_request',
+        repository: 'example/repository',
+        number: '17',
+      }),
+    ).toBe('PR example/repository#17')
     expect(
-      singletonScopeLabel({ kind: 'stack', repository: 'owner/repo', root_pull_request: '11' }),
-    ).toBe('Stack owner/repo#11')
+      singletonScopeLabel({
+        kind: 'stack',
+        repository: 'example/repository',
+        root_pull_request: '11',
+      }),
+    ).toBe('Stack example/repository#11')
     expect(singletonScopeLabel({ kind: 'rule' })).toBe('Rule-wide')
-    expect(singletonScopeLabel({ kind: 'repository', repository: 'owner/repo' })).toBe(
-      'Repository owner/repo',
+    expect(singletonScopeLabel({ kind: 'repository', repository: 'example/repository' })).toBe(
+      'Repository example/repository',
     )
   })
 })

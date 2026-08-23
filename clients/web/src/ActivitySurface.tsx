@@ -433,9 +433,11 @@ function WorkTables({
 function SessionPanel({
   pullRequest,
   query,
+  headingRef,
 }: {
   pullRequest: PullRequest
   query: ReturnType<typeof useQuery<WebRepoWatchPullRequestSessionPage>>
+  headingRef: RefObject<HTMLHeadingElement | null>
 }) {
   return (
     <section
@@ -446,7 +448,9 @@ function SessionPanel({
       <header>
         <div>
           <span className="eyebrow">PR #{pullRequest.number}</span>
-          <h2 id="pr-sessions-heading">Commissioned sessions</h2>
+          <h2 id="pr-sessions-heading" ref={headingRef} tabIndex={-1}>
+            Commissioned sessions
+          </h2>
         </div>
         <span>{pullRequest.commissioned_session_count} total</span>
       </header>
@@ -496,6 +500,10 @@ export function ActivitySurface() {
   const heldWorkHeadingFocus = useRef<HTMLHeadingElement>(null)
   const queuedWorkHeadingFocus = useRef<HTMLHeadingElement>(null)
   const workFocusPending = useRef<'held' | 'queued' | null>(null)
+  const sessionHeadingFocus = useRef<HTMLHeadingElement>(null)
+  const sessionFocusPending = useRef(false)
+  const activityHeadingFocus = useRef<HTMLHeadingElement>(null)
+  const activityFocusPending = useRef(false)
 
   const repositories = useQuery({
     queryKey: ['production', 'repository-watch', 'repositories', repositoryAfter],
@@ -571,6 +579,12 @@ export function ActivitySurface() {
       ),
     enabled: repository !== null && selectedPullRequest !== null,
   })
+  useLayoutEffect(() => {
+    if (!sessions.data || !sessionFocusPending.current) return
+    sessionFocusPending.current = false
+    sessionHeadingFocus.current?.focus()
+  }, [sessions.data])
+
   const activity = useQuery({
     queryKey: [
       'production',
@@ -596,6 +610,11 @@ export function ActivitySurface() {
     enabled: repository !== null,
     gcTime: 0,
   })
+  useLayoutEffect(() => {
+    if (!activity.data || !activityFocusPending.current) return
+    activityFocusPending.current = false
+    activityHeadingFocus.current?.focus()
+  }, [activity.data])
 
   useEffect(() => {
     if (!activity.data) return
@@ -689,6 +708,10 @@ export function ActivitySurface() {
     workFocusPending.current = 'queued'
     setObligationAfter(after)
   }
+  const changeSessionPage = (before: RepoWatchSessionCursor | undefined) => {
+    sessionFocusPending.current = true
+    setSessionBefore(before)
+  }
   const nextActivityPage = () => {
     const page = activity.data
     if (!page) return
@@ -701,11 +724,21 @@ export function ActivitySurface() {
       includeEvents: event !== null,
       includeWebhooks: page.webhook_continuation_before_receipt_sequence !== null,
     }
+    activityFocusPending.current = true
     setActivityPaging(true)
     setIncludeEvents(nextWindow.includeEvents)
     setIncludeWebhooks(nextWindow.includeWebhooks)
     setEventBefore(nextWindow.eventBefore)
     setWebhookBefore(nextWindow.webhookBeforeReceiptSequence)
+  }
+  const returnToLatestActivity = () => {
+    activityFocusPending.current = true
+    setEventBefore(undefined)
+    setWebhookBefore(undefined)
+    setIncludeEvents(true)
+    setIncludeWebhooks(true)
+    setActivityPaging(false)
+    setActivityPages([])
   }
 
   return (
@@ -756,7 +789,7 @@ export function ActivitySurface() {
             repository={repository}
             selected={selectedPullRequest}
             onSelect={(number) => {
-              setSelectedPullRequest(number)
+              setSelectedPullRequest(selectedPullRequest === number ? null : number)
               setSessionBefore(undefined)
             }}
             headingRef={pullRequestHeadingFocus}
@@ -781,9 +814,11 @@ export function ActivitySurface() {
         </>
       )}
 
-      {selected && <SessionPanel pullRequest={selected} query={sessions} />}
+      {selected && (
+        <SessionPanel pullRequest={selected} query={sessions} headingRef={sessionHeadingFocus} />
+      )}
       {sessionBefore && (
-        <button type="button" onClick={() => setSessionBefore(undefined)}>
+        <button type="button" onClick={() => changeSessionPage(undefined)}>
           First session page
         </button>
       )}
@@ -791,7 +826,7 @@ export function ActivitySurface() {
         <button
           type="button"
           onClick={() =>
-            setSessionBefore({
+            changeSessionPage({
               commissionedAtUnixMilliseconds:
                 sessions.data?.continuation_before?.commissioned_at_unix_milliseconds ?? '',
               sessionId: sessions.data?.continuation_before?.session_id ?? '',
@@ -861,7 +896,9 @@ export function ActivitySurface() {
         <header>
           <div>
             <span className="eyebrow">Keyset-paged durable history</span>
-            <h2 id="activity-history-heading">Events and webhooks</h2>
+            <h2 id="activity-history-heading" ref={activityHeadingFocus} tabIndex={-1}>
+              Events and webhooks
+            </h2>
           </div>
           <span>{rows.length} loaded in browser window</span>
         </header>
@@ -885,17 +922,7 @@ export function ActivitySurface() {
         <HistoryTable rows={rows} />
         <div className="activity-page-controls">
           {activityPaging && (
-            <button
-              type="button"
-              onClick={() => {
-                setEventBefore(undefined)
-                setWebhookBefore(undefined)
-                setIncludeEvents(true)
-                setIncludeWebhooks(true)
-                setActivityPaging(false)
-                setActivityPages([])
-              }}
-            >
+            <button type="button" onClick={returnToLatestActivity}>
               Return to latest
             </button>
           )}

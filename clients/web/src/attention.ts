@@ -35,6 +35,8 @@ export const reduceAttentionEvent = (
     return { kind: 'resync' }
   }
 
+  const replacementIds = new Set(event.summaries.map((summary) => summary.session_id))
+  if (replacementIds.size !== event.summaries.length) return { kind: 'resync' }
   const replacements = new Map(event.summaries.map((summary) => [summary.session_id, summary]))
   const knownSessionIds = new Set(current.summaries.map((summary) => summary.session_id))
   if (event.summaries.some((summary) => !knownSessionIds.has(summary.session_id))) {

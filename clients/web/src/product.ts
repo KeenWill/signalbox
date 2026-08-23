@@ -21,6 +21,8 @@ import {
 // The version-one browser contract fixes both transport ceilings at 65,536 bytes.
 const MAX_JSON_BODY_BYTES = 65_536
 const MAX_ATTENTION_EVENT_BYTES = 65_536
+const EXPECTED_CONTRACT_NAME = 'signalbox.web-http'
+const EXPECTED_CONTRACT_VERSION = '1'
 const MAX_POSTGRES_BIGINT = 9_223_372_036_854_775_807n
 const MAX_POSTGRES_INTEGER = 2_147_483_647
 const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -326,13 +328,17 @@ const validateActivityContinuations = (
 
 const requireCompatibleBootstrap = (bootstrap: WebContractBootstrap): WebContractBootstrap => {
   if (
+    bootstrap.contract.name !== EXPECTED_CONTRACT_NAME ||
+    bootstrap.contract.version !== EXPECTED_CONTRACT_VERSION ||
     !bootstrap.capabilities.bounded_json ||
     !bootstrap.capabilities.same_origin_json_mutations ||
     !bootstrap.capabilities.ndjson_streaming ||
     bootstrap.limits.max_json_body_bytes !== MAX_JSON_BODY_BYTES ||
     bootstrap.limits.max_ndjson_item_bytes !== MAX_ATTENTION_EVENT_BYTES
   ) {
-    throw new TypeError('bootstrap capabilities or limits are incompatible with this client')
+    throw new TypeError(
+      'bootstrap contract identity, capabilities, or limits are incompatible with this client',
+    )
   }
   return bootstrap
 }

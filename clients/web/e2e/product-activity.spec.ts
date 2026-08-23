@@ -314,9 +314,15 @@ test('pages a 101-delivery burst and preserves semantic session evidence', async
   const sessionEvidence = page.getByText(sessionOne, { exact: true })
   await expect(sessionEvidence).toBeVisible()
   await expect(sessionEvidence).not.toHaveAttribute('href')
+  await page.getByRole('button', { name: /#103 Non-converged checks/ }).click()
+  await expect(page.getByRole('region', { name: 'Commissioned sessions' })).toBeHidden()
+  await page.getByRole('button', { name: /#103 Non-converged checks/ }).click()
 
   await page.getByRole('button', { name: 'Load older window' }).click()
   await expect(page.getByText('106 loaded in browser window')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Events and webhooks' })).toBeFocused()
+  await page.getByRole('button', { name: 'Return to latest' }).click()
+  await expect(page.getByRole('heading', { name: 'Events and webhooks' })).toBeFocused()
   expect(apiRequests).toContain(
     `/api/repository-watch/activity?repository=signalbox%2Foperator&include_events=false&include_webhooks=true&webhook_before_receipt_sequence=2`,
   )

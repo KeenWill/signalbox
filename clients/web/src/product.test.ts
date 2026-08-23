@@ -88,7 +88,26 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      'capabilities or limits are incompatible',
+      'identity, capabilities, or limits are incompatible',
+    )
+  })
+
+  it('rejects a mismatched bootstrap contract identity', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...bootstrapFixture,
+              contract: { name: 'signalbox.other-http', version: '2' },
+            }),
+          ),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'bootstrap carries an incompatible web contract',
     )
   })
 

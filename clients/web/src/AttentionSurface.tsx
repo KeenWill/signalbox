@@ -42,6 +42,7 @@ export function AttentionSurface() {
   const closeFocus = useRef<HTMLButtonElement>(null)
   const pageHeadingFocus = useRef<HTMLHeadingElement>(null)
   const pageFocusPending = useRef<string | null | undefined>(undefined)
+  const selectionEvictedFocus = useRef(false)
   const attention = useQuery({
     queryKey: queryKey(after),
     queryFn: ({ signal }) => productTransport.readAttention(after ?? undefined, signal),
@@ -71,10 +72,21 @@ export function AttentionSurface() {
   }, [after, dispatch, monitorGeneration, queryClient])
 
   useEffect(() => {
-    const target = selectedId ? closeFocus : returnFocus
+    const target = selectionEvictedFocus.current
+      ? pageHeadingFocus
+      : selectedId
+        ? closeFocus
+        : returnFocus
+    selectionEvictedFocus.current = false
     const frame = requestAnimationFrame(() => target.current?.focus())
     return () => cancelAnimationFrame(frame)
   }, [selectedId])
+
+  useLayoutEffect(() => {
+    if (!selectedId || !attention.data || selected) return
+    selectionEvictedFocus.current = true
+    setSelectedId(null)
+  }, [attention.data, selected, selectedId])
 
   useLayoutEffect(() => {
     if (pageFocusPending.current !== after || !attention.data) return
