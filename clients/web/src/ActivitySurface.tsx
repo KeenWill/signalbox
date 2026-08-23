@@ -125,7 +125,12 @@ function HistoryTable({ rows }: { rows: ActivityRow[] }) {
 
   return (
     // biome-ignore lint/a11y/useSemanticElements: Virtualization requires a scrollable ARIA table.
-    <div className="activity-history-table" role="table" aria-label="Repository activity history">
+    <div
+      className="activity-history-table"
+      role="table"
+      aria-label="Repository activity history"
+      aria-rowcount={tableRows.length + 1}
+    >
       {/* biome-ignore lint/a11y: Virtualized column headers are owned by the ARIA table. */}
       <div className="activity-history-header" role="row" aria-rowindex={1}>
         {table.getHeaderGroups()[0]?.headers.map((header) => (

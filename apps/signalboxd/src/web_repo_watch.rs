@@ -589,14 +589,35 @@ fn repository_status_dto(
 fn repository_status_page_dto(
     page: RepoWatchRepositoryStatusPage,
 ) -> Result<WebRepoWatchRepositoryStatusPage, ()> {
-    Ok(WebRepoWatchRepositoryStatusPage {
-        repositories: page
-            .repositories
-            .into_iter()
-            .map(repository_status_dto)
-            .collect::<Result<Vec<_>, _>>()?,
-        continuation_after_repository: page.continuation_after.map(RepositorySlug::into_string),
-    })
+    let mut repositories = page
+        .repositories
+        .into_iter()
+        .map(repository_status_dto)
+        .collect::<Result<Vec<_>, _>>()?;
+    let complete_page_len = repositories.len();
+    let continuation_after_repository = page.continuation_after.map(RepositorySlug::into_string);
+
+    loop {
+        let continuation = if repositories.len() < complete_page_len {
+            repositories.last().map(|status| status.repository.clone())
+        } else {
+            continuation_after_repository.clone()
+        };
+        let candidate = WebRepoWatchRepositoryStatusPage {
+            repositories: repositories.clone(),
+            continuation_after_repository: continuation,
+        };
+        if serde_json::to_vec(&candidate)
+            .map(|encoded| encoded.len() <= MAX_JSON_BODY_BYTES)
+            .unwrap_or(false)
+        {
+            return Ok(candidate);
+        }
+        if repositories.len() <= 1 {
+            return Err(());
+        }
+        repositories.pop();
+    }
 }
 
 fn automation_dto(status: RepoWatchAutomationStatus) -> Result<WebRepoWatchAutomationStatus, ()> {
@@ -944,22 +965,48 @@ fn pull_request_session_dto(
 fn pull_request_session_page_dto(
     page: RepoWatchPullRequestSessionPage,
 ) -> Result<WebRepoWatchPullRequestSessionPage, ()> {
-    Ok(WebRepoWatchPullRequestSessionPage {
-        sessions: page
-            .sessions
-            .into_iter()
-            .map(pull_request_session_dto)
-            .collect::<Result<Vec<_>, _>>()?,
-        continuation_before: page
-            .continuation_before
-            .map(|cursor| {
-                Ok(WebRepoWatchSessionCursor {
-                    commissioned_at_unix_milliseconds: unix_milliseconds(cursor.commissioned_at)?,
-                    session_id: cursor.session.into_uuid().to_string(),
-                })
+    let mut sessions = page
+        .sessions
+        .into_iter()
+        .map(pull_request_session_dto)
+        .collect::<Result<Vec<_>, _>>()?;
+    let complete_page_len = sessions.len();
+    let continuation_before = page
+        .continuation_before
+        .map(|cursor| {
+            Ok(WebRepoWatchSessionCursor {
+                commissioned_at_unix_milliseconds: unix_milliseconds(cursor.commissioned_at)?,
+                session_id: cursor.session.into_uuid().to_string(),
             })
-            .transpose()?,
-    })
+        })
+        .transpose()?;
+
+    loop {
+        let continuation = if sessions.len() < complete_page_len {
+            sessions.last().map(|session| WebRepoWatchSessionCursor {
+                commissioned_at_unix_milliseconds: session
+                    .commissioned_at_unix_milliseconds
+                    .clone(),
+                session_id: session.attention.session_id.clone(),
+            })
+        } else {
+            continuation_before.clone()
+        };
+        let candidate = WebRepoWatchPullRequestSessionPage {
+            sessions: sessions.clone(),
+            continuation_before: continuation,
+        };
+        if serde_json::to_vec(&candidate)
+            .map(|encoded| encoded.len() <= MAX_JSON_BODY_BYTES)
+            .unwrap_or(false)
+        {
+            return Ok(candidate);
+        }
+        if sessions.len() <= 1 {
+            return Err(());
+        }
+        sessions.pop();
+    }
 }
 
 fn webhook_activity_dto(
