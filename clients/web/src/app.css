@@ -810,8 +810,17 @@ kbd {
   display: flex;
   min-width: 0;
   align-items: center;
+  overflow: hidden;
   padding: 0 0.55rem;
   border-right: 1px solid var(--border);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.activity-history-row > div > * {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .activity-history-scroll {
   height: min(360px, 42vh);

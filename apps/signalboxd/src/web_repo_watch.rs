@@ -839,32 +839,78 @@ fn obligation_dto(
 }
 
 fn work_page_dto(page: RepoWatchWorkPage) -> Result<WebRepoWatchWorkPage, ()> {
-    Ok(WebRepoWatchWorkPage {
-        held_slots: page
-            .held_slots
-            .into_iter()
-            .map(held_slot_dto)
-            .collect::<Result<Vec<_>, _>>()?,
-        held_continuation_after: match page.held_continuation_after {
-            RepoWatchPagePosition::After(cursor) => Some(WebRepoWatchHeldCursor {
-                held_since_unix_milliseconds: unix_milliseconds(cursor.held_since)?,
-                dispatch_id: cursor.dispatch.into_uuid().to_string(),
-            }),
-            RepoWatchPagePosition::Start | RepoWatchPagePosition::Exhausted => None,
-        },
-        queued_obligations: page
-            .queued_obligations
-            .into_iter()
-            .map(obligation_dto)
-            .collect::<Result<Vec<_>, _>>()?,
-        obligation_continuation_after: match page.obligation_continuation_after {
-            RepoWatchPagePosition::After(cursor) => Some(WebRepoWatchObligationCursor {
-                owed_since_unix_milliseconds: unix_milliseconds(cursor.owed_since)?,
-                obligation_id: cursor.obligation.into_uuid().to_string(),
-            }),
-            RepoWatchPagePosition::Start | RepoWatchPagePosition::Exhausted => None,
-        },
-    })
+    let mut held_slots = page
+        .held_slots
+        .into_iter()
+        .map(held_slot_dto)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut queued_obligations = page
+        .queued_obligations
+        .into_iter()
+        .map(obligation_dto)
+        .collect::<Result<Vec<_>, _>>()?;
+    let complete_held_len = held_slots.len();
+    let complete_obligation_len = queued_obligations.len();
+    let held_continuation_after = match page.held_continuation_after {
+        RepoWatchPagePosition::After(cursor) => Some(WebRepoWatchHeldCursor {
+            held_since_unix_milliseconds: unix_milliseconds(cursor.held_since)?,
+            dispatch_id: cursor.dispatch.into_uuid().to_string(),
+        }),
+        RepoWatchPagePosition::Start | RepoWatchPagePosition::Exhausted => None,
+    };
+    let obligation_continuation_after = match page.obligation_continuation_after {
+        RepoWatchPagePosition::After(cursor) => Some(WebRepoWatchObligationCursor {
+            owed_since_unix_milliseconds: unix_milliseconds(cursor.owed_since)?,
+            obligation_id: cursor.obligation.into_uuid().to_string(),
+        }),
+        RepoWatchPagePosition::Start | RepoWatchPagePosition::Exhausted => None,
+    };
+
+    loop {
+        let held_continuation = if held_slots.len() < complete_held_len {
+            held_slots.last().map(|slot| WebRepoWatchHeldCursor {
+                held_since_unix_milliseconds: slot.held_since_unix_milliseconds.clone(),
+                dispatch_id: slot.dispatch_id.clone(),
+            })
+        } else {
+            held_continuation_after.clone()
+        };
+        let obligation_continuation = if queued_obligations.len() < complete_obligation_len {
+            queued_obligations
+                .last()
+                .map(|obligation| WebRepoWatchObligationCursor {
+                    owed_since_unix_milliseconds: obligation.owed_since_unix_milliseconds.clone(),
+                    obligation_id: obligation.id.clone(),
+                })
+        } else {
+            obligation_continuation_after.clone()
+        };
+        let candidate = WebRepoWatchWorkPage {
+            held_slots: held_slots.clone(),
+            held_continuation_after: held_continuation,
+            queued_obligations: queued_obligations.clone(),
+            obligation_continuation_after: obligation_continuation,
+        };
+        if serde_json::to_vec(&candidate)
+            .map(|encoded| encoded.len() <= MAX_JSON_BODY_BYTES)
+            .unwrap_or(false)
+        {
+            return Ok(candidate);
+        }
+
+        match (held_slots.len() > 1, queued_obligations.len() > 1) {
+            (true, true) if held_slots.len() >= queued_obligations.len() => {
+                held_slots.pop();
+            }
+            (true, true) | (false, true) => {
+                queued_obligations.pop();
+            }
+            (true, false) => {
+                held_slots.pop();
+            }
+            (false, false) => return Err(()),
+        }
+    }
 }
 
 fn pull_request_session_dto(

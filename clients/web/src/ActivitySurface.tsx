@@ -203,15 +203,15 @@ function RepositoryHealth({ status }: { status: RepositoryStatus }) {
           <dt>Latest webhook</dt>
           <dd>{time(status.latest_webhook?.received_at_unix_milliseconds)}</dd>
         </div>
-        <div>
-          <dt>
-            Delivery volume · {durationLabel(status.previous_five_minutes.seconds)} /{' '}
-            {durationLabel(status.previous_hour.seconds)}
-          </dt>
-          <dd>
-            {status.previous_five_minutes.received} / {status.previous_hour.received}
-          </dd>
-        </div>
+        {[status.previous_five_minutes, status.previous_hour].map((window) => (
+          <div key={window.seconds}>
+            <dt>Webhook processing · {durationLabel(window.seconds)}</dt>
+            <dd>
+              received {window.received} · projected {window.projected} · terminal {window.terminal}{' '}
+              · quarantined {window.quarantined}
+            </dd>
+          </div>
+        ))}
         <div>
           <dt>Projection latency · latest / 1h max</dt>
           <dd>

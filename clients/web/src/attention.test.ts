@@ -78,6 +78,15 @@ describe('attention projection recovery', () => {
     expect(reduction).toEqual({ kind: 'resync' })
   })
 
+  it('requests resynchronization when a snapshot repeats a session identity', () => {
+    const reduction = reduceAttentionEvent(undefined, {
+      kind: 'snapshot',
+      snapshot: { ...snapshot, summaries: [summary, { ...summary, state: 'idle' }] },
+    })
+
+    expect(reduction).toEqual({ kind: 'resync' })
+  })
+
   it('requests resynchronization when an update moves the cursor backward', () => {
     const reduction = reduceAttentionEvent(snapshot, {
       kind: 'update',

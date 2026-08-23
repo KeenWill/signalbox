@@ -96,7 +96,7 @@ export function AttentionSurface() {
 
   const open = (summary: AttentionSummary, button: HTMLButtonElement) => {
     returnFocus.current = button
-    setSelectedId(summary.session_id)
+    setSelectedId((selected) => (selected === summary.session_id ? null : summary.session_id))
   }
   const close = () => setSelectedId(null)
   const nextPage = () => {

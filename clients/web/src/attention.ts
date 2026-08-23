@@ -15,13 +15,17 @@ const cursorValue = (cursor: string): bigint | null => {
   return value <= MAX_CURSOR ? value : null
 }
 
+const hasUniqueSessionIds = (snapshot: WebAttentionSnapshot) =>
+  new Set(snapshot.summaries.map((summary) => summary.session_id)).size ===
+  snapshot.summaries.length
+
 export const reduceAttentionEvent = (
   current: WebAttentionSnapshot | undefined,
   event: WebAttentionStreamEvent,
 ): AttentionReduction => {
   if (event.kind === 'snapshot') {
     const snapshotCursor = cursorValue(event.snapshot.cursor)
-    if (snapshotCursor === null) return { kind: 'resync' }
+    if (snapshotCursor === null || !hasUniqueSessionIds(event.snapshot)) return { kind: 'resync' }
     if (current) {
       const currentCursor = cursorValue(current.cursor)
       if (currentCursor === null || snapshotCursor < currentCursor) return { kind: 'resync' }
