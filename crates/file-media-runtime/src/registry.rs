@@ -445,11 +445,7 @@ impl FileMediaRegistry {
         cancellation: &dyn crate::CancellationSignal,
     ) -> Result<FileReadResult, FileMediaFailure> {
         let initial_request = match &request.input {
-            crate::FileReadInput::Initial { options }
-                if options.is_object() && serialized_read_options_fit(options) =>
-            {
-                true
-            }
+            crate::FileReadInput::Initial { options } if read_options_fit(options) => true,
             crate::FileReadInput::Initial { .. } => {
                 return Err(FileMediaFailure::InvalidViewArguments);
             }
@@ -509,7 +505,11 @@ impl FileMediaRegistry {
     }
 }
 
-fn serialized_read_options_fit(options: &serde_json::Value) -> bool {
+/// Checks read options against their object, nesting, and encoded-byte bounds.
+pub fn read_options_fit(options: &serde_json::Value) -> bool {
+    if !options.is_object() || !json_value_depth_fits(options, crate::MAX_STRUCTURED_DEPTH) {
+        return false;
+    }
     serde_json::to_writer(
         LimitedWriter {
             written: 0,
@@ -518,6 +518,34 @@ fn serialized_read_options_fit(options: &serde_json::Value) -> bool {
         options,
     )
     .is_ok()
+}
+
+fn json_value_depth_fits(value: &serde_json::Value, maximum: u32) -> bool {
+    let mut pending = vec![(value, 0_u32)];
+    while let Some((value, depth)) = pending.pop() {
+        match value {
+            serde_json::Value::Array(values) => {
+                let Some(next) = depth.checked_add(1).filter(|next| *next <= maximum) else {
+                    return false;
+                };
+                pending.extend(values.iter().map(|child| (child, next)));
+            }
+            serde_json::Value::Object(values) => {
+                let Some(next) = depth.checked_add(1).filter(|next| *next <= maximum) else {
+                    return false;
+                };
+                pending.extend(values.values().map(|child| (child, next)));
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
+        }
+        if pending.len() > MAX_READ_OPTIONS_BYTES {
+            return false;
+        }
+    }
+    true
 }
 
 struct LimitedWriter {
@@ -1143,6 +1171,15 @@ mod tests {
     fn read_option_serialization_stops_at_its_byte_ceiling() {
         let options = serde_json::json!({ "value": "x".repeat(MAX_READ_OPTIONS_BYTES) });
 
-        assert!(!serialized_read_options_fit(&options));
+        assert!(!read_options_fit(&options));
+    }
+
+    #[test]
+    fn read_options_reject_nesting_before_serialization() {
+        let options = serde_json::json!({
+            "nested": nested_arrays(crate::MAX_STRUCTURED_DEPTH)
+        });
+
+        assert!(!read_options_fit(&options));
     }
 }

@@ -23,12 +23,11 @@ use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProcessCeilings, FileMediaProcessor, FileMediaProcessorFuture,
     FileMediaProviderDeclaration, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
     FileReadInput, MAX_PROBE_CUMULATIVE_BYTES, MAX_PROBE_PREFIX_BYTES, MAX_PROBE_RANGES,
-    MAX_PROBE_SUFFIX_BYTES, MAX_READ_OPTIONS_BYTES, MAX_READ_RANGES, MAX_READ_SOURCE_BYTES,
-    MAX_READERS_PER_PROVIDER, MAX_REGISTRY_READERS, MAX_VALIDATION_RANGES,
-    MAX_VALIDATION_SOURCE_BYTES, MAX_WORKER_TASKS, ProbeDeclaration, ProcessorBoundaryFailure,
-    ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, ReadAccessPattern, ReadViewDeclaration, ReaderDeclaration,
-    ReaderIdentity, VerifiedBlobSource,
+    MAX_PROBE_SUFFIX_BYTES, MAX_READ_RANGES, MAX_READ_SOURCE_BYTES, MAX_READERS_PER_PROVIDER,
+    MAX_REGISTRY_READERS, MAX_VALIDATION_RANGES, MAX_VALIDATION_SOURCE_BYTES, MAX_WORKER_TASKS,
+    ProbeDeclaration, ProcessorBoundaryFailure, ProcessorFailure, ProcessorIsolation,
+    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
+    ReadViewDeclaration, ReaderDeclaration, ReaderIdentity, VerifiedBlobSource, read_options_fit,
 };
 use tokio::{
     io::AsyncReadExt as _,
@@ -579,38 +578,8 @@ fn read_envelope_fits(view: &ReadViewDeclaration) -> bool {
 
 fn direct_read_input_fits(input: &FileReadInput) -> bool {
     match input {
-        FileReadInput::Initial { options } => {
-            options.is_object()
-                && serde_json::to_writer(
-                    LimitedWriter {
-                        written: 0,
-                        maximum: MAX_READ_OPTIONS_BYTES,
-                    },
-                    options,
-                )
-                .is_ok()
-        }
+        FileReadInput::Initial { options } => read_options_fit(options),
         FileReadInput::Continuation { .. } => true,
-    }
-}
-
-struct LimitedWriter {
-    written: usize,
-    maximum: usize,
-}
-
-impl std::io::Write for LimitedWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.written = self
-            .written
-            .checked_add(bytes.len())
-            .filter(|total| *total <= self.maximum)
-            .ok_or_else(|| std::io::Error::other("serialized value exceeds its byte ceiling"))?;
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
     }
 }
 
@@ -1475,20 +1444,20 @@ mod tests {
     use std::{ffi::OsStr, fs, os::unix::fs::PermissionsExt as _, path::Path};
 
     use signalbox_file_media_runtime::{
-        CancellationSignal, CanonicalJsonObjectSchema, FileReadInput, ProbeDeclaration,
-        ProcessorBoundaryFailure, ProcessorFailure, ReadAccessPattern, ReadViewBounds,
-        ReadViewDeclaration, ReadViewName,
+        CancellationSignal, CanonicalJsonObjectSchema, FileReadInput, MAX_READ_OPTIONS_BYTES,
+        ProbeDeclaration, ProcessorBoundaryFailure, ProcessorFailure, ReadAccessPattern,
+        ReadViewBounds, ReadViewDeclaration, ReadViewName,
     };
 
     use super::{
         CompletedOutput, ConstructionTarget, MAX_AGGREGATE_EXECUTABLE_SNAPSHOT_BYTES,
         MAX_EXECUTABLE_SNAPSHOT_BYTES, MAX_PROBE_CUMULATIVE_BYTES, MAX_PROBE_PREFIX_BYTES,
-        MAX_READ_OPTIONS_BYTES, MAX_READ_RANGES, MAX_READ_SOURCE_BYTES, MAX_READERS_PER_PROVIDER,
-        MAX_REGISTRY_READERS, MAX_WORKER_BINDINGS, admit_completed,
-        admit_executable_snapshot_bytes, admit_reader_inventory, admit_worker_binding_count,
-        cgroup_is_populated, direct_read_input_fits, open_executable_snapshot,
-        open_worker_executable, probe_envelope_fits, read_envelope_fits, sandbox_arguments,
-        seccomp_instructions, startup_pipe, worker_memory_budget,
+        MAX_READ_RANGES, MAX_READ_SOURCE_BYTES, MAX_READERS_PER_PROVIDER, MAX_REGISTRY_READERS,
+        MAX_WORKER_BINDINGS, admit_completed, admit_executable_snapshot_bytes,
+        admit_reader_inventory, admit_worker_binding_count, cgroup_is_populated,
+        direct_read_input_fits, open_executable_snapshot, open_worker_executable,
+        probe_envelope_fits, read_envelope_fits, sandbox_arguments, seccomp_instructions,
+        startup_pipe, worker_memory_budget,
     };
 
     struct Cancelled;
@@ -1580,6 +1549,19 @@ mod tests {
                 "value": "x".repeat(MAX_READ_OPTIONS_BYTES),
             }),
         };
+        assert!(!direct_read_input_fits(&input));
+    }
+
+    #[test]
+    fn direct_read_input_rejects_excessive_option_nesting_before_framing() {
+        let nested = (0..signalbox_file_media_runtime::MAX_STRUCTURED_DEPTH)
+            .fold(serde_json::Value::Null, |value, _| {
+                serde_json::Value::Array(vec![value])
+            });
+        let input = FileReadInput::Initial {
+            options: serde_json::json!({ "nested": nested }),
+        };
+
         assert!(!direct_read_input_fits(&input));
     }
 
