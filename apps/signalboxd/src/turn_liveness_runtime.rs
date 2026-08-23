@@ -327,9 +327,12 @@ pub struct TurnLivenessRuntime {
 impl TurnLivenessRuntime {
     /// Supervises turn liveness with the supplied bound and cadence.
     ///
-    /// The bound is a parameter rather than a reload of the compiled ceiling so
-    /// a deployment that validated a shorter one actually runs with it; the
-    /// ceiling stays the only maximum, enforced where the bound is built.
+    /// `staleness_bound` governs only the quiescent watchdog. It is a parameter
+    /// rather than a reload of the compiled ceiling so a deployment that
+    /// validated a shorter one actually runs with it; the ceiling stays the
+    /// only maximum, enforced where the bound is built. The slot-held watchdog
+    /// separately uses [`StaleActiveTurnBound::hard_ceiling`] so a lowered
+    /// quiescent bound cannot classify live operation work as stale early.
     pub fn new(
         pool: PgPool,
         staleness_bound: Option<StaleActiveTurnBound>,

@@ -1637,7 +1637,7 @@ async fn run_hub(
                 tracing::warn!(
                     phase = ?RuntimePhase::StartupScan,
                     session = %session.into_uuid(),
-                    "session holds its slot awaiting bounded model-call reconciliation"
+                    "session holds its slot awaiting a durable recovery decision"
                 );
             }
             Ok(())

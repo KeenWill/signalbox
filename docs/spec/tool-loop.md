@@ -1305,6 +1305,9 @@ rather than applying one global version constant.
 
 ## Open edges
 
+- Replacing direct approval-judge recommendations with graded risk and brief
+  alignment remains recorded under
+  [Graded approval judging](../open-questions.md#graded-approval-judging).
 - Dynamic execution-strategy policy beyond the two named runner profiles,
   model-declared approval expiry and additional high-risk guardrails are
   recorded in [Tool safety](../open-questions.md#tool-safety).

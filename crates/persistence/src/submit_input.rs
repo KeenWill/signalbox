@@ -5488,7 +5488,7 @@ fn map_tool_loop_error(
     }
 }
 
-fn require_applied_interrupt_from_attempt(
+pub(crate) fn require_applied_interrupt_from_attempt(
     row: &PgRow,
     owning_turn: TurnId,
     recorded_commands: &BTreeMap<DurableCommandId, ReconstitutedSubmitInput>,

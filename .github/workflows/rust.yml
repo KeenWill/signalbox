@@ -20,17 +20,31 @@ permissions:
 
 env:
   RUSTFLAGS: "-D warnings"
+  # CI never reuses incremental artifacts across runs; they are pure write
+  # amplification on the self-hosted runners' scratch NVMe (measured 2026-08-22).
+  CARGO_INCREMENTAL: "0"
+  # Line tables keep backtraces and coverage useful at a fraction of the
+  # debuginfo bytes written per build.
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
 
 jobs:
   # Keep the required `validate` and `postgres-integration` checks present on
-  # every pull-request head. Their aggregate jobs below accept skipped heavy
-  # work only when this job proves every changed path is Markdown or under
-  # `docs/`; pushes to main always run the complete workflow.
+  # every pull-request head. Their aggregate jobs below accept skipped Rust
+  # work only when this job proves no changed path can reach the Rust build:
+  # every path is either non-binding Markdown/`docs/` prose or browser-client
+  # source under `clients/web/` (the generated contract under
+  # `clients/web/src/generated/` is Rust output and keeps the full bar, as
+  # does `clients/web`'s own workflow file). Pushes to main always run the
+  # complete workflow. `clients/web/**` changes are gated by `web.yml`, which
+  # triggers on exactly that path set.
   rust-change-scope:
     name: Rust change scope
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.paths.outputs.docs_only }}
+      web_only: ${{ steps.paths.outputs.web_only }}
+      skip_rust: ${{ steps.paths.outputs.skip_rust }}
     steps:
       - name: Check out repository history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,8 +59,12 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           docs_only=false
+          web_only=false
+          skip_rust=false
           if [ "$EVENT_NAME" = pull_request ]; then
-            docs_only=true
+            docs=0
+            web=0
+            rust=0
             changed_paths="$RUNNER_TEMP/rust-changed-files"
             git diff --no-renames --name-only -z \
               "$BASE_SHA...$HEAD_SHA" > "$changed_paths"
@@ -57,19 +75,35 @@ jobs:
                 AGENTS.md | */AGENTS.md | docs/agents/* | docs/spec/* \
                   | docs/domain-spine.md | docs/invariants.md \
                   | docs/scenarios.md | docs/style.md)
-                  docs_only=false
-                  break
+                  rust=$((rust + 1))
                   ;;
                 docs/* | *.md)
+                  docs=$((docs + 1))
+                  ;;
+                # Generated browser-contract output is produced from Rust and
+                # checked against it by the workspace tests.
+                clients/web/src/generated/*)
+                  rust=$((rust + 1))
+                  ;;
+                clients/web/*)
+                  web=$((web + 1))
                   ;;
                 *)
-                  docs_only=false
-                  break
+                  rust=$((rust + 1))
                   ;;
               esac
             done < "$changed_paths"
+            if [ "$rust" -eq 0 ]; then
+              skip_rust=true
+              [ "$web" -eq 0 ] && docs_only=true
+              [ "$docs" -eq 0 ] && web_only=true
+            fi
+            echo "changed paths: docs=$docs web=$web rust-reaching=$rust" \
+              "-> skip_rust=$skip_rust"
           fi
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "web_only=$web_only" >> "$GITHUB_OUTPUT"
+          echo "skip_rust=$skip_rust" >> "$GITHUB_OUTPUT"
 
   contract-checks:
     runs-on: ubuntu-latest
@@ -195,7 +229,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            238f712efd43df95063e56eb04d3f221d06eb75fb32231cd594341974a9c315c
+            809ef9d584585c4f9bfbbb0f8c011c1cb5e3f51ba5160afb99ca0b3e6fb14e65
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
@@ -210,7 +244,7 @@ jobs:
           }
   rust-checks:
     needs: rust-change-scope
-    if: needs.rust-change-scope.outputs.docs_only != 'true'
+    if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: signalbox
     # The self-hosted pool starts with cold caches; give the workspace check
     # headroom until they warm.
@@ -221,10 +255,56 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - name: Use the node-local cargo target cache
+        # Self-hosted runners expose a persistent per-node cache directory
+        # through /home/runner/_work/_ci-cache, provisioned by the runner pod
+        # template outside this repository. Each run gets its own target dir,
+        # cloned copy-on-write (reflink, same XFS filesystem) from the last
+        # published run with the same lockfile/toolchain key, so concurrent
+        # runs never share a cargo lock and nothing one run writes leaks into
+        # another. GitHub-hosted runners have no such directory and keep the
+        # default. Run dirs older than a day are pruned across every key and
+        # job, except the directory a key's "latest" seed points at.
+        id: nodecache
+        shell: bash
+        run: |
+          cache=/home/runner/_work/_ci-cache
+          if [ -d "$cache/target" ]; then
+            # Prune expired run dirs under every key/job, keeping current seeds.
+            find "$cache/target" -mindepth 4 -maxdepth 4 -type d -path '*/runs/*' -mtime +0 -print0 2>/dev/null \
+              | while IFS= read -r -d '' dir; do
+                  base="$(dirname "$(dirname "$dir")")"
+                  seed="$(readlink -f "$base/latest" 2>/dev/null || true)"
+                  [ "$dir" = "$seed" ] || rm -rf "$dir"
+                done
+            find "$cache/target" -mindepth 1 -maxdepth 3 -type d -empty -delete 2>/dev/null || true
+            key="${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}"
+            job="${{ github.job }}${{ strategy.job-index != '' && format('-{0}', strategy.job-index) || '' }}"
+            base="$cache/target/$key/$job"
+            mkdir -p "$base/runs"
+            target="$base/runs/${{ github.run_id }}-${{ github.run_attempt }}"
+            rm -rf "$target"
+            if [ -d "$base/latest" ] && cp --reflink=always --no-preserve=timestamps -a "$base/latest/." "$target" 2>/dev/null; then
+              echo "seeded $target from the last published run (reflink)"
+            else
+              rm -rf "$target"; mkdir -p "$target"
+              echo "no seed available; fresh target dir $target"
+            fi
+            touch "$target"
+            echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+            echo "NODECACHE_BASE=$base" >> "$GITHUB_ENV"
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "no node-local cache directory; using the default target dir"
+          fi
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          # With the node-local target dir active, uploading/extracting target
+          # archives through the GitHub cache is pure write amplification.
+          cache-targets: ${{ steps.nodecache.outputs.active != 'true' }}
           shared-key: rust
           save-if: false
       - name: Check workspace
@@ -238,6 +318,19 @@ jobs:
   # repository contracts, checker tests, formatting, and Rust compilation run
   # concurrently. This aggregate keeps the required `validate` check bound to
   # every command it covered before the split.
+      - name: Publish this run's target dir as the cache seed
+        # Seeds come only from pushes and same-repository pull requests, never
+        # from forks; a unique temporary link keeps concurrent publishers from
+        # racing each other before the atomic rename.
+        if: >-
+          success() && steps.nodecache.outputs.active == 'true'
+          && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository)
+        shell: bash
+        run: |
+          tmp="$NODECACHE_BASE/latest.tmp.${{ github.run_id }}-${{ github.run_attempt }}"
+          ln -sfn "$CARGO_TARGET_DIR" "$tmp" && mv -T "$tmp" "$NODECACHE_BASE/latest"
+          echo "cache seed -> $CARGO_TARGET_DIR"
   validate-checks:
     if: ${{ always() }}
     needs:
@@ -250,11 +343,11 @@ jobs:
           CONTRACT_RESULT: ${{ needs.contract-checks.result }}
           CHECKER_RESULT: ${{ needs.checker-and-format-tests.result }}
           RUST_RESULT: ${{ needs.rust-checks.result }}
-          DOCS_ONLY: ${{ needs.rust-change-scope.outputs.docs_only }}
+          SKIP_RUST: ${{ needs.rust-change-scope.outputs.skip_rust }}
         run: |
           test "$CONTRACT_RESULT" = success
           test "$CHECKER_RESULT" = success
-          if [ "$DOCS_ONLY" = true ]; then
+          if [ "$SKIP_RUST" = true ]; then
             test "$RUST_RESULT" = skipped
           else
             test "$RUST_RESULT" = success
@@ -266,7 +359,7 @@ jobs:
   # share a target directory, so this job carries its own rust-cache entry.
   workspace-tests:
     needs: rust-change-scope
-    if: needs.rust-change-scope.outputs.docs_only != 'true'
+    if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -310,10 +403,10 @@ jobs:
         env:
           CHECKS_RESULT: ${{ needs.validate-checks.result }}
           TESTS_RESULT: ${{ needs.workspace-tests.result }}
-          DOCS_ONLY: ${{ needs.rust-change-scope.outputs.docs_only }}
+          SKIP_RUST: ${{ needs.rust-change-scope.outputs.skip_rust }}
         run: |
           test "$CHECKS_RESULT" = success
-          if [ "$DOCS_ONLY" = true ]; then
+          if [ "$SKIP_RUST" = true ]; then
             test "$TESTS_RESULT" = skipped
           else
             test "$TESTS_RESULT" = success
@@ -325,7 +418,7 @@ jobs:
     name: Domain instruction counts (report only)
     continue-on-error: true
     needs: rust-change-scope
-    if: needs.rust-change-scope.outputs.docs_only != 'true'
+    if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: signalbox
     timeout-minutes: 20
     steps:
@@ -336,10 +429,46 @@ jobs:
           persist-credentials: false
       # The pinned Signalbox runner image includes Valgrind, so this public-repo
       # job needs neither root access nor an unpinned package installation.
+      - name: Use the node-local cargo target cache
+        # Self-hosted runners expose a persistent per-node cache directory
+        # through /home/runner/_work/_ci-cache, provisioned by the runner pod
+        # template outside this repository. Each run gets its own target dir,
+        # cloned copy-on-write (reflink, same XFS filesystem) from the last
+        # successful run with the same lockfile/toolchain key, so concurrent
+        # runs never share a cargo lock and nothing one run writes leaks into
+        # another. GitHub-hosted runners have no such directory and keep the
+        # default. Run dirs untouched for a day are pruned at job start.
+        id: nodecache
+        shell: bash
+        run: |
+          cache=/home/runner/_work/_ci-cache
+          if [ -d "$cache/target" ]; then
+            key="${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}"
+            job="${{ github.job }}${{ strategy.job-index != '' && format('-{0}', strategy.job-index) || '' }}"
+            base="$cache/target/$key/$job"
+            mkdir -p "$base/runs"
+            find "$base/runs" -mindepth 1 -maxdepth 1 -type d -mtime +0 -exec rm -rf {} + 2>/dev/null || true
+            target="$base/runs/${{ github.run_id }}-${{ github.run_attempt }}"
+            if [ -d "$base/latest" ] && cp --reflink=always -a "$base/latest/." "$target" 2>/dev/null; then
+              echo "seeded $target from the last successful run (reflink)"
+            else
+              rm -rf "$target"; mkdir -p "$target"
+              echo "no seed available; fresh target dir $target"
+            fi
+            echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+            echo "NODECACHE_BASE=$base" >> "$GITHUB_ENV"
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "no node-local cache directory; using the default target dir"
+          fi
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          # With the node-local target dir active, uploading/extracting target
+          # archives through the GitHub cache is pure write amplification.
+          cache-targets: ${{ steps.nodecache.outputs.active != 'true' }}
           shared-key: rust
           save-if: false
       - name: Install Gungraun runner
@@ -376,10 +505,23 @@ jobs:
   # directories, and the linked search paths, which is everything the run job
   # needs; it deliberately does not carry the source tree, so the run job
   # checks the sources out and passes `--workspace-remap`.
+      - name: Publish this run's target dir as the cache seed
+        # Seeds come only from pushes and same-repository pull requests, never
+        # from forks; a unique temporary link keeps concurrent publishers from
+        # racing each other before the atomic rename.
+        if: >-
+          success() && steps.nodecache.outputs.active == 'true'
+          && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository)
+        shell: bash
+        run: |
+          tmp="$NODECACHE_BASE/latest.tmp.${{ github.run_id }}-${{ github.run_attempt }}"
+          ln -sfn "$CARGO_TARGET_DIR" "$tmp" && mv -T "$tmp" "$NODECACHE_BASE/latest"
+          echo "cache seed -> $CARGO_TARGET_DIR"
   postgres-integration-build:
     name: postgres-integration (build)
     needs: rust-change-scope
-    if: needs.rust-change-scope.outputs.docs_only != 'true'
+    if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: signalbox-docker
     # Generous by design: this job now absorbs all five suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
@@ -402,14 +544,50 @@ jobs:
           printf 'matrix=%s\n' \
             "$(python3 scripts/postgres_integration_suites.py --matrix)" \
             >> "$GITHUB_OUTPUT"
+      - name: Use the node-local cargo target cache
+        # Self-hosted runners expose a persistent per-node cache directory
+        # through /home/runner/_work/_ci-cache, provisioned by the runner pod
+        # template outside this repository. Each run gets its own target dir,
+        # cloned copy-on-write (reflink, same XFS filesystem) from the last
+        # successful run with the same lockfile/toolchain key, so concurrent
+        # runs never share a cargo lock and nothing one run writes leaks into
+        # another. GitHub-hosted runners have no such directory and keep the
+        # default. Run dirs untouched for a day are pruned at job start.
+        id: nodecache
+        shell: bash
+        run: |
+          cache=/home/runner/_work/_ci-cache
+          if [ -d "$cache/target" ]; then
+            key="${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}"
+            job="${{ github.job }}${{ strategy.job-index != '' && format('-{0}', strategy.job-index) || '' }}"
+            base="$cache/target/$key/$job"
+            mkdir -p "$base/runs"
+            find "$base/runs" -mindepth 1 -maxdepth 1 -type d -mtime +0 -exec rm -rf {} + 2>/dev/null || true
+            target="$base/runs/${{ github.run_id }}-${{ github.run_attempt }}"
+            if [ -d "$base/latest" ] && cp --reflink=always -a "$base/latest/." "$target" 2>/dev/null; then
+              echo "seeded $target from the last successful run (reflink)"
+            else
+              rm -rf "$target"; mkdir -p "$target"
+              echo "no seed available; fresh target dir $target"
+            fi
+            echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+            echo "NODECACHE_BASE=$base" >> "$GITHUB_ENV"
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "no node-local cache directory; using the default target dir"
+          fi
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          # With the node-local target dir active, uploading/extracting target
+          # archives through the GitHub cache is pure write amplification.
+          cache-targets: ${{ steps.nodecache.outputs.active != 'true' }}
           shared-key: rust
           save-if: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2.86.4
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
@@ -494,6 +672,19 @@ jobs:
   # replaces. The run matrix currently expands to twelve shards after the one
   # shared build. The shards compile nothing and run for minutes; the build's
   # single cache key replaces the old per-suite keys that evicted one another.
+      - name: Publish this run's target dir as the cache seed
+        # Seeds come only from pushes and same-repository pull requests, never
+        # from forks; a unique temporary link keeps concurrent publishers from
+        # racing each other before the atomic rename.
+        if: >-
+          success() && steps.nodecache.outputs.active == 'true'
+          && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository)
+        shell: bash
+        run: |
+          tmp="$NODECACHE_BASE/latest.tmp.${{ github.run_id }}-${{ github.run_attempt }}"
+          ln -sfn "$CARGO_TARGET_DIR" "$tmp" && mv -T "$tmp" "$NODECACHE_BASE/latest"
+          echo "cache seed -> $CARGO_TARGET_DIR"
   postgres-integration-run:
     name: >-
       postgres-integration
@@ -530,7 +721,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2.86.4
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
           tool: cargo-nextest@0.9.143
       - name: Download the ${{ matrix.suite }} archive
@@ -551,6 +742,10 @@ jobs:
           PARTITION: ${{ matrix.partition }}
           PARTITIONS: ${{ matrix.partitions }}
           FILTER: ${{ matrix.filter }}
+          # nextest runs each ignored integration test in its own libtest
+          # process. Keep deeply composed scheduler fixtures from exhausting
+          # the platform's smaller default test-thread stack.
+          RUST_MIN_STACK: "8388608"
         run: >-
           cargo nextest run
           --archive-file "$RUNNER_TEMP/archive/$SUITE.tar.zst"
@@ -576,9 +771,9 @@ jobs:
         env:
           BUILD_RESULT: ${{ needs.postgres-integration-build.result }}
           RUN_RESULT: ${{ needs.postgres-integration-run.result }}
-          DOCS_ONLY: ${{ needs.rust-change-scope.outputs.docs_only }}
+          SKIP_RUST: ${{ needs.rust-change-scope.outputs.skip_rust }}
         run: |
-          if [ "$DOCS_ONLY" = true ]; then
+          if [ "$SKIP_RUST" = true ]; then
             test "$BUILD_RESULT" = skipped
             test "$RUN_RESULT" = skipped
           else

@@ -111,6 +111,127 @@ pub(crate) const STARTUP_RECOVERY: &str = "SELECT
                    AND NOT delegation_runtime_terminal
             )";
 
+pub(crate) const AUTOMATIC_RECONCILIATION_DISCOVERY: &str = "WITH discovery AS (
+            SELECT after_turn_id, high_turn_id
+              FROM automatic_reconciliation_discovery_state
+             WHERE singleton
+             FOR UPDATE
+         ), bounds AS MATERIALIZED (
+            SELECT after_turn_id,
+                   CASE
+                       WHEN after_turn_id IS NULL THEN (
+                           SELECT turn_id
+                             FROM turn_lifecycle
+                            WHERE state_kind = 'active'
+                              AND active_phase_kind IN (
+                                  'awaiting_model_call_recovery',
+                                  'awaiting_tool_recovery'
+                              )
+                              AND NOT delegation_runtime_terminal
+                              AND num_nonnulls(
+                                  recovery_model_call_id,
+                                  recovery_tool_attempt_id
+                              ) = 1
+                            ORDER BY turn_id DESC
+                            LIMIT 1
+                       )
+                       ELSE high_turn_id
+                   END AS high_turn_id
+              FROM discovery
+         ), page AS (
+            SELECT turn_id, session_id, recovery_model_call_id,
+                   recovery_tool_attempt_id
+              FROM turn_lifecycle, bounds
+             WHERE state_kind = 'active'
+               AND active_phase_kind IN (
+                   'awaiting_model_call_recovery',
+                   'awaiting_tool_recovery'
+               )
+               AND NOT delegation_runtime_terminal
+               AND num_nonnulls(
+                   recovery_model_call_id,
+                   recovery_tool_attempt_id
+               ) = 1
+               AND (bounds.after_turn_id IS NULL OR turn_id > bounds.after_turn_id)
+               AND turn_id <= bounds.high_turn_id
+             ORDER BY turn_id
+             LIMIT $1
+         ), inserted AS (
+            INSERT INTO automatic_reconciliation
+                (turn_id, session_id, model_call_id, tool_attempt_id)
+            SELECT turn_id, session_id, recovery_model_call_id,
+                   recovery_tool_attempt_id FROM page
+            ON CONFLICT (turn_id) DO NOTHING
+            RETURNING turn_id
+         )
+         UPDATE automatic_reconciliation_discovery_state
+            SET after_turn_id = CASE
+                    WHEN (SELECT count(*) FROM page) = $1 THEN (
+                        SELECT turn_id FROM page ORDER BY turn_id DESC LIMIT 1
+                    )
+                    ELSE NULL
+                END,
+                high_turn_id = CASE
+                    WHEN (SELECT count(*) FROM page) = $1 THEN (
+                        SELECT high_turn_id FROM bounds
+                    )
+                    ELSE NULL
+                END
+          WHERE singleton";
+
+pub(crate) const AUTOMATIC_RECONCILIATION_SUPERSESSION: &str = "WITH cursor AS (
+            SELECT after_turn_id
+              FROM automatic_reconciliation_supersession_state
+             WHERE singleton
+             FOR UPDATE
+         ), page AS (
+            SELECT recovery.turn_id, recovery.session_id, recovery.model_call_id,
+                   recovery.tool_attempt_id,
+                   recovery.state_kind, recovery.attempt_count
+              FROM automatic_reconciliation AS recovery, cursor
+             WHERE recovery.state_kind IN ('scheduled', 'attempting', 'exhausted')
+               AND (cursor.after_turn_id IS NULL OR recovery.turn_id > cursor.after_turn_id)
+             ORDER BY recovery.turn_id
+             LIMIT $1
+         ), superseded AS (
+            SELECT page.*
+              FROM page
+             WHERE NOT EXISTS (
+                SELECT 1 FROM turn_lifecycle AS lifecycle
+                 WHERE lifecycle.turn_id = page.turn_id
+                   AND lifecycle.session_id = page.session_id
+                   AND lifecycle.state_kind = 'active'
+                   AND NOT lifecycle.delegation_runtime_terminal
+                   AND (
+                        lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
+                        AND lifecycle.recovery_model_call_id = page.model_call_id
+                        AND page.tool_attempt_id IS NULL
+                     OR lifecycle.active_phase_kind = 'awaiting_tool_recovery'
+                        AND lifecycle.recovery_tool_attempt_id = page.tool_attempt_id
+                        AND page.model_call_id IS NULL
+                   )
+            )
+         ), attempts AS (
+            UPDATE automatic_reconciliation_attempt AS attempt
+               SET outcome_kind = 'superseded',
+                   finished_at = statement_timestamp()
+              FROM superseded
+             WHERE superseded.state_kind = 'attempting'
+               AND attempt.turn_id = superseded.turn_id
+               AND attempt.attempt_ordinal = superseded.attempt_count
+               AND attempt.outcome_kind = 'attempting'
+         ), recoveries AS (
+            UPDATE automatic_reconciliation AS recovery
+               SET state_kind = 'superseded', exhausted_at = NULL
+              FROM superseded
+             WHERE recovery.turn_id = superseded.turn_id
+         )
+         UPDATE automatic_reconciliation_supersession_state
+            SET after_turn_id = (
+                SELECT turn_id FROM page ORDER BY turn_id DESC LIMIT 1
+            )
+          WHERE singleton";
+
 pub(crate) const AUTOMATIC_RECONCILIATION_CLAIM: &str = "WITH due AS (
                 SELECT turn_id
                   FROM automatic_reconciliation

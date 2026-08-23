@@ -850,13 +850,14 @@ where
                     () = &mut shutdown => break,
                     completed = passes.join_next_with_id() => {
                         if let Some(completed) = completed
-                            && let Some(session) = observe_pass_completion::<Pass>(
+                            && let Some((session, rerun_allowed)) = observe_pass_completion::<Pass>(
                                 completed,
                                 &mut task_sessions,
                                 &mut in_flight_sessions,
                                 &self.occupancy_observer,
                             )
                             && pending_reruns.remove(&session)
+                            && rerun_allowed
                         {
                             pending_hints.push_back(session);
                         }
@@ -913,13 +914,14 @@ where
                         if !task_sessions.is_empty() =>
                     {
                         if let Some(completed) = completed
-                            && let Some(session) = observe_pass_completion::<Pass>(
+                            && let Some((session, rerun_allowed)) = observe_pass_completion::<Pass>(
                                 completed,
                                 &mut task_sessions,
                                 &mut in_flight_sessions,
                                 &self.occupancy_observer,
                             )
                             && pending_reruns.remove(&session)
+                            && rerun_allowed
                         {
                             pending_hints.push_back(session);
                             break None;
@@ -1073,7 +1075,7 @@ fn observe_pass_completion<Pass>(
     task_sessions: &mut HashMap<Id, InFlightPass>,
     in_flight_sessions: &mut HashSet<SessionId>,
     observer: &Option<Arc<dyn SchedulerOccupancyObserver>>,
-) -> Option<SessionId>
+) -> Option<(SessionId, bool)>
 where
     Pass: EligibilityPass,
     Pass::Error: ClassifyOperatorFailure,
@@ -1118,14 +1120,17 @@ where
                 ),
             };
         }
-        Ok((_, PassTaskOutcome::OccupancyExpired { bound })) => tracing::error!(
-            failure_class = ?crate::OperatorFailureClass::Infrastructure { commit_ambiguous: true },
-            cause_code = "scheduler_pass_occupancy_expired",
-            stage = "occupancy",
-            session_id = %session.as_uuid(),
-            occupancy_bound_seconds = bound.get().map(|duration| duration.as_secs()),
-            "authoritative eligibility pass exceeded its occupancy bound and released its slot"
-        ),
+        Ok((_, PassTaskOutcome::OccupancyExpired { bound })) => {
+            tracing::error!(
+                failure_class = ?crate::OperatorFailureClass::Infrastructure { commit_ambiguous: true },
+                cause_code = "scheduler_pass_occupancy_expired",
+                stage = "occupancy",
+                session_id = %session.as_uuid(),
+                occupancy_bound_seconds = bound.get().map(|duration| duration.as_secs()),
+                "authoritative eligibility pass exceeded its occupancy bound and released its slot"
+            );
+            return Some((session, false));
+        }
         Err(_) => {
             tracing::error!(
                 failure_class = ?crate::OperatorFailureClass::CallerOrHubBug,
@@ -1136,7 +1141,7 @@ where
             );
         }
     }
-    Some(session)
+    Some((session, true))
 }
 
 /// Creates the root of one session's scheduler work.
@@ -1884,6 +1889,7 @@ mod tests {
         started: Arc<Notify>,
         expired: Arc<Notify>,
         expiration_count: Arc<AtomicUsize>,
+        run_count: Arc<AtomicUsize>,
     }
 
     impl super::SchedulerPassExpiryHandler for OccupancyExpiryPass {
@@ -1905,7 +1911,9 @@ mod tests {
             _session: SessionId,
         ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             let started = Arc::clone(&self.started);
+            let run_count = Arc::clone(&self.run_count);
             async move {
+                run_count.fetch_add(1, Ordering::SeqCst);
                 started.notify_one();
                 pending().await
             }
@@ -1921,17 +1929,19 @@ mod tests {
         let started = Arc::new(Notify::new());
         let expired = Arc::new(Notify::new());
         let expiration_count = Arc::new(AtomicUsize::new(0));
+        let run_count = Arc::new(AtomicUsize::new(0));
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         let bound = SchedulerPassOccupancyBound::try_new(Duration::from_secs(1))
             .expect("one second lowers the production ceiling");
         let scheduler = SchedulerLoop::new(
             FakeWorkSource {
-                hints: VecDeque::from([Ok(selected)]),
+                hints: VecDeque::from([Ok(selected), Ok(selected)]),
             },
             OccupancyExpiryPass {
                 started: Arc::clone(&started),
                 expired: Arc::clone(&expired),
                 expiration_count: Arc::clone(&expiration_count),
+                run_count: Arc::clone(&run_count),
             },
         )
         .with_occupancy_bound(bound);
@@ -1947,6 +1957,9 @@ mod tests {
         started.notified().await;
         tokio::time::advance(Duration::from_secs(1)).await;
         expired.notified().await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        assert_eq!(run_count.load(Ordering::SeqCst), 1);
         shutdown_sender
             .send(())
             .expect("the scheduler still listens for shutdown");

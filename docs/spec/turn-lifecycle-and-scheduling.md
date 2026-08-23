@@ -588,9 +588,12 @@ is decided by repeated observation instead. Each pass records, per candidate
 turn, its session's turn-progress frontier — the greatest `event_sequence` the
 session has emitted for an event that a turn's own execution produces — and the
 turn's current attempt. A turn is due only once that evidence has been observed
-unchanged for at least the staleness bound. Any progress at all restarts the
-bound, so a turn that resumed cannot be ended on the strength of its earlier
-silence.
+unchanged for at least the bound governing its watchdog. The composed
+`staleness_bound` governs only the quiescent watchdog; the slot-held watchdog
+always uses the separate thirty-minute hard ceiling so lowering the quiescent
+bound cannot classify live model-call, tool, or stop work as stale early. Any
+progress at all restarts the applicable bound, so a turn that resumed cannot be
+ended on the strength of its earlier silence.
 
 The frontier is the outbox's rather than the transcript's because the outbox
 assigns its sequence in commit order, and every session-scoped transition kind
