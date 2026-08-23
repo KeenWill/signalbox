@@ -411,6 +411,7 @@ export function ProductApp({
       callback: (event) => {
         if (isEditableTarget(event.target) || app.overlay !== null) return
         invokeCommand(binding.commandId, context)
+        primaryRef.current?.focus()
       },
     })),
   )

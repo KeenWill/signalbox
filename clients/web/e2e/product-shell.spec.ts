@@ -241,6 +241,7 @@ test('runs product navigation sequences but leaves Mod+K to an editing field', a
   await page.keyboard.press('g')
   await page.keyboard.press('a')
   await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.getByRole('main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
