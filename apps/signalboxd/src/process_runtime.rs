@@ -14470,7 +14470,7 @@ impl ProcessUpdateEvent {
                 acceptance_position: acceptance_position.as_u64(),
                 content: content.clone(),
             },
-            DispatchedOutboxEventKind::GoalTurnRetired { turn } => {
+            DispatchedOutboxEventKind::GoalTurnRetired { turn, .. } => {
                 Self::GoalTurnRetired { turn: *turn }
             }
             DispatchedOutboxEventKind::TurnActivated {
@@ -17992,9 +17992,11 @@ mod tests {
     #[test]
     fn goal_turn_retirement_projects_to_the_exact_wire_identity() {
         let turn = TurnId::from_uuid(Uuid::from_u128(7));
-        let update =
-            ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::GoalTurnRetired { turn })
-                .expect("a client-visible event projects to one update");
+        let update = ProcessUpdateEvent::from_outbox(&DispatchedOutboxEventKind::GoalTurnRetired {
+            turn,
+            goal_event_ordinal: 1,
+        })
+        .expect("a client-visible event projects to one update");
 
         assert_eq!(
             update.wire().expect("the fixture event is representable"),

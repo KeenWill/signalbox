@@ -912,10 +912,19 @@ async fn project_detail_event(
                         continuation,
                     )
                 }
-                DispatchedOutboxEventKind::GoalTurnRetired { turn } => {
-                    let event =
-                        load_goal_turn_event(transaction, *turn, address, cursor, &mut remaining)
-                            .await?;
+                DispatchedOutboxEventKind::GoalTurnRetired {
+                    turn,
+                    goal_event_ordinal,
+                } => {
+                    let event = load_goal_turn_event(
+                        transaction,
+                        *turn,
+                        *goal_event_ordinal,
+                        address,
+                        cursor,
+                        &mut remaining,
+                    )
+                    .await?;
                     let continuation =
                         goal_event_continuation(&event).map(TimelineDetailContinuation::MoreBody);
                     (
@@ -1156,6 +1165,7 @@ async fn load_imported_evidence(
 async fn load_goal_turn_event(
     transaction: &mut Transaction<'_, Postgres>,
     turn: TurnId,
+    goal_event_ordinal: u64,
     address: TimelineAddress,
     cursor: Option<TimelineDetailCursor>,
     remaining: &mut u32,
@@ -1169,10 +1179,10 @@ async fn load_goal_turn_event(
              ON event.session_id = goal.session_id
             AND event.generation = goal.goal_generation
           WHERE goal.turn_id = $1
-          ORDER BY event.event_ordinal DESC
-          LIMIT 1",
+            AND event.event_ordinal = $2",
     )
     .bind(turn.into_uuid())
+    .bind(Decimal::from(goal_event_ordinal))
     .fetch_one(&mut **transaction)
     .await?;
     let text = row
@@ -1284,7 +1294,7 @@ async fn project_tool_batch(
     if let Some(goal_cursor) =
         cursor.filter(|cursor| cursor.field == Some(TimelineBodyField::GoalText))
     {
-        let goal_row = load_goal_event_row(transaction, producing_call, goal_cursor.member_index)
+        let goal_row = load_goal_event_row(transaction, address, goal_cursor.member_index)
             .await?
             .ok_or(SessionTimelineCorruption::InvalidDetailCursor)?;
         return project_tool_goal(
@@ -1309,7 +1319,6 @@ async fn project_tool_batch(
         return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
     }
     let member_index = cursor.map_or(0, |cursor| cursor.member_index);
-    let member_ordinal = i64::from(member_index) + 1;
     let selected_field = match requested_field {
         TimelineBodyField::ToolArguments => "tool_arguments",
         TimelineBodyField::ToolResult => "tool_result",
@@ -1317,30 +1326,12 @@ async fn project_tool_batch(
         _ => return Err(SessionTimelineRepositoryError::InvalidDetailQuery),
     };
     let row = sqlx::query(
-        "WITH ordered_members AS (
-            SELECT request.request_id, attempt.attempt_id,
-                   row_number() OVER (
-                       ORDER BY request.request_ordinal,
-                                generation.generation NULLS FIRST
-                   ) AS member_ordinal
-              FROM tool_request AS request
-              LEFT JOIN tool_attempt AS attempt
-                ON attempt.request_id = request.request_id
-              LEFT JOIN LATERAL (
-                    SELECT lease.generation
-                      FROM runner_physical_attempt_lease_binding AS binding
-                      JOIN runner_lease_generation AS lease
-                        ON lease.lease_id = binding.lease_id
-                       AND lease.attempt_id = binding.attempt_id
-                     WHERE binding.attempt_id = attempt.attempt_id
-                     ORDER BY lease.generation DESC
-                     LIMIT 1
-              ) AS generation ON TRUE
-             WHERE request.producing_model_call_id = $1
-        ), selected_member AS (
+        "WITH selected_member AS (
             SELECT request_id, attempt_id
-              FROM ordered_members
-             WHERE member_ordinal = $2
+              FROM tool_batch_transition_detail_member
+             WHERE event_sequence = $1
+               AND member_kind = 'tool'
+               AND member_index = $2
         )
         SELECT request.request_id, request.tool_name,
                 CASE $3::text
@@ -1355,15 +1346,15 @@ async fn project_tool_batch(
                 attempt.error_detail IS NOT NULL AS has_failure,
                 EXISTS (
                     SELECT 1
-                      FROM ordered_members AS probe
-                     WHERE probe.member_ordinal = $2 + 1
+                      FROM tool_batch_transition_detail_member AS probe
+                     WHERE probe.event_sequence = $1
+                       AND probe.member_kind = 'tool'
+                       AND probe.member_index = $2 + 1
                 ) AS has_next,
                 EXISTS (
-                    SELECT 1
-                      FROM goal_event AS event
-                      JOIN tool_request AS goal_request
-                        ON goal_request.request_id = event.model_tool_request_id
-                     WHERE goal_request.producing_model_call_id = $1
+                    SELECT 1 FROM tool_batch_transition_detail_member AS goal
+                     WHERE goal.event_sequence = $1
+                       AND goal.member_kind = 'goal'
                 ) AS has_goal_events,
                 (
                     SELECT CASE placement.requested_sandbox_profile
@@ -1392,8 +1383,8 @@ async fn project_tool_batch(
            LEFT JOIN tool_attempt AS attempt
              ON attempt.attempt_id = selected.attempt_id",
     )
-    .bind(producing_call.into_uuid())
-    .bind(member_ordinal)
+    .bind(Decimal::from(address.sequence().get()))
+    .bind(i64::from(member_index))
     .bind(selected_field)
     .fetch_optional(&mut **transaction)
     .await?;
@@ -1573,34 +1564,29 @@ struct StoredGoalEvent {
 
 async fn load_goal_event_row(
     transaction: &mut Transaction<'_, Postgres>,
-    call: ModelCallId,
+    address: TimelineAddress,
     member_index: u32,
 ) -> Result<Option<StoredGoalEvent>, SessionTimelineRepositoryError> {
-    let member_ordinal = i64::from(member_index) + 1;
     let row = sqlx::query(
-        "WITH ordered_goals AS (
-            SELECT event.generation, event.event_kind, event.blocked_reason,
-                   event.statement, event.need, event.guidance, event.report,
-                   row_number() OVER (
-                       ORDER BY request.request_ordinal, event.event_ordinal
-                   ) AS member_ordinal
-              FROM goal_event AS event
-              JOIN tool_request AS request
-                ON request.request_id = event.model_tool_request_id
-             WHERE request.producing_model_call_id = $1
-        )
-        SELECT generation, event_kind, blocked_reason,
-               COALESCE(statement, need, guidance, report) AS body,
+        "SELECT event.generation, event.event_kind, event.blocked_reason,
+               COALESCE(event.statement, event.need, event.guidance, event.report) AS body,
                EXISTS (
                    SELECT 1
-                     FROM ordered_goals AS probe
-                    WHERE probe.member_ordinal = $2 + 1
+                     FROM tool_batch_transition_detail_member AS probe
+                    WHERE probe.event_sequence = $1
+                      AND probe.member_kind = 'goal'
+                      AND probe.member_index = $2 + 1
                ) AS has_next
-          FROM ordered_goals
-         WHERE member_ordinal = $2",
+          FROM tool_batch_transition_detail_member AS selected
+          JOIN goal_event AS event
+            ON event.session_id = selected.session_id
+           AND event.event_ordinal = selected.goal_event_ordinal
+         WHERE selected.event_sequence = $1
+           AND selected.member_kind = 'goal'
+           AND selected.member_index = $2",
     )
-    .bind(call.into_uuid())
-    .bind(member_ordinal)
+    .bind(Decimal::from(address.sequence().get()))
+    .bind(i64::from(member_index))
     .fetch_optional(&mut **transaction)
     .await?;
     row.map(|row| {

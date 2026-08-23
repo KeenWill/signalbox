@@ -23,6 +23,44 @@ const ambiguousModelCallPage = {
   projected_body_bytes: 128,
 }
 
+const inheritedSettingsOverlay = {
+  reasoning_level: { kind: 'inherit' },
+  fast_mode: { kind: 'inherit' },
+  service_tier: { kind: 'inherit' },
+}
+
+const settingsSnapshot = {
+  precedence: {
+    per_call: inheritedSettingsOverlay,
+    session: inheritedSettingsOverlay,
+    profile: inheritedSettingsOverlay,
+    global_default: inheritedSettingsOverlay,
+  },
+  effective: { fast_mode: 'disabled' },
+}
+
+const sessionDefaultsSettingsBody = {
+  type: 'model_settings',
+  detail: {
+    type: 'session_defaults_changed',
+    command_id: '00000000-0000-0000-0000-000000000004',
+    prior_defaults_version: '1',
+    installed_defaults_version: '2',
+    prior_model: {
+      kind: 'direct',
+      selection_id: '00000000-0000-0000-0000-000000000005',
+    },
+    installed_model: {
+      kind: 'direct',
+      selection_id: '00000000-0000-0000-0000-000000000006',
+    },
+    prior_settings: settingsSnapshot,
+    installed_settings: settingsSnapshot,
+    caller_override: inheritedSettingsOverlay,
+    adjustments: [],
+  },
+}
+
 function expectTimelineBodyRejected(kind: string, body: object) {
   const page = {
     session_id: ambiguousModelCallPage.session_id,
@@ -92,8 +130,13 @@ describe('generated timeline detail decoder', () => {
                 approval_posture: 'delegated',
                 approval_judge_escalated: true,
                 operator_required: true,
-                state: 'known_failed',
-                cause_code: 'denied',
+                evidence: {
+                  type: 'physical_attempt',
+                  attempt_id: '00000000-0000-0000-0000-000000000005',
+                  effect_posture: 'effect_free',
+                  state: 'known_failed',
+                  cause: 'invalid_arguments',
+                },
               },
             ],
             goal_events: [],
@@ -234,7 +277,12 @@ describe('generated timeline detail decoder', () => {
                 approval_posture: 'auto',
                 approval_judge_escalated: false,
                 operator_required: false,
-                state: 'awaiting_child',
+                evidence: {
+                  type: 'physical_attempt',
+                  attempt_id: '00000000-0000-0000-0000-000000000005',
+                  effect_posture: 'external_effect',
+                  state: 'awaiting_child',
+                },
               },
             ],
             goal_events: [],
@@ -343,6 +391,7 @@ describe('generated timeline detail decoder', () => {
           approval_posture: 'future',
           approval_judge_escalated: false,
           operator_required: false,
+          evidence: { type: 'request_only' },
         },
       ],
       goal_events: [],
@@ -365,7 +414,12 @@ describe('generated timeline detail decoder', () => {
           approval_posture: 'auto',
           approval_judge_escalated: false,
           operator_required: false,
-          effect_posture: 'future',
+          evidence: {
+            type: 'physical_attempt',
+            attempt_id: '00000000-0000-0000-0000-000000000005',
+            effect_posture: 'future',
+            state: 'prepared',
+          },
         },
       ],
       goal_events: [],
@@ -388,7 +442,13 @@ describe('generated timeline detail decoder', () => {
           approval_posture: 'auto',
           approval_judge_escalated: false,
           operator_required: false,
-          sandbox_posture: 'future_sandbox',
+          evidence: {
+            type: 'physical_attempt',
+            attempt_id: '00000000-0000-0000-0000-000000000005',
+            effect_posture: 'effect_free',
+            sandbox_posture: 'future_sandbox',
+            state: 'prepared',
+          },
         },
       ],
       goal_events: [],
@@ -438,6 +498,135 @@ describe('generated timeline detail decoder', () => {
     })
   })
 
+  it('rejects non-parking reconciliation facts', () => {
+    const body = {
+      type: 'reconciliation',
+      turn_id: '00000000-0000-0000-0000-000000000002',
+      operation: {
+        type: 'model_call',
+        model_call_id: '00000000-0000-0000-0000-000000000003',
+      },
+      attempt_count: '2',
+      exhausted: true,
+      operator_required: true,
+      cause_code: 'ambiguous_operation',
+    }
+
+    const exhaustedPage = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '13' },
+          kind: 'turn_reconciliation_required',
+          body: { ...body, exhausted: false },
+          projected_body_bytes: 128,
+        },
+      ],
+      projected_body_bytes: 128,
+    }
+    const operatorPage = {
+      ...exhaustedPage,
+      items: [{ ...exhaustedPage.items[0], body: { ...body, operator_required: false } }],
+    }
+    const causePage = {
+      ...exhaustedPage,
+      items: [{ ...exhaustedPage.items[0], body: { ...body, cause_code: 'future' } }],
+    }
+
+    expect(() => decodeWebSessionTimelineDetailPage(exhaustedPage)).toThrow(
+      'an exhausted operator-required ambiguous_operation reconciliation',
+    )
+    expect(() => decodeWebSessionTimelineDetailPage(operatorPage)).toThrow(
+      'an exhausted operator-required ambiguous_operation reconciliation',
+    )
+    expect(() => decodeWebSessionTimelineDetailPage(causePage)).toThrow(
+      'an exhausted operator-required ambiguous_operation reconciliation',
+    )
+  })
+
+  it('rejects impossible tool-attempt evidence', () => {
+    expectTimelineBodyRejected('tool_batch_transition', {
+      type: 'tool_batch',
+      turn_id: '00000000-0000-0000-0000-000000000002',
+      producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+      state: {
+        type: 'proposed',
+        frontier_id: '00000000-0000-0000-0000-000000000008',
+      },
+      tools: [
+        {
+          request_id: '00000000-0000-0000-0000-000000000004',
+          tool_name: 'exec',
+          approval_posture: 'auto',
+          approval_judge_escalated: false,
+          operator_required: false,
+          evidence: { type: 'physical_attempt', state: 'completed' },
+        },
+      ],
+      goal_events: [],
+    })
+  })
+
+  it('rejects an unknown tool failure cause', () => {
+    expectTimelineBodyRejected('tool_batch_transition', {
+      type: 'tool_batch',
+      turn_id: '00000000-0000-0000-0000-000000000002',
+      producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+      state: {
+        type: 'results_projected',
+        frontier_id: '00000000-0000-0000-0000-000000000008',
+      },
+      tools: [
+        {
+          request_id: '00000000-0000-0000-0000-000000000004',
+          tool_name: 'exec',
+          approval_posture: 'auto',
+          approval_judge_escalated: false,
+          operator_required: false,
+          evidence: {
+            type: 'physical_attempt',
+            attempt_id: '00000000-0000-0000-0000-000000000005',
+            effect_posture: 'effect_free',
+            state: 'known_failed',
+            cause: 'future',
+          },
+        },
+      ],
+      goal_events: [],
+    })
+  })
+
+  it('rejects oversized model-setting adjustments', () => {
+    const adjustment = { type: 'fast_mode_disabled' }
+
+    expectTimelineBodyRejected('session_model_settings_changed', {
+      ...sessionDefaultsSettingsBody,
+      detail: {
+        ...sessionDefaultsSettingsBody.detail,
+        adjustments: [adjustment, adjustment, adjustment, adjustment],
+      },
+    })
+  })
+
+  it('rejects a mismatched model-settings header', () => {
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '13' },
+          kind: 'turn_model_settings_resolved',
+          body: sessionDefaultsSettingsBody,
+          projected_body_bytes: 128,
+        },
+      ],
+      projected_body_bytes: 128,
+    }
+
+    expect(() => decodeWebSessionTimelineDetailPage(page)).toThrow(
+      'session_model_settings_changed for session defaults detail',
+    )
+  })
+
   it('accepts a continued tool argument with exact byte accounting', () => {
     const continuation = {
       address: { event_sequence: '20' },
@@ -472,6 +661,7 @@ describe('generated timeline detail decoder', () => {
                 approval_posture: 'auto',
                 approval_judge_escalated: false,
                 operator_required: false,
+                evidence: { type: 'request_only' },
               },
             ],
             goal_events: [],
@@ -508,6 +698,7 @@ describe('generated timeline detail decoder', () => {
       approval_posture: 'auto',
       approval_judge_escalated: false,
       operator_required: false,
+      evidence: { type: 'request_only' },
     }
     const secondTool = {
       request_id: '00000000-0000-0000-0000-000000000005',
@@ -515,6 +706,7 @@ describe('generated timeline detail decoder', () => {
       approval_posture: 'auto',
       approval_judge_escalated: false,
       operator_required: false,
+      evidence: { type: 'request_only' },
     }
 
     expectTimelineBodyRejected('tool_batch_transition', {

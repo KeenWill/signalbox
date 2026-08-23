@@ -455,16 +455,23 @@ type WebTimelineToolAttempt = {
   readonly approval_judge_escalated: boolean;
   readonly approval_posture: WebTimelineToolApprovalPosture;
   readonly arguments?: WebTimelineTextExcerpt | null;
-  readonly attempt_id?: string | null;
-  readonly cause_code?: string | null;
-  readonly effect_posture?: WebTimelineToolEffectPosture | null;
-  readonly failure?: WebTimelineTextExcerpt | null;
+  readonly evidence: WebTimelineToolAttemptEvidence;
   readonly operator_required: boolean;
   readonly request_id: string;
+  readonly tool_name: string;
+};
+
+type WebTimelineToolAttemptEvidence = {
+  readonly type: "request_only";
+} | {
+  readonly attempt_id: string;
+  readonly cause?: WebTimelineToolFailureCause | null;
+  readonly effect_posture: WebTimelineToolEffectPosture;
+  readonly failure?: WebTimelineTextExcerpt | null;
   readonly result?: WebTimelineTextExcerpt | null;
   readonly sandbox_posture?: WebTimelineToolSandboxPosture | null;
-  readonly state?: WebTimelineToolState | null;
-  readonly tool_name: string;
+  readonly state: WebTimelineToolState;
+  readonly type: "physical_attempt";
 };
 
 type WebTimelineToolBatchState = {
@@ -479,6 +486,8 @@ type WebTimelineToolBatchState = {
 };
 
 type WebTimelineToolEffectPosture = "effect_free" | "external_effect";
+
+type WebTimelineToolFailureCause = "unknown_tool" | "invalid_arguments" | "execution_failed" | "result_too_large" | "crash_lost";
 
 type WebTimelineToolSandboxPosture = "unsandboxed" | "sandboxed";
 

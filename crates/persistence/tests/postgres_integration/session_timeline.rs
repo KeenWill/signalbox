@@ -174,7 +174,7 @@ async fn item_and_region_details_share_the_stable_creation_address() -> Result<(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn tool_detail_selects_one_lease_generation_for_sandbox_posture() -> Result<(), Box<dyn Error>>
+async fn proposed_tool_detail_freezes_members_before_later_attempts() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x99a0;
@@ -289,8 +289,9 @@ async fn tool_detail_selects_one_lease_generation_for_sandbox_posture() -> Resul
         panic!("the selected event projects a tool-batch body");
     };
     assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].attempt_id, Some(attempt));
-    assert!(tools[0].sandbox_posture.is_some());
+    assert_eq!(tools[0].request_id, request);
+    assert_eq!(tools[0].attempt_id, None);
+    assert_eq!(tools[0].sandbox_posture, None);
 
     pool.close().await;
     drop(container);

@@ -1770,6 +1770,7 @@ const schemas = {
                 "items": {
                   "$ref": "#/$defs/WebTimelineModelChangeAdjustment"
                 },
+                "maxItems": 3,
                 "type": "array"
               },
               "caller_override": {
@@ -1831,6 +1832,7 @@ const schemas = {
                 "items": {
                   "$ref": "#/$defs/WebTimelineModelChangeAdjustment"
                 },
+                "maxItems": 3,
                 "type": "array"
               },
               "defaults_version": {
@@ -2303,73 +2305,14 @@ const schemas = {
               }
             ]
           },
-          "attempt_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "cause_code": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "effect_posture": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebTimelineToolEffectPosture"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "failure": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebTimelineTextExcerpt"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "evidence": {
+            "$ref": "#/$defs/WebTimelineToolAttemptEvidence"
           },
           "operator_required": {
             "type": "boolean"
           },
           "request_id": {
             "type": "string"
-          },
-          "result": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebTimelineTextExcerpt"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "sandbox_posture": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebTimelineToolSandboxPosture"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "state": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebTimelineToolState"
-              },
-              {
-                "type": "null"
-              }
-            ]
           },
           "tool_name": {
             "type": "string"
@@ -2380,9 +2323,92 @@ const schemas = {
           "tool_name",
           "approval_posture",
           "approval_judge_escalated",
-          "operator_required"
+          "operator_required",
+          "evidence"
         ],
         "type": "object"
+      },
+      "WebTimelineToolAttemptEvidence": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "request_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "attempt_id": {
+                "type": "string"
+              },
+              "cause": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineToolFailureCause"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effect_posture": {
+                "$ref": "#/$defs/WebTimelineToolEffectPosture"
+              },
+              "failure": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineTextExcerpt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "result": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineTextExcerpt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "sandbox_posture": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineToolSandboxPosture"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "$ref": "#/$defs/WebTimelineToolState"
+              },
+              "type": {
+                "const": "physical_attempt",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "attempt_id",
+              "effect_posture",
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WebTimelineToolBatchState": {
         "oneOf": [
@@ -2443,6 +2469,16 @@ const schemas = {
         "enum": [
           "effect_free",
           "external_effect"
+        ],
+        "type": "string"
+      },
+      "WebTimelineToolFailureCause": {
+        "enum": [
+          "unknown_tool",
+          "invalid_arguments",
+          "execution_failed",
+          "result_too_large",
+          "crash_lost"
         ],
         "type": "string"
       },
@@ -2924,10 +2960,46 @@ function assertTimelineDetailPage(value) {
         const tool = item.body.tools[0];
         const goal = item.body.goal_events[0];
         if (tool !== undefined) {
+          const physical = tool.evidence.type === "physical_attempt" ? tool.evidence : null;
+          if (physical !== null) {
+            const terminalFailure = physical.state === "known_failed";
+            if ((physical.cause !== undefined && physical.cause !== null) !== terminalFailure) {
+              fail(
+                `${path}.body.tools[0].evidence.cause`,
+                "present exactly for a known_failed attempt",
+              );
+            }
+            if (
+              physical.result !== undefined &&
+              physical.result !== null &&
+              physical.state !== "completed"
+            ) {
+              fail(
+                `${path}.body.tools[0].evidence.result`,
+                "present only for a completed attempt",
+              );
+            }
+            if (
+              physical.failure !== undefined &&
+              physical.failure !== null &&
+              !terminalFailure
+            ) {
+              fail(
+                `${path}.body.tools[0].evidence.failure`,
+                "present only for a known_failed attempt",
+              );
+            }
+            if (physical.state === "ambiguous" && physical.effect_posture !== "external_effect") {
+              fail(
+                `${path}.body.tools[0].evidence.effect_posture`,
+                "external_effect for an ambiguous attempt",
+              );
+            }
+          }
           const excerpts = [
             [tool.arguments, "tool_arguments", `${path}.body.tools[0].arguments`],
-            [tool.result, "tool_result", `${path}.body.tools[0].result`],
-            [tool.failure, "tool_failure", `${path}.body.tools[0].failure`],
+            [physical?.result, "tool_result", `${path}.body.tools[0].evidence.result`],
+            [physical?.failure, "tool_failure", `${path}.body.tools[0].evidence.failure`],
           ].filter(([excerpt]) => excerpt !== undefined && excerpt !== null);
           if (excerpts.length > 1) {
             fail(`${path}.body.tools[0]`, "at most one projected text field");
@@ -3002,6 +3074,16 @@ function assertTimelineDetailPage(value) {
         if (item.kind !== "turn_reconciliation_required") {
           fail(`${path}.kind`, "turn_reconciliation_required for a reconciliation body");
         }
+        if (
+          item.body.exhausted !== true ||
+          item.body.operator_required !== true ||
+          item.body.cause_code !== "ambiguous_operation"
+        ) {
+          fail(
+            `${path}.body`,
+            "an exhausted operator-required ambiguous_operation reconciliation",
+          );
+        }
         break;
       case "runner":
         if (item.kind !== "runner_state_transition") {
@@ -3042,10 +3124,22 @@ function assertTimelineDetailPage(value) {
         break;
       case "model_settings":
         if (
-          item.kind !== "session_model_settings_changed" &&
+          item.body.detail.type === "session_defaults_changed" &&
+          item.kind !== "session_model_settings_changed"
+        ) {
+          fail(
+            `${path}.kind`,
+            "session_model_settings_changed for session defaults detail",
+          );
+        }
+        if (
+          item.body.detail.type === "turn_resolved" &&
           item.kind !== "turn_model_settings_resolved"
         ) {
-          fail(`${path}.kind`, "a model-settings event for a model_settings body");
+          fail(
+            `${path}.kind`,
+            "turn_model_settings_resolved for resolved turn detail",
+          );
         }
         break;
       case "turn_lifecycle":

@@ -65,8 +65,9 @@ use signalbox_web_contract::{
     WebTimelineReasoningLevel, WebTimelineReconciliationOperation, WebTimelineRunnerSandboxPosture,
     WebTimelineRunnerState, WebTimelineServiceTier, WebTimelineSettingOverlay,
     WebTimelineTextExcerpt, WebTimelineToolApprovalPosture, WebTimelineToolAttempt,
-    WebTimelineToolBatchState, WebTimelineToolEffectPosture, WebTimelineToolSandboxPosture,
-    WebTimelineToolState, WebTimelineTurnLifecycleKind, WebU64,
+    WebTimelineToolAttemptEvidence, WebTimelineToolBatchState, WebTimelineToolEffectPosture,
+    WebTimelineToolFailureCause, WebTimelineToolSandboxPosture, WebTimelineToolState,
+    WebTimelineTurnLifecycleKind, WebU64,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -1560,13 +1561,58 @@ const fn bound_child_action_dto(action: TimelineBoundChildAction) -> WebTimeline
 }
 
 fn tool_attempt_dto(attempt: TimelineToolAttempt) -> WebTimelineToolAttempt {
+    let evidence = match (
+        attempt.attempt_id,
+        attempt.effect_posture,
+        attempt.state,
+        attempt.cause_code.as_deref(),
+    ) {
+        (None, None, None, None) => WebTimelineToolAttemptEvidence::RequestOnly {},
+        (Some(attempt_id), Some(effect_posture), Some(state), cause) => {
+            WebTimelineToolAttemptEvidence::PhysicalAttempt {
+                attempt_id: attempt_id.into_uuid().to_string(),
+                result: attempt.result.map(text_excerpt_dto),
+                failure: attempt.failure.map(text_excerpt_dto),
+                effect_posture: match effect_posture {
+                    TimelineToolEffectPosture::EffectFree => {
+                        WebTimelineToolEffectPosture::EffectFree
+                    }
+                    TimelineToolEffectPosture::ExternalEffect => {
+                        WebTimelineToolEffectPosture::ExternalEffect
+                    }
+                },
+                sandbox_posture: attempt.sandbox_posture.map(|posture| match posture {
+                    TimelineToolSandboxPosture::Unsandboxed => {
+                        WebTimelineToolSandboxPosture::Unsandboxed
+                    }
+                    TimelineToolSandboxPosture::Sandboxed => {
+                        WebTimelineToolSandboxPosture::Sandboxed
+                    }
+                }),
+                state: match state {
+                    TimelineToolState::Prepared => WebTimelineToolState::Prepared,
+                    TimelineToolState::InFlight => WebTimelineToolState::InFlight,
+                    TimelineToolState::AwaitingChild => WebTimelineToolState::AwaitingChild,
+                    TimelineToolState::Completed => WebTimelineToolState::Completed,
+                    TimelineToolState::KnownFailed => WebTimelineToolState::KnownFailed,
+                    TimelineToolState::Ambiguous => WebTimelineToolState::Ambiguous,
+                },
+                cause: cause.map(|cause| match cause {
+                    "unknown_tool" => WebTimelineToolFailureCause::UnknownTool,
+                    "invalid_arguments" => WebTimelineToolFailureCause::InvalidArguments,
+                    "execution_failed" => WebTimelineToolFailureCause::ExecutionFailed,
+                    "result_too_large" => WebTimelineToolFailureCause::ResultTooLarge,
+                    "crash_lost" => WebTimelineToolFailureCause::CrashLost,
+                    _ => unreachable!("persistence closes tool failure causes"),
+                }),
+            }
+        }
+        _ => unreachable!("persistence closes tool attempt evidence shapes"),
+    };
     WebTimelineToolAttempt {
         request_id: attempt.request_id.into_uuid().to_string(),
-        attempt_id: attempt.attempt_id.map(|id| id.into_uuid().to_string()),
         tool_name: attempt.tool_name,
         arguments: attempt.arguments.map(text_excerpt_dto),
-        result: attempt.result.map(text_excerpt_dto),
-        failure: attempt.failure.map(text_excerpt_dto),
         approval_posture: match attempt.approval_posture {
             TimelineToolApprovalPosture::Auto => WebTimelineToolApprovalPosture::Auto,
             TimelineToolApprovalPosture::Delegated => WebTimelineToolApprovalPosture::Delegated,
@@ -1574,25 +1620,7 @@ fn tool_attempt_dto(attempt: TimelineToolAttempt) -> WebTimelineToolAttempt {
         },
         approval_judge_escalated: attempt.approval_judge_escalated,
         operator_required: attempt.operator_required,
-        effect_posture: attempt.effect_posture.map(|posture| match posture {
-            TimelineToolEffectPosture::EffectFree => WebTimelineToolEffectPosture::EffectFree,
-            TimelineToolEffectPosture::ExternalEffect => {
-                WebTimelineToolEffectPosture::ExternalEffect
-            }
-        }),
-        sandbox_posture: attempt.sandbox_posture.map(|posture| match posture {
-            TimelineToolSandboxPosture::Unsandboxed => WebTimelineToolSandboxPosture::Unsandboxed,
-            TimelineToolSandboxPosture::Sandboxed => WebTimelineToolSandboxPosture::Sandboxed,
-        }),
-        state: attempt.state.map(|state| match state {
-            TimelineToolState::Prepared => WebTimelineToolState::Prepared,
-            TimelineToolState::InFlight => WebTimelineToolState::InFlight,
-            TimelineToolState::AwaitingChild => WebTimelineToolState::AwaitingChild,
-            TimelineToolState::Completed => WebTimelineToolState::Completed,
-            TimelineToolState::KnownFailed => WebTimelineToolState::KnownFailed,
-            TimelineToolState::Ambiguous => WebTimelineToolState::Ambiguous,
-        }),
-        cause_code: attempt.cause_code,
+        evidence,
     }
 }
 
