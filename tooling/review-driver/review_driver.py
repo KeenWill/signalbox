@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import socket
 import subprocess
@@ -172,7 +173,9 @@ class SessionBoundary(Protocol):
         content: str,
     ) -> str: ...
 
-    def transcript(self, session_id: str) -> TranscriptSnapshot: ...
+    def transcript(
+        self, session_id: str, turn_id: str | None = None
+    ) -> TranscriptSnapshot: ...
 
 
 def stable_id(facts: PullRequestFacts, role: str) -> str:
@@ -510,59 +513,109 @@ class UnixSessionClient:
             )
         return session_id
 
-    def transcript(self, session_id: str) -> TranscriptSnapshot:
+    def transcript(
+        self, session_id: str, turn_id: str | None = None
+    ) -> TranscriptSnapshot:
         messages = self._request(
             {"type": "read_transcript", "session_id": session_id}, sequence=True
         )
-        accepted_input_id: str | None = None
-        turn_id: str | None = None
-        turn_state: str | None = None
-        terminal_frontier_id: str | None = None
-        assistant_entry_indexes: set[str] = set()
-        assistant_fragments: dict[str, list[str]] = {}
-        for message in messages:
-            message_type = message["type"]
-            if message_type == "transcript_turn":
-                candidate_turn = message.get("turn_id")
-                state = message.get("state")
-                if isinstance(candidate_turn, str) and isinstance(state, dict):
-                    turn_id = candidate_turn
-                    if isinstance(state.get("type"), str):
-                        turn_state = state["type"]
-                    if isinstance(state.get("terminal_frontier_id"), str):
-                        terminal_frontier_id = state["terminal_frontier_id"]
-                    if isinstance(state.get("accepted_input_id"), str):
-                        accepted_input_id = state["accepted_input_id"]
-            elif message_type == "transcript_text_entry":
-                entry = message.get("entry")
-                index = message.get("entry_index")
-                if not isinstance(entry, dict) or not isinstance(index, str):
-                    continue
-                if entry.get("type") == "user":
-                    if isinstance(entry.get("accepted_input_id"), str):
-                        accepted_input_id = entry["accepted_input_id"]
-                    if isinstance(entry.get("turn_id"), str):
-                        turn_id = entry["turn_id"]
-                elif entry.get("type") == "assistant":
-                    assistant_entry_indexes.add(index)
-            elif message_type == "transcript_content":
-                index = message.get("entry_index")
-                fragment = message.get("content_fragment")
-                if isinstance(index, str) and isinstance(fragment, str):
-                    assistant_fragments.setdefault(index, []).append(fragment)
-        assistant_text = "".join(
-            fragment
-            for index in sorted(assistant_entry_indexes, key=int)
-            for fragment in assistant_fragments.get(index, [])
+        return transcript_snapshot(messages, session_id, turn_id)
+
+
+def transcript_snapshot(
+    messages: Sequence[dict[str, object]],
+    session_id: str,
+    selected_turn_id: str | None = None,
+) -> TranscriptSnapshot:
+    """Project one exact turn from a possibly multi-turn session transcript."""
+    positions: dict[str, int] = {}
+    states: dict[str, str] = {}
+    frontiers: dict[str, str] = {}
+    accepted_inputs: dict[str, str] = {}
+    assistant_entry_turns: dict[str, str] = {}
+    assistant_fragments: dict[str, list[str]] = {}
+    for message in messages:
+        message_type = message["type"]
+        if message_type == "transcript_turn":
+            candidate_turn = message.get("turn_id")
+            position = message.get("acceptance_position")
+            state = message.get("state")
+            if (
+                not isinstance(candidate_turn, str)
+                or not isinstance(position, str)
+                or not isinstance(state, dict)
+                or not isinstance(state.get("type"), str)
+            ):
+                raise DriverFailure(
+                    "socket-response-invalid",
+                    "read-transcript",
+                    "daemon transcript contained an invalid turn projection",
+                )
+            try:
+                positions[candidate_turn] = int(position)
+            except ValueError as error:
+                raise DriverFailure(
+                    "socket-response-invalid",
+                    "read-transcript",
+                    "daemon transcript contained a non-numeric acceptance position",
+                ) from error
+            states[candidate_turn] = state["type"]
+            if isinstance(state.get("terminal_frontier_id"), str):
+                frontiers[candidate_turn] = state["terminal_frontier_id"]
+            if isinstance(state.get("accepted_input_id"), str):
+                accepted_inputs[candidate_turn] = state["accepted_input_id"]
+        elif message_type == "transcript_text_entry":
+            entry = message.get("entry")
+            index = message.get("entry_index")
+            if not isinstance(entry, dict) or not isinstance(index, str):
+                continue
+            entry_turn = entry.get("turn_id")
+            if entry.get("type") == "user" and isinstance(entry_turn, str):
+                accepted_input = entry.get("accepted_input_id")
+                if isinstance(accepted_input, str):
+                    accepted_inputs[entry_turn] = accepted_input
+            elif entry.get("type") == "assistant" and isinstance(entry_turn, str):
+                assistant_entry_turns[index] = entry_turn
+        elif message_type == "transcript_content":
+            index = message.get("entry_index")
+            fragment = message.get("content_fragment")
+            if isinstance(index, str) and isinstance(fragment, str):
+                assistant_fragments.setdefault(index, []).append(fragment)
+    if selected_turn_id is None:
+        candidates = positions.keys() & accepted_inputs.keys()
+        selected_turn_id = min(
+            candidates,
+            key=lambda candidate: (positions[candidate], candidate),
+            default=None,
         )
-        return TranscriptSnapshot(
-            session_id=session_id,
-            accepted_input_id=accepted_input_id,
-            turn_id=turn_id,
-            turn_state=turn_state,
-            terminal_frontier_id=terminal_frontier_id,
-            assistant_text=assistant_text,
-        )
+    if selected_turn_id not in positions:
+        return TranscriptSnapshot(session_id, None, None, None, None, "")
+    assistant_indexes = {
+        index
+        for index, entry_turn in assistant_entry_turns.items()
+        if entry_turn == selected_turn_id
+    }
+    try:
+        ordered_indexes = sorted(assistant_indexes, key=int)
+    except ValueError as error:
+        raise DriverFailure(
+            "socket-response-invalid",
+            "read-transcript",
+            "daemon transcript contained a non-numeric entry index",
+        ) from error
+    assistant_text = "".join(
+        fragment
+        for index in ordered_indexes
+        for fragment in assistant_fragments.get(index, [])
+    )
+    return TranscriptSnapshot(
+        session_id=session_id,
+        accepted_input_id=accepted_inputs.get(selected_turn_id),
+        turn_id=selected_turn_id,
+        turn_state=states[selected_turn_id],
+        terminal_frontier_id=frontiers.get(selected_turn_id),
+        assistant_text=assistant_text,
+    )
 
 
 class ReviewDriver:
@@ -712,21 +765,24 @@ class ReviewDriver:
                 stage,
                 "commissioned transcript omitted the accepted input or origin turn",
             )
+        accepted_input_id = snapshot.accepted_input_id
+        origin_turn_id = snapshot.turn_id
         self.cli.start_run(
             facts_target_id(facts),
             identities,
             workflow,
             session_id,
-            snapshot.accepted_input_id,
+            accepted_input_id,
         )
         snapshot = self._wait_for(
             session_id,
             stage,
             lambda value: value.turn_state in ACTIVE_TURN_STATES
             or value.turn_state in TERMINAL_TURN_STATES,
+            turn_id=origin_turn_id,
         )
         try:
-            self.cli.activate_pass(identities, snapshot.turn_id or "")
+            self.cli.activate_pass(identities, origin_turn_id)
         except DriverFailure as error:
             if snapshot.turn_state in TERMINAL_TURN_STATES:
                 raise DriverFailure(
@@ -739,6 +795,7 @@ class ReviewDriver:
             session_id,
             stage,
             lambda value: value.turn_state in TERMINAL_TURN_STATES,
+            turn_id=origin_turn_id,
         )
         if snapshot.accepted_input_id is None or snapshot.turn_id is None:
             raise DriverFailure(
@@ -752,6 +809,17 @@ class ReviewDriver:
                 stage,
                 "terminal transcript omitted the turn state",
             )
+        snapshot = self.sessions.transcript(session_id, origin_turn_id)
+        if (
+            snapshot.accepted_input_id != accepted_input_id
+            or snapshot.turn_id != origin_turn_id
+            or snapshot.turn_state not in TERMINAL_TURN_STATES
+        ):
+            raise DriverFailure(
+                "terminal-evidence-invalid",
+                stage,
+                "the exact pass turn did not re-verify as terminal",
+            )
         return CompletedPass(
             identities=identities,
             session_id=session_id,
@@ -762,10 +830,17 @@ class ReviewDriver:
             assistant_text=snapshot.assistant_text,
         )
 
-    def _wait_for(self, session_id: str, stage: str, predicate) -> TranscriptSnapshot:
+    def _wait_for(
+        self,
+        session_id: str,
+        stage: str,
+        predicate,
+        *,
+        turn_id: str | None = None,
+    ) -> TranscriptSnapshot:
         deadline = time.monotonic() + self.timeout_seconds
         while True:
-            snapshot = self.sessions.transcript(session_id)
+            snapshot = self.sessions.transcript(session_id, turn_id)
             if predicate(snapshot):
                 return snapshot
             if time.monotonic() >= deadline:
@@ -840,7 +915,11 @@ def parser() -> argparse.ArgumentParser:
     argument_parser.add_argument("repository", type=repository_argument)
     argument_parser.add_argument("pull_request", type=positive_integer)
     argument_parser.add_argument("socket", type=Path)
-    argument_parser.add_argument("--signalbox-bin", default="signalbox")
+    argument_parser.add_argument(
+        "--signalbox-bin",
+        default=os.environ.get("SIGNALBOX_BIN", "signalbox"),
+        help="signalbox executable (default: $SIGNALBOX_BIN or signalbox on PATH)",
+    )
     argument_parser.add_argument("--gh-bin", default="gh")
     argument_parser.add_argument(
         "--timeout-seconds", type=positive_float, default=1800.0

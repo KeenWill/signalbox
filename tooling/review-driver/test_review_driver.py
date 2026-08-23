@@ -19,6 +19,7 @@ from review_driver import (  # noqa: E402
     TranscriptSnapshot,
     attempt_identities,
     parser,
+    transcript_snapshot,
 )
 
 
@@ -138,7 +139,9 @@ class FakeSessions:
         )
         return session
 
-    def transcript(self, session_id: str) -> TranscriptSnapshot:
+    def transcript(
+        self, session_id: str, turn_id: str | None = None
+    ) -> TranscriptSnapshot:
         self.transcript_reads += 1
         state = "completed" if self.terminal_after_interruption else "active_running"
         frontier = str(uuid.UUID(int=4)) if state == "completed" else None
@@ -156,8 +159,47 @@ class UnusedSessions:
     def commission(self, *args, **kwargs) -> str:
         raise AssertionError("a complete attempt must not commission a session")
 
-    def transcript(self, session_id: str) -> TranscriptSnapshot:
+    def transcript(
+        self, session_id: str, turn_id: str | None = None
+    ) -> TranscriptSnapshot:
         raise AssertionError("a complete attempt must not read a transcript")
+
+
+class TerminalRecheckSessions:
+    def __init__(self) -> None:
+        self.read_index = 0
+        self.turn_id = str(uuid.UUID(int=3))
+
+    def commission(
+        self,
+        facts: PullRequestFacts,
+        template: str,
+        command_id: str,
+        statement: str,
+        content: str,
+    ) -> str:
+        return str(uuid.UUID(int=1))
+
+    def transcript(
+        self, session_id: str, turn_id: str | None = None
+    ) -> TranscriptSnapshot:
+        states = (
+            "active_running",
+            "active_running",
+            "completed",
+            "active_running",
+        )
+        state = states[self.read_index]
+        self.read_index += 1
+        frontier = str(uuid.UUID(int=4)) if state == "completed" else None
+        return TranscriptSnapshot(
+            session_id=session_id,
+            accepted_input_id=str(uuid.UUID(int=2)),
+            turn_id=self.turn_id,
+            turn_state=state,
+            terminal_frontier_id=frontier,
+            assistant_text="imported context",
+        )
 
 
 class ReviewDriverTests(unittest.TestCase):
@@ -188,6 +230,85 @@ class ReviewDriverTests(unittest.TestCase):
         self.assertEqual(len(cli.started_runs), 1)
         self.assertEqual(len(sessions.sessions_by_command), 1)
         self.assertEqual(len(cli.completed_passes), 1)
+
+    def test_transcript_pins_first_turn_when_a_later_turn_is_terminal(self) -> None:
+        first_turn = str(uuid.UUID(int=3))
+        second_turn = str(uuid.UUID(int=5))
+        first_input = str(uuid.UUID(int=2))
+        messages = [
+            {
+                "type": "transcript_turn",
+                "turn_id": first_turn,
+                "acceptance_position": "1",
+                "state": {"type": "active_running"},
+            },
+            {
+                "type": "transcript_turn",
+                "turn_id": second_turn,
+                "acceptance_position": "2",
+                "state": {
+                    "type": "reconciliation_required",
+                    "terminal_frontier_id": str(uuid.UUID(int=8)),
+                },
+            },
+            {
+                "type": "transcript_text_entry",
+                "entry_index": "1",
+                "entry": {
+                    "type": "user",
+                    "accepted_input_id": first_input,
+                    "turn_id": first_turn,
+                },
+            },
+            {
+                "type": "transcript_text_entry",
+                "entry_index": "2",
+                "entry": {"type": "assistant", "turn_id": first_turn},
+            },
+            {
+                "type": "transcript_content",
+                "entry_index": "2",
+                "content_fragment": "first output",
+            },
+            {
+                "type": "transcript_text_entry",
+                "entry_index": "3",
+                "entry": {
+                    "type": "user",
+                    "accepted_input_id": str(uuid.UUID(int=4)),
+                    "turn_id": second_turn,
+                },
+            },
+            {
+                "type": "transcript_text_entry",
+                "entry_index": "4",
+                "entry": {"type": "assistant", "turn_id": second_turn},
+            },
+            {
+                "type": "transcript_content",
+                "entry_index": "4",
+                "content_fragment": "second output",
+            },
+        ]
+
+        snapshot = transcript_snapshot(messages, str(uuid.UUID(int=1)))
+
+        self.assertEqual(snapshot.accepted_input_id, first_input)
+        self.assertEqual(snapshot.turn_id, first_turn)
+        self.assertEqual(snapshot.turn_state, "active_running")
+        self.assertEqual(snapshot.assistant_text, "first output")
+
+    def test_complete_pass_rechecks_exact_turn_terminality(self) -> None:
+        facts = pull_request_facts(HEAD_ONE)
+        cli = FakeReviewCli(state="awaiting_import")
+        sessions = TerminalRecheckSessions()
+        driver = ReviewDriver(FakeGitHub(facts), cli, sessions, 1.0, 0.001)
+
+        with self.assertRaises(DriverFailure) as caught:
+            driver.run(REPOSITORY, PULL_REQUEST)
+
+        self.assertEqual(caught.exception.code, "terminal-evidence-invalid")
+        self.assertEqual(len(cli.completed_passes), 0)
 
     def test_moved_head_creates_a_new_target_and_attempt(self) -> None:
         first_facts = pull_request_facts(HEAD_ONE)

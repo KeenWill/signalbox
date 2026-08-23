@@ -9,11 +9,20 @@ python3 tooling/review-driver/review_driver.py KeenWill/signalbox 123 \
   /run/user/1000/signalbox.sock
 ```
 
+If `signalbox` is not on `PATH`, pass `--signalbox-bin /path/to/signalbox` or
+set `SIGNALBOX_BIN`. The command-line option takes precedence over the
+environment.
+
 The driver reads exact pull-request facts with `gh`, derives UUIDv5 identities
 from the exact head and base revisions, and supplies every mutation with a
 stable command identity. Re-running the command therefore resumes the same
 target and attempt. A moved head changes the identity material and creates the
 new target and attempt required by the review-workflow contract.
+
+The commissioned accepted input and origin turn are selected once by their
+lowest acceptance position, then pinned across run creation, activation,
+terminal waiting, and a final terminal recheck. Later reconciliation turns in
+the same session cannot change the durable command intent.
 
 Session-backed passes are commissioned directly over the version-one process
 socket because the terminal client does not expose `commission_session`; review
