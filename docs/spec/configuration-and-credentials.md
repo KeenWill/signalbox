@@ -85,15 +85,15 @@ Placement-scoped native conversation reads are verified through PR #400
 [docs/invariants.md](../invariants.md), cited here by tag. The runner
 configuration parser, filesystem admission, exact availability advertisement,
 and checked-in example are re-verified against this PR
-(`agent/runner-restricted-command-environment`).
-Runner credential use during provisioning or execution remains committed
-unimplemented functionality as labeled below. The credential-profile and
-credential-pool grammar, its fail-closed admission, the deliveries this build
-supplies, the fail-closed rejection of reserved Codex deliveries, the
-operator-chosen model-provider profile names, and the retirement of both
-provider key-file environment channels are verified against this PR
-(`agent/credential-pools-parser`), in `apps/signalboxd/src/credential_pools.rs`
-and `apps/signalboxd/src/configuration.rs`. Preparation-time pool selection, the
+(`agent/runner-restricted-command-environment`). Runner credential use during
+provisioning or execution remains committed unimplemented functionality as
+labeled below. The credential-profile and credential-pool grammar, its
+fail-closed admission, the deliveries this build supplies, the fail-closed
+rejection of reserved Codex deliveries, the operator-chosen model-provider
+profile names, and the retirement of both provider key-file environment channels
+are verified against this PR (`agent/credential-pools-parser`), in
+`apps/signalboxd/src/credential_pools.rs` and
+`apps/signalboxd/src/configuration.rs`. Preparation-time pool selection, the
 Codex `file`, `codex_home`, and `oauth` deliveries, durable quarantine, and the
 availability successor calls owned by
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
