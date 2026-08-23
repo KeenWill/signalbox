@@ -2022,7 +2022,8 @@ mod linux {
         use super::*;
 
         const CHILD_FIXTURE_NAME: &str = "linux::tests::child_fixture";
-        const LONG_RUNNING_CHILD_FIXTURE_NAME: &str = "linux::tests::long_running_child_fixture";
+        const LONG_RUNNING_CHILD_FIXTURE_NAME: &str =
+            "exec_supervisor::linux::tests::long_running_child_fixture";
         const CARGO_TEST_EXECUTABLE: &str = "/workspace/target/debug/deps/example-target";
         const CARGO_PASSING_TEST: &str = "example::passes";
         const CARGO_IGNORED_TEST: &str = "example::ignored";

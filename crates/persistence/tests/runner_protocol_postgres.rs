@@ -9241,9 +9241,8 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_created_placement()
 async fn s32_inv044_runner_loss_migration_preserves_valid_pinned_placement()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = unmigrated_postgres().await?;
-    MIGRATOR.run_to(PRE_PLACEMENT_LOSS_MIGRATION, &pool).await?;
     MIGRATOR
-        .run_to(PRE_RUNNER_LOSS_CURSOR_MIGRATION, &pool)
+        .run_to(PRE_TOOL_REQUEST_LOCUS_MIGRATION, &pool)
         .await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -9345,11 +9344,6 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_pinned_placement()
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
-    sqlx::query(
-        "ALTER TABLE runner_lease_generation\n         ADD COLUMN offer_registration_revision numeric(20, 0)",
-    )
-    .execute(&pool)
-    .await?;
     store.store_lease(&pin.lease).await?;
     let mut lease_completion = pool.begin().await?;
     sqlx::query(
@@ -9388,11 +9382,6 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_pinned_placement()
     sqlx::query(
         "ALTER TABLE runner_session_placement_record
          ENABLE TRIGGER runner_initial_pin_requires_lease",
-    )
-    .execute(&pool)
-    .await?;
-    sqlx::query(
-        "ALTER TABLE runner_lease_generation\n         DROP COLUMN offer_registration_revision",
     )
     .execute(&pool)
     .await?;
