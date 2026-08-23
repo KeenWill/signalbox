@@ -55,9 +55,10 @@ use signalbox_model_provider_runtime::{RuntimeContextCompactionModel, RuntimeMod
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CancellationSignal, CompletionEvidence, CompletionFinish,
     DeliveryMode, ExchangeFacts, InputTokenCountOutcome, LossCause, MessagePart,
-    ModelInputTokenCounter, ModelOperation, ModelRuntime, Observation, ObservationFact,
-    ObservationSink, PreparationOutcome, ProviderReportedModel, Script, ScriptedModel,
-    ScriptedPrepared, TerminalEvidence, TerminalReport, TokenUsage, ToolCallsAtLoss,
+    ModelInputTokenCounter, ModelOperation, ModelRuntime, NativeErrorFacts, Observation,
+    ObservationFact, ObservationSink, PreparationOutcome, ProviderErrorEvidence, ProviderErrorKind,
+    ProviderReportedModel, Script, ScriptedModel, ScriptedPrepared, TerminalEvidence,
+    TerminalReport, TokenUsage, ToolCallsAtLoss,
 };
 use signalbox_persistence::{
     blob::BlobCatalogRepository,
@@ -8245,28 +8246,12 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
     runtime.stop().await
 }
 
-#[track_caller]
-fn assert_context_still_exceeded<CountError, ExecutionError>(
-    outcome: Result<(), ContextGuardedTurnPassError<CountError, ExecutionError>>,
-    expected_turn: CanonicalUuid,
-) where
-    CountError: std::fmt::Debug,
-    ExecutionError: std::fmt::Debug,
-{
-    match outcome {
-        Err(ContextGuardedTurnPassError::ContextStillExceeded(actual_turn)) => {
-            assert_eq!(*actual_turn.as_uuid(), expected_turn.into_uuid());
-        }
-        other => panic!("expected ContextStillExceeded, got {other:?}"),
-    }
-}
-
-/// S01 / S03 / INV-014 / INV-015: one queued candidate retains its durable
-/// automatic-attempt marker across eligibility retries, so an oversized suffix
-/// cannot issue a paid successor compaction on every sweep.
+/// S01 / S03 / INV-014 / INV-015: a failed automatic compaction closes the
+/// queued candidate call-free, so a later eligibility pass cannot dispatch
+/// the known-oversized ordinary request.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_turn()
+async fn s01_s03_inv014_inv015_failed_automatic_compaction_closes_turn_call_free()
 -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
@@ -8313,10 +8298,15 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
     let ordinary_runtime =
         RecordingCountedScriptedModel::following(std::iter::empty::<Script>(), [40, 40, 40]);
     let ordinary_probe = ordinary_runtime.clone();
-    let summary_runtime = ScriptedModel::single(completed_script(
-        "fixture-model",
-        "one durable retry summary",
-        TokenUsage::unreported(),
+    let summary_runtime = ScriptedModel::single(Script::delivering(
+        TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            exchange: ExchangeFacts::default(),
+            reported_model: None,
+            kind: ProviderErrorKind::Unrecognized,
+            non_acceptance_proven: true,
+            native: NativeErrorFacts::default(),
+            usage: TokenUsage::unreported(),
+        }),
     ));
     let summary_probe = summary_runtime.clone();
     let runtime_models = guarded_configuration.runtime_model_catalog();
@@ -8364,11 +8354,19 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
     );
     let session = SessionId::from_uuid(session_id.into_uuid());
     let first_attempt = pass.run(session).await;
-    assert_context_still_exceeded(first_attempt, queued_turn);
+    let Err(ContextGuardedTurnPassError::Compaction {
+        turn,
+        cause_code: "context_compaction_model",
+        ..
+    }) = first_attempt
+    else {
+        panic!("failed automatic compaction must surface its typed pass failure")
+    };
+    assert_eq!(*turn.as_uuid(), queued_turn.into_uuid());
     let second_attempt = pass.run(session).await;
-    assert_context_still_exceeded(second_attempt, queued_turn);
+    assert!(second_attempt.is_ok());
     assert!(!fatal_execution.is_triggered());
-    assert_eq!(ordinary_probe.counted_operations().len(), 3);
+    assert_eq!(ordinary_probe.counted_operations().len(), 1);
     assert_eq!(ordinary_probe.prepared_operations().len(), 0);
     assert_eq!(summary_probe.received_operations().len(), 1);
     assert_eq!(
@@ -8382,7 +8380,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
             .bind(session_id.into_uuid())
             .fetch_one(&runtime.pool)
             .await?;
-    assert_eq!(compaction_count, 1);
+    assert_eq!(compaction_count, 0);
     let automatic_command_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM compact_session_command
           WHERE session_id = $1 AND automatic_for_turn_id = $2",
@@ -8392,6 +8390,37 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
     .fetch_one(&runtime.pool)
     .await?;
     assert_eq!(automatic_command_count, 1);
+    let compaction_call: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM context_compaction_model_call
+          WHERE session_id = $1",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(
+        compaction_call,
+        (String::from("terminal"), Some(String::from("known_failed")))
+    );
+    let ordinary_call_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")
+            .bind(queued_turn.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(ordinary_call_count, 0);
+    let lifecycle: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, terminal_model_call_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session_id.into_uuid())
+    .bind(queued_turn.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(
+        lifecycle,
+        (String::from("terminal"), Some(String::from("failed")), None)
+    );
 
     drop(connection);
     runtime.stop().await

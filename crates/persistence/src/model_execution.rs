@@ -1777,6 +1777,38 @@ impl PostgresModelCallRepository {
         finish_commit(transaction, result).await
     }
 
+    /// Closes a freshly activated call-free turn after required automatic
+    /// context compaction failed in the same transaction.
+    pub(crate) async fn fail_automatic_compaction_in_transaction(
+        &self,
+        connection: &mut PgConnection,
+        session: SessionId,
+        turn: TurnId,
+        identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallRepositoryError> {
+        let execution = require_live_execution(connection, session, &self.targets).await?;
+        if execution.turn() != turn || execution.current_call().is_some() {
+            return Err(ModelCallRepositoryError::InvalidTransition(
+                "automatic compaction failure does not match fresh call-free execution",
+            ));
+        }
+        let failed = execution
+            .fail_automatic_context_compaction(identities)
+            .map_err(|_| {
+                ModelCallRepositoryError::InvalidTransition(
+                    "automatic compaction failure could not close fresh execution",
+                )
+            })?;
+        persist_failed_with_delegated_child_result(
+            connection,
+            &failed,
+            ProviderReportedTokenUsage::unreported(),
+            None,
+        )
+        .await?;
+        Ok(failed)
+    }
+
     /// Rereads whether an unchanged pre-send capability failure committed.
     pub async fn reread_capability_failure(
         &self,

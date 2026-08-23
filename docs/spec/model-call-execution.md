@@ -20,7 +20,9 @@ the next queued-turn baseline is verified against this PR
 model-bounded content-weighted boundary is verified against this PR
 (`agent/daemon-live-model-bounded-compaction`). Codex advisory output
 reservation behavior is re-verified against this PR
-(`agent/daemon-live-codex-output-reservation`).
+(`agent/daemon-live-codex-output-reservation`). Failed automatic-compaction
+terminal closure is verified against this PR
+(`agent/daemon-live-terminalize-compaction-failure`).
 
 Non-ambiguous execution-failure containment is verified against this PR
 (`agent/daemon-live-nonambiguous-execution-containment`).
@@ -463,16 +465,18 @@ unreported successor content and counts any proved result entry present in that
 frontier exactly once. Historical dedicated calls prepared before that semantics
 became durable retain an unknown value; the guard treats unknown as
 cache-exclusive so it may overcount but cannot omit reported cache axes. A
-queued turn spends at most one automatic attempt; if durable evidence says that
-attempt was already spent, the scheduler reports exhaustion and permits
-activation rather than wedging the queue on a compaction it may not repeat.
-After a nominal completion, the daemon retains adapter-reported usage and the
-completed observation even when reported output exceeds `max_output_tokens` or
-the reported input-plus-output lower bound exceeds `context_window_tokens`; it
-emits a closed operator cause for the overage rather than discarding assistant
-material after the provider has already accepted and served the request. Missing
-usage fields remain missing and are never invented. Adapters need no separate
-counting operation.
+queued turn spends at most one automatic attempt. If the attempt fails, still
+cannot make the prospective request fit, or durable evidence says it was already
+spent, the scheduler atomically activates and fails the turn without preparing
+or dispatching an ordinary call. Goal disposition can then apply its bounded
+resumption policy to a fresh turn rather than either wedging the queue or
+sending the known-oversized request. After a nominal completion, the daemon
+retains adapter-reported usage and the completed observation even when reported
+output exceeds `max_output_tokens` or the reported input-plus-output lower bound
+exceeds `context_window_tokens`; it emits a closed operator cause for the
+overage rather than discarding assistant material after the provider has already
+accepted and served the request. Missing usage fields remain missing and are
+never invented. Adapters need no separate counting operation.
 
 The same guard runs inside the atomic tool-result continuation transaction
 against the exact completed tool-producing call. It combines reported usage, the

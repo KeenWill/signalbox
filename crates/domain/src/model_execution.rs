@@ -1186,6 +1186,32 @@ impl ModelCallExecution {
         Ok(CredentialPoolExhaustedModelCallTurn { pool_name, failed })
     }
 
+    /// Closes a call-free attempt whose required automatic context compaction failed.
+    pub fn fail_automatic_context_compaction(
+        self,
+        identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallClosureError> {
+        if self.current_call.is_some() || !self.attempt_accepts_prepared_call() {
+            return Err(ModelCallClosureError::CallStateMismatch);
+        }
+        let reclassified_pending_steering = reclassify_pending_steering(
+            &self.active_turn,
+            &identities.pending_steering_reclassifications,
+        )?;
+        close_failed_turn(
+            ModelCallTurnScope {
+                session: self.session,
+                turn: self.turn,
+            },
+            self.current_attempt,
+            None,
+            self.current_snapshot,
+            identities,
+            UnstoppedAttemptDisposition::KnownFailure,
+            reclassified_pending_steering,
+        )
+    }
+
     /// Closes a trustworthy local capability-preparation failure before send.
     pub fn fail_prepared_call(
         self,
@@ -8098,6 +8124,40 @@ mod tests {
             pending,
             turn_id(3),
             successor,
+        );
+    }
+
+    /// S03 / INV-015: a failed required compaction closes the fresh physical
+    /// attempt without fabricating a provider call.
+    #[test]
+    fn s03_inv015_automatic_compaction_failure_closes_call_free_turn() {
+        let failure_entry = semantic_transcript_entry_id(10);
+        let failed = active_execution()
+            .fail_automatic_context_compaction(FailedModelCallTurnIdentities::new(
+                failure_entry,
+                context_frontier_id(11),
+            ))
+            .expect("required compaction failure closes the call-free attempt");
+
+        assert_eq!(failed.call(), None);
+        assert!(matches!(
+            failed.attempt().end(),
+            crate::AttemptEnd::WithoutStop {
+                disposition: UnstoppedAttemptDisposition::KnownFailure,
+            }
+        ));
+        assert_eq!(
+            failed
+                .terminal_snapshot()
+                .ordered_entries()
+                .collect::<Vec<_>>(),
+            vec![
+                SemanticTranscriptEntryRef::from_source(
+                    session_id(1),
+                    semantic_transcript_entry_id(5),
+                ),
+                SemanticTranscriptEntryRef::from_source(session_id(1), failure_entry),
+            ]
         );
     }
 

@@ -4088,6 +4088,10 @@ impl ModelCallExecution {
         pool_name: String,
         identities: FailedModelCallTurnIdentities,
     ) -> Result<CredentialPoolExhaustedModelCallTurn, ModelCallClosureError>;
+    pub fn fail_automatic_context_compaction(
+        self,
+        identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
     pub fn fail_prepared_call(
         self,
         identities: FailedModelCallTurnIdentities,
