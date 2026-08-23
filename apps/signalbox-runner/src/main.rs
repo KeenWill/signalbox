@@ -11,9 +11,9 @@ use std::{
 use signalbox_runner::{
     AcceptedWorkspaceRelease, ArgumentError, ConnectionEnd, DispatchHttpsEndpoint,
     EnrollmentOutcome, HttpsBroker, LeaseCredentialAuthorization, ProtocolViolation,
-    ResolvedRunnerCredential, RunnerConfiguration, RunnerConfigurationError,
-    RunnerConfigurationPath, RunnerConnection, RunnerConnectionError, RunnerStateError,
-    RunnerStateRoot, ServeOutcome, SocketConnectError, connect_verified, resolve_runner_credential,
+    RunnerConfiguration, RunnerConfigurationError, RunnerConfigurationPath, RunnerConnection,
+    RunnerConnectionError, RunnerStateError, RunnerStateRoot, ServeOutcome, SocketConnectError,
+    connect_verified,
 };
 use signalbox_runner_wire::{ExecutionErrorKind, SandboxProfile, TerminalResult};
 use signalbox_tools_exec::{ExecArguments, SandboxedCommandRunner, TokioProcessRunner};
@@ -112,9 +112,7 @@ async fn run(
                 }
             };
             match connection
-                .serve_until_shutdown_with_credential_admission(&mut state, shutdown, |profile| {
-                    resolve_runner_credential(&configuration, profile).is_ok()
-                })
+                .serve_until_shutdown_with_credential_admission(&mut state, shutdown, |_| false)
                 .await
             {
                 Ok(ServeOutcome::DispatchReady(dispatch)) => {
@@ -206,8 +204,14 @@ async fn execute_dispatch(
     process_runner: TokioProcessRunner,
     correlation: signalbox_runner_wire::LeaseCorrelation,
     normalized_arguments: serde_json::Value,
-    credential_authorization: LeaseCredentialAuthorization,
+    authorization: LeaseCredentialAuthorization,
 ) -> TerminalResult {
+    if !matches!(authorization, LeaseCredentialAuthorization::Profileless) {
+        return TerminalResult::KnownFailure {
+            error_kind: ExecutionErrorKind::ExecutionFailed,
+            detail: None,
+        };
+    }
     if correlation.sandbox_profile != SandboxProfile::WorkspaceRestricted {
         return TerminalResult::KnownFailure {
             error_kind: ExecutionErrorKind::ExecutionFailed,
@@ -247,20 +251,6 @@ async fn execute_dispatch(
             };
         }
     };
-    let credential = match credential_authorization {
-        LeaseCredentialAuthorization::Profileless => None,
-        LeaseCredentialAuthorization::Granted { profile, .. } => {
-            match resolve_runner_credential(configuration, &profile) {
-                Ok(credential) => Some(credential),
-                Err(_) => {
-                    return TerminalResult::KnownFailure {
-                        error_kind: ExecutionErrorKind::ExecutionFailed,
-                        detail: None,
-                    };
-                }
-            }
-        }
-    };
     let Some(deadline) =
         tokio::time::Instant::now().checked_add(Duration::from_secs(arguments.timeout_seconds))
     else {
@@ -275,16 +265,7 @@ async fn execute_dispatch(
         deadline,
         stop_broker,
     ));
-    let result = match credential.as_ref() {
-        Some(credential) => match credential.sandbox_environment() {
-            Ok(environment) => runner
-                .try_run_with_environment(arguments, environment)
-                .await
-                .map_err(|_| ()),
-            Err(_) => Err(()),
-        },
-        None => runner.try_run(arguments).await.map_err(|_| ()),
-    };
+    let result = runner.try_run(arguments).await.map_err(|_| ());
     let _ = broker_stop.send(());
     if !matches!(broker.await, Ok(Ok(()))) {
         return TerminalResult::KnownFailure {
@@ -301,7 +282,7 @@ async fn execute_dispatch(
             };
         }
     };
-    match encode_dispatch_result(&result, credential.as_ref()) {
+    match encode_dispatch_result(&result) {
         Ok(text) if text.len() <= signalbox_runner_wire::SUCCESS_TEXT_BYTES as usize => {
             TerminalResult::Success { text }
         }
@@ -318,13 +299,8 @@ async fn execute_dispatch(
 
 fn encode_dispatch_result(
     result: &signalbox_tools_exec::ExecResult,
-    credential: Option<&ResolvedRunnerCredential>,
 ) -> Result<String, serde_json::Error> {
-    let text = serde_json::to_string(result)?;
-    Ok(match credential {
-        Some(credential) => credential.redact_text(text),
-        None => text,
-    })
+    serde_json::to_string(result)
 }
 
 async fn shutdown_with_timeout(
@@ -500,13 +476,9 @@ impl Error for RunnerDaemonError {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt as _};
-
-    use signalbox_runner::{
-        EnrollmentAuthority, EnrollmentReceipt, PrivateWorkspaceRequest, resolve_runner_credential,
-    };
+    use signalbox_runner::{EnrollmentAuthority, EnrollmentReceipt, PrivateWorkspaceRequest};
     use signalbox_runner_wire::{
-        Advertisement, CanonicalUuid, PositiveU64, ProfileName, ReleaseCorrelation, SandboxProfile,
+        Advertisement, CanonicalUuid, PositiveU64, ReleaseCorrelation, SandboxProfile,
         advertisement_digest,
     };
     use signalbox_tools_exec::{
@@ -523,7 +495,6 @@ mod tests {
     const ENROLLMENT: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00f3;
     const AUTHENTICATION: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00f4;
     const PLACEMENT_REVISION: u64 = 3;
-    const SYNTHETIC_CREDENTIAL: &str = "synthetic-credential-value";
 
     struct PrivateReleaseFixture {
         _parent: TempDir,
@@ -590,41 +561,6 @@ mod tests {
         }
     }
 
-    fn credential_configuration(parent: &TempDir) -> RunnerConfiguration {
-        let executable = std::env::current_exe().expect("the test executable path is available");
-        let runner_root = parent.path().join("runner-root");
-        let socket = parent.path().join("runner.sock");
-        let credential = parent.path().join("credential");
-        fs::write(&credential, SYNTHETIC_CREDENTIAL).expect("the synthetic credential is written");
-        fs::set_permissions(&credential, fs::Permissions::from_mode(0o600))
-            .expect("the synthetic credential is owner-only");
-        let document = format!(
-            r#"version = 1
-daemon_socket_path = "{}"
-runner_root = "{}"
-exec_supervisor_executable = "{}"
-bubblewrap_path = "{}"
-read_only_paths = ["/usr"]
-allowed_network_hosts = []
-git_author_name = "Signalbox Runner"
-git_author_email = "runner@example.invalid"
-repositories = {{}}
-
-[credentials.github-runner]
-file = "{}"
-injection_env = "GH_TOKEN"
-"#,
-            socket.display(),
-            runner_root.display(),
-            executable.display(),
-            executable.display(),
-            credential.display(),
-        );
-        let path = parent.path().join("runner.toml");
-        fs::write(&path, document).expect("the synthetic runner configuration is written");
-        RunnerConfiguration::read(&path).expect("the synthetic runner configuration is valid")
-    }
-
     fn completed_exec_result(text: String) -> ExecResult {
         ExecResult {
             confinement: ExecutionConfinement::FilesystemConfined,
@@ -668,22 +604,15 @@ injection_env = "GH_TOKEN"
         assert!(!fixture.placement.exists());
     }
 
-    /// INV-035: the composed dispatch result is scrubbed before it can form a
-    /// successful runner frame.
     #[test]
-    fn inv035_credential_dispatch_encoding_scrubs_captured_output() {
-        let parent = TempDir::new().expect("a temporary parent is available");
-        let configuration = credential_configuration(&parent);
-        let profile =
-            ProfileName::try_new("github-runner".to_owned()).expect("the fixture profile is valid");
-        let credential = resolve_runner_credential(&configuration, &profile)
-            .expect("the synthetic credential resolves");
-        let result = completed_exec_result(SYNTHETIC_CREDENTIAL.to_owned());
+    fn dispatch_result_encoding_preserves_json_structure() {
+        let captured = "quoted \"text\" with \\ and {braces}".to_owned();
+        let result = completed_exec_result(captured.clone());
 
-        let encoded = encode_dispatch_result(&result, Some(&credential))
-            .expect("the scrubbed result encodes");
+        let encoded = encode_dispatch_result(&result).expect("the result encodes");
+        let decoded: serde_json::Value =
+            serde_json::from_str(&encoded).expect("the encoded result remains valid JSON");
 
-        assert!(!encoded.contains(SYNTHETIC_CREDENTIAL));
-        assert!(encoded.contains("[redacted]"));
+        assert_eq!(decoded["stdout"]["text"], captured);
     }
 }
