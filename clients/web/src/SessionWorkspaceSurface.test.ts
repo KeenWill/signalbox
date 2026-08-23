@@ -294,6 +294,7 @@ describe('Session Workspace projection', () => {
             approval_posture: 'human',
             approval_judge_escalated: false,
             operator_required: false,
+            evidence: { type: 'request_only' },
           },
         ],
       }),
@@ -357,13 +358,13 @@ describe('Session Workspace projection', () => {
             approval_judge_escalated: false,
             operator_required: false,
             arguments: null,
-            attempt_id: null,
-            state: 'completed',
-            effect_posture: null,
-            sandbox_posture: null,
-            result: null,
-            failure: null,
-            cause_code: null,
+            evidence: {
+              type: 'physical_attempt',
+              attempt_id: '00000000-0000-0000-0000-000000000044',
+              state: 'completed',
+              effect_posture: 'effect_free',
+              cause: 'execution_failed',
+            },
           },
         ],
       }),
@@ -379,13 +380,13 @@ describe('Session Workspace projection', () => {
             approval_judge_escalated: false,
             operator_required: false,
             arguments: null,
-            attempt_id: '00000000-0000-0000-0000-000000000044',
-            state: null,
-            effect_posture: 'effect_free',
-            sandbox_posture: null,
-            result: null,
-            failure: null,
-            cause_code: null,
+            evidence: {
+              type: 'physical_attempt',
+              attempt_id: '00000000-0000-0000-0000-000000000044',
+              state: 'completed',
+              effect_posture: 'effect_free',
+              cause: 'execution_failed',
+            },
           },
         ],
       }),
@@ -398,13 +399,15 @@ describe('Session Workspace projection', () => {
       approval_judge_escalated: false,
       operator_required: false,
       arguments: null,
-      attempt_id: '00000000-0000-0000-0000-000000000044',
-      state: 'known_failed',
-      effect_posture: 'effect_free',
-      sandbox_posture: 'sandboxed',
-      result: null,
-      failure: { text: 'failed', offset_bytes: '0', total_bytes: '6' },
-      cause_code: 'execution_failed',
+      evidence: {
+        type: 'physical_attempt',
+        attempt_id: '00000000-0000-0000-0000-000000000044',
+        state: 'known_failed',
+        effect_posture: 'effect_free',
+        sandbox_posture: 'sandboxed',
+        failure: { text: 'failed', offset_bytes: '0', total_bytes: '6' },
+        cause: 'execution_failed',
+      },
     } as const
     expect(
       isCompatibleDetailBody('tool_batch_transition', { ...toolBatch, tools: [issuedTool] }),
@@ -412,14 +415,14 @@ describe('Session Workspace projection', () => {
     expect(
       isCompatibleDetailBody('tool_batch_transition', {
         ...toolBatch,
-        tools: [{ ...issuedTool, state: 'completed' }],
+        tools: [{ ...issuedTool, evidence: { ...issuedTool.evidence, state: 'completed' } }],
       }),
     ).toBe(false)
     expect(
       isCompatibleDetailBody('tool_batch_transition', {
         ...toolBatch,
-        tools: [{ ...issuedTool, cause_code: 'invented' }],
-      }),
+        tools: [{ ...issuedTool, evidence: { ...issuedTool.evidence, cause: 'invented' } }],
+      } as unknown as Parameters<typeof isCompatibleDetailBody>[1]),
     ).toBe(false)
 
     const reconciliation = {

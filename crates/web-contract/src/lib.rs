@@ -446,22 +446,41 @@ pub enum WebTimelineToolSandboxPosture {
     Sandboxed,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineToolFailureCause {
+    UnknownTool,
+    InvalidArguments,
+    ExecutionFailed,
+    ResultTooLarge,
+    CrashLost,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineToolAttemptEvidence {
+    RequestOnly {},
+    PhysicalAttempt {
+        attempt_id: String,
+        result: Option<WebTimelineTextExcerpt>,
+        failure: Option<WebTimelineTextExcerpt>,
+        effect_posture: WebTimelineToolEffectPosture,
+        sandbox_posture: Option<WebTimelineToolSandboxPosture>,
+        state: WebTimelineToolState,
+        cause: Option<WebTimelineToolFailureCause>,
+    },
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineToolAttempt {
     pub request_id: String,
-    pub attempt_id: Option<String>,
     pub tool_name: String,
     pub arguments: Option<WebTimelineTextExcerpt>,
-    pub result: Option<WebTimelineTextExcerpt>,
-    pub failure: Option<WebTimelineTextExcerpt>,
     pub approval_posture: WebTimelineToolApprovalPosture,
     pub approval_judge_escalated: bool,
     pub operator_required: bool,
-    pub effect_posture: Option<WebTimelineToolEffectPosture>,
-    pub sandbox_posture: Option<WebTimelineToolSandboxPosture>,
-    pub state: Option<WebTimelineToolState>,
-    pub cause_code: Option<String>,
+    pub evidence: WebTimelineToolAttemptEvidence,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -866,6 +885,7 @@ pub enum WebTimelineModelSettingsDetail {
         prior_settings: WebTimelineModelSettingsSnapshot,
         installed_settings: WebTimelineModelSettingsSnapshot,
         caller_override: WebTimelineModelSettingsOverlay,
+        #[schemars(length(max = 3))]
         adjustments: Vec<WebTimelineModelChangeAdjustment>,
     },
     TurnResolved {
@@ -877,6 +897,7 @@ pub enum WebTimelineModelSettingsDetail {
         per_call_override: WebTimelineModelSettingsOverlay,
         settings: WebTimelineModelSettingsSnapshot,
         adjusted_from_selection_id: Option<String>,
+        #[schemars(length(max = 3))]
         adjustments: Vec<WebTimelineModelChangeAdjustment>,
     },
 }
@@ -1423,7 +1444,43 @@ function assertTimelineDetailPage(value) {{
           fail(`${{path}}.body`, "at most one projected tool or goal member");
         }}
         item.body.tools.forEach((tool, memberIndex) => {{
-          const projectedTextFields = [tool.arguments, tool.result, tool.failure].filter(
+          const physical = tool.evidence.type === "physical_attempt" ? tool.evidence : null;
+          if (physical !== null) {{
+            const terminalFailure = physical.state === "known_failed";
+            if ((physical.cause !== undefined && physical.cause !== null) !== terminalFailure) {{
+              fail(
+                `${{path}}.body.tools[${{memberIndex}}].evidence.cause`,
+                "present exactly for a known_failed attempt",
+              );
+            }}
+            if (
+              physical.result !== undefined &&
+              physical.result !== null &&
+              physical.state !== "completed"
+            ) {{
+              fail(
+                `${{path}}.body.tools[${{memberIndex}}].evidence.result`,
+                "present only for a completed attempt",
+              );
+            }}
+            if (
+              physical.failure !== undefined &&
+              physical.failure !== null &&
+              !terminalFailure
+            ) {{
+              fail(
+                `${{path}}.body.tools[${{memberIndex}}].evidence.failure`,
+                "present only for a known_failed attempt",
+              );
+            }}
+            if (physical.state === "ambiguous" && physical.effect_posture !== "external_effect") {{
+              fail(
+                `${{path}}.body.tools[${{memberIndex}}].evidence.effect_posture`,
+                "external_effect for an ambiguous attempt",
+              );
+            }}
+          }}
+          const projectedTextFields = [tool.arguments, physical?.result, physical?.failure].filter(
             (excerpt) => excerpt !== undefined && excerpt !== null,
           );
           if (projectedTextFields.length > 1) {{
@@ -1432,11 +1489,11 @@ function assertTimelineDetailPage(value) {{
           if (tool.arguments !== undefined && tool.arguments !== null) {{
             excerpts.push([tool.arguments, "tool_arguments", memberIndex, `${{path}}.body.tools[${{memberIndex}}].arguments`]);
           }}
-          if (tool.result !== undefined && tool.result !== null) {{
-            excerpts.push([tool.result, "tool_result", memberIndex, `${{path}}.body.tools[${{memberIndex}}].result`]);
+          if (physical?.result !== undefined && physical.result !== null) {{
+            excerpts.push([physical.result, "tool_result", memberIndex, `${{path}}.body.tools[${{memberIndex}}].evidence.result`]);
           }}
-          if (tool.failure !== undefined && tool.failure !== null) {{
-            excerpts.push([tool.failure, "tool_failure", memberIndex, `${{path}}.body.tools[${{memberIndex}}].failure`]);
+          if (physical?.failure !== undefined && physical.failure !== null) {{
+            excerpts.push([physical.failure, "tool_failure", memberIndex, `${{path}}.body.tools[${{memberIndex}}].evidence.failure`]);
           }}
         }});
         item.body.goal_events.forEach((event, memberIndex) => {{
@@ -1470,6 +1527,16 @@ function assertTimelineDetailPage(value) {{
       case "reconciliation":
         if (item.kind !== "turn_reconciliation_required") {{
           fail(`${{path}}.kind`, "turn_reconciliation_required for a reconciliation body");
+        }}
+        if (
+          item.body.exhausted !== true ||
+          item.body.operator_required !== true ||
+          item.body.cause_code !== "ambiguous_operation"
+        ) {{
+          fail(
+            `${{path}}.body`,
+            "an exhausted operator-required ambiguous_operation reconciliation",
+          );
         }}
         break;
       case "runner":
@@ -1505,10 +1572,22 @@ function assertTimelineDetailPage(value) {{
         break;
       case "model_settings":
         if (
-          item.kind !== "session_model_settings_changed" &&
+          item.body.detail.type === "session_defaults_changed" &&
+          item.kind !== "session_model_settings_changed"
+        ) {{
+          fail(
+            `${{path}}.kind`,
+            "session_model_settings_changed for session defaults detail",
+          );
+        }}
+        if (
+          item.body.detail.type === "turn_resolved" &&
           item.kind !== "turn_model_settings_resolved"
         ) {{
-          fail(`${{path}}.kind`, "a model-settings event for a model_settings body");
+          fail(
+            `${{path}}.kind`,
+            "turn_model_settings_resolved for resolved turn detail",
+          );
         }}
         break;
       case "turn_lifecycle":

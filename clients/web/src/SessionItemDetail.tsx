@@ -138,23 +138,14 @@ export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): bool
       kind === 'tool_batch_transition' &&
       body.goal_events.every(hasCompatibleGoalReason) &&
       body.tools.every((tool) => {
-        const completed = tool.state === 'completed'
-        const knownFailed = tool.state === 'known_failed'
-        const terminalFactsMatch =
-          (tool.result == null || completed) &&
-          (tool.failure == null || knownFailed) &&
-          (knownFailed
-            ? typeof tool.cause_code === 'string' && toolFailureCauses.has(tool.cause_code)
-            : tool.cause_code == null)
-        const attemptFactsMatch =
-          tool.attempt_id === null
-            ? tool.state === null &&
-              tool.effect_posture === null &&
-              tool.sandbox_posture === null &&
-              tool.cause_code === null
-            : tool.state !== null && terminalFactsMatch
+        const evidence = tool.evidence
+        const evidenceMatches =
+          evidence.type === 'request_only' ||
+          (evidence.state === 'known_failed'
+            ? typeof evidence.cause === 'string' && toolFailureCauses.has(evidence.cause)
+            : evidence.cause == null)
         return (
-          attemptFactsMatch &&
+          evidenceMatches &&
           tool.operator_required ===
             (tool.approval_judge_escalated || tool.approval_posture === 'human')
         )
@@ -232,27 +223,31 @@ const GoalEventList = ({ events }: { events: ReadonlyArray<GoalEvent> }): ReactN
   )
 }
 
-const ToolAttemptDetail = ({ tool }: { tool: ToolAttempt }) => (
-  <article className="session-detail-member">
-    <h4>{tool.tool_name}</h4>
-    <Facts
-      facts={[
-        ['Request', tool.request_id],
-        ['Attempt', tool.attempt_id ?? 'not issued'],
-        ['State', tool.state?.replaceAll('_', ' ') ?? 'requested'],
-        ['Approval', tool.approval_posture.replaceAll('_', ' ')],
-        ['Effect', tool.effect_posture?.replaceAll('_', ' ') ?? 'not recorded'],
-        ['Sandbox', tool.sandbox_posture?.replaceAll('_', ' ') ?? 'not recorded'],
-        ['Operator required', tool.operator_required ? 'yes' : 'no'],
-        ['Judge escalated', tool.approval_judge_escalated ? 'yes' : 'no'],
-        ['Cause', tool.cause_code ?? 'not recorded'],
-      ]}
-    />
-    {tool.arguments && <TextDetail label="Tool arguments" excerpt={tool.arguments} />}
-    {tool.result && <TextDetail label="Tool result" excerpt={tool.result} />}
-    {tool.failure && <TextDetail label="Tool failure" excerpt={tool.failure} />}
-  </article>
-)
+const ToolAttemptDetail = ({ tool }: { tool: ToolAttempt }) => {
+  const evidence = tool.evidence
+  const physical = evidence.type === 'physical_attempt' ? evidence : null
+  return (
+    <article className="session-detail-member">
+      <h4>{tool.tool_name}</h4>
+      <Facts
+        facts={[
+          ['Request', tool.request_id],
+          ['Attempt', physical?.attempt_id ?? 'not issued'],
+          ['State', physical?.state.replaceAll('_', ' ') ?? 'requested'],
+          ['Approval', tool.approval_posture.replaceAll('_', ' ')],
+          ['Effect', physical?.effect_posture.replaceAll('_', ' ') ?? 'not recorded'],
+          ['Sandbox', physical?.sandbox_posture?.replaceAll('_', ' ') ?? 'not recorded'],
+          ['Operator required', tool.operator_required ? 'yes' : 'no'],
+          ['Judge escalated', tool.approval_judge_escalated ? 'yes' : 'no'],
+          ['Cause', physical?.cause ?? 'not recorded'],
+        ]}
+      />
+      {tool.arguments && <TextDetail label="Tool arguments" excerpt={tool.arguments} />}
+      {physical?.result && <TextDetail label="Tool result" excerpt={physical.result} />}
+      {physical?.failure && <TextDetail label="Tool failure" excerpt={physical.failure} />}
+    </article>
+  )
+}
 
 type DelegationDetail = Extract<DetailBody, { type: 'delegation' }>['detail']
 type Fact = readonly [string, ReactNode]

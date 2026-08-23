@@ -324,13 +324,14 @@ const isCanonicalCrossFieldContinuation = (
   }
   const tool = body.tools.length === 1 ? body.tools[0] : undefined
   if (!tool || body.goal_events.length !== 0) return false
+  const physical = tool.evidence.type === 'physical_attempt' ? tool.evidence : null
   const currentExcerpt =
     currentField === 'tool_arguments'
       ? tool.arguments
       : currentField === 'tool_result'
-        ? tool.result
+        ? physical?.result
         : currentField === 'tool_failure'
-          ? tool.failure
+          ? physical?.failure
           : null
   if (currentExcerpt == null || currentExcerpt.continuation !== null) return false
   if (continuation.field === 'goal_text') {
