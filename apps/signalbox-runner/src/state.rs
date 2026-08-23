@@ -558,16 +558,21 @@ impl RunnerStateRoot {
 
     /// Clones the pinned root descriptor into the managed-workspace store.
     pub fn workspace_store(&self) -> Result<crate::RunnerWorkspaceStore, RunnerStateError> {
-        self.directory
+        let directory = self
+            .directory
             .try_clone()
-            .map(|directory| {
-                crate::RunnerWorkspaceStore::from_root(directory, self.canonical_path.clone())
-            })
             .map_err(|source| RunnerStateError::Io {
                 operation: StateOperation::Open,
                 resource: StateResource::Root,
                 source,
-            })
+            })?;
+        crate::RunnerWorkspaceStore::from_root(directory, self.canonical_path.clone()).map_err(
+            |source| RunnerStateError::Io {
+                operation: StateOperation::ConfigurePermissions,
+                resource: StateResource::Root,
+                source,
+            },
+        )
     }
 
     /// Borrows the complete ready payload retained beside its reconnect item.

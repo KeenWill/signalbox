@@ -1,4 +1,5 @@
-//! Narrow safe boundary for changing the mode of an already-open Linux object.
+//! Safe, descriptor-native Linux permission restoration for runner cleanup.
+#![allow(unsafe_code)]
 
 use std::{
     ffi::{c_char, c_int, c_long},
@@ -8,9 +9,42 @@ use std::{
 
 const AT_EMPTY_PATH: c_int = 0x1000;
 const SYS_FCHMODAT2: c_long = 452;
+const INVALID_DESCRIPTOR: c_int = -1;
 
 unsafe extern "C" {
     fn syscall(number: c_long, ...) -> c_long;
+}
+
+/// Verifies that the host admits descriptor-native permission restoration.
+///
+/// The deliberately invalid descriptor makes a supported kernel return
+/// `EBADF` without changing any filesystem object. Older kernels return
+/// `ENOSYS`, while a seccomp profile that rejects the syscall returns its own
+/// error. Callers run this check before beginning any workspace operation.
+pub fn ensure_available() -> io::Result<()> {
+    static EMPTY_PATH: &[u8] = b"\0";
+
+    // SAFETY: `EMPTY_PATH` is a static NUL-terminated C string, all remaining
+    // arguments are integers, and the invalid descriptor prevents mutation.
+    let result = unsafe {
+        syscall(
+            SYS_FCHMODAT2,
+            INVALID_DESCRIPTOR,
+            EMPTY_PATH.as_ptr().cast::<c_char>(),
+            0,
+            AT_EMPTY_PATH,
+        )
+    };
+    let error = io::Error::last_os_error();
+    if result == -1 && error.raw_os_error() == Some(9) {
+        Ok(())
+    } else if result == -1 {
+        Err(error)
+    } else {
+        Err(io::Error::other(
+            "fchmodat2 capability probe unexpectedly succeeded",
+        ))
+    }
 }
 
 /// Changes the mode of the object referenced by `descriptor`.
@@ -19,7 +53,7 @@ unsafe extern "C" {
 /// the supplied descriptor. No pathname, symbolic link, or procfs magic link is
 /// resolved. Callers remain responsible for authenticating the descriptor as
 /// the object whose permissions they intend to change.
-pub(crate) fn chmod_descriptor(descriptor: BorrowedFd<'_>, mode: u32) -> io::Result<()> {
+pub fn chmod_descriptor(descriptor: BorrowedFd<'_>, mode: u32) -> io::Result<()> {
     static EMPTY_PATH: &[u8] = b"\0";
 
     // SAFETY: `EMPTY_PATH` is a static NUL-terminated C string, the remaining
@@ -53,6 +87,11 @@ mod tests {
     };
 
     use rustix::fs::{Mode, OFlags, open};
+
+    #[test]
+    fn host_supports_descriptor_chmod_before_workspace_operations() {
+        super::ensure_available().expect("the host admits descriptor-native chmod");
+    }
 
     #[test]
     fn descriptor_chmod_restores_a_mode_zero_directory() {

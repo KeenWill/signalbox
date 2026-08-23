@@ -28,7 +28,7 @@ use signalbox_runner_wire::{
 };
 use uuid::Uuid;
 
-use crate::fchmodat2::chmod_descriptor;
+use signalbox_runner_fchmodat2::{chmod_descriptor, ensure_available};
 
 const DIRECTORY_MODE: u32 = 0o700;
 const DOCUMENT_MODE: u32 = 0o600;
@@ -260,11 +260,12 @@ pub struct RunnerWorkspaceStore {
 }
 
 impl RunnerWorkspaceStore {
-    pub(crate) const fn from_root(root: File, canonical_root: PathBuf) -> Self {
-        Self {
+    pub(crate) fn from_root(root: File, canonical_root: PathBuf) -> io::Result<Self> {
+        ensure_available()?;
+        Ok(Self {
             root,
             canonical_root,
-        }
+        })
     }
 
     /// Creates and publishes one private root, or replays its exact ready manifest.
@@ -1300,6 +1301,8 @@ mod tests {
     const CLONE_URL: &str = "https://github.com/KeenWill/signalbox.git";
     const PREPARED_REPOSITORY_BYTES: &[u8] = b"repository\n";
     const LATE_REPOSITORY_WRITE_BYTES: &[u8] = b"late repository write\n";
+    const ARBITRARY_FIRST_CONCURRENT_REPOSITORY_BYTES: &[u8] = b"first\n";
+    const ARBITRARY_SECOND_CONCURRENT_REPOSITORY_BYTES: &[u8] = b"second\n";
     const NESTED_REPOSITORY_DIRECTORY: &str = "nested";
     const PARTIAL_REPOSITORY_BYTES: &[u8] = b"partial repository\n";
 
@@ -1963,7 +1966,10 @@ mod tests {
         let first_barrier = Arc::clone(&barrier);
         let second_barrier = Arc::clone(&barrier);
         let first = first_store.prepare_repository_workspace(&expected, move |target| async move {
-            fs::write(target.path().join("prepared"), b"first\n")?;
+            fs::write(
+                target.path().join("prepared"),
+                ARBITRARY_FIRST_CONCURRENT_REPOSITORY_BYTES,
+            )?;
             first_barrier.wait().await;
             Ok::<Recovery, std::io::Error>(Recovery::Commit {
                 revision: "f".repeat(40),
@@ -1971,7 +1977,10 @@ mod tests {
         });
         let second =
             second_store.prepare_repository_workspace(&expected, move |target| async move {
-                fs::write(target.path().join("prepared"), b"second\n")?;
+                fs::write(
+                    target.path().join("prepared"),
+                    ARBITRARY_SECOND_CONCURRENT_REPOSITORY_BYTES,
+                )?;
                 second_barrier.wait().await;
                 Ok::<Recovery, std::io::Error>(Recovery::Commit {
                     revision: "0".repeat(40),
