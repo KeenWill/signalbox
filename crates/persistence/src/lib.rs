@@ -11,6 +11,7 @@ mod model_settings_resolution;
 pub mod approval_judge;
 pub mod approval_judge_eval;
 pub mod blob;
+pub mod commissioned_dispatch;
 pub mod context_compaction;
 pub mod conversation_import;
 pub mod conversation_listing;
@@ -29,6 +30,7 @@ pub mod replace_session_defaults;
 pub mod repo_watch;
 pub mod repo_watch_dispatch;
 pub mod repo_watch_dispatch_obligation;
+pub mod repo_watch_webhook;
 pub mod review_orchestration;
 pub mod review_workflow;
 mod review_workflow_command;
@@ -43,6 +45,7 @@ pub mod start_eligible_turn;
 pub mod startup;
 pub mod submit_input;
 pub mod tool_loop;
+pub mod turn_liveness;
 
 pub use session_credentials::{
     ModelCredentialFamilyCatalog, ModelCredentialFamilyCatalogError, SessionCredentialPin,
@@ -310,6 +313,63 @@ pub fn disposable_test_container_labels_for_command(
         DISPOSABLE_TEST_CONTAINER_LABEL_KEY,
         DISPOSABLE_TEST_CONTAINER_LABEL_VALUE,
     )]
+}
+
+/// Where the pinned `postgres:18*` images keep every byte of database state.
+///
+/// The image sets `PGDATA` to `/var/lib/postgresql/<major>/docker` and declares
+/// `VOLUME /var/lib/postgresql`, so a mount at this path holds the data
+/// directory and its WAL, and pre-empts the anonymous volume the image would
+/// otherwise create on the daemon's disk.
+#[cfg(feature = "postgres-integration")]
+const POSTGRES_STATE_DIRECTORY: &str = "/var/lib/postgresql";
+
+// numeric-bound: ceiling - bounds a runaway test's in-memory database so it
+// cannot consume unbounded host memory
+#[cfg(feature = "postgres-integration")]
+const DISPOSABLE_POSTGRES_STATE_CEILING_BYTES: i64 = 512 * 1024 * 1024;
+
+/// The `postgres` server arguments every disposable test container starts
+/// with: durability off, because every container is discarded after its test.
+///
+/// `fsync=off` restates the testcontainers module's own default so a caller
+/// composing extra arguments through `with_cmd` — which replaces the image's
+/// command wholesale — cannot silently drop it; `synchronous_commit=off` and
+/// `full_page_writes=off` stop commits waiting on WAL flushes and stop
+/// torn-page protection writes whose crash-recovery value is nil for a
+/// database that never restarts. None of the three changes SQL semantics.
+///
+/// Callers needing further settings extend this list rather than restating it:
+/// `disposable_postgres_server_args().into_iter().chain([...])`.
+#[cfg(feature = "postgres-integration")]
+pub fn disposable_postgres_server_args() -> [&'static str; 6] {
+    [
+        "-c",
+        "fsync=off",
+        "-c",
+        "synchronous_commit=off",
+        "-c",
+        "full_page_writes=off",
+    ]
+}
+
+/// The RAM-backed mount every disposable test container keeps its database
+/// state on, so ephemeral `initdb`, WAL, and relation writes never reach the
+/// host's disk.
+///
+/// The size bound exists so a runaway test fails its own container with
+/// `No space left on device` instead of consuming host memory without limit;
+/// tmpfs charges only pages actually written, so the bound costs nothing when
+/// unreached. A fully migrated test database measures 79 MiB of state all-in —
+/// PostgreSQL 18.4, every embedded migration applied, 32 MiB of it WAL — so
+/// the 512 MiB bound leaves ordinary tests six times their whole footprint in
+/// headroom. Stranded containers hold their tmpfs until removed, which is one
+/// more reason `tooling/sweep-test-containers.sh` runs on a timer on shared
+/// machines.
+#[cfg(feature = "postgres-integration")]
+pub fn disposable_postgres_state_tmpfs() -> testcontainers_modules::testcontainers::core::Mount {
+    testcontainers_modules::testcontainers::core::Mount::tmpfs_mount(POSTGRES_STATE_DIRECTORY)
+        .with_size_bytes(DISPOSABLE_POSTGRES_STATE_CEILING_BYTES)
 }
 
 #[cfg(test)]
@@ -593,5 +653,22 @@ mod tests {
         let held = Duration::from_secs(DISPOSABLE_TEST_CONTAINER_LIFETIME_HOURS * 60 * 60);
 
         assert!(outlives_the_disposable_container_sweep(held));
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[test]
+    fn a_disposable_container_keeps_its_database_state_on_a_bounded_tmpfs() {
+        use testcontainers_modules::testcontainers::core::MountType;
+
+        let mount = super::disposable_postgres_state_tmpfs();
+
+        assert_eq!(mount.mount_type(), MountType::Tmpfs);
+        // The literal contract, not the implementation's constants: the mount
+        // must cover the postgres image's state directory and stay inside the
+        // documented 512 MiB bound, and a constant drifting away from either
+        // value has to fail here.
+        assert_eq!(mount.target(), Some("/var/lib/postgresql"));
+        let options = mount.tmpfs_options().expect("the tmpfs mount is bounded");
+        assert_eq!(options.size_bytes, Some(512 * 1024 * 1024));
     }
 }

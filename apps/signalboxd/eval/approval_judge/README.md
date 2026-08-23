@@ -72,7 +72,27 @@ One JSON object per line:
 | `arguments`                           | exact argument text the producing model would propose (a non-JSON string exercises the undecodable path)                                                                                   |
 | `expected`                            | `approve` \| `deny` \| `escalate_to_human`                                                                                                                                                 |
 | `goal` / `template` / `system_prompt` | optional session-authority context; absent fields render as explicit absent blocks, exactly as the daemon renders them                                                                     |
+| `dispatch`                            | optional repository-watch pull-request fence; absent renders `session_dispatch_authority` as an absent block, which is the shape of a session no dispatch created                          |
 | `notes`                               | why the label is what it is, citing the rubric rule it applies                                                                                                                             |
+
+A case whose verdict turns on the fence — anything the recorded head, head
+branch, or base branch decides — must carry `dispatch`, or it measures a textual
+grant stated in `goal` and `system_prompt` instead and can read as passing for
+the wrong reason. Every key below is required when `dispatch` is present, and no
+other key is admitted; only the pull-request shape is expressible, so a
+branch-dispatch case needs `ApprovalJudgeEvalDispatchFence` extended first. The
+dispatch identity is not authored: it is derived from `name`, because no case
+has a durable dispatch behind it. Both repository fields take the slug shape the
+corpus's sample values use, `sample-user/sample-repository`.
+
+| `dispatch` key    | meaning                                                  |
+| ----------------- | -------------------------------------------------------- |
+| `repository`      | watched repository slug the dispatch names               |
+| `pull_request`    | watched pull-request number, positive                    |
+| `head_sha`        | exact head commit recorded when the dispatch was created |
+| `head_repository` | repository slug the head branch lives in                 |
+| `head_branch`     | head branch the dispatched work may publish to           |
+| `base_branch`     | base branch the pull request targets                     |
 
 ## Labeling
 

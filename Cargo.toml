@@ -4,6 +4,7 @@ members = [
     "apps/signalbox-runner",
     "apps/signalboxd",
     "crates/application",
+    "crates/approval-judge-eval",
     "crates/blob-store",
     "crates/blob-store-filesystem",
     "crates/egress-transport",
@@ -35,6 +36,7 @@ members = [
     "crates/tools-sessions",
     "crates/tools-web",
     "crates/tools-workspace",
+    "crates/web-contract",
 ]
 resolver = "3"
 

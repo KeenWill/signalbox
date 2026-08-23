@@ -7,37 +7,68 @@
 use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use signalbox_application::{
+    ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
+    ApprovalJudgeDispatchProvenance, ApprovalJudgePullRequestAuthority, AuthorizeModelCallOutcome,
+    CommissionDispatchRequest, CommissionedDispatchFence, ModelCallCredentialReference,
     RepoWatchBranchHead, RepoWatchDispatchService, RepoWatchDispatchTransaction,
-    RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
-    RepoWatchPullRequestStateInput, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
-    RepoWatchResolvedTemplate, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchTemplateResolver, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
+    RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
+    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver,
+    RepoWatchWorkflowRunObservation, StartEligibleTurnOutcome, StartEligibleTurnService,
+    UuidV7CommissionedDispatchIdGenerator, UuidV7RepoWatchDispatchIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_domain::{
-    AcceptedInputId, BranchName, CheckConclusion, CommitSha, DangerousToolAutoApproval,
-    DescendantTerminationScope, DirectModelSelection, DurableCommandId, GitHubObjectId,
-    GoalCommandResult, GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance,
-    GoalState, GoalStatement, GoalUserAction, GoalUserCommand, MergeableState,
-    ModelSelectionRequest, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
-    PullRequestNumber, PullRequestTitle, RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent,
-    RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget,
-    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule,
-    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt,
-    RepositorySlug, SessionConfigurationDefaults, SessionId, SessionSystemPrompt,
-    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance, ToolRequestId,
-    TurnId, UserContent, WorkflowName,
+    AcceptedInputId, ActiveTurnPhase, AssistantResponsePart, BranchName,
+    CancelledModelCallTurnIdentities, CheckConclusion, CommissionedDispatchId, CommitSha,
+    ContextFrontierId, CreateSession, DangerousToolAutoApproval, DelegateApprovalRecommendation,
+    DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    FailedModelCallTurnIdentities, GitHubObjectId, GoalCommandResult, GoalModelProvenance,
+    GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction,
+    GoalUserCommand, InitialToolApproval, MergeableState, ModelCallId, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionRequest,
+    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments, ProviderModelIdentity,
+    ProviderReportedTokenUsage, PullRequestBody, PullRequestEventContext,
+    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchActionV1,
+    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1,
+    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
+    RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId,
+    RepoWatchRuleIdentityField, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    RepoWatchWorkflowRunAttempt, RepositorySlug, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
+    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, SubmitInput, ToolCallProposal, ToolDecisionRationale, ToolName,
+    ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
+    WorkflowName,
 };
 use signalbox_persistence::{
-    SessionCredentialPin, SessionModelCredential, disposable_test_container_labels,
+    SessionCredentialPin, SessionModelCredential,
+    approval_judge::{
+        ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, CompleteApprovalJudgeOutcome,
+        PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
+    },
+    commissioned_dispatch::{CommissionDispatchOutcome, PostgresCommissionedDispatchStore},
+    create_session::{
+        CreateSessionHandlingOutcome, CreateSessionRepository, CreateSessionRepositoryError,
+    },
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
+    model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
         RepoWatchCursorCandidate, RepoWatchCursorGeneration,
     },
     repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
-    repo_watch_dispatch_obligation::RepoWatchDispatchObligation,
+    repo_watch_dispatch_obligation::{
+        RepoWatchDispatchObligation, RepoWatchDispatchRetryPolicy, RepoWatchObligationParkRelease,
+    },
+    start_eligible_turn::StartEligibleTurnRepository,
+    submit_input::SubmitInputRepository,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -50,6 +81,7 @@ const DATABASE_NAME: &str = "signalbox_repo_watch_dispatch";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const REPOSITORY: &str = "signalbox/repository";
+const SECOND_REPOSITORY: &str = "signalbox/second-repository";
 const HEAD_REPOSITORY: &str = "contributor/repository";
 const BASE_BRANCH: &str = "main";
 const HEAD_BRANCH: &str = "feature/repo-watch";
@@ -59,6 +91,8 @@ const SECOND_HEAD: &str = "2222222222222222222222222222222222222222";
 const THIRD_HEAD: &str = "3333333333333333333333333333333333333333";
 const TEMPLATE: &str = "merge-forward";
 const RULE: &str = "merge-forward-on-conflict";
+const FRESH_RULE: &str = "merge-forward-on-conflict-replacement";
+const REPLACEMENT_RULE_VERSION: u64 = 2;
 const EAGER_RULE: &str = "merge-forward-on-base-advance";
 const AGENT_HEAD_PATTERN: &str = "^agent/.+$";
 const BOTTOM_AGENT_BRANCH: &str = "agent/bottom";
@@ -81,6 +115,26 @@ const TERMINAL_RULE_OPENED_EVENT_ID: u128 = 0x54_000;
 const TERMINAL_RULE_MERGED_EVENT_ID: u128 = 0x54_100;
 const STARTUP_DRAIN_CUTOFF_EVENT_ID: u128 = 0x57_100;
 const STARTUP_DRAIN_STOP_COMMAND_ID: u128 = 0x57_110;
+const PARK_FIRST_STOP_COMMAND_ID: u128 = 0x58_100;
+const CROSS_TARGET_OPENED_EVENT_ID: u128 = 0x58_500;
+const PARKED_TARGET_CUTOFF_EVENT_ID: u128 = 0x58_800;
+const SPENT_FRONTIER_OLDER_EVENT_ID: u128 = 0x58_900;
+const SPENT_FRONTIER_NEWER_EVENT_ID: u128 = 0x58_901;
+const SPENT_FRONTIER_STOP_COMMAND_ID: u128 = 0x58_902;
+const CROSS_TARGET_SPEND_PROGRESS_EVENT_ID: u128 = 0x58_910;
+const CROSS_TARGET_SPEND_STOP_COMMAND_ID: u128 = 0x58_911;
+const CROSS_TARGET_SPEND_NEIGHBOUR_EVENT_ID: u128 = 0x58_912;
+const PARKED_TARGET_CUTOFF_COMMAND_ID: u128 = 0x58_801;
+const NONMATCHING_PROGRESS_EVENT_ID: u128 = 0x58_600;
+const SIBLING_COUNT_FIRST_STOP_COMMAND_ID: u128 = 0x58_700;
+const SIBLING_COUNT_SECOND_STOP_COMMAND_ID: u128 = 0x58_701;
+const CROSS_TARGET_CONFLICT_EVENT_ID: u128 = 0x58_501;
+const REPOSITORY_SCOPED_RULE: &str = "merge-forward-per-repository";
+const BATCH_DELAY_FIRST_STOP_COMMAND_ID: u128 = 0x58_400;
+const BATCH_DELAY_SECOND_STOP_COMMAND_ID: u128 = 0x58_401;
+const PARK_RELEASING_EVENT_ID: u128 = 0x58_200;
+const PARK_STALE_EVENT_ID: u128 = 0x58_300;
+const PARK_RELEASE_ACTOR: &str = "operator-under-test";
 const BRANCH_RULE: &str = "branch-workflow-follow-up";
 const WORKFLOW_NAME: &str = "rust";
 const WORKFLOW_BRANCH: &str = "main";
@@ -111,13 +165,33 @@ const SIBLING_STOP_COMMAND_ID: u128 = 0x5b_200;
 const SIBLING_GOAL_INPUT_ID: u128 = 0x5b_300;
 const SIBLING_GOAL_TURN_ID: u128 = 0x5b_400;
 const UNKNOWN_DELIVERED_REQUEST_ID: u128 = 0x5c_000;
+const SUCCESSOR_JUDGE_SUPERSEDE_COMMAND_ID: u128 = 0x5d_000;
+const SUCCESSOR_JUDGE_INPUT_ID: u128 = 0x5d_100;
+const SUCCESSOR_JUDGE_TURN_ID: u128 = 0x5d_200;
+const STEERED_DISPATCH_COMMAND_ID: u128 = 0x5d_300;
+const STEERED_DISPATCH_INPUT_ID: u128 = 0x5d_400;
+const RESUMED_DISPATCH_COMMAND_ID: u128 = 0x5d_500;
+const RESUMED_DISPATCH_INPUT_ID: u128 = 0x5d_600;
+const RESUMED_DISPATCH_TURN_ID: u128 = 0x5d_700;
+const STALE_DISPATCH_RESUME_COMMAND_ID: u128 = 0x5d_800;
+const STALE_DISPATCH_INPUT_ID: u128 = 0x5d_900;
+const STALE_DISPATCH_TURN_ID: u128 = 0x5d_a00;
+const STALE_DISPATCH_STOP_COMMAND_ID: u128 = 0x5d_b00;
+const HELD_BATCH_RESUME_COMMAND_ID: u128 = 0x5d_c00;
+const HELD_BATCH_RESUME_INPUT_ID: u128 = 0x5d_d00;
+const HELD_BATCH_RESUME_TURN_ID: u128 = 0x5d_e00;
+const TEMPLATE_MODEL_SELECTION_ID: u128 = 901;
+const APPROVAL_JUDGE_PROVIDER_ID: u128 = 902;
+const FIXTURE_CREDENTIAL_REFERENCE: &str = "fixture-credential";
+const CLOSED_RESULT_ID_OFFSET: u128 = 0x2_000_000;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
-        .with_fsync_enabled()
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -265,6 +339,30 @@ fn conflict_event(value: u128, head: &str) -> Result<RepoWatchEvent, Box<dyn Err
     )?)
 }
 
+fn conflict_event_for(
+    value: u128,
+    context: PullRequestEventContext,
+) -> Result<RepoWatchEvent, Box<dyn Error>> {
+    Ok(RepoWatchEvent::try_pull_request(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(value)),
+        repository()?,
+        context,
+        RepoWatchEventKindV1::MergeableStateChanged {
+            current: MergeableState::Conflicting,
+        },
+    )?)
+}
+
+fn identified_event(event: RepoWatchEvent) -> RepoWatchEventOccurrenceV1 {
+    let mut identity = [0_u8; 32];
+    identity[..16].copy_from_slice(event.id().as_uuid().as_bytes());
+    identity[16..].copy_from_slice(event.id().as_uuid().as_bytes());
+    RepoWatchEventOccurrenceV1::from_parts(
+        event,
+        RepoWatchEventContentIdentityV1::from_bytes(identity),
+    )
+}
+
 fn opened_event_for(
     value: u128,
     context: PullRequestEventContext,
@@ -308,11 +406,13 @@ fn base_advanced_event(
 }
 
 fn rule_with_actions_and_cooldown(
+    version: RepoWatchRuleVersion,
     actions: Vec<RepoWatchRuleActionV1>,
     cooldown: Duration,
 ) -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(RULE.to_owned())?,
+        version,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
             mergeable_state: vec![MergeableState::Conflicting],
@@ -325,20 +425,40 @@ fn rule_with_actions_and_cooldown(
 }
 
 fn rule() -> Result<RepoWatchRule, Box<dyn Error>> {
+    rule_at_version(RepoWatchRuleVersion::V1)
+}
+
+fn rule_at_version(version: RepoWatchRuleVersion) -> Result<RepoWatchRule, Box<dyn Error>> {
+    rule_with_identity(RepoWatchRuleId::try_new(RULE.to_owned())?, version)
+}
+
+fn rule_with_identity(
+    id: RepoWatchRuleId,
+    version: RepoWatchRuleVersion,
+) -> Result<RepoWatchRule, Box<dyn Error>> {
     let template = SessionTemplateName::try_new(TEMPLATE.to_owned())?;
-    rule_with_actions_and_cooldown(
+    Ok(RepoWatchRule::try_new(
+        id,
+        version,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
+            mergeable_state: vec![MergeableState::Conflicting],
+            ..RepoWatchMatcherV1Input::default()
+        }),
         vec![
             RepoWatchRuleActionV1::DispatchSession {
                 template: template.clone(),
             },
             RepoWatchRuleActionV1::DispatchSession { template },
         ],
+        RepoWatchSingletonScope::PullRequest,
         Duration::ZERO,
-    )
+    )?)
 }
 
 fn cooldown_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     rule_with_actions_and_cooldown(
+        RepoWatchRuleVersion::V1,
         vec![RepoWatchRuleActionV1::DispatchSession {
             template: SessionTemplateName::try_new(TEMPLATE.to_owned())?,
         }],
@@ -348,6 +468,7 @@ fn cooldown_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
 
 fn one_action_rule(cooldown: Duration) -> Result<RepoWatchRule, Box<dyn Error>> {
     rule_with_actions_and_cooldown(
+        RepoWatchRuleVersion::V1,
         vec![RepoWatchRuleActionV1::DispatchSession {
             template: SessionTemplateName::try_new(TEMPLATE.to_owned())?,
         }],
@@ -358,6 +479,7 @@ fn one_action_rule(cooldown: Duration) -> Result<RepoWatchRule, Box<dyn Error>> 
 fn eager_merge_forward_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(EAGER_RULE.to_owned())?,
+        RepoWatchRuleVersion::V1,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![RepoWatchEventKindNameV1::BaseAdvanced],
             repository: Some(repository()?),
@@ -372,9 +494,29 @@ fn eager_merge_forward_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     )?)
 }
 
+/// One conflict rule whose singleton collapses every pull request in the
+/// repository onto a single obligation.
+fn repository_scoped_conflict_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
+    Ok(RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(REPOSITORY_SCOPED_RULE.to_owned())?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
+            mergeable_state: vec![MergeableState::Conflicting],
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(TEMPLATE.to_owned())?,
+        }],
+        RepoWatchSingletonScope::Repository,
+        Duration::ZERO,
+    )?)
+}
+
 fn branch_workflow_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(BRANCH_RULE.to_owned())?,
+        RepoWatchRuleVersion::V1,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
             ..RepoWatchMatcherV1Input::default()
@@ -433,6 +575,7 @@ fn closed_event(value: u128, head: &str) -> Result<RepoWatchEvent, Box<dyn Error
 fn closed_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(RULE.to_owned())?,
+        RepoWatchRuleVersion::V1,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![RepoWatchEventKindNameV1::PullRequestClosed],
             ..RepoWatchMatcherV1Input::default()
@@ -448,6 +591,7 @@ fn closed_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
 fn merged_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(RULE.to_owned())?,
+        RepoWatchRuleVersion::V1,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![RepoWatchEventKindNameV1::PullRequestMerged],
             ..RepoWatchMatcherV1Input::default()
@@ -463,6 +607,7 @@ fn merged_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
 fn conflict_and_merged_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(RULE.to_owned())?,
+        RepoWatchRuleVersion::V1,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![
                 RepoWatchEventKindNameV1::MergeableStateChanged,
@@ -492,7 +637,7 @@ impl RepoWatchTemplateResolver for TemplateResolver {
             ),
             SessionConfigurationDefaults::complete(
                 ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(
-                    901,
+                    TEMPLATE_MODEL_SELECTION_ID,
                 ))),
                 DangerousToolAutoApproval::Disabled,
                 Some(
@@ -530,12 +675,38 @@ struct OutstandingTerminationVisibility {
 }
 
 #[derive(Debug, sqlx::FromRow)]
+struct ParkedObligationVisibility {
+    obligation_id: Uuid,
+    failed_attempts: i64,
+    head_sha: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
+struct ParkTransitionVisibility {
+    transition_kind: String,
+    failed_attempts: i64,
+    release_reason: Option<String>,
+    release_actor: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
 struct HeldSlotVisibility {
     every_action_delivered: bool,
     every_delivery_turn_releasable: bool,
     no_live_runtime_turn: bool,
     every_goal_nonpursuing: bool,
     blockers: Vec<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct HeadlessEscalationVisibility {
+    lifecycle_state: String,
+    terminal_disposition: Option<String>,
+    goal_event_kind: String,
+    blocked_reason: Option<String>,
+    rationale: String,
+    dispatch_released: bool,
+    replacement_owed: bool,
 }
 
 impl RepoWatchDispatchTransaction for ObligationTransaction {
@@ -560,9 +731,43 @@ impl RepoWatchDispatchTransaction for ObligationTransaction {
 fn credential_pin() -> SessionCredentialPin {
     SessionCredentialPin::try_new(vec![SessionModelCredential::new(
         "fixture-family",
-        "fixture-credential",
+        FIXTURE_CREDENTIAL_REFERENCE,
     )])
     .expect("fixture credential pin is valid")
+}
+
+fn model_credential_reference() -> ModelCallCredentialReference {
+    ModelCallCredentialReference::new(FIXTURE_CREDENTIAL_REFERENCE)
+}
+
+fn model_targets() -> ModelTargetCatalog {
+    ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(TEMPLATE_MODEL_SELECTION_ID)),
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+            APPROVAL_JUDGE_PROVIDER_ID,
+        ))),
+    )])
+    .expect("one fixture target forms a catalog")
+}
+
+#[track_caller]
+fn ready_approval_judge(outcome: PrepareApprovalJudgeOutcome) -> PreparedApprovalJudge {
+    let PrepareApprovalJudgeOutcome::Ready(prepared) = outcome else {
+        panic!("the delegated fixture prepares a fresh judge call")
+    };
+    *prepared
+}
+
+#[track_caller]
+fn prepared_pull_request_authority(
+    prepared: &PreparedApprovalJudge,
+) -> &ApprovalJudgePullRequestAuthority {
+    let Some(ApprovalJudgeDispatchAuthority::PullRequest(authority)) =
+        prepared.session_context().dispatch()
+    else {
+        panic!("the dispatched pull-request session carries its immutable fence")
+    };
+    authority
 }
 
 fn dispatch_context() -> UserContent {
@@ -615,18 +820,99 @@ fn session_uuids(fixture: &DispatchFixture) -> Vec<Uuid> {
         .collect()
 }
 
-fn reused_rule_identity(error: &RepoWatchDispatchRepositoryError) -> bool {
-    matches!(
-        error,
-        RepoWatchDispatchRepositoryError::ReusedRuleIdentity { .. }
-    )
+/// Closed classification of one rule-admission refusal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuleAdmissionRefusal {
+    ReusedIdentity,
+    ChangedField(RepoWatchRuleIdentityField),
+    RegressedVersion {
+        configured: RepoWatchRuleVersion,
+        latest: RepoWatchRuleVersion,
+    },
+    StorageCorruption,
+    NotAnAdmissionRefusal,
 }
 
-fn changed_rule_identity(error: &RepoWatchDispatchRepositoryError) -> bool {
-    matches!(
-        error,
-        RepoWatchDispatchRepositoryError::ChangedRuleIdentity { .. }
+/// Classifies a reconciliation failure for the assertions below.
+///
+/// One exhaustive accessor rather than a wildcard per assertion: a repository
+/// error variant added later forces a classification decision here instead of
+/// silently reading as "not the refusal under test" at every call site.
+fn admission_refusal(error: &RepoWatchDispatchRepositoryError) -> RuleAdmissionRefusal {
+    match error {
+        RepoWatchDispatchRepositoryError::ReusedRuleIdentity { .. } => {
+            RuleAdmissionRefusal::ReusedIdentity
+        }
+        RepoWatchDispatchRepositoryError::ChangedRuleIdentity { field, .. } => {
+            RuleAdmissionRefusal::ChangedField(*field)
+        }
+        RepoWatchDispatchRepositoryError::RegressedRuleVersion {
+            rule_version,
+            latest_version,
+            ..
+        } => RuleAdmissionRefusal::RegressedVersion {
+            configured: *rule_version,
+            latest: *latest_version,
+        },
+        RepoWatchDispatchRepositoryError::Corruption(_) => RuleAdmissionRefusal::StorageCorruption,
+        RepoWatchDispatchRepositoryError::Database(_)
+        | RepoWatchDispatchRepositoryError::CommitAmbiguous(_)
+        | RepoWatchDispatchRepositoryError::EventStore(_)
+        | RepoWatchDispatchRepositoryError::SessionCreation(_)
+        | RepoWatchDispatchRepositoryError::InitialInput(_)
+        | RepoWatchDispatchRepositoryError::GoalCommission(_)
+        | RepoWatchDispatchRepositoryError::GoalCutoff(_) => {
+            RuleAdmissionRefusal::NotAnAdmissionRefusal
+        }
+    }
+}
+
+/// The recorded revisions of one rule and whether each is deactivated.
+async fn revisions_of(
+    fixture: &DispatchFixture,
+    rule_id: &str,
+) -> Result<Vec<(i64, bool)>, Box<dyn Error>> {
+    Ok(sqlx::query_as(
+        "SELECT activation.rule_version, deactivation.rule_id IS NOT NULL AS deactivated
+           FROM repo_watch_rule_activation AS activation
+           LEFT JOIN repo_watch_rule_deactivation AS deactivation
+             USING (repository, rule_id, rule_version)
+          WHERE activation.repository = $1 AND activation.rule_id = $2
+          ORDER BY activation.rule_version",
     )
+    .bind(fixture.repository.as_str())
+    .bind(rule_id)
+    .fetch_all(&fixture.pool)
+    .await?)
+}
+
+/// Removes the fixture rule's stored fingerprints to stage a corrupt shape.
+///
+/// The table is append-only in production, so the trigger is disabled only
+/// long enough to reach a state reconciliation must refuse.
+async fn remove_field_fingerprints(fixture: &DispatchFixture) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "ALTER TABLE repo_watch_rule_field_fingerprint
+         DISABLE TRIGGER repo_watch_rule_field_fingerprint_is_append_only",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM repo_watch_rule_field_fingerprint
+          WHERE repository = $1 AND rule_id = $2 AND rule_version = $3",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(fixture.rule.id().as_str())
+    .bind(i64::try_from(fixture.rule.version().get())?)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE repo_watch_rule_field_fingerprint
+         ENABLE TRIGGER repo_watch_rule_field_fingerprint_is_append_only",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    Ok(())
 }
 
 fn outcome_is_dispatched(outcome: &RepoWatchRuleEvaluationOutcome) -> bool {
@@ -960,7 +1246,11 @@ async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Bo
         event_store
             .commit(
                 &repository,
-                RepoWatchCommitRequest::new(None, initial, vec![opened_event(100, INITIAL_HEAD)?]),
+                RepoWatchCommitRequest::new(
+                    None,
+                    initial,
+                    vec![identified_event(opened_event(100, INITIAL_HEAD)?)],
+                ),
             )
             .await?,
     );
@@ -975,7 +1265,7 @@ async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Bo
             RepoWatchCommitRequest::new(
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(observation.clone()),
-                vec![event.clone()],
+                vec![identified_event(event.clone())],
             ),
         )
         .await?;
@@ -1005,6 +1295,196 @@ async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Bo
         dispatch_id,
         sessions,
     })
+}
+
+async fn checkpoint_dispatched_delegated_approval(
+    fixture: &DispatchFixture,
+    seed: u128,
+) -> Result<
+    (
+        PostgresModelCallRepository,
+        PreparedApprovalJudge,
+        TurnId,
+        Vec<ToolRequestId>,
+    ),
+    Box<dyn Error>,
+> {
+    checkpoint_dispatched_delegated_approval_for(
+        fixture,
+        seed,
+        &[("exec", r#"{"cmd":"git fetch origin main"}"#)],
+    )
+    .await
+}
+
+async fn checkpoint_dispatched_delegated_approval_for(
+    fixture: &DispatchFixture,
+    seed: u128,
+    proposals: &[(&str, &str)],
+) -> Result<
+    (
+        PostgresModelCallRepository,
+        PreparedApprovalJudge,
+        TurnId,
+        Vec<ToolRequestId>,
+    ),
+    Box<dyn Error>,
+> {
+    checkpoint_delegated_approval_at(&fixture.pool, fixture.session(0), seed, proposals).await
+}
+
+/// Parks the given session's already-queued first turn on a delegated
+/// approval, however the session was dispatched.
+async fn checkpoint_delegated_approval_at(
+    pool: &PgPool,
+    session: SessionId,
+    seed: u128,
+    proposals: &[(&str, &str)],
+) -> Result<
+    (
+        PostgresModelCallRepository,
+        PreparedApprovalJudge,
+        TurnId,
+        Vec<ToolRequestId>,
+    ),
+    Box<dyn Error>,
+> {
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) = activation.execute(session).await? else {
+        panic!("the dispatched work turn activates")
+    };
+    let turn = activated.turn();
+    drop(activated);
+
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        model_targets(),
+        model_credential_reference(),
+    );
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed));
+    let PrepareInitialModelCallOutcome::Checkpointed(checkpointed) = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 1)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 2)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 3)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 4)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 5)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the dispatched turn checkpoints its initial model call")
+    };
+    assert_eq!(checkpointed, call);
+    let PrepareInitialModelCallOutcome::Ready { .. } = repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 20)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 23)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 24)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 25)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the checkpointed initial model call reloads ready")
+    };
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        repository.authorize_send(session, call).await?
+    else {
+        panic!("the initial model call authorizes")
+    };
+    let requests = proposals
+        .iter()
+        .enumerate()
+        .map(|(ordinal, _)| {
+            ToolRequestId::from_uuid(Uuid::from_u128(
+                seed + 6 + u128::try_from(ordinal).expect("fixture ordinal fits u128"),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let response = ToolUsingAssistantResponse::try_from_parts(
+        proposals
+            .iter()
+            .map(|(name, arguments)| {
+                AssistantResponsePart::ToolCall(ToolCallProposal::new(
+                    ToolName::try_new(String::from(*name))
+                        .expect("the fixture tool name is admitted"),
+                    NormalizedToolArguments::try_from_provider_text(String::from(*arguments))
+                        .expect("the fixture arguments are admitted"),
+                ))
+            })
+            .collect(),
+    )
+    .expect("the proposals form a tool-using response");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+    let ModelCallTerminalOutcome::ToolRound(round) = repository
+        .apply_terminal_observation(
+            session,
+            observation,
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                requests
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, request)| {
+                        ToolResponsePartIdentity::tool_call(
+                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                                seed + 100
+                                    + u128::try_from(ordinal).expect("fixture ordinal fits u128"),
+                            )),
+                            *request,
+                            InitialToolApproval::Delegated,
+                        )
+                    })
+                    .collect(),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 8)),
+                None,
+            )),
+            |_| panic!("the fixture has no pending steering"),
+        )
+        .await?
+    else {
+        panic!("the model call reaches a delegated tool round")
+    };
+    assert_eq!(
+        round.next_phase(),
+        &ActiveTurnPhase::AwaitingApproval {
+            request: requests[0],
+        }
+    );
+    let approval_repository = repository.approval_judge_repository();
+    let prepared = ready_approval_judge(
+        approval_repository
+            .prepare(
+                session,
+                turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 9)),
+                Some(DirectModelSelection::from_uuid(Uuid::from_u128(
+                    TEMPLATE_MODEL_SELECTION_ID,
+                ))),
+            )
+            .await?,
+    );
+    Ok((repository, prepared, turn, requests))
 }
 
 async fn evaluate_second_conflict(
@@ -1057,7 +1537,7 @@ async fn load_conflict(
             RepoWatchCommitRequest::new(
                 Some(cursor.generation()),
                 RepoWatchCursorCandidate::new(observation.clone()),
-                vec![event],
+                vec![identified_event(event)],
             ),
         )
         .await?;
@@ -1089,7 +1569,7 @@ async fn commit_lifecycle(
             RepoWatchCommitRequest::new(
                 Some(cursor.generation()),
                 RepoWatchCursorCandidate::new(observation),
-                vec![event],
+                vec![identified_event(event)],
             ),
         )
         .await?;
@@ -1139,6 +1619,313 @@ async fn corrupt_goal_generation(pool: &PgPool, session: SessionId) -> Result<()
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// The shipped delay would hold every requeued obligation past the life of a
+/// test container. Only the delay is lowered; the attempt budget belongs to the
+/// schema and is spent for real by the tests that park.
+fn immediate_retry_policy() -> RepoWatchDispatchRetryPolicy {
+    RepoWatchDispatchRetryPolicy::production().lowered_to(Duration::ZERO, Duration::ZERO)
+}
+
+async fn dispatch_attempt_budget(pool: &PgPool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT repo_watch_dispatch_attempt_budget()")
+        .fetch_one(pool)
+        .await
+}
+
+/// Fails one dispatched session and redispatches the obligation it leaves,
+/// returning the session the successor created.
+async fn spend_one_attempt(
+    fixture: &DispatchFixture,
+    session: SessionId,
+    identity_seed: u128,
+) -> Result<SessionId, Box<dyn Error>> {
+    withdraw_dispatched_goal(&fixture.pool, session, identity_seed).await?;
+    let requeued = load_next_obligation(fixture)
+        .await?
+        .expect("a failed attempt inside the budget leaves a dispatchable obligation");
+    let cursor = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let (_successor, successor_sessions) =
+        dispatched(evaluate_obligation(fixture, requeued, cursor.candidate().observation()).await?);
+    Ok(successor_sessions[0])
+}
+
+/// Spends the whole shipped budget on the fixture's lineage, returning the
+/// obligation its exhausting attempt parked.
+///
+/// Written out rather than iterated: the budget is a schema constant, and a
+/// walk of named attempts fails on the one whose behavior changed.
+async fn park_dispatch_obligation(
+    fixture: &DispatchFixture,
+    identity_seed: u128,
+) -> Result<Uuid, Box<dyn Error>> {
+    assert_eq!(dispatch_attempt_budget(&fixture.pool).await?, 6);
+    let second = spend_one_attempt(fixture, fixture.session(0), identity_seed).await?;
+    let third = spend_one_attempt(fixture, second, identity_seed + 1).await?;
+    let fourth = spend_one_attempt(fixture, third, identity_seed + 2).await?;
+    let fifth = spend_one_attempt(fixture, fourth, identity_seed + 3).await?;
+    let sixth = spend_one_attempt(fixture, fifth, identity_seed + 4).await?;
+    withdraw_dispatched_goal(&fixture.pool, sixth, identity_seed + 5).await?;
+    Ok(
+        sqlx::query_scalar("SELECT obligation_id FROM repo_watch_parked_dispatch_obligation")
+            .fetch_one(&fixture.pool)
+            .await?,
+    )
+}
+
+/// Opens a second pull request in the watched repository and matches the rule
+/// against a conflict on it, leaving both pull requests durably open.
+async fn evaluate_neighbour_conflict(
+    fixture: &DispatchFixture,
+) -> Result<RepoWatchRuleEvaluationOutcome, Box<dyn Error>> {
+    let neighbour = same_repository_context(SameRepositoryContextFacts {
+        number: TOP_PULL_REQUEST_NUMBER,
+        head: SECOND_HEAD,
+        base_branch: BASE_BRANCH,
+        head_branch: TOP_AGENT_BRANCH,
+    })?;
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let cursor = event_store
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    event_store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(
+                Some(cursor.generation()),
+                RepoWatchCursorCandidate::new(mergeable_observation(
+                    vec![context(FIRST_HEAD)?, neighbour.clone()],
+                    Vec::new(),
+                )?),
+                vec![
+                    identified_event(opened_event_for(
+                        CROSS_TARGET_OPENED_EVENT_ID,
+                        neighbour.clone(),
+                    )?),
+                    identified_event(conflict_event_for(
+                        CROSS_TARGET_CONFLICT_EVENT_ID,
+                        neighbour,
+                    )?),
+                ],
+            ),
+        )
+        .await?;
+    let observation = mergeable_observation(vec![context(FIRST_HEAD)?], Vec::new())?;
+    let opened = fixture
+        .store
+        .load_next_event(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("the neighbour's opened event is unevaluated");
+    let opened_outcome =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                opened,
+                &fixture.rule,
+                &observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+    assert_eq!(opened_outcome, RepoWatchRuleEvaluationOutcome::NotMatched);
+    let conflicting = fixture
+        .store
+        .load_next_event(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("the neighbour's conflict remains unevaluated");
+    Ok(
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                conflicting,
+                &fixture.rule,
+                &observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?,
+    )
+}
+
+/// Commits and evaluates a head change on the fixture's pull request. The
+/// fixture rule matches conflicts only, so this event is durable progress on the
+/// parked target that the parked rule itself never matches.
+async fn evaluate_nonmatching_head_change(
+    fixture: &DispatchFixture,
+) -> Result<RepoWatchRuleEvaluationOutcome, Box<dyn Error>> {
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let cursor = event_store
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let observation = observation(context(SECOND_HEAD)?)?;
+    event_store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(
+                Some(cursor.generation()),
+                RepoWatchCursorCandidate::new(observation.clone()),
+                vec![identified_event(head_changed_event(
+                    NONMATCHING_PROGRESS_EVENT_ID,
+                    context(SECOND_HEAD)?,
+                    FIRST_HEAD,
+                )?)],
+            ),
+        )
+        .await?;
+    let loaded = fixture
+        .store
+        .load_next_event(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("the head change remains unevaluated");
+    Ok(
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                loaded,
+                &fixture.rule,
+                &observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?,
+    )
+}
+
+/// The fixture's pull request at the head it stalled on, restated with one
+/// field changed.
+///
+/// The event store refuses a commit that carries events without moving the
+/// observation, and what this exercises is a matching event carrying no new
+/// head, so something other than the head has to differ.
+fn restated_context() -> Result<PullRequestEventContext, Box<dyn Error>> {
+    Ok(PullRequestEventContext::new(PullRequestEventContextInput {
+        number: PullRequestNumber::new(BOTTOM_PULL_REQUEST_NUMBER.try_into()?),
+        head_sha: CommitSha::try_new(FIRST_HEAD.to_owned())?,
+        head_repository: RepositorySlug::try_new(HEAD_REPOSITORY.to_owned())?,
+        base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+        head_branch: BranchName::try_new(HEAD_BRANCH.to_owned())?,
+        title: PullRequestTitle::try_new("Merge forward, restated".to_owned())?,
+        body: PullRequestBody::try_new("Resolve the conflict.".to_owned())?,
+        labels: Vec::new(),
+        draft: false,
+        author: Some(RepoWatchAuthorLogin::try_new("fixture-author".to_owned())?),
+    }))
+}
+
+/// Commits and evaluates a matching conflict on the stalled head.
+async fn evaluate_restated_conflict(
+    fixture: &DispatchFixture,
+) -> Result<RepoWatchRuleEvaluationOutcome, Box<dyn Error>> {
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let cursor = event_store
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let context = restated_context()?;
+    let observation = observation(context.clone())?;
+    event_store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(
+                Some(cursor.generation()),
+                RepoWatchCursorCandidate::new(observation.clone()),
+                vec![identified_event(conflict_event_for(
+                    PARK_STALE_EVENT_ID,
+                    context,
+                )?)],
+            ),
+        )
+        .await?;
+    let loaded = fixture
+        .store
+        .load_next_event(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("the restated conflict remains unevaluated");
+    Ok(
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                loaded,
+                &fixture.rule,
+                &observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?,
+    )
+}
+
+async fn load_next_obligation(
+    fixture: &DispatchFixture,
+) -> Result<Option<RepoWatchDispatchObligation>, Box<dyn Error>> {
+    Ok(fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+            immediate_retry_policy(),
+        )
+        .await?)
+}
+
+async fn outstanding_failed_attempts(pool: &PgPool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT failed_attempts
+           FROM repo_watch_dispatch_obligation
+          WHERE settled_kind IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+}
+
+async fn failed_attempt_epoch(pool: &PgPool) -> Result<f64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT extract(epoch FROM last_failed_attempt_at)::double precision
+           FROM repo_watch_dispatch_obligation
+          WHERE settled_kind IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+}
+
+async fn batch_release_epoch(fixture: &DispatchFixture) -> Result<f64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT extract(epoch FROM released_at)::double precision
+           FROM repo_watch_dispatch_release
+          WHERE dispatch_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await
+}
+
+async fn park_transitions(pool: &PgPool) -> Result<Vec<ParkTransitionVisibility>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT transition_kind, failed_attempts, release_reason, release_actor
+           FROM repo_watch_dispatch_obligation_park
+          ORDER BY obligation_id, transition_ordinal",
+    )
+    .fetch_all(pool)
+    .await
 }
 
 async fn evaluate_obligation(
@@ -1195,7 +1982,10 @@ async fn eager_main_advance_dispatches_its_mergeable_dependent_immediately()
                 RepoWatchCommitRequest::new(
                     None,
                     RepoWatchCursorCandidate::new(initial_observation),
-                    vec![opened_event_for(MAIN_OPENED_EVENT_ID, dependent.clone())?],
+                    vec![identified_event(opened_event_for(
+                        MAIN_OPENED_EVENT_ID,
+                        dependent.clone(),
+                    )?)],
                 ),
             )
             .await?,
@@ -1216,10 +2006,10 @@ async fn eager_main_advance_dispatches_its_mergeable_dependent_immediately()
             RepoWatchCommitRequest::new(
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(current_observation.clone()),
-                vec![base_advanced_event(
+                vec![identified_event(base_advanced_event(
                     MAIN_BASE_ADVANCED_EVENT_ID,
                     dependent.clone(),
-                )?],
+                )?)],
             ),
         )
         .await?;
@@ -1287,8 +2077,14 @@ async fn eager_parent_advance_dispatches_only_its_mergeable_child_immediately()
                     None,
                     RepoWatchCursorCandidate::new(initial_observation),
                     vec![
-                        opened_event_for(STACK_BOTTOM_OPENED_EVENT_ID, initial_parent.clone())?,
-                        opened_event_for(STACK_TOP_OPENED_EVENT_ID, child.clone())?,
+                        identified_event(opened_event_for(
+                            STACK_BOTTOM_OPENED_EVENT_ID,
+                            initial_parent.clone(),
+                        )?),
+                        identified_event(opened_event_for(
+                            STACK_TOP_OPENED_EVENT_ID,
+                            child.clone(),
+                        )?),
                     ],
                 ),
             )
@@ -1317,12 +2113,15 @@ async fn eager_parent_advance_dispatches_only_its_mergeable_child_immediately()
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(current_observation.clone()),
                 vec![
-                    head_changed_event(
+                    identified_event(head_changed_event(
                         STACK_PARENT_HEAD_CHANGED_EVENT_ID,
                         advanced_parent.clone(),
                         INITIAL_HEAD,
-                    )?,
-                    base_advanced_event(STACK_BASE_ADVANCED_EVENT_ID, child.clone())?,
+                    )?),
+                    identified_event(base_advanced_event(
+                        STACK_BASE_ADVANCED_EVENT_ID,
+                        child.clone(),
+                    )?),
                 ],
             ),
         )
@@ -1401,6 +2200,7 @@ async fn stale_stopped_dispatch_requeues_and_redispatches_after_release()
             &fixture.repository,
             fixture.rule.id(),
             fixture.rule.version(),
+            immediate_retry_policy(),
         )
         .await?
         .expect("the stopped dispatch obligation is ready after release");
@@ -1415,6 +2215,1518 @@ async fn stale_stopped_dispatch_requeues_and_redispatches_after_release()
         evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?,
     );
     assert_ne!(successor_sessions[0], fixture.session(0));
+    Ok(())
+}
+
+/// INV-069: a completed judge escalation in a repository-watch-created session
+/// cannot retain the singleton as unattended active work. Its normal
+/// failed-turn/blocked-goal closeout releases the dispatch, leaves an auditable
+/// escalation record, and makes the same event eligible for a fresh dispatch.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn headless_approval_escalation_releases_rearms_and_redispatches()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let seed = 0x50_240;
+    let (model_repository, prepared, turn, requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let authority = prepared_pull_request_authority(&prepared);
+    let expected_context = context(FIRST_HEAD)?;
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the provider requests authority beyond the immutable dispatch fence",
+    ))?;
+
+    let outcome = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let audit: HeadlessEscalationVisibility = sqlx::query_as(
+        "SELECT lifecycle.state_kind AS lifecycle_state,
+                    lifecycle.terminal_disposition_kind AS terminal_disposition,
+                    latest_goal.event_kind AS goal_event_kind,
+                    latest_goal.blocked_reason,
+                    audit.rationale,
+                    audit.released_at IS NOT NULL AS dispatch_released,
+                    audit.obligation_id IS NOT NULL AS replacement_owed
+               FROM repo_watch_headless_approval_escalation_audit AS audit
+               JOIN turn_lifecycle AS lifecycle
+                 ON lifecycle.session_id = audit.session_id
+                AND lifecycle.turn_id = audit.turn_id
+               JOIN LATERAL (
+                    SELECT event_kind, blocked_reason
+                      FROM goal_event
+                     WHERE session_id = audit.session_id
+                     ORDER BY event_ordinal DESC
+                     LIMIT 1
+               ) AS latest_goal ON true
+              WHERE audit.model_call_id = $1",
+    )
+    .bind(prepared.call().as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    // The requeue an escalation owes is a counted failed attempt, so under the
+    // production policy it waits out that delay before redispatching; this
+    // reads it through the immediate policy, because what is under test is the
+    // release and the replacement it opens rather than the delay's own bounds.
+    let obligation = load_next_obligation(&fixture)
+        .await?
+        .expect("the headless escalation obligation is ready after release");
+    let cursor = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let (_successor_dispatch, successor_sessions) = dispatched(
+        evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?,
+    );
+
+    assert_eq!(
+        authority.dispatch(),
+        ApprovalJudgeDispatchProvenance::RepoWatch(fixture.dispatch_id)
+    );
+    assert_eq!(authority.repository(), &fixture.repository);
+    assert_eq!(authority.pull_request(), expected_context.number());
+    assert_eq!(authority.head_sha(), expected_context.head_sha());
+    assert_eq!(
+        authority.head_repository(),
+        expected_context.head_repository()
+    );
+    assert_eq!(authority.head_branch(), expected_context.head_branch());
+    assert_eq!(authority.base_branch(), expected_context.base_branch());
+    assert_eq!(
+        outcome,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(audit.lifecycle_state, "terminal");
+    assert_eq!(audit.terminal_disposition.as_deref(), Some("failed"));
+    assert_eq!(audit.goal_event_kind, "blocked");
+    assert_eq!(audit.blocked_reason.as_deref(), Some("execution_failure"));
+    assert_eq!(audit.rationale, rationale.as_str());
+    assert!(audit.dispatch_released);
+    assert!(audit.replacement_owed);
+    assert_ne!(successor_sessions[0], fixture.session(0));
+    assert_eq!(prepared.request().id(), *request);
+    assert_eq!(turn, prepared.request().turn());
+    Ok(())
+}
+
+/// INV-069: the dispatch fence describes the generation the dispatch
+/// commissioned and nothing else. A session that goes on to accept an unrelated
+/// successor goal judges that goal's requests without the fence, so its
+/// escalation parks for the user whose goal it is instead of taking the
+/// headless path that fails the turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_successor_generation_is_judged_without_the_dispatch_fence() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let session = fixture.session(0);
+    let successor_turn = TurnId::from_uuid(Uuid::from_u128(SUCCESSOR_JUDGE_TURN_ID));
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(
+                        SUCCESSOR_JUDGE_SUPERSEDE_COMMAND_ID,
+                    )),
+                    session,
+                    GoalUserAction::Supersede(GoalStatement::try_new(String::from(
+                        "an unrelated successor goal this session accepted",
+                    ))?),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(SUCCESSOR_JUDGE_INPUT_ID)),
+                    successor_turn,
+                )),
+                |_| None,
+            )
+            .await?,
+    );
+
+    let (_repository, prepared, judged_turn, _requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, 0x50_280).await?;
+
+    assert_eq!(
+        judged_turn, successor_turn,
+        "supersession retires the dispatched turn, so the successor's turn is the eligible one"
+    );
+    assert!(
+        prepared.session_context().dispatch().is_none(),
+        "the dispatch authority describes only the generation it commissioned"
+    );
+    Ok(())
+}
+
+/// A headless escalation terminalizes its turn under three fresh identities.
+/// Replaying the completion with any other one is a structurally different call
+/// rather than the same one twice, so it is reported instead of replayed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_headless_escalation_replay_binds_every_terminal_identity() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let seed = 0x50_2a0;
+    let (model_repository, prepared, _turn, _requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the provider requests authority beyond the immutable dispatch fence",
+    ))?;
+    let identities = ApprovalJudgeCompletionIdentities::new(
+        TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+    );
+    let complete = async |identities| {
+        approval_repository
+            .complete(
+                &prepared,
+                DelegateApprovalRecommendation::EscalateToHuman,
+                rationale.clone(),
+                ProviderReportedTokenUsage::unreported(),
+                identities,
+                |closed_request| {
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                        closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                    ))
+                },
+            )
+            .await
+    };
+    let escalated = complete(identities).await?;
+
+    let other_failure_entry = complete(ApprovalJudgeCompletionIdentities::new(
+        identities.continuation_attempt(),
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
+        identities.terminal_frontier(),
+    ))
+    .await
+    .expect_err("a replay naming another failure entry is not the same completion");
+    let other_terminal_frontier = complete(ApprovalJudgeCompletionIdentities::new(
+        identities.continuation_attempt(),
+        identities.failure_entry(),
+        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 32)),
+    ))
+    .await
+    .expect_err("a replay naming another terminal frontier is not the same completion");
+    let other_attempt = complete(ApprovalJudgeCompletionIdentities::new(
+        TurnAttemptId::from_uuid(Uuid::from_u128(seed + 30)),
+        identities.failure_entry(),
+        identities.terminal_frontier(),
+    ))
+    .await
+    .expect_err("a replay naming another terminal attempt is not the same completion");
+    let replayed = complete(identities).await?;
+
+    assert_eq!(
+        escalated,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(release_count(&fixture).await?, 1);
+    assert_mismatched_replay(other_failure_entry);
+    assert_mismatched_replay(other_terminal_frontier);
+    assert_mismatched_replay(other_attempt);
+    assert_eq!(
+        replayed, escalated,
+        "the completion still replays under the identities it committed"
+    );
+    Ok(())
+}
+
+/// Fails naming the error a mismatched headless replay produced, so an
+/// unrelated failure is not read as the replay refusal under test.
+#[track_caller]
+fn assert_mismatched_replay(error: ApprovalJudgeRepositoryError) {
+    let ApprovalJudgeRepositoryError::Corruption(ApprovalJudgeCorruption::Inconsistent(
+        "completed judge replay",
+    )) = error
+    else {
+        panic!("a mismatched headless replay is reported as one: {error:?}")
+    };
+}
+
+/// A denial decided earlier in the same delegated batch remains a denial when
+/// a later request escalates and terminalizes the unattended turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn headless_escalation_preserves_an_earlier_delegate_denial() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let seed = 0x50_260;
+    let (model_repository, first, turn, requests) = checkpoint_dispatched_delegated_approval_for(
+        &fixture,
+        seed,
+        &[("exec", "{}"), ("workspace", "{}")],
+    )
+    .await?;
+    let [denied_request, escalated_request] = requests.as_slice() else {
+        panic!("the fixture has two delegated requests")
+    };
+    let repository = model_repository.approval_judge_repository();
+    repository.authorize(&first).await?;
+    let denied = repository
+        .complete(
+            &first,
+            DelegateApprovalRecommendation::Deny,
+            ToolDecisionRationale::try_new(String::from("the first request is denied"))?,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 30)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 32)),
+            ),
+            |request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let second = ready_approval_judge(
+        repository
+            .prepare(
+                fixture.session(0),
+                turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 40)),
+                None,
+            )
+            .await?,
+    );
+    repository.authorize(&second).await?;
+    let escalated = repository
+        .complete(
+            &second,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            ToolDecisionRationale::try_new(String::from("the second request needs a human"))?,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 41)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 42)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 43)),
+            ),
+            |request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let result_kinds: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT tool_result_request_id, payload_kind
+           FROM semantic_transcript_entry
+          WHERE tool_result_request_id IN ($1, $2)
+          ORDER BY tool_result_request_id",
+    )
+    .bind(denied_request.as_uuid())
+    .bind(escalated_request.as_uuid())
+    .fetch_all(&fixture.pool)
+    .await?;
+
+    assert_eq!(denied, CompleteApprovalJudgeOutcome::Decided);
+    assert_eq!(
+        escalated,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(release_count(&fixture).await?, 1);
+    assert_eq!(
+        result_kinds,
+        vec![
+            (*denied_request.as_uuid(), String::from("tool_denied")),
+            (
+                *escalated_request.as_uuid(),
+                String::from("tool_closed_by_turn_end"),
+            ),
+        ]
+    );
+    Ok(())
+}
+
+/// A steer accepted while the dispatched turn awaits its judge is a user
+/// attending the session, and terminalizing that turn would strand the steer
+/// against `turn_lifecycle_pending_steering_closed`. The escalation parks for
+/// that user instead, leaving the turn active and the dispatch owned.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_steered_dispatched_turn_escalates_to_its_user() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let seed = 0x50_2c0;
+    let (model_repository, prepared, turn, _requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    SubmitInputRepository::new(fixture.pool.clone())
+        .handle_with_candidates(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(STEERED_DISPATCH_COMMAND_ID)),
+                fixture.session(0),
+                UserContent::try_text(String::from("narrow the change to the failing test"))
+                    .expect("the fixture steering content is admitted"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn,
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(STEERED_DISPATCH_INPUT_ID)),
+            None,
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 60)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 61)),
+            ),
+            |_| panic!("the steer's source turn is still active"),
+            |_| panic!("the steer cancels no tool request without a terminal observation"),
+        )
+        .await?;
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+
+    let outcome = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            ToolDecisionRationale::try_new(String::from(
+                "the provider requests authority beyond the immutable dispatch fence",
+            ))?,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let lifecycle: String = sqlx::query_scalar(
+        "SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1 AND session_id = $2",
+    )
+    .bind(turn.as_uuid())
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let escalations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM repo_watch_headless_approval_escalation WHERE session_id = $1",
+    )
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
+    assert_eq!(lifecycle, "active");
+    assert_eq!(escalations, 0);
+    assert_eq!(release_count(&fixture).await?, 0);
+    Ok(())
+}
+
+/// Once the dispatch has released, the unattended path has nothing left to do:
+/// it cannot free a singleton this session no longer holds, and
+/// `repo_watch_owe_dispatch_requeue` owes no second replacement. Work an
+/// operator resumed by hand from that state therefore escalates to that
+/// operator instead of failing another turn under a promise nothing keeps.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_released_dispatch_escalates_resumed_work_to_its_operator() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let seed = 0x50_2e0;
+    let (model_repository, prepared, _turn, _requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the provider requests authority beyond the immutable dispatch fence",
+    ))?;
+    let unattended = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let released = release_count(&fixture).await?;
+
+    // The operator takes the blocked goal back by hand. The resumed turn is
+    // still the generation the dispatch commissioned, so it still resolves the
+    // dispatch authority — the released batch, not the missing authority, is
+    // what sends its escalation to a user.
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(RESUMED_DISPATCH_COMMAND_ID)),
+                    fixture.session(0),
+                    GoalUserAction::Resume(None),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(RESUMED_DISPATCH_INPUT_ID)),
+                    TurnId::from_uuid(Uuid::from_u128(RESUMED_DISPATCH_TURN_ID)),
+                )),
+                |_| None,
+            )
+            .await?,
+    );
+    let (resumed_repository, resumed_prepared, resumed_turn, _resumed_requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, 0x50_300).await?;
+    let resumed_approvals = resumed_repository.approval_judge_repository();
+    resumed_approvals.authorize(&resumed_prepared).await?;
+
+    let outcome = resumed_approvals
+        .complete(
+            &resumed_prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(0x50_300 + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x50_300 + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x50_300 + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET + 1,
+                ))
+            },
+        )
+        .await?;
+    let lifecycle: String = sqlx::query_scalar(
+        "SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1 AND session_id = $2",
+    )
+    .bind(resumed_turn.as_uuid())
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let escalations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM repo_watch_headless_approval_escalation WHERE session_id = $1",
+    )
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(
+        unattended,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(released, 1);
+    assert_eq!(
+        resumed_turn,
+        TurnId::from_uuid(Uuid::from_u128(RESUMED_DISPATCH_TURN_ID))
+    );
+    assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
+    assert_eq!(lifecycle, "active");
+    assert_eq!(
+        escalations, 1,
+        "the resumed escalation records no second audit row"
+    );
+    assert_eq!(release_count(&fixture).await?, 1);
+    Ok(())
+}
+
+/// A sibling action still pursuing keeps the batch unreleased, so the release
+/// row cannot say whether a person is behind the work. The escalation record
+/// can: only an operator can resume a goal an unattended escalation blocked, so
+/// the resumed turn's own escalation parks for them even though nothing has
+/// released.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_resumption_before_release_escalates_to_its_operator() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let seed = 0x50_360;
+    let (model_repository, prepared, _turn, _requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the provider requests authority beyond the immutable dispatch fence",
+    ))?;
+    let unattended = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let held = release_count(&fixture).await?;
+
+    let resumed_turn = TurnId::from_uuid(Uuid::from_u128(HELD_BATCH_RESUME_TURN_ID));
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(HELD_BATCH_RESUME_COMMAND_ID)),
+                    fixture.session(0),
+                    GoalUserAction::Resume(None),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(HELD_BATCH_RESUME_INPUT_ID)),
+                    resumed_turn,
+                )),
+                |_| None,
+            )
+            .await?,
+    );
+    let (resumed_repository, resumed_prepared, judged_turn, _resumed_requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, 0x50_380).await?;
+    let resumed_approvals = resumed_repository.approval_judge_repository();
+    resumed_approvals.authorize(&resumed_prepared).await?;
+
+    let outcome = resumed_approvals
+        .complete(
+            &resumed_prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(0x50_380 + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x50_380 + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x50_380 + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET + 1,
+                ))
+            },
+        )
+        .await?;
+    let lifecycle: String = sqlx::query_scalar(
+        "SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1 AND session_id = $2",
+    )
+    .bind(judged_turn.as_uuid())
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let escalations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM repo_watch_headless_approval_escalation WHERE session_id = $1",
+    )
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(
+        unattended,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(
+        held, 0,
+        "the sibling action still pursues, so nothing released"
+    );
+    assert_eq!(judged_turn, resumed_turn);
+    assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
+    assert_eq!(lifecycle, "active");
+    assert_eq!(
+        escalations, 1,
+        "the resumed escalation records no second audit row"
+    );
+    assert_eq!(release_count(&fixture).await?, 0);
+    Ok(())
+}
+
+/// A released batch parks only while a person is still behind the work. The
+/// reachable stale case is the resumed one: an earlier escalation terminalized
+/// its turn and released the batch, an operator resumed the goal, and the goal
+/// then ended while the resumed turn's judge was in flight. That escalation is
+/// terminalized rather than parked for nobody, and with the authority already
+/// ended no execution-failure block is appended and no requeue is owed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_released_dispatch_terminalizes_work_whose_goal_ended() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let seed = 0x50_320;
+    let (model_repository, prepared, _turn, _requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the provider requests authority beyond the immutable dispatch fence",
+    ))?;
+    let unattended = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let released = release_count(&fixture).await?;
+
+    let stale_turn = TurnId::from_uuid(Uuid::from_u128(STALE_DISPATCH_TURN_ID));
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(STALE_DISPATCH_RESUME_COMMAND_ID)),
+                    fixture.session(0),
+                    GoalUserAction::Resume(None),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(STALE_DISPATCH_INPUT_ID)),
+                    stale_turn,
+                )),
+                |_| None,
+            )
+            .await?,
+    );
+    let (resumed_repository, resumed_prepared, resumed_turn, _resumed_requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, 0x50_340).await?;
+    let resumed_approvals = resumed_repository.approval_judge_repository();
+    resumed_approvals.authorize(&resumed_prepared).await?;
+    // The goal ends while this judge is in flight, which is what makes the
+    // resumed work stale. The turn stays active until the completion below
+    // terminalizes it: an active turn is runtime-relevant whatever its goal
+    // recorded, so ending the goal releases nothing by itself.
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        STALE_DISPATCH_STOP_COMMAND_ID,
+    )
+    .await?;
+    let released_before_completion = release_count(&fixture).await?;
+
+    let outcome = resumed_approvals
+        .complete(
+            &resumed_prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(0x50_340 + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x50_340 + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x50_340 + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET + 1,
+                ))
+            },
+        )
+        .await?;
+    let lifecycle: String = sqlx::query_scalar(
+        "SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1 AND session_id = $2",
+    )
+    .bind(resumed_turn.as_uuid())
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let latest_goal_event: String = sqlx::query_scalar(
+        "SELECT event_kind
+           FROM goal_event
+          WHERE session_id = $1
+          ORDER BY event_ordinal DESC
+          LIMIT 1",
+    )
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let escalations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM repo_watch_headless_approval_escalation WHERE session_id = $1",
+    )
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(
+        unattended,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(released, 1);
+    assert_eq!(resumed_turn, stale_turn);
+    assert_eq!(
+        released_before_completion, 1,
+        "ending the goal releases nothing further while the resumed turn is active"
+    );
+    assert_eq!(
+        outcome,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(lifecycle, "terminal");
+    assert_eq!(
+        latest_goal_event, "user_stopped",
+        "an ended generation records no execution-failure block"
+    );
+    assert_eq!(escalations, 2);
+    assert_eq!(release_count(&fixture).await?, 1);
+    Ok(())
+}
+
+/// Terminalizing one action in a multi-action dispatch does not claim release
+/// while its sibling remains pursuing, and exact replay reports the same
+/// durable effect — including after the batch releases, which is a fact about
+/// the batch and never about this completion.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn headless_escalation_waits_for_a_multi_action_dispatch_sibling()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let seed = 0x50_280;
+    let (model_repository, prepared, _, _) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let repository = model_repository.approval_judge_repository();
+    repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the unattended request needs a human decision",
+    ))?;
+
+    let outcome = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let replay = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+
+    let pending_release = release_count(&fixture).await?;
+    // Stands in for the sibling action settling, which is the only way this
+    // batch releases and is not this completion's doing either way.
+    sqlx::query("INSERT INTO repo_watch_dispatch_release (dispatch_id) VALUES ($1)")
+        .bind(fixture.dispatch_id.as_uuid())
+        .execute(&fixture.pool)
+        .await?;
+    let replay_after_release = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            ToolDecisionRationale::try_new(String::from(
+                "the unattended request needs a human decision",
+            ))?,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+
+    assert_eq!(
+        outcome,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(replay, outcome);
+    assert_eq!(replay_after_release, outcome);
+    assert_eq!(pending_release, 0);
+    assert_eq!(release_count(&fixture).await?, 1);
+    Ok(())
+}
+
+/// The delay between attempts is what keeps a lineage that keeps failing from
+/// re-dispatching at the poll cadence, so it must hold back an obligation the
+/// singleton and cooldown would otherwise release immediately.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_failed_attempt_waits_out_its_delay_before_redispatch() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        PARK_FIRST_STOP_COMMAND_ID,
+    )
+    .await?;
+
+    let delayed = fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+            RepoWatchDispatchRetryPolicy::production(),
+        )
+        .await?;
+    let undelayed = fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+            immediate_retry_policy(),
+        )
+        .await?;
+
+    assert!(delayed.is_none());
+    assert_eq!(
+        undelayed.map(|obligation| obligation.failed_attempts()),
+        Some(1)
+    );
+    Ok(())
+}
+
+/// The spend ordering numbers one repository's event stream, so it can only
+/// order facts about the same target. A collapsed singleton spends facts about
+/// whichever pull request it stalled on at the time, and comparing those across
+/// targets would let a target that had reached a higher cursor position hold a
+/// lineage parked on one whose own numbering is lower.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_spend_on_another_target_does_not_order_this_target_progress()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(repository_scoped_conflict_rule()?).await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        CROSS_TARGET_SPEND_STOP_COMMAND_ID,
+    )
+    .await?;
+    // Progress on the stalled pull request, recorded before the neighbour's
+    // fact and therefore at a lower cursor position than it takes.
+    commit_lifecycle(
+        &fixture,
+        observation(context(SECOND_HEAD)?)?,
+        conflict_event(CROSS_TARGET_SPEND_PROGRESS_EVENT_ID, SECOND_HEAD)?,
+    )
+    .await?;
+    // The neighbour's fact, at the higher cursor position. Committed and left
+    // unevaluated: what this test needs from it is that it is durable and that
+    // the lineage records a spend on it.
+    let neighbour = same_repository_context(SameRepositoryContextFacts {
+        number: TOP_PULL_REQUEST_NUMBER,
+        head: THIRD_HEAD,
+        base_branch: BASE_BRANCH,
+        head_branch: TOP_AGENT_BRANCH,
+    })?;
+    commit_lifecycle(
+        &fixture,
+        mergeable_observation(vec![context(SECOND_HEAD)?, neighbour.clone()], Vec::new())?,
+        conflict_event_for(CROSS_TARGET_SPEND_NEIGHBOUR_EVENT_ID, neighbour)?,
+    )
+    .await?;
+    // A spend this lineage took on the neighbour, which the ordering arm must
+    // not weigh against progress on the pull request it stalled on. Written
+    // directly because the machinery only ever spends facts about the stalled
+    // target, which is the asymmetry under test.
+    sqlx::query(
+        "INSERT INTO repo_watch_dispatch_obligation_park
+            (obligation_id, transition_ordinal, transition_kind, failed_attempts,
+             release_reason, release_event_id)
+         SELECT obligation_id, 1, 'released', 6, 'pull_request_progress', $1
+           FROM repo_watch_dispatch_obligation
+          WHERE settled_kind IS NULL",
+    )
+    .bind(Uuid::from_u128(CROSS_TARGET_SPEND_NEIGHBOUR_EVENT_ID))
+    .execute(&fixture.pool)
+    .await?;
+
+    exhaust_and_park(&fixture).await?;
+
+    let latest_release: Option<Uuid> = sqlx::query_scalar(
+        "SELECT release_event_id
+           FROM repo_watch_dispatch_obligation_park
+          WHERE release_event_id IS NOT NULL
+          ORDER BY transition_ordinal DESC
+          LIMIT 1",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        latest_release,
+        Some(Uuid::from_u128(CROSS_TARGET_SPEND_PROGRESS_EVENT_ID))
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM repo_watch_parked_dispatch_obligation")
+            .fetch_one(&fixture.pool)
+            .await?,
+        0
+    );
+    assert_eq!(outstanding_failed_attempts(&fixture.pool).await?, 0);
+    Ok(())
+}
+
+/// Several progress facts can follow the stalled state, and parking spends only
+/// the newest of them. The older one stays unevaluated by any rule that lags, so
+/// a spend test comparing identity alone would let it release a later park that
+/// a newer fact had already been spent on.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_progress_fact_older_than_one_already_spent_releases_nothing()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        SPENT_FRONTIER_STOP_COMMAND_ID,
+    )
+    .await?;
+    // Durable and after the stalled state, but never evaluated, so neither is
+    // spent by an ordinary release.
+    commit_lifecycle(
+        &fixture,
+        observation(context(SECOND_HEAD)?)?,
+        conflict_event(SPENT_FRONTIER_OLDER_EVENT_ID, SECOND_HEAD)?,
+    )
+    .await?;
+    commit_lifecycle(
+        &fixture,
+        observation(context(THIRD_HEAD)?)?,
+        conflict_event(SPENT_FRONTIER_NEWER_EVENT_ID, THIRD_HEAD)?,
+    )
+    .await?;
+
+    exhaust_and_park(&fixture).await?;
+    let spent_on_the_newest: Option<Uuid> = sqlx::query_scalar(
+        "SELECT release_event_id
+           FROM repo_watch_dispatch_obligation_park
+          WHERE release_event_id IS NOT NULL
+          ORDER BY transition_ordinal DESC
+          LIMIT 1",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    exhaust_and_park(&fixture).await?;
+
+    let older_releases: i64 =
+        sqlx::query_scalar("SELECT repo_watch_release_dispatch_obligation_parks_for_event($1)")
+            .bind(Uuid::from_u128(SPENT_FRONTIER_OLDER_EVENT_ID))
+            .fetch_one(&fixture.pool)
+            .await?;
+
+    assert_eq!(
+        spent_on_the_newest,
+        Some(Uuid::from_u128(SPENT_FRONTIER_NEWER_EVENT_ID))
+    );
+    assert_eq!(older_releases, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM repo_watch_parked_dispatch_obligation")
+            .fetch_one(&fixture.pool)
+            .await?,
+        1
+    );
+    Ok(())
+}
+
+/// Drives the outstanding obligation to its budget and parks it, without
+/// spending six real dispatches on a sequence whose subject is the park.
+async fn exhaust_and_park(fixture: &DispatchFixture) -> Result<(), Box<dyn Error>> {
+    let obligation: Uuid = sqlx::query_scalar(
+        "UPDATE repo_watch_dispatch_obligation
+            SET failed_attempts = repo_watch_dispatch_attempt_budget(),
+                last_failed_attempt_at = clock_timestamp()
+          WHERE settled_kind IS NULL
+        RETURNING obligation_id",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    sqlx::query("SELECT repo_watch_park_exhausted_dispatch_obligation($1)")
+        .bind(obligation)
+        .execute(&fixture.pool)
+        .await?;
+    Ok(())
+}
+
+/// A batch holds its singleton until every one of its actions is terminal, so a
+/// delay measured from the first sibling to fail would be spent while the batch
+/// still occupied the slot and the successor would be dispatchable the instant
+/// the batch released. The clock therefore starts at the release.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_delay_starts_when_the_whole_batch_releases() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        BATCH_DELAY_FIRST_STOP_COMMAND_ID,
+    )
+    .await?;
+    let stamped_at_first_termination = failed_attempt_epoch(&fixture.pool).await?;
+    let held = release_count(&fixture).await?;
+
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(1),
+        BATCH_DELAY_SECOND_STOP_COMMAND_ID,
+    )
+    .await?;
+
+    let stamped_at_release = failed_attempt_epoch(&fixture.pool).await?;
+    assert_eq!(held, 0);
+    assert_eq!(release_count(&fixture).await?, 1);
+    assert!(stamped_at_release > stamped_at_first_termination);
+    assert!(stamped_at_release >= batch_release_epoch(&fixture).await?);
+    Ok(())
+}
+
+/// The unbounded case this budget exists for: a lineage whose sessions keep
+/// ending without meeting it stops being dispatched at all, rather than
+/// re-dispatching for as long as the rule's cooldown allows.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_lineage_that_spends_its_attempt_budget_parks() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+
+    let parked_obligation = park_dispatch_obligation(&fixture, PARK_FIRST_STOP_COMMAND_ID).await?;
+
+    let parked: ParkedObligationVisibility = sqlx::query_as(
+        "SELECT obligation_id, failed_attempts, head_sha
+           FROM repo_watch_parked_dispatch_obligation",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(parked.obligation_id, parked_obligation);
+    assert_eq!(
+        parked.failed_attempts,
+        dispatch_attempt_budget(&fixture.pool).await?
+    );
+    assert_eq!(parked.head_sha.as_deref(), Some(FIRST_HEAD));
+    assert!(load_next_obligation(&fixture).await?.is_none());
+    assert_eq!(
+        park_transitions(&fixture.pool).await?,
+        vec![ParkTransitionVisibility {
+            transition_kind: String::from("parked"),
+            failed_attempts: 6,
+            release_reason: None,
+            release_actor: None,
+        }]
+    );
+    Ok(())
+}
+
+/// Parking is durable state, not a load-time verdict: the projection reports it
+/// and the obligation stays out of dispatch after the store is reconstructed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_parked_obligation_survives_a_reconstructed_store() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    park_dispatch_obligation(&fixture, PARK_FIRST_STOP_COMMAND_ID).await?;
+
+    let resumed = PostgresRepoWatchDispatchStore::new(fixture.pool.clone(), credential_pin());
+    let loaded = resumed
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+            immediate_retry_policy(),
+        )
+        .await?;
+
+    assert!(loaded.is_none());
+    Ok(())
+}
+
+/// An operator asking for another attempt is asking for the allowance a lineage
+/// that never failed would have, so the release restores the whole budget.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_operator_release_restores_the_whole_budget() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let parked_obligation = park_dispatch_obligation(&fixture, PARK_FIRST_STOP_COMMAND_ID).await?;
+
+    let release = fixture
+        .store
+        .release_parked_dispatch_obligation(parked_obligation, PARK_RELEASE_ACTOR)
+        .await?;
+
+    let released = load_next_obligation(&fixture).await?;
+    assert_eq!(release, RepoWatchObligationParkRelease::Released);
+    assert_eq!(
+        released.map(|obligation| obligation.failed_attempts()),
+        Some(0)
+    );
+    assert_eq!(
+        park_transitions(&fixture.pool).await?,
+        vec![
+            ParkTransitionVisibility {
+                transition_kind: String::from("parked"),
+                failed_attempts: 6,
+                release_reason: None,
+                release_actor: None,
+            },
+            ParkTransitionVisibility {
+                transition_kind: String::from("released"),
+                failed_attempts: 6,
+                release_reason: Some(String::from("operator")),
+                release_actor: Some(String::from(PARK_RELEASE_ACTOR)),
+            },
+        ]
+    );
+    Ok(())
+}
+
+/// An obligation that is not parked has nothing to release, and reporting that
+/// is not an error: an operator racing a release the pull request already
+/// earned must not read as storage failure.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn releasing_an_unparked_obligation_reports_that_it_was_not_parked()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        PARK_FIRST_STOP_COMMAND_ID,
+    )
+    .await?;
+    let outstanding: Uuid = sqlx::query_scalar(
+        "SELECT obligation_id
+           FROM repo_watch_dispatch_obligation
+          WHERE settled_kind IS NULL",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    let release = fixture
+        .store
+        .release_parked_dispatch_obligation(outstanding, PARK_RELEASE_ACTOR)
+        .await?;
+
+    assert_eq!(release, RepoWatchObligationParkRelease::NotParked);
+    assert!(park_transitions(&fixture.pool).await?.is_empty());
+    Ok(())
+}
+
+/// A head the parked obligation has not seen is the pull request producing
+/// something new, which is what buys another attempt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_new_head_releases_a_parked_obligation() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    park_dispatch_obligation(&fixture, PARK_FIRST_STOP_COMMAND_ID).await?;
+
+    let advanced = evaluate_conflict(&fixture, PARK_RELEASING_EVENT_ID, SECOND_HEAD).await?;
+
+    let released = load_next_obligation(&fixture).await?;
+    assert_eq!(advanced.outcome, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(
+        released
+            .as_ref()
+            .map(|obligation| obligation.failed_attempts()),
+        Some(0)
+    );
+    assert_eq!(
+        released.map(|obligation| *obligation.latest_event().id().as_uuid()),
+        Some(*advanced.event_id.as_uuid())
+    );
+    assert_eq!(
+        park_transitions(&fixture.pool)
+            .await?
+            .last()
+            .map(|transition| transition.release_reason.clone()),
+        Some(Some(String::from("pull_request_progress")))
+    );
+    Ok(())
+}
+
+/// A parked lineage still holds its singleton. If its stalled pull request
+/// closes while the latest-event projection points at a neighbour, settling
+/// only through that projection would record the close as handled and leave the
+/// singleton held forever.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn closing_the_stalled_pull_request_settles_a_parked_obligation() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(repository_scoped_conflict_rule()?).await?;
+    park_dispatch_obligation(&fixture, PARK_FIRST_STOP_COMMAND_ID).await?;
+    evaluate_neighbour_conflict(&fixture).await?;
+    commit_merge(&fixture, PARKED_TARGET_CUTOFF_EVENT_ID).await?;
+
+    fixture
+        .store
+        .process_next_lifecycle_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(PARKED_TARGET_CUTOFF_COMMAND_ID))
+        })
+        .await?;
+
+    let settlement: Option<String> = sqlx::query_scalar(
+        "SELECT settled_kind
+           FROM repo_watch_dispatch_obligation
+          WHERE parked_state_event_id IS NOT NULL",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    let parked: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_parked_dispatch_obligation")
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(settlement.as_deref(), Some("target_closed"));
+    assert_eq!(parked, 0);
+    Ok(())
+}
+
+/// The head can move while the exhausting attempt is still running, under an
+/// event no rule of the lineage matches. Nothing restates that head afterwards,
+/// so a park that only ever read matched events would strand the lineage on a
+/// state the pull request had already left.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_head_that_moved_during_the_last_attempt_releases_the_park() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let second =
+        spend_one_attempt(&fixture, fixture.session(0), PARK_FIRST_STOP_COMMAND_ID).await?;
+    let third = spend_one_attempt(&fixture, second, PARK_FIRST_STOP_COMMAND_ID + 1).await?;
+    let fourth = spend_one_attempt(&fixture, third, PARK_FIRST_STOP_COMMAND_ID + 2).await?;
+    let fifth = spend_one_attempt(&fixture, fourth, PARK_FIRST_STOP_COMMAND_ID + 3).await?;
+    let sixth = spend_one_attempt(&fixture, fifth, PARK_FIRST_STOP_COMMAND_ID + 4).await?;
+
+    evaluate_nonmatching_head_change(&fixture).await?;
+    withdraw_dispatched_goal(&fixture.pool, sixth, PARK_FIRST_STOP_COMMAND_ID + 5).await?;
+
+    let parked: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_parked_dispatch_obligation")
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(parked, 0);
+    assert_eq!(outstanding_failed_attempts(&fixture.pool).await?, 0);
+    assert!(load_next_obligation(&fixture).await?.is_some());
+    Ok(())
+}
+
+/// The stalled target must survive a neighbour's match. A collapsed singleton
+/// advances its latest-event projection on any matching event, so reading the
+/// stalled target from that projection would hand the release condition to the
+/// neighbour and take it away from the pull request that actually stalled.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_neighbours_match_does_not_move_the_parked_target() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(repository_scoped_conflict_rule()?).await?;
+    park_dispatch_obligation(&fixture, PARK_FIRST_STOP_COMMAND_ID).await?;
+    evaluate_neighbour_conflict(&fixture).await?;
+
+    let progress = evaluate_nonmatching_head_change(&fixture).await?;
+
+    let released = load_next_obligation(&fixture).await?;
+    assert_eq!(progress, RepoWatchRuleEvaluationOutcome::NotMatched);
+    assert_eq!(
+        released.map(|obligation| obligation.failed_attempts()),
+        Some(0)
+    );
+    Ok(())
+}
+
+/// A rule watching one narrow signal parks on a pull request that keeps
+/// failing, and the head then moves under an event that rule never matches.
+/// Reading progress only from matching events would leave that obligation
+/// parked on an obsolete head until an operator intervened.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_nonmatching_head_change_releases_a_parked_obligation() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    park_dispatch_obligation(&fixture, PARK_FIRST_STOP_COMMAND_ID).await?;
+
+    let progress = evaluate_nonmatching_head_change(&fixture).await?;
+
+    let released = load_next_obligation(&fixture).await?;
+    assert_eq!(progress, RepoWatchRuleEvaluationOutcome::NotMatched);
+    assert_eq!(
+        released.map(|obligation| obligation.failed_attempts()),
+        Some(0)
+    );
+    assert_eq!(
+        park_transitions(&fixture.pool)
+            .await?
+            .last()
+            .map(|transition| transition.release_reason.clone()),
+        Some(Some(String::from("pull_request_progress")))
+    );
+    Ok(())
+}
+
+/// One batch is one attempt however many of its actions fail. Counting each
+/// sibling would spend the budget several times faster than the delay assumes,
+/// and would let a later sibling recompute a count that a release taken since
+/// the first sibling terminated had already cleared.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn one_batch_counts_one_attempt_however_many_siblings_fail() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        SIBLING_COUNT_FIRST_STOP_COMMAND_ID,
+    )
+    .await?;
+    let after_first_sibling = outstanding_failed_attempts(&fixture.pool).await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(1),
+        SIBLING_COUNT_SECOND_STOP_COMMAND_ID,
+    )
+    .await?;
+
+    assert_eq!(after_first_sibling, 1);
+    assert_eq!(outstanding_failed_attempts(&fixture.pool).await?, 1);
+    Ok(())
+}
+
+/// The same guard seen from the consequence that matters: a release taken while
+/// a sibling of the counted batch is still running must survive that sibling's
+/// own termination, or the pull request's progress is silently discarded and
+/// the lineage reparks on state it has already been given.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_release_survives_a_later_siblings_termination() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        SIBLING_COUNT_FIRST_STOP_COMMAND_ID,
+    )
+    .await?;
+    let obligation: Uuid = sqlx::query_scalar(
+        "UPDATE repo_watch_dispatch_obligation
+            SET failed_attempts = repo_watch_dispatch_attempt_budget()
+          WHERE settled_kind IS NULL
+        RETURNING obligation_id",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    sqlx::query("SELECT repo_watch_park_exhausted_dispatch_obligation($1)")
+        .bind(obligation)
+        .execute(&fixture.pool)
+        .await?;
+    sqlx::query("SELECT repo_watch_release_parked_dispatch_obligation($1, $2)")
+        .bind(obligation)
+        .bind(PARK_RELEASE_ACTOR)
+        .execute(&fixture.pool)
+        .await?;
+
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(1),
+        SIBLING_COUNT_SECOND_STOP_COMMAND_ID,
+    )
+    .await?;
+
+    let parked: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_parked_dispatch_obligation")
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(outstanding_failed_attempts(&fixture.pool).await?, 0);
+    assert_eq!(parked, 0);
+    Ok(())
+}
+
+/// Rule, repository, and stack singletons collapse many pull requests onto one
+/// obligation. Comparing heads alone would then let ordinary traffic on any
+/// neighbour restore the budget of the one pull request that keeps failing,
+/// because a neighbour's head almost never matches the stalled one.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn another_pull_requests_progress_leaves_a_parked_obligation_parked()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(repository_scoped_conflict_rule()?).await?;
+    park_dispatch_obligation(&fixture, PARK_FIRST_STOP_COMMAND_ID).await?;
+
+    let neighbour = evaluate_neighbour_conflict(&fixture).await?;
+
+    let parked: ParkedObligationVisibility = sqlx::query_as(
+        "SELECT obligation_id, failed_attempts, head_sha
+           FROM repo_watch_parked_dispatch_obligation",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(neighbour, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(
+        parked.failed_attempts,
+        dispatch_attempt_budget(&fixture.pool).await?
+    );
+    assert_eq!(parked.head_sha.as_deref(), Some(FIRST_HEAD));
+    assert!(load_next_obligation(&fixture).await?.is_none());
+    Ok(())
+}
+
+/// A rule that matches recomputed state on an unchanged head would otherwise
+/// let churn against a hostile pull request buy attempts without limit.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_matching_event_on_the_parked_head_buys_no_further_attempt() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    park_dispatch_obligation(&fixture, PARK_FIRST_STOP_COMMAND_ID).await?;
+
+    let unchanged = evaluate_restated_conflict(&fixture).await?;
+
+    let collapsed: ParkedObligationVisibility = sqlx::query_as(
+        "SELECT obligation_id, failed_attempts, head_sha
+           FROM repo_watch_parked_dispatch_obligation",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(unchanged, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(
+        collapsed.failed_attempts,
+        dispatch_attempt_budget(&fixture.pool).await?
+    );
+    assert!(load_next_obligation(&fixture).await?.is_none());
     Ok(())
 }
 
@@ -1453,6 +3765,7 @@ async fn restart_invalidated_dispatch_recovery_leaves_an_obligation() -> Result<
             &fixture.repository,
             fixture.rule.id(),
             fixture.rule.version(),
+            immediate_retry_policy(),
         )
         .await?
         .expect("restart recovery retains the invalidated dispatch obligation");
@@ -1538,11 +3851,11 @@ async fn achievement_after_a_head_change_requeues_once_and_then_seals() -> Resul
             RepoWatchCommitRequest::new(
                 Some(cursor.generation()),
                 RepoWatchCursorCandidate::new(advanced.clone()),
-                vec![head_changed_event(
+                vec![identified_event(head_changed_event(
                     SUPERSEDING_HEAD_EVENT_ID,
                     context(SECOND_HEAD)?,
                     FIRST_HEAD,
-                )?],
+                )?)],
             ),
         )
         .await?;
@@ -1553,6 +3866,7 @@ async fn achievement_after_a_head_change_requeues_once_and_then_seals() -> Resul
             &fixture.repository,
             fixture.rule.id(),
             fixture.rule.version(),
+            immediate_retry_policy(),
         )
         .await?
         .expect("achievement against a superseded head owes one current-state batch");
@@ -1675,7 +3989,10 @@ async fn achieved_branch_dispatch_seals_without_requeue() -> Result<(), Box<dyn 
                 RepoWatchCommitRequest::new(
                     None,
                     RepoWatchCursorCandidate::new(observation(context(INITIAL_HEAD)?)?),
-                    vec![opened_event(BRANCH_ACTIVATION_EVENT_ID, INITIAL_HEAD)?],
+                    vec![identified_event(opened_event(
+                        BRANCH_ACTIVATION_EVENT_ID,
+                        INITIAL_HEAD,
+                    )?)],
                 ),
             )
             .await?,
@@ -1690,7 +4007,9 @@ async fn achieved_branch_dispatch_seals_without_requeue() -> Result<(), Box<dyn 
             RepoWatchCommitRequest::new(
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(branch.clone()),
-                vec![branch_workflow_event(BRANCH_WORKFLOW_EVENT_ID)?],
+                vec![identified_event(branch_workflow_event(
+                    BRANCH_WORKFLOW_EVENT_ID,
+                )?)],
             ),
         )
         .await?;
@@ -1738,7 +4057,10 @@ async fn reopening_a_pull_request_drops_a_stopped_close_dispatch_requeue()
                 RepoWatchCommitRequest::new(
                     None,
                     RepoWatchCursorCandidate::new(observation(context(INITIAL_HEAD)?)?),
-                    vec![opened_event(REOPENED_CLOSE_OPENED_EVENT_ID, INITIAL_HEAD)?],
+                    vec![identified_event(opened_event(
+                        REOPENED_CLOSE_OPENED_EVENT_ID,
+                        INITIAL_HEAD,
+                    )?)],
                 ),
             )
             .await?,
@@ -1755,7 +4077,10 @@ async fn reopening_a_pull_request_drops_a_stopped_close_dispatch_requeue()
                 RepoWatchCommitRequest::new(
                     Some(first_generation),
                     RepoWatchCursorCandidate::new(closed.clone()),
-                    vec![closed_event(REOPENED_CLOSE_CLOSED_EVENT_ID, SECOND_HEAD)?],
+                    vec![identified_event(closed_event(
+                        REOPENED_CLOSE_CLOSED_EVENT_ID,
+                        SECOND_HEAD,
+                    )?)],
                 ),
             )
             .await?,
@@ -1781,7 +4106,10 @@ async fn reopening_a_pull_request_drops_a_stopped_close_dispatch_requeue()
             RepoWatchCommitRequest::new(
                 Some(second_generation),
                 RepoWatchCursorCandidate::new(observation(context(THIRD_HEAD)?)?),
-                vec![opened_event(REOPENED_CLOSE_REOPENED_EVENT_ID, THIRD_HEAD)?],
+                vec![identified_event(opened_event(
+                    REOPENED_CLOSE_REOPENED_EVENT_ID,
+                    THIRD_HEAD,
+                )?)],
             ),
         )
         .await?;
@@ -1810,10 +4138,10 @@ async fn stopped_terminal_event_dispatch_keeps_its_requeue() -> Result<(), Box<d
                 RepoWatchCommitRequest::new(
                     None,
                     RepoWatchCursorCandidate::new(observation(context(INITIAL_HEAD)?)?),
-                    vec![opened_event(
+                    vec![identified_event(opened_event(
                         STOPPED_TERMINAL_OPENED_EVENT_ID,
                         INITIAL_HEAD,
-                    )?],
+                    )?)],
                 ),
             )
             .await?,
@@ -1829,7 +4157,10 @@ async fn stopped_terminal_event_dispatch_keeps_its_requeue() -> Result<(), Box<d
             RepoWatchCommitRequest::new(
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(merged.clone()),
-                vec![merged_event(STOPPED_TERMINAL_MERGED_EVENT_ID, SECOND_HEAD)?],
+                vec![identified_event(merged_event(
+                    STOPPED_TERMINAL_MERGED_EVENT_ID,
+                    SECOND_HEAD,
+                )?)],
             ),
         )
         .await?;
@@ -2141,7 +4472,10 @@ async fn matching_merged_event_dispatch_survives_its_lifecycle_cutoff() -> Resul
                 RepoWatchCommitRequest::new(
                     None,
                     RepoWatchCursorCandidate::new(initial),
-                    vec![opened_event(TERMINAL_RULE_OPENED_EVENT_ID, INITIAL_HEAD)?],
+                    vec![identified_event(opened_event(
+                        TERMINAL_RULE_OPENED_EVENT_ID,
+                        INITIAL_HEAD,
+                    )?)],
                 ),
             )
             .await?,
@@ -2157,7 +4491,10 @@ async fn matching_merged_event_dispatch_survives_its_lifecycle_cutoff() -> Resul
             RepoWatchCommitRequest::new(
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(merged.clone()),
-                vec![merged_event(TERMINAL_RULE_MERGED_EVENT_ID, SECOND_HEAD)?],
+                vec![identified_event(merged_event(
+                    TERMINAL_RULE_MERGED_EVENT_ID,
+                    SECOND_HEAD,
+                )?)],
             ),
         )
         .await?;
@@ -2219,7 +4556,7 @@ async fn merged_event_before_a_later_terminal_cutoff_records_target_closed()
                 RepoWatchCommitRequest::new(
                     None,
                     RepoWatchCursorCandidate::new(initial),
-                    vec![opened_event(0x54_300, INITIAL_HEAD)?],
+                    vec![identified_event(opened_event(0x54_300, INITIAL_HEAD)?)],
                 ),
             )
             .await?,
@@ -2236,7 +4573,7 @@ async fn merged_event_before_a_later_terminal_cutoff_records_target_closed()
                 RepoWatchCommitRequest::new(
                     Some(first_generation),
                     RepoWatchCursorCandidate::new(first_merged),
-                    vec![merged_event(0x54_310, SECOND_HEAD)?],
+                    vec![identified_event(merged_event(0x54_310, SECOND_HEAD)?)],
                 ),
             )
             .await?,
@@ -2250,7 +4587,7 @@ async fn merged_event_before_a_later_terminal_cutoff_records_target_closed()
                 RepoWatchCommitRequest::new(
                     Some(second_generation),
                     RepoWatchCursorCandidate::new(reopened),
-                    vec![opened_event(0x54_320, THIRD_HEAD)?],
+                    vec![identified_event(opened_event(0x54_320, THIRD_HEAD)?)],
                 ),
             )
             .await?,
@@ -2263,7 +4600,7 @@ async fn merged_event_before_a_later_terminal_cutoff_records_target_closed()
             RepoWatchCommitRequest::new(
                 Some(third_generation),
                 RepoWatchCursorCandidate::new(second_merged.clone()),
-                vec![merged_event(0x54_330, THIRD_HEAD)?],
+                vec![identified_event(merged_event(0x54_330, THIRD_HEAD)?)],
             ),
         )
         .await?;
@@ -2316,6 +4653,7 @@ async fn terminal_target_settles_owed_work_without_dispatch() -> Result<(), Box<
             &fixture.repository,
             fixture.rule.id(),
             fixture.rule.version(),
+            immediate_retry_policy(),
         )
         .await?;
     let settlement: String = sqlx::query_scalar(
@@ -2573,7 +4911,10 @@ async fn retired_rule_identity_cannot_resume_from_its_old_activation() -> Result
         .await
         .expect_err("retired rule identity must not reactivate");
 
-    assert!(reused_rule_identity(&error));
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::ReusedIdentity
+    );
     Ok(())
 }
 
@@ -2592,7 +4933,10 @@ async fn removed_repository_deactivates_its_rule_identities() -> Result<(), Box<
         .await
         .expect_err("a rule from a removed repository must be retired");
 
-    assert!(reused_rule_identity(&error));
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::ReusedIdentity
+    );
     Ok(())
 }
 
@@ -2624,16 +4968,397 @@ async fn startup_drain_processes_cutoff_after_repository_removal() -> Result<(),
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn active_rule_identity_rejects_in_place_content_changes() -> Result<(), Box<dyn Error>> {
+async fn active_rule_identity_names_the_matcher_field_changed_without_a_version_bump()
+-> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture().await?;
-    let changed_rule = cooldown_rule()?;
+    let changed_rule = merged_event_rule()?;
     let error = fixture
         .store
         .reconcile_rules(&fixture.repository, std::slice::from_ref(&changed_rule))
         .await
         .expect_err("active rule semantics require a new identity");
 
-    assert!(changed_rule_identity(&error));
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::ChangedField(RepoWatchRuleIdentityField::MatcherEventKinds)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn active_activation_without_field_fingerprints_is_storage_corruption()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    remove_field_fingerprints(&fixture).await?;
+
+    let error = fixture
+        .store
+        .reconcile_rules(&fixture.repository, std::slice::from_ref(&fixture.rule))
+        .await
+        .expect_err("an active activation without fingerprints is not a tolerated shape");
+
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::StorageCorruption
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retiring_a_removed_repository_validates_its_field_fingerprints()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    remove_field_fingerprints(&fixture).await?;
+
+    let error = fixture
+        .store
+        .deactivate_unconfigured_repositories(&[])
+        .await
+        .expect_err("a removed repository is retired against a validated stored shape");
+
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::StorageCorruption
+    );
+    let deactivated: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM repo_watch_rule_deactivation
+              WHERE repository = $1 AND rule_id = $2 AND rule_version = $3
+         )",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(fixture.rule.id().as_str())
+    .bind(i64::try_from(fixture.rule.version().get())?)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(!deactivated);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retiring_an_omitted_rule_validates_its_field_fingerprints() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    remove_field_fingerprints(&fixture).await?;
+
+    let error = fixture
+        .store
+        .reconcile_rules(&fixture.repository, &[])
+        .await
+        .expect_err("an omitted rule is retired against a validated stored shape");
+
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::StorageCorruption
+    );
+    let deactivated: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM repo_watch_rule_deactivation
+              WHERE repository = $1 AND rule_id = $2 AND rule_version = $3
+         )",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(fixture.rule.id().as_str())
+    .bind(i64::try_from(fixture.rule.version().get())?)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(!deactivated);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn every_active_activation_carries_its_field_fingerprints() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let retired: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM repo_watch_rule_activation AS activation
+              WHERE NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_rule_field_fingerprint AS fingerprint
+                     WHERE fingerprint.repository = activation.repository
+                       AND fingerprint.rule_id = activation.rule_id
+                       AND fingerprint.rule_version = activation.rule_version
+              )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_rule_deactivation AS deactivation
+                     WHERE deactivation.repository = activation.repository
+                       AND deactivation.rule_id = activation.rule_id
+                       AND deactivation.rule_version = activation.rule_version
+              )
+         )",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(!retired);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_revision_below_the_highest_recorded_revision_is_refused() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(rule_at_version(
+        RepoWatchRuleVersion::new(
+            NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("recorded version is positive"),
+        )
+        .expect("recorded version is within the durable range"),
+    )?)
+    .await?;
+
+    let error = fixture
+        .store
+        .reconcile_rules(
+            &fixture.repository,
+            std::slice::from_ref(&rule_at_version(RepoWatchRuleVersion::V1)?),
+        )
+        .await
+        .expect_err("a revision below the highest recorded revision is not a replacement");
+
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::RegressedVersion {
+            configured: RepoWatchRuleVersion::V1,
+            latest: RepoWatchRuleVersion::new(
+                NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("recorded version is positive")
+            )
+            .expect("recorded version is within the durable range")
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repeating_an_admission_commit_changes_nothing() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let replacement_version = RepoWatchRuleVersion::new(
+        NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("replacement version is positive"),
+    )
+    .expect("replacement version is within the durable range");
+    let replacement = rule_at_version(replacement_version)?;
+    let repositories = [fixture.repository.clone()];
+    fixture
+        .store
+        .reconcile_configured_rules(&repositories, std::slice::from_ref(&replacement))
+        .await?;
+    let after_first: Vec<(i64, bool)> = revisions_of(&fixture, replacement.id().as_str()).await?;
+
+    // The rerun that resolves a lost commit response takes this path.
+    fixture
+        .store
+        .reconcile_configured_rules(&repositories, std::slice::from_ref(&replacement))
+        .await?;
+
+    let after_second: Vec<(i64, bool)> = revisions_of(&fixture, replacement.id().as_str()).await?;
+    assert_eq!(
+        after_first,
+        [
+            (i64::try_from(fixture.rule.version().get())?, true),
+            (i64::try_from(replacement.version().get())?, false)
+        ]
+    );
+    assert_eq!(after_second, after_first);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn validating_an_admissible_revision_consumes_no_revision() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let replacement_version = RepoWatchRuleVersion::new(
+        NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("replacement version is positive"),
+    )
+    .expect("replacement version is within the durable range");
+    let replacement = rule_at_version(replacement_version)?;
+
+    fixture
+        .store
+        .validate_configured_rules(
+            std::slice::from_ref(&fixture.repository),
+            std::slice::from_ref(&replacement),
+        )
+        .await?;
+
+    let revisions: Vec<(i64, bool)> = sqlx::query_as(
+        "SELECT activation.rule_version, deactivation.rule_id IS NOT NULL AS deactivated
+           FROM repo_watch_rule_activation AS activation
+           LEFT JOIN repo_watch_rule_deactivation AS deactivation
+             USING (repository, rule_id, rule_version)
+          WHERE activation.repository = $1 AND activation.rule_id = $2
+          ORDER BY activation.rule_version",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(replacement.id().as_str())
+    .fetch_all(&fixture.pool)
+    .await?;
+
+    assert_eq!(
+        revisions,
+        [(i64::try_from(fixture.rule.version().get())?, false)]
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn validation_refuses_an_inadmissible_rule_before_any_write() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let changed_rule = merged_event_rule()?;
+
+    let error = fixture
+        .store
+        .validate_configured_rules(
+            std::slice::from_ref(&fixture.repository),
+            std::slice::from_ref(&changed_rule),
+        )
+        .await
+        .expect_err("an unbumped semantic change is refused during validation");
+
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::ChangedField(RepoWatchRuleIdentityField::MatcherEventKinds)
+    );
+    let deactivated: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM repo_watch_rule_deactivation WHERE repository = $1)",
+    )
+    .bind(fixture.repository.as_str())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(!deactivated);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_refused_repository_leaves_every_other_repository_unmutated() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture().await?;
+    let second_repository = RepositorySlug::try_new(SECOND_REPOSITORY.to_owned())?;
+    let replacement_version = RepoWatchRuleVersion::new(
+        NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("replacement version is positive"),
+    )
+    .expect("replacement version is within the durable range");
+    let replacement = rule_at_version(replacement_version)?;
+    fixture
+        .store
+        .reconcile_rules(&second_repository, std::slice::from_ref(&replacement))
+        .await?;
+    fixture
+        .store
+        .reconcile_rules(&second_repository, &[])
+        .await?;
+
+    let error = fixture
+        .store
+        .reconcile_configured_rules(
+            &[fixture.repository.clone(), second_repository.clone()],
+            std::slice::from_ref(&replacement),
+        )
+        .await
+        .expect_err("the second repository retired the configured identity");
+
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::ReusedIdentity
+    );
+    let revisions: Vec<(i64, bool)> = sqlx::query_as(
+        "SELECT activation.rule_version, deactivation.rule_id IS NOT NULL AS deactivated
+           FROM repo_watch_rule_activation AS activation
+           LEFT JOIN repo_watch_rule_deactivation AS deactivation
+             USING (repository, rule_id, rule_version)
+          WHERE activation.repository = $1 AND activation.rule_id = $2
+          ORDER BY activation.rule_version",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(fixture.rule.id().as_str())
+    .fetch_all(&fixture.pool)
+    .await?;
+    assert_eq!(
+        revisions,
+        [(i64::try_from(fixture.rule.version().get())?, false)]
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn version_bump_retires_the_old_rule_and_activates_the_replacement_after_history()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let replacement_version = RepoWatchRuleVersion::new(
+        NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("replacement version is positive"),
+    )
+    .expect("replacement version is within the durable range");
+    let replacement = rule_at_version(replacement_version)?;
+
+    fixture
+        .store
+        .reconcile_rules(&fixture.repository, std::slice::from_ref(&replacement))
+        .await?;
+
+    let revisions: Vec<(i64, bool)> = sqlx::query_as(
+        "SELECT activation.rule_version, deactivation.rule_id IS NOT NULL AS deactivated
+           FROM repo_watch_rule_activation AS activation
+           LEFT JOIN repo_watch_rule_deactivation AS deactivation
+             USING (repository, rule_id, rule_version)
+          WHERE activation.repository = $1 AND activation.rule_id = $2
+          ORDER BY activation.rule_version",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(replacement.id().as_str())
+    .fetch_all(&fixture.pool)
+    .await?;
+    assert_eq!(
+        revisions,
+        [
+            (i64::try_from(fixture.rule.version().get())?, true),
+            (i64::try_from(replacement.version().get())?, false)
+        ]
+    );
+    assert_eq!(
+        fixture
+            .store
+            .load_next_event(&fixture.repository, replacement.id(), replacement.version())
+            .await?,
+        None
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn fresh_rule_identity_still_replaces_an_active_rule() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let replacement_id = RepoWatchRuleId::try_new(FRESH_RULE.to_owned())?;
+    let replacement = rule_with_identity(replacement_id, RepoWatchRuleVersion::V1)?;
+
+    fixture
+        .store
+        .reconcile_rules(&fixture.repository, std::slice::from_ref(&replacement))
+        .await?;
+
+    let active_rule: String = sqlx::query_scalar(
+        "SELECT activation.rule_id
+           FROM repo_watch_rule_activation AS activation
+          WHERE activation.repository = $1
+            AND NOT EXISTS (
+                SELECT 1 FROM repo_watch_rule_deactivation AS deactivation
+                 WHERE deactivation.repository = activation.repository
+                   AND deactivation.rule_id = activation.rule_id
+                   AND deactivation.rule_version = activation.rule_version
+            )",
+    )
+    .bind(fixture.repository.as_str())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(active_rule, replacement.id().as_str());
     Ok(())
 }
 
@@ -3026,6 +5751,7 @@ async fn released_obligation_dispatches_latest_state_once_and_replays_that_deliv
             &fixture.repository,
             fixture.rule.id(),
             fixture.rule.version(),
+            immediate_retry_policy(),
         )
         .await?
         .expect("released obligation is ready");
@@ -3080,6 +5806,7 @@ async fn dispatch_obligation_waits_visibly_through_configured_cooldown()
             &fixture.repository,
             fixture.rule.id(),
             fixture.rule.version(),
+            immediate_retry_policy(),
         )
         .await?;
     let visible: OutstandingCooldownVisibility = sqlx::query_as(
@@ -3120,5 +5847,444 @@ async fn rule_deactivation_settles_its_outstanding_dispatch_obligation()
 
     assert_eq!(outstanding, 0);
     assert_eq!(settlement, "deactivated");
+    Ok(())
+}
+
+// --- Operator-commissioned dispatch: fence consumption and escalation ---
+
+const COMMISSION_COMMAND_ID: u128 = 0x60_100;
+const COMMISSION_TEMPLATE: &str = "review-response";
+const COMMISSION_STATEMENT: &str =
+    "Address the review findings on pull request 41 and push fixes to its head branch.";
+const COMMISSION_CONTEXT: &str = "Respond to the open review threads.";
+
+struct CommissionedFixture {
+    _container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    store: PostgresCommissionedDispatchStore,
+    dispatch_id: CommissionedDispatchId,
+    session: SessionId,
+}
+
+fn commissioned_fence() -> Result<CommissionedDispatchFence, Box<dyn Error>> {
+    Ok(CommissionedDispatchFence::PullRequest {
+        repository: repository()?,
+        pull_request: PullRequestNumber::new(BOTTOM_PULL_REQUEST_NUMBER.try_into()?),
+        head_sha: CommitSha::try_new(FIRST_HEAD.to_owned())?,
+        head_repository: RepositorySlug::try_new(HEAD_REPOSITORY.to_owned())?,
+        head_branch: BranchName::try_new(HEAD_BRANCH.to_owned())?,
+        base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+    })
+}
+
+fn commission_request_with_fence(
+    command: u128,
+    fence: CommissionedDispatchFence,
+) -> Result<CommissionDispatchRequest, Box<dyn Error>> {
+    Ok(CommissionDispatchRequest::try_new(
+        DurableCommandId::from_uuid(Uuid::from_u128(command)),
+        SessionTemplateName::try_new(COMMISSION_TEMPLATE.to_owned())?,
+        fence,
+        GoalStatement::try_new(COMMISSION_STATEMENT.to_owned())?,
+        UserContent::try_text(COMMISSION_CONTEXT.to_owned())
+            .expect("the fixture context is admitted"),
+    )?)
+}
+
+fn commission_request_with_content(
+    command: u128,
+    content: &str,
+) -> Result<CommissionDispatchRequest, Box<dyn Error>> {
+    Ok(CommissionDispatchRequest::try_new(
+        DurableCommandId::from_uuid(Uuid::from_u128(command)),
+        SessionTemplateName::try_new(COMMISSION_TEMPLATE.to_owned())?,
+        commissioned_fence()?,
+        GoalStatement::try_new(COMMISSION_STATEMENT.to_owned())?,
+        UserContent::try_text(content.to_owned()).expect("the fixture context is admitted"),
+    )?)
+}
+
+/// The exact template shape the dispatch fixtures resolve, under the
+/// commissioned template name.
+fn commissioned_template() -> (SessionTemplateProvenance, SessionConfigurationDefaults) {
+    (
+        SessionTemplateProvenance::new(
+            SessionTemplateName::try_new(COMMISSION_TEMPLATE.to_owned())
+                .expect("the fixture template name is admitted"),
+            SessionTemplateContentDigest::from_bytes([7; 32]),
+        ),
+        SessionConfigurationDefaults::complete(
+            ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(
+                TEMPLATE_MODEL_SELECTION_ID,
+            ))),
+            DangerousToolAutoApproval::Disabled,
+            Some(
+                SessionSystemPrompt::try_new("Respond to review findings.".to_owned())
+                    .expect("the fixture prompt is admitted"),
+            ),
+        ),
+    )
+}
+
+async fn commissioned_fixture() -> Result<CommissionedFixture, Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let store = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
+    let (provenance, defaults) = commissioned_template();
+    let prepared = commission_request_with_fence(COMMISSION_COMMAND_ID, commissioned_fence()?)?
+        .prepare(
+            &mut UuidV7CommissionedDispatchIdGenerator,
+            provenance,
+            defaults,
+        )?;
+    let CommissionDispatchOutcome::Dispatched { dispatch, session } =
+        store.commission(prepared, |_| None).await?
+    else {
+        panic!("the fixture commission dispatches fresh")
+    };
+    Ok(CommissionedFixture {
+        _container: container,
+        pool,
+        store,
+        dispatch_id: dispatch,
+        session,
+    })
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct CommissionedEscalationVisibility {
+    lifecycle_state: String,
+    terminal_disposition: Option<String>,
+    goal_event_kind: String,
+    blocked_reason: Option<String>,
+    need: Option<String>,
+    rationale: String,
+}
+
+/// A commissioned session's first turn is judged under the exact fence its
+/// commission recorded, through the same authority loading a repository-watch
+/// dispatch feeds, and an unattended escalation terminalizes the turn with a
+/// commissioned audit row instead of pooling forever in the approval wait.
+/// The exact replay is stable and a mismatched replay identity is refused.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_commissioned_escalation_terminalizes_under_its_recorded_fence()
+-> Result<(), Box<dyn Error>> {
+    let fixture = commissioned_fixture().await?;
+    let seed = 0x61_240;
+    let (model_repository, prepared, turn, requests) = checkpoint_delegated_approval_at(
+        &fixture.pool,
+        fixture.session,
+        seed,
+        &[("exec", r#"{"cmd":"git fetch origin main"}"#)],
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let authority = prepared_pull_request_authority(&prepared);
+    assert_eq!(
+        authority.dispatch(),
+        ApprovalJudgeDispatchProvenance::Commissioned(fixture.dispatch_id)
+    );
+    assert_eq!(authority.repository(), &repository()?);
+    assert_eq!(authority.pull_request().get(), BOTTOM_PULL_REQUEST_NUMBER);
+    assert_eq!(authority.head_sha().as_str(), FIRST_HEAD);
+    assert_eq!(authority.head_repository().as_str(), HEAD_REPOSITORY);
+    assert_eq!(authority.head_branch().as_str(), HEAD_BRANCH);
+    assert_eq!(authority.base_branch().as_str(), BASE_BRANCH);
+
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the provider requests authority beyond the immutable commissioned fence",
+    ))?;
+    let identities = ApprovalJudgeCompletionIdentities::new(
+        TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+    );
+    let closed_result = |closed_request: ToolRequestId| {
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+            closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+        ))
+    };
+
+    let outcome = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            identities,
+            closed_result,
+        )
+        .await?;
+    assert_eq!(
+        outcome,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+
+    let audit: CommissionedEscalationVisibility = sqlx::query_as(
+        "SELECT lifecycle.state_kind AS lifecycle_state,
+                lifecycle.terminal_disposition_kind AS terminal_disposition,
+                latest_goal.event_kind AS goal_event_kind,
+                latest_goal.blocked_reason,
+                latest_goal.need,
+                audit.rationale
+           FROM commissioned_dispatch_headless_approval_escalation_audit AS audit
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.session_id = audit.session_id
+            AND lifecycle.turn_id = audit.turn_id
+           JOIN LATERAL (
+                SELECT event_kind, blocked_reason, need
+                  FROM goal_event
+                 WHERE session_id = audit.session_id
+                 ORDER BY event_ordinal DESC
+                 LIMIT 1
+           ) AS latest_goal ON true
+          WHERE audit.model_call_id = $1",
+    )
+    .bind(prepared.call().as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(audit.lifecycle_state, "terminal");
+    assert_eq!(audit.terminal_disposition.as_deref(), Some("failed"));
+    assert_eq!(audit.goal_event_kind, "blocked");
+    assert_eq!(audit.blocked_reason.as_deref(), Some("execution_failure"));
+    assert!(
+        audit
+            .need
+            .as_deref()
+            .is_some_and(|need| need.contains("commissioned directly")),
+        "the commissioned block names its own repair, not a repository-watch redispatch"
+    );
+    assert_eq!(audit.rationale, rationale.as_str());
+    let audited_dispatch: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM commissioned_dispatch_headless_approval_escalation
+             WHERE dispatch_id = $1 AND session_id = $2
+        )",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .bind(fixture.session.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(audited_dispatch);
+
+    let replay = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            identities,
+            closed_result,
+        )
+        .await?;
+    assert_eq!(
+        replay,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    let mismatched = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 30)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            closed_result,
+        )
+        .await;
+    assert!(matches!(
+        mismatched,
+        Err(ApprovalJudgeRepositoryError::Corruption(
+            ApprovalJudgeCorruption::Inconsistent("completed judge replay")
+        ))
+    ));
+    assert_eq!(prepared.request().id(), *request);
+    assert_eq!(turn, prepared.request().turn());
+    Ok(())
+}
+
+/// One commission commits one session, one queued goal-adopted turn, and one
+/// fence row; the same command identity replays to the committed session, and
+/// the same identity naming a different fence is a conflicting reuse.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_replayed_commission_returns_its_committed_session() -> Result<(), Box<dyn Error>> {
+    let fixture = commissioned_fixture().await?;
+
+    let commissioned_turn: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM goal_turn WHERE session_id = $1 AND goal_generation = 1
+        )",
+    )
+    .bind(fixture.session.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(
+        commissioned_turn,
+        "the commission adopts its reserved turn as the goal's first turn"
+    );
+
+    let (provenance, defaults) = commissioned_template();
+    let replay = commission_request_with_fence(COMMISSION_COMMAND_ID, commissioned_fence()?)?
+        .prepare(
+            &mut UuidV7CommissionedDispatchIdGenerator,
+            provenance,
+            defaults,
+        )?;
+    assert_eq!(
+        fixture.store.commission(replay, |_| None).await?,
+        CommissionDispatchOutcome::Replayed {
+            dispatch: fixture.dispatch_id,
+            session: fixture.session,
+        }
+    );
+
+    let (provenance, defaults) = commissioned_template();
+    let conflicting = commission_request_with_fence(
+        COMMISSION_COMMAND_ID,
+        CommissionedDispatchFence::Branch {
+            repository: repository()?,
+            branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+        },
+    )?
+    .prepare(
+        &mut UuidV7CommissionedDispatchIdGenerator,
+        provenance,
+        defaults,
+    )?;
+    assert_eq!(
+        fixture.store.commission(conflicting, |_| None).await?,
+        CommissionDispatchOutcome::ConflictingReuse
+    );
+
+    // The committed commission is loadable by its command identity alone, and
+    // that record answers the daemon's pre-template replay equality — so a
+    // retry of the exact request replays even if configuration later removed
+    // or renamed the template it was commissioned from.
+    let recorded = fixture
+        .store
+        .load(DurableCommandId::from_uuid(Uuid::from_u128(
+            COMMISSION_COMMAND_ID,
+        )))
+        .await?
+        .expect("the committed commission is loadable by its command identity");
+    assert_eq!(recorded.dispatch(), fixture.dispatch_id);
+    assert_eq!(recorded.session(), fixture.session);
+    assert!(recorded.matches(&commission_request_with_fence(
+        COMMISSION_COMMAND_ID,
+        commissioned_fence()?
+    )?));
+    assert!(!recorded.matches(&commission_request_with_fence(
+        COMMISSION_COMMAND_ID,
+        CommissionedDispatchFence::Branch {
+            repository: repository()?,
+            branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+        },
+    )?));
+
+    // A retry that changes only the initial content names different intent:
+    // the recorded digest refuses it instead of silently replaying a session
+    // whose first input was something else.
+    let changed_content =
+        commission_request_with_content(COMMISSION_COMMAND_ID, "Different context entirely.")?;
+    assert!(!recorded.matches(&changed_content));
+    let (provenance, defaults) = commissioned_template();
+    let changed = changed_content.prepare(
+        &mut UuidV7CommissionedDispatchIdGenerator,
+        provenance,
+        defaults,
+    )?;
+    assert_eq!(
+        fixture.store.commission(changed, |_| None).await?,
+        CommissionDispatchOutcome::ConflictingReuse
+    );
+
+    // An ordinary template creation retried against the commission's command
+    // identity is a different wire operation: it must refuse rather than adopt
+    // the commissioned session as its own replay.
+    let (provenance, defaults) = commissioned_template();
+    let ordinary = CreateSession::new_from_template(
+        DurableCommandId::from_uuid(Uuid::from_u128(COMMISSION_COMMAND_ID)),
+        SessionCreationProvenance::new(
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None,
+        ),
+        provenance,
+        defaults,
+    )
+    .prepare(SessionId::from_uuid(Uuid::from_u128(0x60_300)))
+    .expect("the fixture creation command prepares");
+    let ordinary_repository = CreateSessionRepository::new(fixture.pool.clone(), credential_pin());
+    let ordinary_outcome = ordinary_repository.handle(ordinary).await?;
+    let CreateSessionHandlingOutcome::ConflictingReuse { .. } = ordinary_outcome else {
+        panic!("ordinary creation must refuse a commission's command identity");
+    };
+
+    // The replay probe the daemon runs before handling refuses the same way:
+    // a commission-claimed identity reads as a different command kind, never
+    // as an equal ordinary creation.
+    let probe = ordinary_repository
+        .load(DurableCommandId::from_uuid(Uuid::from_u128(
+            COMMISSION_COMMAND_ID,
+        )))
+        .await;
+    let Err(CreateSessionRepositoryError::DifferentCommandKind { .. }) = probe else {
+        panic!("the ordinary replay probe must refuse a commission's command identity");
+    };
+
+    // A command identity already claimed by another kind entirely is the same
+    // refusal, not a fail-closed corruption.
+    let foreign_command = 0x60_200;
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(foreign_command)),
+                    fixture.session,
+                    GoalUserAction::Stop {
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                ),
+                None,
+                |_| None,
+            )
+            .await?,
+    );
+    let (provenance, defaults) = commissioned_template();
+    let reused = commission_request_with_fence(foreign_command, commissioned_fence()?)?.prepare(
+        &mut UuidV7CommissionedDispatchIdGenerator,
+        provenance,
+        defaults,
+    )?;
+    assert_eq!(
+        fixture.store.commission(reused, |_| None).await?,
+        CommissionDispatchOutcome::ConflictingReuse
+    );
+
+    // The registry read the daemon runs on the unknown-template path sees the
+    // same claim, so a foreign identity refuses as conflicting reuse even
+    // when no template resolves; an unseen identity claims nothing.
+    assert!(
+        fixture
+            .store
+            .identity_claimed(DurableCommandId::from_uuid(Uuid::from_u128(
+                foreign_command
+            )))
+            .await?
+    );
+    assert!(
+        !fixture
+            .store
+            .identity_claimed(DurableCommandId::from_uuid(Uuid::from_u128(0x60_201)))
+            .await?
+    );
     Ok(())
 }
