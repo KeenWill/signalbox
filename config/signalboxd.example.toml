@@ -843,8 +843,10 @@ service_tiers = ["auto", "standard_only"]
 # fetches from its provider (`codex debug models`, client 0.146) and from the
 # provider's published CLI documentation. The CLI's set is not the API's: it
 # publishes no dated snapshots, it serves a model the API does not, and the
-# models it shares with the API carry a 272000 window where Chat Completions
-# advertises 1050000 for the same spelling. The CLI validates neither a model
+# models it shares with the API carry a 272000 raw window where Chat Completions
+# advertises 1050000 for the same spelling. The CLI reserves 5% of the raw
+# window internally, so each configured context ceiling below is the 95% usable
+# window that the CLI actually admits. The CLI validates neither a model
 # spelling nor an effort at startup — a wrong value fails at the provider — so
 # these spellings are the only guard a deployment gets.
 #
@@ -861,27 +863,28 @@ service_tiers = ["auto", "standard_only"]
 # "priority" request value behind the CLI's fast speed tier.
 
 # [[models]]
-# # The CLI's own default model. Advertised window: 272000.
+# # The CLI's own default model. Raw window: 272000; usable window: 258400.
 # selection_id = "ff15fc0a-bac0-45df-9d59-ab3b79282a95"
 # target_id = "4d4a9f4c-ce89-4c75-ae2e-695cda3ae4bc"
 # model_family = "codex"
 # provider_model = "gpt-5.6-sol"
 # max_output_tokens = 8192
-# context_window_tokens = 272000
+# context_window_tokens = 258400
 # reasoning_levels = ["low", "medium", "high", "xhigh", "max", "ultra"]
 # fast_mode = "request_control"
 # service_tiers = ["priority"]
 
 # [[models]]
 # # Served only through this surface: the provider's API does not offer it.
-# # Advertised window: 128000. Its catalog entry advertises no speed tier, so
+# # Raw window: 128000; usable window: 121600. Its catalog entry advertises no
+# # speed tier, so
 # # the row declares neither a tier nor request-controlled fast mode.
 # selection_id = "bacd74df-e96b-4fcd-85be-749ec7b73123"
 # target_id = "ce659f71-9a81-433a-b94d-5c33db7cd493"
 # model_family = "codex"
 # provider_model = "gpt-5.3-codex-spark"
 # max_output_tokens = 8192
-# context_window_tokens = 128000
+# context_window_tokens = 121600
 # reasoning_levels = ["low", "medium", "high", "xhigh"]
 
 # Claude Code catalog, extracted on 2026-08-06 from the model catalog embedded

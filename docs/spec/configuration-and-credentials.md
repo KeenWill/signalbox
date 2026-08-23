@@ -11,6 +11,9 @@ against this PR (`agent/web-session-timeline`).
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
 
+The usable context-ceiling definition and Codex CLI catalog values are
+re-verified against this PR (`agent/daemon-live-codex-effective-window`).
+
 The required numeric-bound configuration grammar and scheduler admission policy
 are verified against this PR (`agent/bounds-required-config-protocol`).
 
@@ -1126,8 +1129,9 @@ Each `[[models]]` entry defines one direct selection:
   typed startup failure, so a deployment serving one provider through two
   surfaces gives each surface its own spelling.
 - `max_output_tokens` — required positive `u32` output-token ceiling.
-- `context_window_tokens` — required positive `u32` context ceiling, not smaller
-  than `max_output_tokens`.
+- `context_window_tokens` — required positive `u32` usable context ceiling after
+  any provider or adapter reservation, not the provider's larger raw advertised
+  window, and not smaller than `max_output_tokens`.
 - the optional all-or-none rate set — `rate_version`,
   `input_usd_per_million_tokens`, `output_usd_per_million_tokens`,
   `cache_creation_input_usd_per_million_tokens`, and
