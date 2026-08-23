@@ -1,5 +1,8 @@
 # Configuration and credentials
 
+The browser HTTP listener, same-origin static assets, and generated contract
+bootstrap are verified against this PR (`agent/web-http-transport`).
+
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
 
@@ -12,12 +15,16 @@ and which of them changes its resolved approval, are re-verified against this PR
 The daemon-local Git and execution-tool dependencies are verified against this
 stack through this PR (`agent/daemon-exec-tools`).
 
+The scheduler pass-admission override is verified against this PR
+(`agent/scheduler-pass-pause`).
+
 The derivation of each session's workspace root from the configured root is
 verified against this PR (`agent/per-session-workspaces`).
 
 The execution family's permission defaults and the confinement its bubblewrap
 profile does and does not provide are verified against this PR
-(`agent/exec-sandbox-net-fence`).
+(`agent/exec-sandbox-net-fence`). Its explicit container-process-namespace
+variant is verified against this PR (`agent/kubernetes-bwrap-proc`).
 
 Direct unsandboxed Git execution from sandbox-created linked worktrees is
 verified against this PR (`agent/unsandboxed-worktree-gitdir`).
@@ -104,16 +111,16 @@ describes behavior verified against the references above.
 
 ## Process configuration
 
-`signalboxd` reads six unconditionally required deployment values and the
-optional runner-socket override from the process environment at startup, and
-also consults `HOME`. Model-provider credential paths are not among them: this
-build composes `FileCredentialAccess` from the profile catalog, so those paths
-come only from each `file` profile's delivery configuration in the static
-catalog below, on the same pattern `[credentials.<name>]` already uses for the
-runner. `ANTHROPIC_API_KEY_FILE` and `OPENAI_API_KEY_FILE` are not read and
-supplying them has no effect. Why this direction: one environment variable
-cannot name the paths of several accounts, and a deployment holding two keys for
-one provider must be able to say so.
+`signalboxd` reads six unconditionally required deployment values, the optional
+runner-socket override, and the two optional browser HTTP values below from the
+process environment at startup, and also consults `HOME`. Model-provider
+credential paths are not among them: this build composes `FileCredentialAccess`
+from the profile catalog, so those paths come only from each `file` profile's
+delivery configuration in the static catalog below, on the same pattern
+`[credentials.<name>]` already uses for the runner. `ANTHROPIC_API_KEY_FILE` and
+`OPENAI_API_KEY_FILE` are not read and supplying them has no effect. Why this
+direction: one environment variable cannot name the paths of several accounts,
+and a deployment holding two keys for one provider must be able to say so.
 
 The complete set of unconditional process settings, including the two
 integration credentials of which there is exactly one each, is below. Because
@@ -148,6 +155,63 @@ stated where each is owned.
   including one reached through parent-directory aliases, is a typed
   configuration failure. Otherwise the runner socket uses the same private-node
   discipline but has an independent lock, identity, vocabulary, and listener.
+- `SIGNALBOX_WEB_BIND` — optional browser HTTP socket address. Absence binds
+  `127.0.0.1:37231`, keeping the listener on loopback; an explicit valid socket
+  address is the deployment's opt-in override. An invalid or non-Unicode value
+  fails the `Configuration` phase without logging the value.
+- `SIGNALBOX_WEB_ASSET_ROOT` — optional path to a static production web build.
+  An explicitly empty path fails the `Configuration` phase. When absent, non-API
+  paths return `404 Not Found`; when present, the daemon serves files from that
+  root and uses its `index.html` for client-side routes.
+
+### Browser HTTP listener and generated contract
+
+The browser application and `/api/**` share the configured listener and origin.
+API routing takes precedence over static files: an unknown `/api/**` path
+returns a structured API `404` and never the web application's `index.html`. The
+daemon does not emit permissive CORS headers and adds no account, login,
+bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. Those
+deployment boundaries remain outside Signalbox.
+
+`GET /api/bootstrap` is the production browser API in this foundation slice. It
+returns the exact contract family `signalbox.web-http`, version `1`, the
+`bounded_json`, `same_origin_json_mutations`, and `ndjson_streaming`
+capabilities, and the effective 65,536-byte JSON-body and NDJSON-item hard
+ceilings. The generated browser decoder rejects an unknown field, wrong shape,
+different family, or different version rather than interpreting it as the local
+process protocol. No process-protocol frame is a browser DTO.
+
+Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
+authority. The checked-in `web-contract.mjs` runtime decoders and
+`web-contract.d.mts` TypeScript declarations under `clients/web/src/generated`
+are generated from that authority. A workspace test fails when either generated
+file or the generated round-trip fixture drifts, and CI executes the generated
+decoder against the Rust-produced fixture.
+
+The transport foundation admits ordinary JSON bodies only through a 65,536-byte
+buffering ceiling. Browser mutation routes use `POST`, require
+`application/json`, and, when the browser supplies `Origin`, require its HTTP(S)
+host and effective port to equal the request `Host` authority. Because the
+listener is plain HTTP, a `Host` without an explicit port has effective port 80;
+the daemon never derives that port from the supplied origin. A missing origin is
+admitted for non-browser and same-origin clients as the issue contract requires;
+an invalid, opaque, missing-authority, or cross-origin pair receives a
+structured transport error. Only crossing the buffering ceiling produces
+`413 Payload Too Large`; another failure while reading the request body produces
+a distinct `400 Bad Request` transport error. Application errors occupy a
+separate error kind and are not inferred from HTTP status alone.
+
+Incremental responses are `application/x-ndjson`: each item is serialized only
+when the response body polls it, carries one trailing newline, and is at most
+65,536 bytes before that newline. The source is a caller-supplied stream, so its
+own bounded channel supplies backpressure; dropping the browser response drops
+that stream and closes its receiver, cancelling a blocked producer. Static files
+use ordinary HTTP bodies rather than JSON wrapping.
+
+`deterministic_test_router` supplies a database-free page plus bounded read,
+mutation, and two-item stream routes. It composes the same bootstrap, mutation
+guard, bounded decoder, DTOs, and NDJSON encoder, but the production daemon does
+not mount its `/api/test/**` paths.
 
 `DATABASE_URL` is the whole database configuration channel. The SQLx driver
 would otherwise seed anything the URL omits from the ambient libpq-style `PG*`
@@ -541,6 +605,16 @@ fail-closed:
 - Parse errors are typed, sanitized values; no file content appears in error
   text. (signalboxd erases the type before logging, as described above.)
 
+The optional `[scheduler]` table has exactly one `max_in_flight_passes` integer
+from 0 through 16. It replaces the scheduler's fixed 16-pass baseline for this
+daemon process. Omission keeps that baseline. A positive limit bounds concurrent
+authoritative per-session passes, not the durable queue: excess eligible
+sessions remain recorded and are admitted as passes finish. Zero pauses
+authoritative session execution while the scheduler task and the daemon's
+ingestion and process services remain live; durable queued work is unchanged. A
+value above 16, a mistyped value, or an unknown field fails startup as invalid
+scheduler settings.
+
 The optional `[model_settings]` table supplies the deployment-global settings
 overlay. Each `[[model_settings_profiles]]` entry gives an exact unique `name`
 and an overlay that a selectable model may name with `settings_profile`. Both
@@ -873,7 +947,10 @@ an explicit posture supersedes that legacy result for the request: `auto`
 records policy automation and `human` parks for a user even when the session
 blanket is enabled. `delegated` parks the request, invokes the approval judge,
 and exposes the ordinary user-decision path only after escalation or a terminal
-judge failure.
+judge failure — except where the escalation is judged under repository-watch
+dispatch authority and takes the unattended terminal path
+[repository watch](repo-watch.md) owns, which fails the turn instead of exposing
+that path to a user who is not there.
 
 The optional `[approval_judge]` table has exactly one `selection_id`, and the
 configuration parser requires it to name a configured direct selection. The
@@ -926,18 +1003,22 @@ and then lists separately what the profile does not provide. The recitation
 draws no consequence, because every consequence stated here so far has proved
 narrower than it sounded.
 
-The launch is this. Bubblewrap receives `--die-with-parent`, `--new-session`,
-`--unshare-user`, `--unshare-pid`, `--unshare-ipc`, `--unshare-uts`, and
-`--unshare-net`. It mounts a fresh `/proc`, a fresh `/dev`, and a `tmpfs` at
-`/tmp`; creates `/etc`; and read-only binds `/usr`, `/bin`, `/lib`, `/lib64`,
-`/nix/store`, `/etc/alternatives`, `/etc/hosts`, `/etc/nsswitch.conf`, and
-`/etc/ssl`, each where it is present. It does not bind `/etc/resolv.conf`. It
-binds the calling session's bound workspace root read-write at `/workspace`,
-read-only binds the pinned execution supervisor — a host path that need not lie
-under that root — at `/signalbox-exec-dispatch`, and changes directory to
-`/workspace` or to the requested directory beneath it. The child environment is
-cleared and then set to `LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. Every
-command is dispatched through the supervisor.
+The default launch is this. Bubblewrap receives `--die-with-parent`,
+`--new-session`, `--unshare-user`, `--unshare-pid`, `--unshare-ipc`,
+`--unshare-uts`, and `--unshare-net`, and mounts a fresh `/proc`. An explicit
+container-process-namespace variant omits `--unshare-pid` and instead read-only
+binds the existing `/proc`; it is admissible only when an outer container
+runtime already isolates that PID namespace and procfs from the host. Both
+variants mount a fresh `/dev` and a `tmpfs` at `/tmp`; create `/etc`; and
+read-only bind `/usr`, `/bin`, `/lib`, `/lib64`, `/nix/store`,
+`/etc/alternatives`, `/etc/hosts`, `/etc/nsswitch.conf`, and `/etc/ssl`, each
+where it is present. It does not bind `/etc/resolv.conf`. It binds the calling
+session's bound workspace root read-write at `/workspace`, read-only binds the
+pinned execution supervisor — a host path that need not lie under that root — at
+`/signalbox-exec-dispatch`, and changes directory to `/workspace` or to the
+requested directory beneath it. The child environment is cleared and then set to
+`LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. Every command is dispatched
+through the supervisor.
 
 The profile does not provide the following, and no other daemon-local control
 supplies them:
@@ -952,10 +1033,11 @@ supplies them:
   admitted on presence alone and are never checked against that root, so one
   configured inside it is bound along with the workspace, as is any secret the
   repository itself carries.
-- The fresh `/proc` and `/dev` are not a private surface. They carry kernel- and
-  host-derived data — `/proc/cpuinfo`, `/proc/meminfo`, and the boot identifier
-  among it — that no bind governs, so the readable surface is wider than the
-  bound paths alone.
+- The fresh `/proc` in the default variant, the container-isolated `/proc` in
+  the explicit variant, and `/dev` are not a private surface. They carry kernel-
+  and host-derived data — `/proc/cpuinfo`, `/proc/meminfo`, and the boot
+  identifier among it — that no workspace bind governs, so the readable surface
+  is wider than the bound paths alone.
 - `HOME` is the workspace root, so home-relative configuration discovery —
   `~/.cargo`, `~/.config`, and anything else a program resolves that way — lands
   inside the writable workspace rather than at a host location.
@@ -2697,6 +2779,9 @@ are outside this cluster-delivery policy:
 
 ## Open edges
 
+- [Graded approval judging](../open-questions.md#graded-approval-judging) owns
+  the unresolved actor-audit decision if trusted outcome derivation introduces
+  mutable graded thresholds.
 - Selection-key retargeting across a restart is not prevented by code:
   reconstitution's `CallTargetMismatch` cross-check fails closed only for a
   session with a live stored call; for everything else, not retargeting a

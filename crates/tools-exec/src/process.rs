@@ -712,11 +712,25 @@ fn classify_bwrap_availability(result: &ProcessRunResult) -> BwrapAvailability {
     }
 }
 
+/// Process and procfs namespace policy for one Bubblewrap sandbox.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SandboxProcessNamespace {
+    /// Bubblewrap creates a private PID namespace and mounts a fresh procfs.
+    #[default]
+    Private,
+    /// Bubblewrap reuses an already-isolated container PID namespace and procfs.
+    ///
+    /// This mode is only admissible when an outer container runtime already
+    /// isolates the process and procfs namespaces from the host.
+    Container,
+}
+
 /// Sandboxed command service reusable by higher-level tools.
 #[derive(Clone, Debug)]
 pub struct SandboxedCommandRunner<Runner> {
     runner: Runner,
     workspace_root: PathBuf,
+    process_namespace: SandboxProcessNamespace,
     #[cfg(not(target_os = "linux"))]
     sandbox_launcher: PathBuf,
     #[cfg(target_os = "linux")]
@@ -730,6 +744,20 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
     pub fn try_new(
         runner: Runner,
         workspace_root: impl AsRef<Path>,
+    ) -> Result<Self, ExecToolConstructionError> {
+        Self::try_new_with_process_namespace(
+            runner,
+            workspace_root,
+            SandboxProcessNamespace::Private,
+        )
+    }
+
+    /// Admits one canonical injected workspace root under an explicit process
+    /// namespace policy.
+    pub fn try_new_with_process_namespace(
+        runner: Runner,
+        workspace_root: impl AsRef<Path>,
+        process_namespace: SandboxProcessNamespace,
     ) -> Result<Self, ExecToolConstructionError> {
         #[cfg(target_os = "linux")]
         let workspace_identity = WorkspaceIdentity::capture(workspace_root.as_ref())?;
@@ -755,6 +783,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
             #[cfg(target_os = "linux")]
             workspace_identity,
             workspace_root,
+            process_namespace,
         })
     }
 
@@ -840,6 +869,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 #[cfg(target_os = "linux")]
                 working_directory_bind_descriptor: None,
             },
+            self.process_namespace,
             &probe_program,
             &[String::from("-c"), String::from("exit 0")],
             ".",
@@ -911,6 +941,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                         #[cfg(not(target_os = "linux"))]
                         working_directory_bind_source: None,
                     },
+                    self.process_namespace,
                     &arguments.program,
                     &arguments.arguments,
                     &arguments.working_directory,
@@ -1294,6 +1325,7 @@ struct SandboxLaunchContext<'a> {
 
 fn bwrap_request(
     context: SandboxLaunchContext<'_>,
+    process_namespace: SandboxProcessNamespace,
     program: &str,
     arguments: &[String],
     working_directory: &str,
@@ -1310,72 +1342,86 @@ fn bwrap_request(
     // or reordering here fails
     // `sandboxed_request_opens_with_the_user_pid_ipc_uts_and_network_unshare_prefix`,
     // which restates the expected prefix independently.
-    let mut bwrap_arguments = [
-        "--die-with-parent",
-        "--new-session",
-        "--unshare-user",
-        "--unshare-pid",
-        "--unshare-ipc",
-        "--unshare-uts",
-        "--unshare-net",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--tmpfs",
-        "/tmp",
-        "--ro-bind-try",
-        "/usr",
-        "/usr",
-        "--ro-bind-try",
-        "/bin",
-        "/bin",
-        "--ro-bind-try",
-        "/lib",
-        "/lib",
-        "--ro-bind-try",
-        "/lib64",
-        "/lib64",
-        "--ro-bind-try",
-        "/nix/store",
-        "/nix/store",
-        "--dir",
-        "/etc",
-        "--ro-bind-try",
-        "/etc/alternatives",
-        "/etc/alternatives",
-        // `/etc/hosts` and `/etc/nsswitch.conf` are kept: the unshared network
-        // namespace still carries a loopback interface, and glibc reads
-        // `nsswitch.conf` for `passwd`/`group` lookups that no resolver serves.
-        //
-        // `/etc/ssl` is kept on purpose, and is not dead weight to clean up.
-        // Building a TLS client reads the trust store even when nothing will be
-        // connected to: reqwest depends on `rustls-platform-verifier`, which
-        // loads the native store on Linux, so workspace tests that construct an
-        // HTTPS client would meet an empty root store without it. Binding it
-        // adds no transport and no IP route, so it grants no reach the profile
-        // did not already have — it only lets a client finish constructing.
-        // What this profile does and does not fence, including the non-IP
-        // transports that survive `--unshare-net`, is owned by
-        // `docs/spec/configuration-and-credentials.md`.
-        //
-        // `/etc/resolv.conf` is deliberately absent. Resolving a name needs the
-        // network that `--unshare-net` removes, so it is genuinely inert, and
-        // binding it would leave the profile reading as though egress were
-        // still expected to work.
-        "--ro-bind-try",
-        "/etc/hosts",
-        "/etc/hosts",
-        "--ro-bind-try",
-        "/etc/nsswitch.conf",
-        "/etc/nsswitch.conf",
-        "--ro-bind-try",
-        "/etc/ssl",
-        "/etc/ssl",
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect::<Vec<_>>();
+    let mut bwrap_arguments = ["--die-with-parent", "--new-session", "--unshare-user"]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+    if process_namespace == SandboxProcessNamespace::Private {
+        bwrap_arguments.push(OsString::from("--unshare-pid"));
+    }
+    bwrap_arguments.extend(
+        ["--unshare-ipc", "--unshare-uts", "--unshare-net"]
+            .into_iter()
+            .map(OsString::from),
+    );
+    match process_namespace {
+        SandboxProcessNamespace::Private => {
+            bwrap_arguments.extend(["--proc", "/proc"].into_iter().map(OsString::from))
+        }
+        SandboxProcessNamespace::Container => bwrap_arguments.extend(
+            ["--ro-bind", "/proc", "/proc"]
+                .into_iter()
+                .map(OsString::from),
+        ),
+    }
+    bwrap_arguments.extend(
+        [
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+            "--ro-bind-try",
+            "/usr",
+            "/usr",
+            "--ro-bind-try",
+            "/bin",
+            "/bin",
+            "--ro-bind-try",
+            "/lib",
+            "/lib",
+            "--ro-bind-try",
+            "/lib64",
+            "/lib64",
+            "--ro-bind-try",
+            "/nix/store",
+            "/nix/store",
+            "--dir",
+            "/etc",
+            "--ro-bind-try",
+            "/etc/alternatives",
+            "/etc/alternatives",
+            // `/etc/hosts` and `/etc/nsswitch.conf` are kept: the unshared network
+            // namespace still carries a loopback interface, and glibc reads
+            // `nsswitch.conf` for `passwd`/`group` lookups that no resolver serves.
+            //
+            // `/etc/ssl` is kept on purpose, and is not dead weight to clean up.
+            // Building a TLS client reads the trust store even when nothing will be
+            // connected to: reqwest depends on `rustls-platform-verifier`, which
+            // loads the native store on Linux, so workspace tests that construct an
+            // HTTPS client would meet an empty root store without it. Binding it
+            // adds no transport and no IP route, so it grants no reach the profile
+            // did not already have — it only lets a client finish constructing.
+            // What this profile does and does not fence, including the non-IP
+            // transports that survive `--unshare-net`, is owned by
+            // `docs/spec/configuration-and-credentials.md`.
+            //
+            // `/etc/resolv.conf` is deliberately absent. Resolving a name needs the
+            // network that `--unshare-net` removes, so it is genuinely inert, and
+            // binding it would leave the profile reading as though egress were
+            // still expected to work.
+            "--ro-bind-try",
+            "/etc/hosts",
+            "/etc/hosts",
+            "--ro-bind-try",
+            "/etc/nsswitch.conf",
+            "/etc/nsswitch.conf",
+            "--ro-bind-try",
+            "/etc/ssl",
+            "/etc/ssl",
+        ]
+        .into_iter()
+        .map(OsString::from),
+    );
     #[cfg(target_os = "linux")]
     bwrap_arguments.extend([
         OsString::from("--bind"),
@@ -4153,6 +4199,7 @@ mod tests {
 
         let request = bwrap_request(
             isolation_fixture_context(workspace_root),
+            SandboxProcessNamespace::Private,
             "cargo",
             &[String::from("check")],
             ".",
@@ -4175,6 +4222,7 @@ mod tests {
 
         let request = bwrap_request(
             isolation_fixture_context(workspace_root),
+            SandboxProcessNamespace::Private,
             "cargo",
             &[String::from("check")],
             ".",
@@ -4187,6 +4235,40 @@ mod tests {
                 .arguments
                 .contains(&OsString::from("/etc/resolv.conf"))
         );
+    }
+
+    /// Kubernetes gives each runner container its own PID namespace, while its
+    /// seccomp profile cannot permit a second procfs mount. This explicit mode
+    /// must preserve Bubblewrap's remaining namespace fences while reusing the
+    /// container's procfs read-only.
+    #[test]
+    fn container_process_namespace_reuses_procfs_and_keeps_other_unshares() {
+        let workspace_root = Path::new(TEST_SANDBOX_WORKSPACE_ROOT);
+        let expected_isolation_prefix = [
+            OsString::from("--die-with-parent"),
+            OsString::from("--new-session"),
+            OsString::from("--unshare-user"),
+            OsString::from("--unshare-ipc"),
+            OsString::from("--unshare-uts"),
+            OsString::from("--unshare-net"),
+            OsString::from("--ro-bind"),
+            OsString::from("/proc"),
+            OsString::from("/proc"),
+        ];
+
+        let request = bwrap_request(
+            isolation_fixture_context(workspace_root),
+            SandboxProcessNamespace::Container,
+            "cargo",
+            &[String::from("check")],
+            ".",
+            ISOLATION_FIXTURE_TIMEOUT,
+            EXEC_CAPTURE_BYTES,
+        );
+
+        assert!(request.arguments.starts_with(&expected_isolation_prefix));
+        assert!(!request.arguments.contains(&OsString::from("--unshare-pid")));
+        assert!(!request.arguments.contains(&OsString::from("--proc")));
     }
 
     #[cfg(target_os = "linux")]
