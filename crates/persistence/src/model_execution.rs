@@ -813,12 +813,16 @@ impl PostgresModelCallRepository {
                         .await?;
                         let tool_entries =
                             load_tool_conversation_entries(&mut transaction, &request).await?;
+                        let recorded_user_overrides =
+                            load_call_user_overrides(&mut transaction, session, current_call_id)
+                                .await?;
                         Ok((
                             false,
                             PrepareInitialModelCallOutcome::Ready {
                                 request: Box::new(request),
                                 credential_reference,
                                 dangerous_tool_auto_approval,
+                                recorded_user_overrides,
                                 system_prompt,
                                 tool_entries,
                             },
@@ -5808,6 +5812,7 @@ pub(crate) async fn insert_prepared_call(
     .bind(input_includes_cache_tokens)
     .execute(&mut *connection)
     .await?;
+    freeze_recorded_user_overrides(connection, prepared.session(), call.id()).await?;
     if let Some(policy) = credential_pool_policy {
         persist_call_pool_policy(connection, call.id(), policy).await?;
     }
@@ -5996,6 +6001,172 @@ async fn load_call_credential_reference(
     .await?
     .ok_or(ModelCallCorruption::Missing("prepared model call"))?;
     Ok(ModelCallCredentialReference::new(reference))
+}
+
+/// Freezes the session's recorded, still-effective user overrides for one newly
+/// checkpointed model call.
+///
+/// Two things retire a recorded override. The first is the consuming
+/// `user_override` decision that names it through its UNIQUE column — the
+/// durable one-shot boundary. The second is an approval of the identical
+/// command recorded by any other authority after the denial: the judge
+/// approving the re-proposal it previously denied, a user decision after
+/// escalation, or a policy approval. Retiring on the second matters because the
+/// first call after a denial can never carry that denial's override (it is
+/// checkpointed by the transaction that materializes the denied result), so its
+/// re-proposal is decided without the override; leaving the override standing
+/// would let a later call pre-approve a repeat of a side-effecting command the
+/// session has already let through once.
+///
+/// "After the denial" is a structural ordering, not a clock — none of these
+/// append-only tables carries one. Across turns it is `acceptance_position`,
+/// the per-session position of the input that opened each turn. Within the
+/// denial's own turn it is the attempt chain: each tool round continues into a
+/// fresh `turn_attempt` through `continued_from_attempt_id`, so walking that
+/// chain forward from the attempt that produced the denied proposal names the
+/// later proposals of the same turn. Both are needed — the re-proposal this
+/// override exists for is normally made in the denial's own turn, while a
+/// later turn's proposal is ordered only by acceptance.
+///
+/// That scoping is load-bearing rather than decoration. The same command is
+/// routinely approved and executed earlier in a session, long before a later
+/// proposal of it is denied; retiring on an approval anywhere in the session
+/// would retire most overrides at the instant they were recorded and leave the
+/// command with nothing to authorize.
+async fn freeze_recorded_user_overrides(
+    connection: &mut PgConnection,
+    session: SessionId,
+    call: ModelCallId,
+) -> Result<(), ModelCallRepositoryError> {
+    sqlx::query(
+        "WITH RECURSIVE effective AS (
+            SELECT recorded.denied_request_id,
+                   denied_turn.acceptance_position AS denied_turn_position,
+                   producing.turn_attempt_id AS denied_attempt_id,
+                   denied.tool_name, denied.arguments_kind, denied.arguments_text
+              FROM tool_approval_user_override AS recorded
+              JOIN tool_request AS denied
+                ON denied.request_id = recorded.denied_request_id
+              JOIN turn_lifecycle AS denied_turn
+                ON denied_turn.turn_id = denied.turn_id
+              JOIN model_call AS producing
+                ON producing.model_call_id = denied.producing_model_call_id
+             WHERE recorded.session_id = $1
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM tool_approval_decision AS consumed
+                    WHERE consumed.override_denied_request_id
+                          = recorded.denied_request_id
+               )
+         ),
+         -- The attempts the denial's own turn ran after the denied proposal's.
+         later_attempt AS (
+            SELECT effective.denied_request_id, successor.turn_attempt_id
+              FROM effective
+              JOIN turn_attempt AS successor
+                ON successor.continued_from_attempt_id
+                   = effective.denied_attempt_id
+             UNION
+            SELECT walked.denied_request_id, successor.turn_attempt_id
+              FROM later_attempt AS walked
+              JOIN turn_attempt AS successor
+                ON successor.continued_from_attempt_id = walked.turn_attempt_id
+         )
+         INSERT INTO model_call_user_override
+            (model_call_id, denied_request_id)
+         SELECT $2, effective.denied_request_id
+           FROM effective
+          WHERE NOT EXISTS (
+              SELECT 1
+                FROM tool_request AS matching
+                JOIN tool_approval_decision AS decision
+                  ON decision.request_id = matching.request_id
+                 AND decision.decision_kind = 'approve'
+                JOIN turn_lifecycle AS matching_turn
+                  ON matching_turn.turn_id = matching.turn_id
+                JOIN model_call AS proposing
+                  ON proposing.model_call_id = matching.producing_model_call_id
+               WHERE matching.session_id = $1
+                 AND matching.tool_name = effective.tool_name
+                 AND matching.arguments_kind = effective.arguments_kind
+                 AND matching.arguments_text = effective.arguments_text
+                 AND (
+                     matching_turn.acceptance_position
+                         > effective.denied_turn_position
+                     OR EXISTS (
+                         SELECT 1
+                           FROM later_attempt
+                          WHERE later_attempt.denied_request_id
+                                = effective.denied_request_id
+                            AND later_attempt.turn_attempt_id
+                                = proposing.turn_attempt_id
+                     )
+                 )
+          )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(call.into_uuid())
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+/// Reloads exactly the override inventory frozen when this call was
+/// checkpointed, irrespective of overrides recorded or consumed afterward.
+async fn load_call_user_overrides(
+    connection: &mut PgConnection,
+    session: SessionId,
+    call: ModelCallId,
+) -> Result<Box<[signalbox_domain::RecordedUserOverride]>, ModelCallRepositoryError> {
+    let rows = sqlx::query(
+        "SELECT recorded.command_id, recorded.denied_request_id, recorded.judge_model_call_id,
+                request.tool_name, request.arguments_kind, request.arguments_text
+           FROM model_call_user_override AS frozen
+           JOIN tool_approval_user_override AS recorded
+             ON recorded.denied_request_id = frozen.denied_request_id
+           JOIN tool_request AS request
+             ON request.request_id = recorded.denied_request_id
+          WHERE recorded.session_id = $1
+            AND frozen.model_call_id = $2
+          ORDER BY recorded.denied_request_id",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(call.into_uuid())
+    .fetch_all(&mut *connection)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            let command: Uuid = row.try_get("command_id")?;
+            let denied_request: Uuid = row.try_get("denied_request_id")?;
+            let judge_call: Uuid = row.try_get("judge_model_call_id")?;
+            let tool = signalbox_domain::ToolName::try_new(row.try_get("tool_name")?)
+                .map_err(|_| ModelCallCorruption::Inconsistent("recorded override tool name"))?;
+            let arguments_kind = match row.try_get::<String, _>("arguments_kind")?.as_str() {
+                "json" => signalbox_domain::ToolArgumentsKind::Json,
+                "undecodable" => signalbox_domain::ToolArgumentsKind::Undecodable,
+                _ => {
+                    return Err(ModelCallCorruption::Inconsistent(
+                        "recorded override arguments kind",
+                    )
+                    .into());
+                }
+            };
+            let arguments = signalbox_domain::NormalizedToolArguments::try_from_stored(
+                arguments_kind,
+                row.try_get("arguments_text")?,
+            )
+            .map_err(|_| ModelCallCorruption::Inconsistent("recorded override arguments"))?;
+            Ok(signalbox_domain::RecordedUserOverride::new(
+                durable_command_id_from_uuid(command)
+                    .map_err(|_| ModelCallCorruption::Inconsistent("recorded override command"))?,
+                session,
+                signalbox_domain::ToolRequestId::from_uuid(denied_request),
+                ModelCallId::from_uuid(judge_call),
+                tool,
+                arguments,
+            ))
+        })
+        .collect::<Result<Box<[_]>, ModelCallRepositoryError>>()
 }
 
 /// Loads the optional session system prompt from the exact immutable defaults
@@ -6712,18 +6883,44 @@ async fn persist_tool_round(
     for approval in round.automatic_approvals() {
         let (decision_kind, denial_reason) = encode_tool_approval(approval.decision());
         let source = encode_tool_decision_source(approval.source())?;
+        let override_denied_request = match (approval.source(), approval.decider()) {
+            (
+                ToolDecisionSource::UserOverride,
+                Some(signalbox_domain::ToolApprovalDecider::UserOverride {
+                    denied_request, ..
+                }),
+            ) => Some(tool_request_id_to_uuid(*denied_request)),
+            (ToolDecisionSource::UserOverride, _) => {
+                return Err(
+                    ModelCallCorruption::Inconsistent("user-override decision provenance").into(),
+                );
+            }
+            _ => None,
+        };
         sqlx::query(
             "INSERT INTO tool_approval_decision
                 (request_id, decision_kind, decision_source, denial_reason,
-                 user_command_id)
-             VALUES ($1, $2, $3, $4, NULL)",
+                 user_command_id, override_denied_request_id)
+             VALUES ($1, $2, $3, $4, NULL, $5)",
         )
         .bind(tool_request_id_to_uuid(approval.request()))
         .bind(decision_kind)
         .bind(source)
         .bind(denial_reason)
+        .bind(override_denied_request)
         .execute(&mut *connection)
         .await?;
+        if approval.source() == ToolDecisionSource::UserOverride {
+            outbox::append(
+                connection,
+                OutboxEvent::ToolApprovalDecided {
+                    session: round.session(),
+                    turn: round.turn(),
+                    request: approval.request(),
+                },
+            )
+            .await?;
+        }
     }
     insert_snapshot(connection, round.yielded_snapshot()).await?;
 
@@ -7213,6 +7410,7 @@ fn encode_tool_decision_source(
         ToolDecisionSource::UserCommand => ToolApprovalDecisionSourceStorageKind::UserCommand,
         ToolDecisionSource::PolicyAuto => ToolApprovalDecisionSourceStorageKind::PolicyAuto,
         ToolDecisionSource::SessionBlanket => ToolApprovalDecisionSourceStorageKind::SessionBlanket,
+        ToolDecisionSource::UserOverride => ToolApprovalDecisionSourceStorageKind::UserOverride,
         ToolDecisionSource::SessionOverride | ToolDecisionSource::Delegate => {
             return Err(ModelCallRepositoryError::InvalidTransition(
                 "unimplemented tool-decision source cannot be stored",
