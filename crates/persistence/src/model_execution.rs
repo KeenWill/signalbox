@@ -614,8 +614,12 @@ impl PostgresModelCallRepository {
         target: ResolvedProviderTarget,
         prospective_frontier: ContextFrontierId,
     ) -> Result<Option<ReportedModelCallUsage>, ModelCallRepositoryError> {
+        // An ordinary successor normally extends the reported frontier through
+        // its immutable header chain. Stop at that header and inspect only the
+        // appended deltas; compaction and independently assembled frontiers
+        // retain the exact complete-membership comparison below.
         let row = sqlx::query(
-            "WITH latest_compaction AS MATERIALIZED (
+            "WITH RECURSIVE latest_compaction AS MATERIALIZED (
                 SELECT compaction.context_compaction_id,
                        compaction.source_frontier_id,
                        compaction.summary_entry_id,
@@ -711,29 +715,72 @@ impl PostgresModelCallRepository {
                   ) AS candidate
                  ORDER BY model_call_id DESC
                  LIMIT 1
-             ), prospective_member AS MATERIALIZED (
-                SELECT member.source_session_id, member.semantic_entry_id
-                  FROM context_frontier_member AS member
-                 WHERE member.owning_session_id = $1
-                   AND member.context_frontier_id = $3
-             ), reported_member AS MATERIALIZED (
-                SELECT member.source_session_id, member.semantic_entry_id
+             ), prospective_chain (
+                    context_frontier_id,
+                    prefix_context_frontier_id
+                ) AS MATERIALIZED (
+                SELECT frontier.context_frontier_id,
+                       frontier.prefix_context_frontier_id
+                  FROM context_frontier AS frontier
+                 WHERE frontier.owning_session_id = $1
+                   AND frontier.context_frontier_id = $3
+                UNION
+                SELECT prefix.context_frontier_id,
+                       prefix.prefix_context_frontier_id
+                  FROM prospective_chain AS chain
+                  JOIN latest_call ON true
+                  JOIN context_frontier AS prefix
+                    ON prefix.owning_session_id = $1
+                   AND prefix.context_frontier_id =
+                       chain.prefix_context_frontier_id
+                 WHERE chain.context_frontier_id <>
+                       latest_call.context_frontier_id
+             ), ordinary_header_prefix AS MATERIALIZED (
+                SELECT latest_call.call_kind = 'ordinary'
+                       AND EXISTS (
+                           SELECT 1
+                             FROM prospective_chain AS chain
+                            WHERE chain.context_frontier_id =
+                                  latest_call.context_frontier_id
+                       ) AS preserved
                   FROM latest_call
-                  JOIN context_frontier_member AS member
-                    ON member.owning_session_id = $1
-                   AND member.context_frontier_id = latest_call.context_frontier_id
-                   AND (
-                       latest_call.call_kind = 'ordinary'
-                       OR member.member_position <= latest_call.reported_through_position
-                   )
              ), unreported_member AS MATERIALIZED (
-                SELECT prospective.source_session_id,
-                       prospective.semantic_entry_id
-                  FROM prospective_member AS prospective
-                EXCEPT
-                SELECT reported.source_session_id,
-                       reported.semantic_entry_id
-                  FROM reported_member AS reported
+                SELECT delta.source_session_id, delta.semantic_entry_id
+                  FROM latest_call
+                  JOIN ordinary_header_prefix AS header ON header.preserved
+                  JOIN prospective_chain AS chain
+                    ON chain.context_frontier_id <>
+                       latest_call.context_frontier_id
+                  JOIN context_frontier_delta AS delta
+                    ON delta.owning_session_id = $1
+                   AND delta.context_frontier_id = chain.context_frontier_id
+                UNION ALL
+                SELECT fallback.source_session_id,
+                       fallback.semantic_entry_id
+                  FROM ordinary_header_prefix AS header
+                  CROSS JOIN LATERAL (
+                      SELECT prospective.source_session_id,
+                             prospective.semantic_entry_id
+                        FROM context_frontier_member AS prospective
+                       WHERE NOT header.preserved
+                         AND prospective.owning_session_id = $1
+                         AND prospective.context_frontier_id = $3
+                      EXCEPT
+                      SELECT reported.source_session_id,
+                             reported.semantic_entry_id
+                        FROM latest_call
+                        JOIN context_frontier_member AS reported
+                          ON reported.owning_session_id = $1
+                         AND reported.context_frontier_id =
+                             latest_call.context_frontier_id
+                         AND (
+                             latest_call.call_kind = 'ordinary'
+                             OR reported.member_position <=
+                                latest_call.reported_through_position
+                         )
+                       WHERE NOT header.preserved
+                  ) AS fallback
+                 WHERE NOT header.preserved
              )
              SELECT usage_input_includes_cache_tokens, output_is_retained,
                     usage_input_tokens, usage_output_tokens,
