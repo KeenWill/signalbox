@@ -519,6 +519,27 @@ async fn live_pull_request_session(
                  WHERE event.session_id = target.session_id
                  ORDER BY event.event_ordinal DESC LIMIT 1
             ), false)
+            AND (
+                target.repo_watch_dispatch_id IS NULL
+                OR NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_dispatch_release AS released
+                     WHERE released.dispatch_id = target.repo_watch_dispatch_id
+                )
+                OR EXISTS (
+                    SELECT 1
+                      FROM goal_event AS event
+                      JOIN durable_command AS command
+                        ON command.command_id = event.user_command_id
+                      JOIN repo_watch_dispatch_release AS released
+                        ON released.dispatch_id = target.repo_watch_dispatch_id
+                     WHERE event.session_id = target.session_id
+                       AND event.event_kind IN ('resumed', 'superseded')
+                       AND command.claimed_at >= released.released_at
+                     ORDER BY event.event_ordinal DESC
+                     LIMIT 1
+                )
+            )
           ORDER BY target.recorded_at DESC, target.session_id DESC
           LIMIT 1",
     )
