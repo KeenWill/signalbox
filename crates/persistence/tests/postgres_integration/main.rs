@@ -47,8 +47,8 @@ use signalbox_application::{
     ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
     ModelCallObservationCommitOutcome, ModelConversationMessage, OperatorFailureClass,
     PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
-    ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
-    RetainedModelCallObservationStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
+    ReplaceSessionDefaultsService, RetainedModelCallObservationStatus,
+    RetainedPreparedFailureStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
     SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
     StartupScanSessionOutcome, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
@@ -4739,9 +4739,9 @@ async fn assert_delegated_capability_reread_rejects_damage(
     assert_eq!(
         fixture
             .repository
-            .reread_capability_failure(fixture.child, fixture.call)
+            .reread_prepared_failure(fixture.child, fixture.call)
             .await?,
-        RetainedCapabilityFailureStatus::AlreadyCommitted
+        RetainedPreparedFailureStatus::AlreadyCommitted
     );
     match damage {
         DelegatedCapabilityResultDamage::InitialTask => {
@@ -4842,13 +4842,13 @@ async fn assert_delegated_capability_reread_rejects_damage(
     }
     let error = fixture
         .repository
-        .reread_capability_failure(fixture.child, fixture.call)
+        .reread_prepared_failure(fixture.child, fixture.call)
         .await
         .expect_err("damaged delegated delivery cannot authenticate a capability failure");
     assert!(matches!(
         error,
         ModelCallRepositoryError::InvalidTransition(
-            "retained capability failure durable closure is incomplete"
+            "retained prepared failure durable closure is incomplete"
         )
     ));
 

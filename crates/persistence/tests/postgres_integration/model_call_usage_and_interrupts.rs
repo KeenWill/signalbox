@@ -324,7 +324,7 @@ async fn inv014_model_call_credential_reference_is_immutable() -> Result<(), Box
 /// attempt and call provenance, before any resubmission.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_committed()
+async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_committed()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7000;
@@ -366,9 +366,9 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
 
     assert_eq!(
         repository
-            .reread_capability_failure(fixture.session, fixture.call)
+            .reread_prepared_failure(fixture.session, fixture.call)
             .await?,
-        RetainedCapabilityFailureStatus::Pending
+        RetainedPreparedFailureStatus::Pending
     );
     let failed = repository
         .fail_prepared_call(
@@ -387,9 +387,9 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
     );
     assert_eq!(
         repository
-            .reread_capability_failure(fixture.session, fixture.call)
+            .reread_prepared_failure(fixture.session, fixture.call)
             .await?,
-        RetainedCapabilityFailureStatus::AlreadyCommitted
+        RetainedPreparedFailureStatus::AlreadyCommitted
     );
     let terminal_execution: (Uuid, Uuid) = sqlx::query_as(
         "SELECT terminal_attempt_id, terminal_model_call_id
@@ -439,10 +439,10 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
         .await?;
     assert!(matches!(
         repository
-            .reread_capability_failure(fixture.session, fixture.call)
+            .reread_prepared_failure(fixture.session, fixture.call)
             .await,
         Err(ModelCallRepositoryError::InvalidTransition(
-            "retained capability failure durable closure is incomplete"
+            "retained prepared failure durable closure is incomplete"
         ))
     ));
 
@@ -465,10 +465,10 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
         .await?;
     assert!(matches!(
         issued_repository
-            .reread_capability_failure(issued.session, issued.call)
+            .reread_prepared_failure(issued.session, issued.call)
             .await,
         Err(ModelCallRepositoryError::InvalidTransition(
-            "retained capability failure durable closure is incomplete"
+            "retained prepared failure durable closure is incomplete"
         ))
     ));
     assert_eq!(
@@ -502,7 +502,7 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
     Ok(())
 }
 
-/// INV-006 / INV-014 / INV-037: retained capability failure and ambiguous
+/// INV-006 / INV-014 / INV-037: retained prepared failure and ambiguous
 /// authorization rereads accept an exact interrupt-caused cancellation of the
 /// still-Prepared call as authoritative no-work, and reject an incomplete
 /// cancellation closure.
@@ -550,7 +550,7 @@ async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
             input_with_delivery(
                 seed + 19,
                 seed + 1,
-                "cancel retained capability failure",
+                "cancel retained prepared failure",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: fixture.turn,
                     descendant_scope: DescendantTerminationScope::ParentAlone,
@@ -563,9 +563,9 @@ async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
         .await?;
     assert_eq!(
         repository
-            .reread_capability_failure(fixture.session, fixture.call)
+            .reread_prepared_failure(fixture.session, fixture.call)
             .await?,
-        RetainedCapabilityFailureStatus::Cancelled
+        RetainedPreparedFailureStatus::Cancelled
     );
     assert_eq!(
         repository
@@ -586,10 +586,10 @@ async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
         .await?;
     assert!(matches!(
         repository
-            .reread_capability_failure(fixture.session, fixture.call)
+            .reread_prepared_failure(fixture.session, fixture.call)
             .await,
         Err(ModelCallRepositoryError::InvalidTransition(
-            "retained capability failure cancellation closure is incomplete"
+            "retained prepared failure cancellation closure is incomplete"
         ))
     ));
     assert!(matches!(

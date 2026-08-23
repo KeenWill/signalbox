@@ -760,7 +760,7 @@ continuation transaction still projects all results and creates its fresh
 provider capability preparation or send. At that enforcement site it emits a
 warning carrying the limit and observed round count, and the guarded pre-send
 closure carries `ToolRoundLimitReached`. The terminal event consequently uses
-`tool_round_limit_reached`, distinct from `capability_known_failure` (INV-061).
+`tool_round_limit_reached`, distinct from `capability_known_failure` (INV-071).
 These durable-content bounds avoid wall-clock policy and ensure one
 model-controlled response or chain cannot retain the progressing slot
 indefinitely.
