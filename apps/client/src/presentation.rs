@@ -1848,6 +1848,16 @@ impl<'a> Output<'a> {
                          decider=delegate model_selection={model_selection_id} \
                          call={model_call_id}"
                     )?,
+                    ToolApprovalEventDecider::UserOverride {
+                        command_id,
+                        overridden_tool_request_id,
+                    } => writeln!(
+                        self.stdout,
+                        "event={cursor} session={session_id} tool_approval_decided \
+                         turn={turn_id} request={tool_request_id} decision={decision} \
+                         decider=user_override command={command_id} \
+                         overridden_request={overridden_tool_request_id}"
+                    )?,
                 }
                 if let Some(reason) = denial_reason {
                     self.text_field("denial_reason", reason)?;
@@ -2456,6 +2466,15 @@ impl<'a> Output<'a> {
                             "tool_approval request={tool_request_id} decision={decision} \
                              decider=delegate model_selection={model_selection_id} \
                              call={model_call_id}"
+                        )?,
+                        ToolApprovalEventDecider::UserOverride {
+                            command_id,
+                            overridden_tool_request_id,
+                        } => writeln!(
+                            self.stdout,
+                            "tool_approval request={tool_request_id} decision={decision} \
+                             decider=user_override command={command_id} \
+                             overridden_request={overridden_tool_request_id}"
                         )?,
                     }
                     if let Some(reason) = reason {

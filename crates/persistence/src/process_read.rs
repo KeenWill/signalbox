@@ -1919,7 +1919,10 @@ impl ProcessReadRepository {
                 transcript_approval.user_command_id AS transcript_user_command_id,
                 transcript_approval.delegate_model_selection_id AS transcript_delegate_model_selection_id,
                 transcript_approval.delegate_model_call_id AS transcript_delegate_model_call_id,
-                transcript_approval.rationale AS transcript_decision_rationale
+                transcript_approval.rationale AS transcript_decision_rationale,
+                transcript_approval.override_denied_request_id
+                    AS transcript_override_denied_request_id,
+                transcript_override.command_id AS transcript_override_command_id
                FROM UNNEST($1::numeric[], $2::uuid[], $3::uuid[])
                     WITH ORDINALITY AS selected(
                         member_position,
@@ -1948,6 +1951,9 @@ impl ProcessReadRepository {
                 )
                LEFT JOIN tool_approval_decision AS transcript_approval
                  ON transcript_approval.request_id = transcript_request.request_id
+               LEFT JOIN tool_approval_user_override AS transcript_override
+                 ON transcript_override.denied_request_id =
+                    transcript_approval.override_denied_request_id
                LEFT JOIN imported_transcript_entry AS imported
                  ON imported.imported_conversation_id =
                         entry.imported_conversation_id
@@ -4312,7 +4318,10 @@ async fn open_transcript_entry_cursor(
             transcript_approval.user_command_id AS transcript_user_command_id,
             transcript_approval.delegate_model_selection_id AS transcript_delegate_model_selection_id,
             transcript_approval.delegate_model_call_id AS transcript_delegate_model_call_id,
-            transcript_approval.rationale AS transcript_decision_rationale
+            transcript_approval.rationale AS transcript_decision_rationale,
+            transcript_approval.override_denied_request_id
+                AS transcript_override_denied_request_id,
+            transcript_override.command_id AS transcript_override_command_id
            FROM (
                 SELECT
                     resolved.*,
@@ -4340,6 +4349,9 @@ async fn open_transcript_entry_cursor(
             )
            LEFT JOIN tool_approval_decision AS transcript_approval
              ON transcript_approval.request_id = transcript_request.request_id
+           LEFT JOIN tool_approval_user_override AS transcript_override
+             ON transcript_override.denied_request_id =
+                transcript_approval.override_denied_request_id
            LEFT JOIN imported_transcript_entry AS imported
              ON imported.imported_conversation_id =
                     entry.imported_conversation_id
@@ -5190,6 +5202,8 @@ fn decode_process_tool_approval(
     let delegate_model: Option<Uuid> = row.try_get("transcript_delegate_model_selection_id")?;
     let delegate_call: Option<Uuid> = row.try_get("transcript_delegate_model_call_id")?;
     let rationale: Option<String> = row.try_get("transcript_decision_rationale")?;
+    let override_denied: Option<Uuid> = row.try_get("transcript_override_denied_request_id")?;
+    let override_command: Option<Uuid> = row.try_get("transcript_override_command_id")?;
     let Some(source) = source else {
         if decision_kind.is_some()
             || denial_reason.is_some()
@@ -5197,6 +5211,8 @@ fn decode_process_tool_approval(
             || delegate_model.is_some()
             || delegate_call.is_some()
             || rationale.is_some()
+            || override_denied.is_some()
+            || override_command.is_some()
         {
             return Err(ProcessReadCorruption::Inconsistent(
                 "tool approval projection without source",
@@ -5223,6 +5239,11 @@ fn decode_process_tool_approval(
             return Err(ProcessReadCorruption::Inconsistent("tool approval decision kind").into());
         }
     };
+    if source_kind != ToolApprovalDecisionSourceStorageKind::UserOverride
+        && (override_denied.is_some() || override_command.is_some())
+    {
+        return Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into());
+    }
     match (
         source_kind,
         user_command,
@@ -5275,11 +5296,32 @@ fn decode_process_tool_approval(
                 rationale: Some(rationale),
             }))
         }
+        (ToolApprovalDecisionSourceStorageKind::UserOverride, None, None, None, None)
+            if decision == ToolApprovalDecision::Approve =>
+        {
+            match (override_denied, override_command) {
+                (Some(denied_request), Some(command)) => Ok(Some(ProcessToolApproval {
+                    decision,
+                    decider: ToolApprovalDecider::UserOverride {
+                        command: durable_command_id_from_uuid(command).map_err(|_| {
+                            ProcessReadCorruption::Inconsistent("tool approval override command")
+                        })?,
+                        denied_request: ToolRequestId::from_uuid(denied_request),
+                    },
+                    rationale: None,
+                })),
+                (None, _) | (_, None) => Err(ProcessReadCorruption::Inconsistent(
+                    "tool approval provenance shape",
+                )
+                .into()),
+            }
+        }
         (
             ToolApprovalDecisionSourceStorageKind::PolicyAuto
             | ToolApprovalDecisionSourceStorageKind::SessionBlanket
             | ToolApprovalDecisionSourceStorageKind::UserCommand
-            | ToolApprovalDecisionSourceStorageKind::Delegate,
+            | ToolApprovalDecisionSourceStorageKind::Delegate
+            | ToolApprovalDecisionSourceStorageKind::UserOverride,
             ..,
         ) => Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into()),
     }

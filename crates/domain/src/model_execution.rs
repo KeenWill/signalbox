@@ -4188,7 +4188,8 @@ fn initial_tool_approval_matches_posture(
             | InitialToolApproval::SessionBlanket
             | InitialToolApproval::PolicyAuto
             | InitialToolApproval::Human
-            | InitialToolApproval::Delegated,
+            | InitialToolApproval::Delegated
+            | InitialToolApproval::UserOverride { .. },
         )
         | (
             DangerousToolAutoApproval::Disabled,
@@ -4196,7 +4197,8 @@ fn initial_tool_approval_matches_posture(
             | InitialToolApproval::AlwaysConfirm
             | InitialToolApproval::PolicyAuto
             | InitialToolApproval::Human
-            | InitialToolApproval::Delegated,
+            | InitialToolApproval::Delegated
+            | InitialToolApproval::UserOverride { .. },
         ) => true,
     }
 }
@@ -5074,9 +5076,9 @@ mod tests {
         ToolExecutionErrorKind, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
         TranscriptAncestry,
         test_support::{
-            accepted_input_id, context_frontier_id, direct, model_call_id, provider_model_identity,
-            semantic_transcript_entry_id, session_id, tool_attempt_id, tool_request_id,
-            turn_attempt_id, turn_id,
+            accepted_input_id, command_id, context_frontier_id, direct, model_call_id,
+            provider_model_identity, semantic_transcript_entry_id, session_id, tool_attempt_id,
+            tool_request_id, turn_attempt_id, turn_id,
         },
     };
 
@@ -5123,6 +5125,32 @@ mod tests {
         assert!(initial_tool_approval_matches_posture(
             DangerousToolAutoApproval::ApproveAll,
             InitialToolApproval::Delegated,
+        ));
+    }
+
+    /// A consumed user override is admitted wherever its `Delegated` base
+    /// selection is: the override substitutes for the judge, not for the
+    /// blanket, so neither frozen blanket posture contradicts it.
+    #[test]
+    fn user_override_approval_is_admitted_when_blanket_posture_is_disabled() {
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::UserOverride {
+                command: command_id(1),
+                denied_request: tool_request_id(2),
+            },
+        ));
+    }
+
+    /// See [`user_override_approval_is_admitted_when_blanket_posture_is_disabled`].
+    #[test]
+    fn user_override_approval_is_admitted_under_dangerous_blanket_posture() {
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::UserOverride {
+                command: command_id(1),
+                denied_request: tool_request_id(2),
+            },
         ));
     }
 
