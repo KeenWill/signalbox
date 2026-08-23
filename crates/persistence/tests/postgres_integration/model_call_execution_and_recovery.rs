@@ -1441,7 +1441,7 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
         (
             "prepared".into(),
             None,
-            "current".into(),
+            "prepared".into(),
             None,
             "active".into(),
             prepared.attempt.into_uuid(),
