@@ -28,6 +28,9 @@ BEGIN
     CREATE TEMPORARY TABLE imported_reset_session (
         session_id uuid PRIMARY KEY
     ) ON COMMIT DROP;
+    CREATE TEMPORARY TABLE imported_reset_review_attempt (
+        attempt_id uuid PRIMARY KEY
+    ) ON COMMIT DROP;
 
     -- Capture every session in the imported-rooted delegation graph before
     -- temporary cascades remove the relationship rows used to discover it.
@@ -53,6 +56,7 @@ BEGIN
           FROM unnest(ARRAY[
               'session'::regclass::oid,
               'durable_command'::regclass::oid,
+              'review_orchestration_attempt'::regclass::oid,
               'imported_conversation'::regclass::oid,
               'imported_raw_source_record'::regclass::oid
           ]) AS root(relation_oid)
@@ -181,6 +185,82 @@ BEGIN
                SELECT session_id FROM imported_reset_session
            )
     ON CONFLICT DO NOTHING;
+
+    -- Finding-event receipts name only the affected finding, not its pass.
+    -- Follow the finding back to its imported-rooted producing pass before the
+    -- review graph disappears.
+    INSERT INTO imported_reset_command (command_id)
+    SELECT command.command_id
+      FROM review_workflow_command AS command
+      JOIN review_finding AS finding
+        ON finding.finding_id = command.result_finding_id
+      JOIN review_pass AS pass
+        ON pass.pass_id = finding.producing_pass_id
+     WHERE pass.session_id IN (
+               SELECT session_id FROM imported_reset_session
+           )
+    ON CONFLICT DO NOTHING;
+
+    -- An orchestration attempt is an aggregate root above its pass- and
+    -- finding-owned stage rows. Capture every attempt touched by the imported
+    -- review graph, then retire the complete aggregate and its command claims.
+    INSERT INTO imported_reset_review_attempt (attempt_id)
+    WITH affected_pass AS (
+        SELECT pass_id
+          FROM review_pass
+         WHERE session_id IN (
+                   SELECT session_id FROM imported_reset_session
+               )
+    ),
+    affected_finding AS (
+        SELECT finding_id
+          FROM review_finding
+         WHERE producing_pass_id IN (SELECT pass_id FROM affected_pass)
+    )
+    SELECT attempt_id FROM review_orchestration_import
+     WHERE pass_id IN (SELECT pass_id FROM affected_pass)
+    UNION
+    SELECT attempt_id FROM review_orchestration_concern_claim
+     WHERE pass_id IN (SELECT pass_id FROM affected_pass)
+    UNION
+    SELECT attempt_id FROM review_orchestration_concern_finding
+     WHERE finding_id IN (SELECT finding_id FROM affected_finding)
+    UNION
+    SELECT attempt_id FROM review_orchestration_judgment_plan
+     WHERE analysis_pass_id IN (SELECT pass_id FROM affected_pass)
+    UNION
+    SELECT attempt_id FROM review_orchestration_judgment_member
+     WHERE finding_pass_id IN (SELECT pass_id FROM affected_pass)
+        OR referenced_pass_id IN (SELECT pass_id FROM affected_pass)
+        OR finding_id IN (SELECT finding_id FROM affected_finding)
+        OR referenced_finding_id IN (SELECT finding_id FROM affected_finding)
+    UNION
+    SELECT attempt_id FROM review_orchestration_repair_inventory
+     WHERE finding_pass_id IN (SELECT pass_id FROM affected_pass)
+        OR finding_id IN (SELECT finding_id FROM affected_finding)
+    UNION
+    SELECT attempt_id FROM review_orchestration_repair_outcome
+     WHERE finding_id IN (SELECT finding_id FROM affected_finding)
+    UNION
+    SELECT attempt_id FROM review_orchestration_publication_inventory
+     WHERE finding_pass_id IN (SELECT pass_id FROM affected_pass)
+        OR finding_id IN (SELECT finding_id FROM affected_finding)
+    UNION
+    SELECT attempt_id FROM review_orchestration_publication_outcome
+     WHERE finding_id IN (SELECT finding_id FROM affected_finding);
+
+    INSERT INTO imported_reset_command (command_id)
+    SELECT command_id
+      FROM review_orchestration_command
+     WHERE attempt_id IN (
+               SELECT attempt_id FROM imported_reset_review_attempt
+           )
+    ON CONFLICT DO NOTHING;
+
+    DELETE FROM review_orchestration_attempt
+     WHERE attempt_id IN (
+               SELECT attempt_id FROM imported_reset_review_attempt
+           );
 
     DELETE FROM session
      WHERE session_id IN (SELECT session_id FROM imported_reset_session);
