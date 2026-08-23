@@ -255,12 +255,7 @@ export function SearchSurface({
         </p>
       )}
       {routeValidationIsVisible && (
-        <p
-          className="search-notice"
-          ref={routeValidationRef}
-          role="alert"
-          tabIndex={-1}
-        >
+        <p className="search-notice" ref={routeValidationRef} role="alert" tabIndex={-1}>
           Search parameters are malformed or outside the contract bounds. Search text uses{' '}
           {queryBytes} of {queryLimit} allowed UTF-8 bytes.
         </p>

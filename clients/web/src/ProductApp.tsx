@@ -393,7 +393,10 @@ export function ProductApp({
   }
   const paletteReturnTarget = () => {
     const active = document.activeElement
-    return active instanceof HTMLElement && active.isConnected && active !== document.body
+    return active instanceof HTMLElement &&
+      active.isConnected &&
+      active !== document.body &&
+      active !== document.documentElement
       ? active
       : primaryRef.current
   }

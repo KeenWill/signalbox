@@ -290,6 +290,32 @@ test('does not write malformed search drafts into browser history', async ({ pag
   expect(searchRequests).toBe(0)
 })
 
+test('bounds search drafts while they are being edited', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.goto('/search')
+
+  const search = page.getByRole('textbox', { name: 'Search text' })
+  const session = page.getByRole('textbox', { name: /Exact session/ })
+  await search.fill('é'.repeat(bootstrapFixture.limits.max_search_query_bytes))
+  await session.fill('x'.repeat(1000))
+
+  await expect(search).toHaveValue('é'.repeat(bootstrapFixture.limits.max_search_query_bytes / 2))
+  await expect(session).toHaveValue('x'.repeat(45))
+})
+
+test('restores focus to validation after malformed browser history', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.goto('/search?q=release')
+  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+
+  await page.evaluate(() => {
+    history.pushState({}, '', '/search?q=release&afterAddress=750')
+    dispatchEvent(new PopStateEvent('popstate'))
+  })
+
+  await expect(page.getByRole('alert')).toBeFocused()
+})
+
 test('does not request NUL-bearing search text', async ({ page }) => {
   let searchRequests = 0
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))

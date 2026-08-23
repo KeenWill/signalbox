@@ -140,6 +140,29 @@ test('restores focus after closing the command palette', async ({ page }) => {
   await expect(trigger).toBeFocused()
 })
 
+test('returns a hotkey-opened palette to its invoking control', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const sessions = page.getByRole('link', { name: /Sessions/ })
+  await sessions.focus()
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await page.keyboard.press('Escape')
+
+  await expect(sessions).toBeFocused()
+})
+
+test('renders a truthful search bootstrap failure', async ({ page }) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ status: 503 }))
+  await page.goto('/search')
+
+  await expect(
+    page.getByRole('heading', { name: 'Search availability could not be checked' }),
+  ).toBeVisible()
+  await expect(page.getByText('Checking whether bounded search is available…')).toHaveCount(0)
+})
+
 test('does not offer the palette opener inside the open palette', async ({ page }) => {
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
