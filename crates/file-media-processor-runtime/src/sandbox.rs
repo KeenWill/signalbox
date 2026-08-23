@@ -379,9 +379,19 @@ impl SandboxedFileMediaProcessor {
             running.terminate().await;
         }
         let diagnostics = finish_diagnostics(&mut stderr_task).await;
+        if outcome.is_err()
+            && std::env::var_os("CI").is_some()
+            && let Ok(diagnostics) = &diagnostics
+            && !diagnostics.is_empty()
+        {
+            eprintln!(
+                "file-media sandbox invocation stderr: {}",
+                String::from_utf8_lossy(diagnostics)
+            );
+        }
         let outcome = admit_completed(outcome, cancellation);
         match (outcome, diagnostics) {
-            (Ok(output), Ok(())) => Ok(output),
+            (Ok(output), Ok(_)) => Ok(output),
             (Err(error), _) => Err(error),
             (Ok(_), Err(())) => Err(ProcessorFailure::Protocol.into()),
         }
@@ -985,9 +995,9 @@ async fn read_and_discard_diagnostics(
 
 async fn finish_diagnostics(
     task: &mut JoinHandle<Result<Vec<u8>, std::io::Error>>,
-) -> Result<(), ()> {
+) -> Result<Vec<u8>, ()> {
     match tokio::time::timeout(CLEANUP_TIMEOUT, &mut *task).await {
-        Ok(Ok(Ok(_))) => Ok(()),
+        Ok(Ok(Ok(diagnostics))) => Ok(diagnostics),
         Ok(Ok(Err(_))) | Ok(Err(_)) => Err(()),
         Err(_) => {
             task.abort();
