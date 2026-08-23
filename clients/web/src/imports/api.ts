@@ -173,6 +173,7 @@ const correlateEntryWindow = (
   const positionsCorrelate = window.items.every(
     (entry, index) =>
       entry.frontier.imported_conversation_id === importedConversationId &&
+      isCanonicalUuid(entry.frontier.imported_entry_id) &&
       entry.frontier.position === window.first_position + index &&
       (entry.content_kind === 'text') === (entry.text !== undefined && entry.text !== null),
   )

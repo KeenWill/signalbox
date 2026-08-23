@@ -149,6 +149,7 @@ export function ImportsWorkspace({
         signal,
         descriptorQuery.data?.timeline.latest.position,
       ),
+    gcTime: 0,
     enabled:
       selectedImport !== null &&
       ((windowRequest.anchor ?? 'first') !== 'latest' || descriptorQuery.data !== undefined),

@@ -451,6 +451,46 @@ describe('HttpImportApi correlation', () => {
     ).rejects.toBeInstanceOf(ImportWindowCorrelationError)
   })
 
+  it('rejects a malformed imported-entry identity in a correlated window', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              anchor_position: 1,
+              first_position: 1,
+              last_position: 1,
+              has_before: false,
+              has_after: false,
+              items: [
+                {
+                  frontier: {
+                    imported_conversation_id: firstId,
+                    imported_entry_id: 'not-a-uuid',
+                    position: 1,
+                  },
+                  raw_record_position: 1,
+                  record_entry_position: 1,
+                  source_speaker: 'not_attested',
+                  content_kind: 'message_content_absent',
+                  text: null,
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).entries(firstId, {
+        anchor: 'first',
+        before: 0,
+        after: 0,
+      }),
+    ).rejects.toBeInstanceOf(ImportWindowCorrelationError)
+  })
+
   it('rejects a catalog page larger than the requested limit', async () => {
     vi.stubGlobal(
       'fetch',

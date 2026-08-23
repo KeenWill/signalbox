@@ -22,7 +22,7 @@ CREATE TABLE imported_conversation_size_totals (
             AND normalized_source_record_bytes BETWEEN 0 AND 18446744073709551615
             AND normalized_entry_bytes BETWEEN 0 AND 18446744073709551615
         ),
-    CONSTRAINT imported_conversation_size_totals_owner_fk
+    CONSTRAINT imported_conversation_size_totals_import_fk
         FOREIGN KEY (imported_conversation_id)
         REFERENCES imported_conversation (imported_conversation_id)
         ON UPDATE RESTRICT
@@ -57,6 +57,11 @@ CREATE TRIGGER imported_conversation_size_totals_is_append_only
 BEFORE UPDATE OR DELETE ON imported_conversation_size_totals
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER imported_conversation_size_totals_cannot_be_truncated
+BEFORE TRUNCATE ON imported_conversation_size_totals
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_imported_table_truncate();
 
 -- Imported entries are immutable. Validate their complete encoding once when
 -- this migration backfills existing rows and whenever a new row is inserted,
