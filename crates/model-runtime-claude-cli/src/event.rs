@@ -527,7 +527,8 @@ impl<C: Clone> EventDecoder<C> {
                         });
                     }
                     ToolArgumentRedaction::Suppressed => {
-                        self.content.push(AssistantPart::SuppressedToolCall);
+                        self.content
+                            .push(AssistantPart::SuppressedToolCall(ToolName::new(name)));
                     }
                 }
             }
@@ -887,7 +888,9 @@ impl<C: Clone> EventDecoder<C> {
                     call.arguments_json = redact_json(&call.arguments_json);
                     Some(AssistantPart::ToolCall(call))
                 }
-                AssistantPart::SuppressedToolCall => Some(AssistantPart::SuppressedToolCall),
+                AssistantPart::SuppressedToolCall(name) => {
+                    Some(AssistantPart::SuppressedToolCall(name))
+                }
             })
             .collect()
     }

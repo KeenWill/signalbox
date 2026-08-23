@@ -17,6 +17,9 @@ const MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
 const MAX_TOOL_NAME_BYTES: usize = 64;
 const MAX_TOOL_RESULT_TEXT_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_TOOL_REQUESTS_PER_RESPONSE: usize = 32;
+const SUPPRESSED_TOOL_ARGUMENTS: &str = r#"{"redacted":"[redacted]"}"#;
+const SUPPRESSED_TOOL_DENIAL_REASON: &str =
+    "Tool arguments were suppressed by the credential boundary";
 
 /// One checked model-facing tool name.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -357,12 +360,30 @@ impl ToolRequestOrdinal {
 pub struct ToolCallProposal {
     name: ToolName,
     arguments: NormalizedToolArguments,
+    suppressed: bool,
 }
 
 impl ToolCallProposal {
     /// Assembles already-checked provider-neutral content.
     pub const fn new(name: ToolName, arguments: NormalizedToolArguments) -> Self {
-        Self { name, arguments }
+        Self {
+            name,
+            arguments,
+            suppressed: false,
+        }
+    }
+
+    /// Constructs the inert projection of a proposal whose arguments were
+    /// suppressed by a provider credential boundary.
+    pub fn suppressed(name: ToolName) -> Self {
+        Self {
+            name,
+            arguments: NormalizedToolArguments {
+                kind: ToolArgumentsKind::Json,
+                value: String::from(SUPPRESSED_TOOL_ARGUMENTS),
+            },
+            suppressed: true,
+        }
     }
 
     /// Borrows the checked tool name.
@@ -373,6 +394,11 @@ impl ToolCallProposal {
     /// Borrows normalized arguments.
     pub const fn arguments(&self) -> &NormalizedToolArguments {
         &self.arguments
+    }
+
+    /// Reports whether the proposal is an inert credential-boundary projection.
+    pub const fn is_suppressed(&self) -> bool {
+        self.suppressed
     }
 }
 
@@ -609,13 +635,18 @@ pub enum ToolDecisionSource {
     SessionOverride,
     /// A checked delegate-model decision.
     Delegate,
+    /// The provider credential boundary suppressed executable arguments.
+    RuntimeSafety,
 }
 
 impl ToolDecisionSource {
     pub(crate) const fn requires_ordered_prefix(self) -> bool {
         match self {
             Self::UserCommand | Self::Delegate => true,
-            Self::PolicyAuto | Self::SessionBlanket | Self::SessionOverride => false,
+            Self::PolicyAuto
+            | Self::SessionBlanket
+            | Self::SessionOverride
+            | Self::RuntimeSafety => false,
         }
     }
 }
@@ -978,6 +1009,20 @@ impl ToolApprovalResolution {
         }
     }
 
+    pub(crate) fn runtime_safety(request: ToolRequestId) -> Self {
+        Self {
+            request,
+            decision: ToolApprovalDecision::Deny {
+                reason: Some(ToolDenialReason(String::from(
+                    SUPPRESSED_TOOL_DENIAL_REASON,
+                ))),
+            },
+            source: ToolDecisionSource::RuntimeSafety,
+            decider: None,
+            rationale: None,
+        }
+    }
+
     fn user(
         command: DurableCommandId,
         request: ToolRequestId,
@@ -1062,6 +1107,7 @@ enum StoredToolApprovalEvidence {
         request: ToolRequestId,
         frozen_posture: DangerousToolAutoApproval,
     },
+    RuntimeSafety(ToolRequestId),
 }
 
 impl ToolApprovalResolutionReconstitutionInput {
@@ -1109,6 +1155,13 @@ impl ToolApprovalResolutionReconstitutionInput {
                 request,
                 frozen_posture,
             },
+        }
+    }
+
+    /// Supplies one credential-boundary safety denial.
+    pub const fn runtime_safety(request: ToolRequestId) -> Self {
+        Self {
+            evidence: StoredToolApprovalEvidence::RuntimeSafety(request),
         }
     }
 
@@ -1169,6 +1222,9 @@ impl ToolApprovalResolutionReconstitutionInput {
                 frozen_posture: DangerousToolAutoApproval::Disabled,
                 ..
             } => None,
+            StoredToolApprovalEvidence::RuntimeSafety(request) => {
+                Some(ToolApprovalResolution::runtime_safety(*request))
+            }
         };
         match resolution {
             Some(resolution) => Ok(resolution),
@@ -1220,14 +1276,17 @@ pub enum InitialToolApproval {
     PolicyAuto,
     /// Record automatic approval from the frozen dangerous blanket.
     SessionBlanket,
+    /// Record an automatic denial for credential-suppressed arguments.
+    RuntimeSafetyDeny,
 }
 
 impl InitialToolApproval {
-    pub(crate) const fn resolution(self, request: ToolRequestId) -> Option<ToolApprovalResolution> {
+    pub(crate) fn resolution(self, request: ToolRequestId) -> Option<ToolApprovalResolution> {
         match self {
             Self::Confirm | Self::AlwaysConfirm | Self::Human | Self::Delegated => None,
             Self::PolicyAuto => Some(ToolApprovalResolution::policy_auto(request)),
             Self::SessionBlanket => Some(ToolApprovalResolution::session_blanket(request)),
+            Self::RuntimeSafetyDeny => Some(ToolApprovalResolution::runtime_safety(request)),
         }
     }
 
@@ -1235,7 +1294,9 @@ impl InitialToolApproval {
         match self {
             Self::Confirm | Self::AlwaysConfirm | Self::Human => ToolApprovalPosture::Human,
             Self::Delegated => ToolApprovalPosture::Delegated,
-            Self::PolicyAuto | Self::SessionBlanket => ToolApprovalPosture::Auto,
+            Self::PolicyAuto | Self::SessionBlanket | Self::RuntimeSafetyDeny => {
+                ToolApprovalPosture::Auto
+            }
         }
     }
 
@@ -1243,7 +1304,7 @@ impl InitialToolApproval {
     pub const fn requires_decision(self) -> bool {
         match self {
             Self::Confirm | Self::AlwaysConfirm | Self::Human | Self::Delegated => true,
-            Self::PolicyAuto | Self::SessionBlanket => false,
+            Self::PolicyAuto | Self::SessionBlanket | Self::RuntimeSafetyDeny => false,
         }
     }
 }
@@ -1996,6 +2057,34 @@ mod tests {
                 DangerousToolAutoApproval::Disabled,
             )
         );
+    }
+
+    /// S10 / INV-020 / INV-035: credential-boundary suppression constructs an
+    /// inert proposal and restores only the fixed automatic denial provenance.
+    #[test]
+    fn s10_inv020_inv035_runtime_safety_denial_is_non_executable() {
+        let request = tool_request_id(4);
+        let proposal = ToolCallProposal::suppressed(
+            ToolName::try_new(String::from("sandboxed_exec")).expect("fixture tool name is valid"),
+        );
+        let restored = ToolApprovalResolutionReconstitutionInput::runtime_safety(request)
+            .reconstitute()
+            .expect("runtime safety evidence is self-authenticating");
+
+        assert!(proposal.is_suppressed());
+        assert_eq!(proposal.arguments().as_str(), SUPPRESSED_TOOL_ARGUMENTS);
+        assert_eq!(restored.request(), request);
+        assert_eq!(restored.source(), ToolDecisionSource::RuntimeSafety);
+        assert_eq!(
+            restored.decision(),
+            &ToolApprovalDecision::Deny {
+                reason: Some(
+                    ToolDenialReason::try_new(String::from(SUPPRESSED_TOOL_DENIAL_REASON))
+                        .expect("fixed denial reason is valid"),
+                ),
+            }
+        );
+        assert!(!restored.is_approved());
     }
 
     /// S10 / INV-020: only the user-command preparation path can construct

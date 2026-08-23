@@ -7,7 +7,7 @@
 //! the caller maps them into its own durable representations and never
 //! stores them as canonical records.
 
-use crate::tool::{ToolCallId, ToolCallProposal};
+use crate::tool::{ToolCallId, ToolCallProposal, ToolName};
 
 /// Who authored a conversation message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +107,7 @@ pub enum AssistantPart {
     /// work.
     ToolCall(ToolCallProposal),
     /// A tool call whose argument object the CLI credential boundary suppressed
-    /// as a whole. No executable proposal exists beyond the adapter boundary.
-    SuppressedToolCall,
+    /// as a whole. The admitted tool name remains available so the application
+    /// can record a correlated non-executable denial.
+    SuppressedToolCall(ToolName),
 }

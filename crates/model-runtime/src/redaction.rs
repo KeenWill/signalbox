@@ -801,7 +801,9 @@ fn redact_assistant_part(part: AssistantPart, credential: &CredentialValue) -> A
         AssistantPart::ToolCall(proposal) => {
             AssistantPart::ToolCall(redact_tool_proposal(proposal, credential))
         }
-        AssistantPart::SuppressedToolCall => AssistantPart::SuppressedToolCall,
+        AssistantPart::SuppressedToolCall(name) => AssistantPart::SuppressedToolCall(
+            ToolName::new(redact_text(name.as_str().to_string(), credential)),
+        ),
     }
 }
 

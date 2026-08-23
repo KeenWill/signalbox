@@ -1289,6 +1289,84 @@ async fn automatic_policy_decision_requires_no_explicit_event_effect() -> Result
     Ok(())
 }
 
+/// S10 / INV-020 / INV-035: a credential-suppressed proposal commits as an
+/// inert request plus a fixed runtime-safety denial and leaves the turn running.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_inv020_inv035_suppressed_tool_request_is_denied_and_continues()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, request) =
+        checkpoint_suppressed_tool_round(&pool, APPROVAL_FIXTURE_SEED + 0x90, APPROVAL_TOOL_NAME)
+            .await?;
+    let stored: (String, String, String, String) = sqlx::query_as(
+        "SELECT request.arguments_text, request.approval_posture,
+                decision.decision_source, decision.denial_reason
+           FROM tool_request AS request
+           JOIN tool_approval_decision AS decision USING (request_id)
+          WHERE request.request_id = $1",
+    )
+    .bind(request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let active_phase: String = sqlx::query_scalar(
+        "SELECT active_phase_kind FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(stored.0, r#"{"redacted":"[redacted]"}"#);
+    assert_eq!(stored.1, "auto");
+    assert_eq!(stored.2, "runtime_safety");
+    assert_eq!(
+        stored.3,
+        "Tool arguments were suppressed by the credential boundary"
+    );
+    assert_eq!(active_phase, "running");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S10 / INV-020: runtime-safety provenance cannot be attached to ordinary
+/// provider arguments or a request that retained human approval posture.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_inv020_runtime_safety_denial_requires_suppressed_arguments()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (_fixture, _repository, _observation, request) = checkpoint_confirmed_tool_round(
+        &pool,
+        APPROVAL_FIXTURE_SEED + 0xa0,
+        APPROVAL_TOOL_NAME,
+        APPROVAL_ARGUMENTS,
+    )
+    .await?;
+    let error = sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source, denial_reason)
+         VALUES ($1, 'deny', 'runtime_safety',
+                 'Tool arguments were suppressed by the credential boundary')",
+    )
+    .bind(request.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("ordinary arguments cannot claim credential-boundary suppression");
+
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_runtime_safety_requires_suppressed_arguments")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn approval_event_migration_backfills_a_prior_explicit_decision() -> Result<(), Box<dyn Error>>

@@ -7835,6 +7835,7 @@ fn encode_tool_decision_source(
         ToolDecisionSource::UserCommand => ToolApprovalDecisionSourceStorageKind::UserCommand,
         ToolDecisionSource::PolicyAuto => ToolApprovalDecisionSourceStorageKind::PolicyAuto,
         ToolDecisionSource::SessionBlanket => ToolApprovalDecisionSourceStorageKind::SessionBlanket,
+        ToolDecisionSource::RuntimeSafety => ToolApprovalDecisionSourceStorageKind::RuntimeSafety,
         ToolDecisionSource::SessionOverride | ToolDecisionSource::Delegate => {
             return Err(ModelCallRepositoryError::InvalidTransition(
                 "unimplemented tool-decision source cannot be stored",

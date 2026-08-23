@@ -4760,7 +4760,8 @@ impl ToolRequestOrdinal {
 pub struct ToolCallProposal { /* private */ }
 impl ToolCallProposal {
     pub const fn new(name: ToolName, arguments: NormalizedToolArguments) -> Self;
-    // accessors: name(), arguments()
+    pub fn suppressed(name: ToolName) -> Self;
+    // accessors: name(), arguments(), is_suppressed()
 }
 pub enum AssistantResponsePart {
     Text(AssistantText),
@@ -4823,6 +4824,7 @@ pub enum ToolDecisionSource {
     SessionBlanket,
     SessionOverride,
     Delegate,
+    RuntimeSafety,
 }
 
 pub enum ToolApprovalDecider {
@@ -4881,7 +4883,8 @@ pub enum ToolApprovalDecision {
     Deny { reason: Option<ToolDenialReason> },
 }
 pub struct ToolApprovalResolution { /* private */ }
-// sealed live producers: user command, registry auto, frozen session blanket, or checked delegate
+// sealed live producers: user command, registry auto, frozen session blanket,
+// checked delegate, or provider credential-boundary safety denial
 impl ToolApprovalResolution {
     // accessors: request(), decision(), source(), decider(), rationale(), is_approved()
 }
@@ -4897,6 +4900,7 @@ impl ToolApprovalResolutionReconstitutionInput {
         request: ToolRequestId,
         frozen_posture: DangerousToolAutoApproval,
     ) -> Self;
+    pub const fn runtime_safety(request: ToolRequestId) -> Self;
     pub fn reconstitute(
         self,
     ) -> Result<ToolApprovalResolution, ToolApprovalResolutionReconstitutionError>;
@@ -4910,6 +4914,7 @@ pub enum InitialToolApproval {
     Delegated,
     PolicyAuto,
     SessionBlanket,
+    RuntimeSafetyDeny,
 }
 impl InitialToolApproval {
     pub const fn requires_decision(self) -> bool;

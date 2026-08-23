@@ -32,6 +32,9 @@ and the unattended-escalation terminal path are verified against this PR
 The operator-attended park after an operator-commissioned approval escalation is
 verified against this PR (`agent/daemon-live-headless-approval-park`).
 
+The automatic non-executable denial of credential-suppressed tool arguments is
+verified against this PR (`agent/daemon-live-redacted-tool-recovery`).
+
 The per-session workspace root the workspace, local Git, and execution families
 bind is verified against this PR (`agent/per-session-workspaces`).
 
@@ -136,14 +139,17 @@ implemented decision sources are:
 - `SessionBlanket` — the frozen dangerous blanket supplied daemon-local
   automatic approval;
 - `SessionOverride` — an exact runner-placement tool override supplied automatic
-  approval; and
-- `Delegate` — an authority-checked approval-judge call decided the request.
+  approval;
+- `Delegate` — an authority-checked approval-judge call decided the request; and
+- `RuntimeSafety` — the provider credential boundary suppressed the complete
+  argument object, so the producing-call transaction recorded a fixed denial
+  before any executor could observe the request.
 
 A delegated decision names the exact direct model selection and dedicated model
 call that made it, and retains the judge rationale as nonempty text of at most
 4,096 bytes. A user decision instead names its exact durable command. Automatic
-policy has no decider or rationale. Neither automated path can claim user agency
-(INV-020).
+policy and runtime-safety denial have no decider or rationale. None of the
+automated paths can claim user agency (INV-020).
 
 Each daemon tool mapping may declare one approval posture: `Auto`, `Delegated`,
 or `Human`. The selected posture is frozen into every resulting request. For

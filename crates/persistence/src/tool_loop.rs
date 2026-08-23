@@ -2226,6 +2226,19 @@ async fn decode_approval(
                 load_frozen_dangerous_tool_auto_approval(connection, request).await?,
             )
         }
+        ToolApprovalDecisionSourceStorageKind::RuntimeSafety if user_command.is_none() => {
+            let expected = ToolApprovalResolutionReconstitutionInput::runtime_safety(request)
+                .reconstitute()
+                .map_err(|_| {
+                    ToolLoopCorruption::Inconsistent("runtime safety approval evidence")
+                })?;
+            if expected.decision() != &decision {
+                return Err(
+                    ToolLoopCorruption::Inconsistent("runtime safety approval evidence").into(),
+                );
+            }
+            ToolApprovalResolutionReconstitutionInput::runtime_safety(request)
+        }
         ToolApprovalDecisionSourceStorageKind::Delegate if user_command.is_none() => {
             let delegate_model: Option<Uuid> = row.try_get("delegate_model_selection_id")?;
             let delegate_call: Option<Uuid> = row.try_get("delegate_model_call_id")?;
@@ -2265,6 +2278,11 @@ async fn decode_approval(
         }
         ToolApprovalDecisionSourceStorageKind::Delegate => {
             return Err(ToolLoopCorruption::Inconsistent("delegate approval evidence").into());
+        }
+        ToolApprovalDecisionSourceStorageKind::RuntimeSafety => {
+            return Err(
+                ToolLoopCorruption::Inconsistent("runtime safety approval evidence").into(),
+            );
         }
     };
     input

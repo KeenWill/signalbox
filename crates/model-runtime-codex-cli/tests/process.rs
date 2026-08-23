@@ -157,7 +157,9 @@ fn collect_assistant_parts(parts: &[AssistantPart], material: &mut Vec<String>) 
             }
             AssistantPart::RedactedThinking { data } => material.push(data.clone()),
             AssistantPart::ToolCall(proposal) => collect_tool_proposal(proposal, material),
-            AssistantPart::SuppressedToolCall => {}
+            AssistantPart::SuppressedToolCall(name) => {
+                material.push(name.as_str().to_string());
+            }
         }
     }
 }
@@ -604,7 +606,9 @@ async fn inv_035_buffered_reasoning_marker_suppresses_tool_arguments() {
         completed(&result.evidence).content,
         vec![
             AssistantPart::Text(REDACTED.to_string()),
-            AssistantPart::SuppressedToolCall,
+            AssistantPart::SuppressedToolCall(signalbox_model_runtime::ToolName::new(
+                fixtures::TOOL_NAME,
+            )),
         ]
     );
     assert_eq!(result.spawns, 1);
@@ -4707,7 +4711,7 @@ fn tool_ids(content: &[AssistantPart]) -> Vec<&str> {
             AssistantPart::Text(_)
             | AssistantPart::Thinking { .. }
             | AssistantPart::RedactedThinking { .. }
-            | AssistantPart::SuppressedToolCall => None,
+            | AssistantPart::SuppressedToolCall(_) => None,
         })
         .collect()
 }

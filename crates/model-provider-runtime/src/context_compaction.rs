@@ -214,7 +214,7 @@ where
                     AssistantPart::Thinking { .. }
                     | AssistantPart::RedactedThinking { .. }
                     | AssistantPart::ToolCall(_)
-                    | AssistantPart::SuppressedToolCall => {
+                    | AssistantPart::SuppressedToolCall(_) => {
                         return Err(ContextCompactionModelError::NonTextSummary);
                     }
                 }

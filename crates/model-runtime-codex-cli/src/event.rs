@@ -704,7 +704,9 @@ impl<C: Clone> EventDecoder<C> {
                     }));
                 }
                 ToolArgumentRedaction::Suppressed => {
-                    content.push(AssistantPart::SuppressedToolCall);
+                    content.push(AssistantPart::SuppressedToolCall(ToolName::new(
+                        call.name.clone(),
+                    )));
                 }
             }
         }
@@ -773,7 +775,7 @@ impl<C: Clone> EventDecoder<C> {
                     }),
                     AssistantPart::Thinking { .. }
                     | AssistantPart::RedactedThinking { .. }
-                    | AssistantPart::SuppressedToolCall => {}
+                    | AssistantPart::SuppressedToolCall(_) => {}
                 }
             }
             self.next_part_index += content_len;

@@ -404,7 +404,12 @@ async fn fully_suppressed_tool_arguments_are_non_executable() {
     let result = execute_scenario("suppressed_tool_arguments", OperationShape::Tool).await;
     let completion = completed(&result.evidence);
 
-    assert_eq!(completion.content, vec![AssistantPart::SuppressedToolCall]);
+    assert_eq!(
+        completion.content,
+        vec![AssistantPart::SuppressedToolCall(
+            signalbox_model_runtime::ToolName::new(fixtures::TOOL_NAME),
+        )]
+    );
     assert!(!result.observations.iter().any(|observation| matches!(
         observation.fact,
         signalbox_model_runtime::ObservationFact::ToolCallProposed(_)

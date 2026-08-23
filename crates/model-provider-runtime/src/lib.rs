@@ -1973,11 +1973,17 @@ fn classify_terminal(
                             DomainToolCallProposal::new(name, arguments),
                         ));
                     }
-                    AssistantPart::SuppressedToolCall => {
-                        return classify(
-                            ModelCallTerminalObservation::KnownFailed,
-                            ModelCallCauseCode::UnrepresentableToolMaterial,
-                        );
+                    AssistantPart::SuppressedToolCall(name) => {
+                        tool_count += 1;
+                        let Ok(name) = DomainToolName::try_new(name.as_str().to_owned()) else {
+                            return classify(
+                                ModelCallTerminalObservation::KnownFailed,
+                                ModelCallCauseCode::UnrepresentableToolMaterial,
+                            );
+                        };
+                        response_parts.push(AssistantResponsePart::ToolCall(
+                            DomainToolCallProposal::suppressed(name),
+                        ));
                     }
                     // Claude 5-family models run adaptive thinking by
                     // default and, with the default omitted display, return
@@ -3001,30 +3007,38 @@ mod tests {
         );
     }
 
-    /// A CLI-redacted argument object is not an executable tool request. The
-    /// completed provider call closes as the existing unrepresentable-material
-    /// failure instead of entering the tool loop with sentinel JSON.
+    /// A CLI-redacted argument object becomes an inert domain proposal so the
+    /// application can record its runtime-safety denial and continue the turn.
     #[test]
-    fn fully_suppressed_tool_arguments_close_as_known_failure() {
+    fn fully_suppressed_tool_arguments_cross_as_inert_proposal() {
         let classified = classify_terminal(
             completion_with_finish(
                 "model-exact",
                 CompletionFinish::ToolUse,
-                vec![AssistantPart::SuppressedToolCall],
+                vec![AssistantPart::SuppressedToolCall(ToolName::new(
+                    "current_time",
+                ))],
             ),
             &[],
             &configured("model-exact"),
         )
         .expect("suppressed tool material has a bounded terminal classification");
 
+        let ModelCallTerminalObservation::CompletedWithTools { response } = classified.observation
+        else {
+            panic!("suppressed tool material yields a same-turn denial round");
+        };
+        assert_eq!(classified.cause, ModelCallCauseCode::Completed);
+        let signalbox_domain::AssistantResponsePart::ToolCall(proposal) = &response.parts()[0]
+        else {
+            panic!("the response retains the inert tool proposal");
+        };
+        assert_eq!(proposal.name().as_str(), "current_time");
         assert_eq!(
-            classified.observation,
-            ModelCallTerminalObservation::KnownFailed
+            proposal.arguments().as_str(),
+            r#"{"redacted":"[redacted]"}"#
         );
-        assert_eq!(
-            classified.cause,
-            ModelCallCauseCode::UnrepresentableToolMaterial
-        );
+        assert!(proposal.is_suppressed());
     }
 
     #[test]

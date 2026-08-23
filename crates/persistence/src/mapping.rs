@@ -756,6 +756,7 @@ pub(crate) enum ToolApprovalDecisionSourceStorageKind {
     PolicyAuto,
     SessionBlanket,
     Delegate,
+    RuntimeSafety,
 }
 
 pub(crate) const fn tool_approval_decision_source_to_str(
@@ -766,6 +767,7 @@ pub(crate) const fn tool_approval_decision_source_to_str(
         ToolApprovalDecisionSourceStorageKind::PolicyAuto => "policy_auto",
         ToolApprovalDecisionSourceStorageKind::SessionBlanket => "session_blanket",
         ToolApprovalDecisionSourceStorageKind::Delegate => "delegate",
+        ToolApprovalDecisionSourceStorageKind::RuntimeSafety => "runtime_safety",
     }
 }
 
@@ -777,6 +779,7 @@ pub(crate) fn tool_approval_decision_source_from_str(
         "policy_auto" => Some(ToolApprovalDecisionSourceStorageKind::PolicyAuto),
         "session_blanket" => Some(ToolApprovalDecisionSourceStorageKind::SessionBlanket),
         "delegate" => Some(ToolApprovalDecisionSourceStorageKind::Delegate),
+        "runtime_safety" => Some(ToolApprovalDecisionSourceStorageKind::RuntimeSafety),
         _ => None,
     }
 }
@@ -2869,6 +2872,12 @@ mod tests {
                 ToolApprovalDecisionSourceStorageKind::Delegate,
             )),
             Some(ToolApprovalDecisionSourceStorageKind::Delegate)
+        );
+        assert_eq!(
+            tool_approval_decision_source_from_str(tool_approval_decision_source_to_str(
+                ToolApprovalDecisionSourceStorageKind::RuntimeSafety,
+            )),
+            Some(ToolApprovalDecisionSourceStorageKind::RuntimeSafety)
         );
         assert_eq!(
             tool_approval_decision_source_from_str(UNKNOWN_DISCRIMINATOR),

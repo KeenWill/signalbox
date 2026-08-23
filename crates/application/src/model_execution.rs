@@ -2018,6 +2018,9 @@ where
             .filter_map(|part| match part {
                 AssistantResponsePart::Text(_) => None,
                 AssistantResponsePart::ToolCall(proposal) => {
+                    if proposal.is_suppressed() {
+                        return Some(InitialToolApproval::RuntimeSafetyDeny);
+                    }
                     let definition = advertised_tools
                         .iter()
                         .find(|definition| definition.name() == proposal.name());
@@ -3967,6 +3970,42 @@ mod tests {
                 identity(41, ContextFrontierId::from_uuid),
             ),
             "lifecycle-dependent candidates receive a disjoint identity inventory"
+        );
+    }
+
+    /// S10 / INV-020 / INV-035: a credential-suppressed proposal bypasses the
+    /// advertised execution policy and receives an automatic safety denial.
+    #[test]
+    fn s10_inv020_inv035_suppressed_proposal_forces_runtime_safety_denial() {
+        let service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: VecDeque::new(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            UnusedProvider,
+            InProcessAttemptDispatchGate::default(),
+            None,
+        );
+        let response = signalbox_domain::ToolUsingAssistantResponse::try_from_parts(vec![
+            signalbox_domain::AssistantResponsePart::ToolCall(
+                signalbox_domain::ToolCallProposal::suppressed(
+                    signalbox_domain::ToolName::try_new(String::from("sandboxed_exec"))
+                        .expect("fixture tool name is valid"),
+                ),
+            ),
+        ])
+        .expect("suppressed proposal remains one bounded logical request");
+        let observation = ModelCallTerminalObservation::CompletedWithTools { response };
+
+        assert_eq!(
+            service
+                .tool_approvals(&observation, DangerousToolAutoApproval::ApproveAll, &[],)
+                .as_ref(),
+            [InitialToolApproval::RuntimeSafetyDeny]
         );
     }
     /// S28 / INV-038 / INV-039: attested imported text keeps its exact

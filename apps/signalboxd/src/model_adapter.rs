@@ -329,7 +329,7 @@ mod tests {
                 Some(signalbox_model_runtime::AssistantPart::Thinking { .. })
                 | Some(signalbox_model_runtime::AssistantPart::RedactedThinking { .. })
                 | Some(signalbox_model_runtime::AssistantPart::ToolCall(_))
-                | Some(signalbox_model_runtime::AssistantPart::SuppressedToolCall)
+                | Some(signalbox_model_runtime::AssistantPart::SuppressedToolCall(_))
                 | None => None,
             },
             TerminalEvidence::Refused(_)

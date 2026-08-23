@@ -3398,6 +3398,50 @@ async fn checkpoint_tool_batch_with_approval(
     .await
 }
 
+async fn checkpoint_suppressed_tool_round(
+    pool: &PgPool,
+    seed: u128,
+    tool_name: &str,
+) -> Result<(RestartModelCallFixture, signalbox_domain::ToolRequestId), Box<dyn Error>> {
+    let (fixture, model_repository, authorized) =
+        authorize_checkpointed_model_call(pool, seed).await?;
+    let request = signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x40));
+    let response =
+        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+            ToolCallProposal::suppressed(
+                ToolName::try_new(String::from(tool_name)).expect("valid fixture tool name"),
+            ),
+        )])
+        .expect("the suppressed proposal forms one inert tool response");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+    let outcome = model_repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x80)),
+                    request,
+                    InitialToolApproval::RuntimeSafetyDeny,
+                )],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xc0)),
+                Some(TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xc1))),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    let ModelCallTerminalOutcome::ToolRound(round) = outcome else {
+        panic!("the suppressed fixture reaches an automatically denied tool round")
+    };
+    assert!(matches!(
+        round.next_phase(),
+        ActiveTurnPhase::Running { .. }
+    ));
+    Ok((fixture, request))
+}
+
 async fn checkpoint_tool_batch_with_approval_and_usage(
     pool: &PgPool,
     seed: u128,

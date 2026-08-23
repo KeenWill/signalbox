@@ -4247,7 +4247,8 @@ fn initial_tool_approval_matches_posture(
             | InitialToolApproval::SessionBlanket
             | InitialToolApproval::PolicyAuto
             | InitialToolApproval::Human
-            | InitialToolApproval::Delegated,
+            | InitialToolApproval::Delegated
+            | InitialToolApproval::RuntimeSafetyDeny,
         )
         | (
             DangerousToolAutoApproval::Disabled,
@@ -4255,7 +4256,8 @@ fn initial_tool_approval_matches_posture(
             | InitialToolApproval::AlwaysConfirm
             | InitialToolApproval::PolicyAuto
             | InitialToolApproval::Human
-            | InitialToolApproval::Delegated,
+            | InitialToolApproval::Delegated
+            | InitialToolApproval::RuntimeSafetyDeny,
         ) => true,
     }
 }

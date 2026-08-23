@@ -16,8 +16,9 @@ use signalbox_domain::{
     RunnerCapabilityClass, RunnerGeneration, RunnerId, RunnerSandboxProfile, RunnerSelector,
     RunnerWorkingDirectory, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
     SessionReadScopeDecision, SessionReadScopeRefusal, ToolApprovalDecider, ToolApprovalDecision,
-    ToolAttemptId, ToolDecisionRationale, ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId,
-    TurnModelSettingsResolved, VersionedSessionPlacement, WorkspaceRepositoryKey,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptId, ToolDecisionRationale,
+    ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId, TurnModelSettingsResolved,
+    VersionedSessionPlacement, WorkspaceRepositoryKey,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -5363,6 +5364,11 @@ fn decode_process_tool_approval(
             return Err(ProcessReadCorruption::Inconsistent("tool approval decision kind").into());
         }
     };
+    let runtime_safety_decision = ToolApprovalResolutionReconstitutionInput::runtime_safety(
+        ToolRequestId::from_uuid(Uuid::nil()),
+    )
+    .reconstitute()
+    .map_err(|_| ProcessReadCorruption::Inconsistent("runtime safety approval evidence"))?;
     match (
         source_kind,
         user_command,
@@ -5378,6 +5384,11 @@ fn decode_process_tool_approval(
             None,
             None,
         ) if decision == ToolApprovalDecision::Approve => Ok(None),
+        (ToolApprovalDecisionSourceStorageKind::RuntimeSafety, None, None, None, None)
+            if runtime_safety_decision.decision() == &decision =>
+        {
+            Ok(None)
+        }
         (ToolApprovalDecisionSourceStorageKind::UserCommand, Some(command), None, None, None) => {
             Ok(Some(ProcessToolApproval {
                 decision,
@@ -5419,7 +5430,8 @@ fn decode_process_tool_approval(
             ToolApprovalDecisionSourceStorageKind::PolicyAuto
             | ToolApprovalDecisionSourceStorageKind::SessionBlanket
             | ToolApprovalDecisionSourceStorageKind::UserCommand
-            | ToolApprovalDecisionSourceStorageKind::Delegate,
+            | ToolApprovalDecisionSourceStorageKind::Delegate
+            | ToolApprovalDecisionSourceStorageKind::RuntimeSafety,
             ..,
         ) => Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into()),
     }
