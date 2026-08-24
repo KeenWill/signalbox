@@ -204,7 +204,7 @@ fn open_blob_root(
         OpenedFilesystemBlobRoot::open_without_locality_check_for_test(root)
     }
     #[cfg(not(feature = "test-support"))]
-    unreachable!("production initialization always requires local backing")
+    OpenedFilesystemBlobRoot::open(root)
 }
 
 #[derive(Clone, Debug)]

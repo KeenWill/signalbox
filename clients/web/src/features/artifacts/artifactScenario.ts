@@ -20,7 +20,9 @@ type BlobView = WebBlobDescriptor['available_views'][number]
 // that the exact source digest passed the owning service's bounded image decoder (16,384 px per
 // axis, 67,108,864 total pixels, and 320 MiB decoder allocation). Until the descriptor carries an
 // aggregate animation-decode bound, only inherently single-frame JPEG originals can use that proof;
-// animation-capable formats and originals without every proof remain ordinary-download only.
+// animation-capable formats and originals without every proof remain ordinary-download only. The
+// declared media type is caller-supplied, so admission is additionally verified against the actual
+// fetched bytes at load time (fetchVerifiedSingleFrameJpeg below).
 export const INLINE_ORIGINAL_MAX_BYTES = 16n * 1024n * 1024n
 const BOUNDED_IMAGE_TRANSFORMATIONS = new Set(['image.preview', 'image.thumbnail'])
 const SINGLE_FRAME_ORIGINAL_MEDIA_TYPES = new Set(['image/jpeg'])
@@ -35,6 +37,65 @@ const expectedTransformation = (kind: 'preview' | 'thumbnail') => ({
 
 const viewOutputDigest = (view: BlobView): string | undefined =>
   /^\/api\/blobs\/(sha256:[0-9a-f]{64})\/content\//u.exec(view.content_url)?.[1]
+
+// The owning service names a browser_native view from the caller-declared media type without
+// inspecting stored bytes, and browsers sniff <img> bytes regardless of Content-Type, so a blob
+// declared image/jpeg could actually be an animated GIF, WebP, or APNG. Until the descriptor
+// carries a server-detected-format proof, the client fetches an admitted original and verifies the
+// JPEG start-of-image signature before handing any bytes to the browser's renderer.
+const JPEG_START_OF_IMAGE_SIGNATURE: readonly number[] = [0xff, 0xd8, 0xff]
+
+export const isSingleFrameJpegBytes = (bytes: Uint8Array): boolean =>
+  bytes.length >= JPEG_START_OF_IMAGE_SIGNATURE.length &&
+  JPEG_START_OF_IMAGE_SIGNATURE.every((expected, index) => bytes[index] === expected)
+
+export const fetchVerifiedSingleFrameJpeg = async (
+  view: BlobView,
+  fetchImplementation: typeof fetch,
+  signal?: AbortSignal,
+): Promise<Blob> => {
+  const advertisedLength = BigInt(view.byte_length)
+  if (advertisedLength > INLINE_ORIGINAL_MAX_BYTES) {
+    throw new Error('original exceeds the inline admission ceiling')
+  }
+  const response = await fetchImplementation(view.content_url, { signal })
+  if (!response.ok) {
+    throw new Error(`original request failed with status ${String(response.status)}`)
+  }
+  if (response.body === null) {
+    throw new Error('original response exposed no readable body')
+  }
+  // Consume the body through a bounded reader: a faulty response longer than the advertised
+  // length is aborted mid-stream instead of being materialized before any size check runs.
+  const expectedLength = Number(advertisedLength)
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let receivedLength = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (value === undefined) continue
+    receivedLength += value.byteLength
+    if (receivedLength > expectedLength) {
+      await reader.cancel()
+      throw new Error('original bytes exceed the advertised byte length')
+    }
+    chunks.push(value)
+  }
+  if (receivedLength !== expectedLength) {
+    throw new Error('original bytes do not match the advertised byte length')
+  }
+  const bytes = new Uint8Array(receivedLength)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  if (!isSingleFrameJpegBytes(bytes)) {
+    throw new Error('original bytes are not a single-frame JPEG stream')
+  }
+  return new Blob([bytes], { type: view.media_type })
+}
 
 export const selectBoundedOriginalView = (descriptor: WebBlobDescriptor): BlobView | undefined => {
   const original = descriptor.available_views.find((view) => view.kind === 'browser_native')

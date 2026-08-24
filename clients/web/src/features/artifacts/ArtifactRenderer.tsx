@@ -15,7 +15,14 @@ import {
   Minimize2,
   ShieldAlert,
 } from 'lucide-react'
-import { type ComponentType, type KeyboardEvent, type ReactNode, useState } from 'react'
+import {
+  type ComponentType,
+  type KeyboardEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from 'react'
 import { type CommandContext, invokeCommand } from '../../commands'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import { actions, useAppDispatch, useAppSelector } from '../../state'
@@ -34,6 +41,7 @@ import {
   type SignalboxImageArtifact,
   type TextArtifact,
 } from './artifactTypes'
+import { useVerifiedOriginalImage } from './originalImageService'
 import { admitRemoteMediaUrl } from './remoteMediaPreference'
 import './artifacts.css'
 
@@ -230,7 +238,11 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
   const original = selectBoundedOriginalView(descriptor)
   const download = selectBlobView(descriptor, 'download')
   const originalRequested = originalState === 'loading' || originalState === 'loaded'
-  const candidate = originalRequested && original ? original : automatic
+  const originalQuery = useVerifiedOriginalImage(original, originalRequested)
+  const [verifiedOriginalUrl, setVerifiedOriginalUrl] = useState<string | null>(null)
+  const verifiedBlob = originalQuery.data
+  const candidate =
+    originalRequested && original && verifiedOriginalUrl !== null ? original : automatic
   const derivation = candidate ? selectViewDerivation(descriptor, candidate) : undefined
   const rendered =
     candidate &&
@@ -238,12 +250,54 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
       ? candidate
       : undefined
 
+  // The object URL is allocated and revoked by one effect owning its lifecycle: allocation during
+  // render would strand the extra URL produced by development double-rendering unrevoked.
+  useEffect(() => {
+    if (verifiedBlob === undefined) return
+    const url = URL.createObjectURL(verifiedBlob)
+    setVerifiedOriginalUrl(url)
+    return () => {
+      setVerifiedOriginalUrl(null)
+      URL.revokeObjectURL(url)
+    }
+  }, [verifiedBlob])
+
+  // Project the service's request state into the explicit control state: a new failure settles the
+  // request as failed, and a retry that finds a failure this projection already settled asks the
+  // service to fetch again. Errors settled before this mount (the ref's initial value) stay
+  // retryable rather than immediately re-settling.
+  const settledErrorCount = useRef(originalQuery.errorUpdateCount)
+  const { errorUpdateCount, isError, isFetching, refetch } = originalQuery
+  const verified = originalQuery.data !== undefined
+  useEffect(() => {
+    if (!originalRequested || isFetching || verified) return
+    if (errorUpdateCount > settledErrorCount.current) {
+      settledErrorCount.current = errorUpdateCount
+      dispatch(actions.artifactOriginalSettled({ id: artifact.id, result: 'failed' }))
+      return
+    }
+    if (isError) void refetch()
+  }, [
+    artifact.id,
+    dispatch,
+    errorUpdateCount,
+    isError,
+    isFetching,
+    originalRequested,
+    refetch,
+    verified,
+  ])
+
   return (
     <div className="artifact-image-layout">
       <div className="artifact-visual">
         {rendered ? (
           <img
-            src={rendered.content_url}
+            src={
+              rendered.kind === 'browser_native' && verifiedOriginalUrl !== null
+                ? verifiedOriginalUrl
+                : rendered.content_url
+            }
             alt={`${imageViewLabel(rendered.kind)} of ${artifact.displayName}`}
             loading="lazy"
             onLoad={() => {

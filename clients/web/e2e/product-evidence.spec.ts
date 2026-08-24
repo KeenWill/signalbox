@@ -68,24 +68,26 @@ const useDeterministicSession = (page: Page) =>
       return route.fulfill({
         json: {
           session_id: sessionEvidenceFixture.id,
+          // Item charges follow the wire contract: a 64-byte envelope plus the UTF-8
+          // event-kind spelling (21 bytes for tool_batch_transition, 14 for the others).
           items: [
             {
               address: { event_sequence: '999998' },
               kind: 'tool_batch_transition',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: 85,
             },
             {
               address: { event_sequence: '999999' },
               kind: 'turn_activated',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: 78,
             },
             {
               address: { event_sequence: '1000000' },
               kind: 'turn_completed',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: 78,
             },
           ],
-          projected_structured_bytes: 288,
+          projected_structured_bytes: 241,
           continuation_before: { event_sequence: '999998' },
           continuation_after: null,
         },

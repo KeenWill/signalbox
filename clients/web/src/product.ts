@@ -8,6 +8,10 @@ import {
 } from './generated/web-contract.mjs'
 import { MAX_BOOTSTRAP_RESPONSE_BYTES, readBoundedJson } from './session-timeline/model'
 
+// The bootstrap contains only contract identity, capabilities, and limits. The hard response
+// ceiling is independent of the untrusted limits inside that response.
+export { MAX_BOOTSTRAP_RESPONSE_BYTES }
+
 const MAX_BLOB_DESCRIPTOR_RESPONSE_BYTES = 64 * 1024
 
 export const productRoutes = [
@@ -122,6 +126,13 @@ export class BlobDescriptorCorrelationError extends Error {
   }
 }
 
+export class BootstrapContractError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'BootstrapContractError'
+  }
+}
+
 export class SameOriginProductTransport implements ProductTransport {
   async readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap> {
     const response = await fetchProduct('/api/bootstrap', {
@@ -130,7 +141,15 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    return decodeWebContractBootstrap(await readBoundedJson(response, MAX_BOOTSTRAP_RESPONSE_BYTES))
+    try {
+      return decodeWebContractBootstrap(
+        await readBoundedJson(response, MAX_BOOTSTRAP_RESPONSE_BYTES),
+      )
+    } catch (error) {
+      throw new BootstrapContractError('bootstrap response violates the web contract', {
+        cause: error,
+      })
+    }
   }
 
   async readBlobDescriptor(

@@ -61,12 +61,23 @@ export function SessionWorkspaceSurface({
   const [manualAnchor, setManualAnchor] = useState<SessionWindowAnchor | null>(null)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const timelineRef = useRef<HTMLOListElement>(null)
+  // One bounded history per opened session: window navigation reuses its retained items and
+  // connected source instead of rebuilding both on every anchor change.
+  const historyRef = useRef<{ sessionId: string; history: BoundedSessionHistory } | null>(null)
   const remembered = sessionId === null ? undefined : app.lastLogicalPositions[sessionId]
   const session = useQuery({
     queryKey: ['production', 'session-workspace', sessionId, manualAnchor],
     queryFn: async ({ signal }) => {
-      const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window), signal)
-      const history = new BoundedSessionHistory(sessionId ?? '', source)
+      let retained = historyRef.current
+      if (retained === null || retained.sessionId !== sessionId) {
+        const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window), signal)
+        retained = {
+          sessionId: sessionId ?? '',
+          history: new BoundedSessionHistory(sessionId ?? '', source),
+        }
+        historyRef.current = retained
+      }
+      const history = retained.history
       const descriptor = await history.describe(signal)
       const active = BigInt(descriptor.work.active_turn_count) !== BigInt(0)
       const anchor: SessionWindowAnchor =
@@ -110,6 +121,25 @@ export function SessionWorkspaceSurface({
     const reconciled = reconcileTimelineSelection(selected, timelineIds)
     if (reconciled !== selected) dispatch(actions.timelineSelected(reconciled))
   }, [dispatch, selected, session.data, timelineIds])
+  // The first/latest window commands own selection: once the requested boundary window settles,
+  // select its boundary row exactly once so the command selects and focuses something.
+  const appliedBoundaryAnchorRef = useRef<SessionWindowAnchor | null>(null)
+  useEffect(() => {
+    if (manualAnchor === null || session.data?.anchor !== manualAnchor) return
+    if (appliedBoundaryAnchorRef.current === manualAnchor) return
+    appliedBoundaryAnchorRef.current = manualAnchor
+    const boundary =
+      manualAnchor.kind === 'first'
+        ? timelineIds[0]
+        : manualAnchor.kind === 'latest'
+          ? timelineIds.at(-1)
+          : undefined
+    if (boundary === undefined) return
+    dispatch(actions.timelineSelected(boundary))
+    if (sessionId !== null) {
+      dispatch(actions.logicalPositionRecorded({ sessionId, position: boundary }))
+    }
+  }, [dispatch, manualAnchor, session.data?.anchor, sessionId, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   useEffect(() => onSessionId(sessionId), [onSessionId, sessionId])
   useEffect(() => () => onSessionId(null), [onSessionId])
@@ -123,14 +153,18 @@ export function SessionWorkspaceSurface({
   }, [selected])
   const showFirstWindow = useCallback(() => setManualAnchor({ kind: 'first' }), [])
   const showLatestWindow = useCallback(() => setManualAnchor({ kind: 'latest' }), [])
+  // Window commands act on an opened session; registering them earlier would advertise
+  // first/latest actions that cannot load or select anything.
   useEffect(() => {
+    if (sessionId === null) return
     onFirstWindowAction(showFirstWindow)
     return () => onFirstWindowAction(null)
-  }, [onFirstWindowAction, showFirstWindow])
+  }, [onFirstWindowAction, sessionId, showFirstWindow])
   useEffect(() => {
+    if (sessionId === null) return
     onLatestWindowAction(showLatestWindow)
     return () => onLatestWindowAction(null)
-  }, [onLatestWindowAction, showLatestWindow])
+  }, [onLatestWindowAction, sessionId, showLatestWindow])
 
   const openSession = (event: FormEvent) => {
     event.preventDefault()
