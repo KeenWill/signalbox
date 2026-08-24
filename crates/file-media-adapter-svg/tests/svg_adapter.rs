@@ -734,6 +734,27 @@ async fn auto_and_container_dimensions_are_valid_without_numeric_metadata()
 }
 
 #[tokio::test]
+async fn css_wide_dimension_keywords_are_valid_without_numeric_metadata()
+-> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="inherit" height="REVERT-LAYER"/>"#,
+    )
+    .into_source()?;
+    let result = read(
+        &DirectProcessor::new(),
+        &source,
+        "metadata",
+        serde_json::json!({}),
+    )
+    .await?;
+    let body = complete_structure(result)?;
+
+    assert_eq!(body["width"], serde_json::Value::Null);
+    assert_eq!(body["height"], serde_json::Value::Null);
+    Ok(())
+}
+
+#[tokio::test]
 async fn calculated_dimensions_are_valid_without_numeric_metadata() -> Result<(), Box<dyn Error>> {
     let source =
         SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(100% - 1px)"/>"#)
@@ -1051,6 +1072,18 @@ async fn foreign_namespaced_width_does_not_change_metadata() -> Result<(), Box<d
 
     assert_eq!(body["width"], 10.0);
     Ok(())
+}
+
+#[tokio::test]
+async fn namespace_character_references_are_expanded_before_policy_checks()
+-> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:x="http://www.w3.org/1999/xlin&#x6b;" x:href="https://example.invalid/a.svg"/>"#,
+        ),
+        "external_reference",
+    )
+    .await
 }
 
 #[tokio::test]

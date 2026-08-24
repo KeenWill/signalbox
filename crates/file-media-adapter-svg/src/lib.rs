@@ -653,26 +653,30 @@ fn inspect_element(
             None
         };
         let expanded_namespace = match &attribute_namespace {
-            Some(ResolveResult::Bound(namespace)) => namespace.as_ref(),
+            Some(ResolveResult::Bound(namespace)) => {
+                let namespace =
+                    std::str::from_utf8(namespace.as_ref()).map_err(|_| ParseIssue::Malformed)?;
+                unescape(namespace)
+                    .map_err(|_| ParseIssue::Malformed)?
+                    .into_owned()
+                    .into_bytes()
+            }
             Some(ResolveResult::Unbound | ResolveResult::Unknown(_)) => {
                 return Err(ParseIssue::Malformed);
             }
-            None => &[][..],
+            None => Vec::new(),
         };
-        if !expanded_attributes.insert((expanded_namespace.to_vec(), key.to_vec())) {
+        if !expanded_attributes.insert((expanded_namespace, key.to_vec())) {
             return Err(ParseIssue::Malformed);
         }
         let is_svg_attribute = attribute_namespace.is_none();
-        let is_xlink_href = matches!(
-            attribute_namespace,
-            Some(ResolveResult::Bound(namespace))
-                if namespace.as_ref() == XLINK_NAMESPACE && key == b"href"
-        );
-        let is_xml_events_attribute = matches!(
-            attribute_namespace,
-            Some(ResolveResult::Bound(namespace))
-                if namespace.as_ref() == XML_EVENTS_NAMESPACE
-        );
+        let is_xlink_href = attribute_namespace
+            .as_ref()
+            .is_some_and(|namespace| namespace_matches(namespace, XLINK_NAMESPACE))
+            && key == b"href";
+        let is_xml_events_attribute = attribute_namespace
+            .as_ref()
+            .is_some_and(|namespace| namespace_matches(namespace, XML_EVENTS_NAMESPACE));
         if is_xml_events_attribute {
             return Err(ParseIssue::ActiveContent);
         }
@@ -706,10 +710,17 @@ fn inspect_element(
 }
 
 fn is_svg_namespace(namespace: &ResolveResult<'_>) -> bool {
-    matches!(
-        namespace,
-        ResolveResult::Bound(namespace) if namespace.as_ref() == SVG_NAMESPACE
-    )
+    namespace_matches(namespace, SVG_NAMESPACE)
+}
+
+fn namespace_matches(namespace: &ResolveResult<'_>, expected: &[u8]) -> bool {
+    let ResolveResult::Bound(namespace) = namespace else {
+        return false;
+    };
+    std::str::from_utf8(namespace.as_ref())
+        .ok()
+        .and_then(|namespace| unescape(namespace).ok())
+        .is_some_and(|namespace| namespace.as_bytes() == expected)
 }
 
 fn is_svg_element(namespace: &ResolveResult<'_>, local_name: &[u8], expected: &[u8]) -> bool {
@@ -961,7 +972,17 @@ fn parse_dimension(value: &str) -> Result<Option<f64>, ParseIssue> {
 
 fn parse_dimension_with_sign(value: &str, allow_negative: bool) -> Result<Option<f64>, ParseIssue> {
     let value = value.trim_matches(|character| matches!(character, ' ' | '\t' | '\n' | '\r'));
-    if value.eq_ignore_ascii_case("auto") {
+    if [
+        "auto",
+        "inherit",
+        "initial",
+        "unset",
+        "revert",
+        "revert-layer",
+    ]
+    .iter()
+    .any(|keyword| value.eq_ignore_ascii_case(keyword))
+    {
         return Ok(None);
     }
     if valid_css_calculation(value) {
