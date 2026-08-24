@@ -1612,6 +1612,23 @@ mod tests {
                 "turn_id"
             ]
         );
+        let saturation_attributes = &spans[0].events[1].attributes;
+        assert_eq!(
+            saturation_attributes
+                .iter()
+                .find(|attribute| attribute.key.as_str() == "tool_round_limit")
+                .expect("the saturation event carries its numeric limit")
+                .value,
+            opentelemetry::Value::I64(32)
+        );
+        assert_eq!(
+            saturation_attributes
+                .iter()
+                .find(|attribute| attribute.key.as_str() == "observed_tool_rounds")
+                .expect("the saturation event carries its numeric observed count")
+                .value,
+            opentelemetry::Value::I64(32)
+        );
     }
 
     #[test]
