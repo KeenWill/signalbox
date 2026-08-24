@@ -94,8 +94,7 @@ content. Rendering is in process, with one screen hosted in one window at a
 fixed canvas size, display scale, and safe area, so it sees no scene lifecycle
 or window chrome. A sheet presented by the hosted screen does reach its golden;
 sheet content is also snapshotted alone on its own canvas.
-`ScreenshotScenario` selects the fixtures, the same seam the golden capture
-scripts below use.
+`ScreenshotScenario` selects the fixtures.
 
 The canonical record and verification entry points are the two scripts below:
 `scripts/record-snapshots.sh` and `scripts/test-snapshots.sh` take the suite and
@@ -131,39 +130,6 @@ scripts/test-snapshots.sh
 `SIGNALBOX_NATIVE_SNAPSHOT_RECORD` takes `all` (the recording script's default,
 rewriting every golden), `missing`, `failed`, or `never`. Only that script
 passes it to the suite; every other entry point always compares.
-
-## Screenshots
-
-Golden screenshots live under `Screenshots/iOS`, `Screenshots/iPadOS`, and
-`Screenshots/macOS`. The 136-image matrix includes pending, completed, and
-failed tool states. Regenerate and verify it with:
-
-```bash
-scripts/capture-screenshots.sh
-scripts/capture-macos-screenshots.sh
-scripts/check-screenshot-goldens.sh
-```
-
-The operations and remote setup captures intentionally present capability gates.
-They are not previews of unimplemented server behavior. Selective capture fails
-before building when a requested screenshot name is not in the checked-in matrix
-or the selection normalizes to no names, so a typo or blank selector cannot
-silently validate an empty selection. The iPad capture uses UI automation only
-to establish landscape orientation, then launches each state independently with
-a bounded settle so one state cannot carry transient lifecycle diagnostics into
-the next golden.
-
-## Tart VM validation
-
-Apple validation can also run inside macOS Tart VM shards:
-
-```bash
-scripts/tart/run-shard.sh --print-plan xcode
-scripts/tart/run-shard.sh xcode
-scripts/tart/run-matrix.sh
-```
-
-See [Tart VM validation](docs/tart-vm-validation.md).
 
 ## Privacy boundary
 
