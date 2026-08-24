@@ -297,6 +297,11 @@ const SELECT_IDENTITY: &str = summary_sql!(
     "ORDER BY selected.session_id"
 );
 
+// Completeness is driven from `session`, exactly like the count query: a
+// session whose `session_timeline_fact` row is missing sorts first (DESC puts
+// the NULL activity timestamp ahead) and stays inside every keyset page, so
+// decoding fails closed on the missing activity timestamp instead of the page
+// silently omitting the session while the exact total still counts it.
 const SELECT_LAST_ACTIVITY: &str = summary_sql!(
     r#"
     SELECT session_row.session_id,
@@ -315,8 +320,8 @@ const SELECT_LAST_ACTIVITY: &str = summary_sql!(
            facts.attention_turn_terminal_disposition_kind,
            facts.attention_activity_kind AS fact_kind,
            facts.attention_activity_recorded_at AS recorded_at
-      FROM session_timeline_fact AS facts
-      JOIN session AS session_row USING (session_id)
+      FROM session AS session_row
+      LEFT JOIN session_timeline_fact AS facts USING (session_id)
       LEFT JOIN session_metadata AS metadata USING (session_id)
      WHERE ($6::text IS NULL
             OR strpos(COALESCE(metadata.title, ''), $6) > 0
@@ -329,6 +334,7 @@ const SELECT_LAST_ACTIVITY: &str = summary_sql!(
                 WHERE stored.session_id = session_row.session_id
                   AND stored.tag = required.tag))
        AND ($9::timestamptz IS NULL
+            OR facts.attention_activity_recorded_at IS NULL
             OR facts.attention_activity_recorded_at < $9
             OR (facts.attention_activity_recorded_at = $9
                 AND session_row.session_id > $3))
@@ -520,6 +526,9 @@ fn classify_state(
     phase: Option<&str>,
     terminal: Option<&str>,
 ) -> Result<AttentionState, AttentionRepositoryError> {
+    // Every stored fact is validated before precedence selects a winner, so
+    // corruption in a lower-precedence fact still fails closed instead of
+    // hiding behind runner loss or a blocked goal.
     let runner_state = runner
         .map(|value| {
             dispatched_runner_state_from_str(value).ok_or(AttentionCorruption::Unsupported {
@@ -528,6 +537,7 @@ fn classify_state(
             })
         })
         .transpose()?;
+    let turn_state = classify_turn_shape(turn, phase, terminal)?;
     if matches!(
         runner_state,
         Some(DispatchedRunnerState::RunnerLost | DispatchedRunnerState::RunnerLostBeforePin)
@@ -537,6 +547,14 @@ fn classify_state(
     if goal == Some(GoalEventDiscriminator::Blocked) {
         return Ok(AttentionState::Blocked);
     }
+    Ok(turn_state)
+}
+
+fn classify_turn_shape(
+    turn: Option<&str>,
+    phase: Option<&str>,
+    terminal: Option<&str>,
+) -> Result<AttentionState, AttentionRepositoryError> {
     match (turn, phase, terminal) {
         (Some("active"), Some("awaiting_tool_approval"), _) => Ok(AttentionState::AwaitingApproval),
         (Some("active"), Some("awaiting_model_call_recovery" | "awaiting_tool_recovery"), _) => {
@@ -692,6 +710,38 @@ mod tests {
     #[test]
     fn goal_event_kind_decoding_rejects_unknown_storage_values() {
         assert!(decode_goal_event_kind("future_goal_state").is_err());
+    }
+
+    #[test]
+    fn state_classification_validates_turn_facts_before_runner_loss_precedence() {
+        assert_eq!(
+            classify_state(
+                Some("runner_lost"),
+                None,
+                Some("terminal"),
+                None,
+                Some("future_disposition"),
+            )
+            .unwrap_err()
+            .to_string(),
+            "unsupported operator attention turn terminal disposition: future_disposition"
+        );
+    }
+
+    #[test]
+    fn state_classification_validates_turn_facts_before_blocked_goal_precedence() {
+        assert_eq!(
+            classify_state(
+                None,
+                Some(GoalEventDiscriminator::Blocked),
+                Some("future_turn_state"),
+                None,
+                None,
+            )
+            .unwrap_err()
+            .to_string(),
+            "unsupported operator attention turn state: future_turn_state"
+        );
     }
 
     #[test]

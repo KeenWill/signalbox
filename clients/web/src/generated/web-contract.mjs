@@ -1353,6 +1353,23 @@ function assertAttentionSnapshot(snapshot, path) {
   snapshot.summaries.forEach((summary, index) =>
     assertAttentionSummary(summary, `${path}.summaries[${index}]`),
   );
+  for (let index = 1; index < snapshot.summaries.length; index += 1) {
+    const previous = snapshot.summaries[index - 1];
+    const current = snapshot.summaries[index];
+    let ordered;
+    if (snapshot.sort === "session_identity_ascending") {
+      ordered = previous.session_id < current.session_id;
+    } else {
+      const previousActivity = BigInt(previous.last_activity.unix_microseconds);
+      const currentActivity = BigInt(current.last_activity.unix_microseconds);
+      ordered =
+        previousActivity > currentActivity ||
+        (previousActivity === currentActivity && previous.session_id < current.session_id);
+    }
+    if (!ordered) {
+      fail(`${path}.summaries[${index}]`, `strictly ordered by sort ${snapshot.sort}`);
+    }
+  }
   if (BigInt(snapshot.total) < BigInt(snapshot.summaries.length)) {
     fail(`${path}.total`, "at least the number of returned summaries");
   }
@@ -1407,6 +1424,13 @@ function assertAttentionSummary(summary, path) {
   ].includes(summary.state);
   if (turnBacked && summary.current_turn_id === null) {
     fail(`${path}.current_turn_id`, `a turn identity for state ${summary.state}`);
+  }
+  const activeBacked = ["active", "awaiting_approval", "ambiguous"].includes(summary.state);
+  if (activeBacked && BigInt(summary.active_turn_count) === 0n) {
+    fail(`${path}.active_turn_count`, `at least one active turn for state ${summary.state}`);
+  }
+  if (summary.state === "queued" && BigInt(summary.queued_turn_count) === 0n) {
+    fail(`${path}.queued_turn_count`, "at least one queued turn for queued state");
   }
   const hasGoalBlock = Object.hasOwn(summary, "goal_block") && summary.goal_block !== null;
   if ((summary.state === "blocked") !== hasGoalBlock) {
