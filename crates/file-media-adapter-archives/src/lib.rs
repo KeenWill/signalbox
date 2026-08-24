@@ -448,7 +448,10 @@ fn enumerate_zip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
         if recursive {
             return Err(ArchiveIssue::Recursive);
         }
-        total = bounded_total(total, expanded)?;
+        total = bounded_total(ExpansionAggregation {
+            current: total,
+            added: expanded,
+        })?;
         entries.push(EntrySummary {
             name,
             kind,
@@ -503,7 +506,10 @@ fn enumerate_tar(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
         if recursive {
             return Err(ArchiveIssue::Recursive);
         }
-        total = bounded_total(total, expanded)?;
+        total = bounded_total(ExpansionAggregation {
+            current: total,
+            added: expanded,
+        })?;
         entries.push(EntrySummary {
             name,
             kind,
@@ -537,7 +543,10 @@ fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
             .checked_sub(expanded)
             .ok_or(ArchiveIssue::Expansion)?;
         let member_expanded = count_reader_with_detector(&mut decoder, maximum, &mut detector)?;
-        expanded = bounded_total(expanded, member_expanded)?;
+        expanded = bounded_total(ExpansionAggregation {
+            current: expanded,
+            added: member_expanded,
+        })?;
         let consumed = usize::try_from(decoder.into_inner().position())
             .map_err(|_| ArchiveIssue::Malformed)?;
         if consumed == 0 {
@@ -632,8 +641,16 @@ impl RecursiveDetector {
     }
 }
 
-fn bounded_total(total: u64, added: u64) -> Result<u64, ArchiveIssue> {
-    let total = total.checked_add(added).ok_or(ArchiveIssue::Expansion)?;
+struct ExpansionAggregation {
+    current: u64,
+    added: u64,
+}
+
+fn bounded_total(aggregation: ExpansionAggregation) -> Result<u64, ArchiveIssue> {
+    let total = aggregation
+        .current
+        .checked_add(aggregation.added)
+        .ok_or(ArchiveIssue::Expansion)?;
     if total > MAX_EXPANDED_BYTES {
         Err(ArchiveIssue::Expansion)
     } else {
