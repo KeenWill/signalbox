@@ -43,6 +43,7 @@ const MAX_DECOMPRESSED_PAGE_BYTES: usize = 1024 * 1024;
 // Hard safety ceilings bound object traversal and page-index construction latency.
 const MAX_OBJECTS: usize = 10_000;
 const MAX_PAGES: usize = 10_000;
+const MAX_GENERATION: u64 = 65_535;
 
 #[derive(Clone, Copy)]
 enum ValidationMode {
@@ -582,7 +583,11 @@ async fn inspect_bounded(
                                 bytes.get(usize::try_from(relative).ok()?..)
                             });
                     let stream_length = cached_stream.map_or_else(
-                        || budget.remaining_bytes.min(source_length - stream_offset),
+                        || {
+                            budget
+                                .available_after_reserving(ROOT_VALIDATION_BYTES, 1)
+                                .min(source_length - stream_offset)
+                        },
                         |bytes| bytes.len() as u64,
                     );
                     if cached_stream.is_none() && !budget.can_read(stream_length) {
@@ -1210,6 +1215,9 @@ fn parse_classic_xref(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
             let offset = parse_unsigned(bytes, &mut cursor)?;
             skip_pdf_space_and_comments(bytes, &mut cursor);
             let generation = parse_unsigned(bytes, &mut cursor)?;
+            if generation > MAX_GENERATION {
+                return None;
+            }
             skip_pdf_space_and_comments(bytes, &mut cursor);
             let state = *bytes.get(cursor)?;
             if state != b'n' && state != b'f' {
@@ -1217,17 +1225,14 @@ fn parse_classic_xref(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
             }
             cursor += 1;
             if state == b'n' {
-                if live_entries.len() == MAX_OBJECTS {
-                    object_limit_exceeded = true;
-                } else if !object_limit_exceeded {
-                    live_entries.push(LiveXrefEntry {
-                        reference: IndirectReference {
-                            object_number,
-                            generation,
-                        },
-                        location: XrefLocation::Uncompressed(offset),
-                    });
-                }
+                live_entries.push(LiveXrefEntry {
+                    reference: IndirectReference {
+                        object_number,
+                        generation,
+                    },
+                    location: XrefLocation::Uncompressed(offset),
+                });
+                object_limit_exceeded = live_entries.len() > MAX_OBJECTS;
             }
         }
     }
@@ -1249,6 +1254,9 @@ fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
     let xref_object = parse_unsigned(bytes, &mut cursor)?;
     skip_pdf_space_and_comments(bytes, &mut cursor);
     let xref_generation = parse_unsigned(bytes, &mut cursor)?;
+    if xref_generation > MAX_GENERATION {
+        return None;
+    }
     skip_pdf_space_and_comments(bytes, &mut cursor);
     if !consume_keyword(bytes, &mut cursor, b"obj") {
         return None;
@@ -1302,19 +1310,15 @@ fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
         object_number: xref_object,
         generation: xref_generation,
     };
-    if !object_limit_exceeded
-        && live_entries
-            .iter()
-            .all(|entry| entry.reference != xref_reference)
+    if live_entries
+        .iter()
+        .all(|entry| entry.reference != xref_reference)
     {
-        if live_entries.len() >= MAX_OBJECTS {
-            object_limit_exceeded = true;
-        } else {
-            live_entries.push(LiveXrefEntry {
-                reference: xref_reference,
-                location: XrefLocation::Uncompressed(0),
-            });
-        }
+        live_entries.push(LiveXrefEntry {
+            reference: xref_reference,
+            location: XrefLocation::Uncompressed(0),
+        });
+        object_limit_exceeded = live_entries.len() > MAX_OBJECTS;
     }
     Some(ParsedXref {
         facts,
@@ -1575,9 +1579,12 @@ fn parse_name(bytes: &[u8], cursor: &mut usize) -> Option<Vec<u8>> {
 
 fn parse_indirect_reference(bytes: &[u8], cursor: &mut usize) -> Option<IndirectReference> {
     let object_number = parse_nonnegative_integer(bytes, cursor)?;
-    skip_pdf_space_and_comments(bytes, cursor);
+    skip_required_pdf_space_and_comments(bytes, cursor)?;
     let generation = parse_nonnegative_integer(bytes, cursor)?;
-    skip_pdf_space_and_comments(bytes, cursor);
+    if generation > MAX_GENERATION {
+        return None;
+    }
+    skip_required_pdf_space_and_comments(bytes, cursor)?;
     if !consume_keyword(bytes, cursor, b"R") {
         return None;
     }
@@ -1622,7 +1629,7 @@ fn parse_filter_names(bytes: &[u8], cursor: &mut usize) -> Option<Vec<Vec<u8>>> 
         skip_pdf_space_and_comments(bytes, cursor);
         if bytes.get(*cursor) == Some(&b']') {
             *cursor += 1;
-            return (!filters.is_empty()).then_some(filters);
+            return Some(filters);
         }
         filters.push(parse_name(bytes, cursor)?);
     }
@@ -1795,20 +1802,16 @@ fn merge_supplemental_xref(current: &mut ParsedXref, supplemental: ParsedXref) {
         current.facts.root = supplemental.facts.root;
     }
     current.facts.xref_stream = supplemental.facts.xref_stream;
-    current.object_limit_exceeded |= supplemental.object_limit_exceeded;
     for entry in supplemental.live_entries {
         current.live_entries.retain(|current_entry| {
             current_entry.reference.object_number != entry.reference.object_number
         });
-        if current.live_entries.len() >= MAX_OBJECTS {
-            current.object_limit_exceeded = true;
-            break;
-        }
         current.live_entries.push(entry);
     }
     current
         .declared_objects
         .extend(supplemental.declared_objects);
+    current.object_limit_exceeded = current.live_entries.len() > MAX_OBJECTS;
 }
 
 fn merge_previous_xref(current: &mut ParsedXref, previous: ParsedXref) {
@@ -1817,20 +1820,16 @@ fn merge_previous_xref(current: &mut ParsedXref, previous: ParsedXref) {
         current.facts.root = previous.facts.root;
     }
     current.facts.prev = previous.facts.prev;
-    current.object_limit_exceeded |= previous.object_limit_exceeded;
     for entry in previous.live_entries {
         if !current
             .declared_objects
             .contains(&entry.reference.object_number)
         {
-            if current.live_entries.len() >= MAX_OBJECTS {
-                current.object_limit_exceeded = true;
-                break;
-            }
             current.live_entries.push(entry);
         }
     }
     current.declared_objects.extend(previous.declared_objects);
+    current.object_limit_exceeded = current.live_entries.len() > MAX_OBJECTS;
 }
 
 fn root_location(parsed: &ParsedXref) -> Option<(IndirectReference, XrefLocation)> {
@@ -2429,7 +2428,7 @@ fn object_is_pages(bytes: &[u8], expected: IndirectReference) -> bool {
             let mut value_cursor = value_start;
             pages = parse_name(bytes, &mut value_cursor).as_deref() == Some(b"Pages");
         } else if key == b"Kids" {
-            kids = bytes.get(value_start) == Some(&b'[');
+            kids = kids_array_contains_only_references(bytes, value_start, cursor);
         } else if key == b"Count" {
             let mut value_cursor = value_start;
             count = parse_nonnegative_integer(bytes, &mut value_cursor)
@@ -2517,12 +2516,11 @@ fn parse_xref_stream_entries(
                 parse_big_endian(entry.get(..type_end)?)?
             };
             if entry_type == 1 || entry_type == 2 {
-                if live_entries.len() == MAX_OBJECTS {
-                    object_limit_exceeded = true;
-                    continue;
-                }
                 let field_two = parse_big_endian(entry.get(type_end..field_two_end)?)?;
                 let generation = parse_big_endian(entry.get(field_two_end..)?)?;
+                if entry_type == 1 && generation > MAX_GENERATION {
+                    return None;
+                }
                 let location = if entry_type == 1 {
                     XrefLocation::Uncompressed(field_two)
                 } else {
@@ -2538,6 +2536,7 @@ fn parse_xref_stream_entries(
                     },
                     location,
                 });
+                object_limit_exceeded = live_entries.len() > MAX_OBJECTS;
             }
         }
     }
@@ -2636,6 +2635,12 @@ fn skip_pdf_space_and_comments(bytes: &[u8], cursor: &mut usize) {
             *cursor += 1;
         }
     }
+}
+
+fn skip_required_pdf_space_and_comments(bytes: &[u8], cursor: &mut usize) -> Option<()> {
+    let start = *cursor;
+    skip_pdf_space_and_comments(bytes, cursor);
+    (*cursor > start).then_some(())
 }
 
 fn is_pdf_delimiter(byte: u8) -> bool {
@@ -2961,6 +2966,64 @@ mod tests {
                 generation: 0,
             })
         );
+    }
+
+    #[test]
+    fn indirect_reference_requires_separators() {
+        for value in [b"1 0R".as_slice(), b"10 R"] {
+            let mut cursor = 0;
+            assert!(parse_indirect_reference(value, &mut cursor).is_none());
+        }
+    }
+
+    #[test]
+    fn indirect_reference_rejects_large_generation() {
+        let mut cursor = 0;
+        assert!(parse_indirect_reference(b"1 65536 R", &mut cursor).is_none());
+    }
+
+    #[test]
+    fn classic_xref_rejects_large_generation() {
+        assert!(
+            parse_xref_structure(
+                b"xref\n1 1\n0000000017 65536 n\ntrailer\n<< /Size 2 /Root 1 0 R >>"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn empty_filter_array_is_absent() {
+        let mut cursor = 0;
+        assert_eq!(parse_filter_names(b"[]", &mut cursor), Some(Vec::new()));
+        assert_eq!(cursor, 2);
+    }
+
+    #[test]
+    fn merged_xrefs_count_only_effective_live_objects() {
+        let mut c = ParsedXref {
+            facts: TrailerFacts::default(),
+            live_entries: Vec::new(),
+            declared_objects: (1..=MAX_OBJECTS as u64).collect(),
+            object_limit_exceeded: false,
+        };
+        let p = ParsedXref {
+            facts: TrailerFacts::default(),
+            live_entries: (1..=MAX_OBJECTS as u64 + 1)
+                .map(|n| LiveXrefEntry {
+                    reference: IndirectReference {
+                        object_number: n,
+                        generation: 0,
+                    },
+                    location: XrefLocation::Uncompressed(n),
+                })
+                .collect(),
+            declared_objects: (1..=MAX_OBJECTS as u64 + 1).collect(),
+            object_limit_exceeded: true,
+        };
+        merge_previous_xref(&mut c, p);
+        assert_eq!(c.live_entries.len(), 1);
+        assert!(!c.object_limit_exceeded);
     }
 
     #[test]
@@ -3511,6 +3574,29 @@ mod tests {
             b"9 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj",
             pages
         ));
+    }
+
+    #[test]
+    fn uncompressed_page_tree_requires_reference_kids() {
+        let p = IndirectReference {
+            object_number: 8,
+            generation: 0,
+        };
+        assert!(!object_is_pages(
+            b"8 0 obj
+<< /Type /Pages /Count 2 /Kids [1 0 R 2] >>
+endobj",
+            p
+        ));
+    }
+
+    #[test]
+    fn page_stream_read_reserves_length_probe_budget() {
+        let b = ValidationBudget::new(16_384, 2);
+        assert_eq!(
+            b.available_after_reserving(ROOT_VALIDATION_BYTES, 1),
+            12_288
+        );
     }
 
     #[test]
