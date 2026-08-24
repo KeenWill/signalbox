@@ -240,6 +240,20 @@ async fn utf16_little_endian_svg_is_accepted() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn utf16_svg_without_declared_encoding_is_accepted() -> Result<(), Box<dyn Error>> {
+    let xml = "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+    let mut bytes = vec![0xff, 0xfe];
+    bytes.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
+    let source = SvgFixture::raw(&bytes).into_source()?;
+
+    assert_eq!(
+        inspect(&DirectProcessor::new(), &source).await?.status(),
+        FileInspectionStatus::Validated
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn utf16_big_endian_svg_is_accepted() -> Result<(), Box<dyn Error>> {
     let xml = "<?xml version=\"1.0\" encoding=\"UTF-16BE\"?><svg xmlns=\"http://www.w3.org/2000/svg\"><text>ok</text></svg>";
     let mut bytes = vec![0xfe, 0xff];
@@ -431,6 +445,17 @@ async fn foreign_resource_element_is_rejected() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn foreign_input_source_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:h="http://www.w3.org/1999/xhtml"><h:input type="image" src="https://example.test/a.png"/></svg>"#,
+        ),
+        "external_reference",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn built_in_attribute_entity_is_accepted() -> Result<(), Box<dyn Error>> {
     let source =
         SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" aria-label="A &amp; B"/>"#)
@@ -459,6 +484,15 @@ async fn cdata_in_text_is_extracted_as_inert_text() -> Result<(), Box<dyn Error>
 
     assert_eq!(complete_text(result)?, "a < b\n");
     Ok(())
+}
+
+#[tokio::test]
+async fn forbidden_xml_character_in_cdata_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(b"<svg xmlns=\"http://www.w3.org/2000/svg\"><![CDATA[a\x01b]]></svg>",),
+        "malformed_svg",
+    )
+    .await
 }
 
 #[tokio::test]
@@ -910,6 +944,19 @@ async fn unknown_bytes_remain_a_typed_unknown_inspection() -> Result<(), Box<dyn
         inspect_as(&DirectProcessor::new(), &source, "application/octet-stream").await?;
 
     assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn probe_accepts_root_before_truncated_utf8_character() -> Result<(), Box<dyn Error>> {
+    let mut bytes = br#"<svg xmlns="http://www.w3.org/2000/svg"><text>"#.to_vec();
+    bytes.resize(65_535, b'a');
+    bytes.extend_from_slice("é</text></svg>".as_bytes());
+    let source = SvgFixture::raw(&bytes).into_source()?;
+    let inspection =
+        inspect_as(&DirectProcessor::new(), &source, "application/octet-stream").await?;
+
+    assert_ne!(inspection.status(), FileInspectionStatus::Unknown);
     Ok(())
 }
 

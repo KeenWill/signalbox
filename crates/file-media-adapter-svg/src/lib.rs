@@ -281,7 +281,7 @@ enum XmlEncoding {
 }
 
 fn probe_root(bytes: &[u8]) -> ProbeRoot {
-    let Ok((document, source_encoding)) = decode_xml(bytes) else {
+    let Ok((document, source_encoding)) = decode_xml(bytes, true) else {
         return ProbeRoot::Other;
     };
     let mut reader = NsReader::from_reader(document.as_bytes());
@@ -337,7 +337,7 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
 }
 
 fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
-    let (document, source_encoding) = decode_xml(bytes)?;
+    let (document, source_encoding) = decode_xml(bytes, false)?;
     let mut reader = NsReader::from_reader(document.as_bytes());
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
@@ -458,6 +458,9 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     return Err(ParseIssue::Malformed);
                 }
                 let decoded = cdata.xml10_content().map_err(|_| ParseIssue::Malformed)?;
+                if !has_only_xml10_characters(&decoded) {
+                    return Err(ParseIssue::Malformed);
+                }
                 if mode.collects_text() && text_depth > 0 {
                     append_text(&mut parsed.text, &decoded)?;
                 }
@@ -614,6 +617,7 @@ fn inspect_element(
         }
         if (is_svg_attribute && key == b"href")
             || is_xlink_href
+            || (!is_svg_namespace(namespace) && is_svg_attribute && foreign_resource_attribute(key))
             || (is_svg_attribute
                 && resource_capable_attribute(key)
                 && (contains_ascii_case_insensitive(value.as_bytes(), b"url(")
@@ -665,6 +669,13 @@ fn resource_element(name: &[u8]) -> bool {
     matches!(
         name,
         b"image" | b"img" | b"audio" | b"video" | b"source" | b"track"
+    )
+}
+
+fn foreign_resource_attribute(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"src" | b"srcset" | b"poster" | b"data" | b"action" | b"formaction" | b"background"
     )
 }
 
@@ -1234,7 +1245,7 @@ fn declaration_matches_encoding(
     source_encoding: XmlEncoding,
 ) -> Result<bool, ()> {
     match declaration.encoding() {
-        None => Ok(source_encoding == XmlEncoding::Utf8),
+        None => Ok(true),
         Some(Ok(encoding)) => Ok(encoding_matches_source(encoding.as_ref(), source_encoding)),
         Some(Err(_)) => Err(()),
     }
@@ -1328,7 +1339,10 @@ fn encoding_matches_source(declared: &[u8], source: XmlEncoding) -> bool {
     }
 }
 
-fn decode_xml(bytes: &[u8]) -> Result<(Cow<'_, str>, XmlEncoding), ParseIssue> {
+fn decode_xml(
+    bytes: &[u8],
+    allow_truncated_tail: bool,
+) -> Result<(Cow<'_, str>, XmlEncoding), ParseIssue> {
     let (encoding, payload) = if let Some(payload) = bytes.strip_prefix(&[0xff, 0xfe]) {
         (XmlEncoding::Utf16Le, payload)
     } else if let Some(payload) = bytes.strip_prefix(&[0xfe, 0xff]) {
@@ -1339,12 +1353,23 @@ fn decode_xml(bytes: &[u8]) -> Result<(Cow<'_, str>, XmlEncoding), ParseIssue> {
         (XmlEncoding::Utf16Be, bytes)
     } else {
         let payload = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
-        let document = std::str::from_utf8(payload).map_err(|_| ParseIssue::Malformed)?;
+        let document = match std::str::from_utf8(payload) {
+            Ok(document) => document,
+            Err(error) if allow_truncated_tail && error.error_len().is_none() => {
+                std::str::from_utf8(&payload[..error.valid_up_to()])
+                    .map_err(|_| ParseIssue::Malformed)?
+            }
+            Err(_) => return Err(ParseIssue::Malformed),
+        };
         return Ok((Cow::Borrowed(document), XmlEncoding::Utf8));
     };
-    if payload.len() % 2 != 0 {
+    let payload = if payload.len() % 2 != 0 && allow_truncated_tail {
+        &payload[..payload.len() - 1]
+    } else if payload.len() % 2 != 0 {
         return Err(ParseIssue::Malformed);
-    }
+    } else {
+        payload
+    };
     let little_endian = match encoding {
         XmlEncoding::Utf16Le => true,
         XmlEncoding::Utf16Be => false,
@@ -1357,9 +1382,15 @@ fn decode_xml(bytes: &[u8]) -> Result<(Cow<'_, str>, XmlEncoding), ParseIssue> {
             u16::from_be_bytes([pair[0], pair[1]])
         }
     });
-    let document: String = char::decode_utf16(units)
-        .collect::<Result<_, _>>()
-        .map_err(|_| ParseIssue::Malformed)?;
+    let mut document = String::new();
+    let mut decoded = char::decode_utf16(units).peekable();
+    while let Some(character) = decoded.next() {
+        match character {
+            Ok(character) => document.push(character),
+            Err(_) if allow_truncated_tail && decoded.peek().is_none() => break,
+            Err(_) => return Err(ParseIssue::Malformed),
+        }
+    }
     Ok((Cow::Owned(document), encoding))
 }
 
