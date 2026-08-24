@@ -1036,7 +1036,9 @@ def runs_file_media_isolation_tests(arguments: list[str]) -> bool:
     """Recognize the ignored isolation suite enforced outside the PostgreSQL manifest.
 
     This exception is intentionally exact: changing the package, feature, test
-    target, or harness selection remains an unmanifested ignored-test run.
+    target, or harness selection remains an unmanifested ignored-test run. Both
+    this module's workflow gate and `check_docs_consistency.py` use this single
+    predicate so ignored-test credit cannot disagree with workflow admission.
     """
     return arguments == [
         "--no-fail-fast",
