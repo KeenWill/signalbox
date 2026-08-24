@@ -386,7 +386,7 @@ test('closes the inspector with global Escape after focus leaves it', async ({ p
     name: new RegExp(`awaiting approval.*${approvalSessionId}`),
   })
   await approval.click()
-  await page.getByRole('button', { name: 'Refresh snapshot' }).focus()
+  await page.getByRole('button', { name: 'Restart monitor' }).focus()
   await page.keyboard.press('Escape')
 
   await expect(page.getByRole('button', { name: 'Close attention inspector' })).toBeHidden()
@@ -403,7 +403,7 @@ test('moves focus to the page heading when refreshed data removes the selection'
   await page
     .getByRole('button', { name: new RegExp(`awaiting approval.*${approvalSessionId}`) })
     .click()
-  await page.getByRole('button', { name: 'Refresh snapshot' }).click()
+  await page.getByRole('button', { name: 'Restart monitor' }).click()
 
   await expect(page.getByRole('button', { name: 'Close attention inspector' })).toBeHidden()
   await expect(
@@ -430,7 +430,7 @@ test('restarts a stale Attention monitor in place', async ({ page }) => {
   await page.goto('/attention')
 
   await expect(page.getByText('Monitor paused')).toBeVisible()
-  await page.getByRole('button', { name: 'Refresh snapshot' }).click()
+  await page.getByRole('button', { name: 'Restart monitor' }).click()
 
   await expect.poll(followRequests).toBe(2)
 })
@@ -461,7 +461,7 @@ test('keeps the live projection when a refresh snapshot regresses', async ({ pag
   await page.goto('/attention')
   await expect(page.getByText('cursor 42')).toBeVisible()
 
-  await page.getByRole('button', { name: 'Refresh snapshot' }).click()
+  await page.getByRole('button', { name: 'Restart monitor' }).click()
 
   await expect.poll(snapshotRequests).toBe(2)
   await expect(page.getByText('cursor 42')).toBeVisible()
