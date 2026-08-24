@@ -8,7 +8,7 @@ use std::{
     collections::VecDeque,
     error::Error,
     fs,
-    future::pending,
+    future::{Future, pending},
     io::{self, ErrorKind},
     os::unix::fs::PermissionsExt,
     panic::{AssertUnwindSafe, resume_unwind},
@@ -25,15 +25,16 @@ use signalbox_application::{
     AuthorizeModelCallOutcome, ClassifyOperatorFailure,
     CreateSessionFromImportedFrontierIdGenerator, CreateSessionFromImportedFrontierOutcome,
     CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
-    EligibilityPass, ImportConversationOutcome, ImportConversationService,
-    ImportedConversationIdGenerator, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
-    InProcessToolDispatchGate, ModelCallCredentialReference, ModelCallExecutionOutcome,
-    ModelCallExecutionService, ModelCallInputTokenCount, ModelCallInputTokenCounter, NoToolCatalog,
-    OperatorFailureClass, PreparedModelOperation, ReplaceSessionMetadataOutcome,
-    ReplaceSessionMetadataRequest, ReplaceSessionMetadataService, SchedulerLoop, SchedulerLoopExit,
-    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnOutcome,
-    StartEligibleTurnService, StartupScanService, UuidV7ModelCallExecutionIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, scheduler_pass_admission_cap,
+    EligibilityPass, EligibilitySweep, EligibilitySweepBatch, ImportConversationOutcome,
+    ImportConversationService, ImportedConversationIdGenerator, InProcessAttemptDispatchGate,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
+    ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallInputTokenCount,
+    ModelCallInputTokenCounter, NoToolCatalog, OperatorFailureClass, PreparedModelOperation,
+    ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
+    SchedulerLoop, SchedulerLoopExit, ScriptedModelCallProvider, ScriptedModelCallStep,
+    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService,
+    UuidV7ModelCallExecutionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7StartupScanIdGenerator, scheduler_pass_admission_cap,
 };
 use signalbox_blob_store::BlobObjectKey;
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
@@ -568,13 +569,68 @@ async fn create_imported_session(pool: &PgPool) -> Result<CanonicalUuid, Box<dyn
     Ok(CanonicalUuid::from_uuid(session.into_uuid()))
 }
 
+#[derive(Clone, Debug)]
+struct ReconciliationWitness {
+    completed_cycles: Arc<AtomicUsize>,
+}
+
+impl ReconciliationWitness {
+    fn new() -> Self {
+        Self {
+            completed_cycles: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn record_completed_cycle(&self) {
+        self.completed_cycles.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn completed_cycles(&self) -> usize {
+        self.completed_cycles.load(Ordering::SeqCst)
+    }
+}
+
+struct WitnessedEligibilitySweep<Sweep> {
+    inner: Sweep,
+    witness: ReconciliationWitness,
+}
+
+impl<Sweep> WitnessedEligibilitySweep<Sweep> {
+    fn new(inner: Sweep, witness: ReconciliationWitness) -> Self {
+        Self { inner, witness }
+    }
+}
+
+impl<Sweep> EligibilitySweep for WitnessedEligibilitySweep<Sweep>
+where
+    Sweep: EligibilitySweep + Send,
+{
+    type Error = Sweep::Error;
+
+    fn find_sessions(
+        &mut self,
+    ) -> impl Future<Output = Result<EligibilitySweepBatch, Self::Error>> + Send {
+        let witness = self.witness.clone();
+        async move {
+            let batch = self.inner.find_sessions().await?;
+            if !batch.clone().into_parts().1 {
+                witness.record_completed_cycle();
+            }
+            Ok(batch)
+        }
+    }
+}
+
+type RuntimeEligibilitySweep = WitnessedEligibilitySweep<PostgresEligibilitySweep>;
+
 struct RunningRuntime {
     container: ContainerAsync<Postgres>,
     pool: PgPool,
     socket_directory: SocketDirectory,
     shutdown: watch::Sender<bool>,
     runtime_task: JoinHandle<Result<(), ProcessRuntimeError>>,
-    work_source: Option<InProcessEligibilityWorkSource<PostgresEligibilitySweep>>,
+    work_source: Option<InProcessEligibilityWorkSource<RuntimeEligibilitySweep>>,
+    reconciliation_witness: ReconciliationWitness,
     provider_text_deltas: ProcessProviderTextDeltaSink,
     blob_store_registry: Option<Arc<BlobStoreRegistry>>,
     blob_storage_root: Option<BlobStorageFixture>,
@@ -614,7 +670,11 @@ impl RunningRuntime {
         let (container, pool) = postgres().await?;
         let socket_directory = SocketDirectory::create()?;
         let listener = LocalProcessListener::bind(socket_directory.socket())?;
-        let sweep = PostgresEligibilitySweep::new(pool.clone());
+        let reconciliation_witness = ReconciliationWitness::new();
+        let sweep = WitnessedEligibilitySweep::new(
+            PostgresEligibilitySweep::new(pool.clone()),
+            reconciliation_witness.clone(),
+        );
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
         let blob_storage_root = match blob_storage {
             BlobStorageFixtureMode::Disabled => None,
@@ -663,6 +723,7 @@ impl RunningRuntime {
             shutdown,
             runtime_task,
             work_source: Some(work_source),
+            reconciliation_witness,
             provider_text_deltas,
             blob_store_registry,
             blob_storage_root,
@@ -718,7 +779,11 @@ impl RunningRuntime {
         let recovered_turn_count = scan.execute().await?.recovered_turn_count();
 
         let listener = LocalProcessListener::bind(self.socket())?;
-        let sweep = PostgresEligibilitySweep::new(self.pool.clone());
+        let reconciliation_witness = ReconciliationWitness::new();
+        let sweep = WitnessedEligibilitySweep::new(
+            PostgresEligibilitySweep::new(self.pool.clone()),
+            reconciliation_witness.clone(),
+        );
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
         let model_configuration = HubModelConfiguration::parse(configuration)?;
         let mut runtime = ProcessRuntime::new_with_templates(
@@ -737,6 +802,7 @@ impl RunningRuntime {
         self.shutdown = shutdown;
         self.runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
         self.work_source = Some(work_source);
+        self.reconciliation_witness = reconciliation_witness;
         self.provider_text_deltas = provider_text_deltas;
         Ok(recovered_turn_count)
     }
@@ -758,10 +824,14 @@ impl RunningRuntime {
             .await
     }
 
-    fn take_work_source(&mut self) -> InProcessEligibilityWorkSource<PostgresEligibilitySweep> {
+    fn take_work_source(&mut self) -> InProcessEligibilityWorkSource<RuntimeEligibilitySweep> {
         self.work_source
             .take()
             .expect("the streaming fixture takes the work source once")
+    }
+
+    fn reconciliation_witness(&self) -> ReconciliationWitness {
+        self.reconciliation_witness.clone()
     }
 
     fn provider_text_delta_sink(&self) -> ProcessProviderTextDeltaSink {
@@ -2225,6 +2295,12 @@ struct FleetPrepared {
     inner: ScriptedPrepared<ModelCallId>,
 }
 
+#[derive(Clone, Copy)]
+struct FleetModelCardinality {
+    hanging: usize,
+    completing: usize,
+}
+
 #[derive(Clone)]
 struct FleetScriptedModel {
     inner: ScriptedModel<ModelCallId>,
@@ -2234,7 +2310,7 @@ struct FleetScriptedModel {
 }
 
 impl FleetScriptedModel {
-    fn new(hang_count: usize, completed_count: usize) -> Self {
+    fn new(cardinality: FleetModelCardinality) -> Self {
         Self {
             inner: ScriptedModel::following(std::iter::repeat_n(
                 completed_script(
@@ -2242,9 +2318,9 @@ impl FleetScriptedModel {
                     "fleet session completed",
                     TokenUsage::unreported(),
                 ),
-                hang_count + completed_count,
+                cardinality.hanging + cardinality.completing,
             )),
-            hangs_remaining: Arc::new(AtomicUsize::new(hang_count)),
+            hangs_remaining: Arc::new(AtomicUsize::new(cardinality.hanging)),
             in_flight_hangs: Arc::new(AtomicUsize::new(0)),
             completed_calls: Arc::new(Mutex::new(Vec::new())),
         }
@@ -2428,6 +2504,16 @@ fn start_fleet_scheduler(
 async fn wait_for_hangs(model: &FleetScriptedModel, expected: usize) -> Result<(), Box<dyn Error>> {
     timeout(FLEET_SETUP_BOUND, async {
         while model.in_flight_hangs() != expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    Ok(())
+}
+
+async fn wait_for_reconciliation(witness: &ReconciliationWitness) -> Result<(), Box<dyn Error>> {
+    timeout(FLEET_SETUP_BOUND, async {
+        while witness.completed_cycles() == 0 {
             tokio::task::yield_now().await;
         }
     })
@@ -2707,7 +2793,10 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
         let enforce_liveness = enforce_fleet_liveness();
         let fleet = commission_fleet(&runtime).await?;
         let census_repository = FleetSoakCensusRepository::new(runtime.pool.clone());
-        let model = FleetScriptedModel::new(1, FLEET_SESSION_COUNT - 1);
+        let model = FleetScriptedModel::new(FleetModelCardinality {
+            hanging: 1,
+            completing: FLEET_SESSION_COUNT - 1,
+        });
         scheduler = Some(start_fleet_scheduler(&mut runtime, model.clone())?);
         wait_for_hangs(&model, 1).await?;
         let completed_calls = wait_for_completed_calls(&model, FLEET_SESSION_COUNT - 1).await?;
@@ -2774,7 +2863,7 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
     }
 }
 
-/// Killing the daemon with a full fleet after every send leaves each model
+/// INV-034: killing the daemon with a full fleet after every send leaves each model
 /// call ambiguous. Recovery must release local scheduler ownership while
 /// preserving every turn in the specification-mandated user-decision park.
 #[tokio::test(flavor = "multi_thread")]
@@ -2785,7 +2874,10 @@ async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), 
     let scenario = AssertUnwindSafe(async {
         let fleet = commission_fleet(&runtime).await?;
         let census_repository = FleetSoakCensusRepository::new(runtime.pool.clone());
-        let hanging_model = FleetScriptedModel::new(FLEET_SESSION_COUNT, 0);
+        let hanging_model = FleetScriptedModel::new(FleetModelCardinality {
+            hanging: FLEET_SESSION_COUNT,
+            completing: 0,
+        });
         scheduler = Some(start_fleet_scheduler(&mut runtime, hanging_model.clone())?);
         wait_for_hangs(&hanging_model, FLEET_SESSION_COUNT).await?;
         let pre_kill_model_call_ids = census_repository.model_call_ids().await?;
@@ -2802,11 +2894,16 @@ async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), 
         .await?;
         wait_for_hangs(&hanging_model, 0).await?;
         let _recovered = runtime.kill_and_restart().await?;
-        let replacement_model = FleetScriptedModel::new(0, FLEET_SESSION_COUNT);
+        let replacement_model = FleetScriptedModel::new(FleetModelCardinality {
+            hanging: 0,
+            completing: FLEET_SESSION_COUNT,
+        });
+        let replacement_reconciliation = runtime.reconciliation_witness();
         scheduler = Some(start_fleet_scheduler(
             &mut runtime,
             replacement_model.clone(),
         )?);
+        wait_for_reconciliation(&replacement_reconciliation).await?;
         let control_session = commission_fleet_control(&runtime).await?;
         let control_model_call =
             wait_for_model_call_for_session(&census_repository, control_session).await?;
