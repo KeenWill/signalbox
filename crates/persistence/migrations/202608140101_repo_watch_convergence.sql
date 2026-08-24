@@ -95,6 +95,7 @@ CREATE TABLE repo_watch_pull_request_convergence_assessment (
     base_branch text NOT NULL,
     base_revision text NOT NULL,
     mergeable_state text NOT NULL,
+    settled boolean NOT NULL,
     review_decision text NOT NULL,
     unresolved_threads text[] NOT NULL,
     gating_check_count bigint NOT NULL,
@@ -126,12 +127,14 @@ CREATE TABLE repo_watch_pull_request_convergence_assessment (
     )),
     CHECK (verdict_kind <> 'merge_ready' OR base_branch = 'main'),
     CHECK (verdict_kind <> 'internally_converged' OR base_branch <> 'main'),
-    CHECK (
+    CONSTRAINT repo_watch_convergence_verdict_matches_evidence CHECK (
         (verdict_kind = 'not_converged')
         = (
             cardinality(unresolved_threads) > 0
             OR cardinality(non_green_gating_checks) > 0
-            OR mergeable_state = 'conflicting'
+            OR mergeable_state <> 'mergeable'
+            OR NOT settled
+            OR gating_check_count = 0
             OR review_decision = 'changes_requested'
         )
     ),

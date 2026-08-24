@@ -3253,6 +3253,7 @@ struct FetchedPullRequest {
 }
 
 struct FetchedConvergenceEvidence {
+    base_revision: CommitSha,
     review_decision: RepoWatchReviewDecision,
     gating_check_count: u64,
     non_green_gating_checks: Vec<CheckRunName>,
@@ -3265,6 +3266,9 @@ impl FetchedConvergenceEvidence {
         base_revision: CommitSha,
         settlement: PullRequestSettlement,
     ) -> Result<RepoWatchConvergenceAssessment, RepositoryWatchAttemptError> {
+        if self.base_revision != base_revision {
+            return Err(RepositoryWatchAttemptError::InvalidResponse);
+        }
         RepoWatchConvergenceAssessment::try_new(RepoWatchConvergenceAssessmentInput {
             number: state.context().number(),
             head_sha: state.context().head_sha().clone(),
@@ -4147,9 +4151,12 @@ impl GitHubRepositoryPoller {
             }
             page = next_page(page)?;
         }
-        let _provider_base_revision =
-            retained_base_revision.ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
+        let base_revision = CommitSha::try_new(
+            retained_base_revision.ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
+        )
+        .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
         Ok(FetchedConvergenceEvidence {
+            base_revision,
             review_decision: retained_review_decision
                 .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
             gating_check_count,
@@ -8298,6 +8305,32 @@ mod tests {
             assessment.verdict(),
             signalbox_application::RepoWatchConvergenceVerdict::NotConverged
         );
+    }
+
+    #[tokio::test]
+    async fn convergence_rejects_evidence_from_a_different_base_revision() {
+        let observation = complete_typed_observation().await;
+        let pull_request = &observation.state().pull_requests()[0];
+        let evidence = super::FetchedConvergenceEvidence {
+            base_revision: CommitSha::try_new(CHANGED_LISTED_HEAD_SHA.to_owned())
+                .expect("fixture provider base revision is valid"),
+            review_decision: super::RepoWatchReviewDecision::Approved,
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        };
+        let snapshot_base_revision = CommitSha::try_new(BASE_SHA.to_owned())
+            .expect("fixture snapshot base revision is valid");
+
+        let assessment = evidence.assess(
+            pull_request,
+            snapshot_base_revision,
+            PullRequestSettlement::Settled,
+        );
+
+        assert!(matches!(
+            assessment,
+            Err(RepositoryWatchAttemptError::InvalidResponse)
+        ));
     }
 
     #[test]

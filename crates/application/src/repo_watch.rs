@@ -473,6 +473,7 @@ pub struct RepoWatchConvergenceAssessment {
     base_branch: BranchName,
     base_revision: CommitSha,
     mergeable_state: MergeableState,
+    settled: bool,
     review_decision: RepoWatchReviewDecision,
     unresolved_threads: Box<[ReviewThreadId]>,
     gating_check_count: u64,
@@ -515,6 +516,7 @@ impl RepoWatchConvergenceAssessment {
             base_branch: input.base_branch,
             base_revision: input.base_revision,
             mergeable_state: input.mergeable_state,
+            settled: input.settled,
             review_decision: input.review_decision,
             unresolved_threads: input.unresolved_threads.into_boxed_slice(),
             gating_check_count: input.gating_check_count,
@@ -541,6 +543,10 @@ impl RepoWatchConvergenceAssessment {
 
     pub const fn mergeable_state(&self) -> MergeableState {
         self.mergeable_state
+    }
+
+    pub const fn settled(&self) -> bool {
+        self.settled
     }
 
     pub const fn review_decision(&self) -> RepoWatchReviewDecision {

@@ -908,18 +908,17 @@ events, and durable convergence evidence for each pull request at the exact head
 and base revision in that cursor. Evidence identical to that identity's latest
 assessment is an idempotent replay; changed evidence appends a new assessment.
 The assessment follows the repository's operational status rule: every review
-thread must be resolved, without filtering by author or outdated state; at
-least one gating check must exist and every gating check on the exact current
-commit must be green; the pull request must be settled with known `mergeable`
-mergeability; and the aggregate review decision must not be
-`changes_requested`. Check runs are green only when completed with `success`,
-`skipped`, or `neutral`, and status contexts are green only at `success`.
-Pending, incomplete, missing-conclusion, and other terminal results are not
-green. Check names containing `report only`, `CodeRabbit`, `codecov/project`, or
-`codecov/patch`, compared case-insensitively, are non-gating. The GraphQL
-check-rollup and review-thread
-connections are read through every bounded page. The head, check, and
-aggregate-review evidence is read before the thread inventory, matching the
+thread must be resolved, without filtering by author or outdated state; at least
+one gating check must exist and every gating check on the exact current commit
+must be green; the pull request must be settled with known `mergeable`
+mergeability; and the aggregate review decision must not be `changes_requested`.
+Check runs are green only when completed with `success`, `skipped`, or
+`neutral`, and status contexts are green only at `success`. Pending, incomplete,
+missing-conclusion, and other terminal results are not green. Check names
+containing `report only`, `CodeRabbit`, `codecov/project`, or `codecov/patch`,
+compared case-insensitively, are non-gating. The GraphQL check-rollup and
+review-thread connections are read through every bounded page. The head, check,
+and aggregate-review evidence is read before the thread inventory, matching the
 operational reference's ordering so a review thread opened between those reads
 cannot be hidden by an earlier thread snapshot. The branch-head snapshot is read
 before pull-request hydration and supplies the assessed base revision committed

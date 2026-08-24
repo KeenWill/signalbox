@@ -7367,7 +7367,7 @@ impl RepoWatchConvergenceAssessment {
         input: RepoWatchConvergenceAssessmentInput,
     ) -> Result<Self, RepoWatchConvergenceAssessmentError>;
     // accessors: number(), head_sha(), base_branch(), base_revision(), mergeable_state(),
-    // review_decision(), unresolved_threads(), gating_check_count(),
+    // settled(), review_decision(), unresolved_threads(), gating_check_count(),
     // non_green_gating_checks(), verdict()
 }
 

@@ -4894,7 +4894,7 @@ async fn converged_head_releases_singleton_after_ending_commission() -> Result<(
                 .to_owned(),
             "merge_ready".to_owned(),
             0,
-            0,
+            1,
         )
     );
     assert_eq!(cutoff_goal_count, 1);
@@ -5379,6 +5379,108 @@ async fn database_rejects_seal_for_nonconverged_assessment() -> Result<(), Box<d
             .as_database_error()
             .and_then(|database| database.constraint()),
         Some("repo_watch_convergence_assessment_matches")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn database_rejects_merge_ready_verdict_for_unknown_mergeability()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    record_merge_ready_head(&fixture, 0x54_900, FIRST_HEAD).await?;
+
+    let error = sqlx::query(
+        "INSERT INTO repo_watch_pull_request_convergence_assessment
+                (assessment_id, repository, cursor_generation, pull_request_number,
+                 head_sha, base_branch, base_revision, mergeable_state, settled,
+                 review_decision, unresolved_threads, gating_check_count,
+                 non_green_gating_checks, verdict_kind)
+         SELECT $1, repository, cursor_generation, pull_request_number,
+                head_sha, base_branch, base_revision, 'unknown', settled,
+                review_decision, unresolved_threads, gating_check_count,
+                non_green_gating_checks, 'merge_ready'
+           FROM repo_watch_pull_request_convergence_assessment
+          LIMIT 1",
+    )
+    .bind(Uuid::now_v7())
+    .execute(&fixture.pool)
+    .await
+    .expect_err("unknown mergeability cannot carry a merge-ready verdict");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("repo_watch_convergence_verdict_matches_evidence")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn database_rejects_merge_ready_verdict_for_unsettled_evidence() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    record_merge_ready_head(&fixture, 0x54_910, FIRST_HEAD).await?;
+
+    let error = sqlx::query(
+        "INSERT INTO repo_watch_pull_request_convergence_assessment
+                (assessment_id, repository, cursor_generation, pull_request_number,
+                 head_sha, base_branch, base_revision, mergeable_state, settled,
+                 review_decision, unresolved_threads, gating_check_count,
+                 non_green_gating_checks, verdict_kind)
+         SELECT $1, repository, cursor_generation, pull_request_number,
+                head_sha, base_branch, base_revision, mergeable_state, false,
+                review_decision, unresolved_threads, gating_check_count,
+                non_green_gating_checks, 'merge_ready'
+           FROM repo_watch_pull_request_convergence_assessment
+          LIMIT 1",
+    )
+    .bind(Uuid::now_v7())
+    .execute(&fixture.pool)
+    .await
+    .expect_err("unsettled evidence cannot carry a merge-ready verdict");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("repo_watch_convergence_verdict_matches_evidence")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn database_rejects_merge_ready_verdict_without_gating_checks() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    record_merge_ready_head(&fixture, 0x54_920, FIRST_HEAD).await?;
+
+    let error = sqlx::query(
+        "INSERT INTO repo_watch_pull_request_convergence_assessment
+                (assessment_id, repository, cursor_generation, pull_request_number,
+                 head_sha, base_branch, base_revision, mergeable_state, settled,
+                 review_decision, unresolved_threads, gating_check_count,
+                 non_green_gating_checks, verdict_kind)
+         SELECT $1, repository, cursor_generation, pull_request_number,
+                head_sha, base_branch, base_revision, mergeable_state, settled,
+                review_decision, unresolved_threads, 0,
+                ARRAY[]::text[], 'merge_ready'
+           FROM repo_watch_pull_request_convergence_assessment
+          LIMIT 1",
+    )
+    .bind(Uuid::now_v7())
+    .execute(&fixture.pool)
+    .await
+    .expect_err("zero gating checks cannot carry a merge-ready verdict");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("repo_watch_convergence_verdict_matches_evidence")
     );
     Ok(())
 }

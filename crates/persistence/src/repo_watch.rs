@@ -669,7 +669,7 @@ impl PostgresRepoWatchStore {
                 "SELECT current.assessment_id
                       FROM (
                             SELECT assessment_id, base_branch, base_revision, mergeable_state,
-                                   review_decision, unresolved_threads,
+                                   settled, review_decision, unresolved_threads,
                                    gating_check_count, non_green_gating_checks,
                                    verdict_kind
                               FROM repo_watch_pull_request_convergence_assessment
@@ -682,11 +682,12 @@ impl PostgresRepoWatchStore {
                            ) AS current
                      WHERE current.base_branch = $5
                        AND current.mergeable_state = $6
-                       AND current.review_decision = $7
-                       AND current.unresolved_threads = $8
-                       AND current.gating_check_count = $9
-                       AND current.non_green_gating_checks = $10
-                       AND current.verdict_kind = $11",
+                       AND current.settled = $7
+                       AND current.review_decision = $8
+                       AND current.unresolved_threads = $9
+                       AND current.gating_check_count = $10
+                       AND current.non_green_gating_checks = $11
+                       AND current.verdict_kind = $12",
             )
             .bind(repository.as_str())
             .bind(Decimal::from(assessment.number().get()))
@@ -696,6 +697,7 @@ impl PostgresRepoWatchStore {
             .bind(repo_watch_mergeable_state_to_str(
                 assessment.mergeable_state(),
             ))
+            .bind(assessment.settled())
             .bind(repo_watch_review_decision_to_str(
                 assessment.review_decision(),
             ))
@@ -721,9 +723,9 @@ impl PostgresRepoWatchStore {
                 "INSERT INTO repo_watch_pull_request_convergence_assessment
                     (assessment_id, repository, cursor_generation,
                      pull_request_number, head_sha, base_branch, base_revision,
-                     mergeable_state, review_decision, unresolved_threads,
+                     mergeable_state, settled, review_decision, unresolved_threads,
                      gating_check_count, non_green_gating_checks, verdict_kind)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             )
             .bind(assessment_id)
             .bind(repository.as_str())
@@ -735,6 +737,7 @@ impl PostgresRepoWatchStore {
             .bind(repo_watch_mergeable_state_to_str(
                 assessment.mergeable_state(),
             ))
+            .bind(assessment.settled())
             .bind(repo_watch_review_decision_to_str(
                 assessment.review_decision(),
             ))
