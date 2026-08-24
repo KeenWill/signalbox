@@ -333,9 +333,22 @@ test('changing scenarios resets timeline selection', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('preserves Scenario focus when focus layout hides navigation', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/streaming')
+  await page.getByRole('link', { name: /Approval required/ }).focus()
+
+  await page.keyboard.press('Shift+W')
+
+  await expect(page.locator('.app-shell')).toHaveClass(/layout-focus/)
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('changing to a cached scenario resets timeline scrolling', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
+  await expect(page).toHaveTitle('Streaming session · Signalbox scenarios')
 
   await page.getByRole('link', { name: /Approval required/ }).click()
   await page.getByRole('link', { name: /Streaming session/ }).click()
@@ -348,6 +361,7 @@ test('changing to a cached scenario resets timeline scrolling', async ({ page })
   await page.getByRole('link', { name: /Approval required/ }).click()
   const approvalTimeline = page.getByRole('listbox', { name: 'Session timeline' })
   await expect(page).toHaveURL(/\/scenario\/approval$/)
+  await expect(page).toHaveTitle('Approval required · Signalbox scenarios')
   await expect(page.locator('main.workspace')).toBeFocused()
   await expect(page.locator(`#${streamingFixture.firstLoadedItemId}`)).toBeInViewport()
   expect(await approvalTimeline.evaluate((element) => element.scrollTop)).toBe(0)

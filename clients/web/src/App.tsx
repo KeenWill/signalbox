@@ -110,6 +110,10 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
   }, [dispatch, initialSelection])
 
   useEffect(() => {
+    document.title = `${transport.scenario.title} · Signalbox scenarios`
+  }, [transport.scenario.title])
+
+  useEffect(() => {
     if (!timelineQuery.isSuccess || !fleetQuery.isSuccess) return
     const frame = requestAnimationFrame(() => {
       const workspace = workspaceRef.current

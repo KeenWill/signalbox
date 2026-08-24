@@ -29,6 +29,17 @@ const importsProductFixture = {
 const useDeterministicBootstrap = (page: Page) =>
   page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
 
+const useTransientBootstrap = async (page: Page) => {
+  const requests = { count: 0 }
+  await page.route('**/api/bootstrap', (route) => {
+    requests.count += 1
+    return requests.count === 1
+      ? route.fulfill({ status: 503 })
+      : route.fulfill({ json: bootstrapFixture })
+  })
+  return requests
+}
+
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
   page.on('console', (message) => {
@@ -401,19 +412,25 @@ test('withholds Imports until bootstrap admission succeeds', async ({ page }) =>
 
 test('retries a transient bootstrap transport failure', async ({ page }) => {
   const problems = watchBrowser(page)
-  let bootstrapRequests = 0
-  await page.route('**/api/bootstrap', (route) => {
-    bootstrapRequests += 1
-    return bootstrapRequests === 1
-      ? route.fulfill({ status: 503 })
-      : route.fulfill({ json: bootstrapFixture })
-  })
+  const bootstrapRequests = await useTransientBootstrap(page)
   await useDeterministicImportApi(page)
   await page.goto('/imports')
 
-  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
+  await expect(
+    page.getByText(`${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`),
+  ).toBeVisible()
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
-  expect(bootstrapRequests).toBe(2)
+  expect(bootstrapRequests.count).toBe(2)
+  expect(problems.pageErrors).toEqual([])
+})
+
+test('keeps Settings status browser-local when bootstrap is unavailable', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ status: 503 }))
+  await page.goto('/settings')
+
+  await expect(page.getByText('Browser-local preferences')).toBeVisible()
+  await expect(page.getByText('Transport unavailable')).toHaveCount(0)
   expect(problems.pageErrors).toEqual([])
 })
 

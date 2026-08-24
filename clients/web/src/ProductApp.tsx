@@ -515,17 +515,25 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         <div className="surface-question">
           <p>{copy.question}</p>
           <span
-            className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
+            className={`contract-state ${
+              surface === 'settings' || bootstrap.isSuccess
+                ? 'ready'
+                : bootstrap.isError
+                  ? 'failed'
+                  : ''
+            }`}
             role="status"
             aria-atomic="true"
           >
-            {bootstrap.isSuccess
-              ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
-              : bootstrap.isError
-                ? bootstrap.error instanceof ProductContractAdmissionError
-                  ? 'Contract incompatible'
-                  : 'Transport unavailable'
-                : 'Checking contract…'}
+            {surface === 'settings'
+              ? 'Browser-local preferences'
+              : bootstrap.isSuccess
+                ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
+                : bootstrap.isError
+                  ? bootstrap.error instanceof ProductContractAdmissionError
+                    ? 'Contract incompatible'
+                    : 'Transport unavailable'
+                  : 'Checking contract…'}
           </span>
         </div>
         {content}

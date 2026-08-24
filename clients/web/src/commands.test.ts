@@ -141,6 +141,22 @@ describe('command registry', () => {
     store.dispatch(actions.layoutSet('workbench'))
   })
 
+  it('falls back to scenario timeline focus before hiding navigation', () => {
+    const focused: string[] = []
+    store.dispatch(actions.layoutSet('workbench'))
+
+    invokeCommand('layout.toggle', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: ['event-0'],
+      focusTimeline: () => focused.push('timeline'),
+    })
+
+    expect(focused).toEqual(['timeline'])
+    expect(selectApp(store.getState()).layout).toBe('focus')
+    store.dispatch(actions.layoutSet('workbench'))
+  })
+
   it('runs available continuation actions through stable command identities', () => {
     const relationships: Array<'resume' | 'fork'> = []
     const context = {

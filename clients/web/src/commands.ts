@@ -55,6 +55,13 @@ const transcriptDetail = (context: CommandContext) =>
   scenarioTimeline(context) || context.transcriptPreferences === true
 const presentationPreferences = (context: CommandContext) =>
   context.presentationPreferences === true
+const focusPrimaryBeforeHidingNavigation = (context: CommandContext) => {
+  if (context.focusPrimaryWhenNavigationHides !== undefined) {
+    context.focusPrimaryWhenNavigationHides()
+  } else {
+    context.focusTimeline()
+  }
+}
 export const commandRegistry = [
   {
     id: 'navigate.attention',
@@ -379,7 +386,7 @@ export const commandRegistry = [
     available: always,
     run: (context) => {
       const current = context.getState().app.layout
-      if (current === 'workbench') context.focusPrimaryWhenNavigationHides?.()
+      if (current === 'workbench') focusPrimaryBeforeHidingNavigation(context)
       context.dispatch(actions.layoutSet(current === 'focus' ? 'workbench' : 'focus'))
     },
   },
@@ -401,7 +408,7 @@ export const commandRegistry = [
     available: presentationPreferences,
     run: (context) => {
       if (context.getState().app.layout === 'workbench') {
-        context.focusPrimaryWhenNavigationHides?.()
+        focusPrimaryBeforeHidingNavigation(context)
       }
       context.dispatch(actions.layoutSet('focus'))
     },
