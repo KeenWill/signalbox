@@ -750,6 +750,7 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
         NumericBoundKind::Duration,
     ),
     ("model_exchange_timeout", NumericBoundKind::Duration),
+    ("codex_cli_version_probe_bound", NumericBoundKind::Duration),
     ("expired_pass_recovery_attempts", NumericBoundKind::Integer),
     (
         "expired_pass_recovery_attempt_bound",
@@ -4428,6 +4429,7 @@ max_review_orchestration_concerns = 32
 max_imported_conversation_display_title_scalars = 256
 graceful_shutdown_cleanup_window = "30s"
 model_exchange_timeout = "600s"
+codex_cli_version_probe_bound = "10s"
 expired_pass_recovery_attempts = 4
 expired_pass_recovery_attempt_bound = "3s"
 expired_pass_recovery_lock_retry_delay = "6s"

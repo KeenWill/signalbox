@@ -12,7 +12,9 @@ The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
 
 The usable context-ceiling definition and Codex CLI catalog values are
-re-verified against this PR (`agent/daemon-live-codex-effective-window`).
+re-verified against this PR (`agent/daemon-live-codex-effective-window`). The
+bounded Codex CLI startup pin probe is verified against this PR
+(`agent/daemon-live-codex-pin-preflight`).
 
 The required numeric-bound configuration grammar and scheduler admission policy
 are verified against this PR (`agent/bounds-required-config-protocol`). The
@@ -648,6 +650,13 @@ authoritative session execution while the scheduler task and the daemon's
 ingestion and process services remain live; `"none"` admits every currently
 eligible session. The retired optional `[scheduler]` table is an unknown root
 field.
+
+The required finite, positive `numeric_bounds.codex_cli_version_probe_bound`
+policy bounds the credential-free startup probe that asks a configured Codex CLI
+executable for its version. A missing, malformed, unbounded, zero, unsuccessful,
+or mismatched probe fails configuration before the socket opens; the executable
+must report the exact version compiled into the adapter from the installation
+manifest.
 
 The required `numeric_bounds.fenced_pool_min_connections` policy controls how
 many fenced PostgreSQL sessions are established before daemon work begins;

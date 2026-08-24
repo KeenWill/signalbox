@@ -39,6 +39,7 @@ use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{
     AnthropicConfig, AnthropicConstructionError, AnthropicRuntime,
 };
+use signalbox_model_runtime_codex_cli::verify_pinned_codex_cli_version;
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, OpenAiRuntime};
 use signalbox_persistence::{
     conversation_import::backfill_imported_conversation_display_titles,
@@ -1305,6 +1306,24 @@ async fn run_hub(
             })
     };
     let model_exchange_timeout = configured_duration("model_exchange_timeout");
+    let codex_cli_version_probe_bound = configured_duration("codex_cli_version_probe_bound")
+        .filter(|bound| !bound.is_zero())
+        .ok_or_else(|| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_codex_cli_version_probe_bound"),
+            )
+        })?;
+    if let Some(codex_cli) = model_configuration.codex_cli() {
+        verify_pinned_codex_cli_version(codex_cli.executable(), codex_cli_version_probe_bound)
+            .await
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("codex_cli_version_probe_failed"),
+                )
+            })?;
+    }
     let fenced_pool_min_connections =
         validate_fenced_pool_min_connections(configured_u32("fenced_pool_min_connections")?)
             .ok_or_else(|| {

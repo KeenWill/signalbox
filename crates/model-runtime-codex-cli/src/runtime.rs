@@ -1,6 +1,7 @@
 //! One operation, one Codex CLI process spawn.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use signalbox_model_runtime::{
@@ -129,6 +130,149 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
 /// remains the missing check. The runtime does not add a version-probe process
 /// to a model dispatch.
 pub const SUPPORTED_CODEX_CLI_VERSION: &str = env!("SIGNALBOX_CODEX_CLI_VERSION");
+
+const MAX_VERSION_BANNER_BYTES: usize = 4096;
+
+/// Why the configured Codex executable could not prove the adapter's pin.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodexCliVersionProbeError {
+    /// The configured probe bound was zero.
+    InvalidBound,
+    /// The executable could not be started.
+    SpawnFailed,
+    /// The executable did not finish within the deployment-owned bound.
+    TimedOut,
+    /// The executable's bounded output could not be collected.
+    OutputFailed,
+    /// The executable rejected the version request.
+    Unsuccessful,
+    /// The version banner was not bounded UTF-8 with a version token.
+    InvalidBanner,
+    /// The invoked executable does not match the adapter's exact pin.
+    VersionMismatch,
+}
+
+impl std::fmt::Display for CodexCliVersionProbeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidBound => "Codex CLI version probe bound is invalid",
+            Self::SpawnFailed => "Codex CLI version probe could not start",
+            Self::TimedOut => "Codex CLI version probe exceeded its bound",
+            Self::OutputFailed => "Codex CLI version probe output could not be collected",
+            Self::Unsuccessful => "Codex CLI version probe exited unsuccessfully",
+            Self::InvalidBanner => "Codex CLI version banner is invalid",
+            Self::VersionMismatch => "Codex CLI executable does not match the adapter pin",
+        })
+    }
+}
+
+impl std::error::Error for CodexCliVersionProbeError {}
+
+/// Proves that the executable invoked by the composition matches this
+/// adapter's exact protocol pin before the composition admits model work.
+pub async fn verify_pinned_codex_cli_version(
+    executable: &Path,
+    bound: Duration,
+) -> Result<(), CodexCliVersionProbeError> {
+    if bound.is_zero() {
+        return Err(CodexCliVersionProbeError::InvalidBound);
+    }
+    let mut command = tokio::process::Command::new(executable);
+    command
+        .arg("--version")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|_| CodexCliVersionProbeError::SpawnFailed)?;
+    let process_group = child.id();
+    let output = match tokio::time::timeout(bound, collect_version_output(&mut child)).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            kill_probe_process_group(process_group);
+            let _ = tokio::time::timeout(bound, child.wait()).await;
+            return Err(error);
+        }
+        Err(_) => {
+            kill_probe_process_group(process_group);
+            let _ = tokio::time::timeout(bound, child.wait()).await;
+            return Err(CodexCliVersionProbeError::TimedOut);
+        }
+    };
+    if !output.status.success() {
+        return Err(CodexCliVersionProbeError::Unsuccessful);
+    }
+    let banner = std::str::from_utf8(&output.stdout)
+        .map_err(|_| CodexCliVersionProbeError::InvalidBanner)?;
+    let version = banner
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().next_back())
+        .ok_or(CodexCliVersionProbeError::InvalidBanner)?;
+    if version != SUPPORTED_CODEX_CLI_VERSION {
+        return Err(CodexCliVersionProbeError::VersionMismatch);
+    }
+    Ok(())
+}
+
+async fn collect_version_output(
+    child: &mut tokio::process::Child,
+) -> Result<std::process::Output, CodexCliVersionProbeError> {
+    use tokio::io::AsyncReadExt;
+
+    let mut stdout = Vec::new();
+    let Some(mut pipe) = child.stdout.take() else {
+        return Err(CodexCliVersionProbeError::OutputFailed);
+    };
+    let mut bounded = vec![0_u8; MAX_VERSION_BANNER_BYTES + 1];
+    let mut filled = 0_usize;
+    while filled < bounded.len() {
+        let read = pipe
+            .read(&mut bounded[filled..])
+            .await
+            .map_err(|_| CodexCliVersionProbeError::OutputFailed)?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+    }
+    if filled > MAX_VERSION_BANNER_BYTES {
+        kill_probe_process_group(child.id());
+        let _ = child.wait().await;
+        return Err(CodexCliVersionProbeError::InvalidBanner);
+    }
+    bounded.truncate(filled);
+    stdout.extend_from_slice(&bounded);
+    let status = child
+        .wait()
+        .await
+        .map_err(|_| CodexCliVersionProbeError::OutputFailed)?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    })
+}
+
+#[cfg(unix)]
+fn kill_probe_process_group(group: Option<u32>) {
+    if let Some(raw) = group
+        && let Some(pid) = rustix::process::Pid::from_raw(raw as i32)
+    {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_probe_process_group(_group: Option<u32>) {}
 
 /// Stateless subscription-backed Codex CLI adapter.
 pub struct CodexCliRuntime {
@@ -614,11 +758,64 @@ async fn execute_process<C: Clone + Send + Sync>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::path::PathBuf;
+    use std::time::Duration;
+
     use super::{
         CODEX_CREDENTIAL_HOME, CODEX_ENVIRONMENT, CliEnvironmentVariable, CodexCliServiceTier,
-        FORBIDDEN_DIRECT_CREDENTIAL_ENVIRONMENT, FastMode, ModelSettings, ReasoningLevel,
-        ServiceTier, codex_controls, validate_model_settings,
+        CodexCliVersionProbeError, FORBIDDEN_DIRECT_CREDENTIAL_ENVIRONMENT, FastMode,
+        ModelSettings, ReasoningLevel, SUPPORTED_CODEX_CLI_VERSION, ServiceTier, codex_controls,
+        validate_model_settings, verify_pinned_codex_cli_version,
     };
+
+    #[cfg(unix)]
+    fn version_fixture(script: &str) -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().expect("temporary version fixture directory");
+        let executable = directory.path().join("codex");
+        std::fs::write(&executable, script).expect("version fixture is written");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("version fixture metadata exists")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions).expect("version fixture is executable");
+        (directory, executable)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_version_probe_accepts_the_exact_adapter_pin() {
+        let script =
+            format!("#!/bin/sh\nprintf 'codex-cli %s\\n' '{SUPPORTED_CODEX_CLI_VERSION}'\n");
+        let (_directory, executable) = version_fixture(&script);
+
+        let result = verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await;
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_version_probe_rejects_executable_drift() {
+        let (_directory, executable) =
+            version_fixture("#!/bin/sh\nprintf 'codex-cli %s\\n' '0.0.1'\n");
+
+        let result = verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await;
+
+        assert_eq!(result, Err(CodexCliVersionProbeError::VersionMismatch));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_version_probe_bounds_a_hung_executable() {
+        let (_directory, executable) = version_fixture("#!/bin/sh\nsleep 30\n");
+
+        let result = verify_pinned_codex_cli_version(&executable, Duration::from_millis(10)).await;
+
+        assert_eq!(result, Err(CodexCliVersionProbeError::TimedOut));
+    }
 
     /// INV-035: the CLI receives only a reference to its ambient login store;
     /// direct credential-value variables are absent from the inherited set.

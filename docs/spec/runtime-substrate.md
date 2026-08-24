@@ -23,18 +23,20 @@ ambient-skill catalog probe, and pinned version were verified against the
 twice-daily schedule and workflow-self-change trigger were verified through PR
 `#471` (`agent/codex-smoke-schedule`). The Codex CLI adapter's prompt
 tool-authority preamble is verified against this PR
-(`agent/phantom-prohibition`). The `signalboxd` names this page states for the
-composition root, its telemetry, and the production `FileCredentialAccess` were
-verified through PR #258 (`agent/signalboxd-rename`); the Anthropic and OpenAI
-adapter-scoped file catalogs are verified against this PR
-(`agent/credential-pools-parser`). The Anthropic adapter's server-side
-`fallback`-block recognition was verified through PR #280
-(`agent/provider-identity-normalization`). The HTTP fallback-body redaction
-ordering was verified through PR #330 (`agent/audit-verified-fixes`). The
-persistence-repository families in the operator-failure inventory were verified
-through PR #288 (`agent/audit-fix-docs-coherence`) when there were five of them,
-and the sixth, turn liveness, against this PR (`agent/turn-liveness-watchdog`).
-The streamed-delivery bridge and ephemeral text-delta projection were verified
+(`agent/phantom-prohibition`). The composition root's pinned-version startup
+probe is verified against this PR (`agent/daemon-live-codex-pin-preflight`). The
+`signalboxd` names this page states for the composition root, its telemetry, and
+the production `FileCredentialAccess` were verified through PR #258
+(`agent/signalboxd-rename`); the Anthropic and OpenAI adapter-scoped file
+catalogs are verified against this PR (`agent/credential-pools-parser`). The
+Anthropic adapter's server-side `fallback`-block recognition was verified
+through PR #280 (`agent/provider-identity-normalization`). The HTTP
+fallback-body redaction ordering was verified through PR #330
+(`agent/audit-verified-fixes`). The persistence-repository families in the
+operator-failure inventory were verified through PR #288
+(`agent/audit-fix-docs-coherence`) when there were five of them, and the sixth,
+turn liveness, against this PR (`agent/turn-liveness-watchdog`). The
+streamed-delivery bridge and ephemeral text-delta projection were verified
 through PR #300 (`agent/token-level-streaming`); the Claude 5-family
 thinking-signature stream shape was verified through PR #305
 (`agent/sonnet-streamed-tool-use`). The Codex CLI redaction contract was
@@ -730,10 +732,11 @@ runs while the key is readable.
 `signalbox-model-runtime-codex-cli` wraps the locally installed Codex CLI event
 protocol captured by the offline fixture corpus at version `0.146.0`; its
 exported version constant is the contract a later composition must pin before
-wiring the adapter. The model dispatch itself performs no separate version
-probe. Preparation validates and renders the complete operation, writes the
-non-secret response-envelope schema to a private temporary file, and returns a
-one-shot capability without starting a process. Admitted schemas and replayed
+wiring the adapter. The daemon composition runs a bounded, credential-free
+version probe before opening its socket; model dispatch performs no separate
+version probe. Preparation validates and renders the complete operation, writes
+the non-secret response-envelope schema to a private temporary file, and returns
+a one-shot capability without starting a process. Admitted schemas and replayed
 tool arguments remain raw JSON through prompt serialization; a shallow raw
 member scan still requires each schema to declare an object root. Execution
 consumes the capability as exactly one `codex exec --json --ephemeral` spawn on
@@ -956,8 +959,10 @@ The adapter build reads that manifest and derives its exported supported-version
 constant from the exact dependency value, so the manifest is the single source
 of truth and a Renovate change is mechanically complete. An unconditional
 offline test still rejects a range, tag, alias, prerelease, or any shape other
-than exactly three numeric components. The live smoke verifies that the
-installed executable reports the derived version.
+than exactly three numeric components. The daemon composition and the live smoke
+both verify that the installed executable reports the derived version; the
+composition refuses startup before socket admission when the bounded probe
+cannot prove equality.
 
 This mechanical binding deliberately removes the old human-attestation tripwire.
 One live exchange proves that the installed CLI still works through the adapter,

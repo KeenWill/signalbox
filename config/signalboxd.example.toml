@@ -52,6 +52,8 @@ max_imported_conversation_display_title_scalars = 256
 graceful_shutdown_cleanup_window = "30s"
 # Time allowed for one complete model-provider exchange.
 model_exchange_timeout = "600s"
+# Time allowed for the startup probe that binds Codex CLI to its exact pin.
+codex_cli_version_probe_bound = "10s"
 # Detached recovery attempts made for one expired scheduler pass.
 expired_pass_recovery_attempts = 4
 # Time allowed for one expired-pass recovery database operation.
