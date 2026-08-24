@@ -442,6 +442,7 @@ pub(crate) struct WireReadRequest {
     view: String,
     options: Option<serde_json::Value>,
     continuation: Option<String>,
+    maximum_container_entries: u64,
 }
 
 impl From<&FileMediaProviderReadRequest> for WireReadRequest {
@@ -462,6 +463,7 @@ impl From<&FileMediaProviderReadRequest> for WireReadRequest {
             view: request.view.as_str().to_owned(),
             options,
             continuation,
+            maximum_container_entries: request.maximum_container_entries,
         }
     }
 }
@@ -487,6 +489,7 @@ impl TryFrom<WireReadRequest> for FileMediaProviderReadRequest {
             metadata: BoundedMetadata::try_new(&value.metadata_json).map_err(map_value_error)?,
             view: ReadViewName::try_new(value.view).map_err(map_value_error)?,
             input,
+            maximum_container_entries: value.maximum_container_entries,
         })
     }
 }

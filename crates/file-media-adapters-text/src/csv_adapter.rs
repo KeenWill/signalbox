@@ -16,7 +16,13 @@ pub(crate) async fn probe(
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorProbeOutput, ProcessorFailure> {
     let prefix = source::read_probe_prefix(source, cancellation).await?;
-    let candidate = source::probe_utf8(&prefix).is_some_and(has_record_structure);
+    let extent = if source.byte_length().get() <= prefix.len() as u64 {
+        ProbeExtent::CompleteSource
+    } else {
+        ProbeExtent::TruncatedPrefix
+    };
+    let candidate =
+        source::probe_utf8(&prefix).is_some_and(|text| has_record_structure(text, extent));
     if candidate {
         Ok(ProcessorProbeOutput::Candidate {
             media_type: String::from(CSV_MEDIA_TYPE),
@@ -38,13 +44,22 @@ pub(crate) async fn inspect(
     let Some(bytes) =
         source::read_complete(source, cancellation, request.maximum_source_bytes).await?
     else {
+        if matches!(
+            request.evidence,
+            ValidationEvidence::DeclaredCandidateStructurallyValidated
+        ) {
+            let prefix = source::read_probe_prefix(source, cancellation).await?;
+            if source::probe_utf8(&prefix).is_some_and(has_declared_record_structure) {
+                return Ok(malformed("source_too_large"));
+            }
+        }
         return Ok(validation_failure(request.evidence, "source_too_large"));
     };
     let text = match source::checked_utf8(bytes) {
         Ok(text) => text,
         Err(reason) => return Ok(validation_failure(request.evidence, reason)),
     };
-    let table = match parse_table(&text) {
+    let table = match parse_table(&text, MAX_OBSERVED_CONTAINER_ENTRIES) {
         Ok(table) => table,
         Err(reason) => {
             let declared_csv_shape = matches!(
@@ -84,7 +99,20 @@ pub(crate) async fn read(
         });
     };
     let text = source::checked_utf8(bytes).map_err(|_| ProcessorFailure::Failed)?;
-    let table = parse_table(&text).map_err(|_| ProcessorFailure::Failed)?;
+    if request.maximum_container_entries < 2 {
+        return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
+            limit_kind: String::from("container_entry_limit_exceeded"),
+        });
+    }
+    let table = match parse_table(&text, request.maximum_container_entries) {
+        Ok(table) => table,
+        Err("row_limit_exceeded") | Err("column_limit_exceeded") => {
+            return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
+                limit_kind: String::from("container_entry_limit_exceeded"),
+            });
+        }
+        Err(_) => return Err(ProcessorFailure::Failed),
+    };
     let body_json = serde_json::to_string(&serde_json::json!({
         "headers": table.headers,
         "rows": table.rows
@@ -105,7 +133,7 @@ struct CsvTable {
     rows: Vec<Vec<String>>,
 }
 
-fn parse_table(text: &str) -> Result<CsvTable, &'static str> {
+fn parse_table(text: &str, maximum_container_entries: u64) -> Result<CsvTable, &'static str> {
     if !quotes_are_well_formed(text) || has_blank_record(text) {
         return Err("malformed_csv");
     }
@@ -121,15 +149,18 @@ fn parse_table(text: &str) -> Result<CsvTable, &'static str> {
     if headers.is_empty() {
         return Err("malformed_csv");
     }
-    if headers.len() > MAX_COLUMNS {
+    if headers.len() > MAX_COLUMNS || headers.len() as u64 > maximum_container_entries {
         return Err("column_limit_exceeded");
     }
     let mut rows = Vec::new();
     for record in reader.records() {
-        if rows.len() as u64 == MAX_OBSERVED_CONTAINER_ENTRIES {
+        if rows.len() as u64 == maximum_container_entries {
             return Err("row_limit_exceeded");
         }
         let record = record.map_err(|_| "malformed_csv")?;
+        if record.len() as u64 > maximum_container_entries {
+            return Err("column_limit_exceeded");
+        }
         rows.push(record.iter().map(String::from).collect());
     }
     if rows.is_empty() && !text.bytes().any(|byte| matches!(byte, b'\r' | b'\n')) {
@@ -138,8 +169,14 @@ fn parse_table(text: &str) -> Result<CsvTable, &'static str> {
     Ok(CsvTable { headers, rows })
 }
 
-fn has_record_structure(text: &str) -> bool {
-    let Some(evidence) = first_two_strict_records(text) else {
+#[derive(Clone, Copy)]
+enum ProbeExtent {
+    CompleteSource,
+    TruncatedPrefix,
+}
+
+fn has_record_structure(text: &str, extent: ProbeExtent) -> bool {
+    let Some(evidence) = first_two_strict_records(text, extent) else {
         return false;
     };
     if !quotes_are_well_formed(evidence) || has_blank_record(evidence) {
@@ -162,7 +199,28 @@ fn has_record_structure(text: &str) -> bool {
     second.len() == first.len()
 }
 
-fn first_two_strict_records(text: &str) -> Option<&str> {
+fn has_declared_record_structure(text: &str) -> bool {
+    let Some(evidence) = first_two_strict_records(text, ProbeExtent::TruncatedPrefix) else {
+        return false;
+    };
+    if !quotes_are_well_formed(evidence) || has_blank_record(evidence) {
+        return false;
+    }
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(false)
+        .from_reader(evidence.as_bytes());
+    let mut records = reader.records();
+    let Some(Ok(first)) = records.next() else {
+        return false;
+    };
+    let Some(Ok(second)) = records.next() else {
+        return false;
+    };
+    !first.is_empty() && second.len() == first.len()
+}
+
+fn first_two_strict_records(text: &str, extent: ProbeExtent) -> Option<&str> {
     let mut state = QuoteState::FieldStart;
     let mut completed_records = 0_u8;
     let mut bytes = text.as_bytes().iter().copied().enumerate().peekable();
@@ -198,7 +256,10 @@ fn first_two_strict_records(text: &str) -> Option<&str> {
             (QuoteState::AfterQuote, _) => return None,
         };
     }
-    if completed_records == 1 && !matches!(state, QuoteState::Quoted) {
+    if matches!(extent, ProbeExtent::CompleteSource)
+        && completed_records == 1
+        && !matches!(state, QuoteState::Quoted)
+    {
         Some(text)
     } else {
         None

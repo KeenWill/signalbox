@@ -139,6 +139,7 @@ pub fn text_family_declaration()
             "source_too_large",
             "row_limit_exceeded",
             "column_limit_exceeded",
+            "container_entry_limit_exceeded",
         ],
         fallback: StreamingTextFallback::Disabled,
     })?;

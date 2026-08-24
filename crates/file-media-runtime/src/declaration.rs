@@ -414,6 +414,8 @@ pub struct FileMediaProviderReadRequest {
     pub view: ReadViewName,
     /// Closed initial-options or continuation input.
     pub input: crate::FileReadInput,
+    /// Maximum entries the registry may admit in any structured container.
+    pub maximum_container_entries: u64,
 }
 
 /// Adapter-owned execution failure inside an isolated worker.

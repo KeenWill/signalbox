@@ -507,6 +507,7 @@ impl FileMediaRegistry {
                     metadata: validated.metadata().clone(),
                     view: request.view,
                     input: request.input,
+                    maximum_container_entries: self.ceilings.observed_container_entries,
                 },
                 source,
                 cancellation,

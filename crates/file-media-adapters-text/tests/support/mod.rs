@@ -143,10 +143,6 @@ impl FileMediaProcessor for DirectProcessor {
     }
 }
 
-pub(crate) fn registry() -> Result<FileMediaRegistry, Box<dyn Error>> {
-    registry_with_ceilings(FileMediaCeilings::version_one())
-}
-
 pub(crate) fn registry_with_ceilings(
     ceilings: FileMediaCeilings,
 ) -> Result<FileMediaRegistry, Box<dyn Error>> {
@@ -192,11 +188,20 @@ pub(crate) async fn read(
     input: ReadInput<'_>,
     processor: &DirectProcessor,
 ) -> Result<FileReadResult, FileMediaFailure> {
+    read_with_ceilings(source, input, processor, FileMediaCeilings::version_one()).await
+}
+
+pub(crate) async fn read_with_ceilings(
+    source: &MemorySource,
+    input: ReadInput<'_>,
+    processor: &DirectProcessor,
+    ceilings: FileMediaCeilings,
+) -> Result<FileReadResult, FileMediaFailure> {
     let source_use = source
         .file_use(input.media_type)
         .map_err(|_| FileMediaFailure::ProcessorFailed)?;
     let view = ReadViewName::try_new(input.view).map_err(|_| FileMediaFailure::ProcessorFailed)?;
-    registry()
+    registry_with_ceilings(ceilings)
         .map_err(|_| FileMediaFailure::ProcessorFailed)?
         .read(
             processor,

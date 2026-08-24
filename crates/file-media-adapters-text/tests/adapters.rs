@@ -103,6 +103,15 @@ async fn json_rejects_duplicate_object_members_as_malformed() -> Result<(), Box<
 }
 
 #[tokio::test]
+async fn json_rejects_duplicate_members_even_beyond_read_depth() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::deep_json_with_duplicate_root_member());
+
+    let inspection = support::inspect(&source, "application/json").await?;
+    support::assert_malformed_reason(inspection, "malformed_json");
+    Ok(())
+}
+
+#[tokio::test]
 async fn top_level_json_scalar_uses_the_text_fallback() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(b"true".to_vec());
 
@@ -336,6 +345,32 @@ async fn json_read_reports_the_container_entry_limit() -> Result<(), Box<dyn Err
 }
 
 #[tokio::test]
+async fn json_read_honors_the_effective_container_entry_ceiling() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::json_document());
+    let expected = ReasonCode::try_new("container_entry_limit_exceeded")?;
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.observed_container_entries = 2;
+
+    let result = support::read_with_ceilings(
+        &source,
+        ReadInput {
+            media_type: "application/json",
+            view: "structured",
+        },
+        &DirectProcessor::provider(),
+        ceilings,
+    )
+    .await;
+    assert_eq!(
+        result,
+        Err(FileMediaFailure::ExpansionLimitExceeded {
+            limit_kind: expected
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn extremely_deep_json_reports_depth_limit_without_stack_walk() -> Result<(), Box<dyn Error>>
 {
     let source = MemorySource::new(fixtures::deeply_nested_json_within_source_ceiling());
@@ -481,6 +516,15 @@ async fn csv_probe_ignores_a_partial_trailing_record() -> Result<(), Box<dyn Err
 }
 
 #[tokio::test]
+async fn csv_probe_rejects_a_partial_second_record() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::csv_with_partial_second_probe_record());
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_validated_media(inspection, "text/plain");
+    Ok(())
+}
+
+#[tokio::test]
 async fn csv_probe_handles_a_utf8_scalar_split_at_its_boundary() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::csv_with_scalar_split_at_probe_boundary());
 
@@ -512,6 +556,42 @@ async fn csv_rejects_oversized_input_with_registered_reason() -> Result<(), Box<
 
     let inspection = support::inspect(&source, "text/csv").await?;
     support::assert_malformed_reason(inspection, "source_too_large");
+    Ok(())
+}
+
+#[tokio::test]
+async fn oversized_declared_one_column_csv_preserves_the_size_reason() -> Result<(), Box<dyn Error>>
+{
+    let source = MemorySource::new(fixtures::oversized_one_column_csv());
+
+    let inspection = support::inspect(&source, "text/csv").await?;
+    support::assert_malformed_reason(inspection, "source_too_large");
+    Ok(())
+}
+
+#[tokio::test]
+async fn csv_read_honors_the_effective_container_entry_ceiling() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::csv_table());
+    let expected = ReasonCode::try_new("container_entry_limit_exceeded")?;
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.observed_container_entries = 1;
+
+    let result = support::read_with_ceilings(
+        &source,
+        ReadInput {
+            media_type: "text/csv",
+            view: "structured",
+        },
+        &DirectProcessor::provider(),
+        ceilings,
+    )
+    .await;
+    assert_eq!(
+        result,
+        Err(FileMediaFailure::ExpansionLimitExceeded {
+            limit_kind: expected
+        })
+    );
     Ok(())
 }
 

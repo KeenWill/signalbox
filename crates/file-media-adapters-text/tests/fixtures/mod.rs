@@ -26,6 +26,15 @@ pub(crate) fn duplicate_member_json() -> Vec<u8> {
     br#"{"role":"user","role":"admin"}"#.to_vec()
 }
 
+pub(crate) fn deep_json_with_duplicate_root_member() -> Vec<u8> {
+    format!(
+        "{{\"role\":\"user\",\"role\":\"admin\",\"deep\":{}0{}}}",
+        "[".repeat(65),
+        "]".repeat(65)
+    )
+    .into_bytes()
+}
+
 pub(crate) fn pretty_json_document() -> Vec<u8> {
     b"{\n  \"name\": \"fixture\",\n  \"values\": [1, 2, 3]\n}\n".to_vec()
 }
@@ -128,6 +137,21 @@ pub(crate) fn csv_with_partial_third_probe_record() -> Vec<u8> {
     bytes.extend_from_slice(b",1\nthird,\"");
     bytes.extend_from_slice(&[b'b'; 100]);
     bytes.extend_from_slice(b"\"\n");
+    bytes
+}
+
+pub(crate) fn csv_with_partial_second_probe_record() -> Vec<u8> {
+    let mut bytes = b"h1,h2\n".to_vec();
+    bytes.extend_from_slice(&vec![b'a'; 4_091]);
+    bytes.extend_from_slice(b",z\n");
+    bytes
+}
+
+pub(crate) fn oversized_one_column_csv() -> Vec<u8> {
+    let mut bytes = b"header\nvalue\n".to_vec();
+    while bytes.len() <= signalbox_file_media_adapters_text::MAX_TEXT_FAMILY_BYTES as usize {
+        bytes.extend_from_slice(b"value\n");
+    }
     bytes
 }
 

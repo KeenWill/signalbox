@@ -1,9 +1,14 @@
-use serde::Deserialize;
+use std::{collections::HashSet, fmt};
+
+use serde::{
+    Deserialize,
+    de::{DeserializeSeed, MapAccess, SeqAccess, Visitor},
+};
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    JsonParseLimits, MAX_OBSERVED_CONTAINER_ENTRIES, MAX_STRUCTURED_DEPTH, ProbeStrength,
-    ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    ValidationEvidence, VerifiedBlobSource, parse_json_without_duplicate_members_bounded,
+    JsonParseLimits, MAX_STRUCTURED_DEPTH, ProbeStrength, ProcessorFailure, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ValidationEvidence, VerifiedBlobSource,
+    parse_json_without_duplicate_members_bounded,
 };
 
 use crate::{
@@ -98,17 +103,7 @@ pub(crate) async fn inspect(
         Ok(text) => text,
         Err(reason) => return Ok(validation_failure(request.evidence, reason)),
     };
-    if validate_json(&text).is_err()
-        || (!json_depth_exceeds(text.as_bytes(), MAX_STRUCTURED_DEPTH)
-            && parse_json_without_duplicate_members_bounded(
-                &text,
-                JsonParseLimits {
-                    maximum_nodes: u64::MAX,
-                    maximum_container_entries: u64::MAX,
-                },
-            )
-            .is_err())
-    {
+    if validate_json(&text).is_err() || validate_json_without_duplicate_members(&text).is_err() {
         return Ok(validation_failure(request.evidence, "malformed_json"));
     }
     Ok(ProcessorValidationOutput::Validated {
@@ -144,7 +139,7 @@ pub(crate) async fn read(
             limit_kind: String::from("depth_limit_exceeded"),
         });
     }
-    if json_container_entries_exceed(&value, MAX_OBSERVED_CONTAINER_ENTRIES) {
+    if json_container_entries_exceed(&value, request.maximum_container_entries) {
         return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
             limit_kind: String::from("container_entry_limit_exceeded"),
         });
@@ -165,6 +160,84 @@ fn validate_json(text: &str) -> Result<(), serde_json::Error> {
     deserializer.disable_recursion_limit();
     serde::de::IgnoredAny::deserialize(serde_stacker::Deserializer::new(&mut deserializer))?;
     deserializer.end()
+}
+
+fn validate_json_without_duplicate_members(text: &str) -> Result<(), serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    deserializer.disable_recursion_limit();
+    DuplicateChecked.deserialize(serde_stacker::Deserializer::new(&mut deserializer))?;
+    deserializer.end()
+}
+
+#[derive(Clone, Copy)]
+struct DuplicateChecked;
+
+impl<'de> DeserializeSeed<'de> for DuplicateChecked {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(DuplicateCheckedVisitor)
+    }
+}
+
+struct DuplicateCheckedVisitor;
+
+impl<'de> Visitor<'de> for DuplicateCheckedVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value without duplicate object members")
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_i64<E>(self, _value: i64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_u64<E>(self, _value: u64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_f64<E>(self, _value: f64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_str<E>(self, _value: &str) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_string<E>(self, _value: String) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_none<E>(self) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_unit<E>(self) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<(), A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element_seed(DuplicateChecked)?.is_some() {}
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<(), A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut names = HashSet::new();
+        while let Some(name) = map.next_key::<String>()? {
+            if !names.insert(name) {
+                return Err(serde::de::Error::custom("duplicate JSON object member"));
+            }
+            map.next_value_seed(DuplicateChecked)?;
+        }
+        Ok(())
+    }
 }
 
 fn has_complete_json_value_prefix(prefix: &[u8]) -> bool {
