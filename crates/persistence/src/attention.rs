@@ -548,7 +548,13 @@ fn classify_state(
         (Some("terminal"), None, Some("reconciliation_required")) => {
             Ok(AttentionState::AwaitingReconciliation)
         }
-        (Some("terminal"), None, Some(_)) | (None, None, None) => Ok(AttentionState::Idle),
+        (Some("terminal"), None, Some("completed" | "refused" | "failed" | "cancelled"))
+        | (None, None, None) => Ok(AttentionState::Idle),
+        (Some("terminal"), None, Some(value)) => Err(AttentionCorruption::Unsupported {
+            field: "turn terminal disposition",
+            value: value.to_owned(),
+        }
+        .into()),
         (Some(value), _, _) => Err(AttentionCorruption::Unsupported {
             field: "turn state",
             value: value.to_owned(),
@@ -686,6 +692,22 @@ mod tests {
     #[test]
     fn goal_event_kind_decoding_rejects_unknown_storage_values() {
         assert!(decode_goal_event_kind("future_goal_state").is_err());
+    }
+
+    #[test]
+    fn state_classification_rejects_unknown_terminal_disposition_spellings() {
+        assert_eq!(
+            classify_state(
+                None,
+                None,
+                Some("terminal"),
+                None,
+                Some("future_disposition"),
+            )
+            .unwrap_err()
+            .to_string(),
+            "unsupported operator attention turn terminal disposition: future_disposition"
+        );
     }
 
     #[test]
