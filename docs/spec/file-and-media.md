@@ -1,12 +1,11 @@
 # File and media interpretation
 
 The provider-neutral core is verified against PR #898 (`agent/file-media-core`).
-Its isolated processor implementation is
-verified against this PR (`agent/file-media-worker`). Together they include the
-type model, declaration and registry checks, detection and validation algorithm,
-untrusted processor-response boundary, stable agent tool contracts,
-visibility-authorizing application bridge, and fresh daemon-supervised worker
-runtime.
+Its isolated processor implementation is verified against this PR
+(`agent/file-media-worker`). Together they include the type model, declaration
+and registry checks, detection and validation algorithm, untrusted
+processor-response boundary, stable agent tool contracts, visibility-authorizing
+application bridge, and fresh daemon-supervised worker runtime.
 
 The audio-family adapter coverage is verified against PR #908
 (`agent/file-media-audio-family`).
@@ -144,9 +143,9 @@ Each listed adapter is compiled into a dedicated worker and registered there as
 one provider declaration. Inputs remain whole-source bounded; adapter output is
 untrusted until the daemon-side registry sanitizer admits it.
 
-| Family | Canonical types                                      | Detection and validation                                                                        | Views                                               | Decoder choice                                                                                                 |
-| ------ | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| Audio  | `audio/wav`, `audio/mpeg`, `audio/flac`, `audio/ogg` | Strong signatures followed by full decode under a 64 MiB hard whole-source memory ceiling plus channel, rate, and presented-duration bounds | Bounded channel count and sample rate as `metadata` | Feature-limited pure-Rust Symphonia for WAV/MP3/FLAC; pure-Rust `ogg` and `opus-rs` for Ogg/Opus, all isolated                         |
+| Family | Canonical types                                      | Detection and validation                                                                                                                    | Views                                               | Decoder choice                                                                                                 |
+| ------ | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Audio  | `audio/wav`, `audio/mpeg`, `audio/flac`, `audio/ogg` | Strong signatures followed by full decode under a 64 MiB hard whole-source memory ceiling plus channel, rate, and presented-duration bounds | Bounded channel count and sample rate as `metadata` | Feature-limited pure-Rust Symphonia for WAV/MP3/FLAC; pure-Rust `ogg` and `opus-rs` for Ogg/Opus, all isolated |
 
 ## Processor and durable media boundary
 
