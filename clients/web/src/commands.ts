@@ -114,6 +114,15 @@ export const commandRegistry = [
     run: (context) => context.navigate?.('/settings'),
   },
   {
+    id: 'navigate.scenario',
+    title: 'Go to Scenario Studio',
+    description: 'Open the streaming interaction scenario.',
+    category: 'Navigate',
+    bindings: [],
+    available: productNavigation,
+    run: (context) => context.navigate?.('/scenario/streaming'),
+  },
+  {
     id: 'palette.open',
     title: 'Open command palette',
     description: 'Browse every available application command.',

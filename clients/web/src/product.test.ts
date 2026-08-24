@@ -337,6 +337,33 @@ describe('SameOriginProductTransport', () => {
     })
   })
 
+  it('accepts an actionless automatic-resumption block', async () => {
+    const automaticResumptionBlock = {
+      ...attentionFixture.summaries[0],
+      action: null,
+      goal_block: {
+        generation: '3',
+        need_summary: 'Retry execution after the automatic delay.',
+        reason: 'execution_failure',
+      },
+      state: 'blocked',
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ ...attentionFixture, summaries: [automaticResumptionBlock] }),
+          ),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).resolves.toEqual({
+      ...attentionFixture,
+      summaries: [automaticResumptionBlock],
+    })
+  })
+
   it('accepts an actionless runner-loss summary', async () => {
     const runnerLost = {
       ...attentionFixture.summaries[0],

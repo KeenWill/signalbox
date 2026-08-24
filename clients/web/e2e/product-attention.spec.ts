@@ -134,9 +134,31 @@ const installAttentionReplacementScenario = async (page: Page) => {
   await page.route('**/api/attention', (route) => {
     snapshotRequests += 1
     return route.fulfill({
-      json: snapshotRequests === 1 ? attentionFixture : nextAttentionFixture,
+      json: snapshotRequests === 1 ? attentionFixture : { ...nextAttentionFixture, cursor: '43' },
     })
   })
+}
+
+const installAdvancingAttentionPageScenario = async (page: Page) => {
+  let pagedRequests = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/attention**', (route) => {
+    const requestUrl = new URL(route.request().url())
+    if (requestUrl.pathname.endsWith('/follow')) {
+      return route.fulfill({
+        body: `${JSON.stringify({ kind: 'snapshot', snapshot: continuedAttentionFixture })}\n`,
+        contentType: 'application/x-ndjson',
+      })
+    }
+    if (requestUrl.searchParams.has('after_session_id')) {
+      pagedRequests += 1
+      return route.fulfill({
+        json: { ...nextAttentionFixture, cursor: pagedRequests === 1 ? '50' : '45' },
+      })
+    }
+    return route.fulfill({ json: continuedAttentionFixture })
+  })
+  return () => pagedRequests
 }
 
 const installFailedAttentionPageScenario = async (page: Page) => {
@@ -341,6 +363,19 @@ test('rejects a paged Attention response with a regressing cursor', async ({ pag
   await expect(
     page.getByText('The response did not match the generated web contract.'),
   ).toBeVisible()
+})
+
+test('advances the paged cursor floor after a successful read', async ({ page }) => {
+  const pagedRequests = await installAdvancingAttentionPageScenario(page)
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: /Next page/ }).click()
+  await expect(page.getByText('cursor 50')).toBeVisible()
+  await page.getByRole('button', { name: 'Refresh snapshot' }).click()
+
+  await expect.poll(pagedRequests).toBe(2)
+  await expect(page.getByText('cursor 50')).toBeVisible()
+  await expect(page.getByText('cursor 45')).toBeHidden()
 })
 
 test('closes the inspector with global Escape after focus leaves it', async ({ page }) => {

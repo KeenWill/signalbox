@@ -75,7 +75,9 @@ const validateAttentionSummary = (summary: AttentionSummary): void => {
   const expectedAction = (() => {
     switch (summary.state) {
       case 'blocked':
-        return 'provide_goal_need'
+        return summary.goal_block?.reason === 'execution_failure' && summary.action == null
+          ? null
+          : 'provide_goal_need'
       case 'awaiting_approval':
         return summary.action === null || summary.action === undefined ? null : 'decide_approval'
       case 'ambiguous':

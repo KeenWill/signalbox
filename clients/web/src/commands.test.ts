@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { globalHotkeySequenceBindings, invokeCommand } from './commands'
+import { commandById, globalHotkeySequenceBindings, invokeCommand } from './commands'
 import { actions, selectApp, store } from './state'
 
 describe('command registry', () => {
@@ -25,6 +25,23 @@ describe('command registry', () => {
         { commandId: 'navigate.settings', sequence: ['G', ','] },
       ]),
     )
+  })
+
+  it('registers Scenario Studio as product navigation', () => {
+    let destination = ''
+
+    invokeCommand('navigate.scenario', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      navigate: (path) => {
+        destination = path
+      },
+    })
+
+    expect(commandById('navigate.scenario').title).toBe('Go to Scenario Studio')
+    expect(destination).toBe('/scenario/streaming')
   })
 
   it('unwinds a surface before returning focus to its root', () => {

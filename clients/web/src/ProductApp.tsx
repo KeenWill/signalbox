@@ -139,7 +139,20 @@ function ProductNavigation({
         className="scenario-entry"
         to="/scenario/$scenarioId"
         params={{ scenarioId: 'streaming' }}
-        onClick={onNavigate}
+        onClick={(event) => {
+          if (
+            event.button !== 0 ||
+            event.metaKey ||
+            event.ctrlKey ||
+            event.shiftKey ||
+            event.altKey
+          ) {
+            return
+          }
+          event.preventDefault()
+          onNavigate?.()
+          invokeCommand('navigate.scenario', context)
+        }}
       >
         Scenario studio <span aria-hidden="true">↗</span>
       </Link>
@@ -346,6 +359,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       focusTimeline: () => primaryRef.current?.focus(),
       unwindSurface: () => surfaceEscape.current?.() ?? false,
       navigate: (path) => {
+        if (path === '/scenario/streaming') {
+          void navigate({
+            to: '/scenario/$scenarioId',
+            params: { scenarioId: 'streaming' },
+          })
+          return
+        }
         void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() =>
           primaryRef.current?.focus(),
         )

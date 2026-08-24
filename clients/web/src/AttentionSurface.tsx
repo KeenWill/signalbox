@@ -66,6 +66,7 @@ export function AttentionSurface({
       ) {
         throw new TypeError('paged attention snapshot cursor regressed')
       }
+      if (after !== null) pageCursorFloor.current = snapshot.cursor
       const latestProjection = liveProjection.current
       if (after !== null || !latestProjection) {
         return snapshot

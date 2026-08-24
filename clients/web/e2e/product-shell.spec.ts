@@ -131,6 +131,17 @@ test('completes route switching from the command palette without a mouse', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('offers Scenario Studio through the product command palette', async ({ page }) => {
+  await useDeterministicProductTransport(page)
+  await page.goto('/attention')
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await page.getByRole('button', { name: /Go to Scenario Studio/ }).click()
+
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+})
+
 test('does not offer the palette-opening command inside the palette', async ({ page }) => {
   await useDeterministicProductTransport(page)
   await page.goto('/attention')
