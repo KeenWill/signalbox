@@ -13,6 +13,7 @@ from unittest import mock
 from reconcile import (
     Config,
     GitHubGraphQL,
+    GitHubNotFoundError,
     choose_decision,
     comment_only_patch,
     configured_path,
@@ -636,6 +637,32 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertFalse(thread["isDispositioned"])
         self.assertFalse(thread["isEscalated"])
 
+    def test_base_only_advance_preserves_review_waves(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "_persisted_record": {
+                "head_oid": "unchanged-head",
+                "known_codex_review_ids": ["review-1"],
+                "review_wave_ids": ["review-1"],
+                "review_wave_base_oid": "base-old",
+            },
+            "_codex_reviews": [
+                {
+                    "id": "review-1",
+                    "author": {"login": "chatgpt-codex-connector"},
+                    "submittedAt": "2026-08-16T10:01:00Z",
+                }
+            ],
+            "base_oid": "base-new",
+            "head_oid": "unchanged-head",
+            "review_threads": [],
+        }
+        with mock.patch.object(client, "_review_exempt_change") as exempt:
+            client._validate_review_waves([pull_request])
+
+        exempt.assert_not_called()
+        self.assertEqual(pull_request["review_wave_ids"], ["review-1"])
+
     def test_description_edit_after_review_invalidates_fresh_evidence(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         head = "a" * 40
@@ -869,12 +896,74 @@ class GitHubGraphQLTests(unittest.TestCase):
         with mock.patch.object(
             client,
             "_review_exempt_change",
-            side_effect=[RuntimeError("compare failed"), True],
+            side_effect=[GitHubNotFoundError("not found"), True],
         ) as review_exempt_change:
             client._load_review_exempt_status([pull_request])
 
         self.assertTrue(pull_request["review_exempt_since_quiet_review"])
         self.assertEqual(review_exempt_change.call_count, 2)
+
+    def test_transient_review_compare_failure_aborts_exemption_loading(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "authenticated_quiet_review_oids": ["reviewed"],
+            "base_oid": "base",
+            "head_oid": "head",
+            "quiet_review_head_oids": [],
+        }
+        with mock.patch.object(
+            client,
+            "_review_exempt_change",
+            side_effect=RuntimeError("compare timed out"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                client._load_review_exempt_status([pull_request])
+
+    def test_change_request_review_is_not_quiet_evidence(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        head = "a" * 40
+        pull_request = {
+            "head_oid": head,
+            "check_rollup_state": "SUCCESS",
+            "checks": [],
+            "review_threads": [],
+            "_review_comments": [
+                {
+                    "authorAssociation": "OWNER",
+                    "body": f"@codex review\nExact head {head}",
+                    "createdAt": "2026-08-16T10:00:00Z",
+                }
+            ],
+            "_reviews": [
+                {
+                    "id": "review-node",
+                    "author": {"login": "chatgpt-codex-connector"},
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2026-08-16T10:01:00Z",
+                    "commit": {"oid": head},
+                    "comments": {"totalCount": 0},
+                }
+            ],
+        }
+
+        client._finalize_review_evidence([pull_request])
+
+        self.assertEqual(pull_request["quiet_review_head_oids"], [])
+        self.assertEqual(pull_request["observed_codex_reviews"], {})
+
+    def test_oid_revalidation_can_abort_on_change(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "node_id": "node",
+            "base_oid": "base",
+            "head_oid": "old-head",
+        }
+        response = {
+            "item0": {"baseRefOid": "base", "headRefOid": "new-head"}
+        }
+        with mock.patch.object(client, "execute", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "changed after"):
+                client._verify_snapshot_oids([pull_request], raise_on_change=True)
 
     def test_all_declined_review_completes_terminal_wave(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)

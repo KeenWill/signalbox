@@ -193,6 +193,10 @@ class PaginationTask:
     cursor: str
 
 
+class GitHubNotFoundError(RuntimeError):
+    """A GitHub REST resource was conclusively not found."""
+
+
 class JsonLogger:
     def __init__(self, path: Path | None) -> None:
         self._stream = path.open("a", encoding="utf-8") if path else sys.stderr
@@ -249,6 +253,8 @@ class GitHubGraphQL:
             raise RuntimeError("gh REST request timed out") from error
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip()
+            if "HTTP 404" in detail:
+                raise GitHubNotFoundError(f"gh REST request failed: {detail}")
             raise RuntimeError(f"gh REST request failed: {detail}")
         try:
             return json.loads(completed.stdout)
@@ -478,7 +484,7 @@ query($id: ID!, $after: String!) {
                 if (
                     reviewed_oid is None
                     or submitted_at is None
-                    or review.get("state") == "DISMISSED"
+                    or review.get("state") in {"DISMISSED", "CHANGES_REQUESTED"}
                     or (
                         isinstance(pull_request.get("body_last_edited_at"), str)
                         and pull_request["body_last_edited_at"] > submitted_at
@@ -616,6 +622,7 @@ query($id: ID!, $after: String!) {
                 isinstance(prior_base, str)
                 and prior_base != pull_request["base_oid"]
                 and isinstance(persisted_head, str)
+                and persisted_head != pull_request["head_oid"]
             ):
                 material_base_forward = not self._review_exempt_change(
                     persisted_head,
@@ -690,7 +697,7 @@ query($id: ID!, $after: String!) {
                         pull_request["head_oid"],
                         pull_request["base_oid"],
                     )
-                except RuntimeError:
+                except GitHubNotFoundError:
                     continue
                 if exempt:
                     pull_request["review_exempt_since_quiet_review"] = True
@@ -936,7 +943,10 @@ query($id: ID!) {
                 page = next_page["pageInfo"]
 
     def _verify_snapshot_oids(
-        self, pull_requests: list[dict[str, Any]]
+        self,
+        pull_requests: list[dict[str, Any]],
+        *,
+        raise_on_change: bool = False,
     ) -> None:
         for offset in range(0, len(pull_requests), DETAIL_BATCH_SIZE):
             batch = pull_requests[offset : offset + DETAIL_BATCH_SIZE]
@@ -963,6 +973,10 @@ query($id: ID!) {
                     node["baseRefOid"] != pull_request["base_oid"]
                     or node["headRefOid"] != pull_request["head_oid"]
                 ):
+                    if raise_on_change:
+                        raise RuntimeError(
+                            "pull request changed after its convergence snapshot"
+                        )
                     pull_request["checked_head_oid"] = None
                     pull_request["base_commits_not_in_head"] = None
 
@@ -2184,12 +2198,14 @@ def run_tick(config: Config, logger: JsonLogger) -> list[dict[str, Any]]:
         int(number): record
         for number, record in state["pull_requests"].items()
     }
-    pull_requests, tracked = GitHubGraphQL(
-        config.repository, config.command_timeout_seconds
-    ).snapshot(tracked_node_ids, config.head_pattern, persisted_records)
+    client = GitHubGraphQL(config.repository, config.command_timeout_seconds)
+    pull_requests, tracked = client.snapshot(
+        tracked_node_ids, config.head_pattern, persisted_records
+    )
     now = time.time()
     summaries = record_terminal_pull_requests(config, logger, state, tracked, now)
     for pull_request in pull_requests:
+        client._verify_snapshot_oids([pull_request], raise_on_change=True)
         authorized = same_repository(pull_request["head_repository"], config.repository)
         watched = authorized and fnmatch.fnmatchcase(
             pull_request["head_ref"], config.head_pattern
