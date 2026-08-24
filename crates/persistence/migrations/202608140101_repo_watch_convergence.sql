@@ -234,7 +234,7 @@ CREATE TABLE repo_watch_convergence_cutoff_goal (
 );
 
 CREATE VIEW repo_watch_current_pull_request_convergence AS
-SELECT DISTINCT ON (identity.repository, identity.pull_request_number)
+SELECT
        assessment.repository,
        assessment.pull_request_number,
        assessment.head_sha,
@@ -250,17 +250,37 @@ SELECT DISTINCT ON (identity.repository, identity.pull_request_number)
        convergence.convergence_kind AS sealed_kind,
        convergence.converged_at,
        assessment.recorded_at
-  FROM repo_watch_pull_request_convergence_identity AS identity
+  FROM (
+       SELECT DISTINCT ON (repository, pull_request_number) *
+         FROM repo_watch_pull_request_convergence_identity
+        ORDER BY repository, pull_request_number, cursor_generation DESC,
+                 recorded_at DESC, identity_id DESC
+  ) AS identity
   JOIN repo_watch_pull_request_convergence_assessment AS assessment
     ON assessment.assessment_id = identity.assessment_id
+  JOIN LATERAL (
+       SELECT cursor_payload
+         FROM repo_watch_cursor
+        WHERE repository = identity.repository
+        ORDER BY generation DESC
+        LIMIT 1
+  ) AS cursor ON true
+  JOIN LATERAL jsonb_array_elements(
+       cursor.cursor_payload -> 'state' -> 'pull_requests'
+  ) AS pull_request ON
+       (pull_request ->> 'number')::numeric = identity.pull_request_number
+  JOIN LATERAL jsonb_array_elements(
+       cursor.cursor_payload -> 'state' -> 'branch_heads'
+  ) AS base_head ON
+       base_head ->> 'branch' = pull_request ->> 'base_branch'
   LEFT JOIN repo_watch_pull_request_convergence AS convergence
     ON convergence.repository = assessment.repository
    AND convergence.pull_request_number = assessment.pull_request_number
    AND convergence.head_sha = assessment.head_sha
    AND convergence.base_revision = assessment.base_revision
- ORDER BY identity.repository, identity.pull_request_number,
-          identity.cursor_generation DESC, identity.recorded_at DESC,
-          identity.identity_id DESC;
+ WHERE pull_request ->> 'head_sha' = assessment.head_sha
+   AND base_head ->> 'head' = assessment.base_revision
+;
 
 CREATE TRIGGER repo_watch_convergence_assessment_is_append_only
 BEFORE UPDATE OR DELETE ON repo_watch_pull_request_convergence_assessment

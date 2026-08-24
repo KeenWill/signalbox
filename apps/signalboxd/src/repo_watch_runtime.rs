@@ -3254,6 +3254,7 @@ struct FetchedPullRequest {
 
 struct FetchedConvergenceEvidence {
     base_revision: CommitSha,
+    gating_checks_settled: bool,
     review_decision: RepoWatchReviewDecision,
     gating_check_count: u64,
     non_green_gating_checks: Vec<CheckRunName>,
@@ -3264,7 +3265,6 @@ impl FetchedConvergenceEvidence {
         self,
         state: &RepoWatchPullRequestState,
         base_revision: CommitSha,
-        settlement: PullRequestSettlement,
     ) -> Result<RepoWatchConvergenceAssessment, RepositoryWatchAttemptError> {
         if self.base_revision != base_revision {
             return Err(RepositoryWatchAttemptError::InvalidResponse);
@@ -3275,7 +3275,8 @@ impl FetchedConvergenceEvidence {
             base_branch: state.context().base_branch().clone(),
             base_revision,
             mergeable_state: state.mergeable_state(),
-            settled: settlement == PullRequestSettlement::Settled,
+            settled: self.gating_checks_settled
+                && state.mergeable_state() != MergeableState::Unknown,
             review_decision: self.review_decision,
             unresolved_threads: state
                 .threads()
@@ -3553,11 +3554,11 @@ impl GitHubRepositoryPoller {
                 })
                 .map(|branch_head| branch_head.head().clone())
                 .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
-            convergence.push(pull_request.convergence_evidence.assess(
-                &pull_request.state,
-                base_revision,
-                pull_request.settlement,
-            )?);
+            convergence.push(
+                pull_request
+                    .convergence_evidence
+                    .assess(&pull_request.state, base_revision)?,
+            );
             states.push(pull_request.state);
         }
         Ok(FetchedPullRequests {
@@ -3924,7 +3925,7 @@ impl GitHubRepositoryPoller {
                                 .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                             normalize_conclusion(run.conclusion.as_deref())?,
                         ));
-                    } else {
+                    } else if !is_non_gating_check_name(&run.name) {
                         every_run_completed = false;
                     }
                 }
@@ -4075,6 +4076,7 @@ impl GitHubRepositoryPoller {
         let mut after: Option<String> = None;
         let mut page = 1_u16;
         let mut gating_check_count = 0_u64;
+        let mut gating_checks_settled = true;
         let mut non_green_gating_checks = Vec::new();
         let mut retained_review_decision = None;
         let mut retained_base_revision = None;
@@ -4145,6 +4147,9 @@ impl GitHubRepositoryPoller {
                 gating_check_count = gating_check_count
                     .checked_add(1)
                     .ok_or(RepositoryWatchAttemptError::ResourceLimit)?;
+                if !check.complete() {
+                    gating_checks_settled = false;
+                }
                 if !check.green() {
                     non_green_gating_checks.push(
                         CheckRunName::try_new(check.name().to_owned())
@@ -4167,6 +4172,7 @@ impl GitHubRepositoryPoller {
         .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
         Ok(FetchedConvergenceEvidence {
             base_revision,
+            gating_checks_settled,
             review_decision: retained_review_decision
                 .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
             gating_check_count,
@@ -5467,10 +5473,14 @@ impl ConvergenceCheck {
     }
 
     fn is_report_only(&self) -> bool {
-        let name = self.name().to_ascii_lowercase();
-        NON_GATING_CHECK_NAME_MARKERS
-            .iter()
-            .any(|marker| name.contains(marker))
+        is_non_gating_check_name(self.name())
+    }
+
+    fn complete(&self) -> bool {
+        match self {
+            Self::CheckRun { status, .. } => status == "COMPLETED",
+            Self::StatusContext { state, .. } => state != "PENDING",
+        }
     }
 
     fn green(&self) -> bool {
@@ -5487,6 +5497,13 @@ impl ConvergenceCheck {
             Self::StatusContext { state, .. } => state == "SUCCESS",
         }
     }
+}
+
+fn is_non_gating_check_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    NON_GATING_CHECK_NAME_MARKERS
+        .iter()
+        .any(|marker| name.contains(marker))
 }
 
 fn normalize_graphql_mergeable(value: &str) -> Result<MergeableState, RepositoryWatchAttemptError> {
@@ -8348,6 +8365,7 @@ mod tests {
         let evidence = super::FetchedConvergenceEvidence {
             base_revision: CommitSha::try_new(CHANGED_LISTED_HEAD_SHA.to_owned())
                 .expect("fixture provider base revision is valid"),
+            gating_checks_settled: true,
             review_decision: super::RepoWatchReviewDecision::Approved,
             gating_check_count: 1,
             non_green_gating_checks: Vec::new(),
@@ -8355,11 +8373,7 @@ mod tests {
         let snapshot_base_revision = CommitSha::try_new(BASE_SHA.to_owned())
             .expect("fixture snapshot base revision is valid");
 
-        let assessment = evidence.assess(
-            pull_request,
-            snapshot_base_revision,
-            PullRequestSettlement::Settled,
-        );
+        let assessment = evidence.assess(pull_request, snapshot_base_revision);
 
         assert!(matches!(
             assessment,
@@ -9586,6 +9600,28 @@ mod tests {
         server.finish().await;
 
         assert_eq!(result, Err(RepositoryWatchAttemptError::InvalidResponse));
+    }
+
+    #[tokio::test]
+    async fn an_unfinished_report_only_run_does_not_unsettle_gating_checks() {
+        let response = check_runs().replace(IN_PROGRESS_CHECK_RUN_NAME, "coverage (report only)");
+        let server = ScriptedServer::start(vec![ScriptedResponse::ok(
+            RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+            ResponseBody(response),
+        )])
+        .await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let suite =
+            object_id(COMPLETED_CHECK_SUITE_IDS[0]).expect("fixture suite identity is positive");
+
+        let (_, every_gating_run_completed) = fixture
+            .poller
+            .fetch_check_runs(std::slice::from_ref(&suite))
+            .await
+            .expect("report-only run is valid check evidence");
+        server.finish().await;
+
+        assert!(every_gating_run_completed);
     }
 
     #[tokio::test]

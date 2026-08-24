@@ -5237,6 +5237,10 @@ async fn base_advance_requires_a_fresh_seal_for_cutoff_and_admission() -> Result
     let advanced_generation =
         commit_mergeable_head_at_base(&fixture, 0x54_701, SECOND_HEAD, ADVANCED_BASE_REVISION)
             .await?;
+    let stale_view_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_current_pull_request_convergence")
+            .fetch_one(&fixture.pool)
+            .await?;
 
     let stale_cutoff = fixture
         .store
@@ -5285,6 +5289,7 @@ async fn base_advance_requires_a_fresh_seal_for_cutoff_and_admission() -> Result
     .await?;
 
     assert!(!stale_cutoff);
+    assert_eq!(stale_view_count, 0);
     assert_eq!(stale_admission, RepoWatchRuleEvaluationOutcome::Occupied);
     assert!(fresh_cutoff);
     assert_eq!(
@@ -5610,6 +5615,7 @@ async fn terminal_cutoff_preserves_an_obligation_for_its_own_event() -> Result<(
 async fn terminal_event_remains_eligible_after_its_exact_head_converges()
 -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(conflict_and_merged_event_rule()?).await?;
+    declare_session_goal_achieved(&fixture.pool, fixture.session(0), 0x53_21f).await?;
     let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
     let cursor = event_store
         .load_cursor(&fixture.repository)
@@ -5651,8 +5657,30 @@ async fn terminal_event_remains_eligible_after_its_exact_head_converges()
                 dispatch_context(),
             )
             .await?;
+    let (_, sessions) = dispatched(outcome);
+    let session = sessions[0];
+    let cutoff_processed = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x53_221))
+        })
+        .await?;
+    let goal = GoalRepository::new(fixture.pool.clone())
+        .load_goal(session)
+        .await?
+        .expect("terminal-event dispatch goal remains readable");
+    let cutoff_goal_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_convergence_cutoff_goal
+          WHERE session_id = $1",
+    )
+    .bind(session.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
 
-    assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert!(cutoff_processed);
+    assert_eq!(goal.current().state(), &GoalState::Pursuing);
+    assert_eq!(cutoff_goal_count, 0);
     Ok(())
 }
 

@@ -447,6 +447,9 @@ impl PostgresRepoWatchDispatchStore {
                JOIN repo_watch_event AS origin ON origin.event_id = action.event_id
               WHERE origin.repository = $1
                 AND origin.pull_request_number = $2
+                AND origin.event_kind NOT IN (
+                    'pull_request_closed', 'pull_request_merged'
+                )
               ORDER BY action.session_id",
         )
         .bind(repository.as_str())
