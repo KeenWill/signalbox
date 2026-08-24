@@ -144,12 +144,16 @@ fn declaration_registers_three_macro_free_formats_under_available_isolation()
 
 #[tokio::test]
 async fn generated_docx_detects_and_extracts_embedded_text() -> Result<(), Box<dyn Error>> {
-    assert_valid_text(OfficeFixture::docx()?).await
+    let observation = valid_text_observation(OfficeFixture::docx()?).await?;
+    assert_valid_text(observation);
+    Ok(())
 }
 
 #[tokio::test]
 async fn generated_xlsx_detects_and_extracts_embedded_text() -> Result<(), Box<dyn Error>> {
-    assert_valid_text(OfficeFixture::xlsx()?).await
+    let observation = valid_text_observation(OfficeFixture::xlsx()?).await?;
+    assert_valid_text(observation);
+    Ok(())
 }
 
 #[tokio::test]
@@ -171,7 +175,9 @@ async fn adjacent_spreadsheet_string_items_are_separated() -> Result<(), Box<dyn
 
 #[tokio::test]
 async fn generated_pptx_detects_and_extracts_embedded_text() -> Result<(), Box<dyn Error>> {
-    assert_valid_text(OfficeFixture::pptx()?).await
+    let observation = valid_text_observation(OfficeFixture::pptx()?).await?;
+    assert_valid_text(observation);
+    Ok(())
 }
 
 #[tokio::test]
@@ -213,7 +219,9 @@ async fn generated_docx_metadata_reports_fixture_inventory() -> Result<(), Box<d
 
 #[tokio::test]
 async fn truncated_docx_is_a_typed_malformed_inspection() -> Result<(), Box<dyn Error>> {
-    assert_malformed(OfficeFixture::truncated_docx()?).await
+    let observation = malformed_observation(OfficeFixture::truncated_docx()?).await?;
+    assert_malformed(observation);
+    Ok(())
 }
 
 #[tokio::test]
@@ -227,12 +235,16 @@ async fn locked_docx_is_terminal_without_a_password_channel() -> Result<(), Box<
 
 #[tokio::test]
 async fn macro_enabled_docx_is_not_accepted_as_macro_free_docx() -> Result<(), Box<dyn Error>> {
-    assert_malformed(OfficeFixture::macro_enabled_docx()?).await
+    let observation = malformed_observation(OfficeFixture::macro_enabled_docx()?).await?;
+    assert_malformed(observation);
+    Ok(())
 }
 
 #[tokio::test]
 async fn vba_part_is_rejected_despite_a_macro_free_main_override() -> Result<(), Box<dyn Error>> {
-    assert_malformed(OfficeFixture::vba_part_in_macro_free_docx()?).await
+    let observation = malformed_observation(OfficeFixture::vba_part_in_macro_free_docx()?).await?;
+    assert_malformed(observation);
+    Ok(())
 }
 
 #[tokio::test]
@@ -246,7 +258,9 @@ async fn package_relationship_selects_the_office_document_family() -> Result<(),
 
 #[tokio::test]
 async fn zip_slip_shaped_entry_is_a_typed_malformed_inspection() -> Result<(), Box<dyn Error>> {
-    assert_malformed(OfficeFixture::zip_slip_docx()?).await
+    let observation = malformed_observation(OfficeFixture::zip_slip_docx()?).await?;
+    assert_malformed(observation);
+    Ok(())
 }
 
 #[tokio::test]
@@ -264,29 +278,39 @@ async fn recognized_zip_slip_docx_with_generic_declaration_remains_malformed()
 
 #[tokio::test]
 async fn symlink_entry_is_a_typed_malformed_inspection() -> Result<(), Box<dyn Error>> {
-    assert_malformed(OfficeFixture::symlink_docx()?).await
+    let observation = malformed_observation(OfficeFixture::symlink_docx()?).await?;
+    assert_malformed(observation);
+    Ok(())
 }
 
 #[tokio::test]
 async fn recursive_office_container_is_a_typed_malformed_inspection() -> Result<(), Box<dyn Error>>
 {
-    assert_malformed(OfficeFixture::recursive_docx()?).await
+    let observation = malformed_observation(OfficeFixture::recursive_docx()?).await?;
+    assert_malformed(observation);
+    Ok(())
 }
 
 #[tokio::test]
 async fn compressed_expansion_bomb_is_a_typed_bounded_failure() -> Result<(), Box<dyn Error>> {
-    assert_malformed(OfficeFixture::expansion_bomb_docx()?).await
+    let observation = malformed_observation(OfficeFixture::expansion_bomb_docx()?).await?;
+    assert_malformed(observation);
+    Ok(())
 }
 
 #[tokio::test]
 async fn large_opaque_office_part_does_not_consume_xml_expansion_budget()
 -> Result<(), Box<dyn Error>> {
-    assert_valid_text(OfficeFixture::large_opaque_part_docx()?).await
+    let observation = valid_text_observation(OfficeFixture::large_opaque_part_docx()?).await?;
+    assert_valid_text(observation);
+    Ok(())
 }
 
 #[tokio::test]
 async fn excessive_entry_count_is_a_typed_bounded_failure() -> Result<(), Box<dyn Error>> {
-    assert_malformed(OfficeFixture::entry_count_bomb_docx()?).await
+    let observation = malformed_observation(OfficeFixture::entry_count_bomb_docx()?).await?;
+    assert_malformed(observation);
+    Ok(())
 }
 
 #[tokio::test]
@@ -337,7 +361,9 @@ async fn multiple_root_part_xml_fails_without_partial_output() -> Result<(), Box
 #[tokio::test]
 async fn duplicate_office_part_name_is_a_typed_malformed_inspection() -> Result<(), Box<dyn Error>>
 {
-    assert_malformed(OfficeFixture::duplicate_document_part_docx()?).await
+    let observation = malformed_observation(OfficeFixture::duplicate_document_part_docx()?).await?;
+    assert_malformed(observation);
+    Ok(())
 }
 
 #[tokio::test]
@@ -395,7 +421,9 @@ async fn adversarial_decoder_structure_is_rejected_by_registry_sanitization()
     Ok(())
 }
 
-async fn assert_valid_text(fixture: OfficeFixture) -> Result<(), Box<dyn Error>> {
+async fn valid_text_observation(
+    fixture: OfficeFixture,
+) -> Result<(FileInspectionStatus, String, String), Box<dyn Error>> {
     let expected_text = fixture.expected_text();
     let source = fixture.into_source()?;
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
@@ -407,19 +435,39 @@ async fn assert_valid_text(fixture: OfficeFixture) -> Result<(), Box<dyn Error>>
     )
     .await?;
 
-    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
-    assert!(complete_text(result)?.contains(expected_text));
-    Ok(())
+    Ok((
+        inspection.status(),
+        complete_text(result)?,
+        String::from(expected_text),
+    ))
 }
 
-async fn assert_malformed(fixture: OfficeFixture) -> Result<(), Box<dyn Error>> {
+#[track_caller]
+fn assert_valid_text(observation: (FileInspectionStatus, String, String)) {
+    let (status, actual_text, expected_text) = observation;
+    assert_eq!(status, FileInspectionStatus::Validated);
+    assert!(actual_text.contains(&expected_text));
+}
+
+async fn malformed_observation(
+    fixture: OfficeFixture,
+) -> Result<(FileInspectionStatus, String, String), Box<dyn Error>> {
     let expected_reason = fixture.expected_reason()?;
     let source = fixture.into_source()?;
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
 
-    assert_eq!(inspection.status(), FileInspectionStatus::Malformed);
-    assert_eq!(malformed_reason(&inspection)?, expected_reason);
-    Ok(())
+    Ok((
+        inspection.status(),
+        String::from(malformed_reason(&inspection)?),
+        String::from(expected_reason),
+    ))
+}
+
+#[track_caller]
+fn assert_malformed(observation: (FileInspectionStatus, String, String)) {
+    let (status, actual_reason, expected_reason) = observation;
+    assert_eq!(status, FileInspectionStatus::Malformed);
+    assert_eq!(actual_reason, expected_reason);
 }
 
 fn registry() -> Result<FileMediaRegistry, Box<dyn Error>> {

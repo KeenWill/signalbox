@@ -42,23 +42,37 @@ const HOSTILE_ENTRY_NAME: &str = "hostile_entry_name";
 const RECURSIVE_CONTAINER: &str = "recursive_container";
 const SYMLINK_ENTRY: &str = "symlink_entry";
 const XML_MALFORMED: &str = "xml_malformed";
-// Probe reads stay within the broker envelope. Decoded-part ceilings separately
-// bound decompression work, while the text ceiling matches the declared view so
-// oversized output is rejected before worker framing and registry sanitization.
+// numeric-bound: not-a-bound - fixed ZIP signature width required by the format
 const ZIP_PREFIX_BYTES: u64 = 4;
+// numeric-bound: not-a-bound - fixed maximum ZIP comment plus trailing record coverage
 const ZIP_SUFFIX_BYTES: u64 = 65_536;
+// numeric-bound: not-a-bound - fixed ZIP64 trailer width preceding the suffix
 const EOCD_PRECEDING_BYTES: u64 = 97;
+// numeric-bound: ceiling - protects probe broker memory and cumulative source reads
 const VALIDATION_SOURCE_BYTES: u64 = 262_144;
+// numeric-bound: ceiling - protects probe decompression from oversized type metadata
 const CONTENT_TYPES_COMPRESSED_BYTES: u64 = 64 * 1024;
+// numeric-bound: ceiling - protects probe decompression from oversized relationship metadata
 const PACKAGE_RELS_COMPRESSED_BYTES: u64 = 8 * 1024;
+// numeric-bound: not-a-bound - fixed ZIP local-file-header width required by the format
 const LOCAL_HEADER_BYTES: u64 = 30;
+// numeric-bound: not-a-bound - fixed byte length of the canonical content-types part name
 const CONTENT_TYPES_NAME_BYTES: u64 = 19;
+// numeric-bound: not-a-bound - fixed byte length of the canonical package-relationships name
 const PACKAGE_RELS_NAME_BYTES: u64 = 11;
+// numeric-bound: ceiling - protects probe reads from adversarial local extra fields
+const LOCAL_EXTRA_BYTES: u64 = 256;
+// numeric-bound: ceiling - protects worker memory while reading a complete Office source
 const READ_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
+// numeric-bound: tunable - controls bounded source-read granularity
 const SOURCE_CHUNK_BYTES: u64 = 256 * 1024;
+// numeric-bound: ceiling - protects decoder memory from one expanded Office part
 const MAX_ENTRY_BYTES: u64 = 4 * 1024 * 1024;
+// numeric-bound: ceiling - protects worker memory and CPU across all expanded Office parts
 const MAX_TOTAL_EXPANDED_BYTES: u64 = 16 * 1024 * 1024;
+// numeric-bound: ceiling - protects XML parsing from adversarial nesting and scope cloning
 const MAX_XML_DEPTH: usize = 256;
+// numeric-bound: ceiling - protects worker framing from oversized metadata output
 const METADATA_OUTPUT_BYTES: usize = 16 * 1024;
 const CONTENT_TYPES: &str = "[Content_Types].xml";
 const PACKAGE_RELS: &str = "_rels/.rels";
@@ -484,9 +498,11 @@ async fn read_central_inventory(
                 - ZIP_PREFIX_BYTES
                 - LOCAL_HEADER_BYTES
                 - CONTENT_TYPES_NAME_BYTES
+                - LOCAL_EXTRA_BYTES
                 - CONTENT_TYPES_COMPRESSED_BYTES
                 - LOCAL_HEADER_BYTES
                 - PACKAGE_RELS_NAME_BYTES
+                - LOCAL_EXTRA_BYTES
                 - PACKAGE_RELS_COMPRESSED_BYTES
     {
         return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
@@ -903,18 +919,36 @@ async fn read_probe_entry(
     }
     let name_length = u64::from(le_u16(&local, 26)?);
     let extra_length = u64::from(le_u16(&local, 28)?);
-    if name_length != u64::try_from(entry.name.len()).unwrap_or(u64::MAX) {
+    if name_length != u64::try_from(entry.name.len()).unwrap_or(u64::MAX)
+        || extra_length > LOCAL_EXTRA_BYTES
+    {
         return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
     }
     let local_name_offset = entry
         .local_offset
         .checked_add(LOCAL_HEADER_BYTES)
         .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
-    require_range(source.byte_length().get(), local_name_offset, name_length)?;
-    let local_name = read_range(source, local_name_offset, name_length).await?;
-    if local_name.as_slice() != entry.name.as_bytes() {
+    let local_variable_length = name_length
+        .checked_add(extra_length)
+        .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+    require_range(
+        source.byte_length().get(),
+        local_name_offset,
+        local_variable_length,
+    )?;
+    let local_variable = read_range(source, local_name_offset, local_variable_length).await?;
+    let local_name_length =
+        usize::try_from(name_length).map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
+    let local_name = local_variable
+        .get(..local_name_length)
+        .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+    let local_extra = local_variable
+        .get(local_name_length..)
+        .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+    if local_name != entry.name.as_bytes() {
         return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
     }
+    validate_local_header_fields(&local, local_extra, entry)?;
     let data_offset = entry
         .local_offset
         .checked_add(LOCAL_HEADER_BYTES)
@@ -948,6 +982,28 @@ async fn read_probe_entry(
         return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
     }
     Ok(bytes)
+}
+
+fn validate_local_header_fields(
+    local: &[u8],
+    local_extra: &[u8],
+    entry: &CentralEntry,
+) -> Result<(), ValidationIssue> {
+    const DATA_DESCRIPTOR_FLAG: u16 = 1 << 3;
+    if entry.flags & DATA_DESCRIPTOR_FLAG != 0 {
+        return Ok(());
+    }
+    let expanded_32 = le_u32(local, 22)?;
+    let compressed_32 = le_u32(local, 18)?;
+    let (expanded, compressed, _) =
+        decode_zip64_entry_fields(local_extra, expanded_32, compressed_32, 0)?;
+    if le_u32(local, 14)? != entry.crc32
+        || compressed != entry.compressed_bytes
+        || expanded != entry.expanded_bytes
+    {
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+    }
+    Ok(())
 }
 
 fn validate_package_relationships(
@@ -1346,7 +1402,7 @@ fn collect_content_type_kind(
         }
     }
     let (Some(part_name), Some(content_type)) = (part_name, content_type) else {
-        return Ok(());
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
     };
     if recursive_content_type(&content_type) {
         return Err(ValidationIssue::Malformed(RECURSIVE_CONTAINER));
@@ -1388,7 +1444,7 @@ fn collect_default_content_type(
         }
     }
     let (Some(extension), Some(content_type)) = (extension, content_type) else {
-        return Ok(());
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
     };
     if recursive_content_type(&content_type) {
         return Err(ValidationIssue::Malformed(RECURSIVE_CONTAINER));
@@ -3365,6 +3421,38 @@ mod tests {
     }
 
     #[test]
+    fn content_types_reject_incomplete_overrides() {
+        let xml = concat!(
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">",
+            "<Override PartName=\"/word/document.xml\"/>",
+            "</Types>"
+        );
+
+        let result = validate_content_types(xml.as_bytes(), &[docx_main_entry()]);
+
+        assert!(matches!(
+            result,
+            Err(ValidationIssue::Malformed(MALFORMED_REASON))
+        ));
+    }
+
+    #[test]
+    fn content_types_reject_incomplete_defaults() {
+        let xml = concat!(
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">",
+            "<Default Extension=\"xml\"/>",
+            "</Types>"
+        );
+
+        let result = validate_content_types(xml.as_bytes(), &[docx_main_entry()]);
+
+        assert!(matches!(
+            result,
+            Err(ValidationIssue::Malformed(MALFORMED_REASON))
+        ));
+    }
+
+    #[test]
     fn content_types_reject_vba_projects_by_content_type() {
         let xml = concat!(
             "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">",
@@ -3538,9 +3626,11 @@ mod tests {
             - ZIP_PREFIX_BYTES
             - LOCAL_HEADER_BYTES
             - CONTENT_TYPES_NAME_BYTES
+            - LOCAL_EXTRA_BYTES
             - CONTENT_TYPES_COMPRESSED_BYTES
             - LOCAL_HEADER_BYTES
             - PACKAGE_RELS_NAME_BYTES
+            - LOCAL_EXTRA_BYTES
             - PACKAGE_RELS_COMPRESSED_BYTES;
 
         assert_eq!(
@@ -3549,12 +3639,65 @@ mod tests {
                 + admitted_central_bytes
                 + LOCAL_HEADER_BYTES
                 + CONTENT_TYPES_NAME_BYTES
+                + LOCAL_EXTRA_BYTES
                 + CONTENT_TYPES_COMPRESSED_BYTES
                 + LOCAL_HEADER_BYTES
                 + PACKAGE_RELS_NAME_BYTES
+                + LOCAL_EXTRA_BYTES
                 + PACKAGE_RELS_COMPRESSED_BYTES,
             VALIDATION_SOURCE_BYTES
         );
+    }
+
+    #[test]
+    fn local_header_fields_must_match_the_central_entry() {
+        let entry = CentralEntry {
+            name: String::from(CONTENT_TYPES),
+            flags: 0,
+            compression: 0,
+            crc32: 7,
+            compressed_bytes: 11,
+            expanded_bytes: 11,
+            local_offset: 0,
+        };
+        let mut local = vec![0_u8; usize::try_from(LOCAL_HEADER_BYTES).expect("header fits")];
+        local[14..18].copy_from_slice(&8_u32.to_le_bytes());
+        local[18..22].copy_from_slice(&11_u32.to_le_bytes());
+        local[22..26].copy_from_slice(&11_u32.to_le_bytes());
+
+        let result = validate_local_header_fields(&local, &[], &entry);
+
+        assert!(matches!(
+            result,
+            Err(ValidationIssue::Malformed(MALFORMED_REASON))
+        ));
+    }
+
+    #[test]
+    fn local_zip64_sizes_must_match_the_central_entry() {
+        let entry = CentralEntry {
+            name: String::from(CONTENT_TYPES),
+            flags: 0,
+            compression: 0,
+            crc32: 7,
+            compressed_bytes: 11,
+            expanded_bytes: 11,
+            local_offset: 0,
+        };
+        let mut local = vec![0_u8; usize::try_from(LOCAL_HEADER_BYTES).expect("header fits")];
+        local[14..18].copy_from_slice(&7_u32.to_le_bytes());
+        local[18..22].copy_from_slice(&u32::MAX.to_le_bytes());
+        local[22..26].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut extra = Vec::from([1_u8, 0, 16, 0]);
+        extra.extend_from_slice(&12_u64.to_le_bytes());
+        extra.extend_from_slice(&11_u64.to_le_bytes());
+
+        let result = validate_local_header_fields(&local, &extra, &entry);
+
+        assert!(matches!(
+            result,
+            Err(ValidationIssue::Malformed(MALFORMED_REASON))
+        ));
     }
 
     #[tokio::test]
