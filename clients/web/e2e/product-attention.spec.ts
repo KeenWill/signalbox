@@ -165,6 +165,23 @@ const installFailedAttentionPageScenario = async (page: Page) => {
   })
 }
 
+const installRegressingAttentionPageScenario = async (page: Page) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/attention**', (route) => {
+    const requestUrl = new URL(route.request().url())
+    if (requestUrl.pathname.endsWith('/follow')) {
+      return route.fulfill({
+        body: `${JSON.stringify({ kind: 'snapshot', snapshot: continuedAttentionFixture })}\n`,
+        contentType: 'application/x-ndjson',
+      })
+    }
+    if (requestUrl.searchParams.has('after_session_id')) {
+      return route.fulfill({ json: { ...nextAttentionFixture, cursor: '41' } })
+    }
+    return route.fulfill({ json: continuedAttentionFixture })
+  })
+}
+
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
   page.on('console', (message) => {
@@ -294,6 +311,18 @@ test('returns to the live page after a paged read fails', async ({ page }) => {
 
   await expect(page.getByText(approvalSessionId)).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Attention could not be read' })).toBeHidden()
+})
+
+test('rejects a paged Attention response with a regressing cursor', async ({ page }) => {
+  await installRegressingAttentionPageScenario(page)
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: /Next page/ }).click()
+
+  await expect(page.getByRole('heading', { name: 'Attention could not be read' })).toBeVisible()
+  await expect(
+    page.getByText('The response did not match the generated web contract.'),
+  ).toBeVisible()
 })
 
 test('closes the inspector with global Escape after focus leaves it', async ({ page }) => {

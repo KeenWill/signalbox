@@ -54,11 +54,19 @@ export function AttentionSurface({
   const focusReplacement = useRef(false)
   const focusRevealedList = useRef(false)
   const liveProjection = useRef<WebAttentionSnapshot | undefined>(undefined)
+  const pageCursorFloor = useRef<string | null>(null)
   const attention = useQuery({
     queryKey: queryKey(after),
     queryFn: async ({ signal }) => {
       const projectionAtStart = liveProjection.current
       const snapshot = await productTransport.readAttention(after ?? undefined, signal)
+      if (
+        after !== null &&
+        pageCursorFloor.current !== null &&
+        BigInt(snapshot.cursor) < BigInt(pageCursorFloor.current)
+      ) {
+        throw new TypeError('paged attention snapshot cursor regressed')
+      }
       const latestProjection = liveProjection.current
       if (after !== null || latestProjection === projectionAtStart || !latestProjection) {
         return snapshot
@@ -153,13 +161,16 @@ export function AttentionSurface({
   }
   const close = () => setSelectedId(null)
   const nextPage = () => {
-    const continuation = attention.data?.continuation_after_session_id
-    if (!continuation) return
+    const currentPage = attention.data
+    const continuation = currentPage?.continuation_after_session_id
+    if (!continuation || !currentPage) return
+    pageCursorFloor.current = currentPage.cursor
     focusReplacement.current = true
     setSelectedId(null)
     setAfter(continuation)
   }
   const returnToLivePage = () => {
+    pageCursorFloor.current = null
     focusReplacement.current = true
     setSelectedId(null)
     setAfter(null)

@@ -201,7 +201,9 @@ describe('SameOriginProductTransport', () => {
     const body = `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n${JSON.stringify(attentionUpdateFixture)}\n`
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(body)),
+      vi.fn(
+        async () => new Response(body, { headers: { 'content-type': 'application/x-ndjson' } }),
+      ),
     )
     const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
 
@@ -213,13 +215,28 @@ describe('SameOriginProductTransport', () => {
     await expect(events.next()).resolves.toEqual({ done: true, value: undefined })
   })
 
+  it('rejects a successful follow response with the wrong media type', async () => {
+    const body = `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n`
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body, { headers: { 'content-type': 'application/json' } })),
+    )
+    const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
+
+    await expect(events.next()).rejects.toThrow(
+      'attention stream response must use application/x-ndjson',
+    )
+  })
+
   it('rejects malformed cursors in HTTP snapshots and stream events', async () => {
     const malformedSnapshot = { ...attentionFixture, cursor: '01' }
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(malformedSnapshot)))
       .mockResolvedValueOnce(
-        new Response(`${JSON.stringify({ ...attentionUpdateFixture, cursor: 'not-a-number' })}\n`),
+        new Response(`${JSON.stringify({ ...attentionUpdateFixture, cursor: 'not-a-number' })}\n`, {
+          headers: { 'content-type': 'application/x-ndjson' },
+        }),
       )
     vi.stubGlobal('fetch', fetchMock)
 
@@ -268,7 +285,9 @@ describe('SameOriginProductTransport', () => {
     const body = `${JSON.stringify({ kind: 'snapshot', snapshot: duplicate })}\n`
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(body)),
+      vi.fn(
+        async () => new Response(body, { headers: { 'content-type': 'application/x-ndjson' } }),
+      ),
     )
     const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
 
@@ -291,6 +310,7 @@ describe('SameOriginProductTransport', () => {
       .mockResolvedValueOnce(
         new Response(
           `${JSON.stringify({ kind: 'update', cursor: '18', summaries: [incoherentSummary] })}\n`,
+          { headers: { 'content-type': 'application/x-ndjson' } },
         ),
       )
     vi.stubGlobal('fetch', fetchMock)
@@ -380,6 +400,25 @@ describe('SameOriginProductTransport', () => {
     })
   })
 
+  it('rejects turn-derived states without a current-turn identity', async () => {
+    const withoutTurn = {
+      ...attentionFixture.summaries[0],
+      action: null,
+      current_turn_id: null,
+      state: 'active',
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () => new Response(JSON.stringify({ ...attentionFixture, summaries: [withoutTurn] })),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
+      'turn-derived attention summary must include a current-turn identity',
+    )
+  })
+
   it('rejects a blocked summary without goal-block evidence', async () => {
     const blockedWithoutEvidence = {
       ...attentionFixture.summaries[0],
@@ -441,7 +480,9 @@ describe('SameOriginProductTransport', () => {
       'fetch',
       vi.fn(
         async () =>
-          new Response(`${JSON.stringify({ kind: 'update', cursor: '18', summaries })}\n`),
+          new Response(`${JSON.stringify({ kind: 'update', cursor: '18', summaries })}\n`, {
+            headers: { 'content-type': 'application/x-ndjson' },
+          }),
       ),
     )
     const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
@@ -514,7 +555,9 @@ describe('SameOriginProductTransport', () => {
     })
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(body)),
+      vi.fn(
+        async () => new Response(body, { headers: { 'content-type': 'application/x-ndjson' } }),
+      ),
     )
 
     await expect(new SameOriginProductTransport().readAttention()).rejects.toEqual(
@@ -541,7 +584,9 @@ describe('SameOriginProductTransport', () => {
     const body = `${' '.repeat(bootstrapFixture.limits.max_ndjson_item_bytes + 1)}\n`
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(body)),
+      vi.fn(
+        async () => new Response(body, { headers: { 'content-type': 'application/x-ndjson' } }),
+      ),
     )
     const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
 
@@ -553,7 +598,12 @@ describe('SameOriginProductTransport', () => {
   it('rejects a final attention event without its record delimiter', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(JSON.stringify(attentionUpdateFixture))),
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(attentionUpdateFixture), {
+            headers: { 'content-type': 'application/x-ndjson' },
+          }),
+      ),
     )
     const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
 
@@ -576,7 +626,9 @@ describe('SameOriginProductTransport', () => {
     })
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(body)),
+      vi.fn(
+        async () => new Response(body, { headers: { 'content-type': 'application/x-ndjson' } }),
+      ),
     )
     const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
 

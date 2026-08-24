@@ -48,6 +48,19 @@ const validateAttentionSummary = (summary: AttentionSummary): void => {
   if (summary.current_turn_id != null && !SESSION_ID_PATTERN.test(summary.current_turn_id)) {
     throw new TypeError('attention summary current-turn identity must be a canonical UUID')
   }
+  if (
+    summary.current_turn_id == null &&
+    [
+      'active',
+      'queued',
+      'awaiting_approval',
+      'ambiguous',
+      'awaiting_tool_recovery',
+      'awaiting_reconciliation',
+    ].includes(summary.state)
+  ) {
+    throw new TypeError('turn-derived attention summary must include a current-turn identity')
+  }
   if (!CANONICAL_NONNEGATIVE_INTEGER_PATTERN.test(summary.last_activity.unix_milliseconds)) {
     throw new TypeError('attention activity timestamp must be a canonical nonnegative integer')
   }
@@ -330,6 +343,11 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw await this.requestError(response, signal)
+    const mediaType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase()
+    if (mediaType !== 'application/x-ndjson') {
+      await response.body?.cancel().catch(() => undefined)
+      throw new TypeError('attention stream response must use application/x-ndjson')
+    }
     if (!response.body) throw new TypeError('attention stream response has no body')
     yield* decodeAttentionLines(response.body, signal)
   }
