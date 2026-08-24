@@ -2368,7 +2368,9 @@ async fn commission_fleet(runtime: &RunningRuntime) -> Result<CommissionedFleet,
     Ok(CommissionedFleet { sessions })
 }
 
-async fn commission_fleet_control(runtime: &RunningRuntime) -> Result<(), Box<dyn Error>> {
+async fn commission_fleet_control(
+    runtime: &RunningRuntime,
+) -> Result<CanonicalUuid, Box<dyn Error>> {
     let mut connection = Connection::connect(runtime.socket()).await?;
     connection
         .request(
@@ -2386,11 +2388,12 @@ async fn commission_fleet_control(runtime: &RunningRuntime) -> Result<(), Box<dy
         )
         .await?;
     let response = response_within(&mut connection).await?.message().clone();
-    assert!(
-        matches!(response, ServerMessage::SessionCommissioned { .. }),
-        "fleet control commission returned {response:?}"
-    );
-    Ok(())
+    let ServerMessage::SessionCommissioned { session_id, .. } = response else {
+        return Err(
+            io::Error::other(format!("fleet control commission returned {response:?}")).into(),
+        );
+    };
+    Ok(session_id)
 }
 
 fn start_fleet_scheduler(
@@ -2464,6 +2467,37 @@ async fn wait_for_completed_calls(
     .await?)
 }
 
+async fn wait_for_model_call_for_session(
+    repository: &FleetSoakCensusRepository,
+    session: CanonicalUuid,
+) -> Result<ModelCallId, Box<dyn Error>> {
+    timeout(FLEET_SETUP_BOUND, async {
+        loop {
+            if let Some(model_call) = repository
+                .model_call_id_for_session(SessionId::from_uuid(session.into_uuid()))
+                .await?
+            {
+                return Ok::<ModelCallId, Box<dyn Error>>(model_call);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?
+}
+
+async fn wait_for_completed_call(
+    model: &FleetScriptedModel,
+    expected: ModelCallId,
+) -> Result<(), Box<dyn Error>> {
+    timeout(FLEET_SETUP_BOUND, async {
+        while !model.completed_call_ids().contains(&expected) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    Ok(())
+}
+
 async fn wait_for_terminal_calls(
     repository: &FleetSoakCensusRepository,
     model_calls: &[ModelCallId],
@@ -2511,6 +2545,7 @@ fn assert_hung_fleet_outcome(
     enforce_liveness: bool,
     model: &FleetScriptedModel,
     census: FleetSoakCensus,
+    hung_call_has_ambiguity_park: bool,
 ) -> Result<(), Box<dyn Error>> {
     let active = census.active_turns();
     let terminal = census.terminal_turns();
@@ -2522,9 +2557,10 @@ fn assert_hung_fleet_outcome(
             || typed_terminal_calls != i64::try_from(FLEET_SESSION_COUNT)?
             || census.awaiting_model_call_recovery_turns() != 1
             || census.ambiguous_model_calls() != 1
+            || !hung_call_has_ambiguity_park
         {
             return Err(io::Error::other(format!(
-                "fleet liveness failed: hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}, recovery_parks={}, ambiguous_calls={}",
+                "fleet liveness failed: hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}, recovery_parks={}, ambiguous_calls={}, hung_call_has_ambiguity_park={hung_call_has_ambiguity_park}",
                 model.in_flight_hangs(),
                 census.awaiting_model_call_recovery_turns(),
                 census.ambiguous_model_calls()
@@ -2549,7 +2585,9 @@ fn assert_restarted_fleet_outcome(
     census: FleetSoakCensus,
     original_model: &FleetScriptedModel,
     replacement_model: &FleetScriptedModel,
+    control_model_call: ModelCallId,
 ) -> Result<(), Box<dyn Error>> {
+    let replacement_completions = replacement_model.completed_call_ids();
     if census.active_turns() != i64::try_from(FLEET_SESSION_COUNT)?
         || census.terminal_turns() != 0
         || census.awaiting_model_call_recovery_turns() != i64::try_from(FLEET_SESSION_COUNT)?
@@ -2557,13 +2595,12 @@ fn assert_restarted_fleet_outcome(
         || census.ambiguous_model_calls() != i64::try_from(FLEET_SESSION_COUNT)?
         || original_model.in_flight_hangs() != 0
         || replacement_model.in_flight_hangs() != 0
-        || replacement_model.completed_call_ids().len() != 1
+        || replacement_completions.as_slice() != [control_model_call]
     {
         return Err(io::Error::other(format!(
-            "restart must preserve the ambiguity park after releasing original executions while the replacement scheduler completes only its readiness control: census={census:?}, original_hangs={}, replacement_hangs={}, replacement_completions={}",
+            "restart must preserve the ambiguity park after releasing original executions while the replacement scheduler completes only its readiness control: census={census:?}, original_hangs={}, replacement_hangs={}, replacement_completions={replacement_completions:?}, control_model_call={control_model_call:?}",
             original_model.in_flight_hangs(),
-            replacement_model.in_flight_hangs(),
-            replacement_model.completed_call_ids().len()
+            replacement_model.in_flight_hangs()
         ))
         .into());
     }
@@ -2609,7 +2646,26 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
             ))
             .into());
         }
-        assert_hung_fleet_outcome(enforce_liveness, &model, census)
+        let hung_model_calls = model_calls
+            .iter()
+            .copied()
+            .filter(|model_call| !completed_calls.contains(model_call))
+            .collect::<Vec<_>>();
+        let [hung_model_call] = hung_model_calls.as_slice() else {
+            return Err(io::Error::other(format!(
+                "expected one hung model call, observed {hung_model_calls:?}"
+            ))
+            .into());
+        };
+        let hung_call_has_ambiguity_park = census_repository
+            .has_ambiguous_recovery_park(*hung_model_call)
+            .await?;
+        assert_hung_fleet_outcome(
+            enforce_liveness,
+            &model,
+            census,
+            hung_call_has_ambiguity_park,
+        )
     })
     .catch_unwind()
     .await;
@@ -2672,8 +2728,10 @@ async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), 
             &mut runtime,
             replacement_model.clone(),
         )?);
-        commission_fleet_control(&runtime).await?;
-        wait_for_completed_calls(&replacement_model, 1).await?;
+        let control_session = commission_fleet_control(&runtime).await?;
+        let control_model_call =
+            wait_for_model_call_for_session(&census_repository, control_session).await?;
+        wait_for_completed_call(&replacement_model, control_model_call).await?;
         tokio::time::sleep(FLEET_ASSERTION_BOUND).await;
         let census = census_repository
             .census_for(&pre_kill_model_call_ids)
@@ -2685,7 +2743,12 @@ async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), 
             ))
             .into());
         }
-        assert_restarted_fleet_outcome(census, &hanging_model, &replacement_model)
+        assert_restarted_fleet_outcome(
+            census,
+            &hanging_model,
+            &replacement_model,
+            control_model_call,
+        )
     })
     .catch_unwind()
     .await;

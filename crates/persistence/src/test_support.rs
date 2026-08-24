@@ -1,6 +1,6 @@
 //! Typed persistence observations used only by composed integration tests.
 
-use signalbox_domain::ModelCallId;
+use signalbox_domain::{ModelCallId, SessionId};
 use sqlx::{FromRow, PgPool, types::Uuid};
 
 /// Durable fleet state observed by the process-runtime soak harness.
@@ -77,6 +77,43 @@ impl FleetSoakCensusRepository {
             .map(ModelCallId::from_uuid)
             .collect::<Vec<_>>()
             .into_boxed_slice())
+    }
+
+    /// Finds the ordinary model call belonging to exactly `session`.
+    pub async fn model_call_id_for_session(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<ModelCallId>, sqlx::Error> {
+        Ok(sqlx::query_scalar::<_, Uuid>(
+            "SELECT model_call_id FROM model_call WHERE session_id = $1",
+        )
+        .bind(session.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?
+        .map(ModelCallId::from_uuid))
+    }
+
+    /// Whether exactly `model_call` and its owning turn carry the ambiguity park.
+    pub async fn has_ambiguous_recovery_park(
+        &self,
+        model_call: ModelCallId,
+    ) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1
+                  FROM model_call AS call
+                  JOIN turn_lifecycle AS turn
+                    ON turn.turn_id = call.turn_id
+                   AND turn.session_id = call.session_id
+                 WHERE call.model_call_id = $1
+                   AND call.terminal_disposition_kind = 'ambiguous'
+                   AND turn.state_kind = 'active'
+                   AND turn.active_phase_kind = 'awaiting_model_call_recovery'
+            )",
+        )
+        .bind(model_call.into_uuid())
+        .fetch_one(&self.pool)
+        .await
     }
 
     /// Reads lifecycle state and dispositions for exactly `model_calls`.
