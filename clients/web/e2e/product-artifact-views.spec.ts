@@ -59,8 +59,10 @@ test('keeps the imported typed artifact view synchronized with keyboard selectio
     'aria-posinset',
     '51',
   )
-  await expect(page.getByRole('article', { name: 'Artifact Imported entry 51' })).toContainText(
-    'Typed renderer not implemented',
+  const blockedArtifact = page.getByRole('article', { name: 'Artifact Imported entry 51' })
+  await expect(blockedArtifact).toContainText('Artifact blocked')
+  await expect(blockedArtifact).toContainText(
+    'No typed renderer is available for this imported content kind.',
   )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -72,8 +74,10 @@ test('renders unavailable review evidence as a typed committed state', async ({ 
 
   const reviewArtifact = page.getByRole('article', { name: 'Artifact Review evidence' })
   await expect(reviewArtifact).toContainText('review evidence artifact')
-  await expect(reviewArtifact).toContainText('Typed renderer not implemented')
-  await expect(reviewArtifact).toContainText('No bytes were read')
+  await expect(reviewArtifact).toContainText('Artifact blocked')
+  await expect(reviewArtifact).toContainText(
+    'Review evidence is not exposed by the current daemon contract.',
+  )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
