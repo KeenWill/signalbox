@@ -931,11 +931,11 @@ struct RepositoryWatchTask {
     webhook_shadow: Option<WebhookShadowBaseline>,
     webhook_shadow_superseded: bool,
     webhook_shadow_supersession_epoch: u64,
-    webhook_projected_terminal_in_flight: bool,
+    webhook_projected_terminal_in_flight: Option<RepoWatchWebhookDeliveryKey>,
     webhook_dispatch_in_flight: bool,
     webhook_targeted_completion:
         Option<JoinHandle<Result<TargetedWebhookCompletion, TargetedWebhookCompletionError>>>,
-    webhook_targeted_terminal_ambiguous: bool,
+    webhook_terminal_ambiguous: Option<RepoWatchWebhookDeliveryKey>,
     webhook_drain_first_failure: Option<RepositoryWatchAttemptError>,
     webhook_drain_projection_failure: Option<RepositoryWatchAttemptError>,
     webhook_drain_timed_out: bool,
@@ -1019,10 +1019,10 @@ impl RepositoryWatchTask {
             webhook_shadow: None,
             webhook_shadow_superseded: false,
             webhook_shadow_supersession_epoch: 0,
-            webhook_projected_terminal_in_flight: false,
+            webhook_projected_terminal_in_flight: None,
             webhook_dispatch_in_flight: false,
             webhook_targeted_completion: None,
-            webhook_targeted_terminal_ambiguous: false,
+            webhook_terminal_ambiguous: None,
             webhook_drain_first_failure: None,
             webhook_drain_projection_failure: None,
             webhook_drain_timed_out: false,
@@ -1481,7 +1481,7 @@ impl RepositoryWatchTask {
         // owed drain settles that durable state.
         if drain == WebhookDrain::Deferred
             && (self.webhook_targeted_completion.is_some()
-                || self.webhook_targeted_terminal_ambiguous)
+                || self.webhook_terminal_ambiguous.is_some())
         {
             return Err(RepositoryWatchAttemptError::Persistence);
         }
@@ -1529,7 +1529,7 @@ impl RepositoryWatchTask {
                     // before another complete sweep can commit.
                     return Err(RepositoryWatchAttemptError::WebhookDrainTimedOut);
                 }
-                if self.webhook_targeted_terminal_ambiguous {
+                if self.webhook_terminal_ambiguous.is_some() {
                     // The targeted terminal write may have committed or rolled
                     // back. Until a later drain settles that durable state, a
                     // complete poll must not advance the cursor past it.
@@ -1678,6 +1678,15 @@ impl RepositoryWatchTask {
             self.webhook_drain_first_failure = Some(error);
             return WebhookDrainOutcome::ProjectionFailed(error);
         }
+        if let Some(key) = self.webhook_terminal_ambiguous
+            && self
+                .webhook_store
+                .terminal_disposition_exists(key)
+                .await
+                .is_ok_and(|exists| exists)
+        {
+            self.webhook_terminal_ambiguous = None;
+        }
         let Ok(page_size) = RepoWatchWebhookPendingPageSize::try_new(WEBHOOK_PENDING_PAGE_SIZE)
         else {
             return WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::Persistence);
@@ -1741,7 +1750,11 @@ impl RepositoryWatchTask {
                     .process_webhook_delivery(delivery, &mut page, &mut dispatch_failure)
                     .await
                 {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        if self.webhook_terminal_ambiguous == Some(delivery.key()) {
+                            self.webhook_terminal_ambiguous = None;
+                        }
+                    }
                     Err(error) => {
                         // A delivery whose targeted refresh cannot succeed stays
                         // the oldest pending row, so failing the whole drain on
@@ -1780,12 +1793,6 @@ impl RepositoryWatchTask {
         // later drain can still retry, and it is what the backoff spaces out.
         // The error-level record instead names the chronological first cause,
         // which the drain contract promises an error-only sink.
-        if first_failure.is_none() {
-            // A projection-clean drain has either observed the ambiguous
-            // targeted delivery as terminal or replayed it to a terminal
-            // disposition, so complete polling may resume.
-            self.webhook_targeted_terminal_ambiguous = false;
-        }
         match first_failure.or(dispatch_failure) {
             // Emitted here rather than by the caller because all three callers
             // — startup, wake, and retry — reach the drain through this one
@@ -1849,10 +1856,10 @@ impl RepositoryWatchTask {
                 // ambiguous. A targeted cursor commit is retained separately
                 // and settled before another drain, so its delivery keeps the
                 // pre-commit shadow needed to reproduce its projections.
-                if self.webhook_projected_terminal_in_flight {
+                if let Some(key) = self.webhook_projected_terminal_in_flight.take() {
                     self.webhook_shadow = None;
                     self.webhook_shadow_superseded = false;
-                    self.webhook_projected_terminal_in_flight = false;
+                    self.webhook_terminal_ambiguous = Some(key);
                 }
                 let first_failure = self.webhook_drain_first_failure.take();
                 let projection_failure = self.webhook_drain_projection_failure.take();
@@ -2189,7 +2196,7 @@ impl RepositoryWatchTask {
             outcome_code.map(str::to_owned),
         )
         .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-        self.webhook_projected_terminal_in_flight = advances_shadow;
+        self.webhook_projected_terminal_in_flight = advances_shadow.then_some(pending.key());
         for attempt in 1..=MAX_WEBHOOK_TERMINAL_ATTEMPTS {
             match self
                 .webhook_store
@@ -2197,7 +2204,10 @@ impl RepositoryWatchTask {
                 .await
             {
                 Ok(_) => {
-                    self.webhook_projected_terminal_in_flight = false;
+                    self.webhook_projected_terminal_in_flight = None;
+                    if self.webhook_terminal_ambiguous == Some(pending.key()) {
+                        self.webhook_terminal_ambiguous = None;
+                    }
                     return Ok(());
                 }
                 // A commit whose result was lost in transit may already be
@@ -2212,7 +2222,10 @@ impl RepositoryWatchTask {
                         .await
                     {
                         Ok(true) => {
-                            self.webhook_projected_terminal_in_flight = false;
+                            self.webhook_projected_terminal_in_flight = None;
+                            if self.webhook_terminal_ambiguous == Some(pending.key()) {
+                                self.webhook_terminal_ambiguous = None;
+                            }
                             return Ok(());
                         }
                         // A read that fails settles nothing, so it is retried
@@ -2226,7 +2239,7 @@ impl RepositoryWatchTask {
                     }
                 }
                 Err(_) => {
-                    self.webhook_projected_terminal_in_flight = false;
+                    self.webhook_projected_terminal_in_flight = None;
                     return Err(RepositoryWatchAttemptError::Persistence);
                 }
             }
@@ -2239,8 +2252,9 @@ impl RepositoryWatchTask {
         // records the gap.
         if advances_shadow {
             self.webhook_shadow = None;
+            self.webhook_terminal_ambiguous = Some(pending.key());
         }
-        self.webhook_projected_terminal_in_flight = false;
+        self.webhook_projected_terminal_in_flight = None;
         Err(RepositoryWatchAttemptError::Persistence)
     }
 
@@ -2346,7 +2360,7 @@ impl RepositoryWatchTask {
             // its projections, and an ordinary poll can advance the old cursor.
             record_webhook_terminal_request(&webhook_store, key, &terminal)
                 .await
-                .map_err(TargetedWebhookCompletionError::Terminal)?;
+                .map_err(|error| TargetedWebhookCompletionError::Terminal(key, error))?;
             let outcome = store
                 .commit(&repository, request)
                 .await
@@ -2358,10 +2372,11 @@ impl RepositoryWatchTask {
                     poller.publish_freshness(cursor.generation());
                 }
                 RepoWatchCommitOutcome::Conflict { current: _ } => {
-                    return Ok(TargetedWebhookCompletion::CursorSuperseded);
+                    return Ok(TargetedWebhookCompletion::CursorSuperseded { key });
                 }
             }
             Ok(TargetedWebhookCompletion::Applied {
+                key,
                 shadow,
                 supersession_epoch,
             })
@@ -2389,16 +2404,23 @@ impl RepositoryWatchTask {
         self.webhook_targeted_completion = None;
         match result {
             Ok(TargetedWebhookCompletion::Applied {
+                key,
                 shadow,
                 supersession_epoch,
             }) => {
+                if self.webhook_terminal_ambiguous == Some(key) {
+                    self.webhook_terminal_ambiguous = None;
+                }
                 self.webhook_shadow = Some(shadow);
                 if self.webhook_shadow_supersession_epoch == supersession_epoch {
                     self.webhook_shadow_superseded = false;
                 }
                 Some(Ok(()))
             }
-            Ok(TargetedWebhookCompletion::CursorSuperseded) => {
+            Ok(TargetedWebhookCompletion::CursorSuperseded { key }) => {
+                if self.webhook_terminal_ambiguous == Some(key) {
+                    self.webhook_terminal_ambiguous = None;
+                }
                 // The terminal disposition and projections are durable, while
                 // a competing poll owns the current cursor. Hand the shadow
                 // over immediately so later pending receipts seed from it.
@@ -2407,11 +2429,12 @@ impl RepositoryWatchTask {
                 Some(Ok(()))
             }
             Err(TargetedWebhookCompletionError::Terminal(
+                key,
                 WebhookTerminalRecordError::Ambiguous,
             )) => {
                 self.webhook_shadow = None;
                 self.webhook_shadow_superseded = false;
-                self.webhook_targeted_terminal_ambiguous = true;
+                self.webhook_terminal_ambiguous = Some(key);
                 Some(Err(RepositoryWatchAttemptError::Persistence))
             }
             Err(TargetedWebhookCompletionError::Cursor) => {
@@ -2692,15 +2715,18 @@ enum WebhookTerminalRecordError {
 enum TargetedWebhookCompletionError {
     Persistence,
     Cursor,
-    Terminal(WebhookTerminalRecordError),
+    Terminal(RepoWatchWebhookDeliveryKey, WebhookTerminalRecordError),
 }
 
 enum TargetedWebhookCompletion {
     Applied {
+        key: RepoWatchWebhookDeliveryKey,
         shadow: WebhookShadowBaseline,
         supersession_epoch: u64,
     },
-    CursorSuperseded,
+    CursorSuperseded {
+        key: RepoWatchWebhookDeliveryKey,
+    },
 }
 
 /// One complete provider sweep derived against a durable cursor but not yet
@@ -5787,10 +5813,10 @@ mod tests {
                 webhook_shadow: None,
                 webhook_shadow_superseded: false,
                 webhook_shadow_supersession_epoch: 0,
-                webhook_projected_terminal_in_flight: false,
+                webhook_projected_terminal_in_flight: None,
                 webhook_dispatch_in_flight: false,
                 webhook_targeted_completion: None,
-                webhook_targeted_terminal_ambiguous: false,
+                webhook_terminal_ambiguous: None,
                 webhook_drain_first_failure: None,
                 webhook_drain_projection_failure: None,
                 webhook_drain_timed_out: false,
@@ -7968,6 +7994,25 @@ mod tests {
                 )
             );
         }
+        assert_eq!(
+            fixture.task.webhook_terminal_ambiguous,
+            Some(admission.key()),
+            "deadline cancellation retains the exact unsettled terminal write"
+        );
+        let mut deferred_drain = None;
+        let mut deferred_dispatch_failure = None;
+        assert_eq!(
+            fixture
+                .task
+                .run_attempt_prelude(
+                    WebhookDrain::Deferred,
+                    &mut deferred_drain,
+                    &mut deferred_dispatch_failure,
+                )
+                .await,
+            Err(RepositoryWatchAttemptError::Persistence),
+            "an unsettled cancelled terminal write blocks cursor-advancing polls"
+        );
         assert!(!webhook_disposition_exists(&webhook_store, admission.key()).await?);
         let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
             .bind(WEBHOOK_PROJECTION_ADVISORY_LOCK)
@@ -7979,6 +8024,10 @@ mod tests {
         assert!(unlocked, "the fixture releases its deliberate drain wedge");
         assert_eq!(retried, WebhookDrainOutcome::Drained);
         assert!(webhook_disposition_exists(&webhook_store, admission.key()).await?);
+        assert_eq!(
+            fixture.task.webhook_terminal_ambiguous, None,
+            "settling that exact delivery releases complete polling"
+        );
         Ok(())
     }
 

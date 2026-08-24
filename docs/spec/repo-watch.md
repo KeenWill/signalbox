@@ -1112,12 +1112,15 @@ after bounded child cleanup even when an inner operation never returns.
 Unfinished child fetches remain in the poller's shared set, which a later
 attempt must drain before it can spawn new work. A deadline reached by the
 pre-poll drain stops that poll before its provider sweep can advance the durable
-cursor past the still-pending delivery. A targeted cursor commit already started
-by the cancelled drain is retained and settled by the next drain before any
-subsequent drain work; its delivery keeps the shadow baseline needed to
-reproduce the same projections and targeted-query provenance. Cancellation
-discards the shadow only when it races a projected terminal write whose
-durability is unknown. If an earlier delivery had already failed before a later
+cursor past the still-pending delivery. A targeted completion already started
+by the cancelled drain retains its exact terminal request and cursor write. It
+records the disposition and projections as the durable recovery handoff before
+attempting the cursor write, and the next drain settles that completion and its
+shadow outcome before subsequent drain work. Cancellation discards the shadow
+only when it races a projected terminal write whose durability is unknown. The
+task retains that delivery identity and blocks cursor-advancing polls until the
+disposition is definitively observed or replayed. If an earlier delivery had
+already failed before a later
 operation reached the deadline, the drain emits that earlier closed cause at
 error level before reporting the timeout, preserving the first-failure guarantee
 for an error-only telemetry sink. A terminal commit whose result is lost in
