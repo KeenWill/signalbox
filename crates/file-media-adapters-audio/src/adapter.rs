@@ -243,7 +243,9 @@ fn decode_with_symphonia(
             sample_rate_hz: decoded.spec().rate(),
         };
         validate_shape(observed)?;
-        if metadata.is_some_and(|prior| prior != observed) {
+        if (format == AdapterFormat::Flac && observed != declared_metadata)
+            || metadata.is_some_and(|prior| prior != observed)
+        {
             return Err("malformed_audio");
         }
         metadata = Some(observed);
@@ -286,6 +288,7 @@ fn decode_ogg_opus(bytes: &[u8]) -> Result<AudioMetadata, &'static str> {
     if !head.first_in_stream()
         || !head.first_in_page()
         || !head.last_in_page()
+        || head.last_in_stream()
         || head.absgp_page() != 0
     {
         return Err("malformed_audio");
@@ -310,6 +313,7 @@ fn decode_ogg_opus(bytes: &[u8]) -> Result<AudioMetadata, &'static str> {
     let mut decoded_frames = 0_u64;
     let mut audio_packets = 0_u64;
     let mut final_granule = None;
+    let mut final_packet_frames = None;
     let mut completed_page_granule = 0_u64;
     let mut saw_end_of_stream = false;
     while let Some(packet) = packets.read_packet().map_err(|_| "malformed_audio")? {
@@ -338,16 +342,20 @@ fn decode_ogg_opus(bytes: &[u8]) -> Result<AudioMetadata, &'static str> {
         }
         if packet.last_in_stream() {
             saw_end_of_stream = true;
+            final_packet_frames = Some(u64::try_from(frames).map_err(|_| "malformed_audio")?);
         }
     }
     if audio_packets == 0 || decoded_frames < u64::from(pre_skip) || !saw_end_of_stream {
         return Err("malformed_audio");
     }
     let final_granule = final_granule.ok_or("malformed_audio")?;
+    let final_packet_frames = final_packet_frames.ok_or("malformed_audio")?;
     let presented_frames = final_granule
         .checked_sub(u64::from(pre_skip))
         .ok_or("malformed_audio")?;
-    if final_granule > decoded_frames {
+    if final_granule > decoded_frames
+        || decoded_frames.saturating_sub(final_granule) > final_packet_frames
+    {
         return Err("malformed_audio");
     }
     validate_duration(presented_frames, metadata.sample_rate_hz)?;

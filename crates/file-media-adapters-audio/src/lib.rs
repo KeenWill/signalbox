@@ -195,7 +195,12 @@ fn valid_id3v23_extended_header(tag_length: usize, size_bytes: [u8; 4], bytes: &
     else {
         return false;
     };
-    let expected_size = if flags & 0x8000 == 0 { 6 } else { 10 };
+    // CRC verification is not implemented, so reject CRC-bearing tags rather
+    // than silently trusting an advertised checksum.
+    if flags & 0x8000 != 0 {
+        return false;
+    }
+    let expected_size = 6;
     let Some(content_after_extended_header) = tag_length.checked_sub(total_size) else {
         return false;
     };
@@ -324,6 +329,15 @@ mod tests {
     fn id3v23_extended_header_rejects_nonzero_declared_padding() {
         let bytes = [
             b'I', b'D', b'3', 3, 0, 0x40, 0, 0, 0, 11, 0, 0, 0, 6, 0, 0, 0, 0, 0, 1, 1,
+        ];
+
+        assert_eq!(id3_tag_layout(&bytes), None);
+    }
+
+    #[test]
+    fn id3v23_extended_header_rejects_an_unverified_crc() {
+        let bytes = [
+            b'I', b'D', b'3', 3, 0, 0x40, 0, 0, 0, 14, 0, 0, 0, 10, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ];
 
         assert_eq!(id3_tag_layout(&bytes), None);

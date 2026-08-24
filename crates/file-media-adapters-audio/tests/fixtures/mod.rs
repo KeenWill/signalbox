@@ -206,6 +206,26 @@ pub(crate) fn ogg_opus_with_inaccurate_intermediate_granule() -> Result<Vec<u8>,
     })
 }
 
+pub(crate) fn ogg_opus_with_excessive_end_trim() -> Result<Vec<u8>, Box<dyn Error>> {
+    ogg_opus(OggOpusFixture {
+        packet_count: 2,
+        frame_size: 960,
+        pre_skip: 0,
+        final_granule: 1,
+        ending: OggEnding::EndOfStream,
+        head_ending: HeadEnding::IsolatedPage,
+        first_audio_page_granule: None,
+    })
+}
+
+pub(crate) fn ogg_opus_with_head_end_of_stream() -> Result<Vec<u8>, Box<dyn Error>> {
+    const SERIAL: u32 = 0x51_67_6e_6c;
+    let mut writer = PacketWriter::new(Vec::new());
+    writer.write_packet(opus_head(0), SERIAL, PacketWriteEndInfo::EndStream, 0)?;
+    writer.write_packet(opus_tags(), SERIAL, PacketWriteEndInfo::EndPage, 0)?;
+    Ok(writer.into_inner())
+}
+
 pub(crate) fn mp3_with_long_id3_tag() -> Result<Vec<u8>, Box<dyn Error>> {
     let encoded = mp3(8_000, 800)?;
     let audio = encoded.get(10..).ok_or("missing MP3 audio")?;
@@ -235,6 +255,15 @@ pub(crate) fn flac_truncated_between_complete_frames() -> Result<Vec<u8>, Box<dy
     let stream_info = bytes.get_mut(18..26).ok_or("missing FLAC STREAMINFO")?;
     let mut encoded = u64::from_be_bytes(<[u8; 8]>::try_from(&*stream_info)?);
     encoded = (encoded & !0x0f_ff_ff_ff_ff) | 800;
+    stream_info.copy_from_slice(&encoded.to_be_bytes());
+    Ok(bytes)
+}
+
+pub(crate) fn flac_with_mismatched_streaminfo_channels() -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut bytes = flac(8_000, 800)?;
+    let stream_info = bytes.get_mut(18..26).ok_or("missing FLAC STREAMINFO")?;
+    let mut encoded = u64::from_be_bytes(<[u8; 8]>::try_from(&*stream_info)?);
+    encoded |= 1_u64 << 41;
     stream_info.copy_from_slice(&encoded.to_be_bytes());
     Ok(bytes)
 }

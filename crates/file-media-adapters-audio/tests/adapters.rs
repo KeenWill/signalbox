@@ -310,6 +310,16 @@ async fn flac_truncated_between_complete_frames_is_rejected() -> Result<(), Box<
 }
 
 #[tokio::test]
+async fn flac_decoded_shape_must_match_streaminfo() -> Result<(), Box<dyn Error>> {
+    assert_reason(
+        FixtureFormat::Flac,
+        fixtures::flac_with_mismatched_streaminfo_channels()?,
+        "malformed_audio",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn ogg_opus_truncation_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_reason(
         FixtureFormat::OggOpus,
@@ -423,6 +433,26 @@ async fn ogg_opus_rejects_an_inaccurate_intermediate_granule() -> Result<(), Box
     let inspection = support::inspect(&source, format.media_type()).await?;
     support::assert_malformed_reason(inspection, "malformed_audio");
     Ok(())
+}
+
+#[tokio::test]
+async fn ogg_opus_rejects_end_of_stream_on_identification_header() -> Result<(), Box<dyn Error>> {
+    assert_reason(
+        FixtureFormat::OggOpus,
+        fixtures::ogg_opus_with_head_end_of_stream()?,
+        "malformed_audio",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn ogg_opus_rejects_eos_trimming_beyond_the_final_packet() -> Result<(), Box<dyn Error>> {
+    assert_reason(
+        FixtureFormat::OggOpus,
+        fixtures::ogg_opus_with_excessive_end_trim()?,
+        "malformed_audio",
+    )
+    .await
 }
 
 #[tokio::test]
