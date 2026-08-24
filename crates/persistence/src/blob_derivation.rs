@@ -15,7 +15,7 @@ use sqlx::{
 use crate::commit_failure_is_ambiguous;
 
 const LOAD_ROOT_BY_KEY: &str = r#"SELECT derivation_id, deterministic_key,
-           transformation_name, transformation_version, parameters_json, parameters_canonical,
+           transformation_name, transformation_version, parameters_canonical,
            producer_class, implementation_digest, execution_id, model_call_id,
            input_count, output_count
       FROM blob_derivation
@@ -134,22 +134,16 @@ impl BlobDerivationRepository {
         let inserted = sqlx::query(
             r#"INSERT INTO blob_derivation (
                    derivation_id, deterministic_key, transformation_name,
-                   transformation_version, parameters_json, parameters_canonical, producer_class,
+                   transformation_version, parameters_canonical, producer_class,
                    implementation_digest, execution_id, model_call_id,
                    input_count, output_count
-               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                ON CONFLICT DO NOTHING"#,
         )
         .bind(derivation.id().into_uuid())
         .bind(deterministic_key.map(|key| key.digest().as_bytes().to_vec()))
         .bind(derivation.transformation().name().as_str())
         .bind(i64::from(derivation.transformation().version().get()))
-        .bind(
-            serde_json::from_str::<serde_json::Value>(
-                derivation.transformation().parameters_json(),
-            )
-            .map_err(|_| BlobDerivationCorruption::InvalidTransformation)?,
-        )
         .bind(derivation.transformation().parameters_json())
         .bind(producer_class)
         .bind(implementation.map(|digest| digest.as_bytes().to_vec()))

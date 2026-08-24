@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { decodeWebSessionTimelineWindow } from './generated/web-contract.mjs'
-import { isCanonicalSessionId, visibleSessionItems } from './SessionWorkspaceSurface'
+import {
+  isCanonicalSessionId,
+  reconcileTimelineSelection,
+  retainSameSessionPlaceholder,
+  visibleSessionItems,
+} from './SessionWorkspaceSurface'
 
 const fixture = decodeWebSessionTimelineWindow({
   session_id: '00000000-0000-0000-0000-000000000991',
@@ -41,6 +46,21 @@ describe('Session Workspace projection', () => {
   it('projects result mode without materializing another window', () => {
     const results = visibleSessionItems(fixture.items, 'results')
 
-    expect(results).toEqual([fixture.items[1], fixture.items[2]])
+    expect(results).toEqual(fixture.items)
+  })
+
+  it('reconciles a hidden selection to the first visible timeline row', () => {
+    expect(reconcileTimelineSelection('42', ['41', '43'])).toBe('41')
+    expect(reconcileTimelineSelection('43', ['41', '43'])).toBe('43')
+    expect(reconcileTimelineSelection('42', [])).toBeNull()
+  })
+
+  it('retains placeholder data only while navigating within the same session', () => {
+    const previous = { sessionId: fixture.session_id, window: fixture }
+
+    expect(retainSameSessionPlaceholder(previous, fixture.session_id)).toBe(previous)
+    expect(
+      retainSameSessionPlaceholder(previous, '00000000-0000-0000-0000-000000000992'),
+    ).toBeUndefined()
   })
 })

@@ -4,20 +4,21 @@ use std::{
     error::Error,
     fmt,
     fs::File as StandardFile,
-    io::{self, Read as _},
+    io::{self, Read as _, SeekFrom},
+    os::unix::fs::MetadataExt as _,
     path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
     time::Duration,
 };
 
-use image::{GenericImageView as _, ImageFormat, ImageReader, Limits};
+use image::{ImageFormat, ImageReader, Limits};
 use sha2::{Digest as _, Sha256};
 use signalbox_application::{
     BlobDerivationServiceOutcome, DeterministicBlobDerivationRequest,
     DeterministicBlobDerivationService, DeterministicBlobProducer, UuidV7BlobDerivationIdGenerator,
 };
-use signalbox_blob_store::{BlobPutOutcome, BlobStoreFailureKind, ExpectedBlob};
+use signalbox_blob_store::{BlobPutOutcome, ExpectedBlob};
 use signalbox_domain::{BlobDerivation, BlobDigest, BlobTransformation, BlobTransformationName};
 use signalbox_persistence::{
     blob::{BlobCatalogEntry, BlobCatalogRepository, BlobReplicaRecord, BlobStoreBindingRecord},
@@ -29,8 +30,9 @@ use signalbox_tools_exec::{
 };
 use sqlx::PgPool;
 use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _},
     sync::Semaphore,
+    time::Instant,
 };
 
 use crate::{BlobStorageClass, BlobStoreRegistry};
@@ -222,8 +224,8 @@ impl DeterministicBlobProducer for ImageProducer {
         }
         make_executable(&worker_path)?;
         run_isolated_worker(workspace.path(), &self.supervisor_program, edge_px).await?;
-        let expected = expected_output(&output_path).await?;
-        publish_output(&self.catalog, &self.registry, &output_path, expected).await?;
+        let (expected, output) = expected_output(&output_path).await?;
+        publish_output(&self.catalog, &self.registry, output, expected).await?;
         Ok(Box::new([expected.digest()]))
     }
 }
@@ -254,24 +256,26 @@ async fn copy_verified_input(
     if entry.expected().byte_length() > MAX_IMAGE_INPUT_BYTES {
         return Err(WebBlobRuntimeError::ProducerFailed);
     }
+    let deadline = Instant::now() + Duration::from_secs(WORKER_TIMEOUT_SECONDS);
     for replica in entry.replicas() {
         let Some(store) = registry.recorded_store(replica.store()) else {
             return Err(WebBlobRuntimeError::Integrity);
         };
-        let opened = match store.open(replica.object_key()).await {
-            Ok(opened) if opened.byte_length() == entry.expected().byte_length() => opened,
-            Ok(_) => continue,
-            Err(error) if error.kind() == BlobStoreFailureKind::NotFound => continue,
-            Err(_) => continue,
-        };
-        let copied = tokio::time::timeout(
-            Duration::from_secs(WORKER_TIMEOUT_SECONDS),
+        let copied = tokio::time::timeout_at(deadline, async {
+            let opened = store
+                .open(replica.object_key())
+                .await
+                .map_err(|_| CandidateCopyError::Read)?;
+            if opened.byte_length() != entry.expected().byte_length() {
+                return Err(CandidateCopyError::Read);
+            }
             copy_input_candidate(
                 opened.into_reader(),
                 destination,
                 entry.expected().byte_length(),
-            ),
-        )
+            )
+            .await
+        })
         .await;
         match copied {
             Ok(Ok(observed_digest)) if observed_digest == digest => return Ok(()),
@@ -363,34 +367,52 @@ async fn run_isolated_worker(
     }
 }
 
-async fn expected_output(path: &Path) -> Result<ExpectedBlob, WebBlobRuntimeError> {
-    let metadata = tokio::fs::metadata(path)
-        .await
+async fn expected_output(
+    path: &Path,
+) -> Result<(ExpectedBlob, tokio::fs::File), WebBlobRuntimeError> {
+    let descriptor = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|_| WebBlobRuntimeError::ProducerFailed)?;
+    let standard = StandardFile::from(descriptor);
+    let metadata = standard
+        .metadata()
         .map_err(|_| WebBlobRuntimeError::ProducerFailed)?;
-    if metadata.len() == 0 || metadata.len() > MAX_DERIVATIVE_BYTES {
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.len() == 0
+        || metadata.len() > MAX_DERIVATIVE_BYTES
+    {
         return Err(WebBlobRuntimeError::ProducerFailed);
     }
-    let bytes = tokio::fs::read(path)
+    let mut file = tokio::fs::File::from_std(standard);
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len()).map_err(|_| WebBlobRuntimeError::Integrity)?,
+    );
+    file.read_to_end(&mut bytes)
         .await
         .map_err(|_| WebBlobRuntimeError::ProducerFailed)?;
     let byte_length = u64::try_from(bytes.len()).map_err(|_| WebBlobRuntimeError::Integrity)?;
     if byte_length != metadata.len() {
         return Err(WebBlobRuntimeError::ProducerFailed);
     }
-    ExpectedBlob::try_new(BlobDigest::digest(&bytes), byte_length)
-        .map_err(|_| WebBlobRuntimeError::ProducerFailed)
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(|_| WebBlobRuntimeError::ProducerFailed)?;
+    let expected = ExpectedBlob::try_new(BlobDigest::digest(&bytes), byte_length)
+        .map_err(|_| WebBlobRuntimeError::ProducerFailed)?;
+    Ok((expected, file))
 }
 
 async fn publish_output(
     catalog: &BlobCatalogRepository,
     registry: &BlobStoreRegistry,
-    path: &Path,
+    file: tokio::fs::File,
     expected: ExpectedBlob,
 ) -> Result<(), WebBlobRuntimeError> {
     let (store_name, store) = registry.routed_store(BlobStorageClass::GeneratedArtifact);
-    let file = tokio::fs::File::open(path)
-        .await
-        .map_err(|_| WebBlobRuntimeError::Unavailable)?;
     let publication = store
         .put(expected, Box::new(file))
         .await
@@ -502,7 +524,13 @@ fn worker_transform(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> 
     if arguments.next().is_some() {
         return Err(());
     }
-    let mut reader = ImageReader::open(input)
+    let reader = ImageReader::open(&input)
+        .map_err(|_| ())?
+        .with_guessed_format()
+        .map_err(|_| ())?;
+    let (width, height) = reader.into_dimensions().map_err(|_| ())?;
+    validate_encoded_dimensions(width, height)?;
+    let mut reader = ImageReader::open(&input)
         .map_err(|_| ())?
         .with_guessed_format()
         .map_err(|_| ())?;
@@ -512,15 +540,18 @@ fn worker_transform(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> 
     limits.max_alloc = Some(MAX_DECODER_ALLOCATION_BYTES);
     reader.limits(limits);
     let image = reader.decode().map_err(|_| ())?;
-    let (width, height) = image.dimensions();
-    let pixels = u64::from(width).checked_mul(u64::from(height)).ok_or(())?;
-    if pixels > MAX_IMAGE_PIXELS {
-        return Err(());
-    }
     image
         .thumbnail(edge, edge)
         .save_with_format(output, ImageFormat::Png)
         .map_err(|_| ())
+}
+
+fn validate_encoded_dimensions(width: u32, height: u32) -> Result<(), ()> {
+    let pixels = u64::from(width).checked_mul(u64::from(height)).ok_or(())?;
+    if width > MAX_IMAGE_AXIS || height > MAX_IMAGE_AXIS || pixels > MAX_IMAGE_PIXELS {
+        return Err(());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -530,14 +561,14 @@ mod tests {
         reason = "image fixtures use explicit expectations"
     )]
 
-    use std::{ffi::OsString, fs::File, io};
+    use std::{ffi::OsString, fs::File, io, os::unix::fs::symlink};
 
     use image::{GenericImageView as _, Rgba, RgbaImage};
     use tokio::io::{AsyncRead, ReadBuf};
 
     use super::{
         CandidateCopyError, MAX_DERIVATIVE_BYTES, copy_input_candidate, expected_output,
-        worker_transform,
+        validate_encoded_dimensions, worker_transform,
     };
 
     struct FailingReader {
@@ -583,6 +614,13 @@ mod tests {
         assert_eq!(decoded.dimensions(), (256, 128));
     }
 
+    #[test]
+    fn image_worker_rejects_oversized_encoded_pixel_count_before_decode() {
+        let result = validate_encoded_dimensions(8_193, 8_192);
+
+        assert!(result.is_err());
+    }
+
     #[tokio::test]
     async fn derivative_output_ceiling_is_checked_before_materialization() {
         let workspace = tempfile::tempdir().expect("fixture workspace exists");
@@ -595,6 +633,17 @@ mod tests {
         let result = expected_output(&output).await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn derivative_output_symlinks_are_rejected() {
+        let workspace = tempfile::tempdir().expect("fixture workspace exists");
+        let target = workspace.path().join("target.png");
+        let output = workspace.path().join("output.png");
+        std::fs::write(&target, b"not worker output").expect("fixture target exists");
+        symlink(&target, &output).expect("fixture output symlink exists");
+
+        assert!(expected_output(&output).await.is_err());
     }
 
     #[tokio::test]

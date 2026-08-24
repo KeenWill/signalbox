@@ -14,6 +14,7 @@ use std::{
     path::PathBuf,
     str::FromStr as _,
     sync::Arc,
+    time::Duration,
 };
 
 use axum::{
@@ -54,7 +55,8 @@ use sqlx::PgPool;
 use tokio::{
     io::AsyncReadExt as _,
     net::TcpListener,
-    sync::{OwnedSemaphorePermit, Semaphore, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
+    time::{Instant, timeout_at},
 };
 use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
@@ -81,6 +83,7 @@ const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 const MAX_DISPLAY_FILENAME_BYTES: usize = 1024;
 const BLOB_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_CONCURRENT_WEB_BLOB_READS: usize = 4;
+const BLOB_RESPONSE_TIMEOUT_SECONDS: u64 = 120;
 
 #[derive(Clone, Debug)]
 struct WebHttpState {
@@ -652,6 +655,7 @@ async fn contract_bootstrap(State(state): State<WebHttpState>) -> Json<WebContra
     Json(WebContractBootstrap::for_runtime(
         state.blobs.is_some(),
         image_derivatives,
+        state.timeline.is_some(),
     ))
 }
 
@@ -727,6 +731,7 @@ async fn blob_descriptor(
         if runtime.supports_image_derivatives() {
             append_image_derivative_view(
                 &runtime,
+                Arc::clone(&state.blob_read_budget),
                 digest,
                 WebImageDerivativeKind::Thumbnail,
                 WebBlobViewKind::Thumbnail,
@@ -735,6 +740,7 @@ async fn blob_descriptor(
             .await;
             append_image_derivative_view(
                 &runtime,
+                Arc::clone(&state.blob_read_budget),
                 digest,
                 WebImageDerivativeKind::Preview,
                 WebBlobViewKind::Preview,
@@ -763,6 +769,7 @@ async fn blob_descriptor_head() -> Response {
 
 async fn append_image_derivative_view(
     runtime: &WebBlobRuntime,
+    read_budget: Arc<Semaphore>,
     input: BlobDigest,
     kind: WebImageDerivativeKind,
     view_kind: WebBlobViewKind,
@@ -777,6 +784,15 @@ async fn append_image_derivative_view(
     let Ok(entry) = runtime.entry(output).await else {
         return;
     };
+    let Some(_permit) = try_acquire_web_blob_read_permit(read_budget) else {
+        return;
+    };
+    if open_recorded_blob_verified(runtime.registry(), &entry)
+        .await
+        .is_err()
+    {
+        return;
+    }
     let Some(provenance) = project_derivation(&derivation) else {
         return;
     };
@@ -975,9 +991,6 @@ async fn serve_blob(
         }
     };
     let method = request.method().clone();
-    if exceeds_web_blob_range_limit(partial, length) {
-        return range_not_satisfiable(total, &etag);
-    }
     let body = if method == Method::HEAD {
         Body::empty()
     } else {
@@ -992,19 +1005,33 @@ async fn serve_blob(
                 "blob read capacity is busy",
             );
         };
-        if length.get() <= MAX_BLOB_RANGE_BYTES {
-            let reader =
-                match open_recorded_blob_range(runtime.registry(), &entry, offset, length).await {
-                    Ok(reader) => reader,
-                    Err(error) => return blob_read_error_response(error),
-                };
-            reader_body(reader, length.get(), permit)
-        } else {
-            match open_recorded_blob_verified(runtime.registry(), &entry).await {
-                Ok(reader) => reader_body(reader, length.get(), permit),
-                Err(error) => return blob_read_error_response(error),
+        let deadline = Instant::now() + Duration::from_secs(BLOB_RESPONSE_TIMEOUT_SECONDS);
+        let opened = timeout_at(deadline, async {
+            if length.get() <= MAX_BLOB_RANGE_BYTES {
+                open_recorded_blob_range(runtime.registry(), &entry, offset, length).await
+            } else {
+                let mut reader = open_recorded_blob_verified(runtime.registry(), &entry).await?;
+                let skipped =
+                    tokio::io::copy(&mut (&mut reader).take(offset), &mut tokio::io::sink())
+                        .await
+                        .map_err(|_| crate::blob_read_runtime::BlobReadError::Unavailable)?;
+                if skipped != offset {
+                    return Err(crate::blob_read_runtime::BlobReadError::Integrity);
+                }
+                Ok(reader)
             }
-        }
+        })
+        .await;
+        let reader = match opened {
+            Ok(Ok(reader)) => reader,
+            Ok(Err(error)) => return blob_read_error_response(error),
+            Err(_) => {
+                return blob_read_error_response(
+                    crate::blob_read_runtime::BlobReadError::Unavailable,
+                );
+            }
+        };
+        reader_body_until(reader, length.get(), permit, deadline)
     };
     let mut response = Response::new(body);
     *response.status_mut() = if partial {
@@ -1032,39 +1059,44 @@ fn try_acquire_web_blob_read_permit(budget: Arc<Semaphore>) -> Option<OwnedSemap
     budget.try_acquire_owned().ok()
 }
 
-fn exceeds_web_blob_range_limit(partial: bool, length: u64) -> bool {
-    partial && length > MAX_BLOB_RANGE_BYTES
-}
-
-fn reader_body(
-    reader: signalbox_blob_store::BlobReader,
+fn reader_body_until(
+    mut reader: signalbox_blob_store::BlobReader,
     length: u64,
     permit: OwnedSemaphorePermit,
+    deadline: Instant,
 ) -> Body {
-    let source = stream::try_unfold(
-        (reader, length, permit),
-        |(mut reader, remaining, permit)| async move {
-            if remaining == 0 {
-                return Ok(None);
+    let (sender, receiver) = mpsc::channel(1);
+    tokio::spawn(async move {
+        let _permit = permit;
+        let produce = async move {
+            let mut remaining = length;
+            while remaining > 0 {
+                let capacity = usize::try_from(remaining.min(BLOB_STREAM_CHUNK_BYTES as u64))
+                    .map_err(|_| io::Error::other("blob response length is invalid"))?;
+                let mut buffer = vec![0_u8; capacity];
+                let read = reader.read(&mut buffer).await?;
+                if read == 0 {
+                    return Err(io::Error::other(
+                        "blob response ended before its declared length",
+                    ));
+                }
+                buffer.truncate(read);
+                remaining -=
+                    u64::try_from(read).map_err(|_| io::Error::other("blob read is invalid"))?;
+                sender
+                    .send(Ok::<Bytes, io::Error>(Bytes::from(buffer)))
+                    .await
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::BrokenPipe, "blob response closed")
+                    })?;
             }
-            let capacity = usize::try_from(remaining.min(BLOB_STREAM_CHUNK_BYTES as u64))
-                .map_err(|_| io::Error::other("blob response length is invalid"))?;
-            let mut buffer = vec![0_u8; capacity];
-            let read = reader.read(&mut buffer).await?;
-            if read == 0 {
-                return Err(io::Error::other(
-                    "blob response ended before its declared length",
-                ));
-            }
-            buffer.truncate(read);
-            let read = u64::try_from(read).map_err(|_| io::Error::other("blob read is invalid"))?;
-            Ok(Some((
-                Bytes::from(buffer),
-                (reader, remaining - read, permit),
-            )))
-        },
-    );
-    Body::from_stream(source)
+            Ok::<(), io::Error>(())
+        };
+        let _ = timeout_at(deadline, produce).await;
+    });
+    Body::from_stream(stream::unfold(receiver, |mut receiver| async move {
+        receiver.recv().await.map(|item| (item, receiver))
+    }))
 }
 
 fn parse_byte_range(value: &HeaderValue, total: u64) -> Result<(u64, u64, bool), ()> {
@@ -1113,23 +1145,86 @@ fn single_range_header(headers: &HeaderMap) -> Result<Option<&HeaderValue>, ()> 
 }
 
 fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
-    headers
-        .get_all(IF_NONE_MATCH)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .any(|value| {
-            value.split(',').any(|candidate| {
-                let candidate = candidate.trim();
-                candidate == "*" || candidate == etag || candidate.strip_prefix("W/") == Some(etag)
-            })
-        })
+    let mut member_count = 0;
+    let mut matched = false;
+    let mut wildcard = false;
+    for value in headers.get_all(IF_NONE_MATCH) {
+        let Some((field_count, field_matched, field_wildcard)) =
+            parse_if_none_match_field(value.as_bytes(), etag.as_bytes())
+        else {
+            return false;
+        };
+        member_count += field_count;
+        matched |= field_matched;
+        wildcard |= field_wildcard;
+    }
+    member_count > 0 && ((wildcard && member_count == 1) || (!wildcard && matched))
+}
+
+fn parse_if_none_match_field(value: &[u8], etag: &[u8]) -> Option<(usize, bool, bool)> {
+    let mut cursor = 0;
+    let mut member_count = 0;
+    let mut matched = false;
+    let mut wildcard = false;
+    loop {
+        while matches!(value.get(cursor), Some(b' ' | b'\t')) {
+            cursor += 1;
+        }
+        if cursor == value.len() {
+            return (member_count > 0).then_some((member_count, matched, wildcard));
+        }
+        let start = cursor;
+        if value[cursor] == b'*' {
+            wildcard = true;
+            cursor += 1;
+        } else {
+            if value.get(cursor..cursor + 2) == Some(b"W/") {
+                cursor += 2;
+            }
+            if value.get(cursor) != Some(&b'\"') {
+                return None;
+            }
+            cursor += 1;
+            while let Some(byte) = value.get(cursor).copied() {
+                if byte == b'\"' {
+                    break;
+                }
+                if byte != 0x21 && !(0x23..=0x7e).contains(&byte) && byte < 0x80 {
+                    return None;
+                }
+                cursor += 1;
+            }
+            if value.get(cursor) != Some(&b'\"') {
+                return None;
+            }
+            cursor += 1;
+            matched |= &value[start..cursor] == etag
+                || value.get(start..start + 2) == Some(b"W/") && &value[start + 2..cursor] == etag;
+        }
+        member_count += 1;
+        while matches!(value.get(cursor), Some(b' ' | b'\t')) {
+            cursor += 1;
+        }
+        if cursor == value.len() {
+            return Some((member_count, matched, wildcard));
+        }
+        if value[cursor] != b',' {
+            return None;
+        }
+        cursor += 1;
+        if wildcard {
+            return None;
+        }
+    }
 }
 
 fn if_range_matches(headers: &HeaderMap, etag: &str) -> bool {
-    headers
-        .get(IF_RANGE)
-        .and_then(|value| value.to_str().ok())
-        .is_none_or(|value| value.trim() == etag)
+    let mut values = headers.get_all(IF_RANGE).iter();
+    match (values.next(), values.next()) {
+        (None, None) => true,
+        (Some(value), None) => value.to_str().is_ok_and(|value| value.trim() == etag),
+        _ => false,
+    }
 }
 
 fn not_modified_response(etag: &str) -> Response {
@@ -1535,7 +1630,6 @@ mod tests {
         http::{Request, StatusCode, header},
     };
     use http_body_util::BodyExt as _;
-    use signalbox_blob_store::MAX_BLOB_RANGE_BYTES;
     use signalbox_web_contract::{
         MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebContractBootstrap, WebContractExample,
     };
@@ -1547,7 +1641,8 @@ mod tests {
         DEFAULT_WEB_BIND_ADDRESS, MAX_CONCURRENT_WEB_BLOB_READS, WebHttpConfiguration,
         WebHttpConfigurationError, WebHttpRuntime, bootstrap_only_router, content_disposition,
         deterministic_test_router, exceeds_web_blob_range_limit, if_none_match, ndjson_response,
-        parse_byte_range, production_router, single_range_header, try_acquire_web_blob_read_permit,
+        parse_byte_range, production_router, reader_body_until, single_range_header,
+        try_acquire_web_blob_read_permit,
     };
 
     fn loopback_ephemeral() -> SocketAddr {
@@ -1588,11 +1683,11 @@ mod tests {
     }
 
     #[test]
-    fn full_downloads_are_not_subject_to_the_partial_range_ceiling() {
-        let oversized = MAX_BLOB_RANGE_BYTES + 1;
+    fn open_ended_ranges_can_exceed_one_storage_chunk() {
+        let total = signalbox_blob_store::MAX_BLOB_RANGE_BYTES + 2;
+        let range = parse_byte_range(&header::HeaderValue::from_static("bytes=1-"), total);
 
-        assert!(!exceeds_web_blob_range_limit(false, oversized));
-        assert!(exceeds_web_blob_range_limit(true, oversized));
+        assert_eq!(range, Ok((1, total - 1, true)));
     }
 
     #[test]
@@ -1611,6 +1706,55 @@ mod tests {
     }
 
     #[test]
+    fn malformed_if_none_match_list_is_ignored() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::IF_NONE_MATCH,
+            header::HeaderValue::from_static("garbage, \"matching\""),
+        );
+
+        assert!(!if_none_match(&headers, "\"matching\""));
+    }
+
+    #[test]
+    fn wildcard_if_none_match_cannot_be_combined_with_members() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::IF_NONE_MATCH,
+            header::HeaderValue::from_static("*, \"matching\""),
+        );
+
+        assert!(!if_none_match(&headers, "\"matching\""));
+    }
+
+    #[test]
+    fn malformed_if_range_is_not_treated_as_absent() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::IF_RANGE,
+            header::HeaderValue::from_bytes(&[0xff])
+                .expect("the fixture is an opaque HTTP field value"),
+        );
+
+        assert!(!super::if_range_matches(&headers, "\"matching\""));
+    }
+
+    #[test]
+    fn repeated_if_range_fields_fail_the_condition() {
+        let mut headers = header::HeaderMap::new();
+        headers.append(
+            header::IF_RANGE,
+            header::HeaderValue::from_static("\"matching\""),
+        );
+        headers.append(
+            header::IF_RANGE,
+            header::HeaderValue::from_static("\"other\""),
+        );
+
+        assert!(!super::if_range_matches(&headers, "\"matching\""));
+    }
+
+    #[test]
     fn web_blob_read_budget_rejects_without_waiting_and_recovers_on_drop() {
         let budget = Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS));
         let held = Arc::clone(&budget)
@@ -1623,6 +1767,31 @@ mod tests {
         assert!(try_acquire_web_blob_read_permit(Arc::clone(&budget)).is_none());
         drop(held);
         assert!(try_acquire_web_blob_read_permit(budget).is_some());
+    }
+
+    #[tokio::test]
+    async fn stalled_blob_response_releases_its_read_permit_at_the_deadline() {
+        let budget = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&budget)
+            .try_acquire_owned()
+            .expect("the fixture acquires the read permit");
+        let reader: signalbox_blob_store::BlobReader = Box::new(tokio::io::repeat(1));
+        let _body = reader_body_until(
+            reader,
+            u64::try_from(super::BLOB_STREAM_CHUNK_BYTES * 3).expect("the fixture length fits u64"),
+            permit,
+            tokio::time::Instant::now() + Duration::from_millis(10),
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while budget.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the stalled response releases its permit within the test bound");
+
+        assert_eq!(budget.available_permits(), 1);
     }
 
     #[test]
@@ -1757,7 +1926,10 @@ mod tests {
                 .expect("fixture URL is valid")
                 .origin()
         );
-        assert_eq!(decoded, WebContractBootstrap::for_runtime(false, false));
+        assert_eq!(
+            decoded,
+            WebContractBootstrap::for_runtime(false, false, false)
+        );
         assert_eq!(runtime_outcome, Ok(()));
     }
 

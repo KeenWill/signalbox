@@ -5,7 +5,6 @@ CREATE TABLE blob_derivation (
     deterministic_key bytea UNIQUE,
     transformation_name text COLLATE "C" NOT NULL,
     transformation_version bigint NOT NULL,
-    parameters_json jsonb NOT NULL,
     parameters_canonical text COLLATE "C" NOT NULL,
     producer_class text COLLATE "C" NOT NULL,
     implementation_digest bytea,
@@ -30,10 +29,7 @@ CREATE TABLE blob_derivation (
     CONSTRAINT blob_derivation_version_shape
         CHECK (transformation_version BETWEEN 1 AND 4294967295),
     CONSTRAINT blob_derivation_parameter_bound
-        CHECK (
-            octet_length(parameters_canonical) <= 4096
-            AND parameters_canonical::jsonb = parameters_json
-        ),
+        CHECK (octet_length(parameters_canonical) <= 4096),
     CONSTRAINT blob_derivation_counts
         CHECK (input_count BETWEEN 1 AND 16 AND output_count BETWEEN 1 AND 16),
     CONSTRAINT blob_derivation_producer_shape

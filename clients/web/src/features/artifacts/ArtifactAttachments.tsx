@@ -1,9 +1,9 @@
 import { FileQuestion, Paperclip, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import type { CommandContext } from '../../commands'
 import { ArtifactRenderer } from './ArtifactRenderer'
 import { attachmentScenario } from './artifactScenario'
 import type { ArtifactItem } from './artifactTypes'
-import { useRemoteMediaPreference } from './remoteMediaPreference'
 
 export const MAX_VISIBLE_ATTACHMENTS = 12
 
@@ -15,7 +15,7 @@ export const boundAttachments = (
 })
 
 const attachmentKind = (artifact: ArtifactItem): string => {
-  if (artifact.kind === 'committed_unimplemented' || artifact.kind === 'blocked') {
+  if (artifact.kind === 'blocked') {
     return artifact.attemptedKind
   }
   if (artifact.kind === 'media_placeholder') return `${artifact.mediaKind} placeholder`
@@ -38,7 +38,7 @@ function AttachmentList({
   const bounded = boundAttachments(items)
 
   return (
-    <section className="attachment-surface" aria-label={label}>
+    <section className="attachment-surface" aria-label={label} tabIndex={-1}>
       <header>
         <div>
           <Paperclip aria-hidden="true" />
@@ -69,7 +69,18 @@ function AttachmentList({
                   type="button"
                   className="attachment-remove"
                   aria-label={`Remove ${artifact.displayName}`}
-                  onClick={() => onRemove(artifact)}
+                  onClick={(event) => {
+                    const item = event.currentTarget.closest('li')
+                    const surface = event.currentTarget.closest<HTMLElement>('.attachment-surface')
+                    const focusTarget =
+                      item?.nextElementSibling?.querySelector<HTMLElement>('.attachment-select') ??
+                      item?.previousElementSibling?.querySelector<HTMLElement>(
+                        '.attachment-select',
+                      ) ??
+                      surface
+                    onRemove(artifact)
+                    requestAnimationFrame(() => focusTarget?.focus())
+                  }}
                 >
                   <X aria-hidden="true" />
                 </button>
@@ -99,10 +110,10 @@ export function MissingAttachmentState({ placement }: { placement: 'composer' | 
   )
 }
 
-export function AttachmentWorkbench() {
-  const [remoteMedia] = useRemoteMediaPreference()
-  const [composerItems, setComposerItems] =
-    useState<ReadonlyArray<ArtifactItem>>(attachmentScenario)
+export function AttachmentWorkbench({ commandContext }: { commandContext: CommandContext }) {
+  const [composerItems, setComposerItems] = useState<ReadonlyArray<ArtifactItem>>(() =>
+    attachmentScenario.map((artifact) => ({ ...artifact, id: `composer:${artifact.id}` })),
+  )
   const [selectedId, setSelectedId] = useState(attachmentScenario[0]?.id ?? null)
   const allItems = useMemo(() => [...attachmentScenario, ...composerItems], [composerItems])
   const selected = allItems.find((artifact) => artifact.id === selectedId) ?? null
@@ -144,7 +155,7 @@ export function AttachmentWorkbench() {
             <strong>{selected?.displayName ?? 'No attachment selected'}</strong>
           </header>
           {selected ? (
-            <ArtifactRenderer artifact={selected} remoteMediaPolicy={remoteMedia} />
+            <ArtifactRenderer artifact={selected} commandContext={commandContext} />
           ) : (
             <p className="attachment-empty">Select an attachment to inspect its typed renderer.</p>
           )}

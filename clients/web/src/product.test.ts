@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { imageArtifact } from './features/artifacts/artifactScenario'
 import { productRoutes, productSurfaceStates, SameOriginProductTransport } from './product'
+import { productHotkeySequenceBindings } from './productCommands'
 
 const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '2' },
@@ -99,9 +100,28 @@ describe('SameOriginProductTransport', () => {
       }),
     )
   })
+
+  it('rejects an oversized bootstrap before JSON materialization', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{}', { headers: { 'content-length': '65537' } })),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'exceeds the browser byte ceiling',
+    )
+  })
 })
 
 describe('product surface availability', () => {
+  it('registers every advertised product navigation sequence', () => {
+    expect(productHotkeySequenceBindings).toEqual([
+      { commandId: 'navigate.attention', sequence: ['G', 'A'] },
+      { commandId: 'navigate.sessions', sequence: ['G', 'S'] },
+      { commandId: 'navigate.settings', sequence: ['G', ','] },
+    ])
+  })
+
   it('defines one typed authority state for every product route', () => {
     expect(productSurfaceStates).toHaveProperty(productRoutes[0].id)
     expect(productSurfaceStates).toHaveProperty(productRoutes[1].id)

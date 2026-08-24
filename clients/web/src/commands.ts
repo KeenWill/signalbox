@@ -6,11 +6,17 @@ export interface CommandContext {
   dispatch: AppDispatch
   getState: () => RootState
   timelineIds: readonly string[]
+  artifactPreviewIds: readonly string[]
+  artifactOriginalIds: readonly string[]
+  artifactSelectionTarget?: string
   focusTimeline: () => void
   importEntryIds?: readonly string[]
   selectedImportEntry?: string | null
   requestedImportEntry?: string
   selectImportEntry?: (id: string) => void
+  openFirstTimelineWindow?: () => void
+  openLatestTimelineWindow?: () => void
+  onTimelineSelected?: (eventSequence: string) => void
 }
 
 export interface CommandBinding {
@@ -25,14 +31,96 @@ interface CommandDefinitionShape {
   id: string
   title: string
   description: string
-  category: 'Navigate' | 'View' | 'Surface' | 'Imports'
+  category: 'Navigate' | 'View' | 'Surface' | 'Imports' | 'Artifact'
   bindings: readonly CommandBinding[]
   available: (context: CommandContext) => boolean
   run: (context: CommandContext) => void
 }
 
 const always = () => true
+const selectTimeline = (context: CommandContext, eventSequence: string | undefined): void => {
+  const selected = eventSequence ?? null
+  context.dispatch(actions.timelineSelected(selected))
+  if (selected !== null) context.onTimelineSelected?.(selected)
+}
+const selectedArtifact = (context: CommandContext) => context.getState().app.selectedArtifact
+const hasSelectedArtifactPreview = (context: CommandContext) => {
+  const id = selectedArtifact(context)
+  return id !== null && context.artifactPreviewIds.includes(id)
+}
 export const commandRegistry = [
+  {
+    id: 'artifact.select',
+    title: 'Select artifact',
+    description: 'Select the artifact targeted by the invoking control.',
+    category: 'Artifact',
+    bindings: [],
+    available: (context) => context.artifactSelectionTarget !== undefined,
+    run: (context) => {
+      if (context.artifactSelectionTarget !== undefined) {
+        context.dispatch(actions.artifactSelected(context.artifactSelectionTarget))
+      }
+    },
+  },
+  {
+    id: 'artifact.preview.expand',
+    title: 'Expand bounded artifact preview',
+    description: 'Show the larger bounded projection of the selected artifact.',
+    category: 'Artifact',
+    bindings: [],
+    available: (context) => {
+      const id = selectedArtifact(context)
+      return (
+        id !== null &&
+        hasSelectedArtifactPreview(context) &&
+        !context.getState().app.expandedArtifacts[id]
+      )
+    },
+    run: (context) => {
+      const id = selectedArtifact(context)
+      if (id !== null) context.dispatch(actions.artifactExpansionSet({ id, expanded: true }))
+    },
+  },
+  {
+    id: 'artifact.preview.collapse',
+    title: 'Collapse artifact preview',
+    description: 'Return the selected artifact to its initial bounded projection.',
+    category: 'Artifact',
+    bindings: [],
+    available: (context) => {
+      const id = selectedArtifact(context)
+      return (
+        id !== null &&
+        hasSelectedArtifactPreview(context) &&
+        Boolean(context.getState().app.expandedArtifacts[id])
+      )
+    },
+    run: (context) => {
+      const id = selectedArtifact(context)
+      if (id !== null) context.dispatch(actions.artifactExpansionSet({ id, expanded: false }))
+    },
+  },
+  {
+    id: 'artifact.original.load',
+    title: 'Load artifact original',
+    description: 'Request the admitted browser-native original for the selected artifact.',
+    category: 'Artifact',
+    bindings: [],
+    available: (context) => {
+      const id = selectedArtifact(context)
+      const originalState = id === null ? undefined : context.getState().app.originalArtifacts[id]
+      return (
+        id !== null &&
+        context.artifactOriginalIds.includes(id) &&
+        originalState !== 'loading' &&
+        originalState !== 'loaded'
+      )
+    },
+    run: (context) => {
+      const id = selectedArtifact(context)
+      if (id !== null) context.dispatch(actions.artifactOriginalRequested(id))
+    },
+  },
   {
     id: 'palette.open',
     title: 'Open command palette',
@@ -87,7 +175,7 @@ export const commandRegistry = [
       const currentIndex = context.timelineIds.indexOf(current ?? '')
       const nextIndex =
         currentIndex < 0 ? 0 : Math.min(currentIndex + 1, context.timelineIds.length - 1)
-      context.dispatch(actions.timelineSelected(context.timelineIds[nextIndex] ?? null))
+      selectTimeline(context, context.timelineIds[nextIndex])
     },
   },
   {
@@ -101,7 +189,7 @@ export const commandRegistry = [
       const current = context.getState().app.selectedTimeline
       const currentIndex = Math.max(context.timelineIds.indexOf(current ?? ''), 0)
       const previousIndex = Math.max(currentIndex - 1, 0)
-      context.dispatch(actions.timelineSelected(context.timelineIds[previousIndex] ?? null))
+      selectTimeline(context, context.timelineIds[previousIndex])
     },
   },
   {
@@ -113,8 +201,12 @@ export const commandRegistry = [
       { label: 'g g', registration: { kind: 'sequence', sequence: ['G', 'G'] } },
       { label: 'Home' },
     ],
-    available: (context) => context.timelineIds.length > 0,
-    run: (context) => context.dispatch(actions.timelineSelected(context.timelineIds[0] ?? null)),
+    available: (context) =>
+      context.openFirstTimelineWindow !== undefined || context.timelineIds.length > 0,
+    run: (context) => {
+      if (context.openFirstTimelineWindow) context.openFirstTimelineWindow()
+      else selectTimeline(context, context.timelineIds[0])
+    },
   },
   {
     id: 'selection.last',
@@ -125,9 +217,12 @@ export const commandRegistry = [
       { label: 'G', registration: { kind: 'hotkey', hotkey: 'Shift+G' } },
       { label: 'End' },
     ],
-    available: (context) => context.timelineIds.length > 0,
-    run: (context) =>
-      context.dispatch(actions.timelineSelected(context.timelineIds.at(-1) ?? null)),
+    available: (context) =>
+      context.openLatestTimelineWindow !== undefined || context.timelineIds.length > 0,
+    run: (context) => {
+      if (context.openLatestTimelineWindow) context.openLatestTimelineWindow()
+      else selectTimeline(context, context.timelineIds.at(-1))
+    },
   },
   {
     id: 'imports.entry.select',

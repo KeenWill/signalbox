@@ -1,24 +1,135 @@
 import { describe, expect, it } from 'vitest'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import { boundAttachments, MAX_VISIBLE_ATTACHMENTS } from './ArtifactAttachments'
-import { registeredArtifactKinds, selectBlobView, selectImageView } from './ArtifactRenderer'
+import { boundAttachments } from './ArtifactAttachments'
 import {
+  imageViewLabel,
+  registeredArtifactKinds,
+  selectBlobView,
+  selectImageView,
+  selectViewDerivation,
+} from './ArtifactRenderer'
+import {
+  artifactOriginalIds,
+  artifactPreviewIds,
   documentAttachment,
+  INLINE_ORIGINAL_MAX_BYTES,
   imageArtifact,
   imageDownloadView,
   imageOriginalView,
   imagePreviewView,
+  jpegDescriptor,
+  selectBoundedOriginalView,
 } from './artifactScenario'
 import {
   ARTIFACT_EXPANDED_CHARACTERS,
   ARTIFACT_PREVIEW_CHARACTERS,
   boundArtifactText,
 } from './artifactTypes'
-import { admitRemoteMediaUrl, decodeRemoteMediaPolicy } from './remoteMediaPreference'
+import { admitRemoteMediaUrl } from './remoteMediaPreference'
+
+const download = imageArtifact.available_views[0]
+const browserNative = imageArtifact.available_views[1]
+const preview = imageArtifact.available_views[2]
+const previewDerivation = preview?.derivations[0]
+if (!download || !browserNative || !preview || !previewDerivation) {
+  throw new Error(
+    'the image artifact fixture must contain download, original, and preview provenance',
+  )
+}
 
 describe('artifact renderer compatibility', () => {
+  it('derives preview command IDs only from artifacts with omitted preview content', () => {
+    expect(artifactPreviewIds).toEqual(['incident-notes', 'renderer-source'])
+  })
+
+  it('derives original-capable IDs only for reachable bounded single-frame artifacts', () => {
+    expect(artifactOriginalIds).toEqual(['bounded-photo'])
+    expect(selectBoundedOriginalView(imageArtifact)).toBeUndefined()
+    expect(selectBoundedOriginalView(jpegDescriptor)?.kind).toBe('browser_native')
+  })
+
+  it('admits a byte-bounded, decode-proven, inherently single-frame JPEG original', () => {
+    const jpegOriginal = { ...imageOriginalView, media_type: 'image/jpeg' }
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      declared_media_type: 'image/jpeg',
+      available_views: [imageDownloadView, jpegOriginal, imagePreviewView],
+    }
+
+    expect(selectBoundedOriginalView(descriptor)).toBe(jpegOriginal)
+  })
+
+  it('keeps oversized originals download-only', () => {
+    const oversizedLength = (INLINE_ORIGINAL_MAX_BYTES + 1n).toString()
+    const oversizedOriginal = {
+      ...imageOriginalView,
+      media_type: 'image/jpeg',
+      byte_length: oversizedLength,
+    }
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      declared_media_type: 'image/jpeg',
+      byte_length: oversizedLength,
+      available_views: [imageDownloadView, oversizedOriginal, imagePreviewView],
+    }
+
+    expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
+  })
+
+  it('keeps originals without bounded decode provenance download-only', () => {
+    const jpegOriginal = { ...imageOriginalView, media_type: 'image/jpeg' }
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      declared_media_type: 'image/jpeg',
+      available_views: [imageDownloadView, jpegOriginal],
+    }
+
+    expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
+  })
+
+  it('requires one exact bounded derivation to bind both input and output', () => {
+    const jpegOriginal = { ...imageOriginalView, media_type: 'image/jpeg' }
+    const unrelatedDigest = `sha256:${'9a'.repeat(32)}`
+    const misleadingPreview = {
+      ...imagePreviewView,
+      derivations: [
+        { ...previewDerivation, input_digests: [unrelatedDigest] },
+        {
+          ...previewDerivation,
+          transformation_name: 'image.thumbnail',
+          input_digests: [imageArtifact.digest],
+        },
+      ],
+    }
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      declared_media_type: 'image/jpeg',
+      available_views: [imageDownloadView, jpegOriginal, misleadingPreview],
+    }
+
+    expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
+  })
+
+  it.each(['image/gif', 'image/png', 'image/webp'])(
+    'keeps animation-capable %s originals download-only without aggregate decode evidence',
+    (mediaType) => {
+      const descriptor: WebBlobDescriptor = {
+        ...imageArtifact,
+        declared_media_type: mediaType,
+        available_views: [
+          imageDownloadView,
+          { ...imageOriginalView, media_type: mediaType },
+          imagePreviewView,
+        ],
+      }
+
+      expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
+    },
+  )
+
   it('registers the closed artifact renderer set', () => {
     expect(registeredArtifactKinds).toEqual([
+      'blob',
       'code',
       'derivative',
       'document',
@@ -32,10 +143,42 @@ describe('artifact renderer compatibility', () => {
     expect(imagePreviewView.kind).toBe('preview')
     const descriptor: WebBlobDescriptor = {
       ...imageArtifact,
-      available_views: [{ ...imagePreviewView, media_type: 'application/octet-stream' }],
+      available_views: [
+        download,
+        browserNative,
+        { ...preview, media_type: 'application/octet-stream' },
+      ],
     }
 
     expect(selectImageView(descriptor)?.kind).toBe('preview')
+  })
+
+  it('selects the derivation that binds the descriptor input to the rendered output', () => {
+    const unrelated = {
+      ...previewDerivation,
+      derivation_id: '0198f321-2300-7000-8000-000000000002',
+      input_digests: [`sha256:${'9a'.repeat(32)}`],
+      output_digests: [`sha256:${'9b'.repeat(32)}`],
+    }
+    const view = {
+      ...imagePreviewView,
+      derivations: [unrelated, previewDerivation],
+    }
+
+    expect(selectViewDerivation(imageArtifact, view)?.derivation_id).toBe(
+      previewDerivation.derivation_id,
+    )
+  })
+
+  it('names a thumbnail fallback as a thumbnail', () => {
+    const thumbnail = { ...preview, kind: 'thumbnail' as const }
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      available_views: [download, thumbnail],
+    }
+
+    expect(selectImageView(descriptor)?.kind).toBe('thumbnail')
+    expect(imageViewLabel('thumbnail')).toBe('Thumbnail')
   })
 
   it('does not create an inline renderer from an image-like MIME string', () => {
@@ -67,9 +210,7 @@ describe('artifact renderer compatibility', () => {
   })
 
   it('selects document affordances only by their admitted capability', () => {
-    expect(selectBlobView(documentAttachment.source.descriptor, 'browser_native')?.kind).toBe(
-      'browser_native',
-    )
+    expect(selectBlobView(documentAttachment.source.descriptor, 'browser_native')).toBeUndefined()
     expect(selectBlobView(documentAttachment.source.descriptor, 'download')?.kind).toBe('download')
   })
 
@@ -81,30 +222,60 @@ describe('artifact renderer compatibility', () => {
 
     const bounded = boundAttachments(source)
 
-    expect(bounded.visible).toHaveLength(MAX_VISIBLE_ATTACHMENTS)
-    expect(bounded.omitted).toBe(source.length - MAX_VISIBLE_ATTACHMENTS)
+    expect(bounded.visible).toHaveLength(12)
+    expect(bounded.omitted).toBe(4)
   })
 
   it('bounds the initial text projection by characters', () => {
     const content = 'x'.repeat(20_000)
 
-    const bounded = boundArtifactText(content, false)
+    const bounded = boundArtifactText(content, Array.from(content).length, 'preview')
 
     expect(bounded.content).toHaveLength(ARTIFACT_PREVIEW_CHARACTERS)
     expect(bounded.omittedCharacters).toBe(content.length - ARTIFACT_PREVIEW_CHARACTERS)
   })
 
-  it('keeps expansion below the larger hard character ceiling', () => {
+  it('keeps expansion within the larger effective character ceiling', () => {
     const content = 'x'.repeat(20_000)
 
-    const bounded = boundArtifactText(content, true)
+    const bounded = boundArtifactText(content, Array.from(content).length, 'expanded')
 
     expect(bounded.content).toHaveLength(ARTIFACT_EXPANDED_CHARACTERS)
     expect(bounded.omittedCharacters).toBe(content.length - ARTIFACT_EXPANDED_CHARACTERS)
   })
 
-  it('fails an unknown remote-media preference closed to ask', () => {
-    expect(decodeRemoteMediaPolicy('invented')).toBe('ask')
+  it('counts and truncates Unicode by code point without splitting surrogate pairs', () => {
+    const content = `${'😀'.repeat(ARTIFACT_PREVIEW_CHARACTERS)}z`
+
+    const bounded = boundArtifactText(content, Array.from(content).length, 'preview')
+
+    expect(Array.from(bounded.content)).toHaveLength(ARTIFACT_PREVIEW_CHARACTERS)
+    expect(bounded.content.endsWith('😀')).toBe(true)
+    expect(bounded.omittedCharacters).toBe(1)
+  })
+
+  it('bounds the expanded projection by lines and reports the remainder', () => {
+    const content = Array.from({ length: 220 }, (_, index) => `line ${index + 1}`).join('\n')
+
+    const bounded = boundArtifactText(content, Array.from(content).length, 'expanded')
+
+    expect(bounded.content.split('\n')).toHaveLength(200)
+    expect(bounded.omittedLines).toBe(true)
+    expect(bounded.omittedCharacters).toBeGreaterThan(0)
+  })
+
+  it('counts bare carriage returns toward the expanded line ceiling', () => {
+    const content = Array.from({ length: 220 }, (_, index) => `line ${index + 1}`).join('\r')
+
+    const bounded = boundArtifactText(content, Array.from(content).length, 'expanded')
+
+    expect(bounded.content.split('\n')).toHaveLength(200)
+    expect(bounded.omittedLines).toBe(true)
+    expect(bounded.omittedCharacters).toBeGreaterThan(0)
+  })
+
+  it('labels thumbnail capabilities as thumbnails', () => {
+    expect(imageViewLabel('thumbnail')).toBe('Thumbnail')
   })
 
   it('admits only credential-free HTTPS remote media', () => {

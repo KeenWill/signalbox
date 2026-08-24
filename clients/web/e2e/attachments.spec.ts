@@ -7,9 +7,11 @@ interface BrowserProblems {
   pageErrors: string[]
 }
 
-const previewPath = `/api/blobs/sha256:${'2b'.repeat(32)}/content/image-png`
-const originalPath = `/api/blobs/sha256:${'1a'.repeat(32)}/content/image-png`
-const documentPath = `/api/blobs/sha256:${'6f'.repeat(32)}/content/application-pdf`
+const previewPath =
+  '/api/blobs/sha256:071d25f582ba9e6a8725e198dab884d70a3d7ce3ea84a74c66e65a1443c41a8e/content/image-png'
+const originalPath =
+  '/api/blobs/sha256:3729b2319da081a0710ba27da7af330c1236325cf8ed0a619cf132375bb0fc1e/content/image-png'
+const documentDownloadPath = `/api/blobs/sha256:${'6f'.repeat(32)}/download`
 const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.meta.url))
 const MOBILE_ATTACHMENT_RASTERIZATION_TOLERANCE = 0.08
 
@@ -35,21 +37,20 @@ test.beforeEach(async ({ page }) => {
   )
 })
 
-test('keeps document bytes behind exact open and download affordances', async ({ page }) => {
+test('keeps document bytes behind the admitted download-only affordance', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/attachments')
 
   const preview = page.getByRole('region', { name: 'Selected attachment preview' })
   await expect(preview.getByText('Document bytes stay unloaded')).toBeVisible()
-  await expect(preview.getByRole('link', { name: 'Open document' })).toHaveAttribute(
-    'href',
-    documentPath,
-  )
-  await expect(preview.getByRole('link', { name: 'Download' })).toHaveAttribute('download')
+  await expect(preview.getByRole('link', { name: 'Open document' })).toHaveCount(0)
+  const download = preview.getByRole('link', { name: 'Download' })
+  await expect(download).toHaveAttribute('download')
+  await expect(download).toHaveAttribute('href', new RegExp(`^${documentDownloadPath}`))
   expect(
     await page.evaluate(
       (path) => performance.getEntriesByName(new URL(path, location.href).href).length,
-      documentPath,
+      documentDownloadPath,
     ),
   ).toBe(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -82,6 +83,21 @@ test('selects an admitted derivative without loading original bytes', async ({ p
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('fails closed when an admitted derivative cannot load', async ({ page }) => {
+  await page.route(`**${previewPath}`, (route) => route.fulfill({ status: 404 }))
+  await page.goto('/scenario/attachments')
+
+  await page
+    .getByRole('region', { name: 'Transcript attachments' })
+    .getByRole('button', { name: /orbital-map\.preview\.png/ })
+    .click()
+
+  await expect(page.getByRole('status').getByText('Derivative unavailable')).toBeVisible()
+  await expect(
+    page.getByRole('img', { name: 'Derived preview of orbital-map.preview.png' }),
+  ).toHaveCount(0)
+})
+
 test('renders media placeholders and removes a composer attachment by keyboard', async ({
   page,
 }) => {
@@ -101,6 +117,7 @@ test('renders media placeholders and removes a composer attachment by keyboard',
   await page.keyboard.press('Enter')
   await expect(composer.getByText('architecture.pdf')).toHaveCount(0)
   await expect(transcript.getByText('architecture.pdf')).toBeVisible()
+  await expect(composer.locator('.attachment-select').first()).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

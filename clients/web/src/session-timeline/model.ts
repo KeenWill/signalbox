@@ -39,6 +39,49 @@ export interface SessionTimelineSource {
 }
 
 const MAX_U64 = (1n << 64n) - 1n
+const MAX_TIMELINE_RESPONSE_BYTES = 1024 * 1024
+export const MAX_BOOTSTRAP_RESPONSE_BYTES = 64 * 1024
+const MAX_ERROR_RESPONSE_BYTES = MAX_BOOTSTRAP_RESPONSE_BYTES
+
+export const readBoundedJson = async (
+  response: Response,
+  maximumBytes: number,
+): Promise<unknown> => {
+  const declaredLength = response.headers.get('content-length')
+  if (declaredLength !== null) {
+    const parsedLength = Number(declaredLength)
+    if (!Number.isSafeInteger(parsedLength) || parsedLength < 0 || parsedLength > maximumBytes) {
+      throw new TypeError('timeline response exceeds the browser byte ceiling')
+    }
+  }
+  if (response.body === null) {
+    const text = await response.text()
+    if (new TextEncoder().encode(text).byteLength > maximumBytes) {
+      throw new TypeError('timeline response exceeds the browser byte ceiling')
+    }
+    return JSON.parse(text)
+  }
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > maximumBytes) {
+      await reader.cancel()
+      throw new TypeError('timeline response exceeds the browser byte ceiling')
+    }
+    chunks.push(value)
+  }
+  const bytes = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return JSON.parse(new TextDecoder().decode(bytes))
+}
 
 const decimalU64 = (value: string): bigint => {
   if (!/^(0|[1-9]\d*)$/.test(value)) throw new TypeError('timeline fact must be unsigned decimal')
@@ -78,7 +121,9 @@ export class SessionTimelineClientError extends Error {
 }
 
 const throwApiError = async (response: Response): Promise<never> => {
-  throw new SessionTimelineClientError(decodeWebApiErrorResponse(await response.json()))
+  throw new SessionTimelineClientError(
+    decodeWebApiErrorResponse(await readBoundedJson(response, MAX_ERROR_RESPONSE_BYTES)),
+  )
 }
 
 export class HttpSessionTimelineSource implements SessionTimelineSource {
@@ -87,10 +132,18 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     private readonly request: typeof fetch,
   ) {}
 
-  static async connect(request: typeof fetch = fetch): Promise<HttpSessionTimelineSource> {
-    const response = await request('/api/bootstrap')
+  static async connect(
+    request: typeof fetch = fetch,
+    signal?: AbortSignal,
+  ): Promise<HttpSessionTimelineSource> {
+    const response = await request('/api/bootstrap', { signal })
     if (!response.ok) return throwApiError(response)
-    const bootstrap = decodeWebContractBootstrap(await response.json())
+    const bootstrap = decodeWebContractBootstrap(
+      await readBoundedJson(response, MAX_ERROR_RESPONSE_BYTES),
+    )
+    if (!bootstrap.capabilities.bounded_session_timeline) {
+      throw new TypeError('bounded session timeline capability is unavailable')
+    }
     return new HttpSessionTimelineSource(bootstrap.limits, request)
   }
 
@@ -102,7 +155,9 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       signal,
     })
     if (!response.ok) return throwApiError(response)
-    return decodeWebSessionTimelineDescriptor(await response.json())
+    return decodeWebSessionTimelineDescriptor(
+      await readBoundedJson(response, MAX_TIMELINE_RESPONSE_BYTES),
+    )
   }
 
   async readWindow(
@@ -123,7 +178,9 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       { signal },
     )
     if (!response.ok) return throwApiError(response)
-    return decodeWebSessionTimelineWindow(await response.json())
+    return decodeWebSessionTimelineWindow(
+      await readBoundedJson(response, MAX_TIMELINE_RESPONSE_BYTES),
+    )
   }
 }
 
@@ -152,10 +209,15 @@ export class BoundedSessionHistory {
     if (canonicalSessionId(descriptor.session_id) !== this.sessionId) {
       throw new TypeError('descriptor session mismatch')
     }
-    decimalAddress(descriptor.first_address.event_sequence)
-    decimalAddress(descriptor.latest_address.event_sequence)
-    decimalU64(descriptor.observed_through)
-    decimalU64(descriptor.sizes.item_count)
+    const firstAddress = decimalAddress(descriptor.first_address.event_sequence)
+    const latestAddress = decimalAddress(descriptor.latest_address.event_sequence)
+    const observedThrough = decimalU64(descriptor.observed_through)
+    if (firstAddress > latestAddress || latestAddress > observedThrough) {
+      throw new TypeError('timeline descriptor carries contradictory bounds')
+    }
+    if (decimalU64(descriptor.sizes.item_count) === 0n) {
+      throw new TypeError('timeline descriptor item count contradicts its durable bounds')
+    }
     decimalU64(descriptor.sizes.projected_text_bytes)
     decimalU64(descriptor.sizes.projected_structured_bytes)
     decimalU64(descriptor.sizes.referenced_blob_count)
@@ -179,18 +241,83 @@ export class BoundedSessionHistory {
     if (window.items.length > bounded.maxItems) {
       throw new TypeError('timeline window exceeds the requested item ceiling')
     }
-    if (window.projected_structured_bytes > bounded.maxBytes) {
+    let verifiedStructuredBytes = 0
+    for (const item of window.items) {
+      verifiedStructuredBytes += item.projected_structured_bytes
+      if (!Number.isSafeInteger(verifiedStructuredBytes)) {
+        throw new TypeError('timeline window byte total overflows a safe integer')
+      }
+    }
+    if (verifiedStructuredBytes !== window.projected_structured_bytes) {
+      throw new TypeError('timeline window byte total does not match its items')
+    }
+    if (verifiedStructuredBytes > bounded.maxBytes) {
       throw new TypeError('timeline window exceeds the requested byte ceiling')
     }
     const incoming = new Map<string, (typeof window.items)[number]>()
+    const requestedAddress = 'eventSequence' in anchor ? decimalAddress(anchor.eventSequence) : null
+    const knownFirstAddress = this.descriptorValue
+      ? decimalAddress(this.descriptorValue.first_address.event_sequence)
+      : null
+    let previousAddress: bigint | undefined
     for (const item of window.items) {
       const address = item.address.event_sequence
-      decimalAddress(address)
+      const parsedAddress = decimalAddress(address)
+      if (knownFirstAddress !== null && parsedAddress < knownFirstAddress) {
+        throw new TypeError('timeline window contains an item below the immutable first address')
+      }
+      if (previousAddress !== undefined && parsedAddress <= previousAddress) {
+        throw new TypeError('timeline window items are not strictly ordered')
+      }
+      previousAddress = parsedAddress
+      if (
+        anchor.kind === 'before' &&
+        requestedAddress !== null &&
+        parsedAddress >= requestedAddress
+      ) {
+        throw new TypeError('timeline before window contains an item at or after its anchor')
+      }
+      if (
+        anchor.kind === 'after' &&
+        requestedAddress !== null &&
+        parsedAddress <= requestedAddress
+      ) {
+        throw new TypeError('timeline after window contains an item at or before its anchor')
+      }
       if (incoming.has(address)) throw new TypeError('timeline window repeats an address')
       incoming.set(address, item)
     }
-    if (window.continuation_before) decimalAddress(window.continuation_before.event_sequence)
-    if (window.continuation_after) decimalAddress(window.continuation_after.event_sequence)
+    const firstAddress = window.items[0]?.address.event_sequence
+    const lastAddress = window.items.at(-1)?.address.event_sequence
+    if (
+      this.descriptorValue &&
+      window.items.length === 0 &&
+      (anchor.kind === 'first' || anchor.kind === 'latest' || anchor.kind === 'around')
+    ) {
+      throw new TypeError('timeline window is impossibly empty for its requested anchor')
+    }
+    if (window.continuation_before) {
+      decimalAddress(window.continuation_before.event_sequence)
+      if (window.continuation_before.event_sequence !== firstAddress) {
+        throw new TypeError('timeline continuation before does not match the first item')
+      }
+    }
+    if (window.continuation_after) {
+      decimalAddress(window.continuation_after.event_sequence)
+      if (window.continuation_after.event_sequence !== lastAddress) {
+        throw new TypeError('timeline continuation after does not match the last item')
+      }
+    }
+    if (this.descriptorValue && firstAddress !== undefined && lastAddress !== undefined) {
+      const descriptorFirst = decimalAddress(this.descriptorValue.first_address.event_sequence)
+      const descriptorLatest = decimalAddress(this.descriptorValue.latest_address.event_sequence)
+      if (decimalAddress(firstAddress) > descriptorFirst && !window.continuation_before) {
+        throw new TypeError('timeline window omits a required continuation before')
+      }
+      if (decimalAddress(lastAddress) < descriptorLatest && !window.continuation_after) {
+        throw new TypeError('timeline window omits a required continuation after')
+      }
+    }
     const candidates = [
       ...incoming.values(),
       ...this.retainedValue.filter((item) => !incoming.has(item.address.event_sequence)),

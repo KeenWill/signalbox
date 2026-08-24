@@ -150,6 +150,24 @@ test('completes route switching from the command palette without a mouse', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('opens visible keyboard help and follows product navigation sequences', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.keyboard.press('Shift+/')
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/attention$/)
+  await page.keyboard.press('Escape')
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page.locator('main.product-main')).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('uses a navigation sheet on a phone viewport and unwinds it with Escape', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -162,6 +180,21 @@ test('uses a navigation sheet on a phone viewport and unwinds it with Escape', a
   await page.keyboard.press('Escape')
   await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeHidden()
   await expect(openNavigation).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('closes the phone navigation sheet after route selection', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open navigation' }).click()
+  const navigation = page.getByRole('dialog', { name: 'Product navigation' })
+  await navigation.getByRole('link', { name: /Sessions/ }).click()
+
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(navigation).toBeHidden()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -213,6 +246,29 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(
     completedItem.getByText('Header only; rich event detail is not exposed'),
   ).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Previous window' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Next window' })).toBeDisabled()
+  const firstWindowRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url())
+    return url.pathname.endsWith('/timeline') && url.searchParams.get('anchor') === 'first'
+  })
+  await page.keyboard.press('g')
+  await page.keyboard.press('g')
+  await firstWindowRequest
+  await expect(completedItem).toHaveClass(/selected/)
+
+  const latestWindowRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url())
+    return url.pathname.endsWith('/timeline') && url.searchParams.get('anchor') === 'latest'
+  })
+  await page.keyboard.press('Shift+G')
+  await latestWindowRequest
+
+  const reopenRequest = page.waitForRequest((request) =>
+    new URL(request.url()).pathname.endsWith(`/api/sessions/${sessionWorkspaceFixture.id}`),
+  )
+  await page.getByRole('button', { name: 'Open workspace' }).click()
+  await reopenRequest
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

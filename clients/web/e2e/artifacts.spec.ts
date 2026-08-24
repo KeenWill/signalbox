@@ -1,20 +1,49 @@
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import { fallbackDescriptor } from '../src/features/artifacts/artifactScenario'
 
 interface BrowserProblems {
   consoleErrors: string[]
   pageErrors: string[]
 }
 
-const previewPath = `/api/blobs/sha256:${'2b'.repeat(32)}/content/image-png`
-const originalPath = `/api/blobs/sha256:${'1a'.repeat(32)}/content/image-png`
+const previewPath =
+  '/api/blobs/sha256:071d25f582ba9e6a8725e198dab884d70a3d7ce3ea84a74c66e65a1443c41a8e/content/image-png'
+const originalPath =
+  '/api/blobs/sha256:3729b2319da081a0710ba27da7af330c1236325cf8ed0a619cf132375bb0fc1e/content/image-png'
+const thumbnailPath =
+  '/api/blobs/sha256:e3f49e726a8b33752609b0f159cac0e185d6f02f6f72e872652e5df849ee5490/content/image-png'
+const jpegOriginalPath =
+  '/api/blobs/sha256:11ce39dce155c991152fad639d7ba25efab3f14e9eb921f20d1dbde5b67cb29e/content/image-jpeg'
 const remotePath = 'https://media.example.test/remote-status-diagram.png'
 const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.meta.url))
 const originalFixture = readFileSync(new URL('./fixtures/original.png', import.meta.url))
+const thumbnailFixture = readFileSync(new URL('./fixtures/thumbnail.png', import.meta.url))
+const jpegOriginalFixture = readFileSync(new URL('./fixtures/original.jpg', import.meta.url))
 // The owned 390 px crop is almost entirely text, so CI font rasterization accounts for 7% of its
 // pixels even when geometry is identical. Keep that measured host allowance local to this fixture.
 const MOBILE_ARTIFACT_RASTERIZATION_TOLERANCE = 0.08
+
+test('fixture bytes match their advertised immutable identities', () => {
+  expect(createHash('sha256').update(originalFixture).digest('hex')).toBe(
+    '3729b2319da081a0710ba27da7af330c1236325cf8ed0a619cf132375bb0fc1e',
+  )
+  expect(originalFixture.byteLength).toBe(33749)
+  expect(createHash('sha256').update(previewFixture).digest('hex')).toBe(
+    '071d25f582ba9e6a8725e198dab884d70a3d7ce3ea84a74c66e65a1443c41a8e',
+  )
+  expect(previewFixture.byteLength).toBe(215370)
+  expect(createHash('sha256').update(thumbnailFixture).digest('hex')).toBe(
+    'e3f49e726a8b33752609b0f159cac0e185d6f02f6f72e872652e5df849ee5490',
+  )
+  expect(thumbnailFixture.byteLength).toBe(93)
+  expect(createHash('sha256').update(jpegOriginalFixture).digest('hex')).toBe(
+    '11ce39dce155c991152fad639d7ba25efab3f14e9eb921f20d1dbde5b67cb29e',
+  )
+  expect(jpegOriginalFixture.byteLength).toBe(761)
+})
 
 const watchBrowser = (page: Page): BrowserProblems => {
   const problems: BrowserProblems = { consoleErrors: [], pageErrors: [] }
@@ -23,6 +52,39 @@ const watchBrowser = (page: Page): BrowserProblems => {
   })
   page.on('pageerror', (error) => problems.pageErrors.push(error.message))
   return problems
+}
+
+const expectOnlyExpectedFailedResourceError = (
+  problems: BrowserProblems,
+  failedResponsePaths: readonly string[],
+  expectedPaths: readonly string[],
+) => {
+  expect(problems.pageErrors).toEqual([])
+  expect(failedResponsePaths).toEqual(expectedPaths)
+  expect(
+    problems.consoleErrors.filter(
+      (message) =>
+        !/^Failed to load resource: the server responded with a status of 500(?: |$)/u.test(
+          message,
+        ),
+    ),
+  ).toEqual([])
+  // Chromium emits one generic failed-resource diagnostic; Firefox emits none. The exact failed
+  // response assertion above correlates either behavior with only the intentional preview request.
+  expect(problems.consoleErrors.length).toBeLessThanOrEqual(expectedPaths.length)
+}
+
+const failRouteAndRecordPath = async (page: Page, path: string): Promise<string[]> => {
+  const failedResponsePaths: string[] = []
+  await page.route(
+    `**${path}`,
+    async (route) => {
+      failedResponsePaths.push(path)
+      await route.fulfill({ status: 500, body: 'unavailable' })
+    },
+    { times: 1 },
+  )
+  return failedResponsePaths
 }
 
 const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
@@ -35,8 +97,16 @@ const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/blobs/**/content/image-png', async (route) => {
     const path = new URL(route.request().url()).pathname
-    const body = path === originalPath ? originalFixture : previewFixture
+    const body =
+      path === originalPath
+        ? originalFixture
+        : path === thumbnailPath
+          ? thumbnailFixture
+          : previewFixture
     await route.fulfill({ body, contentType: 'image/png' })
+  })
+  await page.route('**/api/blobs/**/content/image-jpeg', async (route) => {
+    await route.fulfill({ body: jpegOriginalFixture, contentType: 'image/jpeg' })
   })
 })
 
@@ -50,7 +120,9 @@ test.afterEach(async ({ page }, testInfo) => {
   })
 })
 
-test('selects admitted image views without prefetching original bytes', async ({ page }) => {
+test('selects a bounded image view and keeps an animation-capable original download-only', async ({
+  page,
+}) => {
   const problems = watchBrowser(page)
 
   const previewResponse = page.waitForResponse(
@@ -67,15 +139,59 @@ test('selects admitted image views without prefetching original bytes', async ({
     ),
   ).toBe(0)
 
-  const originalResponse = page.waitForResponse(
-    (response) => new URL(response.url()).pathname === originalPath,
-  )
-  const loadOriginal = page.getByRole('button', { name: 'Load original' })
-  await loadOriginal.focus()
-  await page.keyboard.press('Enter')
-  await expect(page.getByRole('img', { name: 'Original of orbital-map.png' })).toBeVisible()
-  expect((await originalResponse).headers()['content-type']).toContain('image/png')
+  const artifact = page.getByRole('article', { name: 'Artifact orbital-map.png' })
+  await expect(artifact.getByRole('button', { name: 'Load original' })).toHaveCount(0)
+  expect(
+    await page.evaluate(
+      (path) => performance.getEntriesByName(new URL(path, location.href).href).length,
+      originalPath,
+    ),
+  ).toBe(0)
+  await expect(artifact.getByRole('link', { name: 'Download' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('advances from a failed preview to its admitted thumbnail', async ({ page }) => {
+  const problems = watchBrowser(page)
+  const failedResponsePaths = await failRouteAndRecordPath(page, previewPath)
+  await page.goto('/scenario/blobs')
+
+  const artifact = page.getByRole('article', { name: 'Artifact orbital-map.png' })
+  await expect(artifact.getByRole('img', { name: 'Thumbnail of orbital-map.png' })).toBeVisible()
+  await expect(artifact.getByText('thumbnail', { exact: true })).toBeVisible()
+  await expect(artifact.getByRole('link', { name: 'Download' })).toBeVisible()
+  expectOnlyExpectedFailedResourceError(problems, failedResponsePaths, [previewPath])
+})
+
+test('retries a bounded JPEG original and hides obsolete automatic failure status', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  const failedPreviewPaths = await failRouteAndRecordPath(page, thumbnailPath)
+  const failedOriginalPaths = await failRouteAndRecordPath(page, jpegOriginalPath)
+  await page.goto('/scenario/blobs')
+
+  const artifact = page.getByRole('article', { name: 'Artifact bounded-photo.jpg' })
+  await artifact.scrollIntoViewIfNeeded()
+  await expect(artifact.getByRole('status')).toContainText(
+    'No admitted inline image view could be loaded',
+  )
+  await artifact.getByRole('button', { name: 'Load original' }).click()
+  await expect(artifact.getByRole('button', { name: 'Retry original' })).toBeVisible()
+  await expect(artifact.getByRole('status')).toContainText('Original image failed to load')
+
+  await artifact.getByRole('button', { name: 'Retry original' }).click()
+  await expect(artifact.getByRole('img', { name: 'Original of bounded-photo.jpg' })).toBeVisible()
+  await expect(artifact.getByRole('button', { name: 'Original loaded' })).toHaveAttribute(
+    'aria-disabled',
+    'true',
+  )
+  await expect(artifact.getByText('No admitted inline image view could be loaded')).toHaveCount(0)
+  expectOnlyExpectedFailedResourceError(
+    problems,
+    [...failedPreviewPaths, ...failedOriginalPaths],
+    [thumbnailPath, jpegOriginalPath],
+  )
 })
 
 test('expands text through a bounded keyboard action', async ({ page }) => {
@@ -88,11 +204,52 @@ test('expands text through a bounded keyboard action', async ({ page }) => {
   await expect(expand).toBeFocused()
   await page.keyboard.press('Enter')
   await expect(artifact.getByRole('button', { name: 'Collapse preview' })).toBeFocused()
-  await expect(artifact.getByText(/characters remain outside this bounded view/)).toBeVisible()
+  await expect(artifact.getByText('Complete bounded content shown')).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('keeps remote media behind the persisted ask policy', async ({ page }) => {
+test('selects artifacts independently and scopes preview commands', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/blobs')
+
+  await page.getByRole('button', { name: /incident-notes\.txt/ }).click()
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await expect(page.getByRole('button', { name: /Expand bounded artifact preview/ })).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  await page.getByRole('button', { name: /orbital-map\.png/ }).click()
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await expect(page.getByRole('button', { name: /Expand bounded artifact preview/ })).toHaveCount(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('keyboard-scrolls overflowing artifact content', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/blobs')
+
+  const preview = page.getByRole('textbox', { name: 'Bounded preview of renderer.ts' })
+  await preview.focus()
+  await expect(preview).toBeFocused()
+  await page.keyboard.press('PageDown')
+  await expect.poll(() => preview.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('returns Escape focus to the artifact that owns the focused content', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/blobs')
+
+  await page.getByRole('button', { name: /incident-notes\.txt/ }).click()
+  const heading = page.getByRole('button', { name: /renderer\.ts/ })
+  const preview = page.getByRole('textbox', { name: 'Bounded preview of renderer.ts' })
+  await preview.focus()
+  await expect(heading).toHaveAttribute('aria-pressed', 'true')
+  await page.keyboard.press('Escape')
+  await expect(heading).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('keeps remote media unavailable without a bounded owning service', async ({ page }) => {
   const problems = watchBrowser(page)
   let requests = 0
   await page.route(remotePath, async (route) => {
@@ -103,39 +260,35 @@ test('keeps remote media behind the persisted ask policy', async ({ page }) => {
 
   const artifact = page.getByRole('article', { name: 'Artifact remote-status-diagram.png' })
   await expect(artifact.getByLabel('Remote media not loaded')).toBeVisible()
-  expect(requests).toBe(0)
-  const load = artifact.getByRole('button', { name: 'Load this remote image' })
-  await load.focus()
-  await page.keyboard.press('Enter')
-  await expect(artifact.getByRole('img', { name: 'Remote status diagram' })).toBeVisible()
-  await expect.poll(() => requests).toBe(1)
-  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
-})
-
-test('blocks remote media without exposing a load action', async ({ page }) => {
-  const problems = watchBrowser(page)
-  let requests = 0
-  await page.route(remotePath, async (route) => {
-    requests += 1
-    await route.fulfill({ body: previewFixture, contentType: 'image/png' })
-  })
-  await page.goto('/scenario/blobs')
-  await page.getByRole('combobox', { name: 'Remote media' }).selectOption('block')
-
-  const artifact = page.getByRole('article', { name: 'Artifact remote-status-diagram.png' })
-  await expect(artifact.getByText('remote media block')).toBeVisible()
+  await expect(artifact.getByText('remote media unavailable')).toBeVisible()
+  await expect(artifact.getByText('No bytes were fetched.')).toBeVisible()
   await expect(artifact.getByRole('button', { name: 'Load this remote image' })).toHaveCount(0)
   expect(requests).toBe(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('renders unsupported and unauthorized kinds as typed safe states', async ({ page }) => {
+test('keeps a generic descriptor available as metadata and download', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/blobs')
 
-  const document = page.getByRole('article', { name: 'Artifact architecture.pdf' })
-  await expect(document.getByText('Typed renderer not implemented')).toBeVisible()
-  await expect(document.getByText('No bytes were read.')).toBeVisible()
+  const artifact = page.getByRole('article', { name: 'Artifact trace.bin' })
+  await expect(artifact.getByLabel('No compatible inline renderer')).toBeVisible()
+  await expect(artifact.getByText('metadata fallback')).toBeVisible()
+  await expect(artifact.getByText('application/octet-stream')).toBeVisible()
+  await expect(
+    artifact.getByText(`${BigInt(fallbackDescriptor.byte_length).toLocaleString()} bytes`),
+  ).toBeVisible()
+  await expect(artifact.getByRole('link', { name: 'Download' })).toHaveAttribute(
+    'href',
+    /display_filename=trace\.bin/,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('renders unauthorized kinds as typed safe states', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/blobs')
+
   const blocked = page.getByRole('article', { name: 'Artifact restricted.capture' })
   await expect(blocked.getByText('Artifact blocked')).toBeVisible()
   await expect(blocked.getByRole('link')).toHaveCount(0)
@@ -152,6 +305,44 @@ test('captures desktop dark artifact evidence', async ({ page }, testInfo) => {
     'artifacts-desktop-dark.png',
   )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+const captureArtifactState = async (
+  page: Page,
+  testInfo: TestInfo,
+  name: string,
+  screenshot: string,
+) => {
+  skipUnlessLinuxChromium(testInfo)
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.goto('/scenario/blobs')
+  const artifact = page.getByRole('article', { name })
+  await artifact.scrollIntoViewIfNeeded()
+  await expect(artifact).toHaveScreenshot(screenshot)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+}
+
+test('captures the image renderer state', async ({ page }, testInfo) => {
+  await captureArtifactState(page, testInfo, 'Artifact orbital-map.png', 'artifact-image-state.png')
+})
+
+test('captures the remote-unavailable renderer state', async ({ page }, testInfo) => {
+  await captureArtifactState(
+    page,
+    testInfo,
+    'Artifact remote-status-diagram.png',
+    'artifact-remote-unavailable-state.png',
+  )
+})
+
+test('captures the blocked renderer state', async ({ page }, testInfo) => {
+  await captureArtifactState(
+    page,
+    testInfo,
+    'Artifact restricted.capture',
+    'artifact-blocked-state.png',
+  )
 })
 
 test('captures desktop light artifact evidence', async ({ page }, testInfo) => {

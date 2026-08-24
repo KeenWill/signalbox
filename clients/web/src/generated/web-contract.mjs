@@ -82,6 +82,7 @@ const schemas = {
             "$ref": "#/$defs/WebBlobViewKind"
           },
           "media_type": {
+            "maxLength": 255,
             "type": "string"
           }
         },
@@ -236,6 +237,7 @@ const schemas = {
         "type": "string"
       },
       "declared_media_type": {
+        "maxLength": 255,
         "type": "string"
       },
       "digest": {
@@ -1716,30 +1718,161 @@ function assertCanonicalU64(value, path) {
   }
 }
 
-function canonicalJson(value) {
-  if (Array.isArray(value)) {
-    return value.map(canonicalJson);
+const utf8 = new TextEncoder();
+
+function compareUtf8(left, right) {
+  const leftBytes = utf8.encode(left);
+  const rightBytes = utf8.encode(right);
+  const shared = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < shared; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index] - rightBytes[index];
   }
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.keys(value).sort().map((key) => [key, canonicalJson(value[key])]),
-    );
-  }
-  return value;
+  return leftBytes.length - rightBytes.length;
+}
+
+function parseCanonicalJson(source) {
+  let cursor = 0;
+  const parseString = () => {
+    const start = cursor;
+    cursor += 1;
+    while (cursor < source.length) {
+      if (source[cursor] === "\\") cursor += source[cursor + 1] === "u" ? 6 : 2;
+      else if (source[cursor] === '"') {
+        cursor += 1;
+        const spelling = source.slice(start, cursor);
+        const decoded = JSON.parse(spelling);
+        if (JSON.stringify(decoded) !== spelling) throw new TypeError();
+        for (let index = 0; index < decoded.length; index += 1) {
+          const unit = decoded.charCodeAt(index);
+          if (unit >= 0xd800 && unit <= 0xdbff) {
+            const next = decoded.charCodeAt(index + 1);
+            if (!(next >= 0xdc00 && next <= 0xdfff)) throw new TypeError();
+            index += 1;
+          } else if (unit >= 0xdc00 && unit <= 0xdfff) throw new TypeError();
+        }
+        return decoded;
+      } else cursor += 1;
+    }
+    throw new TypeError();
+  };
+  const parseValue = () => {
+    const byte = source[cursor];
+    if (byte === '"') { parseString(); return; }
+    if (byte === "[") {
+      cursor += 1;
+      if (source[cursor] === "]") { cursor += 1; return; }
+      while (true) {
+        parseValue();
+        if (source[cursor] === "]") { cursor += 1; return; }
+        if (source[cursor] !== ",") throw new TypeError();
+        cursor += 1;
+      }
+    }
+    if (byte === "{") {
+      cursor += 1;
+      if (source[cursor] === "}") { cursor += 1; return; }
+      let previous;
+      while (true) {
+        if (source[cursor] !== '"') throw new TypeError();
+        const key = parseString();
+        if (previous !== undefined && compareUtf8(previous, key) >= 0) throw new TypeError();
+        previous = key;
+        if (source[cursor] !== ":") throw new TypeError();
+        cursor += 1;
+        parseValue();
+        if (source[cursor] === "}") { cursor += 1; return; }
+        if (source[cursor] !== ",") throw new TypeError();
+        cursor += 1;
+      }
+    }
+    for (const literal of ["true", "false", "null"]) {
+      if (source.startsWith(literal, cursor)) { cursor += literal.length; return; }
+    }
+    const number = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/u.exec(source.slice(cursor))?.[0];
+    if (number === undefined) throw new TypeError();
+    cursor += number.length;
+  };
+  parseValue();
+  if (cursor !== source.length) throw new TypeError();
 }
 
 function assertCanonicalParametersJson(value, path) {
-  if (new TextEncoder().encode(value).length > 4096) {
+  if (utf8.encode(value).length > 4096) {
     fail(path, "canonical JSON of at most 4096 UTF-8 bytes");
   }
-  let parsed;
   try {
-    parsed = JSON.parse(value);
+    parseCanonicalJson(value);
   } catch {
     fail(path, "canonical JSON");
   }
-  if (JSON.stringify(canonicalJson(parsed)) !== value) {
-    fail(path, "canonical JSON");
+}
+
+function assertDisplayFilename(value, path) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    new TextEncoder().encode(value).length > 1024 ||
+    /\p{Cc}/u.test(value)
+  ) {
+    fail(path, "a nonempty, control-free filename of at most 1024 UTF-8 bytes");
+  }
+}
+
+function isMimeTokenCharacter(value) {
+  return /^[!#$%&'*+.^_`|~0-9A-Za-z-]$/u.test(value);
+}
+
+function consumeMimeToken(value, cursor) {
+  const start = cursor;
+  while (cursor < value.length && isMimeTokenCharacter(value[cursor])) cursor += 1;
+  return cursor === start ? -1 : cursor;
+}
+
+function isMimeValue(value) {
+  let cursor = 0;
+  cursor = consumeMimeToken(value, cursor);
+  if (cursor < 0 || value[cursor] !== "/") return false;
+  cursor += 1;
+  cursor = consumeMimeToken(value, cursor);
+  if (cursor < 0) return false;
+  if (cursor === value.length) return true;
+  if (value[cursor] !== ";") return false;
+  cursor += 1;
+  while (cursor < value.length) {
+    while (value[cursor] === " ") cursor += 1;
+    if (cursor === value.length) return true;
+    cursor = consumeMimeToken(value, cursor);
+    if (cursor < 0 || value[cursor] !== "=") return false;
+    cursor += 1;
+    if (value[cursor] === '"') {
+      cursor += 1;
+      const start = cursor;
+      while (cursor < value.length && value[cursor] !== '"') {
+        const unit = value.charCodeAt(cursor);
+        if (unit <= 31 || unit === 127) return false;
+        cursor += 1;
+      }
+      if (cursor === start || value[cursor] !== '"') return false;
+      cursor += 1;
+      while (value[cursor] === " ") cursor += 1;
+    } else {
+      cursor = consumeMimeToken(value, cursor);
+      if (cursor < 0) return false;
+    }
+    if (cursor === value.length) return true;
+    if (value[cursor] !== ";") return false;
+    cursor += 1;
+  }
+  return true;
+}
+
+function assertMediaType(value, path) {
+  if (
+    typeof value !== "string" ||
+    utf8.encode(value).length > 255 ||
+    !isMimeValue(value)
+  ) {
+    fail(path, "a MIME value of at most 255 UTF-8 bytes");
   }
 }
 
@@ -1764,26 +1897,136 @@ function assertSameOriginBlobUrl(value, path) {
   if (parsed.origin !== base || !parsed.pathname.startsWith("/api/blobs/") || parsed.hash !== "") {
     fail(path, "a same-origin blob API path");
   }
-  const route = /^\/api\/blobs\/(sha256:[0-9a-f]{64})\/(?:download|content\/[a-z0-9-]+)$/u.exec(parsed.pathname);
+  const route = /^\/api\/blobs\/(sha256:[0-9a-f]{64})\/(download|content\/(?:image-png|image-jpeg|image-gif|image-webp))$/u.exec(parsed.pathname);
   if (route === null) {
     fail(path, "a canonical blob API route");
   }
-  return route[1];
+  let mediaType;
+  if (route[2] === "download") {
+    const mediaTypes = parsed.searchParams.getAll("media_type");
+    const filenames = parsed.searchParams.getAll("display_filename");
+    const known = [...parsed.searchParams.keys()].every((key) => key === "media_type" || key === "display_filename");
+    if (mediaTypes.length !== 1 || mediaTypes[0] === "" || filenames.length > 1 || !known) {
+      fail(path, "a download route with required media type metadata");
+    }
+    assertMediaType(mediaTypes[0], `${path} media_type`);
+    mediaType = mediaTypes[0];
+    if (filenames.length === 1) {
+      assertDisplayFilename(filenames[0], `${path} display_filename`);
+    }
+  } else if (parsed.search !== "") {
+    fail(path, "a content route without query metadata");
+  } else {
+    mediaType = {
+      "content/image-png": "image/png",
+      "content/image-jpeg": "image/jpeg",
+      "content/image-gif": "image/gif",
+      "content/image-webp": "image/webp",
+    }[route[2]];
+  }
+  return {
+    digest: route[1],
+    kind: route[2],
+    mediaType,
+    displayFilename: route[2] === "download"
+      ? parsed.searchParams.get("display_filename") ?? undefined
+      : undefined,
+  };
+}
+
+function u64Bytes(value) {
+  const output = new Uint8Array(8);
+  let remaining = BigInt(value);
+  for (let index = 7; index >= 0; index -= 1) { output[index] = Number(remaining & 255n); remaining >>= 8n; }
+  return output;
+}
+
+function digestBytes(value) {
+  return Uint8Array.from(value.slice(7).match(/../gu), (pair) => Number.parseInt(pair, 16));
+}
+
+function sha256(bytes) {
+  const constants = new Uint32Array([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
+  const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLength); padded.set(bytes); padded[bytes.length] = 0x80;
+  let bits = BigInt(bytes.length) * 8n;
+  for (let index = paddedLength - 1; index >= paddedLength - 8; index -= 1) { padded[index] = Number(bits & 255n); bits >>= 8n; }
+  const state = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+  const words = new Uint32Array(64);
+  const rotate = (value, count) => (value >>> count) | (value << (32 - count));
+  for (let block = 0; block < paddedLength; block += 64) {
+    for (let index = 0; index < 16; index += 1) { const offset = block + index * 4; words[index] = (padded[offset] << 24) | (padded[offset + 1] << 16) | (padded[offset + 2] << 8) | padded[offset + 3]; }
+    for (let index = 16; index < 64; index += 1) { const x=words[index-15], y=words[index-2]; words[index]=(words[index-16]+(rotate(x,7)^rotate(x,18)^(x>>>3))+words[index-7]+(rotate(y,17)^rotate(y,19)^(y>>>10)))>>>0; }
+    let [a,b,c,d,e,f,g,h]=state;
+    for (let index=0; index<64; index+=1) { const sum1=(h+(rotate(e,6)^rotate(e,11)^rotate(e,25))+((e&f)^(~e&g))+constants[index]+words[index])>>>0; const sum0=(rotate(a,2)^rotate(a,13)^rotate(a,22))>>>0; const majority=((a&b)^(a&c)^(b&c))>>>0; h=g;g=f;f=e;e=(d+sum1)>>>0;d=c;c=b;b=a;a=(sum1+sum0+majority)>>>0; }
+    for (const [index,value] of [a,b,c,d,e,f,g,h].entries()) state[index]=(state[index]+value)>>>0;
+  }
+  return [...state].map((word) => word.toString(16).padStart(8, "0")).join("");
+}
+
+function deterministicCacheKey(derivation) {
+  const name=utf8.encode(derivation.transformation_name), parameters=utf8.encode(derivation.parameters_json);
+  const version=new Uint8Array(4); new DataView(version.buffer).setUint32(0, derivation.transformation_version);
+  const pieces=[utf8.encode("signalbox.blob-derivation.v1\0"),u64Bytes(derivation.input_digests.length)];
+  derivation.input_digests.forEach((digest)=>pieces.push(digestBytes(digest)));
+  pieces.push(u64Bytes(name.length),name,version,u64Bytes(parameters.length),parameters,digestBytes(derivation.producer.implementation_digest));
+  const framed=new Uint8Array(pieces.reduce((total,piece)=>total+piece.length,0)); let offset=0;
+  pieces.forEach((piece)=>{ framed.set(piece,offset); offset+=piece.length; });
+  return `sha256:${sha256(framed)}`;
 }
 
 function validateWebBlobDescriptor(value) {
   assertBlobDigest(value.digest, "blob_descriptor.digest");
   assertCanonicalU64(value.byte_length, "blob_descriptor.byte_length");
+  assertMediaType(value.declared_media_type, "blob_descriptor.declared_media_type");
+  value.display_filename.forEach((filename, index) =>
+    assertDisplayFilename(filename, `blob_descriptor.display_filename[${index}]`));
   value.available_views.forEach((view, index) => {
+    assertMediaType(view.media_type, `blob_descriptor.available_views[${index}].media_type`);
     assertCanonicalU64(view.byte_length, `blob_descriptor.available_views[${index}].byte_length`);
     const contentPath = `blob_descriptor.available_views[${index}].content_url`;
-    const contentDigest = assertSameOriginBlobUrl(view.content_url, contentPath);
+    const contentRoute = assertSameOriginBlobUrl(view.content_url, contentPath);
+    const contentDigest = contentRoute.digest;
+    if (view.media_type !== contentRoute.mediaType) {
+      fail(`blob_descriptor.available_views[${index}].media_type`, "the content route media type");
+    }
     if (view.kind === "download" || view.kind === "browser_native") {
+      if (view.derivations.length !== 0) {
+        fail(`blob_descriptor.available_views[${index}].derivations`, "empty for an original representation");
+      }
       if (contentDigest !== value.digest) {
         fail(contentPath, "a route for the descriptor digest");
       }
-    } else if (!view.derivations.some((derivation) => derivation.output_digests.includes(contentDigest))) {
-      fail(contentPath, "a route for an advertised derivation output digest");
+      if ((view.kind === "download") !== (contentRoute.kind === "download")) {
+        fail(contentPath, "a route matching the advertised view kind");
+      }
+      if (view.byte_length !== value.byte_length) {
+        fail(`blob_descriptor.available_views[${index}].byte_length`, "the descriptor byte length for an original representation");
+      }
+      if (view.kind === "download" && view.media_type !== value.declared_media_type) {
+        fail(`blob_descriptor.available_views[${index}].media_type`, "the descriptor declared media type for the download representation");
+      }
+      if (
+        view.kind === "download" &&
+        contentRoute.displayFilename !== value.display_filename[0]
+      ) {
+        fail(contentPath, "download filename metadata matching the descriptor");
+      }
+      if (
+        view.kind === "browser_native" &&
+        value.declared_media_type.split(";", 1)[0].trim().toLowerCase() !== contentRoute.mediaType
+      ) {
+        fail(contentPath, "an original-image route matching the descriptor declared media type");
+      }
+    } else {
+      if (contentRoute.kind !== "content/image-png") {
+        fail(contentPath, "an image-content route for a derivative view");
+      }
+      if (!view.derivations.some((derivation) =>
+        derivation.input_digests.includes(value.digest) &&
+        derivation.output_digests.includes(contentDigest))) {
+        fail(contentPath, "a route for a derivation output bound to the descriptor input");
+      }
     }
     view.derivations.forEach((derivation, derivationIndex) => {
       const path = `blob_descriptor.available_views[${index}].derivations[${derivationIndex}]`;
@@ -1796,6 +2039,9 @@ function validateWebBlobDescriptor(value) {
       if (derivation.producer.class === "deterministic") {
         assertBlobDigest(derivation.producer.implementation_digest, `${path}.producer.implementation_digest`);
         assertBlobDigest(derivation.producer.cache_key, `${path}.producer.cache_key`);
+        if (deterministicCacheKey(derivation) !== derivation.producer.cache_key) {
+          fail(`${path}.producer.cache_key`, "the deterministic key for the advertised provenance");
+        }
       } else if (derivation.producer.class === "executed") {
         assertUuid(derivation.producer.execution_id, `${path}.producer.execution_id`);
         assertBlobDigest(derivation.producer.implementation_digest, `${path}.producer.implementation_digest`);
@@ -1803,10 +2049,33 @@ function validateWebBlobDescriptor(value) {
         assertUuid(derivation.producer.model_call_id, `${path}.producer.model_call_id`);
       }
     });
+    if (view.kind === "thumbnail" || view.kind === "preview") {
+      const derivation = view.derivations[0];
+      const expectedName = view.kind === "thumbnail" ? "image.thumbnail" : "image.preview";
+      const expectedParameters = view.kind === "thumbnail"
+        ? '{"edge_px":256,"format":"image/png"}'
+        : '{"edge_px":1600,"format":"image/png"}';
+      if (
+        derivation === undefined ||
+        derivation.transformation_name !== expectedName ||
+        derivation.transformation_version !== 1 ||
+        derivation.parameters_json !== expectedParameters ||
+        derivation.producer.class !== "deterministic"
+      ) {
+        fail(
+          `blob_descriptor.available_views[${index}].derivations`,
+          "the exact deterministic image transformation for the advertised view kind",
+        );
+      }
+    }
   });
   const downloadViews = value.available_views.filter((view) => view.kind === "download");
   if (downloadViews.length !== 1) {
     fail("blob_descriptor.available_views", "exactly one download view");
+  }
+  const representationKinds = value.available_views.map((view) => view.kind);
+  if (new Set(representationKinds).size !== representationKinds.length) {
+    fail("blob_descriptor.available_views", "at most one view of each representation kind");
   }
   return value;
 }
