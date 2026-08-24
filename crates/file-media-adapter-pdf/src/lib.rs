@@ -145,6 +145,7 @@ enum Preflight {
     Ready,
     Encrypted,
     ObjectLimit,
+    DecodedLimit,
 }
 
 enum PageCollectionError {
@@ -257,6 +258,11 @@ impl FileMediaProvider for PdfProvider {
                 Preflight::ObjectLimit => {
                     return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
                         limit_kind: String::from(OBJECT_COUNT_LIMIT),
+                    });
+                }
+                Preflight::DecodedLimit => {
+                    return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
+                        limit_kind: String::from(DECODED_CONTENT_LIMIT),
                     });
                 }
             }
@@ -739,9 +745,78 @@ fn preflight_document(bytes: &[u8]) -> Result<Preflight, FileMediaProviderFailur
         Ok(Preflight::Encrypted)
     } else if parsed.object_limit_exceeded {
         Ok(Preflight::ObjectLimit)
+    } else if !object_streams_fit_expansion_limit(bytes, &parsed)? {
+        Ok(Preflight::DecodedLimit)
     } else {
         Ok(Preflight::Ready)
     }
+}
+
+fn object_streams_fit_expansion_limit(
+    bytes: &[u8],
+    parsed: &ParsedXref,
+) -> Result<bool, FileMediaProviderFailure> {
+    let stream_objects = parsed
+        .live_entries
+        .iter()
+        .filter_map(|entry| match entry.location {
+            XrefLocation::Compressed { stream_object, .. } => Some(stream_object),
+            XrefLocation::Uncompressed(_) => None,
+        })
+        .collect::<BTreeSet<_>>();
+    for stream_object in stream_objects {
+        let (stream_reference, stream_offset) =
+            object_stream_offset(parsed, stream_object).ok_or(FileMediaProviderFailure::Failed)?;
+        let stream_offset =
+            usize::try_from(stream_offset).map_err(|_| FileMediaProviderFailure::Failed)?;
+        let stream_bytes = bytes
+            .get(stream_offset..)
+            .ok_or(FileMediaProviderFailure::Failed)?;
+        let resolved_length = match object_stream_declared_length(stream_bytes, stream_reference)
+            .ok_or(FileMediaProviderFailure::Failed)?
+        {
+            StreamLength::Direct(_) => None,
+            StreamLength::Indirect(reference) => {
+                let entry = parsed
+                    .live_entries
+                    .iter()
+                    .find(|entry| entry.reference == reference)
+                    .ok_or(FileMediaProviderFailure::Failed)?;
+                let XrefLocation::Uncompressed(offset) = entry.location else {
+                    return Err(FileMediaProviderFailure::Failed);
+                };
+                let offset =
+                    usize::try_from(offset).map_err(|_| FileMediaProviderFailure::Failed)?;
+                let length = indirect_integer_object(
+                    bytes
+                        .get(offset..)
+                        .ok_or(FileMediaProviderFailure::Failed)?,
+                    reference,
+                )
+                .ok_or(FileMediaProviderFailure::Failed)?;
+                Some((reference, length))
+            }
+        };
+        let (facts, encoded) = parse_object_stream(stream_bytes, stream_reference, resolved_length)
+            .ok_or(FileMediaProviderFailure::Failed)?;
+        if !facts.is_object_stream
+            || facts.count.is_none_or(|count| count > MAX_OBJECTS as u64)
+            || facts.first.is_none()
+        {
+            return Err(FileMediaProviderFailure::Failed);
+        }
+        if decode_pdf_stream(
+            encoded,
+            &facts.filters,
+            facts.decode_parameters.as_deref(),
+            MAX_OBJECT_STREAM_BYTES,
+        )
+        .is_none()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn collect_pages(document: &Document) -> Result<Vec<(u32, lopdf::ObjectId)>, PageCollectionError> {
@@ -822,12 +897,8 @@ fn collect_pages(document: &Document) -> Result<Vec<(u32, lopdf::ObjectId)>, Pag
                     .get(b"Kids")
                     .and_then(lopdf::Object::as_array)
                     .map_err(|_| PageCollectionError::Malformed)?;
-                if pending
-                    .len()
-                    .saturating_add(kids.len())
-                    .saturating_add(pages.len())
-                    > MAX_PAGES
-                {
+                let count = usize::try_from(count).map_err(|_| PageCollectionError::Limit)?;
+                if pages.len().saturating_add(count) > MAX_PAGES {
                     return Err(PageCollectionError::Limit);
                 }
                 pending.push((object_id, true, expected_parent));
@@ -1534,7 +1605,11 @@ fn parse_xref_chain(bytes: &[u8], start: usize) -> Option<ParsedXref> {
     visited.insert(offset);
     merge_complete_supplemental_xref(bytes, &mut parsed, &mut visited)?;
     while let Some(previous_offset) = parsed.facts.prev {
-        offset = usize::try_from(previous_offset).ok()?;
+        let previous_offset = usize::try_from(previous_offset).ok()?;
+        if previous_offset >= offset {
+            return None;
+        }
+        offset = previous_offset;
         if !visited.insert(offset) {
             return None;
         }
@@ -3182,7 +3257,118 @@ mod tests {
         });
         document.trailer.set("Root", catalog_id);
 
-        assert!(matches!(collect_pages(&document), Ok(pages) if pages.len() == 1));
+        let Ok(pages) = collect_pages(&document) else {
+            panic!("expected valid page collection");
+        };
+
+        assert_eq!(pages.len(), 1);
+    }
+
+    #[test]
+    fn nested_page_tree_accepts_exact_page_ceiling() {
+        let mut document = Document::with_version("1.5");
+        let root_id = document.new_object_id();
+        let nested_id = document.new_object_id();
+        let page_ids = (0..MAX_PAGES)
+            .map(|_| document.new_object_id())
+            .collect::<Vec<_>>();
+        for page_id in &page_ids {
+            document.objects.insert(
+                *page_id,
+                Object::Dictionary(dictionary! {
+                    "Type" => "Page",
+                    "Parent" => nested_id,
+                }),
+            );
+        }
+        document.objects.insert(
+            nested_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Parent" => root_id,
+                "Kids" => page_ids.iter().copied().map(Object::Reference).collect::<Vec<_>>(),
+                "Count" => i64::try_from(MAX_PAGES).expect("page ceiling fits i64"),
+            }),
+        );
+        document.objects.insert(
+            root_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(nested_id)],
+                "Count" => i64::try_from(MAX_PAGES).expect("page ceiling fits i64"),
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => root_id,
+        });
+        document.trailer.set("Root", catalog_id);
+
+        let Ok(pages) = collect_pages(&document) else {
+            panic!("expected exact-ceiling page tree to remain valid");
+        };
+
+        assert_eq!(pages.len(), MAX_PAGES);
+    }
+
+    #[test]
+    fn complete_xref_chain_rejects_forward_prev_link() {
+        let forward_offset = 256_usize;
+        let mut bytes = format!(
+            "xref\n1 1\n0000000009 00000 n\ntrailer\n<< /Size 3 /Root 1 0 R /Prev {forward_offset} >>\n"
+        )
+        .into_bytes();
+        bytes.resize(forward_offset, b' ');
+        bytes.extend_from_slice(
+            b"xref\n2 1\n0000000042 00000 n\ntrailer\n<< /Size 3 /Root 1 0 R >>\n",
+        );
+
+        assert!(parse_xref_chain(&bytes, 0).is_none());
+    }
+
+    #[test]
+    fn complete_preflight_bounds_object_stream_expansion() {
+        let decoded = vec![b'a'; MAX_OBJECT_STREAM_BYTES + 1];
+        let mut compressed = Stream::new(Dictionary::new(), decoded);
+        compressed
+            .compress()
+            .expect("compress object stream fixture");
+        let mut bytes = format!(
+            "5 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length {} /Filter /FlateDecode >>\nstream\n",
+            compressed.content.len()
+        )
+        .into_bytes();
+        bytes.extend_from_slice(&compressed.content);
+        bytes.extend_from_slice(b"\nendstream\nendobj");
+        let parsed = ParsedXref {
+            facts: TrailerFacts::default(),
+            live_entries: vec![
+                LiveXrefEntry {
+                    reference: IndirectReference {
+                        object_number: 5,
+                        generation: 0,
+                    },
+                    location: XrefLocation::Uncompressed(0),
+                },
+                LiveXrefEntry {
+                    reference: IndirectReference {
+                        object_number: 7,
+                        generation: 0,
+                    },
+                    location: XrefLocation::Compressed {
+                        stream_object: 5,
+                        index: 0,
+                    },
+                },
+            ],
+            declared_objects: BTreeSet::from([5, 7]),
+            object_limit_exceeded: false,
+        };
+
+        let fits = object_streams_fit_expansion_limit(&bytes, &parsed)
+            .expect("well-formed object stream preflight");
+
+        assert!(!fits);
     }
 
     #[test]
