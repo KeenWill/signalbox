@@ -842,6 +842,16 @@ const schemas = {
   },
   "WebSessionLiveStreamEvent": {
     "$defs": {
+      "WebLiveResourceId": {
+        "description": "Checked canonical UUID used for browser-visible live resource identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
       "WebSessionLiveActiveState": {
         "description": "Current durable state of one active turn.",
         "oneOf": [
@@ -853,9 +863,13 @@ const schemas = {
                 "type": "string"
               },
               "model_call_id": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebLiveResourceId"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               }
             },
@@ -872,7 +886,7 @@ const schemas = {
                 "type": "string"
               },
               "model_call_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebLiveResourceId"
               }
             },
             "required": [
@@ -889,7 +903,7 @@ const schemas = {
                 "type": "string"
               },
               "tool_request_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebLiveResourceId"
               }
             },
             "required": [
@@ -902,14 +916,14 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "child_session_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "kind": {
                 "const": "awaiting_child",
                 "type": "string"
               },
               "tool_request_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebLiveResourceId"
               }
             },
             "required": [
@@ -927,7 +941,7 @@ const schemas = {
                 "type": "string"
               },
               "tool_attempt_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebLiveResourceId"
               }
             },
             "required": [
@@ -947,7 +961,7 @@ const schemas = {
                 "$ref": "#/$defs/WebU64"
               },
               "runner_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebLiveResourceId"
               }
             },
             "required": [
@@ -966,7 +980,7 @@ const schemas = {
             "$ref": "#/$defs/WebSessionLiveActiveState"
           },
           "turn_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebTurnId"
           }
         },
         "required": [
@@ -985,10 +999,10 @@ const schemas = {
                 "type": "string"
               },
               "model_call_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebLiveResourceId"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebTurnId"
               }
             },
             "required": [
@@ -1006,10 +1020,10 @@ const schemas = {
                 "type": "string"
               },
               "tool_attempt_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebLiveResourceId"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebTurnId"
               }
             },
             "required": [
@@ -1050,7 +1064,7 @@ const schemas = {
                 "$ref": "#/$defs/WebU64"
               },
               "runner_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebLiveResourceId"
               },
               "state": {
                 "const": "pinned",
@@ -1072,7 +1086,7 @@ const schemas = {
                 "$ref": "#/$defs/WebU64"
               },
               "runner_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebLiveResourceId"
               },
               "state": {
                 "const": "runner_lost_before_pin",
@@ -1093,7 +1107,7 @@ const schemas = {
                 "$ref": "#/$defs/WebU64"
               },
               "runner_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebLiveResourceId"
               },
               "state": {
                 "const": "runner_lost",
@@ -1114,7 +1128,7 @@ const schemas = {
                 "$ref": "#/$defs/WebU64"
               },
               "runner_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebLiveResourceId"
               },
               "state": {
                 "const": "runner_abandoned",
@@ -1161,7 +1175,7 @@ const schemas = {
           },
           "queued_turn_ids": {
             "items": {
-              "type": "string"
+              "$ref": "#/$defs/WebTurnId"
             },
             "maxItems": 32,
             "type": "array"
@@ -1187,7 +1201,7 @@ const schemas = {
             ]
           },
           "session_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebSessionId"
           }
         },
         "required": [
@@ -1239,6 +1253,11 @@ const schemas = {
       "WebTimelineEventSequence": {
         "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
         "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebTurnId": {
+        "description": "Checked canonical UUID used for browser-visible turn identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
         "type": "string"
       },
       "WebU64": {
@@ -1303,7 +1322,7 @@ const schemas = {
             "type": "string"
           },
           "model_call_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebLiveResourceId"
           },
           "part_index": {
             "format": "uint32",
@@ -1311,7 +1330,7 @@ const schemas = {
             "type": "integer"
           },
           "turn_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebTurnId"
           }
         },
         "required": [
@@ -1803,12 +1822,33 @@ export function decodeWebAttentionStreamEvent(value) {
 export function decodeWebSessionLiveSnapshot(value) {
   const root = schemas.WebSessionLiveStreamEvent;
   assertSchema(root, root.$defs.WebSessionLiveSnapshot, value, "session_live_snapshot");
+  assertLiveSnapshot(value, "session_live_snapshot");
   return value;
 }
 
 export function decodeWebSessionLiveStreamEvent(value) {
   assertSchema(schemas.WebSessionLiveStreamEvent, schemas.WebSessionLiveStreamEvent, value, "session_live_event");
+  if (value.kind === "snapshot") {
+    assertLiveSnapshot(value.snapshot, "session_live_event.snapshot");
+  }
+  if (value.kind === "durable" && value.cursor !== value.address.event_sequence) {
+    fail("session_live_event.address.event_sequence", "equal to cursor");
+  }
   return value;
+}
+
+function assertLiveSnapshot(snapshot, path) {
+  const queuedTurnCount = BigInt(snapshot.queued_turn_count);
+  const expectedPreviewLength = queuedTurnCount > 32n ? 32n : queuedTurnCount;
+  if (BigInt(snapshot.queued_turn_ids.length) !== expectedPreviewLength) {
+    fail(
+      `${path}.queued_turn_ids`,
+      `exactly ${expectedPreviewLength} IDs for queued_turn_count`,
+    );
+  }
+  if (snapshot.active !== null && snapshot.reconciliation !== null) {
+    fail(`${path}.reconciliation`, "absent while an active turn is present");
+  }
 }
 
 function assertAttentionSummary(summary, path) {

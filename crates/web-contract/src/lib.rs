@@ -223,6 +223,36 @@ impl<'de> Deserialize<'de> for WebTurnId {
     }
 }
 
+/// Checked canonical UUID used for browser-visible live resource identities.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebLiveResourceId(
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    String,
+);
+
+impl WebLiveResourceId {
+    /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
+    #[must_use]
+    pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
+        Self(WebSessionId::from_uuid_bytes(bytes).0)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebLiveResourceId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        canonical_session_id(&value)
+            .then_some(Self(value))
+            .ok_or_else(|| de::Error::custom("live resource ID must be a canonical lowercase UUID"))
+    }
+}
+
 impl WebTimelineEventSequence {
     /// Encodes one already-validated positive durable-event sequence.
     #[must_use]
@@ -387,23 +417,23 @@ where
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebSessionLiveActiveState {
     Running {
-        model_call_id: Option<String>,
+        model_call_id: Option<WebLiveResourceId>,
     },
     AwaitingModelCallRecovery {
-        model_call_id: String,
+        model_call_id: WebLiveResourceId,
     },
     AwaitingToolApproval {
-        tool_request_id: String,
+        tool_request_id: WebLiveResourceId,
     },
     AwaitingChild {
-        tool_request_id: String,
-        child_session_id: String,
+        tool_request_id: WebLiveResourceId,
+        child_session_id: WebSessionId,
     },
     AwaitingToolRecovery {
-        tool_attempt_id: String,
+        tool_attempt_id: WebLiveResourceId,
     },
     AwaitingRunnerRecovery {
-        runner_id: String,
+        runner_id: WebLiveResourceId,
         placement_revision: WebU64,
     },
 }
@@ -411,7 +441,7 @@ pub enum WebSessionLiveActiveState {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionLiveActiveTurn {
-    pub turn_id: String,
+    pub turn_id: WebTurnId,
     pub state: WebSessionLiveActiveState,
 }
 
@@ -419,12 +449,12 @@ pub struct WebSessionLiveActiveTurn {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebSessionLiveReconciliation {
     ModelCall {
-        turn_id: String,
-        model_call_id: String,
+        turn_id: WebTurnId,
+        model_call_id: WebLiveResourceId,
     },
     ToolAttempt {
-        turn_id: String,
-        tool_attempt_id: String,
+        turn_id: WebTurnId,
+        tool_attempt_id: WebLiveResourceId,
     },
 }
 
@@ -444,20 +474,20 @@ pub enum WebSessionLiveRunner {
         placement_revision: WebU64,
     },
     Pinned {
-        runner_id: String,
+        runner_id: WebLiveResourceId,
         placement_revision: WebU64,
         connection_health: WebSessionLiveRunnerConnectionHealth,
     },
     RunnerLostBeforePin {
-        runner_id: String,
+        runner_id: WebLiveResourceId,
         placement_revision: WebU64,
     },
     RunnerLost {
-        runner_id: String,
+        runner_id: WebLiveResourceId,
         placement_revision: WebU64,
     },
     RunnerAbandoned {
-        runner_id: String,
+        runner_id: WebLiveResourceId,
         placement_revision: WebU64,
     },
 }
@@ -466,12 +496,12 @@ pub enum WebSessionLiveRunner {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionLiveSnapshot {
-    pub session_id: String,
+    pub session_id: WebSessionId,
     pub observed_through: WebU64,
     pub active: Option<WebSessionLiveActiveTurn>,
     pub queued_turn_count: WebU64,
     #[schemars(length(max = 32))]
-    pub queued_turn_ids: Vec<String>,
+    pub queued_turn_ids: Vec<WebTurnId>,
     pub reconciliation: Option<WebSessionLiveReconciliation>,
     pub runner: Option<WebSessionLiveRunner>,
 }
@@ -489,8 +519,8 @@ pub enum WebSessionLiveStreamEvent {
         event_kind: WebSessionTimelineEventKind,
     },
     ProviderTextDelta {
-        turn_id: String,
-        model_call_id: String,
+        turn_id: WebTurnId,
+        model_call_id: WebLiveResourceId,
         part_index: u32,
         content: String,
     },
@@ -1000,12 +1030,33 @@ export function decodeWebAttentionStreamEvent(value) {{
 export function decodeWebSessionLiveSnapshot(value) {{
   const root = schemas.WebSessionLiveStreamEvent;
   assertSchema(root, root.$defs.WebSessionLiveSnapshot, value, "session_live_snapshot");
+  assertLiveSnapshot(value, "session_live_snapshot");
   return value;
 }}
 
 export function decodeWebSessionLiveStreamEvent(value) {{
   assertSchema(schemas.WebSessionLiveStreamEvent, schemas.WebSessionLiveStreamEvent, value, "session_live_event");
+  if (value.kind === "snapshot") {{
+    assertLiveSnapshot(value.snapshot, "session_live_event.snapshot");
+  }}
+  if (value.kind === "durable" && value.cursor !== value.address.event_sequence) {{
+    fail("session_live_event.address.event_sequence", "equal to cursor");
+  }}
   return value;
+}}
+
+function assertLiveSnapshot(snapshot, path) {{
+  const queuedTurnCount = BigInt(snapshot.queued_turn_count);
+  const expectedPreviewLength = queuedTurnCount > 32n ? 32n : queuedTurnCount;
+  if (BigInt(snapshot.queued_turn_ids.length) !== expectedPreviewLength) {{
+    fail(
+      `${{path}}.queued_turn_ids`,
+      `exactly ${{expectedPreviewLength}} IDs for queued_turn_count`,
+    );
+  }}
+  if (snapshot.active !== null && snapshot.reconciliation !== null) {{
+    fail(`${{path}}.reconciliation`, "absent while an active turn is present");
+  }}
 }}
 
 function assertAttentionSummary(summary, path) {{

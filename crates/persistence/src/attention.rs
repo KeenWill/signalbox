@@ -10,8 +10,10 @@ use signalbox_application::{
     max_attention_goal_summary_characters, max_attention_snapshot_items,
     max_attention_title_characters,
 };
-use signalbox_domain::{SessionId, TurnId};
+use signalbox_domain::{GoalBlockedReasonKind, SessionId, TurnId};
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
+
+use crate::mapping::goal_blocked_reason_from_str;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AttentionCorruption {
@@ -209,6 +211,8 @@ macro_rules! summary_sql {
            lifecycle.session_id, lifecycle.turn_id, lifecycle.state_kind,
            lifecycle.active_phase_kind, lifecycle.terminal_disposition_kind
       FROM turn_lifecycle AS lifecycle JOIN selected USING (session_id)
+     WHERE NOT lifecycle.delegation_runtime_terminal
+       AND goal_turn_is_runtime_relevant(lifecycle.session_id, lifecycle.turn_id)
      ORDER BY lifecycle.session_id,
               CASE lifecycle.state_kind
                   WHEN 'active' THEN 0
@@ -222,17 +226,6 @@ macro_rules! summary_sql {
            goal.blocked_reason, LEFT(goal.need, $4) AS need_summary
       FROM goal_event AS goal JOIN selected USING (session_id)
      ORDER BY goal.session_id, goal.event_ordinal DESC
-), judge AS (
-    SELECT call.session_id,
-           count(*) FILTER (WHERE call.state_kind <> 'terminal') AS actionable,
-           count(*) FILTER (WHERE call.terminal_disposition_kind = 'completed'
-                              AND call.recommendation_kind <> 'escalate_to_human') AS completed,
-           count(*) FILTER (WHERE call.terminal_disposition_kind = 'completed'
-                              AND call.recommendation_kind = 'escalate_to_human') AS escalated,
-           count(*) FILTER (WHERE call.state_kind = 'terminal'
-                              AND call.terminal_disposition_kind <> 'completed') AS failed
-      FROM tool_approval_judge_model_call AS call JOIN selected USING (session_id)
-     GROUP BY call.session_id
 ), latest_runner AS (
     SELECT DISTINCT ON (placement.session_id)
            placement.session_id, placement.state_kind
@@ -244,16 +237,13 @@ SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
        selected.title_summary, selected.title_truncated, selected.archived,
        selected.active_turn_count, selected.queued_turn_count,
        goal.generation, goal.event_kind AS goal_state, goal.blocked_reason, goal.need_summary,
-       COALESCE(judge.actionable, 0) AS judge_actionable,
-       COALESCE(judge.completed, 0) AS judge_completed,
-       COALESCE(judge.escalated, 0) AS judge_escalated,
-       COALESCE(judge.failed, 0) AS judge_failed,
+       selected.judge_actionable, selected.judge_completed,
+       selected.judge_escalated, selected.judge_failed,
        runner.state_kind AS runner_state,
        selected.fact_kind, selected.recorded_at
   FROM selected
   LEFT JOIN latest_turn AS turn USING (session_id)
   LEFT JOIN latest_goal AS goal USING (session_id)
-  LEFT JOIN judge USING (session_id)
   LEFT JOIN latest_runner AS runner USING (session_id) "#,
             $ordering
         )
@@ -268,6 +258,10 @@ const SELECT_IDENTITY: &str = summary_sql!(
            COALESCE(metadata.archived, false) AS archived,
            facts.active_turn_count::text AS active_turn_count,
            facts.queued_turn_count::text AS queued_turn_count,
+           facts.approval_judge_actionable_count::text AS judge_actionable,
+           facts.approval_judge_completed_count::text AS judge_completed,
+           facts.approval_judge_escalated_count::text AS judge_escalated,
+           facts.approval_judge_failed_count::text AS judge_failed,
            activity.fact_kind, activity.recorded_at
       FROM session AS session_row
       LEFT JOIN session_metadata AS metadata USING (session_id)
@@ -304,6 +298,10 @@ const SELECT_LAST_ACTIVITY: &str = summary_sql!(
            COALESCE(metadata.archived, false) AS archived,
            facts.active_turn_count::text AS active_turn_count,
            facts.queued_turn_count::text AS queued_turn_count,
+           facts.approval_judge_actionable_count::text AS judge_actionable,
+           facts.approval_judge_completed_count::text AS judge_completed,
+           facts.approval_judge_escalated_count::text AS judge_escalated,
+           facts.approval_judge_failed_count::text AS judge_failed,
            activity.fact_kind, activity.recorded_at
       FROM session AS session_row
       LEFT JOIN session_metadata AS metadata USING (session_id)
@@ -475,10 +473,10 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
         action,
         goal_block: decode_goal_block(row, goal_state.as_deref())?,
         judge: AttentionJudgeFacts {
-            actionable: nonnegative(row.try_get("judge_actionable")?, "judge actionable")?,
-            completed: nonnegative(row.try_get("judge_completed")?, "judge completed")?,
-            escalated: nonnegative(row.try_get("judge_escalated")?, "judge escalated")?,
-            failed: nonnegative(row.try_get("judge_failed")?, "judge failed")?,
+            actionable: parse_u64(row, "judge_actionable")?,
+            completed: parse_u64(row, "judge_completed")?,
+            escalated: parse_u64(row, "judge_escalated")?,
+            failed: parse_u64(row, "judge_failed")?,
         },
         last_activity: AttentionActivity {
             recorded_at: SystemTime::from(recorded_at),
@@ -528,15 +526,20 @@ fn decode_goal_block(
     if goal_state != Some("blocked") {
         return Ok(None);
     }
-    let reason = match required_string(row, "blocked_reason")?.as_str() {
-        "user_input_required" => AttentionBlockedReason::UserInputRequired,
-        "external_change_required" => AttentionBlockedReason::ExternalChangeRequired,
-        "authorization_required" => AttentionBlockedReason::AuthorizationRequired,
-        "execution_failure" => AttentionBlockedReason::ExecutionFailure,
-        value => {
+    let stored_reason = required_string(row, "blocked_reason")?;
+    let reason = match goal_blocked_reason_from_str(&stored_reason) {
+        Some(GoalBlockedReasonKind::UserInputRequired) => AttentionBlockedReason::UserInputRequired,
+        Some(GoalBlockedReasonKind::ExternalChangeRequired) => {
+            AttentionBlockedReason::ExternalChangeRequired
+        }
+        Some(GoalBlockedReasonKind::AuthorizationRequired) => {
+            AttentionBlockedReason::AuthorizationRequired
+        }
+        Some(GoalBlockedReasonKind::ExecutionFailure) => AttentionBlockedReason::ExecutionFailure,
+        None => {
             return Err(AttentionCorruption::Unsupported {
                 field: "goal blocked reason",
-                value: value.to_owned(),
+                value: stored_reason,
             }
             .into());
         }
@@ -568,6 +571,12 @@ fn decode_activity_kind(value: &str) -> Result<AttentionActivityKind, AttentionR
 fn required_string(row: &PgRow, field: &'static str) -> Result<String, AttentionRepositoryError> {
     row.try_get::<Option<String>, _>(field)?
         .ok_or_else(|| AttentionCorruption::Missing(field).into())
+}
+
+fn parse_u64(row: &PgRow, field: &'static str) -> Result<u64, AttentionRepositoryError> {
+    required_string(row, field)?
+        .parse()
+        .map_err(|_| AttentionCorruption::Invalid(field).into())
 }
 
 fn nonnegative(value: i64, field: &'static str) -> Result<u64, AttentionRepositoryError> {

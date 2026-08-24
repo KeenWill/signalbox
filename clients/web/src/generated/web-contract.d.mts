@@ -90,43 +90,45 @@ type WebContractLimits = {
   readonly max_timeline_window_items: number;
 };
 
+type WebLiveResourceId = string;
+
 type WebSessionId = string;
 
 type WebSessionLiveActiveState = {
   readonly kind: "running";
-  readonly model_call_id?: string | null;
+  readonly model_call_id?: WebLiveResourceId | null;
 } | {
   readonly kind: "awaiting_model_call_recovery";
-  readonly model_call_id: string;
+  readonly model_call_id: WebLiveResourceId;
 } | {
   readonly kind: "awaiting_tool_approval";
-  readonly tool_request_id: string;
+  readonly tool_request_id: WebLiveResourceId;
 } | {
-  readonly child_session_id: string;
+  readonly child_session_id: WebSessionId;
   readonly kind: "awaiting_child";
-  readonly tool_request_id: string;
+  readonly tool_request_id: WebLiveResourceId;
 } | {
   readonly kind: "awaiting_tool_recovery";
-  readonly tool_attempt_id: string;
+  readonly tool_attempt_id: WebLiveResourceId;
 } | {
   readonly kind: "awaiting_runner_recovery";
   readonly placement_revision: WebU64;
-  readonly runner_id: string;
+  readonly runner_id: WebLiveResourceId;
 };
 
 type WebSessionLiveActiveTurn = {
   readonly state: WebSessionLiveActiveState;
-  readonly turn_id: string;
+  readonly turn_id: WebTurnId;
 };
 
 type WebSessionLiveReconciliation = {
   readonly kind: "model_call";
-  readonly model_call_id: string;
-  readonly turn_id: string;
+  readonly model_call_id: WebLiveResourceId;
+  readonly turn_id: WebTurnId;
 } | {
   readonly kind: "tool_attempt";
-  readonly tool_attempt_id: string;
-  readonly turn_id: string;
+  readonly tool_attempt_id: WebLiveResourceId;
+  readonly turn_id: WebTurnId;
 };
 
 type WebSessionLiveRunner = {
@@ -135,19 +137,19 @@ type WebSessionLiveRunner = {
 } | {
   readonly connection_health: WebSessionLiveRunnerConnectionHealth;
   readonly placement_revision: WebU64;
-  readonly runner_id: string;
+  readonly runner_id: WebLiveResourceId;
   readonly state: "pinned";
 } | {
   readonly placement_revision: WebU64;
-  readonly runner_id: string;
+  readonly runner_id: WebLiveResourceId;
   readonly state: "runner_lost_before_pin";
 } | {
   readonly placement_revision: WebU64;
-  readonly runner_id: string;
+  readonly runner_id: WebLiveResourceId;
   readonly state: "runner_lost";
 } | {
   readonly placement_revision: WebU64;
-  readonly runner_id: string;
+  readonly runner_id: WebLiveResourceId;
   readonly state: "runner_abandoned";
 };
 
@@ -157,10 +159,10 @@ type WebSessionLiveSnapshot = {
   readonly active?: WebSessionLiveActiveTurn | null;
   readonly observed_through: WebU64;
   readonly queued_turn_count: WebU64;
-  readonly queued_turn_ids: ReadonlyArray<string>;
+  readonly queued_turn_ids: ReadonlyArray<WebTurnId>;
   readonly reconciliation?: WebSessionLiveReconciliation | null;
   readonly runner?: WebSessionLiveRunner | null;
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
 };
 
 type WebSessionTimelineEventKind = "session_created" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
@@ -253,10 +255,10 @@ export type WebSessionLiveSnapshot = {
   readonly active?: WebSessionLiveActiveTurn | null;
   readonly observed_through: WebU64;
   readonly queued_turn_count: WebU64;
-  readonly queued_turn_ids: ReadonlyArray<string>;
+  readonly queued_turn_ids: ReadonlyArray<WebTurnId>;
   readonly reconciliation?: WebSessionLiveReconciliation | null;
   readonly runner?: WebSessionLiveRunner | null;
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
 };
 
 export type WebSessionLiveStreamEvent = {
@@ -270,9 +272,9 @@ export type WebSessionLiveStreamEvent = {
 } | {
   readonly content: string;
   readonly kind: "provider_text_delta";
-  readonly model_call_id: string;
+  readonly model_call_id: WebLiveResourceId;
   readonly part_index: number;
-  readonly turn_id: string;
+  readonly turn_id: WebTurnId;
 } | {
   readonly cursor: WebU64;
   readonly kind: "resync_required";
