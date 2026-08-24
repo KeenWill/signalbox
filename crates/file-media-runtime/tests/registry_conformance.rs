@@ -317,6 +317,7 @@ fn inspect(
 #[derive(Clone, Copy)]
 enum SelectionProbe {
     Strong,
+    ProvisionalStructural,
     Structural,
     Malformed,
     NoMatch,
@@ -357,6 +358,10 @@ impl FileMediaProcessor for SelectionProcessor {
                 SelectionProbe::Strong => ProcessorProbeOutput::Candidate {
                     media_type: String::from(SYNTHETIC_MEDIA_TYPE),
                     strength: ProbeStrength::Strong,
+                },
+                SelectionProbe::ProvisionalStructural => ProcessorProbeOutput::Candidate {
+                    media_type: String::from(SYNTHETIC_MEDIA_TYPE),
+                    strength: ProbeStrength::ProvisionalStructuralCandidate,
                 },
                 SelectionProbe::Structural => ProcessorProbeOutput::Candidate {
                     media_type: String::from(SYNTHETIC_MEDIA_TYPE),
@@ -657,6 +662,22 @@ fn structural_validation_no_match_is_processor_failure() {
     );
 
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
+#[test]
+fn provisional_structural_validation_no_match_resumes_fallback() {
+    let outcome = selection_inspection(
+        SelectionProbe::ProvisionalStructural,
+        SelectionValidation::NoMatch,
+        SYNTHETIC_MEDIA_TYPE,
+        SYNTHETIC_MEDIA_TYPE,
+        StreamingTextFallback::Disabled,
+    )
+    .expect("provisional structural validation miss resumes fallback");
+
+    let FileInspection::Unknown { .. } = outcome else {
+        panic!("provisional structural validation miss must become unknown");
+    };
 }
 
 #[test]

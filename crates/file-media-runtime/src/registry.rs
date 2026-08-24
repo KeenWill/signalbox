@@ -259,20 +259,29 @@ impl FileMediaRegistry {
 
         let structural = candidates
             .iter()
-            .filter(|candidate| candidate.strength == ProbeStrength::StructuralCandidate)
+            .filter(|candidate| {
+                matches!(
+                    candidate.strength,
+                    ProbeStrength::ProvisionalStructuralCandidate
+                        | ProbeStrength::StructuralCandidate
+                )
+            })
             .cloned()
             .collect::<Vec<_>>();
         if !structural.is_empty() {
-            return self
+            let inspection = self
                 .resolve_candidates(
                     processor,
-                    request,
+                    request.clone(),
                     source,
                     cancellation,
                     structural,
                     ValidationEvidence::StructuralValidation,
                 )
-                .await;
+                .await?;
+            if !matches!(inspection, FileInspection::Unknown { .. }) {
+                return Ok(inspection);
+            }
         }
 
         if let Ok(declared) = request.source.declared_media_type().canonical_essence()
@@ -495,7 +504,8 @@ impl FileMediaRegistry {
                 media_type: candidate.media_type,
             }),
             SanitizedValidation::NoMatch
-                if evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated
+                if candidate.strength == ProbeStrength::ProvisionalStructuralCandidate
+                    || evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated
                     || evidence == ValidationEvidence::StreamingTextValidation =>
             {
                 Ok(FileInspection::Unknown {
@@ -672,7 +682,9 @@ struct Candidate {
 fn recognized_probe_strength(strength: ProbeStrength) -> bool {
     matches!(
         strength,
-        ProbeStrength::Strong | ProbeStrength::StructuralCandidate
+        ProbeStrength::Strong
+            | ProbeStrength::ProvisionalStructuralCandidate
+            | ProbeStrength::StructuralCandidate
     )
 }
 

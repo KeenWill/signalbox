@@ -27,9 +27,16 @@ pub(crate) async fn probe(
     };
     let candidate = has_json_structure(&prefix, extent);
     if candidate {
+        let strength = if matches!(extent, ProbeExtent::TruncatedPrefix)
+            && is_complete_json_document(&prefix)
+        {
+            ProbeStrength::ProvisionalStructuralCandidate
+        } else {
+            ProbeStrength::StructuralCandidate
+        };
         Ok(ProcessorProbeOutput::Candidate {
             media_type: String::from(JSON_MEDIA_TYPE),
-            strength: ProbeStrength::StructuralCandidate,
+            strength,
         })
     } else {
         Ok(ProcessorProbeOutput::NoMatch)
@@ -66,8 +73,10 @@ pub(crate) fn has_raw_json_structure(prefix: &[u8], extent: ProbeExtent) -> bool
 fn incomplete_json_prefix(text: &str) -> bool {
     let mut deserializer = serde_json::Deserializer::from_str(text);
     deserializer.disable_recursion_limit();
-    serde::de::IgnoredAny::deserialize(serde_stacker::Deserializer::new(&mut deserializer))
-        .is_err_and(|error| error.is_eof())
+    match serde::de::IgnoredAny::deserialize(serde_stacker::Deserializer::new(&mut deserializer)) {
+        Ok(_) => deserializer.end().is_ok(),
+        Err(error) => error.is_eof(),
+    }
 }
 
 fn trim_ascii_start(bytes: &[u8]) -> &[u8] {
@@ -113,7 +122,15 @@ pub(crate) async fn inspect(
         Ok(text) => text,
         Err(reason) => return Ok(validation_failure(request.evidence, reason)),
     };
-    if validate_json(&text).is_err() || validate_json_without_duplicate_members(&text).is_err() {
+    if validate_json(&text).is_err() {
+        if matches!(request.evidence, ValidationEvidence::StructuralValidation)
+            && has_complete_json_prefix_with_trailing_content(&text)
+        {
+            return Ok(ProcessorValidationOutput::NoMatch);
+        }
+        return Ok(validation_failure(request.evidence, "malformed_json"));
+    }
+    if validate_json_without_duplicate_members(&text).is_err() {
         return Ok(validation_failure(request.evidence, "malformed_json"));
     }
     Ok(ProcessorValidationOutput::Validated {
@@ -266,8 +283,61 @@ fn has_declared_json_prefix(prefix: &[u8]) -> bool {
     deserializer.disable_recursion_limit();
     match serde::de::IgnoredAny::deserialize(serde_stacker::Deserializer::new(&mut deserializer)) {
         Ok(_) => deserializer.end().is_ok(),
-        Err(error) => eof_consistent && error.is_eof(),
+        Err(error) => {
+            eof_consistent
+                && (error.is_eof()
+                    || matches!(prefix.first(), Some(b'-' | b'0'..=b'9'))
+                        && is_json_number_prefix(text))
+        }
     }
+}
+
+fn has_complete_json_prefix_with_trailing_content(text: &str) -> bool {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    deserializer.disable_recursion_limit();
+    serde::de::IgnoredAny::deserialize(serde_stacker::Deserializer::new(&mut deserializer))
+        .is_ok_and(|_| deserializer.end().is_err())
+}
+
+fn is_json_number_prefix(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut index = usize::from(bytes.first() == Some(&b'-'));
+    if index == bytes.len() {
+        return true;
+    }
+
+    match bytes[index] {
+        b'0' => index += 1,
+        b'1'..=b'9' => {
+            index += 1;
+            while matches!(bytes.get(index), Some(b'0'..=b'9')) {
+                index += 1;
+            }
+        }
+        _ => return false,
+    }
+
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        while matches!(bytes.get(index), Some(b'0'..=b'9')) {
+            index += 1;
+        }
+        if index == bytes.len() {
+            return true;
+        }
+    }
+
+    if matches!(bytes.get(index), Some(b'e' | b'E')) {
+        index += 1;
+        if matches!(bytes.get(index), Some(b'+' | b'-')) {
+            index += 1;
+        }
+        while matches!(bytes.get(index), Some(b'0'..=b'9')) {
+            index += 1;
+        }
+    }
+
+    index == bytes.len()
 }
 
 pub(crate) fn is_complete_json_document(prefix: &[u8]) -> bool {

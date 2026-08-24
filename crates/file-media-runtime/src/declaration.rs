@@ -17,6 +17,8 @@ const MAX_VIEW_DESCRIPTION_BYTES: usize = 512;
 pub enum ProbeStrength {
     /// Caller declaration nominates a provider but is not evidence.
     DeclaredCandidate,
+    /// A bounded complete prefix is provisional until full validation.
+    ProvisionalStructuralCandidate,
     /// Bounded structure suggests a candidate requiring full validation.
     StructuralCandidate,
     /// A format-owned signature identifies a candidate.

@@ -186,6 +186,30 @@ async fn truncated_declared_json_scalar_preserves_the_size_reason() -> Result<()
 }
 
 #[tokio::test]
+async fn truncated_declared_negative_json_number_preserves_the_size_reason()
+-> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(b"-1".to_vec());
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 1;
+
+    let inspection = support::inspect_with_ceilings(&source, "application/json", ceilings).await?;
+    support::assert_malformed_reason(inspection, "source_too_large");
+    Ok(())
+}
+
+#[tokio::test]
+async fn truncated_declared_json_exponent_preserves_the_size_reason() -> Result<(), Box<dyn Error>>
+{
+    let source = MemorySource::new(b"1e2".to_vec());
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 2;
+
+    let inspection = support::inspect_with_ceilings(&source, "application/json", ceilings).await?;
+    support::assert_malformed_reason(inspection, "source_too_large");
+    Ok(())
+}
+
+#[tokio::test]
 async fn oversized_declared_json_rejects_trailing_prefix_bytes() -> Result<(), Box<dyn Error>> {
     let mut bytes = b"true trailing".to_vec();
     bytes.resize(128 * 1_024 + 1, b' ');
@@ -433,6 +457,24 @@ async fn complete_json_prefix_without_eof_uses_text_fallback() -> Result<(), Box
 
     let inspection = support::inspect(&source, "text/plain").await?;
     support::assert_validated_media(inspection, "text/plain");
+    Ok(())
+}
+
+#[tokio::test]
+async fn completed_json_prefix_followed_by_whitespace_is_structurally_detected()
+-> Result<(), Box<dyn Error>> {
+    let mut bytes = b"{}".to_vec();
+    bytes.resize(4_097, b' ');
+    let source = MemorySource::new(bytes);
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_declared_mismatch(
+        inspection,
+        DeclaredMismatchExpectation {
+            declared: "text/plain",
+            detected: "application/json",
+        },
+    );
     Ok(())
 }
 

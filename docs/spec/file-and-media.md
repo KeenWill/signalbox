@@ -84,21 +84,26 @@ settles conflicting claims.
 
 Incompatible strong claims return ambiguity. Compatible strong claims resolve to
 their sole type and reader and require strong-signature validation. With no
-strong claim, a sole compatible structural candidate receives structural
-validation. This ordering is the simplest interpretation of the accepted
-design's otherwise unplaced `StructuralCandidate` strength. With neither, a
-syntactically canonical declaration may nominate its exact reader for
-independent structural validation. Finally, the sole registered text fallback
-may claim only through complete streaming validation. No successful path returns
-an ordinary declaration as evidence.
+strong claim, a sole compatible structural or provisional structural candidate
+receives structural validation. A provisional structural candidate records a
+complete value at the end of a bounded prefix whose source continues, so full
+validation may disprove it and resume declaration or text fallback. This
+ordering is the simplest interpretation of the accepted design's otherwise
+unplaced `StructuralCandidate` strength. With neither, a syntactically canonical
+declaration may nominate its exact reader for independent structural validation.
+Finally, the sole registered text fallback may claim only through complete
+streaming validation. No successful path returns an ordinary declaration as
+evidence.
 
 A recognized-malformed probe is terminal; incompatible recognized types are
-ambiguous. Strong or structural validation cannot quietly return no-match and
-fall through. A declared or streaming candidate that does not validate becomes
-ordinary unknown. Successful detection that disagrees with a syntactically
-canonical caller declaration becomes `DeclaredTypeMismatch`, blocking typed
-reads without changing the blob or its metadata. Recognized encrypted or locked
-content is terminal `EncryptedOrLocked`; version one has no password channel.
+ambiguous. Strong or ordinary structural validation cannot quietly return
+no-match and fall through. A provisional structural, declared, or streaming
+candidate that does not validate resumes the remaining fallback path and becomes
+ordinary unknown when none succeeds. Successful detection that disagrees with a
+syntactically canonical caller declaration becomes `DeclaredTypeMismatch`,
+blocking typed reads without changing the blob or its metadata. Recognized
+encrypted or locked content is terminal `EncryptedOrLocked`; version one has no
+password channel.
 
 ## Agent tools
 
