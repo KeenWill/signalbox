@@ -43,6 +43,8 @@ pub mod session_placement;
 pub mod start_eligible_turn;
 pub mod startup;
 pub mod submit_input;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod tool_loop;
 pub mod turn_liveness;
 
