@@ -622,7 +622,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           </span>
         </div>
         {importsAvailable && (
-          <div hidden={surface !== 'imports'}>
+          <div
+            hidden={surface !== 'imports'}
+            style={surface === 'imports' ? { display: 'contents' } : undefined}
+          >
             <ImportsWorkspace
               api={productImportApi}
               scenario={false}
