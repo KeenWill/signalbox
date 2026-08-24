@@ -1549,11 +1549,14 @@ impl HubModelConfiguration {
         target: ResolvedProviderTarget,
         profile: &str,
         semantics: ProcessModelCallInputTokenSemantics,
-        input_tokens: Option<u128>,
-        output_tokens: Option<u128>,
-        cache_creation_input_tokens: Option<u128>,
-        cache_read_input_tokens: Option<u128>,
+        token_axes: [Option<u128>; 4],
     ) -> Option<DerivedModelCallCost> {
+        let [
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        ] = token_axes;
         let rates = self.billing_rates.get(&target)?;
         let billing_kind = self.credential_profiles.get(profile)?.billing_kind();
         let ordinary_input_tokens = match semantics {
@@ -2649,7 +2652,7 @@ fn exact_rate_token_product(rate: Decimal, tokens: u128) -> Option<Decimal> {
     if tokens > u128::try_from(Decimal::MAX.mantissa()).ok()? {
         return None;
     }
-    let product = rate.checked_mul(Decimal::try_from(tokens).ok()?)?;
+    let product = rate.checked_mul(Decimal::from(tokens))?;
     let scale_loss = rate.scale().checked_sub(product.scale())?;
     if scale_loss == 0 {
         return Some(product);
@@ -5701,10 +5704,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
                 configured_target(&configuration),
                 "anthropic-primary",
                 ProcessModelCallInputTokenSemantics::CacheExclusive,
-                None,
-                Some(u128::from(u64::MAX) + 1),
-                None,
-                None,
+                [None, Some(u128::from(u64::MAX) + 1), None, None],
             )
             .expect("the widened output total is exactly priceable");
 
@@ -5720,10 +5720,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
                 configured_target(&configuration),
                 "anthropic-primary",
                 ProcessModelCallInputTokenSemantics::CacheExclusive,
-                Some(u128::MAX),
-                Some(1_000_000),
-                None,
-                None,
+                [Some(u128::MAX), Some(1_000_000), None, None],
             )
             .expect("the representable output axis remains priceable");
 

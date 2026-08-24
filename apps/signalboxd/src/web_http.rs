@@ -948,10 +948,12 @@ fn usage_aggregate_cost_dto(
         group.key.model,
         &group.key.credential_profile,
         semantics,
-        group.tokens.input,
-        group.tokens.output,
-        group.tokens.cache_creation_input,
-        group.tokens.cache_read_input,
+        [
+            group.tokens.input,
+            group.tokens.output,
+            group.tokens.cache_creation_input,
+            group.tokens.cache_read_input,
+        ],
     ) else {
         return unavailable(WebUsageCostUnavailableReason::ConfigurationUnavailable);
     };
