@@ -228,6 +228,28 @@ async fn mp3_probe_rejects_an_invalid_id3v24_footer() -> Result<(), Box<dyn Erro
 }
 
 #[tokio::test]
+async fn mp3_rejects_an_empty_advertised_id3v24_extended_header() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::mp3_with_empty_id3v24_extended_header()?);
+
+    let inspection = support::inspect(&source, "audio/mpeg").await?;
+    assert!(matches!(
+        inspection,
+        signalbox_file_media_runtime::FileInspection::Unknown { .. }
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn mp3_rejects_fewer_frames_than_its_xing_header_advertises() -> Result<(), Box<dyn Error>> {
+    assert_reason(
+        FixtureFormat::Mp3,
+        fixtures::mp3_with_excess_xing_frame_count()?,
+        "malformed_audio",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn flac_truncation_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_reason(
         FixtureFormat::Flac,

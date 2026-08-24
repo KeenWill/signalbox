@@ -17,7 +17,7 @@ use signalbox_file_media_runtime::{
 const PROVIDER_NAME: &str = "signalbox_audio";
 const READER_REVISION: &str = "v1";
 const METADATA_VIEW_NAME: &str = "metadata";
-/// Hard safety ceiling covering the exact probe prefix and possible one-byte suffix.
+/// Hard safety ceiling covering the prefix and two possible exact MP3 reads.
 const AUDIO_PROBE_CUMULATIVE_BYTES: u64 = 78;
 
 /// Hard safety ceiling bounding whole-source worker memory while admitting ordinary audio.
@@ -82,7 +82,19 @@ fn ogg_opus_signature(prefix: &[u8]) -> bool {
     let Some(lacing) = prefix.get(27..packet_offset) else {
         return false;
     };
-    if !lacing.iter().any(|length| *length < 255) {
+    let mut first_packet_length = 0_usize;
+    let mut first_packet_complete = false;
+    for segment_length in lacing {
+        let Some(length) = first_packet_length.checked_add(usize::from(*segment_length)) else {
+            return false;
+        };
+        first_packet_length = length;
+        if *segment_length < 255 {
+            first_packet_complete = true;
+            break;
+        }
+    }
+    if !first_packet_complete || first_packet_length < 19 {
         return false;
     }
     prefix
@@ -125,17 +137,107 @@ pub(crate) fn id3_tag_layout(bytes: &[u8]) -> Option<(usize, bool)> {
     let tag_length = header[6..10].iter().try_fold(0_usize, |length, byte| {
         length.checked_mul(128)?.checked_add(usize::from(*byte))
     })?;
+    if flags & 0x40 != 0 && !valid_id3_extended_header(major, tag_length, bytes) {
+        return None;
+    }
     Some((
         10_usize.checked_add(tag_length)?,
         major == 4 && flags & 0x10 != 0,
     ))
 }
 
-pub(crate) fn valid_id3_footer(header: &[u8], footer: &[u8]) -> bool {
-    header.len() == 10
-        && footer.len() == 10
-        && footer.starts_with(b"3DI")
-        && footer[3..10] == header[3..10]
+fn valid_id3_extended_header(major: u8, tag_length: usize, bytes: &[u8]) -> bool {
+    let Some(size_bytes) = bytes
+        .get(10..14)
+        .and_then(|value| <[u8; 4]>::try_from(value).ok())
+    else {
+        return false;
+    };
+    match major {
+        3 => valid_id3v23_extended_header(tag_length, size_bytes, bytes),
+        4 => {
+            if size_bytes.iter().any(|byte| byte & 0x80 != 0) {
+                return false;
+            }
+            let Some(size) = size_bytes.iter().try_fold(0_usize, |length, byte| {
+                length.checked_mul(128)?.checked_add(usize::from(*byte))
+            }) else {
+                return false;
+            };
+            valid_id3v24_extended_header(tag_length, size, bytes)
+        }
+        _ => false,
+    }
+}
+
+fn valid_id3v23_extended_header(tag_length: usize, size_bytes: [u8; 4], bytes: &[u8]) -> bool {
+    let Ok(size) = usize::try_from(u32::from_be_bytes(size_bytes)) else {
+        return false;
+    };
+    let Some(total_size) = size.checked_add(4) else {
+        return false;
+    };
+    let Some(body) = bytes.get(14..14_usize.saturating_add(size)) else {
+        return false;
+    };
+    let Some(flags) = body
+        .get(..2)
+        .and_then(|value| <[u8; 2]>::try_from(value).ok())
+        .map(u16::from_be_bytes)
+    else {
+        return false;
+    };
+    total_size <= tag_length
+        && flags & !0x8000 == 0
+        && if flags & 0x8000 == 0 {
+            size == 6
+        } else {
+            size == 10
+        }
+}
+
+fn valid_id3v24_extended_header(tag_length: usize, size: usize, bytes: &[u8]) -> bool {
+    if size < 6 || size > tag_length {
+        return false;
+    }
+    let Some(body) = bytes.get(14..10_usize.saturating_add(size)) else {
+        return false;
+    };
+    if body.first() != Some(&1) {
+        return false;
+    }
+    let Some(flags) = body.get(1).copied() else {
+        return false;
+    };
+    if flags & !0x70 != 0 {
+        return false;
+    }
+    let mut fields = &body[2..];
+    for (flag, expected_length) in [(0x40, 0_usize), (0x20, 5), (0x10, 1)] {
+        if flags & flag == 0 {
+            continue;
+        }
+        if fields.first().copied() != u8::try_from(expected_length).ok() {
+            return false;
+        }
+        let Some(remaining) = fields.get(1_usize.saturating_add(expected_length)..) else {
+            return false;
+        };
+        fields = remaining;
+    }
+    fields.is_empty()
+}
+
+pub(crate) struct Id3Footer<'a> {
+    pub(crate) header: &'a [u8],
+    pub(crate) footer: &'a [u8],
+}
+
+pub(crate) fn valid_id3_footer(input: Id3Footer<'_>) -> bool {
+    input.header.len() == 10
+        && input.footer.len() == 10
+        && input.footer.starts_with(b"3DI")
+        && input.footer[3..10] == input.header[3..10]
 }
 
 fn id3_audio_offset(bytes: &[u8]) -> Option<usize> {
@@ -144,7 +246,10 @@ fn id3_audio_offset(bytes: &[u8]) -> Option<usize> {
         return Some(tag_end);
     }
     let footer_end = tag_end.checked_add(10)?;
-    if !valid_id3_footer(bytes.get(..10)?, bytes.get(tag_end..footer_end)?) {
+    if !valid_id3_footer(Id3Footer {
+        header: bytes.get(..10)?,
+        footer: bytes.get(tag_end..footer_end)?,
+    }) {
         return None;
     }
     Some(footer_end)
@@ -199,6 +304,25 @@ mod tests {
         writer
             .write_packet(
                 b"codec-version=OpusHead".to_vec(),
+                7,
+                PacketWriteEndInfo::EndStream,
+                0,
+            )
+            .expect("second Ogg packet should encode");
+        let bytes = writer.into_inner();
+
+        assert!(!AdapterFormat::OggOpus.matches_signature(&bytes));
+    }
+
+    #[test]
+    fn ogg_opus_probe_does_not_join_two_packets_into_an_identification_header() {
+        let mut writer = PacketWriter::new(Vec::new());
+        writer
+            .write_packet(b"OpusHead".to_vec(), 7, PacketWriteEndInfo::NormalPacket, 0)
+            .expect("first Ogg packet should encode");
+        writer
+            .write_packet(
+                vec![1, 1, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0],
                 7,
                 PacketWriteEndInfo::EndStream,
                 0,
@@ -291,7 +415,7 @@ fn reader(
         reader: FileReaderName::try_new(format.reader_name())?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(format.media_type())?],
-        probe: ProbeDeclaration::new(64, 1, 3, AUDIO_PROBE_CUMULATIVE_BYTES),
+        probe: ProbeDeclaration::new(64, 0, 2, AUDIO_PROBE_CUMULATIVE_BYTES),
         views: vec![metadata_view()?],
         reason_codes: reasons,
         streaming_text_fallback: StreamingTextFallback::Disabled,

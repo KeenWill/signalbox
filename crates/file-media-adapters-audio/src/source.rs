@@ -9,17 +9,27 @@ use crate::MAX_AUDIO_SOURCE_BYTES;
 pub(crate) async fn read_complete(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
+    maximum_source_bytes: u64,
+    maximum_ranges: u32,
 ) -> Result<Option<Vec<u8>>, FileMediaProviderFailure> {
     if cancellation.is_cancelled() {
         return Err(FileMediaProviderFailure::Failed);
     }
-    if source.byte_length().get() > MAX_AUDIO_SOURCE_BYTES {
+    let effective_source_bytes = maximum_source_bytes.min(MAX_AUDIO_SOURCE_BYTES);
+    if source.byte_length().get() > effective_source_bytes {
         return Ok(None);
     }
     let source_length = source.byte_length().get();
     let capacity = usize::try_from(source_length).map_err(|_| FileMediaProviderFailure::Failed)?;
     let maximum_chunk = u64::try_from(MAX_PROCESSOR_FRAME_BYTES / 2)
         .map_err(|_| FileMediaProviderFailure::Failed)?;
+    let required_ranges = source_length
+        .checked_add(maximum_chunk - 1)
+        .ok_or(FileMediaProviderFailure::Failed)?
+        / maximum_chunk;
+    if required_ranges > u64::from(maximum_ranges) {
+        return Ok(None);
+    }
     let mut bytes = Vec::with_capacity(capacity);
     let mut offset = 0_u64;
     while offset < source_length {

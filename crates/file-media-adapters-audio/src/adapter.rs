@@ -18,8 +18,8 @@ use symphonia::{
 };
 
 use crate::{
-    AdapterFormat, MAX_AUDIO_SOURCE_BYTES, id3_audio_offset, id3_tag_layout, options_are_empty,
-    source, valid_id3_footer, valid_mp3_frame_header,
+    AdapterFormat, Id3Footer, MAX_AUDIO_SOURCE_BYTES, id3_audio_offset, id3_tag_layout,
+    options_are_empty, source, valid_id3_footer, valid_mp3_frame_header,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,7 +59,10 @@ pub(crate) async fn probe(
                 };
                 footer
             };
-            if !valid_id3_footer(&prefix[..10], &footer) {
+            if !valid_id3_footer(Id3Footer {
+                header: &prefix[..10],
+                footer: &footer,
+            }) {
                 return Ok(ProcessorProbeOutput::NoMatch);
             }
             footer_end
@@ -109,7 +112,14 @@ pub(crate) async fn inspect(
     if request.media_type.as_str() != format.media_type() {
         return Err(FileMediaProviderFailure::Failed);
     }
-    let Some(bytes) = source::read_complete(source, cancellation).await? else {
+    let Some(bytes) = source::read_complete(
+        source,
+        cancellation,
+        request.maximum_source_bytes.min(MAX_AUDIO_SOURCE_BYTES),
+        request.maximum_ranges,
+    )
+    .await?
+    else {
         return Ok(validation_failure(
             format,
             request.evidence,
@@ -140,7 +150,9 @@ pub(crate) async fn read(
     if request.view.as_str() != "metadata" || !valid_input {
         return Ok(ProcessorReadOutput::InvalidViewArguments);
     }
-    let Some(bytes) = source::read_complete(source, cancellation).await? else {
+    let Some(bytes) =
+        source::read_complete(source, cancellation, MAX_AUDIO_SOURCE_BYTES, 512).await?
+    else {
         return Ok(ProcessorReadOutput::SourceTooLarge {
             maximum_bytes: MAX_AUDIO_SOURCE_BYTES,
         });
@@ -207,10 +219,10 @@ fn decode_with_symphonia(
         sample_rate_hz: codec_parameters.sample_rate.ok_or("malformed_audio")?,
     };
     validate_shape(declared_metadata)?;
-    let declared_frames = if format == AdapterFormat::Flac {
-        flac_declared_frames(bytes)?
-    } else {
-        None
+    let declared_frames = match format {
+        AdapterFormat::Flac => flac_declared_frames(bytes)?,
+        AdapterFormat::Mp3 => mp3_declared_frames(bytes)?,
+        AdapterFormat::Wav | AdapterFormat::OggOpus => None,
     };
     let mut decoder_options = AudioDecoderOptions::default();
     decoder_options.verify = true;
@@ -218,7 +230,8 @@ fn decode_with_symphonia(
         .make_audio_decoder(&codec_parameters, &decoder_options)
         .map_err(|_| "malformed_audio")?;
     let mut metadata = (format == AdapterFormat::Wav).then_some(declared_metadata);
-    let mut decoded_frames = 0_u64;
+    let mut raw_decoded_frames = 0_u64;
+    let mut presented_frames = 0_u64;
 
     while let Some(packet) = reader.next_packet().map_err(|_| "malformed_audio")? {
         if packet.track_id != track_id {
@@ -236,6 +249,9 @@ fn decode_with_symphonia(
         metadata = Some(observed);
         let decoded_packet_frames =
             u64::try_from(decoded.frames()).map_err(|_| "duration_limit_exceeded")?;
+        raw_decoded_frames = raw_decoded_frames
+            .checked_add(decoded_packet_frames)
+            .ok_or("duration_limit_exceeded")?;
         let trimmed_frames = packet
             .trim_start
             .get()
@@ -244,14 +260,14 @@ fn decode_with_symphonia(
         let presented_packet_frames = decoded_packet_frames
             .checked_sub(trimmed_frames)
             .ok_or("malformed_audio")?;
-        decoded_frames = decoded_frames
+        presented_frames = presented_frames
             .checked_add(presented_packet_frames)
             .ok_or("duration_limit_exceeded")?;
-        validate_duration(decoded_frames, observed.sample_rate_hz)?;
+        validate_duration(presented_frames, observed.sample_rate_hz)?;
     }
     let metadata = metadata.ok_or("malformed_audio")?;
-    if format == AdapterFormat::Flac
-        && declared_frames.is_some_and(|frames| frames != 0 && frames != decoded_frames)
+    if matches!(format, AdapterFormat::Mp3 | AdapterFormat::Flac)
+        && declared_frames.is_some_and(|frames| frames != 0 && frames != raw_decoded_frames)
     {
         return Err("malformed_audio");
     }
@@ -348,6 +364,56 @@ fn flac_declared_frames(bytes: &[u8]) -> Result<Option<u64>, &'static str> {
         .ok_or("malformed_audio")?;
     let frames = u64::from_be_bytes(encoded) & 0x0f_ff_ff_ff_ff;
     Ok((frames != 0).then_some(frames))
+}
+
+fn mp3_declared_frames(bytes: &[u8]) -> Result<Option<u64>, &'static str> {
+    let header = bytes.get(..4).ok_or("malformed_audio")?;
+    if !valid_mp3_frame_header(header) {
+        return Err("malformed_audio");
+    }
+    let version = (header[1] >> 3) & 0x03;
+    let layer = (header[1] >> 1) & 0x03;
+    let samples_per_frame = match (version, layer) {
+        (_, 0x03) => 384_u64,
+        (_, 0x02) | (0x03, 0x01) => 1_152,
+        (_, 0x01) => 576,
+        _ => return Err("malformed_audio"),
+    };
+    let has_crc = header[1] & 1 == 0;
+    let mono = (header[3] >> 6) & 0x03 == 0x03;
+    let side_information = match (version == 0x03, mono) {
+        (true, true) => 17_usize,
+        (true, false) => 32,
+        (false, true) => 9,
+        (false, false) => 17,
+    };
+    let xing_offset = (if has_crc { 6_usize } else { 4 })
+        .checked_add(side_information)
+        .ok_or("malformed_audio")?;
+    let xing_frames = bytes
+        .get(xing_offset..xing_offset.saturating_add(12))
+        .filter(|value| value.starts_with(b"Xing") || value.starts_with(b"Info"))
+        .and_then(|value| {
+            let flags = u32::from_be_bytes(value.get(4..8)?.try_into().ok()?);
+            (flags & 1 != 0)
+                .then(|| value.get(8..12)?.try_into().ok().map(u32::from_be_bytes))
+                .flatten()
+        });
+    let vbri_frames = bytes
+        .get(36..54)
+        .filter(|value| value.starts_with(b"VBRI"))
+        .and_then(|value| value.get(14..18)?.try_into().ok())
+        .map(u32::from_be_bytes);
+    xing_frames
+        .or(vbri_frames)
+        .map(u64::from)
+        .map(|frames| {
+            frames
+                .checked_sub(1)
+                .and_then(|audio_frames| audio_frames.checked_mul(samples_per_frame))
+                .ok_or("malformed_audio")
+        })
+        .transpose()
 }
 
 fn mp3_audio_bytes(bytes: &[u8]) -> Result<&[u8], &'static str> {
