@@ -4,6 +4,57 @@
 -- remains a read-time derivation from versioned deployment rates and is
 -- deliberately not stored.
 
+-- Tighten canonical compaction evidence before projection backfill. This is a
+-- forward correction because recorded migrations are immutable.
+ALTER TABLE context_compaction_model_call
+    ADD COLUMN usage_input_includes_cache_tokens boolean;
+UPDATE context_compaction_model_call
+   SET usage_input_includes_cache_tokens = false;
+ALTER TABLE context_compaction_model_call
+    ALTER COLUMN usage_input_includes_cache_tokens SET NOT NULL,
+    DROP CONSTRAINT context_compaction_model_call_usage_nonnegative;
+ALTER TABLE context_compaction_model_call
+    ADD CONSTRAINT context_compaction_model_call_usage_u64
+        CHECK (
+            (
+                input_tokens IS NULL
+                OR input_tokens BETWEEN 0 AND 18446744073709551615
+            )
+            AND (
+                output_tokens IS NULL
+                OR output_tokens BETWEEN 0 AND 18446744073709551615
+            )
+            AND (
+                cache_read_input_tokens IS NULL
+                OR cache_read_input_tokens BETWEEN 0 AND 18446744073709551615
+            )
+            AND (
+                cache_creation_input_tokens IS NULL
+                OR cache_creation_input_tokens
+                    BETWEEN 0 AND 18446744073709551615
+            )
+        );
+
+CREATE FUNCTION reject_context_compaction_usage_input_semantics_change()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.usage_input_includes_cache_tokens IS DISTINCT FROM
+       OLD.usage_input_includes_cache_tokens
+    THEN
+        RAISE EXCEPTION 'compaction input-token semantics are immutable'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER context_compaction_usage_input_semantics_are_immutable
+BEFORE UPDATE ON context_compaction_model_call
+FOR EACH ROW
+EXECUTE FUNCTION reject_context_compaction_usage_input_semantics_change();
+
 CREATE FUNCTION bounded_web_usage_profile(value text)
 RETURNS text
 LANGUAGE sql

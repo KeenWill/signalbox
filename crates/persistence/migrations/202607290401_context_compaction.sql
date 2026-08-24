@@ -44,7 +44,6 @@ CREATE TABLE context_compaction_model_call (
     resolved_provider_model_identity_id uuid NOT NULL,
     source_frontier_id uuid NOT NULL,
     credential_reference text NOT NULL,
-    usage_input_includes_cache_tokens boolean NOT NULL,
     state_kind text NOT NULL,
     terminal_disposition_kind text,
     input_tokens numeric(20, 0),
@@ -73,24 +72,17 @@ CREATE TABLE context_compaction_model_call (
             OR
             (state_kind = 'terminal' AND terminal_disposition_kind IS NOT NULL)
         ),
-    CONSTRAINT context_compaction_model_call_usage_u64
+    CONSTRAINT context_compaction_model_call_usage_nonnegative
         CHECK (
-            (
-                input_tokens IS NULL
-                OR input_tokens BETWEEN 0 AND 18446744073709551615
-            )
-            AND (
-                output_tokens IS NULL
-                OR output_tokens BETWEEN 0 AND 18446744073709551615
-            )
+            (input_tokens IS NULL OR input_tokens >= 0)
+            AND (output_tokens IS NULL OR output_tokens >= 0)
             AND (
                 cache_read_input_tokens IS NULL
-                OR cache_read_input_tokens BETWEEN 0 AND 18446744073709551615
+                OR cache_read_input_tokens >= 0
             )
             AND (
                 cache_creation_input_tokens IS NULL
-                OR cache_creation_input_tokens
-                    BETWEEN 0 AND 18446744073709551615
+                OR cache_creation_input_tokens >= 0
             )
         ),
     CONSTRAINT context_compaction_model_call_session_key
@@ -143,16 +135,14 @@ BEGIN
         OLD.direct_model_selection_id,
         OLD.resolved_provider_model_identity_id,
         OLD.source_frontier_id,
-        OLD.credential_reference,
-        OLD.usage_input_includes_cache_tokens
+        OLD.credential_reference
     ) IS DISTINCT FROM ROW(
         NEW.model_call_id,
         NEW.session_id,
         NEW.direct_model_selection_id,
         NEW.resolved_provider_model_identity_id,
         NEW.source_frontier_id,
-        NEW.credential_reference,
-        NEW.usage_input_includes_cache_tokens
+        NEW.credential_reference
     ) THEN
         RAISE EXCEPTION 'compaction model call authorization facts are immutable'
             USING ERRCODE = '23514';
