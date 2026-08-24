@@ -331,6 +331,33 @@ impl VideoFixture {
         )
     }
 
+    pub fn hevc_mp4_with_excessive_nal_entries() -> Self {
+        let mut configuration = hevc_configuration();
+        configuration[22] = 1;
+        configuration.push(0);
+        configuration.extend_from_slice(&10_001_u16.to_be_bytes());
+        for _ in 0..10_001 {
+            configuration.extend_from_slice(&1_u16.to_be_bytes());
+            configuration.push(0);
+        }
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(
+                MP4_TIMESCALE,
+                MP4_DURATION_UNITS,
+                visual_sample_entry(*b"hvc1", *b"hvcC", &configuration),
+            ),
+        )
+    }
+
+    pub fn mp4_with_misplaced_track_box() -> Self {
+        let ordinary = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
+        Self::new(
+            FixtureKind::Mp4,
+            [ordinary, mp4_track(2, avc1_sample_entry())].concat(),
+        )
+    }
+
     pub fn mp4_with_metadata_after_probe_prefix() -> Self {
         let ordinary = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
         let movie = ordinary[ftyp().len()..].to_vec();

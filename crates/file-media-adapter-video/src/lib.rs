@@ -748,11 +748,31 @@ fn parse_mp4_boxes(
                 )?;
             }
             MP4_MEHD if scope == Mp4Scope::MovieExtends => parse_mehd(payload, state)?,
+            _ if recognized_mp4_box(box_type) => return Err(VideoIssue::Malformed),
             _ => {}
         }
         cursor = cursor.checked_add(consumed).ok_or(VideoIssue::Structure)?;
     }
     Ok(track_evidence)
+}
+
+fn recognized_mp4_box(box_type: [u8; 4]) -> bool {
+    matches!(
+        box_type,
+        MP4_FTYP
+            | MP4_MOOV
+            | MP4_MVHD
+            | MP4_TRAK
+            | MP4_TKHD
+            | MP4_MDIA
+            | MP4_MDHD
+            | MP4_HDLR
+            | MP4_MINF
+            | MP4_STBL
+            | MP4_STSD
+            | MP4_MVEX
+            | MP4_MEHD
+    )
 }
 
 fn mp4_box_at(
@@ -1122,7 +1142,7 @@ fn parse_visual_sample_entry(
             if configuration_seen {
                 return Err(VideoIssue::Malformed);
             }
-            validate_visual_configuration(configuration_type, configuration)?;
+            validate_visual_configuration(configuration_type, configuration, state)?;
             configuration_seen = true;
         }
         cursor = cursor.checked_add(consumed).ok_or(VideoIssue::Structure)?;
@@ -1136,12 +1156,13 @@ fn parse_visual_sample_entry(
 fn validate_visual_configuration(
     configuration_type: [u8; 4],
     configuration: &[u8],
+    state: &mut Mp4State,
 ) -> Result<(), VideoIssue> {
     match configuration_type {
         [b'a', b'v', b'c', b'C'] => {
             validate_avc_configuration(configuration)?;
         }
-        [b'h', b'v', b'c', b'C'] => validate_hevc_configuration(configuration)?,
+        [b'h', b'v', b'c', b'C'] => validate_hevc_configuration(configuration, state)?,
         [b'a', b'v', b'1', b'C'] => {
             if configuration.len() < 4 || configuration[0] != 0x81 || configuration[3] & 0xe0 != 0 {
                 return Err(VideoIssue::Malformed);
@@ -1227,7 +1248,10 @@ fn consume_avc_parameter_set(configuration: &[u8], cursor: usize) -> Result<usiz
     Ok(end)
 }
 
-fn validate_hevc_configuration(configuration: &[u8]) -> Result<(), VideoIssue> {
+fn validate_hevc_configuration(
+    configuration: &[u8],
+    state: &mut Mp4State,
+) -> Result<(), VideoIssue> {
     if configuration.len() < 23
         || configuration[0] != 1
         || configuration[13] & 0xf0 != 0xf0
@@ -1247,6 +1271,10 @@ fn validate_hevc_configuration(configuration: &[u8]) -> Result<(), VideoIssue> {
         let nal_count = usize::from(u16::from_be_bytes([array_header[1], array_header[2]]));
         cursor = cursor.checked_add(3).ok_or(VideoIssue::Structure)?;
         for _ in 0..nal_count {
+            state.nodes = state.nodes.checked_add(1).ok_or(VideoIssue::Structure)?;
+            if state.nodes > MAX_NODES {
+                return Err(VideoIssue::Structure);
+            }
             let length_bytes = configuration
                 .get(cursor..cursor.checked_add(2).ok_or(VideoIssue::Structure)?)
                 .ok_or(VideoIssue::Malformed)?;

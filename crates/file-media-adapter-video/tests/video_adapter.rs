@@ -412,6 +412,24 @@ async fn hevc_reserved_configuration_fields_are_malformed() -> Result<(), Box<dy
 }
 
 #[tokio::test]
+async fn excessive_hevc_nal_entries_are_a_typed_bounded_failure() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::hevc_mp4_with_excessive_nal_entries(),
+        "structure_limit",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn recognized_mp4_box_in_invalid_scope_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_misplaced_track_box(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn mp4_metadata_after_the_former_probe_prefix_is_nominated() -> Result<(), Box<dyn Error>> {
     let source = VideoFixture::mp4_with_metadata_after_probe_prefix().into_source()?;
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
