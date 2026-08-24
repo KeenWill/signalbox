@@ -255,6 +255,12 @@ fn structured_view_with_output_bytes(output_bytes: usize) -> ReadViewDeclaration
 }
 
 fn registry_with_view(view: ReadViewDeclaration) -> FileMediaRegistry {
+    registry_with_view_result(view).expect("fixture registry is conflict-free")
+}
+
+fn registry_with_view_result(
+    view: ReadViewDeclaration,
+) -> Result<FileMediaRegistry, signalbox_file_media_runtime::FileMediaRegistryConstructionError> {
     let provider =
         FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
     let reader = ReaderDeclaration::try_new(ReaderDeclarationInput {
@@ -275,7 +281,6 @@ fn registry_with_view(view: ReadViewDeclaration) -> FileMediaRegistry {
         FileMediaCeilings::version_one(),
         ProcessorIsolation::Available,
     )
-    .expect("fixture registry is conflict-free")
 }
 
 fn inspection_request(source: &MemorySource, declared: &str) -> InspectionRequest {
@@ -405,6 +410,18 @@ fn selection_registry(
     owned_media_type: &str,
     streaming_text_fallback: StreamingTextFallback,
 ) -> FileMediaRegistry {
+    selection_registry_with_ceilings(
+        owned_media_type,
+        streaming_text_fallback,
+        FileMediaCeilings::version_one(),
+    )
+}
+
+fn selection_registry_with_ceilings(
+    owned_media_type: &str,
+    streaming_text_fallback: StreamingTextFallback,
+    ceilings: FileMediaCeilings,
+) -> FileMediaRegistry {
     let provider =
         FileReaderProviderName::try_new("selection").expect("fixture provider name is valid");
     let reader = ReaderDeclaration::try_new(ReaderDeclarationInput {
@@ -420,12 +437,8 @@ fn selection_registry(
     .expect("fixture reader declaration is valid");
     let declaration = FileMediaProviderDeclaration::try_new(provider, vec![reader])
         .expect("fixture provider owns its reader");
-    FileMediaRegistry::try_new(
-        vec![declaration],
-        FileMediaCeilings::version_one(),
-        ProcessorIsolation::Available,
-    )
-    .expect("selection fixture registry is valid")
+    FileMediaRegistry::try_new(vec![declaration], ceilings, ProcessorIsolation::Available)
+        .expect("selection fixture registry is valid")
 }
 
 fn selection_inspection(
@@ -508,6 +521,26 @@ fn streaming_text_fallback_follows_probe_and_declaration_miss() {
         validated_evidence(inspection),
         ValidationEvidence::StreamingTextValidation
     );
+}
+
+#[test]
+fn oversized_streaming_text_fallback_becomes_unknown_before_validation() {
+    let source = MemorySource::synthetic();
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 1;
+    let registry =
+        selection_registry_with_ceilings("text/plain", StreamingTextFallback::Enabled, ceilings);
+    let processor = SelectionProcessor {
+        probe: SelectionProbe::NoMatch,
+        validation: SelectionValidation::Validated,
+    };
+
+    let outcome = inspect(&registry, &processor, &source, "unknown")
+        .expect("oversized streaming fallback becomes unknown");
+
+    let FileInspection::Unknown { .. } = outcome else {
+        panic!("oversized streaming fallback must produce unknown inspection");
+    };
 }
 
 #[test]
@@ -814,6 +847,21 @@ fn inv076_canonicalized_structured_bytes_are_rechecked() {
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
 
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
+#[test]
+fn structured_view_reserves_processor_frame_escaping_space() {
+    let view = structured_view_with_output_bytes(500 * 1_024 + 1);
+
+    let outcome = registry_with_view_result(view);
+
+    let Err(error) = outcome else {
+        panic!("structured view above the processor-frame allowance must be rejected");
+    };
+    assert_eq!(
+        error,
+        signalbox_file_media_runtime::FileMediaRegistryConstructionError::ViewBounds
+    );
 }
 
 /// INV-076: contradictory continuation facts from a processor do not enter the

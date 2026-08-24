@@ -138,8 +138,7 @@ impl DisplayFilename {
             || value.as_ref() == ".."
             || value.contains('/')
             || value.contains('\\')
-            || value.contains('\0')
-            || value.chars().any(char::is_control);
+            || value.contains('\0');
         if invalid {
             Err(RegistryValueError::DisplayFilename)
         } else {
@@ -814,13 +813,18 @@ mod tests {
     }
 
     #[test]
-    fn display_filenames_reject_control_characters() {
+    fn display_filenames_preserve_blob_valid_control_characters() {
+        let newline_filename = "line\nbreak.txt";
+        let delete_filename = "delete\u{7f}.txt";
+        let newline = DisplayFilename::try_new(newline_filename)
+            .expect("blob-valid newline filename remains representable");
+        let delete = DisplayFilename::try_new(delete_filename)
+            .expect("blob-valid delete-character filename remains representable");
+
+        assert_eq!(newline.as_str(), newline_filename);
+        assert_eq!(delete.as_str(), delete_filename);
         assert_eq!(
-            DisplayFilename::try_new("line\nbreak.txt"),
-            Err(RegistryValueError::DisplayFilename)
-        );
-        assert_eq!(
-            DisplayFilename::try_new("escape\u{1b}.txt"),
+            DisplayFilename::try_new("null\0.txt"),
             Err(RegistryValueError::DisplayFilename)
         );
     }
