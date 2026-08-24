@@ -9,6 +9,7 @@ import {
   HttpSessionProjectionSource,
   MAX_CATALOG_ROWS,
   MAX_LIVE_DURABLE_ITEMS,
+  MAX_PROVIDER_DRAFT_BYTES,
   MAX_PROVIDER_DRAFT_PARTS,
   readBoundedJson,
   readBoundedNdjson,
@@ -317,7 +318,7 @@ describe('session live projection', () => {
 
   it('rejects durable records before a snapshot or without an advancing cursor', () => {
     const durable = {
-      address: { event_sequence: '43' },
+      address: { event_sequence: '42' },
       cursor: '42',
       event_kind: 'turn_completed' as const,
       kind: 'durable' as const,
@@ -353,11 +354,55 @@ describe('session live projection', () => {
     ).toThrow('before the initial snapshot')
   })
 
-  it('bounds retained provider draft parts', () => {
+  it('rejects a durable cursor that does not match its timeline address', () => {
+    const initial = applyLiveEvent(
+      EMPTY_LIVE_PRESENTATION,
+      { kind: 'snapshot', snapshot: liveSnapshot },
+      liveSnapshot.session_id,
+    )
+
+    expect(() =>
+      applyLiveEvent(
+        initial,
+        {
+          address: { event_sequence: '44' },
+          cursor: '43',
+          event_kind: 'turn_completed',
+          kind: 'durable',
+        },
+        liveSnapshot.session_id,
+      ),
+    ).toThrow('cursor does not match its timeline address')
+  })
+
+  it('resynchronizes instead of retaining a provider-draft suffix after part overflow', () => {
     const fixture = draftPresentation(MAX_PROVIDER_DRAFT_PARTS + 1)
 
-    expect(fixture.presentation.drafts).toHaveLength(MAX_PROVIDER_DRAFT_PARTS)
-    expect(fixture.presentation.drafts[0]?.partIndex).toBe(fixture.events[1]?.part_index)
+    expect(fixture.presentation.drafts).toEqual([])
+    expect(fixture.presentation.resyncing).toBe(true)
+  })
+
+  it('resynchronizes instead of retaining a provider-draft suffix after byte overflow', () => {
+    const initial = applyLiveEvent(
+      EMPTY_LIVE_PRESENTATION,
+      { kind: 'snapshot', snapshot: liveSnapshot },
+      liveSnapshot.session_id,
+    )
+
+    const result = applyLiveEvent(
+      initial,
+      {
+        content: 'x'.repeat(MAX_PROVIDER_DRAFT_BYTES + 1),
+        kind: 'provider_text_delta',
+        model_call_id: 'call-1',
+        part_index: 0,
+        turn_id: 'turn-1',
+      },
+      liveSnapshot.session_id,
+    )
+
+    expect(result.drafts).toEqual([])
+    expect(result.resyncing).toBe(true)
   })
 
   it('rejects a snapshot for a different selected session', () => {

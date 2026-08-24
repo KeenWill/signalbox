@@ -179,14 +179,33 @@ describe('browser preferences', () => {
   })
 
   it('rejects noncanonical and out-of-range persisted logical positions', () => {
-    for (const position of ['cursor', '0', '01', '18446744073709551616']) {
-      expect(() =>
-        decodeBrowserPreferences({
-          ...defaultBrowserPreferences,
-          lastLogicalPositions: { session: position },
-        }),
-      ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
-    }
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { session: 'cursor' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { session: '0' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { session: '01' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { session: '18446744073709551616' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
   })
 
   it('rejects key-override keys and values above their UTF-8 byte ceilings', () => {

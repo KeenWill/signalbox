@@ -491,6 +491,9 @@ export function SessionWorkspaceSurface({
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   useEffect(() => {
+    if (session.data?.active && openingPosition !== undefined) setOpeningPosition(undefined)
+  }, [openingPosition, session.data?.active])
+  useEffect(() => {
     if (openingPosition !== undefined && timelineIds.includes(openingPosition)) {
       if (app.selectedTimeline !== openingPosition) {
         dispatch(actions.timelineSelected(openingPosition))
@@ -820,7 +823,7 @@ export function SessionWorkspaceSurface({
           </div>
           {timelineCapability !== 'available' ? (
             <p className="session-load-state">Session catalog unavailable</p>
-          ) : catalog.isError ? (
+          ) : catalog.isError && catalogPresentation.snapshot === null ? (
             <p className="session-load-state" role="alert">
               The daemon could not provide the bounded session catalog.
             </p>

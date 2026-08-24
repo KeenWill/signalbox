@@ -15,6 +15,7 @@ import {
 import {
   type CommandContext,
   type CommandId,
+  commandById,
   commandRegistry,
   globalHotkeyBindings,
   globalHotkeySequenceBindings,
@@ -449,8 +450,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       hotkey: binding.hotkey,
       callback: () => {
         if (store.getState().app.overlay === null || binding.commandId === 'surface.escape') {
-          if (binding.commandId.startsWith('selection.')) context.focusTimeline()
-          invokeCommand(binding.commandId, context)
+          const command = commandById(binding.commandId)
+          if (command.available(context)) {
+            if (binding.commandId.startsWith('selection.')) context.focusTimeline()
+            invokeCommand(binding.commandId, context)
+          }
         }
       },
     })),
@@ -460,8 +464,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       sequence: binding.sequence,
       callback: () => {
         if (store.getState().app.overlay === null) {
-          if (binding.commandId.startsWith('selection.')) context.focusTimeline()
-          invokeCommand(binding.commandId, context)
+          const command = commandById(binding.commandId)
+          if (command.available(context)) {
+            if (binding.commandId.startsWith('selection.')) context.focusTimeline()
+            invokeCommand(binding.commandId, context)
+          }
         }
       },
     })),

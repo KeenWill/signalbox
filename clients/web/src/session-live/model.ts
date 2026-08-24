@@ -350,12 +350,6 @@ const draftKey = (event: Extract<WebSessionLiveStreamEvent, { kind: 'provider_te
 const draftBytes = (drafts: ReadonlyArray<ProviderDraft>) =>
   drafts.reduce((total, draft) => total + new TextEncoder().encode(draft.content).byteLength, 0)
 
-const boundedDrafts = (drafts: ReadonlyArray<ProviderDraft>): ReadonlyArray<ProviderDraft> => {
-  const retained = drafts.slice(-MAX_PROVIDER_DRAFT_PARTS)
-  while (retained.length > 0 && draftBytes(retained) > MAX_PROVIDER_DRAFT_BYTES) retained.shift()
-  return retained
-}
-
 export const beginLiveResync = (current: LivePresentation): LivePresentation => ({
   ...current,
   durable: [],
@@ -401,6 +395,9 @@ export const applyLiveEvent = (
       throw new Error('session live durable event arrived before the initial snapshot')
     }
     const cursor = BigInt(event.cursor)
+    if (event.cursor !== event.address.event_sequence) {
+      throw new Error('session live durable cursor does not match its timeline address')
+    }
     const previousCursor = BigInt(
       current.durable.at(-1)?.cursor ?? current.snapshot.observed_through,
     )
@@ -420,6 +417,9 @@ export const applyLiveEvent = (
   if (current.snapshot === null) {
     throw new Error('session live provider delta arrived before the initial snapshot')
   }
+  if (current.resyncing) {
+    throw new Error('session live provider delta arrived while resynchronizing')
+  }
   const key = draftKey(event)
   const existing = current.drafts.find((draft) => draft.key === key)
   const next: ProviderDraft = {
@@ -429,8 +429,9 @@ export const applyLiveEvent = (
     partIndex: event.part_index,
     content: `${existing?.content ?? ''}${event.content}`,
   }
-  return {
-    ...current,
-    drafts: boundedDrafts([...current.drafts.filter((draft) => draft.key !== key), next]),
+  const drafts = [...current.drafts.filter((draft) => draft.key !== key), next]
+  if (drafts.length > MAX_PROVIDER_DRAFT_PARTS || draftBytes(drafts) > MAX_PROVIDER_DRAFT_BYTES) {
+    return beginLiveResync(current)
   }
+  return { ...current, drafts }
 }
