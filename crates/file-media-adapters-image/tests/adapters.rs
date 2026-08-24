@@ -64,90 +64,132 @@ async fn gif_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>
 }
 
 #[tokio::test]
-async fn png_hostile_inputs_fail_typed_within_ceilings() -> Result<(), Box<dyn Error>> {
-    let format = FixtureFormat::Png;
-    let truncated = MemorySource::new(fixtures::truncated(format)?);
-    let malformed = MemorySource::new(fixtures::malformed(format));
-    let oversized = MemorySource::new(fixtures::oversized(format)?);
-    let dimension_bomb = MemorySource::new(fixtures::dimension_bomb(format)?);
-    let pixel_bomb = MemorySource::new(fixtures::pixel_bomb(format)?);
+async fn truncated_images_are_reported_as_malformed() -> Result<(), Box<dyn Error>> {
+    let png = MemorySource::new(fixtures::truncated(FixtureFormat::Png)?);
+    let jpeg = MemorySource::new(fixtures::truncated(FixtureFormat::Jpeg)?);
+    let webp = MemorySource::new(fixtures::truncated(FixtureFormat::WebP)?);
+    let gif = MemorySource::new(fixtures::truncated(FixtureFormat::Gif)?);
 
-    let truncated_result = support::inspect(&truncated, "image/png").await?;
-    support::assert_malformed_reason(truncated_result, "malformed_image");
-    let malformed_result = support::inspect(&malformed, "image/png").await?;
-    support::assert_malformed_reason(malformed_result, "malformed_image");
-    let oversized_result = support::inspect(&oversized, "image/png").await?;
-    support::assert_malformed_reason(oversized_result, "source_too_large");
-    let dimension_result = support::inspect(&dimension_bomb, "image/png").await?;
-    support::assert_malformed_reason(dimension_result, "dimension_limit_exceeded");
-    let pixel_result = support::inspect(&pixel_bomb, "image/png").await?;
-    support::assert_malformed_reason(pixel_result, "pixel_limit_exceeded");
+    support::assert_malformed_reason(
+        support::inspect(&png, "image/png").await?,
+        "malformed_image",
+    );
+    support::assert_malformed_reason(
+        support::inspect(&jpeg, "image/jpeg").await?,
+        "malformed_image",
+    );
+    support::assert_malformed_reason(
+        support::inspect(&webp, "image/webp").await?,
+        "malformed_image",
+    );
+    support::assert_malformed_reason(
+        support::inspect(&gif, "image/gif").await?,
+        "malformed_image",
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn jpeg_hostile_inputs_fail_typed_within_ceilings() -> Result<(), Box<dyn Error>> {
-    let format = FixtureFormat::Jpeg;
-    let truncated = MemorySource::new(fixtures::truncated(format)?);
-    let malformed = MemorySource::new(fixtures::malformed(format));
-    let oversized = MemorySource::new(fixtures::oversized(format)?);
-    let dimension_bomb = MemorySource::new(fixtures::dimension_bomb(format)?);
-    let pixel_bomb = MemorySource::new(fixtures::pixel_bomb(format)?);
+async fn malformed_images_are_reported_as_malformed() -> Result<(), Box<dyn Error>> {
+    let png = MemorySource::new(fixtures::malformed(FixtureFormat::Png));
+    let jpeg = MemorySource::new(fixtures::malformed(FixtureFormat::Jpeg));
+    let webp = MemorySource::new(fixtures::malformed(FixtureFormat::WebP));
+    let gif = MemorySource::new(fixtures::malformed(FixtureFormat::Gif));
 
-    let truncated_result = support::inspect(&truncated, "image/jpeg").await?;
-    support::assert_malformed_reason(truncated_result, "malformed_image");
-    let malformed_result = support::inspect(&malformed, "image/jpeg").await?;
-    support::assert_malformed_reason(malformed_result, "malformed_image");
-    let oversized_result = support::inspect(&oversized, "image/jpeg").await?;
-    support::assert_malformed_reason(oversized_result, "source_too_large");
-    let dimension_result = support::inspect(&dimension_bomb, "image/jpeg").await?;
-    support::assert_malformed_reason(dimension_result, "dimension_limit_exceeded");
-    let pixel_result = support::inspect(&pixel_bomb, "image/jpeg").await?;
-    support::assert_malformed_reason(pixel_result, "pixel_limit_exceeded");
+    support::assert_malformed_reason(
+        support::inspect(&png, "image/png").await?,
+        "malformed_image",
+    );
+    support::assert_malformed_reason(
+        support::inspect(&jpeg, "image/jpeg").await?,
+        "malformed_image",
+    );
+    support::assert_malformed_reason(
+        support::inspect(&webp, "image/webp").await?,
+        "malformed_image",
+    );
+    support::assert_malformed_reason(
+        support::inspect(&gif, "image/gif").await?,
+        "malformed_image",
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn webp_hostile_inputs_fail_typed_within_ceilings() -> Result<(), Box<dyn Error>> {
-    let format = FixtureFormat::WebP;
-    let truncated = MemorySource::new(fixtures::truncated(format)?);
-    let malformed = MemorySource::new(fixtures::malformed(format));
-    let oversized = MemorySource::new(fixtures::oversized(format)?);
-    let dimension_bomb = MemorySource::new(fixtures::dimension_bomb(format)?);
-    let pixel_bomb = MemorySource::new(fixtures::pixel_bomb(format)?);
+async fn oversized_images_are_reported_as_source_too_large() -> Result<(), Box<dyn Error>> {
+    let png = MemorySource::new(fixtures::oversized(FixtureFormat::Png)?);
+    let jpeg = MemorySource::new(fixtures::oversized(FixtureFormat::Jpeg)?);
+    let webp = MemorySource::new(fixtures::oversized(FixtureFormat::WebP)?);
+    let gif = MemorySource::new(fixtures::oversized(FixtureFormat::Gif)?);
 
-    let truncated_result = support::inspect(&truncated, "image/webp").await?;
-    support::assert_malformed_reason(truncated_result, "malformed_image");
-    let malformed_result = support::inspect(&malformed, "image/webp").await?;
-    support::assert_malformed_reason(malformed_result, "malformed_image");
-    let oversized_result = support::inspect(&oversized, "image/webp").await?;
-    support::assert_malformed_reason(oversized_result, "source_too_large");
-    let dimension_result = support::inspect(&dimension_bomb, "image/webp").await?;
-    support::assert_malformed_reason(dimension_result, "dimension_limit_exceeded");
-    let pixel_result = support::inspect(&pixel_bomb, "image/webp").await?;
-    support::assert_malformed_reason(pixel_result, "pixel_limit_exceeded");
+    support::assert_malformed_reason(
+        support::inspect(&png, "image/png").await?,
+        "source_too_large",
+    );
+    support::assert_malformed_reason(
+        support::inspect(&jpeg, "image/jpeg").await?,
+        "source_too_large",
+    );
+    support::assert_malformed_reason(
+        support::inspect(&webp, "image/webp").await?,
+        "source_too_large",
+    );
+    support::assert_malformed_reason(
+        support::inspect(&gif, "image/gif").await?,
+        "source_too_large",
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn gif_hostile_inputs_fail_typed_within_ceilings() -> Result<(), Box<dyn Error>> {
-    let format = FixtureFormat::Gif;
-    let truncated = MemorySource::new(fixtures::truncated(format)?);
-    let malformed = MemorySource::new(fixtures::malformed(format));
-    let oversized = MemorySource::new(fixtures::oversized(format)?);
-    let dimension_bomb = MemorySource::new(fixtures::dimension_bomb(format)?);
-    let pixel_bomb = MemorySource::new(fixtures::pixel_bomb(format)?);
+async fn dimension_bombs_are_reported_as_dimension_limit_exceeded() -> Result<(), Box<dyn Error>> {
+    let png = MemorySource::new(fixtures::dimension_bomb(FixtureFormat::Png)?);
+    let jpeg = MemorySource::new(fixtures::dimension_bomb(FixtureFormat::Jpeg)?);
+    let webp = MemorySource::new(fixtures::dimension_bomb(FixtureFormat::WebP)?);
+    let gif = MemorySource::new(fixtures::dimension_bomb(FixtureFormat::Gif)?);
 
-    let truncated_result = support::inspect(&truncated, "image/gif").await?;
-    support::assert_malformed_reason(truncated_result, "malformed_image");
-    let malformed_result = support::inspect(&malformed, "image/gif").await?;
-    support::assert_malformed_reason(malformed_result, "malformed_image");
-    let oversized_result = support::inspect(&oversized, "image/gif").await?;
-    support::assert_malformed_reason(oversized_result, "source_too_large");
-    let dimension_result = support::inspect(&dimension_bomb, "image/gif").await?;
-    support::assert_malformed_reason(dimension_result, "dimension_limit_exceeded");
-    let pixel_result = support::inspect(&pixel_bomb, "image/gif").await?;
-    support::assert_malformed_reason(pixel_result, "pixel_limit_exceeded");
+    support::assert_malformed_reason(
+        support::inspect(&png, "image/png").await?,
+        "dimension_limit_exceeded",
+    );
+    support::assert_malformed_reason(
+        support::inspect(&jpeg, "image/jpeg").await?,
+        "dimension_limit_exceeded",
+    );
+    support::assert_malformed_reason(
+        support::inspect(&webp, "image/webp").await?,
+        "dimension_limit_exceeded",
+    );
+    support::assert_malformed_reason(
+        support::inspect(&gif, "image/gif").await?,
+        "dimension_limit_exceeded",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pixel_bombs_are_reported_as_pixel_limit_exceeded() -> Result<(), Box<dyn Error>> {
+    let png = MemorySource::new(fixtures::pixel_bomb(FixtureFormat::Png)?);
+    let jpeg = MemorySource::new(fixtures::pixel_bomb(FixtureFormat::Jpeg)?);
+    let webp = MemorySource::new(fixtures::pixel_bomb(FixtureFormat::WebP)?);
+    let gif = MemorySource::new(fixtures::pixel_bomb(FixtureFormat::Gif)?);
+
+    support::assert_malformed_reason(
+        support::inspect(&png, "image/png").await?,
+        "pixel_limit_exceeded",
+    );
+    support::assert_malformed_reason(
+        support::inspect(&jpeg, "image/jpeg").await?,
+        "pixel_limit_exceeded",
+    );
+    support::assert_malformed_reason(
+        support::inspect(&webp, "image/webp").await?,
+        "pixel_limit_exceeded",
+    );
+    support::assert_malformed_reason(
+        support::inspect(&gif, "image/gif").await?,
+        "pixel_limit_exceeded",
+    );
     Ok(())
 }
 

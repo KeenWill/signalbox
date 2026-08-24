@@ -573,13 +573,24 @@ mod tests {
     }
 
     #[test]
-    fn validation_envelope_changes_declaration_fingerprint() {
+    fn validation_source_bytes_change_declaration_fingerprint() {
         let smaller = declaration_with_validation(ValidationDeclaration::new(64, 1));
-        let larger = declaration_with_validation(ValidationDeclaration::new(128, 2));
+        let larger = declaration_with_validation(ValidationDeclaration::new(128, 1));
 
         assert_ne!(
             declaration_fingerprint(&[smaller]),
             declaration_fingerprint(&[larger])
+        );
+    }
+
+    #[test]
+    fn validation_range_count_changes_declaration_fingerprint() {
+        let fewer = declaration_with_validation(ValidationDeclaration::new(64, 1));
+        let more = declaration_with_validation(ValidationDeclaration::new(64, 2));
+
+        assert_ne!(
+            declaration_fingerprint(&[fewer]),
+            declaration_fingerprint(&[more])
         );
     }
 

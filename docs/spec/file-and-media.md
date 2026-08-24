@@ -54,26 +54,29 @@ The daemon-side registry stores checked declarations and calls only
 
 Registry construction sorts unsigned-ASCII provider/reader identities and
 rejects duplicate providers or readers, duplicate exact media-type claims,
-duplicate per-reader types, views, or reason codes, absent or excessive probe
-and output bounds, read source work or range fan-out above their compiled
-lowerable ceilings, contradictory image bounds, ambiguous streaming-text
-fallback, unavailable isolation when any provider is present, and any effective
-ceiling above the compiled version-one value. An empty registry is valid.
-Configuration can therefore disable providers or lower bounds but cannot add a
-media-type mapping, alias, executable, or precedence rule.
+duplicate per-reader types, views, or reason codes, absent or excessive probe,
+validation, and output bounds, read source work or range fan-out above their
+compiled lowerable ceilings, contradictory image bounds, ambiguous
+streaming-text fallback, unavailable isolation when any provider is present, and
+any effective ceiling above the compiled version-one value. An empty registry is
+valid. Configuration can therefore disable providers or lower bounds but cannot
+add a media-type mapping, alias, executable, or precedence rule.
 
 An adapter author supplies one provider declaration with exact owned canonical
-types, probe budget, view schemas and resource envelopes, registered sanitized
-reason codes, and immutable reader revision. Probe, inspect, and read methods
-receive only a placement-free `VerifiedBlobSource`, cooperative cancellation,
-and their checked request. An adapter may report only adapter execution failure;
-the daemon supervisor originates process availability, timeout, cancellation,
-and framing failures. Validation requests carry effective lowerable source-byte
-and exact-range ceilings for broker enforcement. They return raw processor
-outputs: the registry reparses and cross-checks every type, evidence claim,
-reason, metadata object, body, JSON tree, continuation, and bound before
-admitting it. Structured output node and per-container entry ceilings stop
-duplicate-aware deserialization before structural excess is materialized.
+types, probe budget, validation source-byte and range envelope, view schemas and
+resource envelopes, registered sanitized reason codes, and immutable reader
+revision. The daemon clamps each validation request and its source broker to
+both the effective deployment ceilings and the reader-declared validation
+envelope. Probe, inspect, and read methods receive only a placement-free
+`VerifiedBlobSource`, cooperative cancellation, and their checked request. An
+adapter may report only adapter execution failure; the daemon supervisor
+originates process availability, timeout, cancellation, and framing failures.
+Validation requests carry effective lowerable source-byte and exact-range
+ceilings for broker enforcement. They return raw processor outputs: the registry
+reparses and cross-checks every type, evidence claim, reason, metadata object,
+body, JSON tree, continuation, and bound before admitting it. Structured output
+node and per-container entry ceilings stop duplicate-aware deserialization
+before structural excess is materialized.
 
 ## Detection and validation
 
