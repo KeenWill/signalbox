@@ -375,8 +375,46 @@ impl ArchiveFixture {
     }
 
     pub fn disguised_recursive_zip() -> Result<Self, Box<dyn Error>> {
+        let nested = gzip_bytes("nested.txt", PAYLOAD)?;
         Ok(Self {
-            bytes: zip_bytes(&[("payload.bin", b"\x1f\x8b\x08nested", ZipEntryKind::File)])?,
+            bytes: zip_bytes(&[("payload.bin", &nested, ZipEntryKind::File)])?,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload.bin",
+        })
+    }
+
+    pub fn zip_with_gzip_signature_text_payload() -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            bytes: zip_bytes(&[(
+                "payload.bin",
+                b"\x1f\x8b\x08not a complete GZIP stream",
+                ZipEntryKind::File,
+            )])?,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload.bin",
+        })
+    }
+
+    pub fn zip_with_zstd_signature_text_payload() -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            bytes: zip_bytes(&[(
+                "payload.bin",
+                b"\x28\xb5\x2f\xfdnot a complete Zstandard frame",
+                ZipEntryKind::File,
+            )])?,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload.bin",
+        })
+    }
+
+    pub fn zip_with_tar_signature_text_payload() -> Result<Self, Box<dyn Error>> {
+        let mut payload = vec![0_u8; 512];
+        payload[257..262].copy_from_slice(b"ustar");
+        Ok(Self {
+            bytes: zip_bytes(&[("payload.bin", &payload, ZipEntryKind::File)])?,
             media_type: "application/zip",
             expected_format: "zip",
             expected_name: "payload.bin",

@@ -8,7 +8,8 @@ use std::{
     str::FromStr,
 };
 
-use flate2::bufread::GzDecoder;
+use flate2::{bufread::GzDecoder, read::MultiGzDecoder};
+
 use signalbox_file_media_runtime::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider,
     FileMediaProviderDeclaration, FileMediaProviderFailure, FileMediaProviderFuture,
@@ -41,6 +42,8 @@ const SOURCE_BYTES: u64 = 256 * 1024;
 const MAX_ENTRIES: usize = 1_000;
 // numeric-bound: hard safety ceiling - bounds one decoded entry's memory and CPU work
 const MAX_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
+// numeric-bound: hard safety ceiling - prevents Zstandard frames from reserving more than 8 MiB
+const ZSTD_WINDOW_LOG_MAX: u32 = 23;
 // numeric-bound: hard safety ceiling - bounds aggregate decompression memory and CPU work
 const MAX_EXPANDED_BYTES: u64 = 16 * 1024 * 1024;
 // numeric-bound: hard safety ceiling - bounds retained untrusted entry-name memory
@@ -565,13 +568,23 @@ fn enumerate_zstd(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
     if zstd_frames_have_dictionary(bytes)? {
         return Err(ArchiveIssue::UnsupportedDictionary);
     }
-    let mut decoder =
-        zstd::stream::read::Decoder::new(bytes).map_err(|_| ArchiveIssue::Malformed)?;
+    let mut decoder = zstd_decoder(bytes)?;
     let (expanded, recursive) = count_reader(&mut decoder, MAX_ENTRY_BYTES)?;
     if recursive {
         return Err(ArchiveIssue::Recursive);
     }
     Ok(single_stream_summary(String::from("content"), expanded))
+}
+
+fn zstd_decoder(
+    bytes: &[u8],
+) -> Result<zstd::stream::read::Decoder<'static, std::io::BufReader<&[u8]>>, ArchiveIssue> {
+    let mut decoder =
+        zstd::stream::read::Decoder::new(bytes).map_err(|_| ArchiveIssue::Malformed)?;
+    decoder
+        .window_log_max(ZSTD_WINDOW_LOG_MAX)
+        .map_err(|_| ArchiveIssue::Malformed)?;
+    Ok(decoder)
 }
 
 fn single_stream_summary(name: String, expanded: u64) -> ArchiveSummary {
@@ -617,27 +630,83 @@ fn count_reader_with_detector(
 }
 
 struct RecursiveDetector {
-    prefix: Vec<u8>,
     complete: Vec<u8>,
 }
 
 impl RecursiveDetector {
     fn new() -> Self {
         Self {
-            prefix: Vec::with_capacity(PREFIX_BYTES),
             complete: Vec::new(),
         }
     }
 
     fn observe(&mut self, bytes: &[u8]) {
-        let remaining = PREFIX_BYTES.saturating_sub(self.prefix.len());
-        self.prefix
-            .extend_from_slice(&bytes[..bytes.len().min(remaining)]);
         self.complete.extend_from_slice(bytes);
     }
 
     fn detected(&self) -> bool {
-        ZipArchive::new(Cursor::new(&self.complete)).is_ok() || recursive_bytes(&self.prefix)
+        ZipArchive::new(Cursor::new(&self.complete)).is_ok()
+            || structurally_valid_gzip(&self.complete)
+            || structurally_valid_zstd(&self.complete)
+            || structurally_valid_tar(&self.complete)
+    }
+}
+
+fn structurally_valid_gzip(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x1f\x8b\x08")
+        && reader_decodes_within_limit(&mut MultiGzDecoder::new(bytes))
+}
+
+fn structurally_valid_zstd(bytes: &[u8]) -> bool {
+    if !zstd_header(bytes) {
+        return false;
+    }
+    let Ok(mut decoder) = zstd_decoder(bytes) else {
+        return false;
+    };
+    reader_decodes_within_limit(&mut decoder)
+}
+
+fn structurally_valid_tar(bytes: &[u8]) -> bool {
+    if !tar_header(bytes) {
+        return false;
+    }
+    let mut archive = tar::Archive::new(Cursor::new(bytes));
+    archive.set_ignore_zeros(true);
+    let Ok(entries) = archive.entries() else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(mut entry) = entry else {
+            return false;
+        };
+        if !reader_decodes_within_limit(&mut entry) {
+            return false;
+        }
+    }
+    true
+}
+
+fn reader_decodes_within_limit(reader: &mut dyn Read) -> bool {
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let Ok(count) = reader.read(&mut buffer) else {
+            return false;
+        };
+        if count == 0 {
+            return true;
+        }
+        let Ok(count) = u64::try_from(count) else {
+            return false;
+        };
+        let Some(next) = total.checked_add(count) else {
+            return false;
+        };
+        if next > MAX_ENTRY_BYTES {
+            return false;
+        }
+        total = next;
     }
 }
 
@@ -686,10 +755,6 @@ fn recursive_name(name: &str) -> bool {
     [".zip", ".tar", ".tgz", ".gz", ".zst", ".zstd"]
         .iter()
         .any(|suffix| lowercase.ends_with(suffix))
-}
-
-fn recursive_bytes(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"\x1f\x8b\x08") || zstd_header(bytes) || tar_header(bytes)
 }
 
 fn zip_header(bytes: &[u8]) -> bool {

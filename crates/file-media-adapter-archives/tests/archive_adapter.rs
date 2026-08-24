@@ -86,18 +86,41 @@ fn declaration_registers_four_archive_formats_under_available_isolation()
     let registry = registry()?;
 
     assert_eq!(registry.providers(), &[declaration()?]);
-    assert_eq!(declaration()?.readers().len(), 4);
-    assert_eq!(declaration()?.observed_container_entries(), Some(1_000));
-    for reader in declaration()?.readers() {
-        let view = reader
-            .views()
-            .first()
-            .ok_or("archive reader must declare its entries view")?;
-        assert_eq!(
-            view.access(),
-            ReadAccessPattern::Streaming { maximum_ranges: 1 }
-        );
-    }
+    let declaration = declaration()?;
+    assert_eq!(declaration.readers().len(), 4);
+    assert_eq!(declaration.observed_container_entries(), Some(1_000));
+    let gzip_view = declaration.readers()[0]
+        .views()
+        .first()
+        .ok_or("GZIP reader must declare its entries view")?;
+    assert_eq!(
+        gzip_view.access(),
+        ReadAccessPattern::Streaming { maximum_ranges: 1 }
+    );
+    let tar_view = declaration.readers()[1]
+        .views()
+        .first()
+        .ok_or("TAR reader must declare its entries view")?;
+    assert_eq!(
+        tar_view.access(),
+        ReadAccessPattern::Streaming { maximum_ranges: 1 }
+    );
+    let zip_view = declaration.readers()[2]
+        .views()
+        .first()
+        .ok_or("ZIP reader must declare its entries view")?;
+    assert_eq!(
+        zip_view.access(),
+        ReadAccessPattern::Streaming { maximum_ranges: 1 }
+    );
+    let zstd_view = declaration.readers()[3]
+        .views()
+        .first()
+        .ok_or("Zstandard reader must declare its entries view")?;
+    assert_eq!(
+        zstd_view.access(),
+        ReadAccessPattern::Streaming { maximum_ranges: 1 }
+    );
     Ok(())
 }
 
@@ -407,6 +430,30 @@ async fn disguised_recursive_zip_payload_is_rejected() -> Result<(), Box<dyn Err
     assert_malformed(
         malformed_inspection(ArchiveFixture::disguised_recursive_zip()?).await?,
         "recursive_container",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn gzip_signature_like_payload_is_not_a_recursive_archive() -> Result<(), Box<dyn Error>> {
+    assert_valid_inventory(
+        valid_inventory(ArchiveFixture::zip_with_gzip_signature_text_payload()?).await?,
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn zstd_signature_like_payload_is_not_a_recursive_archive() -> Result<(), Box<dyn Error>> {
+    assert_valid_inventory(
+        valid_inventory(ArchiveFixture::zip_with_zstd_signature_text_payload()?).await?,
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn tar_signature_like_payload_is_not_a_recursive_archive() -> Result<(), Box<dyn Error>> {
+    assert_valid_inventory(
+        valid_inventory(ArchiveFixture::zip_with_tar_signature_text_payload()?).await?,
     );
     Ok(())
 }
