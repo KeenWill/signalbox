@@ -920,11 +920,10 @@ Locks per transaction, in acquisition order:
   paging and wraps after reaching that bound. The bound carries weight here that
   it does not for discovery: a recovery becomes superseded by a `turn_lifecycle`
   change rather than by anything this statement writes, so a row the cursor has
-  already passed can acquire that disposition afterwards and must be
-  reinspected — and a lap whose pages a steady arrival rate keeps full would
-  never wrap to reach it. A recovery below the lap's bound is paged on the state
-  it holds when that page is read, so a disposition acquired mid-lap is still
-  seen. Exhaustion
+  already passed can acquire that disposition afterwards and must be reinspected
+  — and a lap whose pages a steady arrival rate keeps full would never wrap to
+  reach it. A recovery below the lap's bound is paged on the state it holds when
+  that page is read, so a disposition acquired mid-lap is still seen. Exhaustion
   parks at most 64 `scheduled` recoveries that spent the whole attempt budget
   and whose turn still holds the exact matching `awaiting_model_call_recovery`
   wait; a recovery whose turn no longer holds that wait is left for supersession
