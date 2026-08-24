@@ -21,13 +21,14 @@ use signalbox_application::{
     EligibilityNudge, ImportConversationError, ImportConversationOutcome,
     ImportConversationService, ImportedConversationConverter, InProcessEligibilityNudge,
     InProcessToolDispatchGate, ListConversationsService, ListSessionMetadataService,
-    LoadSessionMetadataService, OperatorFailureClass, PromptMemberStatement,
-    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
-    ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
-    ReviewPassCompletionStatus, ReviewWorkflowCommand, ReviewWorkflowCommandOutcome,
-    ReviewWorkflowCommandResult, ReviewWorkflowCommandService, ReviewWorkflowOperation,
-    ReviewWorkflowOperationKind, SessionMetadataListItem, SessionMetadataListQuery,
-    SessionTimelineEventKind, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
+    LoadSessionMetadataService, OperatorFailureClass, OverrideDeniedToolRequestService,
+    PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
+    ReplaceSessionDefaultsService, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
+    ReplaceSessionMetadataService, ReviewPassCompletionStatus, ReviewWorkflowCommand,
+    ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult, ReviewWorkflowCommandService,
+    ReviewWorkflowOperation, ReviewWorkflowOperationKind, SessionMetadataListItem,
+    SessionMetadataListQuery, SessionTimelineEventKind, SubmitInputOutcome, SubmitInputRequest,
+    SubmitInputService,
     SubmitInputTransaction, UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest,
     UpdateSessionPlacementService, UuidV7CommissionedDispatchIdGenerator,
     UuidV7CreateSessionFromImportedFrontierIdGenerator, UuidV7ImportedConversationIdGenerator,
@@ -61,15 +62,17 @@ use signalbox_domain::{
     ModelChangeAdjustment as DomainModelChangeAdjustment, ModelSelectionOverride,
     ModelSelectionRequest, ModelSettingSource as DomainModelSettingSource,
     ModelSettingsOverlay as DomainModelSettingsOverlay,
-    ModelSettingsPrecedence as DomainModelSettingsPrecedence, ParentTerminationCommandSource,
-    PerInputConfigurationChoices, PullRequestNumber, ReasoningLevel as DomainReasoningLevel,
-    ReplaceSessionDefaults as DomainReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
-    ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
-    ReplaceSessionMetadataResult, RepositorySlug, ReviewChangeRequestNumber, ReviewConfidence,
-    ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
-    ReviewExternalLinkAttachment, ReviewExternalLinkAttachmentResult, ReviewExternalLinkId,
-    ReviewExternalObjectKind, ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent,
-    ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
+    ModelSettingsPrecedence as DomainModelSettingsPrecedence, OverrideDeniedToolRequest,
+    OverrideDeniedToolRequestRejectedResult, OverrideDeniedToolRequestResult,
+    ParentTerminationCommandSource, PerInputConfigurationChoices, PullRequestNumber,
+    ReasoningLevel as DomainReasoningLevel, ReplaceSessionDefaults as DomainReplaceSessionDefaults,
+    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
+    ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult, RepositorySlug,
+    ReviewChangeRequestNumber, ReviewConfidence, ReviewEventOrdinal, ReviewExternalLink,
+    ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
+    ReviewExternalLinkAttachmentResult, ReviewExternalLinkId, ReviewExternalObjectKind,
+    ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent, ReviewFindingDiffSide,
+    ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
     ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation,
     ReviewFindingPendingExternalLinkRef, ReviewFindingProposal, ReviewFindingRef,
     ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence,
@@ -1232,7 +1235,8 @@ fn conversation_import_request_requires_permit(
         | ClientRequest::RecordReviewPublicationOutcomes { .. }
         | ClientRequest::ReadReviewOrchestration { .. }
         | ClientRequest::StopTurn { .. }
-        | ClientRequest::DecideToolRequest { .. } => false,
+        | ClientRequest::DecideToolRequest { .. }
+        | ClientRequest::OverrideDeniedToolRequest { .. } => false,
     }
 }
 fn retain_inbound_frame_permit_during_import_admission(
@@ -1428,7 +1432,8 @@ impl SnapshotReaderAdmission {
             | ClientRequest::RecordReviewRepairOutcomes { .. }
             | ClientRequest::RecordReviewPublicationOutcomes { .. }
             | ClientRequest::StopTurn { .. }
-            | ClientRequest::DecideToolRequest { .. } => Self::NotRequired,
+            | ClientRequest::DecideToolRequest { .. }
+            | ClientRequest::OverrideDeniedToolRequest { .. } => Self::NotRequired,
         }
     }
 }
@@ -2623,6 +2628,22 @@ where
                 decision,
                 &services.pool,
                 &services.eligibility_nudge,
+            )
+            .await
+        }
+        ClientRequest::OverrideDeniedToolRequest {
+            command_id,
+            session_id,
+            tool_request_id,
+        } => {
+            handle_override_denied_tool_request(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                tool_request_id,
+                &services.pool,
             )
             .await
         }
@@ -11574,6 +11595,90 @@ fn wire_tool_decision(
     }
 }
 
+/// Records one user override of a delegate denial through the canonical
+/// override command.
+///
+/// A claimed command identity reaches the durable replay boundary
+/// unconditionally (INV-012). The session is part of the canonical override
+/// payload, so an other-session request is the transaction's recorded
+/// `request_not_in_session` rejection rather than a pre-command refusal, and
+/// every outcome is the recorded result of the canonical command.
+async fn handle_override_denied_tool_request<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_id: uuid::Uuid,
+    session_id: CanonicalUuid,
+    tool_request_id: CanonicalUuid,
+    pool: &PgPool,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let request = ToolRequestId::from_uuid(tool_request_id.into_uuid());
+    let command_id = DurableCommandId::from_uuid(command_id);
+    let Ok(command) = OverrideDeniedToolRequest::try_new(command_id, session, request) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let mut service = OverrideDeniedToolRequestService::new(repository);
+    match service.execute(command).await {
+        Ok(prepared) => match prepared.result() {
+            OverrideDeniedToolRequestResult::Applied(applied) => {
+                write_message(
+                    writer,
+                    version,
+                    request_id,
+                    ServerMessage::ToolDenialOverridden {
+                        tool_request_id: wire_uuid(applied.recorded().denied_request().into_uuid()),
+                    },
+                )
+                .await
+            }
+            OverrideDeniedToolRequestResult::Rejected(rejected) => {
+                let detail = match *rejected {
+                    OverrideDeniedToolRequestRejectedResult::RequestNotFound { denied_request } => {
+                        RejectionDetail::ToolRequestNotFound {
+                            tool_request_id: wire_uuid(denied_request.into_uuid()),
+                        }
+                    }
+                    OverrideDeniedToolRequestRejectedResult::RequestNotInSession {
+                        session,
+                        denied_request,
+                    } => RejectionDetail::ToolRequestNotInSession {
+                        session_id: wire_uuid(session.into_uuid()),
+                        tool_request_id: wire_uuid(denied_request.into_uuid()),
+                    },
+                    OverrideDeniedToolRequestRejectedResult::NotDelegateDenied {
+                        denied_request,
+                    } => RejectionDetail::ToolRequestNotDelegateDenied {
+                        tool_request_id: wire_uuid(denied_request.into_uuid()),
+                    },
+                    OverrideDeniedToolRequestRejectedResult::NotTerminallyDenied {
+                        denied_request,
+                    } => RejectionDetail::ToolRequestNotTerminallyDenied {
+                        tool_request_id: wire_uuid(denied_request.into_uuid()),
+                    },
+                    OverrideDeniedToolRequestRejectedResult::AlreadyOverridden {
+                        denied_request,
+                    } => RejectionDetail::ToolDenialAlreadyOverridden {
+                        tool_request_id: wire_uuid(denied_request.into_uuid()),
+                    },
+                };
+                write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
+            }
+        },
+        Err(error) => write_tool_loop_error(writer, version, request_id, session_id, error).await,
+    }
+}
+
 async fn write_tool_loop_error<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
@@ -12420,6 +12525,15 @@ where
                                         model_call_id: wire_uuid(call.into_uuid()),
                                     }
                                 }
+                                signalbox_domain::ToolApprovalDecider::UserOverride {
+                                    command,
+                                    denied_request,
+                                } => WireToolApprovalEventDecider::UserOverride {
+                                    command_id: wire_uuid(command.into_uuid()),
+                                    overridden_tool_request_id: wire_uuid(
+                                        denied_request.into_uuid(),
+                                    ),
+                                },
                             },
                             rationale: approval
                                 .rationale()
@@ -14843,6 +14957,13 @@ impl ProcessUpdateEvent {
                             model_call_id: wire_uuid(call.into_uuid()),
                         }
                     }
+                    signalbox_domain::ToolApprovalDecider::UserOverride {
+                        command,
+                        denied_request,
+                    } => WireToolApprovalEventDecider::UserOverride {
+                        command_id: wire_uuid(command.into_uuid()),
+                        overridden_tool_request_id: wire_uuid(denied_request.into_uuid()),
+                    },
                 };
                 SessionEvent::ToolApprovalDecided {
                     turn_id: wire_uuid(turn.into_uuid()),

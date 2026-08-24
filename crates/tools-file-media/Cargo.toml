@@ -1,0 +1,21 @@
+[package]
+name = "signalbox-tools-file-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+schemars = "1.0.4"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = { version = "1.0.140", features = ["unbounded_depth"] }
+serde_stacker = "0.1.14"
+signalbox-application = { path = "../application" }
+signalbox-domain = { path = "../domain" }
+signalbox-file-media-runtime = { path = "../file-media-runtime" }
+signalbox-tool-contract = { path = "../tool-contract" }
+
+[lints]
+workspace = true

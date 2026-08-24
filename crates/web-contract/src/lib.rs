@@ -4,7 +4,7 @@
 //! these serde and JSON Schema definitions. Browser DTOs deliberately remain
 //! distinct from domain, persistence, and local process-protocol values.
 
-use std::{collections::BTreeMap, error::Error, fmt, num::NonZeroU64};
+use std::{collections::BTreeMap, error::Error, fmt};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -283,6 +283,41 @@ impl<'de> Deserialize<'de> for WebTimelineEventSequence {
     }
 }
 
+/// Checked positive unsigned 64-bit value encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebPositiveU64(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
+
+impl WebPositiveU64 {
+    /// Encodes one already-validated positive value in canonical decimal form.
+    #[must_use]
+    pub fn from_nonzero(value: std::num::NonZeroU64) -> Self {
+        Self(value.get().to_string())
+    }
+
+    /// Returns the canonical positive decimal wire spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebPositiveU64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let positive = canonical_u64(&value).and_then(std::num::NonZeroU64::new);
+        if positive.is_none() {
+            return Err(de::Error::custom(
+                "wire value must be a canonical positive u64",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
 /// Checked unsigned 64-bit value encoded losslessly for JavaScript.
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -314,32 +349,6 @@ impl<'de> Deserialize<'de> for WebU64 {
             ));
         }
         Ok(Self(value))
-    }
-}
-
-/// Checked positive 64-bit value encoded losslessly for JavaScript.
-#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(transparent)]
-pub struct WebPositiveU64(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
-
-impl WebPositiveU64 {
-    /// Encodes one domain-validated positive value in canonical decimal form.
-    #[must_use]
-    pub fn from_nonzero(value: NonZeroU64) -> Self {
-        Self(value.get().to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for WebPositiveU64 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        canonical_u64(&value)
-            .filter(|value| *value > 0)
-            .map(|_| Self(value))
-            .ok_or_else(|| de::Error::custom("wire value must be a canonical positive u64"))
     }
 }
 
@@ -554,6 +563,21 @@ pub enum WebSessionLiveStreamEvent {
     },
 }
 
+/// Title summaries carry at most this many Unicode scalar values; production
+/// truncates longer stored titles to exactly this bound and marks
+/// `title_truncated`.
+const MAX_ATTENTION_TITLE_SCALARS: u32 = 128;
+
+/// Present-nullable bounded title text. `#[schemars(required)]` alone renders
+/// an `Option` field as its inner type, dropping the `null` arm, so this keeps
+/// `null` a legal value while absence stays rejected.
+fn nullable_title_summary_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["string", "null"],
+        "maxLength": MAX_ATTENTION_TITLE_SCALARS,
+    })
+}
+
 /// Layer that owns one browser API failure.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -636,10 +660,14 @@ pub enum WebAttentionActivityKind {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionGoalBlock {
-    pub generation: WebU64,
+    /// Goal generations are strictly positive in the domain and its storage
+    /// constraint, so zero is not a valid wire spelling.
+    pub generation: WebPositiveU64,
     pub reason: WebAttentionBlockedReason,
-    /// At most 128 Unicode scalar values; exact text is in session detail.
-    #[schemars(length(max = 128))]
+    /// At least 1 and at most 128 Unicode scalar values; exact text is in
+    /// session detail. The stored goal need is never empty, so an empty
+    /// summary is contract-invalid.
+    #[schemars(length(min = 1, max = 128))]
     pub need_summary: String,
 }
 
@@ -663,7 +691,8 @@ pub struct WebAttentionActivity {
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionSummary {
     pub session_id: WebSessionId,
-    #[schemars(length(max = 128))]
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_title_summary_schema")]
     pub title_summary: Option<String>,
     pub title_truncated: bool,
     pub archived: bool,
@@ -916,6 +945,39 @@ function isWellFormedUnicode(value) {{
   return true;
 }}
 
+function exceedsScalarLength(value, maxLength) {{
+  let count = 0;
+  const scalars = value[Symbol.iterator]();
+  while (!scalars.next().done) {{
+    count += 1;
+    if (count > maxLength) {{
+      return true;
+    }}
+  }}
+  return false;
+}}
+
+function scalarLengthAtLeast(value, minLength) {{
+  let count = 0;
+  const scalars = value[Symbol.iterator]();
+  while (!scalars.next().done) {{
+    count += 1;
+    if (count >= minLength) {{
+      return true;
+    }}
+  }}
+  return count >= minLength;
+}}
+
+function scalarLength(value) {{
+  let count = 0;
+  const scalars = value[Symbol.iterator]();
+  while (!scalars.next().done) {{
+    count += 1;
+  }}
+  return count;
+}}
+
 function resolveReference(root, reference) {{
   const prefix = "#/$defs/";
   if (!reference.startsWith(prefix)) {{
@@ -1052,9 +1114,16 @@ function assertSchema(root, schema, value, path) {{
   if (
     schema.type === "string" &&
     schema.maxLength !== undefined &&
-    Array.from(value).length > schema.maxLength
+    exceedsScalarLength(value, schema.maxLength)
   ) {{
     fail(path, `at most ${{schema.maxLength}} Unicode scalar values`);
+  }}
+  if (
+    schema.type === "string" &&
+    schema.minLength !== undefined &&
+    !scalarLengthAtLeast(value, schema.minLength)
+  ) {{
+    fail(path, `at least ${{schema.minLength}} Unicode scalar values`);
   }}
   if (
     schema.type === "string" &&
@@ -1113,10 +1182,22 @@ export function decodeWebAttentionStreamEvent(value) {{
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
   if (value.kind === "snapshot") {{
     assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
+    if (value.snapshot.sort !== "last_activity_descending") {{
+      fail("attention_event.snapshot.sort", "the fixed hot-page activity sort");
+    }}
+    assertUnarchivedSummaries(value.snapshot.summaries, "attention_event.snapshot.summaries");
   }} else {{
     value.summaries?.forEach((summary, index) =>
       assertAttentionSummary(summary, `attention_event.summaries[${{index}}]`),
     );
+    assertUnarchivedSummaries(value.summaries ?? [], "attention_event.summaries");
+    const identities = new Set();
+    for (const summary of value.summaries ?? []) {{
+      if (identities.has(summary.session_id)) {{
+        fail("attention_event.summaries", "at most one replacement per session");
+      }}
+      identities.add(summary.session_id);
+    }}
   }}
   return value;
 }}
@@ -1179,10 +1260,38 @@ function assertLiveSnapshot(snapshot, path) {{
   }}
 }}
 
+function assertUnarchivedSummaries(summaries, path) {{
+  summaries.forEach((summary, index) => {{
+    if (summary.archived) {{
+      fail(`${{path}}[${{index}}].archived`, "false on the hot attention stream");
+    }}
+  }});
+}}
+
 function assertAttentionSnapshot(snapshot, path) {{
   snapshot.summaries.forEach((summary, index) =>
     assertAttentionSummary(summary, `${{path}}.summaries[${{index}}]`),
   );
+  for (let index = 1; index < snapshot.summaries.length; index += 1) {{
+    const previous = snapshot.summaries[index - 1];
+    const current = snapshot.summaries[index];
+    let ordered;
+    if (snapshot.sort === "session_identity_ascending") {{
+      ordered = previous.session_id < current.session_id;
+    }} else {{
+      const previousActivity = BigInt(previous.last_activity.unix_microseconds);
+      const currentActivity = BigInt(current.last_activity.unix_microseconds);
+      ordered =
+        previousActivity > currentActivity ||
+        (previousActivity === currentActivity && previous.session_id < current.session_id);
+    }}
+    if (!ordered) {{
+      fail(`${{path}}.summaries[${{index}}]`, `strictly ordered by sort ${{snapshot.sort}}`);
+    }}
+  }}
+  if (BigInt(snapshot.total) < BigInt(snapshot.summaries.length)) {{
+    fail(`${{path}}.total`, "at least the number of returned summaries");
+  }}
   const continuationKind = snapshot.continuation?.kind ?? null;
   const expectedContinuationKind = {{
     last_activity_descending: "last_activity",
@@ -1190,6 +1299,24 @@ function assertAttentionSnapshot(snapshot, path) {{
   }}[snapshot.sort];
   if (continuationKind !== null && continuationKind !== expectedContinuationKind) {{
     fail(`${{path}}.continuation`, `the continuation required by sort ${{snapshot.sort}}`);
+  }}
+  if (snapshot.continuation !== null) {{
+    const boundary = snapshot.summaries[snapshot.summaries.length - 1];
+    if (boundary === undefined) {{
+      fail(`${{path}}.continuation`, "absent when no summaries are returned");
+    }}
+    if (snapshot.continuation.session_id !== boundary.session_id) {{
+      fail(`${{path}}.continuation.session_id`, "the session of the last returned summary");
+    }}
+    if (
+      snapshot.continuation.kind === "last_activity" &&
+      snapshot.continuation.unix_microseconds !== boundary.last_activity.unix_microseconds
+    ) {{
+      fail(
+        `${{path}}.continuation.unix_microseconds`,
+        "the activity timestamp of the last returned summary",
+      );
+    }}
   }}
 }}
 
@@ -1207,6 +1334,23 @@ function assertAttentionSummary(summary, path) {{
   if (summary.action !== expectedAction) {{
     fail(`${{path}}.action`, `the action required by state ${{summary.state}}`);
   }}
+  const turnBacked = [
+    "active",
+    "queued",
+    "awaiting_approval",
+    "ambiguous",
+    "awaiting_reconciliation",
+  ].includes(summary.state);
+  if (turnBacked && summary.current_turn_id === null) {{
+    fail(`${{path}}.current_turn_id`, `a turn identity for state ${{summary.state}}`);
+  }}
+  const activeBacked = ["active", "awaiting_approval", "ambiguous"].includes(summary.state);
+  if (activeBacked && BigInt(summary.active_turn_count) === 0n) {{
+    fail(`${{path}}.active_turn_count`, `at least one active turn for state ${{summary.state}}`);
+  }}
+  if (summary.state === "queued" && BigInt(summary.queued_turn_count) === 0n) {{
+    fail(`${{path}}.queued_turn_count`, "at least one queued turn for queued state");
+  }}
   const hasGoalBlock = Object.hasOwn(summary, "goal_block") && summary.goal_block !== null;
   if ((summary.state === "blocked") !== hasGoalBlock) {{
     fail(`${{path}}.goal_block`, "present exactly for blocked state");
@@ -1214,9 +1358,20 @@ function assertAttentionSummary(summary, path) {{
   if (summary.title_summary === null && summary.title_truncated) {{
     fail(`${{path}}.title_truncated`, "false when title_summary is null");
   }}
+  if (
+    summary.title_truncated &&
+    summary.title_summary !== null &&
+    scalarLength(summary.title_summary) !== {max_title_scalars}
+  ) {{
+    fail(
+      `${{path}}.title_summary`,
+      "exactly {max_title_scalars} Unicode scalar values when title_truncated is true",
+    );
+  }}
 }}
 "##,
         contract_name = WEB_CONTRACT_NAME,
+        max_title_scalars = MAX_ATTENTION_TITLE_SCALARS,
         contract_version = WEB_CONTRACT_VERSION,
         live_preview_limit = max_session_live_queued_turns(),
     ))

@@ -23,18 +23,20 @@ use sha2::{Digest, Sha256};
 use signalbox_application::{
     EligibilityNudge, InProcessEligibilityNudge, RepoWatchBranchHead,
     RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchDifferFailureKind, RepoWatchDispatchService,
+    RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment,
+    RepoWatchConvergenceAssessmentInput, RepoWatchDifferFailureKind, RepoWatchDispatchService,
     RepoWatchDispatchTransaction, RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1,
     RepoWatchObservation, RepoWatchObservationApplyV1, RepoWatchPullRequestLifecycle,
     RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
-    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
-    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTargetedRefreshCoalescerV1,
-    RepoWatchTargetedRefreshV1, RepoWatchThreadObservation, RepoWatchThreadState,
-    RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
-    RepoWatchWebhookMappedNoChangeV1, RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1,
-    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
-    UuidV7RepoWatchEventIdGenerator, apply_repo_watch_observation_patch_v1,
-    derive_repo_watch_events, map_repo_watch_webhook_delivery_v1,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewDecision,
+    RepoWatchReviewObservation, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
+    RepoWatchTargetedRefreshCoalescerV1, RepoWatchTargetedRefreshV1, RepoWatchThreadObservation,
+    RepoWatchThreadState, RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input,
+    RepoWatchWebhookIgnoredReasonV1, RepoWatchWebhookMappedNoChangeV1,
+    RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1, RepoWatchWorkflowRunObservation,
+    UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator,
+    apply_repo_watch_observation_patch_v1, derive_repo_watch_events,
+    map_repo_watch_webhook_delivery_v1,
 };
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, DurableCommandId,
@@ -99,6 +101,12 @@ const MAX_POLL_WIRE_BYTES: usize = 768 * 1024 * 1024;
 // and therefore multiplies by the configured repository count. Deliberately not
 // raised with the per-attempt bound: transfer is transient, retention is not.
 const MAX_CACHED_WIRE_BYTES: usize = 64 * 1024 * 1024;
+const NON_GATING_CHECK_NAME_MARKERS: [&str; 4] = [
+    "report only",
+    "coderabbit",
+    "codecov/project",
+    "codecov/patch",
+];
 const WEBHOOK_PENDING_PAGE_SIZE: NonZeroU16 =
     NonZeroU16::new(100).expect("webhook pending page size is positive");
 const WEBHOOK_DRAIN_RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -148,6 +156,39 @@ query RepositoryWatchReviewThreads(
       reviewThreads(first: 100, after: $after) {
         nodes { id isResolved }
         pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"#;
+
+const CONVERGENCE_QUERY: &str = r#"
+query RepositoryWatchConvergence(
+  $namespace: String!, $name: String!, $number: Int!, $after: String
+) {
+  repository(owner: $namespace, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid
+      baseRefName
+      baseRefOid
+      mergeable
+      reviewDecision
+      commits(last: 1) {
+        nodes {
+          commit {
+            oid
+            statusCheckRollup {
+              contexts(first: 100, after: $after) {
+                nodes {
+                  __typename
+                  ... on CheckRun { name status conclusion }
+                  ... on StatusContext { context state }
+                }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -2163,7 +2204,7 @@ impl RepositoryWatchTask {
                 .await
             {
                 Ok(true) => {}
-                Ok(false) => return Ok(()),
+                Ok(false) => break,
                 Err(RepoWatchDispatchRepositoryError::GoalCutoff(
                     error @ signalbox_persistence::goal::GoalRepositoryError::Corruption(_),
                 )) => {
@@ -2178,6 +2219,31 @@ impl RepositoryWatchTask {
                 Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
             }
         }
+        loop {
+            match self
+                .dispatch_store
+                .process_next_convergence_cutoff(&self.repository, || {
+                    DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+                })
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(RepoWatchDispatchRepositoryError::GoalCutoff(
+                    error @ signalbox_persistence::goal::GoalRepositoryError::Corruption(_),
+                )) => {
+                    tracing::error!(
+                        repository = %self.repository.as_str(),
+                        cause_code = "repository_watch_convergence_cutoff_corruption",
+                        error = %error,
+                        "repository-watch convergence cutoff quarantined a corrupt goal; dispatch processing continues"
+                    );
+                    continue;
+                }
+                Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
+            }
+        }
+        Ok(())
     }
 
     async fn activate_rules(&self) -> Result<(), RepositoryWatchAttemptError> {
@@ -2281,6 +2347,7 @@ impl RepositoryWatchTask {
             RepoWatchRuleEvaluationOutcome::NotMatched
             | RepoWatchRuleEvaluationOutcome::Inactive
             | RepoWatchRuleEvaluationOutcome::TargetClosed
+            | RepoWatchRuleEvaluationOutcome::TargetConverged
             | RepoWatchRuleEvaluationOutcome::Occupied
             | RepoWatchRuleEvaluationOutcome::Cooldown => {}
         }
@@ -2307,14 +2374,14 @@ impl RepositoryWatchTask {
             .as_ref()
             .map(|cursor| cursor.candidate().event_identity_frontier().clone())
             .unwrap_or_default();
-        let observation = self
+        let polled = self
             .poller
             .poll_against_cursor(previous, cursor_generation)
             .await?;
         let events = derive_repo_watch_events(
             &self.repository,
             previous,
-            &observation,
+            &polled.observation,
             &mut event_identity_frontier,
             &mut UuidV7RepoWatchEventIdGenerator,
         )
@@ -2336,10 +2403,11 @@ impl RepositoryWatchTask {
         Ok(PreparedCompletePoll {
             cursor_generation,
             candidate: RepoWatchCursorCandidate::with_event_identity_frontier(
-                observation,
+                polled.observation,
                 event_identity_frontier,
             ),
             events,
+            convergence: polled.convergence,
         })
     }
 
@@ -2350,13 +2418,14 @@ impl RepositoryWatchTask {
     ) -> Result<(), RepositoryWatchAttemptError> {
         let outcome = self
             .store
-            .commit(
+            .commit_with_convergence(
                 &self.repository,
                 RepoWatchCommitRequest::new(
                     prepared.cursor_generation,
                     prepared.candidate,
                     prepared.events,
                 ),
+                &prepared.convergence,
             )
             .await
             .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
@@ -2390,6 +2459,7 @@ struct PreparedCompletePoll {
     cursor_generation: Option<RepoWatchCursorGeneration>,
     candidate: RepoWatchCursorCandidate,
     events: Vec<RepoWatchEventOccurrenceV1>,
+    convergence: Vec<RepoWatchConvergenceAssessment>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3155,13 +3225,14 @@ struct GitHubRepositoryPoller {
     // dropping the future aborts them and releases the lock, but they stay
     // joinable, and whoever runs next — the following attempt, or the
     // repository task on its way out — joins them before proceeding.
-    fetches:
-        tokio::sync::Mutex<JoinSet<Result<RepoWatchPullRequestState, RepositoryWatchAttemptError>>>,
+    fetches: tokio::sync::Mutex<JoinSet<Result<FetchedPullRequest, RepositoryWatchAttemptError>>>,
 }
 
 struct PullRequestFreshness {
     updated_at: String,
+    head_sha: CommitSha,
     settlement: PullRequestSettlement,
+    gating_check_inventory: Vec<String>,
     skipped_polls: usize,
     // A fetch that never reached the durable cursor must not authorize reuse:
     // the next attempt would compare this updated_at against a stale committed
@@ -3180,6 +3251,60 @@ struct ListedPullRequest {
 struct FetchedPullRequest {
     state: RepoWatchPullRequestState,
     settlement: PullRequestSettlement,
+    convergence_evidence: FetchedConvergenceEvidence,
+}
+
+struct FetchedConvergenceEvidence {
+    base_revision: CommitSha,
+    gating_checks_settled: bool,
+    gating_check_inventory_quiesced: bool,
+    gating_check_inventory: Vec<String>,
+    review_decision: RepoWatchReviewDecision,
+    gating_check_count: u64,
+    non_green_gating_checks: Vec<CheckRunName>,
+}
+
+impl FetchedConvergenceEvidence {
+    fn assess(
+        self,
+        state: &RepoWatchPullRequestState,
+        base_revision: CommitSha,
+    ) -> Result<RepoWatchConvergenceAssessment, RepositoryWatchAttemptError> {
+        if self.base_revision != base_revision {
+            return Err(RepositoryWatchAttemptError::InvalidResponse);
+        }
+        RepoWatchConvergenceAssessment::try_new(RepoWatchConvergenceAssessmentInput {
+            number: state.context().number(),
+            head_sha: state.context().head_sha().clone(),
+            base_branch: state.context().base_branch().clone(),
+            base_revision,
+            mergeable_state: state.mergeable_state(),
+            settled: self.gating_checks_settled
+                && self.gating_check_inventory_quiesced
+                && state.mergeable_state() != MergeableState::Unknown,
+            review_decision: self.review_decision,
+            unresolved_threads: state
+                .threads()
+                .iter()
+                .filter(|thread| thread.state() == RepoWatchThreadState::Open)
+                .map(|thread| thread.thread().clone())
+                .collect(),
+            gating_check_count: self.gating_check_count,
+            non_green_gating_checks: self.non_green_gating_checks,
+        })
+        .map_err(|_| RepositoryWatchAttemptError::Normalization)
+    }
+}
+
+struct PolledRepository {
+    observation: RepoWatchObservation,
+    convergence: Vec<RepoWatchConvergenceAssessment>,
+}
+
+#[derive(Debug)]
+struct FetchedPullRequests {
+    states: Vec<RepoWatchPullRequestState>,
+    convergence: Vec<RepoWatchConvergenceAssessment>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3265,15 +3390,17 @@ impl GitHubRepositoryPoller {
         self: &Arc<Self>,
         previous: Option<&RepoWatchObservation>,
     ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
-        self.poll_against_cursor(previous, Some(RepoWatchCursorGeneration::INITIAL))
-            .await
+        Ok(self
+            .poll_against_cursor(previous, Some(RepoWatchCursorGeneration::INITIAL))
+            .await?
+            .observation)
     }
 
     async fn poll_against_cursor(
         self: &Arc<Self>,
         previous: Option<&RepoWatchObservation>,
         cursor_generation: Option<RepoWatchCursorGeneration>,
-    ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
+    ) -> Result<PolledRepository, RepositoryWatchAttemptError> {
         self.cache().begin_poll();
         let result = self.poll_complete(previous, cursor_generation).await;
         if result.is_ok() {
@@ -3342,7 +3469,7 @@ impl GitHubRepositoryPoller {
         self: &Arc<Self>,
         previous: Option<&RepoWatchObservation>,
         cursor_generation: Option<RepoWatchCursorGeneration>,
-    ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
+    ) -> Result<PolledRepository, RepositoryWatchAttemptError> {
         let listed = self.fetch_open_pull_numbers().await?;
         let mut pull_numbers: BTreeSet<u64> = listed.keys().copied().collect();
         if let Some(previous) = previous {
@@ -3352,10 +3479,20 @@ impl GitHubRepositoryPoller {
                 }
             }
         }
-        let pull_requests = self
-            .fetch_pull_requests(pull_numbers, &listed, previous, cursor_generation)
-            .await?;
+        // Anchor convergence assessments to the same branch-head snapshot that
+        // will be committed in the cursor. Pull-request hydration is the long
+        // phase of a poll, so reading branch heads afterwards creates a broad
+        // window in which an ordinary base advance invalidates all evidence.
         let branch_heads = self.fetch_branch_heads().await?;
+        let pull_requests = self
+            .fetch_pull_requests(
+                pull_numbers,
+                &listed,
+                previous,
+                cursor_generation,
+                &branch_heads,
+            )
+            .await?;
         let workflows = self.fetch_workflows().await?;
         let mut workflow_runs = Vec::new();
         let previous_workflow_runs = previous
@@ -3368,15 +3505,15 @@ impl GitHubRepositoryPoller {
             );
         }
         let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
-            pull_requests,
+            pull_requests: pull_requests.states,
             workflow_runs,
             branch_heads,
         })
         .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        Ok(RepoWatchObservation::new(
-            self.signal_reviewers.clone(),
-            state,
-        ))
+        Ok(PolledRepository {
+            observation: RepoWatchObservation::new(self.signal_reviewers.clone(), state),
+            convergence: pull_requests.convergence,
+        })
     }
 
     async fn fetch_pull_requests(
@@ -3385,7 +3522,8 @@ impl GitHubRepositoryPoller {
         listed: &BTreeMap<u64, ListedPullRequest>,
         previous: Option<&RepoWatchObservation>,
         cursor_generation: Option<RepoWatchCursorGeneration>,
-    ) -> Result<Vec<RepoWatchPullRequestState>, RepositoryWatchAttemptError> {
+        branch_heads: &[RepoWatchBranchHead],
+    ) -> Result<FetchedPullRequests, RepositoryWatchAttemptError> {
         self.forget_unlisted_freshness(&pull_numbers);
         let mut fetches = self.fetches.lock().await;
         // A cancelled attempt drops this future mid-collection, which aborts
@@ -3399,6 +3537,7 @@ impl GitHubRepositoryPoller {
                 listed,
                 previous,
                 cursor_generation,
+                branch_heads,
                 &mut fetches,
             )
             .await;
@@ -3409,8 +3548,28 @@ impl GitHubRepositoryPoller {
         // every task to finish before the caller can begin another poll.
         fetches.shutdown().await;
         let mut pull_requests = collected?;
-        pull_requests.sort_by_key(|pull_request| pull_request.context().number().get());
-        Ok(pull_requests)
+        pull_requests.sort_by_key(|pull_request| pull_request.state.context().number().get());
+        let mut states = Vec::with_capacity(pull_requests.len());
+        let mut convergence = Vec::with_capacity(pull_requests.len());
+        for pull_request in pull_requests {
+            let base_revision = branch_heads
+                .iter()
+                .find(|branch_head| {
+                    branch_head.branch() == pull_request.state.context().base_branch()
+                })
+                .map(|branch_head| branch_head.head().clone())
+                .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
+            convergence.push(
+                pull_request
+                    .convergence_evidence
+                    .assess(&pull_request.state, base_revision)?,
+            );
+            states.push(pull_request.state);
+        }
+        Ok(FetchedPullRequests {
+            states,
+            convergence,
+        })
     }
 
     /// Joins every child fetch a cancelled attempt left behind. The repository
@@ -3427,8 +3586,9 @@ impl GitHubRepositoryPoller {
         listed: &BTreeMap<u64, ListedPullRequest>,
         previous: Option<&RepoWatchObservation>,
         cursor_generation: Option<RepoWatchCursorGeneration>,
-        fetches: &mut JoinSet<Result<RepoWatchPullRequestState, RepositoryWatchAttemptError>>,
-    ) -> Result<Vec<RepoWatchPullRequestState>, RepositoryWatchAttemptError> {
+        branch_heads: &[RepoWatchBranchHead],
+        fetches: &mut JoinSet<Result<FetchedPullRequest, RepositoryWatchAttemptError>>,
+    ) -> Result<Vec<FetchedPullRequest>, RepositoryWatchAttemptError> {
         let mut pull_requests = Vec::with_capacity(pull_numbers.len());
         let mut pending = pull_numbers.into_iter();
         loop {
@@ -3441,6 +3601,11 @@ impl GitHubRepositoryPoller {
                 let previous_pull_request = previous
                     .and_then(|observation| previous_pull_request(observation, number))
                     .cloned();
+                let base_revision_unchanged = previous_pull_request.as_ref().is_some_and(|pull| {
+                    previous.is_some_and(|observation| {
+                        pull_request_base_revision_matches(observation, pull, branch_heads)
+                    })
+                });
                 fetches.spawn(async move {
                     poller
                         .fetch_or_reuse_pull_request(
@@ -3448,6 +3613,7 @@ impl GitHubRepositoryPoller {
                             listed_pull_request.as_ref(),
                             previous_pull_request.as_ref(),
                             cursor_generation,
+                            base_revision_unchanged,
                         )
                         .await
                 });
@@ -3505,28 +3671,61 @@ impl GitHubRepositoryPoller {
         listed_pull_request: Option<&ListedPullRequest>,
         previous_pull_request: Option<&RepoWatchPullRequestState>,
         cursor_generation: Option<RepoWatchCursorGeneration>,
-    ) -> Result<RepoWatchPullRequestState, RepositoryWatchAttemptError> {
+        base_revision_unchanged: bool,
+    ) -> Result<FetchedPullRequest, RepositoryWatchAttemptError> {
         if let (Some(listed), Some(previous)) = (listed_pull_request, previous_pull_request)
+            && base_revision_unchanged
             && self.pull_request_detail_is_reusable(number, listed, previous, cursor_generation)
         {
             let reviews = self.fetch_reviews(number, Some(previous.reviews())).await?;
+            let mut convergence_evidence =
+                self.fetch_convergence_evidence(previous.context()).await?;
+            convergence_evidence.gating_check_inventory_quiesced = self
+                .gating_check_inventory_quiesced(
+                    number,
+                    listed,
+                    cursor_generation,
+                    &convergence_evidence.gating_check_inventory,
+                );
             let threads = self.fetch_threads(number).await?;
             let reactions = self
                 .fetch_reactions(number, Some(previous.reactions()))
                 .await?;
             self.record_skipped_poll(number);
-            return reuse_pull_request(previous, reviews, threads, reactions);
+            self.record_gating_check_inventory(
+                number,
+                listed,
+                convergence_evidence.gating_check_inventory.clone(),
+            );
+            let state = reuse_pull_request(previous, reviews, threads, reactions)?;
+            return Ok(FetchedPullRequest {
+                state,
+                settlement: PullRequestSettlement::Settled,
+                convergence_evidence,
+            });
         }
-        let fetched = self
+        let mut fetched = self
             .fetch_pull_request(number, previous_pull_request)
             .await?;
         match listed_pull_request {
             Some(listed) => {
-                self.record_fetched_pull_request(number, listed, fetched.settlement);
+                fetched.convergence_evidence.gating_check_inventory_quiesced = self
+                    .gating_check_inventory_quiesced(
+                        number,
+                        listed,
+                        cursor_generation,
+                        &fetched.convergence_evidence.gating_check_inventory,
+                    );
+                self.record_fetched_pull_request(
+                    number,
+                    listed,
+                    fetched.settlement,
+                    fetched.convergence_evidence.gating_check_inventory.clone(),
+                );
             }
             None => self.forget_pull_request(number),
         }
-        Ok(fetched.state)
+        Ok(fetched)
     }
 
     fn pull_request_detail_is_reusable(
@@ -3552,17 +3751,50 @@ impl GitHubRepositoryPoller {
         }
     }
 
+    fn gating_check_inventory_quiesced(
+        &self,
+        number: u64,
+        listed: &ListedPullRequest,
+        cursor_generation: Option<RepoWatchCursorGeneration>,
+        gating_check_inventory: &[String],
+    ) -> bool {
+        self.freshness().get(&number).is_some_and(|freshness| {
+            freshness.published_generation == cursor_generation
+                && cursor_generation.is_some()
+                && freshness.updated_at == listed.updated_at
+                && freshness.head_sha == listed.head_sha
+                && freshness.gating_check_inventory == gating_check_inventory
+        })
+    }
+
+    fn record_gating_check_inventory(
+        &self,
+        number: u64,
+        listed: &ListedPullRequest,
+        gating_check_inventory: Vec<String>,
+    ) {
+        if let Some(freshness) = self.freshness().get_mut(&number) {
+            freshness.updated_at = listed.updated_at.clone();
+            freshness.head_sha = listed.head_sha.clone();
+            freshness.gating_check_inventory = gating_check_inventory;
+            freshness.published_generation = None;
+        }
+    }
+
     fn record_fetched_pull_request(
         &self,
         number: u64,
         listed: &ListedPullRequest,
         settlement: PullRequestSettlement,
+        gating_check_inventory: Vec<String>,
     ) {
         self.freshness().insert(
             number,
             PullRequestFreshness {
                 updated_at: listed.updated_at.clone(),
+                head_sha: listed.head_sha.clone(),
                 settlement,
+                gating_check_inventory,
                 skipped_polls: 0,
                 published_generation: None,
             },
@@ -3645,6 +3877,7 @@ impl GitHubRepositoryPoller {
                 previous_pull_request.map(RepoWatchPullRequestState::reviews),
             )
             .await?;
+        let convergence_evidence = self.fetch_convergence_evidence(&context).await?;
         let threads = self.fetch_threads(number).await?;
         let reactions = self
             .fetch_reactions(
@@ -3663,7 +3896,11 @@ impl GitHubRepositoryPoller {
             reactions,
         })
         .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        Ok(FetchedPullRequest { state, settlement })
+        Ok(FetchedPullRequest {
+            state,
+            settlement,
+            convergence_evidence,
+        })
     }
 
     async fn fetch_check_suites(
@@ -3751,7 +3988,7 @@ impl GitHubRepositoryPoller {
                                 .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
                             normalize_conclusion(run.conclusion.as_deref())?,
                         ));
-                    } else {
+                    } else if !is_non_gating_check_name(&run.name) {
                         every_run_completed = false;
                     }
                 }
@@ -3886,6 +4123,129 @@ impl GitHubRepositoryPoller {
             }
             page = next_page(page)?;
         }
+    }
+
+    async fn fetch_convergence_evidence(
+        &self,
+        context: &PullRequestEventContext,
+    ) -> Result<FetchedConvergenceEvidence, RepositoryWatchAttemptError> {
+        let (namespace, name) = self
+            .repository
+            .as_str()
+            .split_once('/')
+            .ok_or(RepositoryWatchAttemptError::Normalization)?;
+        let number = i64::try_from(context.number().get())
+            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+        let mut after: Option<String> = None;
+        let mut page = 1_u16;
+        let mut gating_check_count = 0_u64;
+        let mut gating_checks_settled = true;
+        let mut gating_check_inventory = Vec::new();
+        let mut non_green_gating_checks = Vec::new();
+        let mut retained_review_decision = None;
+        let mut retained_base_revision = None;
+        loop {
+            let body = serde_json::to_vec(&GraphQlRequest {
+                query: CONVERGENCE_QUERY,
+                variables: ThreadVariables {
+                    namespace,
+                    name,
+                    number,
+                    after: after.as_deref(),
+                },
+            })
+            .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
+            let response: GraphQlEnvelope<ConvergenceData> = self
+                .conditional_json(
+                    "convergence",
+                    Method::POST,
+                    self.graphql_url.clone(),
+                    Some(body),
+                )
+                .await?;
+            if !response.errors.is_empty() {
+                return Err(RepositoryWatchAttemptError::Rejected);
+            }
+            let pull_request = response
+                .data
+                .and_then(|data| data.repository)
+                .and_then(|repository| repository.pull_request)
+                .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
+            let _provider_mergeable_state = normalize_graphql_mergeable(&pull_request.mergeable)?;
+            if pull_request.head_ref_oid != context.head_sha().as_str()
+                || pull_request.base_ref_name != context.base_branch().as_str()
+            {
+                return Err(RepositoryWatchAttemptError::InvalidResponse);
+            }
+            if retained_base_revision
+                .replace(pull_request.base_ref_oid.clone())
+                .is_some_and(|retained| retained != pull_request.base_ref_oid)
+            {
+                return Err(RepositoryWatchAttemptError::InvalidResponse);
+            }
+            let review_decision =
+                normalize_review_decision(pull_request.review_decision.as_deref())?;
+            if retained_review_decision
+                .replace(review_decision)
+                .is_some_and(|retained| retained != review_decision)
+            {
+                return Err(RepositoryWatchAttemptError::InvalidResponse);
+            }
+            let [commit_node] = pull_request.commits.nodes.as_slice() else {
+                return Err(RepositoryWatchAttemptError::InvalidResponse);
+            };
+            let commit = &commit_node.commit;
+            if commit.oid != pull_request.head_ref_oid {
+                return Err(RepositoryWatchAttemptError::InvalidResponse);
+            }
+            let Some(rollup) = commit.status_check_rollup.as_ref() else {
+                if page != 1 {
+                    return Err(RepositoryWatchAttemptError::InvalidResponse);
+                }
+                break;
+            };
+            for check in &rollup.contexts.nodes {
+                if check.is_report_only() {
+                    continue;
+                }
+                gating_check_inventory.push(check.name().to_owned());
+                gating_check_count = gating_check_count
+                    .checked_add(1)
+                    .ok_or(RepositoryWatchAttemptError::ResourceLimit)?;
+                if !check.complete() {
+                    gating_checks_settled = false;
+                }
+                if !check.green() {
+                    non_green_gating_checks.push(
+                        CheckRunName::try_new(check.name().to_owned())
+                            .map_err(|_| RepositoryWatchAttemptError::Normalization)?,
+                    );
+                }
+            }
+            if !rollup.contexts.page_info.has_next_page {
+                break;
+            }
+            after = rollup.contexts.page_info.end_cursor.clone();
+            if after.is_none() {
+                return Err(RepositoryWatchAttemptError::InvalidResponse);
+            }
+            page = next_page(page)?;
+        }
+        let base_revision = CommitSha::try_new(
+            retained_base_revision.ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
+        )
+        .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+        gating_check_inventory.sort_unstable();
+        Ok(FetchedConvergenceEvidence {
+            base_revision,
+            gating_checks_settled,
+            gating_check_inventory_quiesced: false,
+            gating_check_inventory,
+            review_decision: retained_review_decision
+                .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
+            gating_check_count,
+            non_green_gating_checks,
+        })
     }
 
     async fn fetch_reactions(
@@ -4705,6 +5065,30 @@ impl PollCache {
     }
 }
 
+fn pull_request_base_revision<'a>(
+    observation: &'a RepoWatchObservation,
+    pull_request: &RepoWatchPullRequestState,
+) -> Option<&'a CommitSha> {
+    observation
+        .state()
+        .branch_heads()
+        .iter()
+        .find(|head| head.branch() == pull_request.context().base_branch())
+        .map(RepoWatchBranchHead::head)
+}
+
+fn pull_request_base_revision_matches(
+    observation: &RepoWatchObservation,
+    pull_request: &RepoWatchPullRequestState,
+    branch_heads: &[RepoWatchBranchHead],
+) -> bool {
+    pull_request_base_revision(observation, pull_request)
+        == branch_heads
+            .iter()
+            .find(|head| head.branch() == pull_request.context().base_branch())
+            .map(RepoWatchBranchHead::head)
+}
+
 fn reuse_pull_request(
     previous: &RepoWatchPullRequestState,
     reviews: Vec<RepoWatchReviewObservation>,
@@ -5081,6 +5465,137 @@ struct ThreadResponse {
 }
 
 #[derive(Clone, Deserialize)]
+struct ConvergenceData {
+    repository: Option<ConvergenceRepository>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ConvergenceRepository {
+    #[serde(rename = "pullRequest")]
+    pull_request: Option<ConvergencePullRequest>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ConvergencePullRequest {
+    #[serde(rename = "headRefOid")]
+    head_ref_oid: String,
+    #[serde(rename = "baseRefName")]
+    base_ref_name: String,
+    #[serde(rename = "baseRefOid")]
+    base_ref_oid: String,
+    mergeable: String,
+    #[serde(rename = "reviewDecision")]
+    review_decision: Option<String>,
+    commits: ConvergenceCommitConnection,
+}
+
+#[derive(Clone, Deserialize)]
+struct ConvergenceCommitConnection {
+    nodes: Vec<ConvergenceCommitNode>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ConvergenceCommitNode {
+    commit: ConvergenceCommit,
+}
+
+#[derive(Clone, Deserialize)]
+struct ConvergenceCommit {
+    oid: String,
+    #[serde(rename = "statusCheckRollup")]
+    status_check_rollup: Option<ConvergenceCheckRollup>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ConvergenceCheckRollup {
+    contexts: ConvergenceCheckConnection,
+}
+
+#[derive(Clone, Deserialize)]
+struct ConvergenceCheckConnection {
+    nodes: Vec<ConvergenceCheck>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(tag = "__typename")]
+enum ConvergenceCheck {
+    CheckRun {
+        name: String,
+        status: String,
+        conclusion: Option<String>,
+    },
+    StatusContext {
+        context: String,
+        state: String,
+    },
+}
+
+impl ConvergenceCheck {
+    fn name(&self) -> &str {
+        match self {
+            Self::CheckRun { name, .. } => name,
+            Self::StatusContext { context, .. } => context,
+        }
+    }
+
+    fn is_report_only(&self) -> bool {
+        is_non_gating_check_name(self.name())
+    }
+
+    fn complete(&self) -> bool {
+        match self {
+            Self::CheckRun { status, .. } => status == "COMPLETED",
+            Self::StatusContext { state, .. } => state != "PENDING",
+        }
+    }
+
+    fn green(&self) -> bool {
+        match self {
+            Self::CheckRun {
+                status, conclusion, ..
+            } => {
+                status == "COMPLETED"
+                    && matches!(
+                        conclusion.as_deref(),
+                        Some("SUCCESS" | "SKIPPED" | "NEUTRAL")
+                    )
+            }
+            Self::StatusContext { state, .. } => state == "SUCCESS",
+        }
+    }
+}
+
+fn is_non_gating_check_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    NON_GATING_CHECK_NAME_MARKERS
+        .iter()
+        .any(|marker| name.contains(marker))
+}
+
+fn normalize_graphql_mergeable(value: &str) -> Result<MergeableState, RepositoryWatchAttemptError> {
+    match value {
+        "MERGEABLE" => Ok(MergeableState::Mergeable),
+        "CONFLICTING" => Ok(MergeableState::Conflicting),
+        "UNKNOWN" => Ok(MergeableState::Unknown),
+        _ => Err(RepositoryWatchAttemptError::InvalidResponse),
+    }
+}
+
+fn normalize_review_decision(
+    value: Option<&str>,
+) -> Result<RepoWatchReviewDecision, RepositoryWatchAttemptError> {
+    match value {
+        None => Ok(RepoWatchReviewDecision::None),
+        Some("APPROVED") => Ok(RepoWatchReviewDecision::Approved),
+        Some("REVIEW_REQUIRED") => Ok(RepoWatchReviewDecision::ReviewRequired),
+        Some("CHANGES_REQUESTED") => Ok(RepoWatchReviewDecision::ChangesRequested),
+        Some(_) => Err(RepositoryWatchAttemptError::InvalidResponse),
+    }
+}
+
+#[derive(Clone, Deserialize)]
 struct PageInfo {
     #[serde(rename = "hasNextPage")]
     has_next_page: bool,
@@ -5114,11 +5629,12 @@ mod tests {
     };
 
     use super::{
-        CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
-        ListedPullRequest, MAX_CACHED_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
-        MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE,
-        PollAttemptWait, PollCache, PullRequestSettlement, PullResponse, ReactionContent,
-        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
+        CheckConclusion, ChecksOutcome, ConvergenceCheck, EntityTag, FileCredentialAccess,
+        GitHubRepositoryPoller, ListedPullRequest, MAX_CACHED_WIRE_BYTES,
+        MAX_CONCURRENT_PULL_REQUEST_FETCHES, MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS,
+        MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE, PollAttemptWait, PollCache,
+        PullRequestSettlement, PullResponse, ReactionContent, RepoWatchAuthorLogin,
+        RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
         RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
         RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
         RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchChildExit,
@@ -5813,6 +6329,61 @@ mod tests {
         .to_string()
     }
 
+    fn convergence() -> String {
+        convergence_with_mergeability("CONFLICTING")
+    }
+
+    fn convergence_with_mergeability(mergeable: &str) -> String {
+        serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "headRefOid": HEAD_SHA,
+                        "baseRefName": BASE_BRANCH,
+                        "baseRefOid": BASE_SHA,
+                        "mergeable": mergeable,
+                        "reviewDecision": "APPROVED",
+                        "commits": {
+                            "nodes": [{
+                                "commit": {
+                                    "oid": HEAD_SHA,
+                                    "statusCheckRollup": {
+                                        "contexts": {
+                                            "nodes": [
+                                                {
+                                                    "__typename": "CheckRun",
+                                                    "name": CHECK_RUN_NAME,
+                                                    "status": "COMPLETED",
+                                                    "conclusion": "FAILURE"
+                                                },
+                                                {
+                                                    "__typename": "CheckRun",
+                                                    "name": "coverage (report only)",
+                                                    "status": "IN_PROGRESS",
+                                                    "conclusion": null
+                                                },
+                                                {
+                                                    "__typename": "StatusContext",
+                                                    "context": "CodeRabbit",
+                                                    "state": "ERROR"
+                                                }
+                                            ],
+                                            "pageInfo": {
+                                                "hasNextPage": false,
+                                                "endCursor": null
+                                            }
+                                        }
+                                    }
+                                }
+                            }]
+                        }
+                    }
+                }
+            }
+        })
+        .to_string()
+    }
+
     fn pull_reactions() -> String {
         serde_json::json!([
             {
@@ -6062,6 +6633,7 @@ mod tests {
     struct ScriptedResponse {
         method: &'static str,
         target: String,
+        request_body_marker: Option<String>,
         validator: Option<&'static str>,
         status: &'static str,
         entity_tag: Option<&'static str>,
@@ -6075,6 +6647,7 @@ mod tests {
             Self {
                 method: "GET",
                 target: target.0,
+                request_body_marker: None,
                 validator: None,
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
@@ -6088,6 +6661,7 @@ mod tests {
             Self {
                 method: "GET",
                 target: target.0,
+                request_body_marker: None,
                 validator: None,
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
@@ -6101,6 +6675,7 @@ mod tests {
             Self {
                 method: "GET",
                 target: target.0,
+                request_body_marker: None,
                 validator: Some(ENTITY_TAG),
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
@@ -6114,6 +6689,7 @@ mod tests {
             Self {
                 method: "GET",
                 target: target.0,
+                request_body_marker: None,
                 validator: None,
                 status: "404 Not Found",
                 entity_tag: None,
@@ -6127,6 +6703,7 @@ mod tests {
             Self {
                 method: "GET",
                 target: target.0,
+                request_body_marker: None,
                 validator: Some(ENTITY_TAG),
                 status: "304 Not Modified",
                 entity_tag: None,
@@ -6145,6 +6722,7 @@ mod tests {
             Self {
                 method: "POST",
                 target: target.0,
+                request_body_marker: None,
                 validator: None,
                 status: "200 OK",
                 entity_tag: None,
@@ -6152,6 +6730,11 @@ mod tests {
                 body: body.0,
                 delay: Duration::ZERO,
             }
+        }
+
+        fn matching_request_body(mut self, marker: String) -> Self {
+            self.request_body_marker = Some(marker);
+            self
         }
     }
 
@@ -6250,6 +6833,10 @@ mod tests {
                 .iter()
                 .position(|response| {
                     start_line == format!("{} {} HTTP/1.1", response.method, response.target)
+                        && response
+                            .request_body_marker
+                            .as_ref()
+                            .is_none_or(|marker| request.contains(marker))
                 })
                 .map(|position| responses.remove(position))
         };
@@ -6306,12 +6893,32 @@ mod tests {
                 .await
                 .expect("scripted request can be read");
             request.extend_from_slice(&chunk[..read]);
-            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            if scripted_request_is_complete(&request) {
                 break;
             }
-            assert_ne!(read, 0, "request headers must be complete");
+            assert_ne!(read, 0, "request body must be complete");
         }
         String::from_utf8(request).expect("request headers are UTF-8")
+    }
+
+    fn scripted_request_is_complete(request: &[u8]) -> bool {
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let header_end = header_end + 4;
+        let headers = std::str::from_utf8(&request[..header_end])
+            .expect("scripted request headers are UTF-8");
+        let content_length = headers
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .map_or(0, |(_, value)| {
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .expect("scripted request content length is valid")
+            });
+        request.len() >= header_end + content_length
     }
 
     async fn write_response(stream: &mut TcpStream, response: &ScriptedResponse) {
@@ -6433,6 +7040,10 @@ mod tests {
                 ResponseBody(pulls_with_one()),
             ),
             ScriptedResponse::ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(branches()),
+            ),
+            ScriptedResponse::ok(
                 RequestTarget(PULL_DETAIL_TARGET.to_owned()),
                 ResponseBody(pull_detail()),
             ),
@@ -6451,6 +7062,10 @@ mod tests {
             ScriptedResponse::ok(
                 RequestTarget(REVIEWS_TARGET.to_owned()),
                 ResponseBody(reviews()),
+            ),
+            ScriptedResponse::post(
+                RequestTarget(THREADS_TARGET.to_owned()),
+                ResponseBody(convergence()),
             ),
             ScriptedResponse::post(
                 RequestTarget(THREADS_TARGET.to_owned()),
@@ -6477,10 +7092,6 @@ mod tests {
                 ResponseBody(review_comment_reactions()),
             ),
             ScriptedResponse::ok(
-                RequestTarget(BRANCHES_TARGET.to_owned()),
-                ResponseBody(branches()),
-            ),
-            ScriptedResponse::ok(
                 RequestTarget(WORKFLOWS_TARGET.to_owned()),
                 ResponseBody(workflows()),
             ),
@@ -6494,8 +7105,8 @@ mod tests {
     fn complete_pull_request_responses() -> Vec<ScriptedResponse> {
         complete_typed_observation_responses()
             .into_iter()
-            .skip(1)
-            .take(11)
+            .skip(2)
+            .take(12)
             .collect()
     }
 
@@ -6551,6 +7162,32 @@ mod tests {
         .to_string()
     }
 
+    fn minimal_convergence(number: u64) -> String {
+        let head_sha = minimal_pull_head_sha(number);
+        serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "headRefOid": head_sha,
+                        "baseRefName": BASE_BRANCH,
+                        "baseRefOid": BASE_SHA,
+                        "mergeable": "MERGEABLE",
+                        "reviewDecision": null,
+                        "commits": {
+                            "nodes": [{
+                                "commit": {
+                                    "oid": minimal_pull_head_sha(number),
+                                    "statusCheckRollup": null
+                                }
+                            }]
+                        }
+                    }
+                }
+            }
+        })
+        .to_string()
+    }
+
     fn minimal_pull_responses(number: u64) -> Vec<ScriptedResponse> {
         let head_sha = minimal_pull_head_sha(number);
         vec![
@@ -6573,8 +7210,14 @@ mod tests {
             ),
             ScriptedResponse::post(
                 RequestTarget(THREADS_TARGET.to_owned()),
+                ResponseBody(minimal_convergence(number)),
+            )
+            .matching_request_body(format!("\"number\":{number}")),
+            ScriptedResponse::post(
+                RequestTarget(THREADS_TARGET.to_owned()),
                 ResponseBody(empty_threads()),
-            ),
+            )
+            .matching_request_body(format!("\"number\":{number}")),
             ScriptedResponse::ok(
                 RequestTarget(format!(
                     "/repos/{WATCHED_REPOSITORY}/issues/{number}/reactions?per_page=100&page=1"
@@ -6603,6 +7246,10 @@ mod tests {
                 ResponseBody(pulls_with_one()),
             ),
             ScriptedResponse::ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(branches()),
+            ),
+            ScriptedResponse::ok(
                 RequestTarget(PULL_DETAIL_TARGET.to_owned()),
                 ResponseBody(pull_detail()),
             ),
@@ -6617,6 +7264,10 @@ mod tests {
             ScriptedResponse::ok(
                 RequestTarget(REVIEWS_TARGET.to_owned()),
                 ResponseBody(reviews()),
+            ),
+            ScriptedResponse::post(
+                RequestTarget(THREADS_TARGET.to_owned()),
+                ResponseBody(convergence()),
             ),
             ScriptedResponse::post(
                 RequestTarget(THREADS_TARGET.to_owned()),
@@ -6641,10 +7292,6 @@ mod tests {
             ScriptedResponse::ok(
                 RequestTarget(REVIEW_COMMENT_REACTIONS_TARGET.to_owned()),
                 ResponseBody(review_comment_reactions()),
-            ),
-            ScriptedResponse::ok(
-                RequestTarget(BRANCHES_TARGET.to_owned()),
-                ResponseBody(branches()),
             ),
             ScriptedResponse::ok(
                 RequestTarget(WORKFLOWS_TARGET.to_owned()),
@@ -6672,8 +7319,16 @@ mod tests {
                 ResponseBody(pulls_with_one()),
             ),
             ScriptedResponse::conditional_ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(branches()),
+            ),
+            ScriptedResponse::conditional_ok(
                 RequestTarget(REVIEWS_TARGET.to_owned()),
                 ResponseBody(reviews),
+            ),
+            ScriptedResponse::post(
+                RequestTarget(THREADS_TARGET.to_owned()),
+                ResponseBody(convergence()),
             ),
             ScriptedResponse::post(
                 RequestTarget(THREADS_TARGET.to_owned()),
@@ -6698,10 +7353,6 @@ mod tests {
             ScriptedResponse::conditional_ok(
                 RequestTarget(REVIEW_COMMENT_REACTIONS_TARGET.to_owned()),
                 ResponseBody(review_comment_reactions()),
-            ),
-            ScriptedResponse::conditional_ok(
-                RequestTarget(BRANCHES_TARGET.to_owned()),
-                ResponseBody(branches()),
             ),
             ScriptedResponse::conditional_ok(
                 RequestTarget(WORKFLOWS_TARGET.to_owned()),
@@ -6760,6 +7411,11 @@ mod tests {
                     ScriptedResponse::ok(
                         RequestTarget(PULL_DETAIL_TARGET.to_owned()),
                         ResponseBody(pull_detail_with_pending_mergeability()),
+                    )
+                } else if response.target == THREADS_TARGET && response.body == convergence() {
+                    ScriptedResponse::post(
+                        RequestTarget(THREADS_TARGET.to_owned()),
+                        ResponseBody(convergence_with_mergeability("UNKNOWN")),
                     )
                 } else {
                     response
@@ -7520,6 +8176,22 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn scripted_request_waits_for_its_declared_body() {
+        const HEADERS: &[u8] = b"POST /graphql HTTP/1.1\r\nContent-Length: 4\r\n\r\n";
+        const COMPLETE: &[u8] = b"POST /graphql HTTP/1.1\r\nContent-Length: 4\r\n\r\ntest";
+
+        assert!(!scripted_request_is_complete(HEADERS));
+        assert!(scripted_request_is_complete(COMPLETE));
+    }
+
+    #[test]
+    fn scripted_request_without_a_body_completes_at_headers() {
+        const REQUEST: &[u8] = b"GET /resource HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
+        assert!(scripted_request_is_complete(REQUEST));
+    }
+
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn admission_during_a_concurrent_drain_is_drained_by_the_same_task_run()
@@ -7730,6 +8402,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn convergence_matches_the_exact_head_gate() {
+        let server = ScriptedServer::start(complete_typed_observation_responses()).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let polled = fixture
+            .poller
+            .poll_against_cursor(None, Some(RepoWatchCursorGeneration::INITIAL))
+            .await
+            .expect("full poll and convergence assessment succeed");
+        server.finish().await;
+        let assessment = &polled.convergence[0];
+
+        assert_eq!(assessment.gating_check_count(), 1);
+        assert_eq!(
+            assessment.non_green_gating_checks()[0].as_str(),
+            CHECK_RUN_NAME
+        );
+        assert_eq!(assessment.unresolved_threads()[0].as_str(), REVIEW_THREAD);
+        assert_eq!(
+            assessment.verdict(),
+            signalbox_application::RepoWatchConvergenceVerdict::NotConverged
+        );
+    }
+
+    #[tokio::test]
+    async fn convergence_rejects_evidence_from_a_different_base_revision() {
+        let observation = complete_typed_observation().await;
+        let pull_request = &observation.state().pull_requests()[0];
+        let evidence = super::FetchedConvergenceEvidence {
+            base_revision: CommitSha::try_new(CHANGED_LISTED_HEAD_SHA.to_owned())
+                .expect("fixture provider base revision is valid"),
+            gating_checks_settled: true,
+            gating_check_inventory_quiesced: true,
+            gating_check_inventory: vec![String::from(CHECK_RUN_NAME)],
+            review_decision: super::RepoWatchReviewDecision::Approved,
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        };
+        let snapshot_base_revision = CommitSha::try_new(BASE_SHA.to_owned())
+            .expect("fixture snapshot base revision is valid");
+
+        let assessment = evidence.assess(pull_request, snapshot_base_revision);
+
+        assert!(matches!(
+            assessment,
+            Err(RepositoryWatchAttemptError::InvalidResponse)
+        ));
+    }
+
+    #[test]
+    fn codecov_project_status_is_report_only() {
+        let check = ConvergenceCheck::StatusContext {
+            context: String::from("codecov/project"),
+            state: String::from("PENDING"),
+        };
+
+        assert!(check.is_report_only());
+    }
+
+    #[test]
+    fn codecov_patch_status_is_report_only_case_insensitively() {
+        let check = ConvergenceCheck::StatusContext {
+            context: String::from("Codecov/Patch"),
+            state: String::from("PENDING"),
+        };
+
+        assert!(check.is_report_only());
+    }
+
+    #[tokio::test]
     async fn shutdown_wins_when_a_repository_task_exits_cleanly_at_the_same_time() {
         let (sender, receiver) = watch::channel(false);
         let exit = Arc::new(Notify::new());
@@ -7782,6 +8524,7 @@ mod tests {
                         &listed,
                         None,
                         Some(RepoWatchCursorGeneration::INITIAL),
+                        &[base_branch_head()],
                     )
                     .await;
                 RepositoryWatchChildExit::Repository
@@ -7832,6 +8575,7 @@ mod tests {
                         &listed,
                         None,
                         Some(RepoWatchCursorGeneration::INITIAL),
+                        &[base_branch_head()],
                     )
                     .await;
                 RepositoryWatchChildExit::Repository
@@ -8598,6 +9342,7 @@ mod tests {
                 &listed,
                 None,
                 Some(RepoWatchCursorGeneration::INITIAL),
+                &[base_branch_head()],
             )
             .await
             .expect("every open pull request is fetched");
@@ -8605,6 +9350,7 @@ mod tests {
 
         (
             pull_requests
+                .states
                 .iter()
                 .map(|pull_request| pull_request.context().number().get())
                 .collect(),
@@ -8661,6 +9407,7 @@ mod tests {
                     &listed,
                     None,
                     Some(RepoWatchCursorGeneration::INITIAL),
+                    &[base_branch_head()],
                 )
                 .await
         });
@@ -8700,9 +9447,12 @@ mod tests {
         let previous = &observation.state().pull_requests()[0];
         let listed = listed_pull_request(HEAD_SHA);
         let number = previous.context().number().get();
-        fixture
-            .poller
-            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
+        fixture.poller.record_fetched_pull_request(
+            number,
+            &listed,
+            PullRequestSettlement::Settled,
+            Vec::new(),
+        );
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
@@ -8742,9 +9492,12 @@ mod tests {
         let loaded_generation = published_generation
             .next()
             .expect("fixture cursor generation has a successor");
-        fixture
-            .poller
-            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
+        fixture.poller.record_fetched_pull_request(
+            number,
+            &listed,
+            PullRequestSettlement::Settled,
+            Vec::new(),
+        );
         fixture.poller.publish_freshness(published_generation);
 
         assert!(
@@ -8756,6 +9509,46 @@ mod tests {
             ),
             "freshness published against another durable cursor must not authorize reuse"
         );
+    }
+
+    #[tokio::test]
+    async fn a_new_gating_context_requires_another_committed_poll_to_quiesce() {
+        let fixture = poller_fixture(
+            Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
+        )
+        .expect("poller is constructed");
+        let listed = listed_pull_request(HEAD_SHA);
+        let generation = RepoWatchCursorGeneration::INITIAL;
+        fixture.poller.record_fetched_pull_request(
+            PULL_NUMBER,
+            &listed,
+            PullRequestSettlement::Settled,
+            vec![String::from(CHECK_RUN_NAME)],
+        );
+        fixture.poller.publish_freshness(generation);
+        let expanded_inventory = vec![
+            String::from(CHECK_RUN_NAME),
+            String::from("later gating check"),
+        ];
+
+        assert!(!fixture.poller.gating_check_inventory_quiesced(
+            PULL_NUMBER,
+            &listed,
+            Some(generation),
+            &expanded_inventory,
+        ));
+        fixture.poller.record_gating_check_inventory(
+            PULL_NUMBER,
+            &listed,
+            expanded_inventory.clone(),
+        );
+        fixture.poller.publish_freshness(generation);
+        assert!(fixture.poller.gating_check_inventory_quiesced(
+            PULL_NUMBER,
+            &listed,
+            Some(generation),
+            &expanded_inventory,
+        ));
     }
 
     #[tokio::test]
@@ -8772,9 +9565,12 @@ mod tests {
             head_sha: listed.head_sha.clone(),
         };
         let number = previous.context().number().get();
-        fixture
-            .poller
-            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
+        fixture.poller.record_fetched_pull_request(
+            number,
+            &listed,
+            PullRequestSettlement::Settled,
+            Vec::new(),
+        );
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
@@ -8797,9 +9593,12 @@ mod tests {
         let previous = &observation.state().pull_requests()[0];
         let listed = listed_pull_request(HEAD_SHA);
         let number = previous.context().number().get();
-        fixture
-            .poller
-            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
+        fixture.poller.record_fetched_pull_request(
+            number,
+            &listed,
+            PullRequestSettlement::Settled,
+            Vec::new(),
+        );
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
@@ -8847,6 +9646,7 @@ mod tests {
             number,
             &previously_listed,
             PullRequestSettlement::Settled,
+            Vec::new(),
         );
         fixture
             .poller
@@ -8861,6 +9661,23 @@ mod tests {
             ),
             "a head change is never hidden by unchanged listing metadata"
         );
+    }
+
+    #[tokio::test]
+    async fn a_base_advance_forbids_pull_request_reuse() {
+        let observation = complete_typed_observation().await;
+        let pull_request = &observation.state().pull_requests()[0];
+        let advanced_base = RepoWatchBranchHead::new(
+            pull_request.context().base_branch().clone(),
+            CommitSha::try_new(CHANGED_LISTED_HEAD_SHA.to_owned())
+                .expect("changed fixture base revision is canonical"),
+        );
+
+        assert!(!super::pull_request_base_revision_matches(
+            &observation,
+            pull_request,
+            &[advanced_base],
+        ));
     }
 
     #[tokio::test]
@@ -8906,6 +9723,28 @@ mod tests {
         server.finish().await;
 
         assert_eq!(result, Err(RepositoryWatchAttemptError::InvalidResponse));
+    }
+
+    #[tokio::test]
+    async fn an_unfinished_report_only_run_does_not_unsettle_gating_checks() {
+        let response = check_runs().replace(IN_PROGRESS_CHECK_RUN_NAME, "coverage (report only)");
+        let server = ScriptedServer::start(vec![ScriptedResponse::ok(
+            RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+            ResponseBody(response),
+        )])
+        .await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let suite =
+            object_id(COMPLETED_CHECK_SUITE_IDS[0]).expect("fixture suite identity is positive");
+
+        let (_, every_gating_run_completed) = fixture
+            .poller
+            .fetch_check_runs(std::slice::from_ref(&suite))
+            .await
+            .expect("report-only run is valid check evidence");
+        server.finish().await;
+
+        assert!(every_gating_run_completed);
     }
 
     #[tokio::test]

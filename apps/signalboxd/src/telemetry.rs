@@ -801,6 +801,8 @@ fn candidate_event(metadata: &Metadata<'_>) -> bool {
                 | "turn_attempt_id"
                 | "cause_code"
                 | "terminal_outcome"
+                | "tool_round_limit"
+                | "observed_tool_rounds"
         )
     })
 }
@@ -855,6 +857,20 @@ fn admitted_event_values(metadata: &Metadata<'_>, values: &RecordedValues) -> bo
             values.has_exact(&["message", "session_id", "turn_id"])
                 && values.uuid("session_id")
                 && values.uuid("turn_id")
+        }
+        ("signalbox_application::model_execution", "automatic tool-round limit reached") => {
+            values.has_exact(&[
+                "message",
+                "model_call_id",
+                "observed_tool_rounds",
+                "session_id",
+                "tool_round_limit",
+                "turn_id",
+            ]) && values.uuid("session_id")
+                && values.uuid("turn_id")
+                && values.uuid("model_call_id")
+                && values.unsigned("tool_round_limit")
+                && values.unsigned("observed_tool_rounds")
         }
         ("signalbox_model_provider_runtime", "model call dispatched") => {
             values.has_exact(&[
@@ -915,6 +931,11 @@ impl RecordedValues {
             .filter(|(name, _value)| name.as_str() != "message")
             .map(|(name, value)| {
                 let value = value.trim_matches('"');
+                if matches!(name.as_str(), "tool_round_limit" | "observed_tool_rounds") {
+                    let value = value.parse::<u64>().ok()?;
+                    let value = i64::try_from(value).ok()?;
+                    return Some(KeyValue::new(name.clone(), value));
+                }
                 let value = if name.ends_with("_id") {
                     uuid::Uuid::parse_str(value).ok()?.to_string()
                 } else {
@@ -936,6 +957,12 @@ impl RecordedValues {
     fn uuid(&self, name: &str) -> bool {
         self.get(name)
             .map(|value| uuid::Uuid::parse_str(value.trim_matches('"')).is_ok())
+            .unwrap_or(false)
+    }
+
+    fn unsigned(&self, name: &str) -> bool {
+        self.get(name)
+            .map(|value| value.trim_matches('"').parse::<u64>().is_ok())
             .unwrap_or(false)
     }
 
@@ -990,6 +1017,7 @@ const TURN_OUTCOMES: &[&str] = &[
     "cancelled_with_tool_response",
     "target_unavailable",
     "capability_known_failure",
+    "tool_round_limit_reached",
     "continuation_target_unavailable",
 ];
 
@@ -1348,8 +1376,8 @@ mod tests {
         names
     }
 
-    fn event_names(span: &SpanData) -> Vec<String> {
-        let mut names = span.events[0]
+    fn event_names(span: &SpanData, event_index: usize) -> Vec<String> {
+        let mut names = span.events[event_index]
             .attributes
             .iter()
             .map(|attribute| attribute.key.as_str().to_owned())
@@ -1527,6 +1555,8 @@ mod tests {
 
     #[test]
     fn admitted_span_and_event_export_only_the_documented_fields() {
+        let tool_round_limit = 32_usize;
+        let observed_tool_rounds = 32_usize;
         let spans = capture_spans(|| {
             let span = tracing::info_span!(
                 target: "signalboxd::context_guard",
@@ -1542,15 +1572,24 @@ mod tests {
                 terminal_outcome = "completed",
                 "turn terminalized"
             );
+            tracing::warn!(
+                target: "signalbox_application::model_execution",
+                session_id = %SESSION_ID,
+                turn_id = %TURN_ID,
+                model_call_id = %MODEL_CALL_ID,
+                tool_round_limit,
+                observed_tool_rounds,
+                "automatic tool-round limit reached"
+            );
         });
 
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].name, "turn_work");
         assert_eq!(names(&spans[0]), vec!["session_id", "turn_id"]);
-        assert_eq!(spans[0].events.len(), 1);
+        assert_eq!(spans[0].events.len(), 2);
         assert_eq!(spans[0].events[0].name, "turn terminalized");
         assert_eq!(
-            event_names(&spans[0]),
+            event_names(&spans[0], 0),
             vec![
                 "level",
                 "session_id",
@@ -1558,6 +1597,44 @@ mod tests {
                 "terminal_outcome",
                 "turn_id"
             ]
+        );
+        assert_eq!(
+            spans[0].events[1].name,
+            "automatic tool-round limit reached"
+        );
+        assert_eq!(
+            event_names(&spans[0], 1),
+            vec![
+                "level",
+                "model_call_id",
+                "observed_tool_rounds",
+                "session_id",
+                "target",
+                "tool_round_limit",
+                "turn_id"
+            ]
+        );
+        let saturation_attributes = &spans[0].events[1].attributes;
+        assert_eq!(
+            saturation_attributes
+                .iter()
+                .find(|attribute| attribute.key.as_str() == "tool_round_limit")
+                .expect("the saturation event carries its numeric limit")
+                .value,
+            opentelemetry::Value::I64(
+                i64::try_from(tool_round_limit).expect("the fixture limit fits OTLP I64")
+            )
+        );
+        assert_eq!(
+            saturation_attributes
+                .iter()
+                .find(|attribute| attribute.key.as_str() == "observed_tool_rounds")
+                .expect("the saturation event carries its numeric observed count")
+                .value,
+            opentelemetry::Value::I64(
+                i64::try_from(observed_tool_rounds)
+                    .expect("the fixture observed count fits OTLP I64")
+            )
         );
     }
 

@@ -109,11 +109,13 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "generation": {
-            "$ref": "#/$defs/WebU64"
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Goal generations are strictly positive in the domain and its storage\nconstraint, so zero is not a valid wire spelling."
           },
           "need_summary": {
-            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "description": "At least 1 and at most 128 Unicode scalar values; exact text is in\nsession detail. The stored goal need is never empty, so an empty\nsummary is contract-invalid.",
             "maxLength": 128,
+            "minLength": 1,
             "type": "string"
           },
           "reason": {
@@ -240,6 +242,7 @@ const schemas = {
         },
         "required": [
           "session_id",
+          "title_summary",
           "title_truncated",
           "archived",
           "current_turn_id",
@@ -250,6 +253,11 @@ const schemas = {
           "last_activity"
         ],
         "type": "object"
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
       },
       "WebSessionId": {
         "description": "Checked canonical UUID used for browser-visible session identities.",
@@ -391,11 +399,13 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "generation": {
-            "$ref": "#/$defs/WebU64"
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Goal generations are strictly positive in the domain and its storage\nconstraint, so zero is not a valid wire spelling."
           },
           "need_summary": {
-            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "description": "At least 1 and at most 128 Unicode scalar values; exact text is in\nsession detail. The stored goal need is never empty, so an empty\nsummary is contract-invalid.",
             "maxLength": 128,
+            "minLength": 1,
             "type": "string"
           },
           "reason": {
@@ -600,6 +610,7 @@ const schemas = {
         },
         "required": [
           "session_id",
+          "title_summary",
           "title_truncated",
           "archived",
           "current_turn_id",
@@ -610,6 +621,11 @@ const schemas = {
           "last_activity"
         ],
         "type": "object"
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
       },
       "WebSessionId": {
         "description": "Checked canonical UUID used for browser-visible session identities.",
@@ -841,7 +857,7 @@ const schemas = {
         "type": "string"
       },
       "WebPositiveU64": {
-        "description": "Checked positive 64-bit value encoded losslessly for JavaScript.",
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
         "pattern": "^[1-9][0-9]*$",
         "type": "string"
       },
@@ -1639,6 +1655,39 @@ function isWellFormedUnicode(value) {
   return true;
 }
 
+function exceedsScalarLength(value, maxLength) {
+  let count = 0;
+  const scalars = value[Symbol.iterator]();
+  while (!scalars.next().done) {
+    count += 1;
+    if (count > maxLength) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function scalarLengthAtLeast(value, minLength) {
+  let count = 0;
+  const scalars = value[Symbol.iterator]();
+  while (!scalars.next().done) {
+    count += 1;
+    if (count >= minLength) {
+      return true;
+    }
+  }
+  return count >= minLength;
+}
+
+function scalarLength(value) {
+  let count = 0;
+  const scalars = value[Symbol.iterator]();
+  while (!scalars.next().done) {
+    count += 1;
+  }
+  return count;
+}
+
 function resolveReference(root, reference) {
   const prefix = "#/$defs/";
   if (!reference.startsWith(prefix)) {
@@ -1775,9 +1824,16 @@ function assertSchema(root, schema, value, path) {
   if (
     schema.type === "string" &&
     schema.maxLength !== undefined &&
-    Array.from(value).length > schema.maxLength
+    exceedsScalarLength(value, schema.maxLength)
   ) {
     fail(path, `at most ${schema.maxLength} Unicode scalar values`);
+  }
+  if (
+    schema.type === "string" &&
+    schema.minLength !== undefined &&
+    !scalarLengthAtLeast(value, schema.minLength)
+  ) {
+    fail(path, `at least ${schema.minLength} Unicode scalar values`);
   }
   if (
     schema.type === "string" &&
@@ -1836,10 +1892,22 @@ export function decodeWebAttentionStreamEvent(value) {
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
   if (value.kind === "snapshot") {
     assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
+    if (value.snapshot.sort !== "last_activity_descending") {
+      fail("attention_event.snapshot.sort", "the fixed hot-page activity sort");
+    }
+    assertUnarchivedSummaries(value.snapshot.summaries, "attention_event.snapshot.summaries");
   } else {
     value.summaries?.forEach((summary, index) =>
       assertAttentionSummary(summary, `attention_event.summaries[${index}]`),
     );
+    assertUnarchivedSummaries(value.summaries ?? [], "attention_event.summaries");
+    const identities = new Set();
+    for (const summary of value.summaries ?? []) {
+      if (identities.has(summary.session_id)) {
+        fail("attention_event.summaries", "at most one replacement per session");
+      }
+      identities.add(summary.session_id);
+    }
   }
   return value;
 }
@@ -1902,10 +1970,38 @@ function assertLiveSnapshot(snapshot, path) {
   }
 }
 
+function assertUnarchivedSummaries(summaries, path) {
+  summaries.forEach((summary, index) => {
+    if (summary.archived) {
+      fail(`${path}[${index}].archived`, "false on the hot attention stream");
+    }
+  });
+}
+
 function assertAttentionSnapshot(snapshot, path) {
   snapshot.summaries.forEach((summary, index) =>
     assertAttentionSummary(summary, `${path}.summaries[${index}]`),
   );
+  for (let index = 1; index < snapshot.summaries.length; index += 1) {
+    const previous = snapshot.summaries[index - 1];
+    const current = snapshot.summaries[index];
+    let ordered;
+    if (snapshot.sort === "session_identity_ascending") {
+      ordered = previous.session_id < current.session_id;
+    } else {
+      const previousActivity = BigInt(previous.last_activity.unix_microseconds);
+      const currentActivity = BigInt(current.last_activity.unix_microseconds);
+      ordered =
+        previousActivity > currentActivity ||
+        (previousActivity === currentActivity && previous.session_id < current.session_id);
+    }
+    if (!ordered) {
+      fail(`${path}.summaries[${index}]`, `strictly ordered by sort ${snapshot.sort}`);
+    }
+  }
+  if (BigInt(snapshot.total) < BigInt(snapshot.summaries.length)) {
+    fail(`${path}.total`, "at least the number of returned summaries");
+  }
   const continuationKind = snapshot.continuation?.kind ?? null;
   const expectedContinuationKind = {
     last_activity_descending: "last_activity",
@@ -1913,6 +2009,24 @@ function assertAttentionSnapshot(snapshot, path) {
   }[snapshot.sort];
   if (continuationKind !== null && continuationKind !== expectedContinuationKind) {
     fail(`${path}.continuation`, `the continuation required by sort ${snapshot.sort}`);
+  }
+  if (snapshot.continuation !== null) {
+    const boundary = snapshot.summaries[snapshot.summaries.length - 1];
+    if (boundary === undefined) {
+      fail(`${path}.continuation`, "absent when no summaries are returned");
+    }
+    if (snapshot.continuation.session_id !== boundary.session_id) {
+      fail(`${path}.continuation.session_id`, "the session of the last returned summary");
+    }
+    if (
+      snapshot.continuation.kind === "last_activity" &&
+      snapshot.continuation.unix_microseconds !== boundary.last_activity.unix_microseconds
+    ) {
+      fail(
+        `${path}.continuation.unix_microseconds`,
+        "the activity timestamp of the last returned summary",
+      );
+    }
   }
 }
 
@@ -1930,11 +2044,38 @@ function assertAttentionSummary(summary, path) {
   if (summary.action !== expectedAction) {
     fail(`${path}.action`, `the action required by state ${summary.state}`);
   }
+  const turnBacked = [
+    "active",
+    "queued",
+    "awaiting_approval",
+    "ambiguous",
+    "awaiting_reconciliation",
+  ].includes(summary.state);
+  if (turnBacked && summary.current_turn_id === null) {
+    fail(`${path}.current_turn_id`, `a turn identity for state ${summary.state}`);
+  }
+  const activeBacked = ["active", "awaiting_approval", "ambiguous"].includes(summary.state);
+  if (activeBacked && BigInt(summary.active_turn_count) === 0n) {
+    fail(`${path}.active_turn_count`, `at least one active turn for state ${summary.state}`);
+  }
+  if (summary.state === "queued" && BigInt(summary.queued_turn_count) === 0n) {
+    fail(`${path}.queued_turn_count`, "at least one queued turn for queued state");
+  }
   const hasGoalBlock = Object.hasOwn(summary, "goal_block") && summary.goal_block !== null;
   if ((summary.state === "blocked") !== hasGoalBlock) {
     fail(`${path}.goal_block`, "present exactly for blocked state");
   }
   if (summary.title_summary === null && summary.title_truncated) {
     fail(`${path}.title_truncated`, "false when title_summary is null");
+  }
+  if (
+    summary.title_truncated &&
+    summary.title_summary !== null &&
+    scalarLength(summary.title_summary) !== 128
+  ) {
+    fail(
+      `${path}.title_summary`,
+      "exactly 128 Unicode scalar values when title_truncated is true",
+    );
   }
 }

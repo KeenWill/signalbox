@@ -35,6 +35,8 @@ ALTER TABLE session_timeline_fact
     ADD COLUMN attention_turn_state_kind text,
     ADD COLUMN attention_turn_active_phase_kind text,
     ADD COLUMN attention_turn_terminal_disposition_kind text,
+    ADD COLUMN attention_activity_kind text,
+    ADD COLUMN attention_activity_recorded_at timestamptz,
     ADD COLUMN approval_judge_actionable_count numeric(20, 0) NOT NULL DEFAULT 0,
     ADD COLUMN approval_judge_completed_count numeric(20, 0) NOT NULL DEFAULT 0,
     ADD COLUMN approval_judge_escalated_count numeric(20, 0) NOT NULL DEFAULT 0,
@@ -58,7 +60,15 @@ ALTER TABLE session_timeline_fact
          AND attention_turn_terminal_disposition_kind IS NULL)
         OR (attention_turn_id IS NOT NULL
             AND attention_turn_state_kind IS NOT NULL)
+    ),
+    ADD CONSTRAINT session_timeline_fact_attention_activity_kind CHECK (
+        attention_activity_kind IN (
+            'session', 'turn', 'goal', 'approval_judge', 'runner'
+        )
     );
+
+CREATE INDEX session_timeline_fact_by_attention_activity
+    ON session_timeline_fact (attention_activity_recorded_at DESC, session_id);
 
 -- Keep queued goal eligibility indexable for repeated attention-fact refreshes.
 -- Historical goal turns remain immutable; this observation-only bit changes
@@ -372,6 +382,23 @@ $$;
 CREATE TRIGGER runner_placement_records_operator_attention_change
 AFTER INSERT ON runner_session_placement_record
 FOR EACH ROW EXECUTE FUNCTION record_operator_attention_runner_change();
+
+CREATE FUNCTION maintain_operator_attention_activity_fact()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE session_timeline_fact
+       SET attention_activity_kind = NEW.fact_kind,
+           attention_activity_recorded_at = NEW.recorded_at
+     WHERE session_id = NEW.session_id;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER operator_attention_change_maintains_activity_fact
+AFTER INSERT ON operator_attention_change
+FOR EACH ROW EXECUTE FUNCTION maintain_operator_attention_activity_fact();
 
 -- Existing sessions receive only their authoritative command-claim time. No
 -- historical activity time is inferred from UUID identity bits.

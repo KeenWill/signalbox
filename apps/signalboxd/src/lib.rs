@@ -957,6 +957,8 @@ where
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
+                    | ModelCallExecutionOutcome::ToolRoundLimitReached(_)
+                    | ModelCallExecutionOutcome::ToolRoundLimitAlreadyCommitted(_)
                     | ModelCallExecutionOutcome::ObservationCommitted(_)
                     | ModelCallExecutionOutcome::ObservationAlreadyCommitted(_) => return Ok(()),
                 }
@@ -1601,7 +1603,9 @@ where
                     ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
-                    | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_) => {
+                    | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
+                    | ModelCallExecutionOutcome::ToolRoundLimitReached(_)
+                    | ModelCallExecutionOutcome::ToolRoundLimitAlreadyCommitted(_) => {
                         return Ok(());
                     }
                     ModelCallExecutionOutcome::NoWork => return Ok(()),
@@ -1757,6 +1761,8 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
+                    | ModelCallExecutionOutcome::ToolRoundLimitReached(_)
+                    | ModelCallExecutionOutcome::ToolRoundLimitAlreadyCommitted(_)
                     | ModelCallExecutionOutcome::ObservationCommitted(_)
                     | ModelCallExecutionOutcome::ObservationAlreadyCommitted(_) => return Ok(()),
                 }

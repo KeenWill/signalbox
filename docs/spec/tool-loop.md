@@ -29,8 +29,16 @@ and the unattended-escalation terminal path are verified against this PR
 The per-session workspace root the workspace, local Git, and execution families
 bind is verified against this PR (`agent/per-session-workspaces`).
 
+The user override of a delegate denial — its override command, the recorded
+one-shot pre-approval, and the `UserOverride` decision source — is verified
+against this PR (`agent/user-override-denials`).
+
 The change-request-scoped thread mutation contracts and their pre-dispatch
 ownership confirmation are verified through this PR (`agent/thread-ownership`).
+
+The automatic tool-round saturation terminal contract is verified through this
+PR (`agent/tool-round-saturation`) at implementation ref
+`95eec29a38b6b05586ef2e1d45d29328ad5c3c55`.
 
 The daemon blob-read declarations below are the foundation proposal from PR #553
 (`agent/blob-storage-foundation`) and become verified with its implementing
@@ -130,14 +138,18 @@ implemented decision sources are:
 - `SessionBlanket` — the frozen dangerous blanket supplied daemon-local
   automatic approval;
 - `SessionOverride` — an exact runner-placement tool override supplied automatic
-  approval; and
-- `Delegate` — an authority-checked approval-judge call decided the request.
+  approval;
+- `Delegate` — an authority-checked approval-judge call decided the request; and
+- `UserOverride` — a user-recorded one-shot override of a delegate denial
+  supplied approval when the session re-proposed the denied command.
 
 A delegated decision names the exact direct model selection and dedicated model
 call that made it, and retains the judge rationale as nonempty text of at most
-4,096 bytes. A user decision instead names its exact durable command. Automatic
-policy has no decider or rationale. Neither automated path can claim user agency
-(INV-020).
+4,096 bytes. A user decision instead names its exact durable command. A consumed
+user override names its override durable command and the exact delegate-denied
+request it overrides — user agency exercised in advance through that command.
+Automatic policy has no decider or rationale. Neither automated path can claim
+user agency (INV-020).
 
 Each daemon tool mapping may declare one approval posture: `Auto`, `Delegated`,
 or `Human`. The selected posture is frozen into every resulting request. For
@@ -297,6 +309,74 @@ remaining tool work and the interrupt applies. On the wire this composition is
 the parked wait records the typed
 `interrupt_unavailable_while_awaiting_approval` rejection and leaves the wait
 intact.
+
+A judge denial the user disagrees with is reversed forward, never in place: the
+denial is terminal (INV-027), and the session naturally re-proposes after a
+denial because the denial reason reaches the model at the continuation boundary.
+The canonical `OverrideDeniedToolRequest` command — user-global
+`DurableCommandId`, the owning `SessionId`, and the exact denied
+`ToolRequestId`; equality excludes only the command identifier — records one
+one-shot pre-approval for that re-proposal. Recording verifies every conjunct of
+the override predicate against durable evidence, each with its own recorded
+rejection: the recorded approval is a delegate denial (a user denial or any
+approval admits no override), the denial is terminal (its denied-result entry is
+materialized, so a denial whose round is still resolving cannot be overridden),
+the request belongs to the command's session, and no override is already
+recorded for it — each denial admits at most one override ever. The session is
+part of the canonical payload, unlike `decide_tool_request`, because the
+recorded override is a session-scoped standing fact consumed by a later
+proposal. An applied command durably links the denied request, its denying judge
+call, and the override command.
+
+Recorded overrides are frozen into each prepared model call in the same
+transaction as the dangerous blanket posture, so consumption has blanket-frozen
+semantics with no mid-call races: a prepared call's override inventory is part
+of that call's immutable input, and an override recorded after the call is
+checkpointed takes effect at the next prepared call, never at that one.
+
+Only a still-effective override is frozen, and two things retire one: the
+consuming `UserOverride` approval that names it, and an approval of the
+identical command recorded by any other authority after the denial — the judge
+approving a re-proposal it once denied, a user decision after escalation, or a
+policy approval. The second is what keeps the boundary below from leaking. The
+call that first carries a denial cannot hold that denial's override, so its
+re-proposal is decided without one, and an override left standing after that
+decision would pre-approve a repeat of a command the session has already let
+through. Ordering here is structural rather than clocked, because none of these
+append-only records carries a timestamp. Across turns the order is the
+acceptance position of the input that opened each turn; inside a turn each model
+call owns one turn attempt and attempts chain through their predecessor, so a
+proposal counts as later when its turn was accepted after the denial's or its
+attempt continues the denied proposal's. Both are needed, because the
+re-proposal an override exists for is normally made in the denial's own turn.
+The scope is required rather than decorative — the same command is routinely
+approved and executed earlier in a session, long before a later proposal of it
+is denied, and an unscoped rule would retire most overrides at the instant they
+were recorded.
+
+The continuation that first carries a denial to the model is therefore out of
+reach by design, and this is the boundary of the feature rather than a gap in
+it. That continuation is checkpointed by the same transaction that projects the
+denied result, so at the instant its override inventory freezes no override for
+the denial can exist — the user has not yet been shown the denial to disagree
+with. The user overrides it, the model re-proposes on the following call, and
+that call's frozen inventory carries the override. The accepted cost is one
+extra round; the gain is that a prepared call's approval inputs are fixed at
+checkpoint and no concurrent command can race them.
+
+When the completing call proposes a command whose initial selection would park
+for the judge (`Delegated`) and an unconsumed recorded override matches the
+exact denied command — equal tool name and equal normalized arguments — the
+proposal records an immediate `UserOverride` approval at proposal time instead
+of parking. Each recorded override is consumed at most once per response in
+proposal order, and once ever durably: the consuming decision row names the
+overridden denial through a UNIQUE column, so a second identical proposal parks
+for the judge again. The override substitutes only for the judge: a `Human`,
+`AlwaysConfirm`, or automatic selection is never overridden, and the consuming
+request still freezes the `Delegated` posture. Consumption emits the same
+ordered `ToolApprovalDecided` event as other explicit decisions, carrying the
+override provenance, so the full audit chain — judge denial, override command,
+consuming approval — stays queryable end to end.
 
 ## Registry, placement, and effect metadata
 
@@ -677,10 +757,13 @@ so every multi-request batch counts once and inherited tool history from earlier
 turns does not count. After the thirty-second batch resolves, the ordinary
 continuation transaction still projects all results and creates its fresh
 `Prepared` call; model execution closes that checkpoint as `KnownFailed` before
-provider capability preparation or send. The normal known-failure boundary then
-fails the turn honestly. These durable-content bounds avoid wall-clock policy
-and ensure one model-controlled response or chain cannot retain the progressing
-slot indefinitely.
+provider capability preparation or send. At that enforcement site it emits a
+warning carrying the limit and observed round count, and the guarded pre-send
+closure carries `ToolRoundLimitReached`. The terminal event consequently uses
+`tool_round_limit_reached`, distinct from `capability_known_failure` (INV-071).
+These durable-content bounds avoid wall-clock policy and ensure one
+model-controlled response or chain cannot retain the progressing slot
+indefinitely.
 
 If an applied stop terminalizes before continuation, the same materialization
 algorithm appends results for executed and denied requests, closes every request
@@ -1275,12 +1358,15 @@ reconstructing provider history in frontier order; it performs no per-entry
 database round trips while holding the scheduler lock.
 
 `DecideToolRequest` joins the user-global durable-command registry as its own
-typed record family. Adding the dangerous posture originally advanced each
-defaults-bearing command family to kind-scoped storage version 2; version-1
-records reconstitute with `DangerousToolAutoApproval::Disabled`. Later
-system-prompt and template provenance migrations advance the affected families
-independently. The current kind-scoped versions and their compatibility gates
-are owned by
+typed record family, and `OverrideDeniedToolRequest` likewise; the recorded
+override row, its recording and consumption triggers, and the UNIQUE consumption
+column are owned by
+[persistence protocol](persistence-protocol.md#relational-representation).
+Adding the dangerous posture originally advanced each defaults-bearing command
+family to kind-scoped storage version 2; version-1 records reconstitute with
+`DangerousToolAutoApproval::Disabled`. Later system-prompt and template
+provenance migrations advance the affected families independently. The current
+kind-scoped versions and their compatibility gates are owned by
 [identity and commands](identity-and-commands.md#durable-command-records) and
 [persistence protocol](persistence-protocol.md#relational-representation).
 Registry inspection validates the supported version set for the selected kind
