@@ -119,13 +119,17 @@ const WEBHOOK_DRAIN_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 // room for an in-flight bounded provider request while ensuring a task wedge
 // becomes an operator-visible error well before the next full poll.
 const WEBHOOK_DRAIN_STALL_THRESHOLD: Duration = Duration::from_secs(60);
-// The serialized repository owner must return to its scheduler even when one
+// The serialized repository task must return to its scheduler even when one
 // drain step never does. Individual provider requests have their own deadline,
 // but a drain can perform many requests and database operations; without this
 // outer bound, admission wakes and retries remain coalesced behind it forever.
 // Pending delivery records are durable, so cancellation leaves the unfinished
 // work for the existing bounded backoff path to retry.
 const WEBHOOK_DRAIN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
+// Cleanup is best-effort after cancellation: the next attempt also drains the
+// shared child set before spawning, so timing out here cannot let unfinished
+// children interleave with later work.
+const WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 // The monitor reads through the shared daemon pool, whose connections wedged
 // repositories can hold all of. An unbounded acquisition would leave the
 // observer silent during exactly the degradation it exists to expose, so the
@@ -1717,10 +1721,30 @@ impl RepositoryWatchTask {
             Ok(outcome) => outcome,
             Err(_) => {
                 // A future implementation may use the poller's bounded child
-                // fetch set while hydrating a delivery. Join anything the
-                // cancelled drain owned before the next attempt can begin.
-                self.poller.drain_fetches().await;
+                // fetch set while hydrating a delivery. Bound this cleanup so
+                // cancellation itself cannot wedge the repository task. The
+                // poller's next attempt drains the same shared set before it
+                // can spawn, preserving the no-interleaving policy.
+                if timeout(
+                    WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT,
+                    self.poller.drain_fetches(),
+                )
+                .await
+                .is_err()
+                {
+                    tracing::error!(
+                        repository = %self.repository.as_str(),
+                        timeout_seconds = WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT.as_secs(),
+                        cause_code = "webhook_cancelled_fetch_drain_timed_out",
+                        "repository-watch cancelled fetch cleanup exceeded its deadline"
+                    );
+                }
                 self.poller.invalidate_freshness();
+                // Cancellation can race a terminal transaction commit. Reload
+                // the durable cursor rather than projecting later deliveries
+                // from a shadow that may not include that commit.
+                self.webhook_shadow = None;
+                self.webhook_shadow_superseded = false;
                 let error = RepositoryWatchAttemptError::WebhookDrainTimedOut;
                 tracing::error!(
                     repository = %self.repository.as_str(),
@@ -7594,6 +7618,7 @@ mod tests {
         Ok(())
     }
 
+    /// INV-071: deadline cancellation preserves durable webhook work for retry.
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn a_webhook_drain_deadline_cancels_and_retries_durable_work()
