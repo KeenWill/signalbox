@@ -10,7 +10,7 @@ import {
   Minimize2,
   ShieldAlert,
 } from 'lucide-react'
-import { type ComponentType, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
+import { type ComponentType, type ReactNode, useEffect, useRef, useState } from 'react'
 import { type CommandContext, invokeCommand } from '../../commands'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import { actions, useAppDispatch, useAppSelector } from '../../state'
@@ -196,19 +196,23 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
   const download = viewByKind(descriptor, 'download')
   const originalRequested = originalState === 'loading' || originalState === 'loaded'
   const originalQuery = useVerifiedOriginalImage(original, originalRequested)
-  const verifiedOriginalUrl = useMemo(
-    () => (originalQuery.data === undefined ? null : URL.createObjectURL(originalQuery.data)),
-    [originalQuery.data],
-  )
+  const [verifiedOriginalUrl, setVerifiedOriginalUrl] = useState<string | null>(null)
+  const verifiedBlob = originalQuery.data
   const rendered =
     originalRequested && original && verifiedOriginalUrl !== null ? original : automatic
   const derivation = rendered?.derivations[0]
 
+  // The object URL is allocated and revoked by one effect owning its lifecycle: allocation during
+  // render would strand the extra URL produced by development double-rendering unrevoked.
   useEffect(() => {
+    if (verifiedBlob === undefined) return
+    const url = URL.createObjectURL(verifiedBlob)
+    setVerifiedOriginalUrl(url)
     return () => {
-      if (verifiedOriginalUrl !== null) URL.revokeObjectURL(verifiedOriginalUrl)
+      setVerifiedOriginalUrl(null)
+      URL.revokeObjectURL(url)
     }
-  }, [verifiedOriginalUrl])
+  }, [verifiedBlob])
 
   // Project the service's request state into the explicit control state: a new failure settles the
   // request as failed, and a retry that finds a failure this projection already settled asks the
