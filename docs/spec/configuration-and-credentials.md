@@ -17,8 +17,8 @@ re-verified against this PR (`agent/daemon-live-codex-effective-window`).
 The required numeric-bound configuration grammar and scheduler admission policy
 are verified against this PR (`agent/bounds-required-config-protocol`). The
 fenced pool floor reconciliation policy is verified against this PR
-(`agent/daemon-live-nondisruptive-pool-reconcile`). The
-fenced PostgreSQL prewarm policy is verified against this PR
+(`agent/daemon-live-nondisruptive-pool-reconcile`). The fenced PostgreSQL
+prewarm policy is verified against this PR
 (`agent/daemon-live-configured-pool-prewarm`).
 
 The delegated tool-approval posture, judge selection, and daemon composition are
@@ -656,9 +656,9 @@ compiled pool ceiling is rejected during configuration rather than silently
 clamped. A positive floor also requires finite, positive
 `fenced_pool_floor_reconciliation_interval` and
 `fenced_pool_floor_reconciliation_attempt_bound` policies. The runtime
-periodically observes sessions retired after startup without consuming any
-idle service capacity. Once ordinary demand has consumed the idle inventory,
-one bounded attempt adds one missing physical session and returns it; failed,
+periodically observes sessions retired after startup without consuming any idle
+service capacity. Once ordinary demand has consumed the idle inventory, one
+bounded attempt adds one missing physical session and returns it; failed,
 timed-out, or concurrently invalidated attempts retry after the configured
 interval. A zero or `"none"` floor disables that reconciliation.
 
