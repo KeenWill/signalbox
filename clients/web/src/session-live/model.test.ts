@@ -104,7 +104,12 @@ const liveSnapshot: WebSessionLiveSnapshot = {
   queued_turn_count: '1',
   queued_turn_ids: ['turn-2'],
   reconciliation: null,
-  runner: { placement_revision: '3', runner_id: 'runner-1', state: 'pinned' },
+  runner: {
+    connection_health: 'connected',
+    placement_revision: '3',
+    runner_id: 'runner-1',
+    state: 'pinned',
+  },
   session_id: '00000000-0000-0000-0000-000000000001',
 }
 

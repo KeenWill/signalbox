@@ -224,8 +224,7 @@ export function SessionWorkspaceSurface({
   const catalogRetainedTarget = useRef(0)
   const catalogRefreshInFlight = useRef(false)
   const catalogRefreshPending = useRef(false)
-  const timelineRefreshInFlight = useRef(false)
-  const timelineRefreshPending = useRef(false)
+  const refreshCatalogRef = useRef<() => Promise<void>>(async () => undefined)
   const catalog = useQuery({
     queryKey: ['production', 'session-catalog', search, sort],
     queryFn: ({ signal }) => source.catalogPage({ search, sort }, undefined, signal),
@@ -278,21 +277,6 @@ export function SessionWorkspaceSurface({
     )
   }, [livePresentation.durable, session.data?.window.items])
   const refetchSession = session.refetch
-  const refreshTimeline = useCallback(async () => {
-    if (timelineRefreshInFlight.current) {
-      timelineRefreshPending.current = true
-      return
-    }
-    timelineRefreshInFlight.current = true
-    try {
-      do {
-        timelineRefreshPending.current = false
-        await refetchSession()
-      } while (timelineRefreshPending.current)
-    } finally {
-      timelineRefreshInFlight.current = false
-    }
-  }, [refetchSession])
   const items = useMemo(
     () => visibleSessionItems(combinedItems, app.detail),
     [app.detail, combinedItems],
@@ -362,10 +346,14 @@ export function SessionWorkspaceSurface({
       catalogRefreshInFlight.current = false
     }
   }, [search, sort, source])
+  refreshCatalogRef.current = refreshCatalog
   useEffect(() => {
     if (timelineCapability !== 'available') return
-    return synchronizer.followAttention(() => void refreshCatalog(), setCatalogFollowState)
-  }, [refreshCatalog, synchronizer, timelineCapability])
+    return synchronizer.followAttention(
+      () => void refreshCatalogRef.current(),
+      setCatalogFollowState,
+    )
+  }, [synchronizer, timelineCapability])
   useEffect(() => {
     if (sessionId === null || timelineCapability !== 'available') {
       setLiveConnection('idle')
@@ -373,18 +361,47 @@ export function SessionWorkspaceSurface({
       return
     }
     setLivePresentation(EMPTY_LIVE_PRESENTATION)
-    return synchronizer.followSession(
+    let disposed = false
+    let refreshInFlight = false
+    let refreshPending = false
+    const refreshSessionFacts = async () => {
+      if (refreshInFlight) {
+        refreshPending = true
+        return
+      }
+      refreshInFlight = true
+      try {
+        do {
+          refreshPending = false
+          const [, snapshot] = await Promise.all([refetchSession(), source.liveSnapshot(sessionId)])
+          if (!disposed) {
+            setLivePresentation((current) =>
+              applyLiveEvent(current, { kind: 'snapshot', snapshot }, sessionId),
+            )
+          }
+        } while (refreshPending && !disposed)
+      } catch {
+        if (!disposed) setLivePresentation(beginLiveResync)
+      } finally {
+        refreshInFlight = false
+      }
+    }
+    const stop = synchronizer.followSession(
       sessionId,
       (event) => {
         setLivePresentation((current) => applyLiveEvent(current, event, sessionId))
-        if (event.kind === 'durable') void refreshTimeline()
+        if (event.kind === 'durable') void refreshSessionFacts()
       },
       (state) => {
         setLiveConnection(state)
         if (state === 'retrying') setLivePresentation(beginLiveResync)
       },
     )
-  }, [refreshTimeline, sessionId, synchronizer, timelineCapability])
+    return () => {
+      disposed = true
+      stop()
+    }
+  }, [refetchSession, sessionId, source, synchronizer, timelineCapability])
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   useEffect(() => {

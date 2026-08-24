@@ -336,6 +336,19 @@ test('resynchronizes provider and durable updates through approval and reconcili
       },
     ),
   ]
+  const liveSnapshots = [
+    snapshot(watchedSession, { kind: 'running', model_call_id: sessionId(40_001) }),
+    snapshot(watchedSession, {
+      kind: 'awaiting_tool_approval',
+      tool_request_id: sessionId(50_001),
+    }),
+    snapshot(
+      watchedSession,
+      { kind: 'running', model_call_id: sessionId(40_002) },
+      { kind: 'model_call', model_call_id: sessionId(40_001), turn_id: sessionId(30_001) },
+    ),
+    snapshot(watchedSession, { kind: 'running', model_call_id: sessionId(40_003) }),
+  ]
   let followRequest = 0
   await installBootstrap(page)
   await installTimeline(page, watchedSession)
@@ -372,7 +385,11 @@ test('resynchronizes provider and durable updates through approval and reconcili
             followRequest += 1
             return route.fulfill({ contentType: 'application/x-ndjson', body })
           })
-        : route.fallback()
+        : pathname.endsWith('/live')
+          ? route.fulfill({
+              json: liveSnapshots[Math.max(0, followRequest - 1)] ?? liveSnapshots.at(-1),
+            })
+          : route.fallback()
   })
   await page.goto('/sessions')
   await page.getByRole('option', { name: new RegExp(watchedSummary.title_summary) }).click()

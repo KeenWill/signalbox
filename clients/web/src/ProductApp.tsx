@@ -34,6 +34,7 @@ import {
   SessionWorkspaceSurface,
 } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
+import { MAX_JSON_BODY_BYTES, MAX_NDJSON_RECORD_BYTES } from './session-live/model'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
 const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; question: string }> = {
@@ -499,8 +500,14 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <AttentionSurface />
     ) : surface === 'sessions' ? (
       <SessionWorkspaceSurface
-        maxJsonBodyBytes={bootstrap.data?.limits.max_json_body_bytes ?? 65_536}
-        maxNdjsonRecordBytes={bootstrap.data?.limits.max_ndjson_item_bytes ?? 65_536}
+        maxJsonBodyBytes={Math.min(
+          bootstrap.data?.limits.max_json_body_bytes ?? MAX_JSON_BODY_BYTES,
+          MAX_JSON_BODY_BYTES,
+        )}
+        maxNdjsonRecordBytes={Math.min(
+          bootstrap.data?.limits.max_ndjson_item_bytes ?? MAX_NDJSON_RECORD_BYTES,
+          MAX_NDJSON_RECORD_BYTES,
+        )}
         onCommandControls={setSessionControls}
         onSelectionEvidence={updateSelectionEvidence}
         onTimelineIds={updateTimelineIds}
