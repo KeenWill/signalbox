@@ -990,7 +990,7 @@ starts no watch runtime or polling task. It first validates the whole set in one
 transaction it discards, in the Configuration phase before either local socket
 binds, so every refusal is reported there against untouched history. It then
 commits the deactivations and activations in one transaction after every
-remaining fallible startup step succeeds. After admission commits, startup
+remaining fallible startup step succeeds. Before admission commits, startup
 drains both pending lifecycle cutoffs and eligible convergence cutoffs before
 any watch task starts. A refusal anywhere in the set, and any startup failure
 before that commit, therefore leaves no deactivation and no activation behind: a
