@@ -11,7 +11,7 @@ use signalbox_domain::{
     AmbiguousModelCallTurnIdentities, ContextFrontierId, PendingSteeringReclassificationIdentity,
     TurnId,
 };
-use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
+use sqlx::{Acquire, PgConnection, PgPool, Postgres, Row, Transaction, pool::PoolConnection};
 use tokio::time::timeout;
 
 use crate::{
@@ -73,24 +73,52 @@ pub const RECONCILIATION_LOCK_WAIT: Duration = Duration::from_secs(1);
 /// own acquisition timeout is thirty seconds, which is that outcome with room
 /// to spare.
 ///
-/// Cancelling an acquisition is safe in a way cancelling later work would not
-/// be: no transaction has begun, so there is nothing whose fate could be
-/// unknown. The value matches the budget the quiescent terminalizer uses for
-/// the same step and the same reason.
+/// It bounds reaching a connection and nothing after it. Cancelling an
+/// acquisition is safe in a way cancelling a statement is not: no transaction
+/// has begun, nothing has been sent, and so there is no work whose fate could
+/// be unknown and no backend still carrying it. The value matches the budget
+/// the quiescent terminalizer spends on the same step for the same reason.
+///
+/// It is published for the reason [`RECONCILIATION_LOCK_WAIT`] is: what makes
+/// it correct is its relationship to bounds outside this module, so the tests
+/// that pin that relationship read the constant rather than a literal.
 // numeric-bound: tunable - bounds one reconciliation transaction's wait for a pooled connection
-const RECONCILIATION_ACQUIRE_WAIT: Duration = Duration::from_millis(250);
+pub const RECONCILIATION_ACQUIRE_WAIT: Duration = Duration::from_millis(250);
 
 /// Reaches a pooled connection under [`RECONCILIATION_ACQUIRE_WAIT`].
+///
+/// The budget covers the acquisition alone. `Pool::begin` would put `BEGIN`
+/// inside it, and cancelling that is not a smaller failure but the exact one
+/// this module exists to prevent: the statement is already on the wire, so
+/// dropping the future queues a `ROLLBACK` and the connection stays checked out
+/// until the backend answers — under the database slowdown that made `BEGIN`
+/// slow in the first place, and for successive watchdog attempts in turn.
 ///
 /// A pool that cannot answer inside the budget reports the driver's own
 /// `PoolTimedOut`, so the caller reads a plain infrastructure failure rather
 /// than learning that this module wraps its acquisitions.
-async fn begin_bounded(
+async fn acquire_bounded(
     pool: &PgPool,
-) -> Result<Transaction<'static, Postgres>, ModelCallReconciliationRepositoryError> {
-    timeout(RECONCILIATION_ACQUIRE_WAIT, pool.begin())
+) -> Result<PoolConnection<Postgres>, ModelCallReconciliationRepositoryError> {
+    timeout(RECONCILIATION_ACQUIRE_WAIT, pool.acquire())
         .await
         .unwrap_or(Err(sqlx::Error::PoolTimedOut))
+        .map_err(ModelCallReconciliationRepositoryError::database)
+}
+
+/// Opens the transaction on an already-acquired connection.
+///
+/// Deliberately outside [`RECONCILIATION_ACQUIRE_WAIT`]. From here on the
+/// server-side [`RECONCILIATION_LOCK_WAIT`] and the caller's whole-transaction
+/// bound are what govern, and those are budgets a transaction can spend: the
+/// first ends a lock wait inside the database, and the second is the last
+/// resort for a backend that has stopped answering at all.
+async fn begin_acquired(
+    connection: &mut PoolConnection<Postgres>,
+) -> Result<Transaction<'_, Postgres>, ModelCallReconciliationRepositoryError> {
+    connection
+        .begin()
+        .await
         .map_err(ModelCallReconciliationRepositoryError::database)
 }
 
@@ -274,7 +302,8 @@ impl PostgresModelCallReconciliationRepository {
     pub async fn claim_due(
         &self,
     ) -> Result<ModelCallReconciliationBatch, ModelCallReconciliationRepositoryError> {
-        let mut transaction = begin_bounded(&self.pool).await?;
+        let mut connection = acquire_bounded(&self.pool).await?;
+        let mut transaction = begin_acquired(&mut connection).await?;
         bound_reconciliation_lock_wait(&mut transaction).await?;
         discover_recoveries(&mut transaction, CLAIM_WINDOW).await?;
         settle_abandoned_attempts(&mut transaction, CLAIM_WINDOW).await?;
@@ -325,7 +354,8 @@ impl PostgresModelCallReconciliationRepository {
         &self,
         claimed: ClaimedModelCallReconciliation,
     ) -> Result<ModelCallReconciliationOutcome, ModelCallReconciliationRepositoryError> {
-        let mut transaction = begin_bounded(&self.pool).await?;
+        let mut connection = acquire_bounded(&self.pool).await?;
+        let mut transaction = begin_acquired(&mut connection).await?;
         bound_reconciliation_lock_wait(&mut transaction).await?;
         lock_delegated_child_endpoint_sessions(&mut transaction, claimed.session())
             .await
@@ -479,7 +509,8 @@ impl PostgresModelCallReconciliationRepository {
         claimed: ClaimedModelCallReconciliation,
         failure: ModelCallReconciliationFailureKind,
     ) -> Result<(), ModelCallReconciliationRepositoryError> {
-        let mut transaction = begin_bounded(&self.pool).await?;
+        let mut connection = acquire_bounded(&self.pool).await?;
+        let mut transaction = begin_acquired(&mut connection).await?;
         bound_reconciliation_lock_wait(&mut transaction).await?;
         let rows = sqlx::query(
             "UPDATE automatic_model_call_reconciliation_attempt

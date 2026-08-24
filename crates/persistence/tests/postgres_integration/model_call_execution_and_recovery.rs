@@ -1619,6 +1619,11 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
 /// Both sides are asserted: the failure arrives before the caller's bound, and
 /// not before the database budget it is supposed to have spent — together, that
 /// `55P03` and not the client is what ended the wait.
+///
+/// The wait also runs far past [`RECONCILIATION_ACQUIRE_WAIT`], which is sound
+/// only because that budget stops at the acquisition. A bound that still
+/// covered `BEGIN` would be the client giving up on a connection the backend
+/// was still using, which is the strand these tests exist to keep closed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s04_a_contended_automatic_attempt_gives_the_row_up_inside_the_database()
@@ -1800,6 +1805,109 @@ async fn s04_a_contended_failure_record_gives_the_row_up_inside_the_database()
         "the retried record classifies the attempt and reschedules the recovery"
     );
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S04 / S10: the acquisition budget bounds reaching a pooled connection and
+/// nothing past it, so a pool with nothing left to hand out costs one
+/// classified infrastructure failure that wrote nothing, rather than a watchdog
+/// wake spent waiting out the driver's own thirty-second acquisition timeout.
+///
+/// Abandoning an acquisition is the one cancellation on this path that is free:
+/// no transaction has begun and nothing has been sent, so no backend is left
+/// running a statement and no connection is left checked out. That is exactly
+/// why the budget stops there. `Pool::begin` would put `BEGIN` inside it, and
+/// cancelling that is not a smaller failure but the original one — a queued
+/// `ROLLBACK` on a connection held until the backend answers, under the
+/// slowdown that made `BEGIN` slow to begin with, for one watchdog attempt
+/// after another.
+///
+/// The pool is exhausted rather than the server slowed because that is the same
+/// wait from the caller's side and is deterministic. Both constants are read
+/// rather than restated: the wait reached the acquisition budget, and ended
+/// well inside the per-statement database budget that governs everything after
+/// it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s04_an_exhausted_pool_ends_the_automatic_attempt_before_a_transaction_begins()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = migrated_postgres().await?;
+    let parked = park_restart_ambiguity(&pool, 0xF300).await?;
+    let single = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let repository = PostgresModelCallReconciliationRepository::new(single.clone());
+    let batch = repository.claim_due().await?;
+    let claimed = batch.claimed()[0];
+
+    let held = single.acquire().await?;
+    let started = std::time::Instant::now();
+    let starved = repository
+        .reconcile(claimed)
+        .await
+        .expect_err("an exhausted pool cannot be reconciled through");
+    let waited = started.elapsed();
+    let parked_still: (String, String) = sqlx::query_as(
+        "SELECT lifecycle.state_kind, recovery.state_kind
+           FROM turn_lifecycle AS lifecycle
+           JOIN automatic_model_call_reconciliation AS recovery
+             ON recovery.turn_id = lifecycle.turn_id
+          WHERE lifecycle.turn_id = $1",
+    )
+    .bind(parked.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    drop(held);
+    let retried = repository.reconcile(claimed).await?;
+
+    let ModelCallReconciliationRepositoryError::Database {
+        commit_ambiguous,
+        source,
+    } = &starved
+    else {
+        panic!("a bounded acquisition fails as an ordinary database failure")
+    };
+    assert!(
+        !commit_ambiguous,
+        "no transaction began, so no commit could be in doubt"
+    );
+    assert!(
+        matches!(source, sqlx::Error::PoolTimedOut),
+        "the caller reads the driver's own acquisition failure, not a wrapper"
+    );
+    assert_eq!(
+        starved.failure_kind(),
+        ModelCallReconciliationFailureKind::Infrastructure
+    );
+    assert!(
+        matches!(
+            starved.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false
+            }
+        ),
+        "an attempt that never began is unambiguous back pressure"
+    );
+    assert!(
+        waited >= RECONCILIATION_ACQUIRE_WAIT,
+        "the acquisition spent its budget, so {waited:?} is what that bound ended"
+    );
+    assert!(
+        waited < RECONCILIATION_LOCK_WAIT,
+        "the acquisition budget has to end the wait well inside the \
+         per-statement database budget it protects, but it took {waited:?}"
+    );
+    assert_eq!(
+        parked_still,
+        ("active".into(), "attempting".into()),
+        "an attempt that never reached a connection wrote nothing"
+    );
+    assert_eq!(retried, ModelCallReconciliationOutcome::Reconciled);
+
+    single.close().await;
     pool.close().await;
     drop(container);
     Ok(())

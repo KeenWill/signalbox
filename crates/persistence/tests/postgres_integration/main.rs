@@ -114,7 +114,7 @@ use signalbox_persistence::{
     local_test_connection_options, migrate,
     model_call_reconciliation::{
         ModelCallReconciliationRepositoryError, PostgresModelCallReconciliationRepository,
-        RECONCILIATION_LOCK_WAIT,
+        RECONCILIATION_ACQUIRE_WAIT, RECONCILIATION_LOCK_WAIT,
     },
     model_execution::{
         CredentialPoolRuntimeAction, CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy,

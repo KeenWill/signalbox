@@ -40,7 +40,12 @@ current-head authentication is additionally verified against the parent slice
 (`agent/scoped-visibility`). The read-scope enforcement and process surface are
 verified against this PR (`agent/scoped-visibility-wiring`).
 Defaults-replacement settings admission and its locked expected-epoch handoff
-are verified against this PR (`agent/model-settings-execution`).
+are verified against this PR (`agent/model-settings-execution`). The
+automatic-reconciliation child outcome — the failed result carrying the
+`ChildResultUnavailable` reason and the exact reconciled child turn that the
+daemon's durable attempt seals for a parent whose delegated call the provider
+can never settle — is verified against this PR
+(`agent/turn-lifecycle-hardening`).
 
 ## Session identity and creation provenance
 

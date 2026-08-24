@@ -785,8 +785,18 @@ outcome `infrastructure_failure` or `integrity_failure`, and recovery becomes
 due after 120, 240, 480, 960, then 1,800 seconds. If a daemon disappears while
 an attempt is `attempting`, its recorded deadline lets the next daemon classify
 it as an infrastructure failure before continuing. Every inventory or
-application transaction has the same one-second wall-clock bound; a timed-out
-claimed attempt remains durably `attempting` until that deadline makes it
+application transaction carries three bounds rather than one wall-clock
+deadline, because the daemon abandoning a transaction queues a `ROLLBACK`
+instead of cancelling the statement the backend is running: giving up
+client-side leaves the pooled connection checked out for the full real wait, so
+the database-side budget is the one that must expire first. Reaching a pooled
+connection is bounded at 250 milliseconds, which is safe to abandon because no
+transaction has begun; any one statement then waits at most one second for a
+contended row under a PostgreSQL lock budget, whose expiry is an ordinary
+infrastructure failure that spends an attempt and writes nothing; and a
+five-second whole-transaction deadline sits above both as the last resort for a
+backend that has stopped answering at all. A claimed attempt whose transaction
+is abandoned remains durably `attempting` until its recorded deadline makes it
 classifiable. An explicitly recorded fifth failure becomes exhausted on the next
 watchdog scan without waiting out that final ambiguity deadline; the deadline
 remains necessary when the daemon cannot tell whether the fifth attempt
