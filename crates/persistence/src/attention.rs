@@ -209,7 +209,13 @@ macro_rules! summary_sql {
            lifecycle.session_id, lifecycle.turn_id, lifecycle.state_kind,
            lifecycle.active_phase_kind, lifecycle.terminal_disposition_kind
       FROM turn_lifecycle AS lifecycle JOIN selected USING (session_id)
-     ORDER BY lifecycle.session_id, lifecycle.acceptance_position DESC
+     ORDER BY lifecycle.session_id,
+              CASE lifecycle.state_kind
+                  WHEN 'active' THEN 0
+                  WHEN 'queued' THEN 1
+                  ELSE 2
+              END,
+              lifecycle.acceptance_position DESC
 ), latest_goal AS (
     SELECT DISTINCT ON (goal.session_id)
            goal.session_id, goal.generation::text AS generation, goal.event_kind,
@@ -365,7 +371,10 @@ async fn load_summaries(
             ) => (
                 SELECT_LAST_ACTIVITY,
                 Some(session.into_uuid()),
-                Some(sqlx::types::time::OffsetDateTime::from(*recorded_at)),
+                Some(
+                    sqlx::types::time::OffsetDateTime::try_from(*recorded_at)
+                        .map_err(|_| AttentionCorruption::Invalid("catalog continuation"))?,
+                ),
             ),
             (AttentionSort::LastActivityDescending, None) => (SELECT_LAST_ACTIVITY, None, None),
             (

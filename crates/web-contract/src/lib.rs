@@ -185,6 +185,36 @@ impl<'de> Deserialize<'de> for WebSessionId {
     }
 }
 
+/// Checked canonical UUID used for browser-visible turn identities.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebTurnId(
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    String,
+);
+
+impl WebTurnId {
+    /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
+    #[must_use]
+    pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
+        Self(WebSessionId::from_uuid_bytes(bytes).0)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebTurnId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        canonical_session_id(&value)
+            .then_some(Self(value))
+            .ok_or_else(|| de::Error::custom("turn ID must be a canonical lowercase UUID"))
+    }
+}
+
 impl WebTimelineEventSequence {
     /// Encodes one already-validated positive durable-event sequence.
     #[must_use]
@@ -426,38 +456,40 @@ pub enum WebAttentionActivityKind {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionGoalBlock {
-    pub generation: String,
+    pub generation: WebU64,
     pub reason: WebAttentionBlockedReason,
     /// At most 128 Unicode scalar values; exact text is in session detail.
+    #[schemars(length(max = 128))]
     pub need_summary: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionJudgeFacts {
-    pub actionable: String,
-    pub completed: String,
-    pub escalated: String,
-    pub failed: String,
+    pub actionable: WebU64,
+    pub completed: WebU64,
+    pub escalated: WebU64,
+    pub failed: WebU64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionActivity {
-    pub unix_milliseconds: String,
+    pub unix_microseconds: WebU64,
     pub kind: WebAttentionActivityKind,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionSummary {
-    pub session_id: String,
+    pub session_id: WebSessionId,
+    #[schemars(length(max = 128))]
     pub title_summary: Option<String>,
     pub title_truncated: bool,
     pub archived: bool,
-    pub current_turn_id: Option<String>,
-    pub active_turn_count: String,
-    pub queued_turn_count: String,
+    pub current_turn_id: Option<WebTurnId>,
+    pub active_turn_count: WebU64,
+    pub queued_turn_count: WebU64,
     pub state: WebAttentionState,
     pub action: Option<WebAttentionAction>,
     pub goal_block: Option<WebAttentionGoalBlock>,
@@ -473,39 +505,41 @@ pub enum WebAttentionSort {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebAttentionContinuation {
     LastActivity {
-        unix_microseconds: String,
-        session_id: String,
+        unix_microseconds: WebU64,
+        session_id: WebSessionId,
     },
     SessionIdentity {
-        session_id: String,
+        session_id: WebSessionId,
     },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionSnapshot {
-    pub cursor: String,
-    pub total: String,
+    pub cursor: WebU64,
+    pub total: WebU64,
     pub sort: WebAttentionSort,
+    #[schemars(length(max = 32))]
     pub summaries: Vec<WebAttentionSummary>,
     pub continuation: Option<WebAttentionContinuation>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebAttentionStreamEvent {
     Snapshot {
         snapshot: WebAttentionSnapshot,
     },
     Update {
-        cursor: String,
+        cursor: WebU64,
+        #[schemars(length(max = 128))]
         summaries: Vec<WebAttentionSummary>,
     },
     ResyncRequired {
-        cursor: String,
+        cursor: WebU64,
     },
 }
 
@@ -713,17 +747,11 @@ function assertSchema(root, schema, value, path) {{
       return;
     }}
     const concrete = schema.type.filter((candidate) => candidate !== "null");
-    const accepted = concrete.some((candidate) => {{
-      try {{
-        assertSchema(root, {{ ...schema, type: candidate }}, value, path);
-        return true;
-      }} catch {{
-        return false;
-      }}
-    }});
-    if (!accepted) {{
+    const actual = Array.isArray(value) ? "array" : typeof value;
+    if (!concrete.includes(actual)) {{
       fail(path, concrete.join(" or "));
     }}
+    assertSchema(root, {{ ...schema, type: actual }}, value, path);
     return;
   }}
   if (schema.type === "object") {{
@@ -754,6 +782,9 @@ function assertSchema(root, schema, value, path) {{
     if (!Array.isArray(value)) {{
       fail(path, "an array");
     }}
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {{
+      fail(path, `at most ${{schema.maxItems}} items`);
+    }}
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${{path}}[${{index}}]`));
     return;
   }}
@@ -780,6 +811,13 @@ function assertSchema(root, schema, value, path) {{
   }}
   if (typeof value !== schema.type) {{
     fail(path, schema.type);
+  }}
+  if (
+    schema.type === "string" &&
+    schema.maxLength !== undefined &&
+    Array.from(value).length > schema.maxLength
+  ) {{
+    fail(path, `at most ${{schema.maxLength}} Unicode scalar values`);
   }}
   if (
     schema.type === "string" &&
@@ -830,12 +868,34 @@ export function decodeWebSessionTimelineWindow(value) {{
 
 export function decodeWebAttentionSnapshot(value) {{
   assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
+  value.summaries.forEach((summary, index) => assertAttentionSummary(summary, `attention_snapshot.summaries[${{index}}]`));
   return value;
 }}
 
 export function decodeWebAttentionStreamEvent(value) {{
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
+  const summaries = value.kind === "snapshot" ? value.snapshot.summaries : value.summaries;
+  summaries?.forEach((summary, index) => assertAttentionSummary(summary, `attention_event.summaries[${{index}}]`));
   return value;
+}}
+
+function assertAttentionSummary(summary, path) {{
+  const expectedAction = {{
+    active: null,
+    queued: null,
+    blocked: "provide_goal_need",
+    awaiting_approval: "decide_approval",
+    ambiguous: "reconcile_turn",
+    awaiting_reconciliation: "reconcile_turn",
+    runner_lost: "restore_runner",
+    idle: null,
+  }}[summary.state];
+  if (summary.action !== expectedAction) {{
+    fail(`${{path}}.action`, `the action required by state ${{summary.state}}`);
+  }}
+  if ((summary.state === "blocked") !== (summary.goal_block !== null)) {{
+    fail(`${{path}}.goal_block`, "present exactly for blocked state");
+  }}
 }}
 "##,
         contract_name = WEB_CONTRACT_NAME,

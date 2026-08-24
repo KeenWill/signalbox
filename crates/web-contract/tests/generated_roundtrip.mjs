@@ -4,6 +4,8 @@ import test from "node:test";
 
 import {
   decodeWebApiErrorResponse,
+  decodeWebAttentionSnapshot,
+  decodeWebAttentionStreamEvent,
   decodeWebContractBootstrap,
   decodeWebContractExample,
   decodeWebSessionTimelineDescriptor,
@@ -11,6 +13,35 @@ import {
 } from "../../../clients/web/src/generated/web-contract.mjs";
 
 const fixtureUrl = new URL("./fixtures/example.json", import.meta.url);
+
+function attentionSummary(overrides = {}) {
+  return {
+    session_id: "00000000-0000-0000-0000-000000000991",
+    title_summary: null,
+    title_truncated: false,
+    archived: false,
+    current_turn_id: null,
+    active_turn_count: "0",
+    queued_turn_count: "0",
+    state: "idle",
+    action: null,
+    goal_block: null,
+    judge: { actionable: "0", completed: "0", escalated: "0", failed: "0" },
+    last_activity: { unix_microseconds: "1", kind: "session" },
+    ...overrides,
+  };
+}
+
+function attentionSnapshot(overrides = {}) {
+  return {
+    cursor: "1",
+    total: "1",
+    sort: "last_activity_descending",
+    summaries: [attentionSummary()],
+    continuation: null,
+    ...overrides,
+  };
+}
 
 test("generated example decoder round trips the Rust fixture", async () => {
   const source = JSON.parse(await readFile(fixtureUrl, "utf8"));
@@ -183,5 +214,103 @@ test("generated window decoder requires both continuation fields", () => {
         continuation_before: null,
       }),
     /continuation_after must be present/,
+  );
+});
+
+test("generated attention decoder validates decimals and identities", () => {
+  assert.throws(
+    () => decodeWebAttentionSnapshot(attentionSnapshot({ cursor: "garbage" })),
+    /matching/,
+  );
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ session_id: "not-a-uuid" })],
+        }),
+      ),
+    /matching/,
+  );
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ current_turn_id: "not-a-uuid" })],
+        }),
+      ),
+    /one recognized variant/,
+  );
+});
+
+test("generated attention decoder rejects unknown envelope fields", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionStreamEvent({
+        kind: "resync_required",
+        cursor: "1",
+        incompatible: true,
+      }),
+    /one recognized variant/,
+  );
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          continuation: {
+            kind: "session_identity",
+            session_id: "00000000-0000-0000-0000-000000000991",
+            incompatible: true,
+          },
+        }),
+      ),
+    /one recognized variant/,
+  );
+});
+
+test("generated attention decoder enforces collection and scalar bounds", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: Array.from({ length: 33 }, () => attentionSummary()),
+        }),
+      ),
+    /at most 32 items/,
+  );
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ title_summary: "x".repeat(129) })],
+        }),
+      ),
+    /at most 128 Unicode scalar values/,
+  );
+});
+
+test("generated attention decoder rejects inconsistent operator actions", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ state: "awaiting_approval", action: null })],
+        }),
+      ),
+    /action required by state awaiting_approval/,
+  );
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [
+            attentionSummary({
+              state: "blocked",
+              action: "provide_goal_need",
+              goal_block: null,
+            }),
+          ],
+        }),
+      ),
+    /present exactly for blocked state/,
   );
 });
