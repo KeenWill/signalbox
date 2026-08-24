@@ -30,14 +30,15 @@ mapping are the foundation proposal at the bottom of the delegation stack and
 become verified only with its implementing child pull requests. The append-only
 context-compaction record and projection were verified through PR #312
 (`agent/context-compaction-core`); the command path and canonical visible-range
-selection were verified through PR #314 (`agent/context-compaction-protocol`).
-The runner placement-entry paragraphs are the foundation proposal at the bottom
-of their implementing stack and become verified only with those child pull
-requests. The imported-conversation record and converter are owned by
-[conversation-import](conversation-import.md). Where a law is cited as
-`INV-NNN`, the generated [invariant test index](../invariants.md) resolves it;
-where mechanics owned by another contract are summarized, the owning sibling
-page is linked inline.
+selection were verified through PR #314 (`agent/context-compaction-protocol`);
+and the canonical call's immutable input-token semantics were verified through
+PR #1137 (`agent/web-usage-cost`). The runner placement-entry paragraphs are the
+foundation proposal at the bottom of their implementing stack and become
+verified only with those child pull requests. The imported-conversation record
+and converter are owned by [conversation-import](conversation-import.md). Where
+a law is cited as `INV-NNN`, the generated
+[invariant test index](../invariants.md) resolves it; where mechanics owned by
+another contract are summarized, the owning sibling page is linked inline.
 
 The path-scoped session-placement domain and persistence paragraphs were
 verified through PR #423 (`agent/scoped-visibility-placement`); fail-closed
@@ -830,7 +831,8 @@ The transcript therefore remains complete and addressable after compaction. No
 entry or frontier is deleted, replaced, reordered, or rewritten. The
 compaction-call record separately retains the session's current direct model
 selection, resolved provider target, source frontier, physical lifecycle and
-disposition, non-secret credential reference, and each independently optional
+disposition, non-secret credential reference, whether provider-reported input
+tokens include separately reported cache axes, and each independently optional
 provider-reported usage field. Summary production is its own model call; it is
 not assistant output attributed to an accepted-input turn.
 
