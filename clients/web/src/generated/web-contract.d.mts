@@ -133,7 +133,7 @@ type WebU128 = string;
 type WebU64 = string;
 
 type WebUsageAggregateGroup = {
-  readonly call_count: WebU64;
+  readonly call_count: WebUsageCallCount;
   readonly call_kind: WebUsageCallKind;
   readonly cost: WebUsageCost;
   readonly coverage: WebUsageTokenCoverage;
@@ -164,6 +164,8 @@ type WebUsageCall = {
   readonly turn_id?: WebUuid | null;
 };
 
+type WebUsageCallCount = string;
+
 type WebUsageCallCursor = {
   readonly call_id: WebUuid;
   readonly recorded_at_micros: WebU64;
@@ -174,7 +176,7 @@ type WebUsageCallKind = "model_call" | "approval_judge" | "context_compaction";
 type WebUsageCost = {
   readonly amount_usd: WebDollarAmount;
   readonly label: WebUsageCostLabel;
-  readonly rate_version: string;
+  readonly rate_version: WebUsageRateVersion;
   readonly status: "derived";
 } | {
   readonly reason: WebUsageCostUnavailableReason;
@@ -190,6 +192,8 @@ type WebUsageInputSemantics = "unknown" | "cache_exclusive" | "cache_inclusive";
 type WebUsageProfileId = string;
 
 type WebUsageProvenance = "reported" | "estimated";
+
+type WebUsageRateVersion = string;
 
 type WebUsageTokenAxes = {
   readonly cache_creation_input: WebNullableU64;

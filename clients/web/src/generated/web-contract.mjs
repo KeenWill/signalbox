@@ -930,7 +930,7 @@ const schemas = {
                 "$ref": "#/$defs/WebUsageCostLabel"
               },
               "rate_version": {
-                "type": "string"
+                "$ref": "#/$defs/WebUsageRateVersion"
               },
               "status": {
                 "const": "derived",
@@ -998,6 +998,12 @@ const schemas = {
           "reported",
           "estimated"
         ],
+        "type": "string"
+      },
+      "WebUsageRateVersion": {
+        "description": "Checked nonempty configured rate version exposed to browser clients.",
+        "maxLength": 128,
+        "minLength": 1,
         "type": "string"
       },
       "WebUsageTokenAxes": {
@@ -1082,17 +1088,12 @@ const schemas = {
         "pattern": "^(0|[1-9][0-9]{0,38})$",
         "type": "string"
       },
-      "WebU64": {
-        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
-        "pattern": "^(0|[1-9][0-9]*)$",
-        "type": "string"
-      },
       "WebUsageAggregateGroup": {
         "additionalProperties": false,
         "description": "One compatibility-preserving usage and configured-cost summary row.",
         "properties": {
           "call_count": {
-            "$ref": "#/$defs/WebU64"
+            "$ref": "#/$defs/WebUsageCallCount"
           },
           "call_kind": {
             "$ref": "#/$defs/WebUsageCallKind"
@@ -1157,6 +1158,11 @@ const schemas = {
         ],
         "type": "object"
       },
+      "WebUsageCallCount": {
+        "description": "Checked positive summary call count encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
       "WebUsageCallKind": {
         "description": "Closed physical class of one terminal usage record.",
         "enum": [
@@ -1179,7 +1185,7 @@ const schemas = {
                 "$ref": "#/$defs/WebUsageCostLabel"
               },
               "rate_version": {
-                "type": "string"
+                "$ref": "#/$defs/WebUsageRateVersion"
               },
               "status": {
                 "const": "derived",
@@ -1253,6 +1259,12 @@ const schemas = {
           "reported",
           "estimated"
         ],
+        "type": "string"
+      },
+      "WebUsageRateVersion": {
+        "description": "Checked nonempty configured rate version exposed to browser clients.",
+        "maxLength": 128,
+        "minLength": 1,
         "type": "string"
       },
       "WebUsageTokenCoverage": {
@@ -1679,6 +1691,12 @@ export function decodeWebUsageCallPage(value, order) {
 }
 
 function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInvalidBreakdown) {
+  if (cost.status === "derived") {
+    const rateVersionBytes = new TextEncoder().encode(cost.rate_version).length;
+    if (rateVersionBytes === 0 || rateVersionBytes > 128) {
+      fail(`${path}.cost.rate_version`, "1 through 128 UTF-8 bytes");
+    }
+  }
   const hasTokenEvidence = Object.values(tokens).some((value) => value !== null);
   const incompleteCacheAxes =
     inputSemantics === "cache_inclusive" &&

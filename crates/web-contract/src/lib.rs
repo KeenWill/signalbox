@@ -717,13 +717,42 @@ impl<'de> Deserialize<'de> for WebDollarAmount {
     }
 }
 
+/// Checked nonempty configured rate version exposed to browser clients.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebUsageRateVersion(#[schemars(length(min = 1, max = 128))] String);
+
+impl WebUsageRateVersion {
+    /// Wraps a rate version already admitted by daemon configuration.
+    #[must_use]
+    pub fn from_configured(value: String) -> Self {
+        debug_assert!(!value.is_empty() && value.len() <= 128);
+        Self(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebUsageRateVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.is_empty() || value.len() > 128 {
+            return Err(de::Error::custom(
+                "usage rate version must contain 1 through 128 UTF-8 bytes",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
 /// Labeled configured cost, or an explicit reason it cannot be derived.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebUsageCost {
     Derived {
         amount_usd: WebDollarAmount,
-        rate_version: String,
+        rate_version: WebUsageRateVersion,
         label: WebUsageCostLabel,
     },
     Unavailable {
@@ -760,6 +789,35 @@ impl<'de> Deserialize<'de> for WebUsageProfileId {
     }
 }
 
+/// Checked positive summary call count encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebUsageCallCount(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
+
+impl WebUsageCallCount {
+    /// Encodes a positive aggregate count produced by persistence.
+    #[must_use]
+    pub fn from_positive(value: u64) -> Self {
+        debug_assert!(value > 0);
+        Self(value.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for WebUsageCallCount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if canonical_u64(&value).is_none_or(|parsed| parsed == 0) {
+            return Err(de::Error::custom(
+                "usage summary call count must be a canonical positive u64",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
 /// One compatibility-preserving usage and configured-cost summary row.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -770,7 +828,7 @@ pub struct WebUsageAggregateGroup {
     pub provenance: WebUsageProvenance,
     pub input_semantics: WebUsageInputSemantics,
     pub coverage: WebUsageTokenCoverage,
-    pub call_count: WebU64,
+    pub call_count: WebUsageCallCount,
     pub tokens: WebUsageAggregateTokenAxes,
     pub cost: WebUsageCost,
 }
@@ -1339,6 +1397,12 @@ export function decodeWebUsageCallPage(value, order) {{
 }}
 
 function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInvalidBreakdown) {{
+  if (cost.status === "derived") {{
+    const rateVersionBytes = new TextEncoder().encode(cost.rate_version).length;
+    if (rateVersionBytes === 0 || rateVersionBytes > 128) {{
+      fail(`${{path}}.cost.rate_version`, "1 through 128 UTF-8 bytes");
+    }}
+  }}
   const hasTokenEvidence = Object.values(tokens).some((value) => value !== null);
   const incompleteCacheAxes =
     inputSemantics === "cache_inclusive" &&
@@ -1544,7 +1608,8 @@ mod tests {
 
     use super::{
         WebContractBootstrap, WebContractExample, WebDollarAmount, WebSessionId,
-        WebTimelineEventSequence, WebU64, generated_artifacts,
+        WebTimelineEventSequence, WebU64, WebUsageCallCount, WebUsageRateVersion,
+        generated_artifacts,
     };
 
     #[track_caller]
@@ -1616,6 +1681,21 @@ mod tests {
         assert!(serde_json::from_str::<WebU64>(r#""18446744073709551616""#).is_err());
         assert!(serde_json::from_str::<WebU64>(r#""0""#).is_ok());
         assert!(serde_json::from_str::<WebU64>(r#""18446744073709551615""#).is_ok());
+    }
+
+    #[test]
+    fn usage_call_count_requires_canonical_positive_u64() {
+        assert!(serde_json::from_str::<WebUsageCallCount>(r#""0""#).is_err());
+        assert!(serde_json::from_str::<WebUsageCallCount>(r#""01""#).is_err());
+        assert!(serde_json::from_str::<WebUsageCallCount>(r#""1""#).is_ok());
+    }
+
+    #[test]
+    fn usage_rate_version_requires_one_through_128_utf8_bytes() {
+        assert!(serde_json::from_str::<WebUsageRateVersion>(r#""""#).is_err());
+        let oversized = serde_json::to_string(&"é".repeat(65)).expect("fixture serializes");
+        assert!(serde_json::from_str::<WebUsageRateVersion>(&oversized).is_err());
+        assert!(serde_json::from_str::<WebUsageRateVersion>(r#""fixture-v2""#).is_ok());
     }
 
     #[test]

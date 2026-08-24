@@ -297,6 +297,32 @@ test("generated usage decoder rejects noncanonical dollar amounts", () => {
   );
 });
 
+test("generated usage decoder requires positive summary call counts", () => {
+  const group = usageGroup();
+  group.call_count = "0";
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [group], truncated: false }),
+    /matching|positive/,
+  );
+});
+
+test("generated usage decoder bounds rate versions by UTF-8 bytes", () => {
+  const empty = usageGroup();
+  empty.cost.rate_version = "";
+  const oversized = usageGroup();
+  oversized.cost.rate_version = "é".repeat(65);
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [empty], truncated: false }),
+    /at least 1 characters|1 through 128 UTF-8 bytes/,
+  );
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [oversized], truncated: false }),
+    /1 through 128 UTF-8 bytes/,
+  );
+});
+
 test("generated usage summary rejects contradictory coverage", () => {
   const group = usageGroup();
   group.coverage.input = false;

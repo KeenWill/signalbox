@@ -56,9 +56,10 @@ use signalbox_web_contract::{
     WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
     WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
     WebTimelineEventSequence, WebU64, WebUsageAggregateGroup, WebUsageAggregateTokenAxes,
-    WebUsageCall, WebUsageCallCursor, WebUsageCallKind, WebUsageCallPage, WebUsageCost,
-    WebUsageCostLabel, WebUsageCostUnavailableReason, WebUsageInputSemantics, WebUsageProvenance,
-    WebUsageSummary, WebUsageTokenAxes, WebUsageTokenCoverage, WebUuid,
+    WebUsageCall, WebUsageCallCount, WebUsageCallCursor, WebUsageCallKind, WebUsageCallPage,
+    WebUsageCost, WebUsageCostLabel, WebUsageCostUnavailableReason, WebUsageInputSemantics,
+    WebUsageProvenance, WebUsageRateVersion, WebUsageSummary, WebUsageTokenAxes,
+    WebUsageTokenCoverage, WebUuid,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -793,7 +794,7 @@ fn usage_aggregate_dto(
         call_kind: usage_call_kind_dto(group.key.call_kind),
         model_id: web_uuid(group.key.model.identity().into_uuid()),
         profile_id: signalbox_web_contract::WebUsageProfileId::from_bounded(
-            group.key.credential_profile.clone(),
+            group.key.web_profile.clone(),
         ),
         provenance: usage_provenance_dto(group.key.provenance),
         input_semantics: usage_input_semantics_dto(group.key.input_semantics),
@@ -804,7 +805,7 @@ fn usage_aggregate_dto(
                 == UsageTokenPresence::Present,
             cache_read_input: group.key.coverage.cache_read_input == UsageTokenPresence::Present,
         },
-        call_count: WebU64::from_u64(group.call_count),
+        call_count: WebUsageCallCount::from_positive(group.call_count),
         tokens: usage_aggregate_tokens_dto(group.tokens),
         cost: usage_aggregate_cost_dto(configuration, &group),
     }
@@ -891,7 +892,7 @@ fn usage_cost_dto(
     };
     WebUsageCost::Derived {
         amount_usd: WebDollarAmount::from_derived(cost.amount_usd().normalize().to_string()),
-        rate_version: cost.rate_version().to_owned(),
+        rate_version: WebUsageRateVersion::from_configured(cost.rate_version().to_owned()),
         label: match cost.billing_kind() {
             BillingKind::ApiMetered => WebUsageCostLabel::Real,
             BillingKind::Subscription => WebUsageCostLabel::MeteredEquivalent,
@@ -903,24 +904,65 @@ fn usage_aggregate_cost_dto(
     configuration: &HubModelConfiguration,
     group: &UsageAggregateGroup,
 ) -> WebUsageCost {
-    let tokens = usage_aggregate_tokens_for_cost(group.tokens);
-    let widened_axis_overflowed = group.tokens.input.is_some() != tokens.input.is_some()
-        || group.tokens.output.is_some() != tokens.output.is_some()
-        || group.tokens.cache_creation_input.is_some() != tokens.cache_creation_input.is_some()
-        || group.tokens.cache_read_input.is_some() != tokens.cache_read_input.is_some();
-    if widened_axis_overflowed {
-        return WebUsageCost::Unavailable {
-            reason: WebUsageCostUnavailableReason::ConfigurationUnavailable,
-        };
+    let unavailable = |reason| WebUsageCost::Unavailable { reason };
+    if group.tokens.input.is_none()
+        && group.tokens.output.is_none()
+        && group.tokens.cache_creation_input.is_none()
+        && group.tokens.cache_read_input.is_none()
+    {
+        return unavailable(WebUsageCostUnavailableReason::NoTokenEvidence);
     }
-    usage_cost_dto(
-        configuration,
+    let semantics = match group.key.input_semantics {
+        UsageInputTokenSemantics::Unknown => {
+            return unavailable(WebUsageCostUnavailableReason::UnknownInputSemantics);
+        }
+        UsageInputTokenSemantics::CacheExclusive => {
+            ProcessModelCallInputTokenSemantics::CacheExclusive
+        }
+        UsageInputTokenSemantics::CacheInclusive => {
+            if group.tokens.output.is_none()
+                && group.tokens.cache_creation_input.is_none()
+                && group.tokens.cache_read_input.is_none()
+            {
+                return unavailable(WebUsageCostUnavailableReason::IncompleteCacheAxes);
+            }
+            if group
+                .tokens
+                .cache_creation_input
+                .zip(group.tokens.cache_read_input)
+                .is_some_and(|(creation, read)| {
+                    creation
+                        .checked_add(read)
+                        .is_none_or(|cache| group.tokens.input.is_some_and(|input| input < cache))
+                })
+            {
+                return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
+            }
+            ProcessModelCallInputTokenSemantics::CacheInclusive
+        }
+    };
+    if !group.cost_derivation_safe {
+        return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
+    }
+    let Some(cost) = configuration.derive_usage_aggregate_cost(
         group.key.model,
         &group.key.credential_profile,
-        group.key.input_semantics,
-        tokens,
-        group.cost_derivation_safe,
-    )
+        semantics,
+        group.tokens.input,
+        group.tokens.output,
+        group.tokens.cache_creation_input,
+        group.tokens.cache_read_input,
+    ) else {
+        return unavailable(WebUsageCostUnavailableReason::ConfigurationUnavailable);
+    };
+    WebUsageCost::Derived {
+        amount_usd: WebDollarAmount::from_derived(cost.amount_usd().normalize().to_string()),
+        rate_version: WebUsageRateVersion::from_configured(cost.rate_version().to_owned()),
+        label: match cost.billing_kind() {
+            BillingKind::ApiMetered => WebUsageCostLabel::Real,
+            BillingKind::Subscription => WebUsageCostLabel::MeteredEquivalent,
+        },
+    }
 }
 
 const fn usage_call_kind_dto(kind: UsageCallKind) -> WebUsageCallKind {
@@ -943,19 +985,6 @@ const fn usage_input_semantics_dto(semantics: UsageInputTokenSemantics) -> WebUs
         UsageInputTokenSemantics::Unknown => WebUsageInputSemantics::Unknown,
         UsageInputTokenSemantics::CacheExclusive => WebUsageInputSemantics::CacheExclusive,
         UsageInputTokenSemantics::CacheInclusive => WebUsageInputSemantics::CacheInclusive,
-    }
-}
-
-fn usage_aggregate_tokens_for_cost(tokens: UsageAggregateTokenAxes) -> UsageTokenAxes {
-    UsageTokenAxes {
-        input: tokens.input.and_then(|value| u64::try_from(value).ok()),
-        output: tokens.output.and_then(|value| u64::try_from(value).ok()),
-        cache_creation_input: tokens
-            .cache_creation_input
-            .and_then(|value| u64::try_from(value).ok()),
-        cache_read_input: tokens
-            .cache_read_input
-            .and_then(|value| u64::try_from(value).ok()),
     }
 }
 

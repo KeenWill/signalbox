@@ -347,6 +347,8 @@ pub struct UsageCallEvidence {
     pub turn: Option<TurnId>,
     /// Resolved provider/model target.
     pub model: ResolvedProviderTarget,
+    /// Bounded non-secret identity safe for browser partitioning.
+    pub web_profile: String,
     /// Non-secret credential-profile reference needed for cost labeling.
     pub credential_profile: String,
     /// Reported or estimated provenance.
@@ -375,6 +377,8 @@ pub struct UsageAggregateKey {
     pub call_kind: UsageCallKind,
     /// Resolved provider/model target.
     pub model: ResolvedProviderTarget,
+    /// Bounded non-secret identity safe for browser partitioning.
+    pub web_profile: String,
     /// Non-secret credential-profile cost dimension.
     pub credential_profile: String,
     /// Reported or estimated provenance.

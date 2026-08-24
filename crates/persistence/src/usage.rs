@@ -40,7 +40,8 @@ WITH candidate_calls AS MATERIALIZED (
     SELECT count(*) > $9 AS calls_truncated FROM candidate_calls
 )
 SELECT call_kind, resolved_provider_model_identity_id,
-       bounded_web_usage_profile(credential_reference) AS credential_reference,
+       credential_reference,
+       bounded_web_usage_profile(credential_reference) AS web_profile,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens IS NOT NULL AS has_input,
        output_tokens IS NOT NULL AS has_output,
@@ -77,7 +78,8 @@ SELECT call_kind, resolved_provider_model_identity_id,
 const CALLS_NEWEST_SQL: &str = "
 SELECT model_call_id, call_kind, session_id, turn_id,
        resolved_provider_model_identity_id,
-       bounded_web_usage_profile(credential_reference) AS credential_reference,
+       credential_reference,
+       bounded_web_usage_profile(credential_reference) AS web_profile,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens, output_tokens,
        cache_creation_input_tokens, cache_read_input_tokens, recorded_at
@@ -100,7 +102,8 @@ SELECT model_call_id, call_kind, session_id, turn_id,
 const CALLS_OLDEST_SQL: &str = "
 SELECT model_call_id, call_kind, session_id, turn_id,
        resolved_provider_model_identity_id,
-       bounded_web_usage_profile(credential_reference) AS credential_reference,
+       credential_reference,
+       bounded_web_usage_profile(credential_reference) AS web_profile,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens, output_tokens,
        cache_creation_input_tokens, cache_read_input_tokens, recorded_at
@@ -347,6 +350,10 @@ fn decode_call_page(rows: Vec<PgRow>, limit: usize) -> Result<UsageCallPage, Usa
 }
 
 fn decode_call(row: PgRow) -> Result<UsageCallEvidence, UsageRepositoryError> {
+    let web_profile: String = row.try_get("web_profile")?;
+    if web_profile.is_empty() || web_profile.len() > 256 {
+        return Err(UsageProjectionCorruption::Invalid("web profile").into());
+    }
     let credential_profile: String = row.try_get("credential_reference")?;
     if credential_profile.is_empty()
         || credential_profile.len() > usize::from(max_usage_credential_profile_utf8_bytes())
@@ -361,6 +368,7 @@ fn decode_call(row: PgRow) -> Result<UsageCallEvidence, UsageRepositoryError> {
             .try_get::<Option<Uuid>, _>("turn_id")?
             .map(TurnId::from_uuid),
         model: decode_model(&row)?,
+        web_profile,
         credential_profile,
         provenance: decode_provenance(row.try_get("usage_provenance_kind")?)?,
         input_semantics: decode_input_semantics(row.try_get("usage_input_includes_cache_tokens")?),
@@ -370,6 +378,10 @@ fn decode_call(row: PgRow) -> Result<UsageCallEvidence, UsageRepositoryError> {
 }
 
 fn decode_aggregate(row: PgRow) -> Result<UsageAggregateGroup, UsageRepositoryError> {
+    let web_profile: String = row.try_get("web_profile")?;
+    if web_profile.is_empty() || web_profile.len() > 256 {
+        return Err(UsageProjectionCorruption::Invalid("web profile").into());
+    }
     let credential_profile: String = row.try_get("credential_reference")?;
     if credential_profile.is_empty()
         || credential_profile.len() > usize::from(max_usage_credential_profile_utf8_bytes())
@@ -378,10 +390,14 @@ fn decode_aggregate(row: PgRow) -> Result<UsageAggregateGroup, UsageRepositoryEr
     }
     let call_count = u64::try_from(row.try_get::<i64, _>("call_count")?)
         .map_err(|_| UsageProjectionCorruption::Invalid("call count"))?;
+    if call_count == 0 {
+        return Err(UsageProjectionCorruption::Invalid("call count").into());
+    }
     Ok(UsageAggregateGroup {
         key: UsageAggregateKey {
             call_kind: decode_call_kind(row.try_get("call_kind")?)?,
             model: decode_model(&row)?,
+            web_profile,
             credential_profile,
             provenance: decode_provenance(row.try_get("usage_provenance_kind")?)?,
             input_semantics: decode_input_semantics(
@@ -513,9 +529,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn both_call_orders_apply_the_bounded_profile_projection() {
-        assert!(CALLS_NEWEST_SQL.contains("bounded_web_usage_profile(credential_reference)"));
-        assert!(CALLS_OLDEST_SQL.contains("bounded_web_usage_profile(credential_reference)"));
+    fn usage_queries_retain_raw_and_bounded_profile_projections() {
+        for sql in [AGGREGATE_SQL, CALLS_NEWEST_SQL, CALLS_OLDEST_SQL] {
+            assert!(sql.contains("credential_reference,"));
+            assert!(sql.contains("bounded_web_usage_profile(credential_reference) AS web_profile"));
+        }
     }
 
     #[test]
