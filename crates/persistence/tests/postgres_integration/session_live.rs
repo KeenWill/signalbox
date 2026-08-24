@@ -196,6 +196,51 @@ async fn live_snapshot_caps_the_queue_preview() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// A delegation termination cascade marks a turn logically terminal while its
+/// underlying `state_kind` deliberately stays `active`, so the live current
+/// projection must exclude it exactly as the timeline-fact and scheduler
+/// predicates do — otherwise a later active turn makes two selected rows and
+/// every live read fails with an active-cardinality corruption.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn live_snapshot_excludes_a_delegation_terminated_active_turn() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_live_session(&pool).await?;
+    submit_first_live_turn(&pool, session).await?;
+    activate_first_live_turn(&pool, session).await?;
+    // A real release runs through the delegation termination cascade with its
+    // logical-terminal proof rows; this narrows the fixture to the released
+    // runtime slot itself, as the runner-protocol release test does.
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET origin_kind = 'delegation', origin_accepted_input_id = NULL,
+                delegation_runtime_terminal = true
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let snapshot = SessionLiveRepository::new(pool.clone())
+        .read_live_snapshot(session)
+        .await?
+        .expect("the terminated session still has a live snapshot");
+
+    assert_eq!(snapshot.active, None);
+    assert_eq!(snapshot.queued_turn_count, 0);
+    assert_eq!(snapshot.reconciliation, None);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// Goal events reconcile the live queue preview relation through the same
 /// runtime-relevance predicate that recomputes `queued_turn_count`, so a
 /// retiring event can never leave the preview holding more rows than the

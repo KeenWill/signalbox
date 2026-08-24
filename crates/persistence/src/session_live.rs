@@ -187,6 +187,7 @@ SELECT lifecycle.turn_id, lifecycle.active_phase_kind,
    AND current_call.state_kind <> 'terminal'
  WHERE lifecycle.session_id = $1
    AND lifecycle.state_kind = 'active'
+   AND NOT lifecycle.delegation_runtime_terminal
    AND goal_turn_is_runtime_relevant(lifecycle.session_id, lifecycle.turn_id)
  ORDER BY lifecycle.acceptance_position
  LIMIT 2
@@ -205,6 +206,7 @@ SELECT turn_id, state_kind, terminal_disposition_kind,
        terminal_model_call_id, terminal_tool_attempt_id
   FROM turn_lifecycle
  WHERE session_id = $1
+   AND NOT delegation_runtime_terminal
    AND goal_turn_is_runtime_relevant(session_id, turn_id)
  ORDER BY acceptance_position DESC
  LIMIT 1

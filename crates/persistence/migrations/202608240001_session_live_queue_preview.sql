@@ -27,6 +27,13 @@ SET search_path FROM CURRENT AS $$
 DECLARE
     lifecycle turn_lifecycle%ROWTYPE;
 BEGIN
+    -- Every timeline-fact trigger takes the outbox allocator lock before its
+    -- fact row, and trigger-name ordering runs this function's lifecycle
+    -- trigger before the fact trigger while the goal-event fact trigger runs
+    -- before the goal-event queue trigger. Taking the allocator first here
+    -- keeps one global allocator-then-rows order, so a queued-turn transition
+    -- concurrent with a goal event cannot deadlock.
+    PERFORM 1 FROM outbox_sequence_state WHERE singleton FOR UPDATE;
     DELETE FROM session_live_queued_turn
      WHERE session_id = checked_session AND turn_id = checked_turn;
 
@@ -90,6 +97,9 @@ RETURNS trigger
 LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$
 BEGIN
+    -- Same allocator-then-rows lock order as refresh_session_live_queued_turn;
+    -- the goal-event fact trigger that runs before this one already holds it.
+    PERFORM 1 FROM outbox_sequence_state WHERE singleton FOR UPDATE;
     DELETE FROM session_live_queued_turn
      WHERE session_id = NEW.session_id;
     INSERT INTO session_live_queued_turn (
