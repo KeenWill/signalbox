@@ -243,6 +243,62 @@ describe('BoundedSessionHistory', () => {
     await expect(history.describe()).rejects.toThrow('append-only facts are contradictory')
   })
 
+  it('requires descriptor growth to cover every newly returned durable item', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const original = await scenario.readDescriptor(sessionId)
+    const initial = {
+      ...original,
+      sizes: {
+        ...original.sizes,
+        item_count: '1',
+        projected_structured_bytes: '78',
+      },
+      first_address: { event_sequence: '10' },
+      latest_address: { event_sequence: '10' },
+      observed_through: '10',
+    }
+    const reconciled = {
+      ...initial,
+      sizes: {
+        ...initial.sizes,
+        item_count: '2',
+        projected_structured_bytes: '156',
+      },
+      latest_address: { event_sequence: '30' },
+      observed_through: '30',
+    }
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: vi
+        .fn<SessionTimelineSource['readDescriptor']>()
+        .mockResolvedValueOnce(initial)
+        .mockResolvedValueOnce(reconciled),
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '20' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 78,
+          },
+          {
+            address: { event_sequence: '30' },
+            kind: 'turn_activated',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 156,
+        continuation_before: { event_sequence: '20' },
+        continuation_after: null,
+      }),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+    await history.load({ kind: 'latest' }, { maxItems: 2, maxBytes: 256 })
+
+    await expect(history.describe()).rejects.toThrow('append-only facts are contradictory')
+  })
+
   it('rejects a descriptor structured total impossible for its item count', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const descriptor = await scenario.readDescriptor(sessionId)
@@ -1163,6 +1219,20 @@ describe('BoundedSessionHistory', () => {
     await expect(
       source.readWindow(sessionId, { kind: 'first' }, { maxItems: 1, maxBytes: 256 }),
     ).rejects.toThrow('encoded byte ceiling')
+  })
+
+  it('forwards cancellation to the bootstrap request', async () => {
+    const controller = new AbortController()
+    const request = vi.fn<typeof fetch>().mockImplementation(async (_input, init) => {
+      expect(init?.signal).toBe(controller.signal)
+      throw new DOMException('aborted', 'AbortError')
+    })
+
+    const connected = HttpSessionTimelineSource.connect(request, controller.signal)
+    controller.abort()
+
+    await expect(connected).rejects.toMatchObject({ name: 'AbortError' })
+    expect(request).toHaveBeenCalledOnce()
   })
 
   it('rejects HTTP timeline responses for another session', async () => {
