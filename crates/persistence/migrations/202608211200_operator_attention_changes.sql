@@ -31,8 +31,7 @@ $$;
 -- Keep bounded approval-judge totals independent of session lifetime. Backfill
 -- once, then maintain four scalars for each affected session.
 ALTER TABLE session_timeline_fact
-    ADD COLUMN attention_turn_id uuid REFERENCES turn_lifecycle(turn_id)
-        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    ADD COLUMN attention_turn_id uuid,
     ADD COLUMN attention_turn_state_kind text,
     ADD COLUMN attention_turn_active_phase_kind text,
     ADD COLUMN attention_turn_terminal_disposition_kind text,
