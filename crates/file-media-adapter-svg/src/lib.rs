@@ -43,6 +43,12 @@ const SOURCE_BYTES: u64 = 256 * 1024;
 const TEXT_OUTPUT_BYTES: usize = 128 * 1024;
 /// Hard safety ceiling bounding serialized structured output.
 const METADATA_OUTPUT_BYTES: usize = 16 * 1024;
+/// Hard safety ceiling preventing untrusted metadata from exceeding its declared nesting shape.
+const METADATA_OUTPUT_DEPTH: u32 = 4;
+/// Hard safety ceiling bounding the number of untrusted structured-output values.
+const METADATA_OUTPUT_NODES: u64 = 64;
+/// Hard safety ceiling bounding aggregate string storage in untrusted structured output.
+const METADATA_OUTPUT_STRING_BYTES: usize = 1_024;
 /// Hard safety ceiling preventing adversarial nesting from exhausting the stack.
 const MAX_DEPTH: usize = 128;
 /// Hard safety ceiling bounding per-document element processing.
@@ -192,9 +198,9 @@ pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
         ReadViewBounds::Structured {
             source_bytes: SOURCE_BYTES,
             output_bytes: METADATA_OUTPUT_BYTES,
-            depth: 4,
-            nodes: 64,
-            string_bytes: 1024,
+            depth: METADATA_OUTPUT_DEPTH,
+            nodes: METADATA_OUTPUT_NODES,
+            string_bytes: METADATA_OUTPUT_STRING_BYTES,
         },
     )?;
     let reader = ReaderDeclaration::try_new(ReaderDeclarationInput {
@@ -356,6 +362,7 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
     let mut declaration_seen = false;
     let mut prolog_event_seen = false;
     let mut invalid_document_text_before_root = false;
+    let mut pending_prolog_issue = None;
     loop {
         match reader
             .read_event_into(&mut buffer)
@@ -377,6 +384,11 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     &mut parsed,
                     root_seen,
                 )?;
+                if depth == 0
+                    && let Some(issue) = pending_prolog_issue
+                {
+                    return Err(issue);
+                }
                 root_seen = true;
                 depth = depth.checked_add(1).ok_or(ParseIssue::StructureLimit)?;
                 if depth > MAX_DEPTH {
@@ -404,6 +416,11 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     &mut parsed,
                     root_seen,
                 )?;
+                if depth == 0
+                    && let Some(issue) = pending_prolog_issue
+                {
+                    return Err(issue);
+                }
                 if mode.collects_text()
                     && is_svg_element(&namespace, empty.local_name().as_ref(), b"text")
                     && !parsed.text.ends_with('\n')
@@ -494,6 +511,14 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                 }
             }
             Event::Decl(_) => return Err(ParseIssue::Malformed),
+            Event::DocType(_) if depth == 0 && !root_seen => {
+                prolog_event_seen = true;
+                pending_prolog_issue = Some(ParseIssue::Malformed);
+            }
+            Event::PI(_) if depth == 0 && !root_seen => {
+                prolog_event_seen = true;
+                pending_prolog_issue = Some(ParseIssue::ActiveContent);
+            }
             Event::DocType(_) => return Err(ParseIssue::Malformed),
             Event::PI(_) => return Err(ParseIssue::ActiveContent),
             Event::Eof if root_seen && root_closed && depth == 0 => break,
@@ -943,11 +968,20 @@ impl<'a> CalculationParser<'a> {
             return false;
         }
         loop {
+            let whitespace_start = self.position;
             self.skip_whitespace();
             if !self.peek_is(b'+') && !self.peek_is(b'-') {
                 return true;
             }
+            if self.position == whitespace_start {
+                return false;
+            }
             self.position += 1;
+            let whitespace_start = self.position;
+            self.skip_whitespace();
+            if self.position == whitespace_start {
+                return false;
+            }
             if !self.parse_product() {
                 return false;
             }

@@ -400,6 +400,15 @@ async fn unnamespaced_non_svg_root_is_unknown_with_svg_declaration() -> Result<(
 }
 
 #[tokio::test]
+async fn processing_instruction_before_non_svg_root_is_unknown() -> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(br#"<?audit?><foo/>"#).into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
 async fn dtd_bearing_svg_is_malformed_without_svg_declaration() -> Result<(), Box<dyn Error>> {
     let source = SvgFixture::raw(br#"<!DOCTYPE svg><svg xmlns="http://www.w3.org/2000/svg"/>"#)
         .into_source()?;
@@ -659,6 +668,15 @@ async fn calculated_dimensions_are_valid_without_numeric_metadata() -> Result<()
 async fn invalid_calculation_dimension_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed!(
         SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(banana)"/>"#,),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn calculation_addition_requires_surrounding_whitespace() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(1px+2px)"/>"#,),
         "malformed_svg",
     )
     .await
