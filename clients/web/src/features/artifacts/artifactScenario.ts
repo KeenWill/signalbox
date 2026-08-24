@@ -45,21 +45,47 @@ export const fetchVerifiedSingleFrameJpeg = async (
   fetchImplementation: typeof fetch,
   signal?: AbortSignal,
 ): Promise<Blob> => {
+  const advertisedLength = BigInt(view.byte_length)
+  if (advertisedLength > INLINE_ORIGINAL_MAX_BYTES) {
+    throw new Error('original exceeds the inline admission ceiling')
+  }
   const response = await fetchImplementation(view.content_url, { signal })
   if (!response.ok) {
     throw new Error(`original request failed with status ${String(response.status)}`)
   }
-  const blob = await response.blob()
-  if (BigInt(blob.size) !== BigInt(view.byte_length)) {
+  if (response.body === null) {
+    throw new Error('original response exposed no readable body')
+  }
+  // Consume the body through a bounded reader: a faulty response longer than the advertised
+  // length is aborted mid-stream instead of being materialized before any size check runs.
+  const expectedLength = Number(advertisedLength)
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let receivedLength = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (value === undefined) continue
+    receivedLength += value.byteLength
+    if (receivedLength > expectedLength) {
+      await reader.cancel()
+      throw new Error('original bytes exceed the advertised byte length')
+    }
+    chunks.push(value)
+  }
+  if (receivedLength !== expectedLength) {
     throw new Error('original bytes do not match the advertised byte length')
   }
-  const signatureBytes = new Uint8Array(
-    await blob.slice(0, JPEG_START_OF_IMAGE_SIGNATURE.length).arrayBuffer(),
-  )
-  if (!isSingleFrameJpegBytes(signatureBytes)) {
+  const bytes = new Uint8Array(receivedLength)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  if (!isSingleFrameJpegBytes(bytes)) {
     throw new Error('original bytes are not a single-frame JPEG stream')
   }
-  return blob
+  return new Blob([bytes], { type: view.media_type })
 }
 
 export const selectBoundedOriginalView = (descriptor: WebBlobDescriptor): BlobView | undefined => {

@@ -209,6 +209,28 @@ test('retries a bounded JPEG original and hides obsolete automatic failure statu
   ])
 })
 
+test('restores a loaded original after leaving and reopening the scenario', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/blobs')
+
+  const artifact = page.getByRole('article', { name: 'Artifact bounded-photo.jpg' })
+  await artifact.scrollIntoViewIfNeeded()
+  await artifact.getByRole('button', { name: 'Load original' }).click()
+  await expect(artifact.getByRole('img', { name: 'Original of bounded-photo.jpg' })).toBeVisible()
+
+  await page.getByRole('link', { name: /Streaming session/ }).click()
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+  await page.getByRole('link', { name: /Blob evidence/ }).click()
+
+  await artifact.scrollIntoViewIfNeeded()
+  await expect(artifact.getByRole('img', { name: 'Original of bounded-photo.jpg' })).toBeVisible()
+  await expect(artifact.getByRole('button', { name: 'Original loaded' })).toHaveAttribute(
+    'aria-disabled',
+    'true',
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('expands text through a bounded keyboard action', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/blobs')

@@ -10,15 +10,11 @@ import {
   Minimize2,
   ShieldAlert,
 } from 'lucide-react'
-import { type ComponentType, type ReactNode, useEffect, useState } from 'react'
+import { type ComponentType, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { type CommandContext, invokeCommand } from '../../commands'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import { actions, useAppDispatch, useAppSelector } from '../../state'
-import {
-  artifactScenario,
-  fetchVerifiedSingleFrameJpeg,
-  selectBoundedOriginalView,
-} from './artifactScenario'
+import { artifactScenario, selectBoundedOriginalView } from './artifactScenario'
 import {
   ARTIFACT_PREVIEW_CHARACTERS,
   type ArtifactItem,
@@ -30,6 +26,7 @@ import {
   type SignalboxImageArtifact,
   type TextArtifact,
 } from './artifactTypes'
+import { useVerifiedOriginalImage } from './originalImageService'
 import { admitRemoteMediaUrl } from './remoteMediaPreference'
 import './artifacts.css'
 
@@ -192,37 +189,52 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
     () => new Set(),
   )
   const originalState = useAppSelector((state) => state.app.originalArtifacts[artifact.id])
-  const [verifiedOriginalUrl, setVerifiedOriginalUrl] = useState<string | null>(null)
   const { descriptor } = artifact.source
   const automatic = selectImageView(descriptor, failedAutomaticUrls)
   const advertisedOriginal = viewByKind(descriptor, 'browser_native')
   const original = selectBoundedOriginalView(descriptor)
   const download = viewByKind(descriptor, 'download')
   const originalRequested = originalState === 'loading' || originalState === 'loaded'
+  const originalQuery = useVerifiedOriginalImage(original, originalRequested)
+  const verifiedOriginalUrl = useMemo(
+    () => (originalQuery.data === undefined ? null : URL.createObjectURL(originalQuery.data)),
+    [originalQuery.data],
+  )
   const rendered =
     originalRequested && original && verifiedOriginalUrl !== null ? original : automatic
   const derivation = rendered?.derivations[0]
-
-  useEffect(() => {
-    if (originalState !== 'loading' || original === undefined || verifiedOriginalUrl !== null) {
-      return
-    }
-    const controller = new AbortController()
-    fetchVerifiedSingleFrameJpeg(original, (input, init) => fetch(input, init), controller.signal)
-      .then((blob) => setVerifiedOriginalUrl(URL.createObjectURL(blob)))
-      .catch(() => {
-        if (!controller.signal.aborted) {
-          dispatch(actions.artifactOriginalSettled({ id: artifact.id, result: 'failed' }))
-        }
-      })
-    return () => controller.abort()
-  }, [artifact.id, dispatch, original, originalState, verifiedOriginalUrl])
 
   useEffect(() => {
     return () => {
       if (verifiedOriginalUrl !== null) URL.revokeObjectURL(verifiedOriginalUrl)
     }
   }, [verifiedOriginalUrl])
+
+  // Project the service's request state into the explicit control state: a new failure settles the
+  // request as failed, and a retry that finds a failure this projection already settled asks the
+  // service to fetch again. Errors settled before this mount (the ref's initial value) stay
+  // retryable rather than immediately re-settling.
+  const settledErrorCount = useRef(originalQuery.errorUpdateCount)
+  const { errorUpdateCount, isError, isFetching, refetch } = originalQuery
+  const verified = originalQuery.data !== undefined
+  useEffect(() => {
+    if (!originalRequested || isFetching || verified) return
+    if (errorUpdateCount > settledErrorCount.current) {
+      settledErrorCount.current = errorUpdateCount
+      dispatch(actions.artifactOriginalSettled({ id: artifact.id, result: 'failed' }))
+      return
+    }
+    if (isError) void refetch()
+  }, [
+    artifact.id,
+    dispatch,
+    errorUpdateCount,
+    isError,
+    isFetching,
+    originalRequested,
+    refetch,
+    verified,
+  ])
 
   return (
     <div className="artifact-image-layout">

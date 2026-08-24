@@ -273,6 +273,27 @@ describe('artifact renderer compatibility', () => {
     )
   })
 
+  it('aborts original bytes that stream past the advertised length', async () => {
+    const oversized = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10])
+    const view = { ...jpegOriginalView, byte_length: String(oversized.byteLength - 1) }
+    const fetchStub = (async () => new Response(oversized, { status: 200 })) as typeof fetch
+
+    await expect(fetchVerifiedSingleFrameJpeg(view, fetchStub)).rejects.toThrow(
+      'original bytes exceed the advertised byte length',
+    )
+  })
+
+  it('refuses to fetch an original advertised above the inline admission ceiling', async () => {
+    const view = { ...jpegOriginalView, byte_length: (INLINE_ORIGINAL_MAX_BYTES + 1n).toString() }
+    const fetchStub = (async () => {
+      throw new Error('the ceiling check must reject before any request is made')
+    }) as typeof fetch
+
+    await expect(fetchVerifiedSingleFrameJpeg(view, fetchStub)).rejects.toThrow(
+      'original exceeds the inline admission ceiling',
+    )
+  })
+
   it('rejects failed original responses before reading any bytes', async () => {
     const fetchStub = (async () => new Response('unavailable', { status: 500 })) as typeof fetch
 
