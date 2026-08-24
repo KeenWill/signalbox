@@ -2451,6 +2451,30 @@ async fn abort_fleet_scheduler(
     Ok(())
 }
 
+async fn restart_after_fatal_shutdown(
+    scheduler: &mut Option<JoinHandle<SchedulerLoopExit>>,
+    runtime: &mut RunningRuntime,
+) -> Result<(), Box<dyn Error>> {
+    let stopped = timeout(
+        FLEET_ASSERTION_BOUND,
+        scheduler
+            .as_mut()
+            .expect("the fatal-driven fleet scheduler was installed"),
+    )
+    .await;
+    if let Ok(stopped) = stopped {
+        if !matches!(stopped, Ok(SchedulerLoopExit::Shutdown)) {
+            return Err(io::Error::other(format!(
+                "the fleet scheduler must stop by fatal-driven shutdown: {stopped:?}"
+            ))
+            .into());
+        }
+        scheduler.take();
+        runtime.kill_and_restart().await?;
+    }
+    Ok(())
+}
+
 async fn wait_for_completed_calls(
     model: &FleetScriptedModel,
     expected: usize,
@@ -2626,16 +2650,7 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
         let completed_calls = wait_for_completed_calls(&model, FLEET_SESSION_COUNT - 1).await?;
         wait_for_terminal_calls(&census_repository, &completed_calls).await?;
         wait_for_terminal_turns(&census_repository, &completed_calls).await?;
-        tokio::time::sleep(FLEET_ASSERTION_BOUND).await;
-        if scheduler.as_ref().is_some_and(JoinHandle::is_finished) {
-            abort_fleet_scheduler(
-                scheduler
-                    .take()
-                    .expect("the fatal-driven fleet scheduler was installed"),
-            )
-            .await?;
-            runtime.kill_and_restart().await?;
-        }
+        restart_after_fatal_shutdown(&mut scheduler, &mut runtime).await?;
         let model_calls = census_repository.model_call_ids().await?;
         let census = census_repository.census_for(&model_calls).await?;
         if fleet.sessions.len() != FLEET_SESSION_COUNT || model_calls.len() != FLEET_SESSION_COUNT {
