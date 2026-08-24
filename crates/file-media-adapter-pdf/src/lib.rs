@@ -61,7 +61,7 @@ struct TrailerFacts {
     size: Option<u64>,
     widths: Option<[u64; 3]>,
     index: Option<Vec<(u64, u64)>>,
-    length: Option<u64>,
+    length: Option<StreamLength>,
     prev: Option<u64>,
     xref_stream: Option<u64>,
     filters: Vec<Vec<u8>>,
@@ -528,12 +528,26 @@ async fn inspect_bounded(
     };
     match pages_entry.location {
         XrefLocation::Uncompressed(pages_offset) => {
-            let pages_length = budget.remaining_bytes.min(source_length - pages_offset);
-            if !budget.can_read(pages_length) {
-                return Ok(malformed_validation());
-            }
-            let pages_bytes =
-                read_validation_range(source, budget, pages_offset, pages_length).await?;
+            let cached_pages =
+                cached_uncompressed_range
+                    .as_ref()
+                    .and_then(|(cached_offset, bytes)| {
+                        let relative = pages_offset.checked_sub(*cached_offset)?;
+                        bytes.get(usize::try_from(relative).ok()?..)
+                    });
+            let owned_pages;
+            let pages_bytes = match cached_pages {
+                Some(bytes) => bytes,
+                None => {
+                    let pages_length = budget.remaining_bytes.min(source_length - pages_offset);
+                    if !budget.can_read(pages_length) {
+                        return Ok(malformed_validation());
+                    }
+                    owned_pages =
+                        read_validation_range(source, budget, pages_offset, pages_length).await?;
+                    owned_pages.as_slice()
+                }
+            };
             if !object_is_pages(&pages_bytes, pages) {
                 return Ok(malformed_validation());
             }
@@ -638,6 +652,10 @@ fn inspect_complete(
     }
     if parsed_xref.object_limit_exceeded || !valid_xref_targets(&parsed_xref, bytes.len() as u64) {
         return Ok(malformed_validation());
+    }
+    match object_streams_fit_expansion_limit(bytes, &parsed_xref) {
+        Ok(true) => {}
+        Ok(false) | Err(_) => return Ok(malformed_validation()),
     }
     let document = match Document::load_mem(bytes) {
         Ok(document) => document,
@@ -901,6 +919,14 @@ fn collect_pages(document: &Document) -> Result<Vec<(u32, lopdf::ObjectId)>, Pag
                 if pages.len().saturating_add(count) > MAX_PAGES {
                     return Err(PageCollectionError::Limit);
                 }
+                if kids.len() > MAX_PAGES
+                    || pending
+                        .len()
+                        .checked_add(kids.len() + 1)
+                        .is_none_or(|entries| entries > 2 * MAX_PAGES)
+                {
+                    return Err(PageCollectionError::Limit);
+                }
                 pending.push((object_id, true, expected_parent));
                 for kid in kids.iter().rev() {
                     pending.push((
@@ -1124,7 +1150,9 @@ fn parse_classic_xref(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
         let count = parse_unsigned(bytes, &mut cursor)?;
         for index in 0..count {
             let object_number = first_object.checked_add(index)?;
-            declared_objects.insert(object_number);
+            if !declared_objects.insert(object_number) {
+                return None;
+            }
             skip_pdf_space_and_comments(bytes, &mut cursor);
             let offset = parse_unsigned(bytes, &mut cursor)?;
             skip_pdf_space_and_comments(bytes, &mut cursor);
@@ -1180,7 +1208,10 @@ fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
     }
     let facts = valid_trailer_facts(facts, true)?;
     consume_stream_line_end(bytes, &mut cursor)?;
-    let stream_length = usize::try_from(facts.length?).ok()?;
+    let stream_length = match facts.length? {
+        StreamLength::Direct(length) => usize::try_from(length).ok()?,
+        StreamLength::Indirect(_) => inferred_xref_stream_length(bytes, cursor)?,
+    };
     let stream_end = cursor.checked_add(stream_length)?;
     let encoded_stream = bytes.get(cursor..stream_end)?;
     cursor = stream_end;
@@ -1292,7 +1323,7 @@ fn parse_trailer_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(TrailerF
                 facts.index = Some(parse_index(bytes, &mut value_cursor)?);
             }
             b"Length" => {
-                facts.length = Some(parse_nonnegative_integer_value(bytes, value_start, cursor)?);
+                facts.length = Some(parse_stream_length(bytes, value_start, cursor)?);
             }
             b"Prev" => {
                 facts.prev = Some(parse_nonnegative_integer_value(bytes, value_start, cursor)?);
@@ -1603,7 +1634,7 @@ fn parse_xref_chain(bytes: &[u8], start: usize) -> Option<ParsedXref> {
     let mut offset = start;
     let mut parsed = parse_xref_structure(bytes.get(offset..)?)?;
     visited.insert(offset);
-    merge_complete_supplemental_xref(bytes, &mut parsed, &mut visited)?;
+    merge_complete_supplemental_xref(bytes, &mut parsed, offset, &mut visited)?;
     while let Some(previous_offset) = parsed.facts.prev {
         let previous_offset = usize::try_from(previous_offset).ok()?;
         if previous_offset >= offset {
@@ -1614,7 +1645,7 @@ fn parse_xref_chain(bytes: &[u8], start: usize) -> Option<ParsedXref> {
             return None;
         }
         let mut previous = parse_xref_structure(bytes.get(offset..)?)?;
-        merge_complete_supplemental_xref(bytes, &mut previous, &mut visited)?;
+        merge_complete_supplemental_xref(bytes, &mut previous, offset, &mut visited)?;
         merge_previous_xref(&mut parsed, previous);
     }
     Some(parsed)
@@ -1623,17 +1654,43 @@ fn parse_xref_chain(bytes: &[u8], start: usize) -> Option<ParsedXref> {
 fn merge_complete_supplemental_xref(
     bytes: &[u8],
     parsed: &mut ParsedXref,
+    mut section_offset: usize,
     visited: &mut BTreeSet<usize>,
 ) -> Option<()> {
     while let Some(offset) = parsed.facts.xref_stream.take() {
         let offset = usize::try_from(offset).ok()?;
-        if !visited.insert(offset) {
+        if offset >= section_offset || !visited.insert(offset) {
             return None;
         }
         let supplemental = parse_xref_structure(bytes.get(offset..)?)?;
         merge_supplemental_xref(parsed, supplemental);
+        section_offset = offset;
     }
     Some(())
+}
+
+fn inferred_xref_stream_length(bytes: &[u8], stream_start: usize) -> Option<usize> {
+    let tail = bytes.get(stream_start..)?;
+    tail.windows(b"endstream".len())
+        .enumerate()
+        .find_map(|(relative, window)| {
+            if window != b"endstream" {
+                return None;
+            }
+            let mut keyword_cursor = stream_start.checked_add(relative)?;
+            if !consume_keyword(bytes, &mut keyword_cursor, b"endstream") {
+                return None;
+            }
+            skip_pdf_space_and_comments(bytes, &mut keyword_cursor);
+            if !consume_keyword(bytes, &mut keyword_cursor, b"endobj") {
+                return None;
+            }
+            let mut stream_end = stream_start.checked_add(relative)?;
+            while stream_end > stream_start && is_pdf_whitespace(*bytes.get(stream_end - 1)?) {
+                stream_end -= 1;
+            }
+            stream_end.checked_sub(stream_start)
+        })
 }
 
 async fn merge_bounded_supplemental_xref(
@@ -2537,7 +2594,7 @@ mod tests {
     }
 
     #[test]
-    fn xref_stream_requires_live_entries_and_a_resolvable_root() {
+    fn xref_stream_has_valid_live_targets() {
         let stream = [
             0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 17, 1, 0, 0, 0, 0, 0, 0, 42,
         ];
@@ -2550,7 +2607,46 @@ mod tests {
         let parsed = parse_xref_structure(&bytes).expect("valid xref stream");
 
         assert!(valid_xref_targets(&parsed, 128));
+    }
+
+    #[test]
+    fn xref_stream_resolves_the_root_offset() {
+        let parsed = parsed_xref_stream_fixture();
+
         assert_eq!(root_offset(&parsed).map(|(_, offset)| offset), Some(17));
+    }
+
+    fn parsed_xref_stream_fixture() -> ParsedXref {
+        let stream = [
+            0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 17, 1, 0, 0, 0, 0, 0, 0, 42,
+        ];
+        let mut bytes =
+            b"2 0 obj\n<< /Type /XRef /Size 3 /Root 1 0 R /W [1 7 0] /Length 24 >>\nstream\n"
+                .to_vec();
+        bytes.extend_from_slice(&stream);
+        bytes.extend_from_slice(b"\nendstream\nendobj");
+        parse_xref_structure(&bytes).expect("valid xref stream")
+    }
+
+    #[test]
+    fn xref_stream_accepts_an_indirect_length() {
+        let stream = [
+            0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 17, 1, 0, 0, 0, 0, 0, 0, 42,
+        ];
+        let mut bytes =
+            b"2 0 obj\n<< /Type /XRef /Size 4 /Root 1 0 R /W [1 7 0] /Index [0 3] /Length 3 0 R >>\nstream\n"
+                .to_vec();
+        bytes.extend_from_slice(&stream);
+        bytes.extend_from_slice(b"\nendstream\nendobj");
+
+        assert!(parse_xref_structure(&bytes).is_some());
+    }
+
+    #[test]
+    fn classic_xref_rejects_overlapping_subsections() {
+        let bytes = b"xref\n1 2\n0000000017 00000 n\n0000000042 00000 n\n2 1\n0000000064 00000 n\ntrailer\n<< /Size 3 /Root 1 0 R >>";
+
+        assert!(parse_xref_structure(bytes).is_none());
     }
 
     #[test]
@@ -3266,10 +3362,20 @@ mod tests {
 
     #[test]
     fn nested_page_tree_accepts_exact_page_ceiling() {
+        let document = nested_page_tree_fixture(MAX_PAGES);
+
+        let Ok(pages) = collect_pages(&document) else {
+            panic!("expected exact-ceiling page tree to remain valid");
+        };
+
+        assert_eq!(pages.len(), MAX_PAGES);
+    }
+
+    fn nested_page_tree_fixture(page_count: usize) -> Document {
         let mut document = Document::with_version("1.5");
         let root_id = document.new_object_id();
         let nested_id = document.new_object_id();
-        let page_ids = (0..MAX_PAGES)
+        let page_ids = (0..page_count)
             .map(|_| document.new_object_id())
             .collect::<Vec<_>>();
         for page_id in &page_ids {
@@ -3281,13 +3387,14 @@ mod tests {
                 }),
             );
         }
+        let declared_count = i64::try_from(page_count).expect("page count fits i64");
         document.objects.insert(
             nested_id,
             Object::Dictionary(dictionary! {
                 "Type" => "Pages",
                 "Parent" => root_id,
                 "Kids" => page_ids.iter().copied().map(Object::Reference).collect::<Vec<_>>(),
-                "Count" => i64::try_from(MAX_PAGES).expect("page ceiling fits i64"),
+                "Count" => declared_count,
             }),
         );
         document.objects.insert(
@@ -3295,7 +3402,7 @@ mod tests {
             Object::Dictionary(dictionary! {
                 "Type" => "Pages",
                 "Kids" => vec![Object::Reference(nested_id)],
-                "Count" => i64::try_from(MAX_PAGES).expect("page ceiling fits i64"),
+                "Count" => declared_count,
             }),
         );
         let catalog_id = document.add_object(dictionary! {
@@ -3303,12 +3410,49 @@ mod tests {
             "Pages" => root_id,
         });
         document.trailer.set("Root", catalog_id);
+        document
+    }
 
-        let Ok(pages) = collect_pages(&document) else {
-            panic!("expected exact-ceiling page tree to remain valid");
-        };
+    #[test]
+    fn complete_xref_chain_rejects_forward_supplemental_stream() {
+        let forward_offset = 256_usize;
+        let mut bytes = format!(
+            "xref\n1 1\n0000000009 00000 n\ntrailer\n<< /Size 3 /Root 1 0 R /XRefStm {forward_offset} >>\n"
+        )
+        .into_bytes();
+        bytes.resize(forward_offset, b' ');
+        bytes.extend_from_slice(
+            b"2 0 obj\n<< /Type /XRef /Size 3 /Root 1 0 R /W [1 1 1] /Length 9 >>\nstream\n\0\0\0\x01\x09\0\x01\x2a\0\nendstream\nendobj",
+        );
 
-        assert_eq!(pages.len(), MAX_PAGES);
+        assert!(parse_xref_chain(&bytes, 0).is_none());
+    }
+
+    #[test]
+    fn page_collection_bounds_kids_before_stack_expansion() {
+        let mut document = Document::with_version("1.5");
+        let pages_id = document.new_object_id();
+        let kids = (0..=MAX_PAGES)
+            .map(|_| Object::Reference(document.new_object_id()))
+            .collect::<Vec<_>>();
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => kids,
+                "Count" => 0,
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+
+        assert!(matches!(
+            collect_pages(&document),
+            Err(PageCollectionError::Limit)
+        ));
     }
 
     #[test]
