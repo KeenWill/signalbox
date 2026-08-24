@@ -58,7 +58,6 @@ export function AttentionSurface({
   const attention = useQuery({
     queryKey: queryKey(after),
     queryFn: async ({ signal }) => {
-      const projectionAtStart = liveProjection.current
       const snapshot = await productTransport.readAttention(after ?? undefined, signal)
       if (
         after !== null &&
@@ -68,7 +67,7 @@ export function AttentionSurface({
         throw new TypeError('paged attention snapshot cursor regressed')
       }
       const latestProjection = liveProjection.current
-      if (after !== null || latestProjection === projectionAtStart || !latestProjection) {
+      if (after !== null || !latestProjection) {
         return snapshot
       }
       if (

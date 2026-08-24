@@ -316,12 +316,10 @@ describe('SameOriginProductTransport', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
-      'attention_snapshot.summaries[0].action must be consistent with attention state "idle"',
+      'attention_snapshot.summaries[0].action must be one recognized variant',
     )
     const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
-    await expect(events.next()).rejects.toThrow(
-      'attention_event.summaries[0].action must be consistent with attention state "idle"',
-    )
+    await expect(events.next()).rejects.toThrow('attention_event must be one recognized variant')
   })
 
   it('accepts an actionless approval wait', async () => {
@@ -437,7 +435,7 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
-      'blocked attention summary must include goal-block evidence',
+      'attention_snapshot.summaries[0].goal_block must be consistent with attention state "blocked"',
     )
   })
 
