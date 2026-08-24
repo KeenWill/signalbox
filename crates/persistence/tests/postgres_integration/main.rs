@@ -12,6 +12,7 @@
 mod support;
 
 mod approval_decisions;
+mod convergence_sweep;
 mod delegated_result_rereads;
 mod delegation_schema;
 mod delegation_transactions;
@@ -3481,6 +3482,9 @@ fn assert_goal_command_applied(outcome: GoalCommandHandlingOutcome) {
         }
         GoalCommandHandlingOutcome::ConflictingReuse { command_id } => {
             panic!("the fixture goal command identity is already used: {command_id:?}")
+        }
+        GoalCommandHandlingOutcome::TargetBusy { session } => {
+            panic!("the fixture goal command target is held by session: {session:?}")
         }
         GoalCommandHandlingOutcome::LineageMoved => {
             panic!("the fixture goal command expected a lineage head that had moved")

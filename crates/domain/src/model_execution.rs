@@ -1551,7 +1551,16 @@ impl PreparedModelCallRequest {
 
     /// Iterates over the exact ordered semantic frontier.
     pub fn frontier_entries(&self) -> impl ExactSizeIterator<Item = &SemanticTranscriptEntry> {
-        self.frontier_entries.iter()
+        self.frontier_entry_slice().iter()
+    }
+
+    /// Borrows the exact ordered semantic frontier.
+    ///
+    /// Rendering projects and bounds the frontier before cloning any of it,
+    /// which a borrow of the stored order supports and an owning copy of the
+    /// same entries would defeat by duplicating every payload's content first.
+    pub const fn frontier_entry_slice(&self) -> &[SemanticTranscriptEntry] {
+        &self.frontier_entries
     }
 
     /// Borrows the exact user content for a frontier origin.
