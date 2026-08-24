@@ -42,6 +42,9 @@ const HOSTILE_ENTRY_NAME: &str = "hostile_entry_name";
 const RECURSIVE_CONTAINER: &str = "recursive_container";
 const SYMLINK_ENTRY: &str = "symlink_entry";
 const XML_MALFORMED: &str = "xml_malformed";
+// Probe reads stay within the broker envelope. Decoded-part ceilings separately
+// bound decompression work, while the text ceiling matches the declared view so
+// oversized output is rejected before worker framing and registry sanitization.
 const ZIP_PREFIX_BYTES: u64 = 4;
 const ZIP_SUFFIX_BYTES: u64 = 65_536;
 const EOCD_PRECEDING_BYTES: u64 = 77;
@@ -70,6 +73,7 @@ const XLSX_MAIN_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
 const PPTX_MAIN_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml";
+const VBA_PROJECT_CONTENT_TYPE: &str = "application/vnd.ms-office.vbaProject";
 
 /// Macro-free Office Open XML adapter registered in its dedicated worker.
 #[derive(Clone, Copy, Debug, Default)]
@@ -1221,6 +1225,9 @@ fn collect_content_type_kind(
     let (Some(part_name), Some(content_type)) = (part_name, content_type) else {
         return Ok(());
     };
+    if content_type.eq_ignore_ascii_case(VBA_PROJECT_CONTENT_TYPE) {
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+    }
     if !part_names.insert(part_name.clone()) {
         return Err(ValidationIssue::Malformed(MALFORMED_REASON));
     }
@@ -1392,14 +1399,22 @@ fn read_spreadsheet_text<R: Read + std::io::Seek>(
         workbook_relationship_ids(&workbook).map_err(|_| ProcessorFailure::Failed)?;
     let targets =
         workbook_relationship_targets(&relationships).map_err(|_| ProcessorFailure::Failed)?;
-    let shared_strings = match read_entry(archive, "xl/sharedStrings.xml", budget) {
-        Ok(bytes) => spreadsheet_shared_strings(&bytes).map_err(|_| ProcessorFailure::Failed)?,
-        Err(ReadIssue::Failed) => Vec::new(),
-        Err(ReadIssue::Expansion(reason)) => {
-            return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
-                limit_kind: String::from(reason),
-            });
+    let shared_target =
+        workbook_shared_strings_target(&relationships).map_err(|_| ProcessorFailure::Failed)?;
+    let shared_strings = if let Some(shared_target) = shared_target {
+        match read_entry(archive, &shared_target, budget) {
+            Ok(bytes) => {
+                spreadsheet_shared_strings(&bytes).map_err(|_| ProcessorFailure::Failed)?
+            }
+            Err(ReadIssue::Expansion(reason)) => {
+                return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
+                    limit_kind: String::from(reason),
+                });
+            }
+            Err(ReadIssue::Failed) => return Err(ProcessorFailure::Failed),
         }
+    } else {
+        Vec::new()
     };
     let mut output = String::new();
     for relationship_id in relationship_ids {
@@ -1616,6 +1631,16 @@ fn workbook_relationship_targets(bytes: &[u8]) -> Result<Vec<(String, Option<Str
     Ok(targets)
 }
 
+fn workbook_shared_strings_target(bytes: &[u8]) -> Result<Option<String>, XmlIssue> {
+    let mut targets = relationship_targets(bytes, "/sharedStrings", |target| {
+        normalized_part_target(target, "xl/", "xl/")
+    })?;
+    if targets.len() > 1 {
+        return Err(XmlIssue::Malformed);
+    }
+    Ok(targets.pop().map(|(_, target)| target))
+}
+
 fn relationship_targets(
     bytes: &[u8],
     relationship_suffix: &str,
@@ -1719,6 +1744,12 @@ fn spreadsheet_shared_strings(bytes: &[u8]) -> Result<Vec<String>, XmlIssue> {
                     return Err(XmlIssue::Malformed);
                 }
             }
+            Event::Empty(element) if local_name(element.name().as_ref()) == b"si" => {
+                if current.is_some() {
+                    return Err(XmlIssue::Malformed);
+                }
+                strings.push(String::new());
+            }
             Event::Start(element)
                 if current.is_some() && local_name(element.name().as_ref()) == b"rPh" =>
             {
@@ -1777,6 +1808,7 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
     let mut inline_cell = false;
     let mut value_depth = 0_usize;
     let mut inline_text_depth = 0_usize;
+    let mut inline_phonetic_depth = 0_usize;
     let mut value = String::new();
     let mut inline_value = String::new();
     loop {
@@ -1804,7 +1836,18 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
                 value.clear();
                 value_depth = value_depth.checked_add(1).ok_or(XmlIssue::Malformed)?;
             }
-            Event::Start(element) if inline_cell && local_name(element.name().as_ref()) == b"t" => {
+            Event::Start(element)
+                if inline_cell && local_name(element.name().as_ref()) == b"rPh" =>
+            {
+                inline_phonetic_depth = inline_phonetic_depth
+                    .checked_add(1)
+                    .ok_or(XmlIssue::Malformed)?;
+            }
+            Event::Start(element)
+                if inline_cell
+                    && inline_phonetic_depth == 0
+                    && local_name(element.name().as_ref()) == b"t" =>
+            {
                 inline_text_depth = inline_text_depth
                     .checked_add(1)
                     .ok_or(XmlIssue::Malformed)?;
@@ -1820,6 +1863,11 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
                 let decoded = text.decode().map_err(|_| XmlIssue::Malformed)?;
                 append_xml_text(&mut inline_value, &decoded)?;
             }
+            Event::GeneralRef(reference) if inline_text_depth > 0 => {
+                let decoded = reference.decode().map_err(|_| XmlIssue::Malformed)?;
+                let value = decode_xml_reference(&decoded)?;
+                append_xml_text(&mut inline_value, &value)?;
+            }
             Event::End(element)
                 if local_name(element.name().as_ref()) == b"v" && value_depth > 0 =>
             {
@@ -1829,6 +1877,11 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
                 if local_name(element.name().as_ref()) == b"t" && inline_text_depth > 0 =>
             {
                 inline_text_depth -= 1;
+            }
+            Event::End(element)
+                if local_name(element.name().as_ref()) == b"rPh" && inline_phonetic_depth > 0 =>
+            {
+                inline_phonetic_depth -= 1;
             }
             Event::End(element) if local_name(element.name().as_ref()) == b"c" => {
                 if shared_cell {
@@ -1845,7 +1898,11 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
                 inline_value.clear();
             }
             Event::DocType(_) | Event::GeneralRef(_) => return Err(XmlIssue::Malformed),
-            Event::Eof if value_depth == 0 && inline_text_depth == 0 => break,
+            Event::Eof
+                if value_depth == 0 && inline_text_depth == 0 && inline_phonetic_depth == 0 =>
+            {
+                break;
+            }
             Event::Eof => return Err(XmlIssue::Malformed),
             _ => {}
         }
@@ -2002,6 +2059,13 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                 let value = decode_xml_reference(&decoded)?;
                 append_xml_text(&mut output, &value)?;
             }
+            Event::Text(text) if element_depth == 0 => {
+                let decoded = text.xml10_content().map_err(|_| XmlIssue::Malformed)?;
+                if !decoded.trim().is_empty() {
+                    return Err(XmlIssue::Malformed);
+                }
+            }
+            Event::CData(_) if element_depth == 0 => return Err(XmlIssue::Malformed),
             Event::DocType(_) | Event::GeneralRef(_) => return Err(XmlIssue::Malformed),
             Event::Eof
                 if saw_root
@@ -2211,7 +2275,6 @@ fn find_eocd(bytes: &[u8]) -> Option<usize> {
     bytes
         .windows(4)
         .enumerate()
-        .rev()
         .find_map(|(offset, signature)| {
             if signature != b"PK\x05\x06" {
                 return None;
@@ -2440,6 +2503,23 @@ mod tests {
     }
 
     #[test]
+    fn content_types_reject_vba_projects_by_content_type() {
+        let xml = concat!(
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">",
+            "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>",
+            "<Override PartName=\"/custom/project.bin\" ContentType=\"application/vnd.ms-office.vbaProject\"/>",
+            "</Types>"
+        );
+
+        let result = validate_content_types(xml.as_bytes(), &[docx_main_entry()]);
+
+        assert!(matches!(
+            result,
+            Err(ValidationIssue::Malformed(MALFORMED_REASON))
+        ));
+    }
+
+    #[test]
     fn package_relationships_require_the_opc_namespace() {
         let xml = concat!(
             "<Relationships>",
@@ -2656,6 +2736,38 @@ mod tests {
     }
 
     #[test]
+    fn workbook_relationships_resolve_the_shared_string_table() {
+        let xml = br#"<Relationships><Relationship Id="rIdShared" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="tables/strings.xml"/></Relationships>"#;
+
+        let result = workbook_shared_strings_target(xml);
+
+        assert!(matches!(result, Ok(Some(target)) if target == "xl/tables/strings.xml"));
+    }
+
+    #[test]
+    fn shared_strings_preserve_empty_items() {
+        let xml = br#"<sst><si/><si></si><si><t>value</t></si></sst>"#;
+
+        let result = spreadsheet_shared_strings(xml);
+
+        assert!(matches!(
+            result,
+            Ok(strings)
+                if strings
+                    == vec![String::new(), String::new(), String::from("value")]
+        ));
+    }
+
+    #[test]
+    fn inline_strings_decode_references_and_skip_phonetic_runs() {
+        let xml = br#"<worksheet><sheetData><row><c t="inlineStr"><is><t>R&amp;D</t><rPh><t>phonetic</t></rPh><r><t>&#33;</t></r></is></c></row></sheetData></worksheet>"#;
+
+        let result = spreadsheet_worksheet_text(xml, &[]);
+
+        assert!(matches!(result, Ok(text) if text == "R&D!\n"));
+    }
+
+    #[test]
     fn text_extraction_preserves_word_carriage_returns() {
         let xml = b"<w:document><w:t>first</w:t><w:cr/><w:t>second</w:t></w:document>";
 
@@ -2702,6 +2814,15 @@ mod tests {
     }
 
     #[test]
+    fn text_extraction_rejects_character_data_outside_the_root() {
+        let xml = b"outside<w:document><w:t>inside</w:t></w:document>";
+
+        let result = extract_xml_text(xml, OfficeKind::Docx);
+
+        assert!(matches!(result, Err(XmlIssue::Malformed)));
+    }
+
+    #[test]
     fn eocd_scan_ignores_signature_bytes_inside_the_comment() {
         let mut bytes = vec![0_u8; 22];
         bytes[0..4].copy_from_slice(b"PK\x05\x06");
@@ -2709,6 +2830,19 @@ mod tests {
         bytes.extend_from_slice(b"PK\x05\x06tail");
 
         assert_eq!(find_eocd(&bytes), Some(0));
+    }
+
+    #[test]
+    fn eocd_scan_skips_a_complete_false_record_inside_the_comment() {
+        let mut bytes = vec![0_u8; 22];
+        bytes[0..4].copy_from_slice(b"PK\x05\x06");
+        bytes[20..22].copy_from_slice(&22_u16.to_le_bytes());
+        let false_offset = bytes.len();
+        bytes.extend_from_slice(b"PK\x05\x06");
+        bytes.extend_from_slice(&[0_u8; 18]);
+
+        assert_eq!(find_eocd(&bytes), Some(0));
+        assert_ne!(find_eocd(&bytes), Some(false_offset));
     }
 
     #[test]
