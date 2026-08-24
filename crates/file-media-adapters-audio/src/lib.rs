@@ -187,13 +187,34 @@ fn valid_id3v23_extended_header(tag_length: usize, size_bytes: [u8; 4], bytes: &
     else {
         return false;
     };
-    total_size <= tag_length
-        && flags & !0x8000 == 0
-        && if flags & 0x8000 == 0 {
-            size == 6
-        } else {
-            size == 10
-        }
+    let Some(padding_size) = body
+        .get(2..6)
+        .and_then(|value| <[u8; 4]>::try_from(value).ok())
+        .map(u32::from_be_bytes)
+        .and_then(|value| usize::try_from(value).ok())
+    else {
+        return false;
+    };
+    let expected_size = if flags & 0x8000 == 0 { 6 } else { 10 };
+    let Some(content_after_extended_header) = tag_length.checked_sub(total_size) else {
+        return false;
+    };
+    if flags & !0x8000 != 0 || size != expected_size || padding_size > content_after_extended_header
+    {
+        return false;
+    }
+    if padding_size == 0 {
+        return true;
+    }
+    let Some(tag_end) = 10_usize.checked_add(tag_length) else {
+        return false;
+    };
+    let Some(padding_start) = tag_end.checked_sub(padding_size) else {
+        return false;
+    };
+    bytes
+        .get(padding_start..tag_end)
+        .is_none_or(|padding| padding.iter().all(|byte| *byte == 0))
 }
 
 fn valid_id3v24_extended_header(tag_length: usize, size: usize, bytes: &[u8]) -> bool {
@@ -273,7 +294,7 @@ fn valid_mp3_frame_header(bytes: &[u8]) -> bool {
 mod tests {
     use ogg::{PacketWriteEndInfo, PacketWriter};
 
-    use super::AdapterFormat;
+    use super::{AdapterFormat, id3_tag_layout};
 
     #[test]
     fn mp3_probe_rejects_aac_adts_header() {
@@ -288,6 +309,24 @@ mod tests {
         id3_prefixed_aac.extend_from_slice(&[0xff, 0xf1, 0x50, 0x80]);
 
         assert!(!AdapterFormat::Mp3.matches_signature(&id3_prefixed_aac));
+    }
+
+    #[test]
+    fn id3v23_extended_header_rejects_padding_larger_than_the_tag_body() {
+        let bytes = [
+            b'I', b'D', b'3', 3, 0, 0x40, 0, 0, 0, 10, 0, 0, 0, 6, 0, 0, 0, 0, 0, 1,
+        ];
+
+        assert_eq!(id3_tag_layout(&bytes), None);
+    }
+
+    #[test]
+    fn id3v23_extended_header_rejects_nonzero_declared_padding() {
+        let bytes = [
+            b'I', b'D', b'3', 3, 0, 0x40, 0, 0, 0, 11, 0, 0, 0, 6, 0, 0, 0, 0, 0, 1, 1,
+        ];
+
+        assert_eq!(id3_tag_layout(&bytes), None);
     }
 
     #[test]

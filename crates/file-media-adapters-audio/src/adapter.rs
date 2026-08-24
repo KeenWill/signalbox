@@ -436,7 +436,10 @@ fn parse_opus_head(bytes: &[u8]) -> Result<(AudioMetadata, u16), &'static str> {
     if prefix[18] != 0 {
         return Err("unsupported_opus_mapping");
     }
-    if bytes.len() != 19 || channels > 2 {
+    if bytes.len() != 19 {
+        return Err("malformed_audio");
+    }
+    if channels > 2 {
         return Err("channel_limit_exceeded");
     }
     let metadata = AudioMetadata {
@@ -647,5 +650,19 @@ mod tests {
         head.extend_from_slice(&[4, 2, 0, 1, 2, 3, 4, 5]);
 
         assert_eq!(parse_opus_head(&head), Err("unsupported_opus_mapping"));
+    }
+
+    #[test]
+    fn opus_head_classifies_oversized_family_zero_as_malformed() {
+        let mut head = b"OpusHead".to_vec();
+        head.push(1);
+        head.push(2);
+        head.extend_from_slice(&0_u16.to_le_bytes());
+        head.extend_from_slice(&48_000_u32.to_le_bytes());
+        head.extend_from_slice(&0_i16.to_le_bytes());
+        head.push(0);
+        head.push(0);
+
+        assert_eq!(parse_opus_head(&head), Err("malformed_audio"));
     }
 }
