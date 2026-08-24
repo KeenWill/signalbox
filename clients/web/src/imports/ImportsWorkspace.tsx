@@ -10,12 +10,13 @@ import {
   surfaceHotkeyBindings,
   surfaceHotkeySequenceBindings,
 } from '../commands'
-import type {
-  WebImportContinuationReference,
-  WebImportContinuationRequest,
-  WebImportEntryWindowRequest,
-  WebImportedSessionRelationship,
-  WebImportFormat,
+import {
+  decodeWebImportContinuationRequest,
+  type WebImportContinuationReference,
+  type WebImportContinuationRequest,
+  type WebImportEntryWindowRequest,
+  type WebImportedSessionRelationship,
+  type WebImportFormat,
 } from '../generated/web-contract.mjs'
 import { ScenarioNavigation } from '../ScenarioNavigation'
 import { type DiagnosticSnapshot, IconCommand, OverlaySurfaces } from '../Surfaces'
@@ -55,6 +56,38 @@ const isAmbiguousContinuationError = (error: unknown): boolean =>
   error instanceof ImportReceiptCorrelationError ||
   !(error instanceof ImportApiError) ||
   error.detail.error.code === 'continuation_commit_ambiguous'
+
+// The exact command must outlive this tab: once its POST leaves the browser, the daemon may
+// have committed it, so the only safe replacement source after a reload is a durable copy of
+// the same payload retained until a correlated outcome is decoded.
+const retainedCommandStorageKey = (scope: string): string =>
+  `signalbox.imports.retained-continuation.${scope}`
+
+const readRetainedCommand = (scope: string): WebImportContinuationRequest | null => {
+  try {
+    const stored = window.localStorage.getItem(retainedCommandStorageKey(scope))
+    if (stored === null) return null
+    return decodeWebImportContinuationRequest(JSON.parse(stored))
+  } catch {
+    return null
+  }
+}
+
+const persistRetainedCommand = (scope: string, command: WebImportContinuationRequest): void => {
+  try {
+    window.localStorage.setItem(retainedCommandStorageKey(scope), JSON.stringify(command))
+  } catch {
+    // Without browser persistence the exact command survives only in memory.
+  }
+}
+
+const clearRetainedCommand = (scope: string): void => {
+  try {
+    window.localStorage.removeItem(retainedCommandStorageKey(scope))
+  } catch {
+    // A failed removal only re-offers an already-settled exact command later.
+  }
+}
 
 const decimalLabel = (value: string): string => BigInt(value).toLocaleString()
 
@@ -99,10 +132,25 @@ export function ImportsWorkspace({
   )
   const [modelKind, setModelKind] = useState<ModelKind>('direct')
   const [modelSelectionId, setModelSelectionId] = useState(scenario ? SCENARIO_MODEL_SELECTION : '')
-  const [pendingCommand, setPendingCommand] = useState<WebImportContinuationRequest | null>(null)
-  const [continuationAmbiguous, setContinuationAmbiguous] = useState(false)
   const queryScope = scenario ? 'scenario' : 'production'
+  const [pendingCommand, setPendingCommand] = useState<WebImportContinuationRequest | null>(() =>
+    readRetainedCommand(queryScope),
+  )
+  // A command restored from browser persistence has an unknown durable outcome, which is
+  // exactly the ambiguous posture: retry the exact payload until an outcome correlates.
+  const [continuationAmbiguous, setContinuationAmbiguous] = useState(pendingCommand !== null)
   const hasRetainedCommand = pendingCommand !== null
+  const retainCommand = useCallback(
+    (command: WebImportContinuationRequest) => {
+      persistRetainedCommand(queryScope, command)
+      setPendingCommand(command)
+    },
+    [queryScope],
+  )
+  const releaseRetainedCommand = useCallback(() => {
+    clearRetainedCommand(queryScope)
+    setPendingCommand(null)
+  }, [queryScope])
 
   const listRequest = useMemo(
     () => ({
@@ -175,14 +223,14 @@ export function ImportsWorkspace({
     mutationFn: (request: WebImportContinuationRequest) =>
       api.continueImport(request.frontier.imported_conversation_id, request),
     onSuccess: () => {
-      setPendingCommand(null)
+      releaseRetainedCommand()
       setContinuationAmbiguous(false)
     },
     onError: (error) => {
       const ambiguous = continuationAmbiguous || isAmbiguousContinuationError(error)
       if (ambiguous) setContinuationAmbiguous(true)
       if (!ambiguous && !isRetryableContinuationError(error)) {
-        setPendingCommand(null)
+        releaseRetainedCommand()
         setContinuationAmbiguous(false)
       }
     },
@@ -333,10 +381,23 @@ export function ImportsWorkspace({
 
   const retryableContinuationFailure =
     continuation.isError && isRetryableContinuationError(continuation.error)
-  const ambiguousContinuationFailure = continuation.isError && continuationAmbiguous
+  // A retained command is offered for exact retry after a retryable failure and after a
+  // reload restored it from browser persistence with its durable outcome still unknown.
+  const commandRetainedForRetry =
+    pendingCommand !== null &&
+    !continuation.isPending &&
+    (continuation.isError ? retryableContinuationFailure : continuationAmbiguous)
+  const ambiguousContinuationFailure = commandRetainedForRetry && continuationAmbiguous
 
   const continueAt = (relationship: WebImportedSessionRelationship) => {
-    if (!continuationAvailable || !selectedFrontier || modelSelectionId.trim().length === 0) return
+    if (
+      !continuationAvailable ||
+      !selectedFrontier ||
+      modelSelectionId.trim().length === 0 ||
+      hasRetainedCommand
+    ) {
+      return
+    }
     const request: WebImportContinuationRequest = {
       command_id: crypto.randomUUID(),
       frontier: selectedFrontier,
@@ -346,7 +407,7 @@ export function ImportsWorkspace({
           ? { kind: 'direct', selection_id: modelSelectionId.trim() }
           : { kind: 'alias', alias_id: modelSelectionId.trim() },
     }
-    setPendingCommand(request)
+    retainCommand(request)
     setContinuationAmbiguous(false)
     continuation.mutate(request)
   }
@@ -563,6 +624,7 @@ export function ImportsWorkspace({
                     <select
                       aria-label="Initial model selection kind"
                       value={modelKind}
+                      disabled={hasRetainedCommand}
                       onChange={(event) => setModelKind(event.target.value as ModelKind)}
                     >
                       <option value="direct">Direct model</option>
@@ -572,6 +634,7 @@ export function ImportsWorkspace({
                       aria-label="Initial model selection UUID"
                       placeholder="Model selection UUID"
                       value={modelSelectionId}
+                      disabled={hasRetainedCommand}
                       onChange={(event) => setModelSelectionId(event.target.value)}
                     />
                   </div>
@@ -606,7 +669,7 @@ export function ImportsWorkspace({
                     >
                       Fork
                     </button>
-                    {retryableContinuationFailure && pendingCommand && (
+                    {commandRetainedForRetry && pendingCommand && (
                       <>
                         <button type="button" onClick={() => continuation.mutate(pendingCommand)}>
                           Retry exact command
@@ -615,7 +678,7 @@ export function ImportsWorkspace({
                           <button
                             type="button"
                             onClick={() => {
-                              setPendingCommand(null)
+                              releaseRetainedCommand()
                               setContinuationAmbiguous(false)
                               continuation.reset()
                             }}
@@ -629,7 +692,7 @@ export function ImportsWorkspace({
                   {!continuationAvailable && (
                     <p role="status">Imported continuation is not advertised by this daemon.</p>
                   )}
-                  {retryableContinuationFailure && pendingCommand && (
+                  {commandRetainedForRetry && pendingCommand && (
                     <p role="alert">
                       The exact command for import{' '}
                       {pendingCommand.frontier.imported_conversation_id}, position{' '}
