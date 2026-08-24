@@ -1,20 +1,8 @@
 import { expect, type Page, test } from '@playwright/test'
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '2' },
-  capabilities: {
-    blob_derivations: true,
-    bounded_json: true,
-    image_derivatives: true,
-    immutable_blob_content: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 262_144 },
-} as const
+import { webContractBootstrapFixture } from '../src/product.fixture'
 
 const useDeterministicBootstrap = (page: Page) =>
-  page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  page.route('**/api/bootstrap', (route) => route.fulfill({ json: webContractBootstrapFixture }))
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
@@ -38,7 +26,9 @@ test('opens the product at Attention with generated-contract transport status', 
   await expect(page).toHaveURL(/\/attention$/)
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
   await expect(
-    page.getByText(`${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`),
+    page.getByText(
+      `${webContractBootstrapFixture.contract.name} · ${webContractBootstrapFixture.contract.version}`,
+    ),
   ).toBeVisible()
   await expect(page.getByRole('link', { name: /Attention/ })).toHaveAttribute(
     'aria-current',
@@ -239,7 +229,7 @@ test('retries a transient bootstrap failure without reloading', async ({ page })
   const state = { unavailable: true }
   await page.route('**/api/bootstrap', (route) => {
     if (state.unavailable) return route.fulfill({ status: 503 })
-    return route.fulfill({ json: bootstrapFixture })
+    return route.fulfill({ json: webContractBootstrapFixture })
   })
   await page.goto('/attention')
 
@@ -247,7 +237,9 @@ test('retries a transient bootstrap failure without reloading', async ({ page })
   state.unavailable = false
   await page.getByRole('button', { name: 'Retry bootstrap' }).click()
   await expect(
-    page.getByText(`${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`),
+    page.getByText(
+      `${webContractBootstrapFixture.contract.name} · ${webContractBootstrapFixture.contract.version}`,
+    ),
   ).toBeVisible()
   await expect(page.getByRole('status')).toBeFocused()
   expect(problems.pageErrors).toEqual([])

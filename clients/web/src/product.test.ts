@@ -9,19 +9,7 @@ import {
   ProductTransportError,
   SameOriginProductTransport,
 } from './product'
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '2' },
-  capabilities: {
-    blob_derivations: true,
-    bounded_json: true,
-    image_derivatives: true,
-    immutable_blob_content: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 262_144 },
-} as const
+import { webContractBootstrapFixture } from './product.fixture'
 
 const interruptedResponse = (): Response =>
   new Response(
@@ -38,12 +26,31 @@ describe('SameOriginProductTransport', () => {
   it('decodes the Rust-authored bootstrap contract', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(JSON.stringify(bootstrapFixture))),
+      vi.fn(async () => new Response(JSON.stringify(webContractBootstrapFixture))),
     )
 
     const bootstrap = await new SameOriginProductTransport().readBootstrap()
 
-    expect(bootstrap).toEqual(bootstrapFixture)
+    expect(bootstrap).toEqual(webContractBootstrapFixture)
+  })
+
+  it('rejects bootstrap facts that contradict the fixed v2 contract', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...webContractBootstrapFixture,
+              limits: { ...webContractBootstrapFixture.limits, max_ndjson_item_bytes: 262_144 },
+            }),
+          ),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toBeInstanceOf(
+      ProductContractError,
+    )
   })
 
   it('fails closed when the daemon returns an unknown contract shape', async () => {

@@ -399,10 +399,15 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           requestAnimationFrame(() => primaryRef.current?.focus())
         })
       },
+      navigateScenario: () =>
+        void navigate({ to: '/scenario/$scenarioId', params: { scenarioId: 'streaming' } }),
       openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
     }),
     [artifactAvailable, dispatch, navigate],
   )
+  useEffect(() => {
+    primaryRef.current?.focus()
+  }, [])
   useHotkeys(
     globalHotkeyBindings
       .filter((binding) => binding.commandId !== 'surface.escape')

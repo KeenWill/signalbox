@@ -9,6 +9,7 @@ export interface CommandContext {
   timelineIds: readonly string[]
   focusTimeline: () => void
   navigate?: (path: string) => void
+  navigateScenario?: () => void
   openArtifactInspector?: () => void
 }
 
@@ -31,6 +32,7 @@ interface CommandDefinitionShape {
 
 const always = () => true
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
+const scenarioNavigation = (context: CommandContext) => context.navigateScenario !== undefined
 const scenarioTimeline = (context: CommandContext) => context.timelineIds.length > 0
 const scenarioSurface = (context: CommandContext) => context.scenarioSurface
 const artifactInspector = (context: CommandContext) => context.openArtifactInspector !== undefined
@@ -115,6 +117,15 @@ export const commandRegistry = [
     bindings: [{ label: 'g ,', registration: { kind: 'sequence', sequence: ['G', ','] } }],
     available: productNavigation,
     run: (context) => context.navigate?.('/settings'),
+  },
+  {
+    id: 'navigate.scenario',
+    title: 'Open Scenario studio',
+    description: 'Open the deterministic scenario workspace.',
+    category: 'Navigate',
+    bindings: [],
+    available: scenarioNavigation,
+    run: (context) => context.navigateScenario?.(),
   },
   {
     id: 'artifact.open',

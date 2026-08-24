@@ -74,6 +74,7 @@ export class ProductInputError extends Error {
 }
 
 export const MAX_PRODUCT_JSON_BYTES = 65_536
+export const MAX_NDJSON_ITEM_BYTES = 65_536
 export const MAX_DECLARED_MEDIA_TYPE_BYTES = 255
 export const MAX_DISPLAY_FILENAME_BYTES = 1_024
 
@@ -164,6 +165,24 @@ const request = async (input: RequestInfo | URL, init: RequestInit): Promise<Res
   }
 }
 
+const validateCurrentBootstrap = (bootstrap: WebContractBootstrap): WebContractBootstrap => {
+  if (
+    bootstrap.contract.name !== 'signalbox.web-http' ||
+    bootstrap.contract.version !== '2' ||
+    bootstrap.limits.max_json_body_bytes !== MAX_PRODUCT_JSON_BYTES ||
+    bootstrap.limits.max_ndjson_item_bytes !== MAX_NDJSON_ITEM_BYTES ||
+    !bootstrap.capabilities.bounded_json ||
+    !bootstrap.capabilities.same_origin_json_mutations ||
+    !bootstrap.capabilities.ndjson_streaming ||
+    !bootstrap.capabilities.immutable_blob_content ||
+    !bootstrap.capabilities.blob_derivations ||
+    !bootstrap.capabilities.image_derivatives
+  ) {
+    throw new Error('bootstrap contradicted the fixed signalbox.web-http v2 contract')
+  }
+  return bootstrap
+}
+
 export class SameOriginProductTransport implements ProductTransport {
   async readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap> {
     const response = await request('/api/bootstrap', {
@@ -173,7 +192,7 @@ export class SameOriginProductTransport implements ProductTransport {
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
     try {
-      return decodeWebContractBootstrap(await readBoundedJson(response))
+      return validateCurrentBootstrap(decodeWebContractBootstrap(await readBoundedJson(response)))
     } catch (error) {
       if (error instanceof ProductTransportError) throw error
       throw new ProductContractError(error)

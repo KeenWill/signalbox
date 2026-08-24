@@ -367,6 +367,10 @@ export function ArtifactRenderer({
             src={rendered.content_url}
             alt={`${imageViewLabel(rendered.kind)} of ${displayName(descriptor)}`}
             loading="lazy"
+            onError={() => {
+              if (rendered.kind === 'browser_native') setOriginalStatus('failed')
+              else setAutomaticStatus('failed')
+            }}
           />
         ) : (
           <FileQuestion aria-label="No compatible inline renderer" />
@@ -400,9 +404,13 @@ export function ArtifactRenderer({
               Original admitted for {displayName(descriptor)}
             </span>
           )}
-          {automatic && automaticStatus === 'failed' && (
-            <button type="button" onClick={() => admitAutomatic(true)}>
-              Retry preview check
+          {automatic && (automaticStatus === 'failed' || automaticStatus === 'checking') && (
+            <button
+              type="button"
+              disabled={automaticStatus === 'checking'}
+              onClick={() => admitAutomatic(true)}
+            >
+              {automaticStatus === 'checking' ? 'Checking preview…' : 'Retry preview check'}
             </button>
           )}
           {original && (

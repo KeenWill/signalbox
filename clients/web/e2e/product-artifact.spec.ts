@@ -3,19 +3,7 @@ import { readFileSync } from 'node:fs'
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
 import { imageArtifact } from '../src/features/artifacts/artifactScenario'
 import { decodeWebBlobDescriptor } from '../src/generated/web-contract.mjs'
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '2' },
-  capabilities: {
-    blob_derivations: true,
-    bounded_json: true,
-    image_derivatives: true,
-    immutable_blob_content: true,
-    ndjson_streaming: true,
-    same_origin_json_mutations: true,
-  },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 262_144 },
-} as const
+import { webContractBootstrapFixture } from '../src/product.fixture'
 
 const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.meta.url))
 const incompatibleDescriptorFixture = { invented: true } as const
@@ -59,7 +47,9 @@ const platformModifier = (page: Page) =>
   page.evaluate(() => (/Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Meta' : 'Control'))
 
 const useArtifactScenario = async (page: Page, descriptor = imageArtifact) => {
-  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
   await page.route('**/api/blobs/**/descriptor?*', (route) => route.fulfill({ json: descriptor }))
   await page.route('**/api/blobs/**/content/image-png', (route) => {
     if (route.request().headers().range) {
@@ -87,7 +77,9 @@ const useArtifactScenario = async (page: Page, descriptor = imageArtifact) => {
 
 const useRecoveringArtifactScenario = async (page: Page) => {
   const state = { unavailable: true }
-  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
   await page.route('**/api/blobs/**/descriptor?*', (route) => {
     if (state.unavailable) {
       return route.fulfill({ json: incompatibleDescriptorFixture })
@@ -95,6 +87,21 @@ const useRecoveringArtifactScenario = async (page: Page) => {
     return route.fulfill({ json: imageArtifact })
   })
   return { recover: () => (state.unavailable = false) }
+}
+
+const useRecoveringPreviewScenario = async (page: Page) => {
+  await useArtifactScenario(page)
+  const preview = imageArtifact.available_views.find((view) => view.kind === 'preview')
+  let previewAttempts = 0
+  await page.route('**/api/blobs/**/content/image-png', (route) => {
+    const isPreviewProbe =
+      route.request().headers().range !== undefined &&
+      new URL(route.request().url()).pathname === preview?.content_url
+    if (!isPreviewProbe) return route.fallback()
+    previewAttempts += 1
+    return previewAttempts === 1 ? route.fulfill({ status: 503 }) : route.fallback()
+  })
+  return { attempts: () => previewAttempts }
 }
 
 const submitArtifactWithoutMouse = async (page: Page) => {
@@ -291,19 +298,7 @@ test('keeps an oversized automatic derivative metadata-only', async ({ page }) =
 
 test('retries a transient automatic preview failure', async ({ page }) => {
   const problems = watchBrowser(page)
-  await useArtifactScenario(page)
-  const preview = imageArtifact.available_views.find((view) => view.kind === 'preview')
-  let previewAttempts = 0
-  await page.route('**/api/blobs/**/content/image-png', (route) => {
-    if (
-      route.request().headers().range &&
-      new URL(route.request().url()).pathname === preview?.content_url
-    ) {
-      previewAttempts += 1
-      if (previewAttempts === 1) return route.fulfill({ status: 503 })
-    }
-    return route.fallback()
-  })
+  const scenario = await useRecoveringPreviewScenario(page)
   await page.goto('/sessions')
 
   await submitArtifactWithoutMouse(page)
@@ -313,7 +308,7 @@ test('retries a transient automatic preview failure', async ({ page }) => {
   await expect(
     page.getByRole('img', { name: `Preview of ${imageArtifact.display_filename[0]}` }),
   ).toBeVisible()
-  expect(previewAttempts).toBe(2)
+  expect(scenario.attempts()).toBe(2)
   expect(problems.pageErrors).toEqual([])
 })
 
