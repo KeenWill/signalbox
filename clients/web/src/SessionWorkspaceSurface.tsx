@@ -73,6 +73,13 @@ export const restoredTimelineSelection = (
 ): string | undefined =>
   restored && restorePosition && ids.includes(restorePosition) ? restorePosition : undefined
 
+export const sessionAnchorLabel = (anchor: SessionWindowAnchor): string => {
+  if (!('eventSequence' in anchor)) {
+    return anchor.kind === 'latest' ? 'near latest' : 'at first'
+  }
+  return `${anchor.kind} ${anchor.eventSequence}`
+}
+
 export const projectedTimelineSelection = (
   selected: string | null,
   ids: readonly string[],
@@ -344,7 +351,7 @@ export function SessionWorkspaceSurface({
             </p>
           </div>
         </section>
-      ) : session.isError ? (
+      ) : session.isError && !session.data ? (
         <p className="session-load-state" role="alert">
           The daemon could not provide this bounded session window: {session.error.message}
         </p>
@@ -352,24 +359,22 @@ export function SessionWorkspaceSurface({
         <p className="session-load-state">Loading descriptor and bounded history…</p>
       ) : (
         <section className="session-workspace" aria-labelledby="session-workspace-heading">
+          {session.isError && (
+            <p className="session-load-state" role="alert">
+              The requested window could not be loaded; the prior bounded window remains visible:{' '}
+              {session.error.message}
+            </p>
+          )}
           <header className="session-workspace-header">
             <div>
               <span className="eyebrow">Stable timeline identity</span>
               <h2 id="session-workspace-heading">{sessionId}</h2>
               <p>
                 {session.data.active
-                  ? 'Active · opened near latest'
+                  ? `Active · opened ${sessionAnchorLabel(session.data.anchor)}`
                   : didRestoreSelection
                     ? 'Inactive · restored logical position'
-                    : `Inactive · opened ${
-                        session.data.anchor.kind === 'latest'
-                          ? 'near latest'
-                          : session.data.anchor.kind === 'first'
-                            ? 'at first'
-                            : 'eventSequence' in session.data.anchor
-                              ? `${session.data.anchor.kind} ${session.data.anchor.eventSequence}`
-                              : session.data.anchor.kind
-                      }`}
+                    : `Inactive · opened ${sessionAnchorLabel(session.data.anchor)}`}
               </p>
             </div>
             <dl className="session-telemetry">

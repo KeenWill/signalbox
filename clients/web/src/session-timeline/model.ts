@@ -481,6 +481,28 @@ const isCanonicalCrossFieldContinuation = (
   return false
 }
 
+const requiresTerminalToolContinuation = (
+  body: WebSessionTimelineDetailPage['items'][number]['body'],
+): boolean => {
+  if (body.type !== 'tool_batch' || body.tools.length !== 1 || body.goal_events.length !== 0) {
+    return false
+  }
+  const tool = body.tools[0]
+  if (!tool) return false
+  const evidence = tool.evidence
+  if (
+    !tool.arguments ||
+    tool.arguments.continuation != null ||
+    evidence.type !== 'physical_attempt'
+  ) {
+    return false
+  }
+  return (
+    (evidence.state === 'completed' && evidence.result == null) ||
+    (evidence.state === 'known_failed' && evidence.failure == null)
+  )
+}
+
 const cloneTimelineDescriptor = (
   descriptor: WebSessionTimelineDescriptor,
 ): WebSessionTimelineDescriptor => ({
@@ -718,6 +740,9 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       const excerpts = page.items.flatMap((item) => bodyContinuations(item.body))
       if (excerpts.length > 0) {
         throw new TypeError('timeline detail excerpt continuation requires a page continuation')
+      }
+      if (page.items.some((item) => requiresTerminalToolContinuation(item.body))) {
+        throw new TypeError('terminal tool evidence requires a cross-field continuation')
       }
     }
     return page

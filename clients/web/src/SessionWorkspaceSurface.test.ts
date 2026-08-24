@@ -10,6 +10,7 @@ import {
   projectedTimelineSelection,
   restoredTimelineSelection,
   sameSessionWindowAnchor,
+  sessionAnchorLabel,
   timelineArrowTarget,
   visibleSessionItems,
 } from './SessionWorkspaceSurface'
@@ -105,6 +106,13 @@ describe('Session Workspace projection', () => {
         { kind: 'after', eventSequence: '43' },
       ),
     ).toBe(false)
+  })
+
+  it('describes every loaded session anchor accurately', () => {
+    expect(sessionAnchorLabel({ kind: 'latest' })).toBe('near latest')
+    expect(sessionAnchorLabel({ kind: 'first' })).toBe('at first')
+    expect(sessionAnchorLabel({ kind: 'before', eventSequence: '42' })).toBe('before 42')
+    expect(sessionAnchorLabel({ kind: 'after', eventSequence: '43' })).toBe('after 43')
   })
 
   it('moves focused timeline selection with arrow keys', () => {
@@ -223,6 +231,75 @@ describe('Session Workspace projection', () => {
       },
     } as const
     expect(isCompatibleDetailBody('delegation_update', delegation)).toBe(true)
+    const childDisposition = {
+      type: 'delegation',
+      detail: {
+        type: 'child_lifecycle_disposition',
+        relationship_id: delegation.detail.relationship_id,
+        child_session_id: delegation.detail.child_session_id,
+        event_ordinal: '1',
+        outcome: 'result_returned',
+        reason: 'child_completed',
+        provenance: {
+          type: 'child_turn',
+          session_id: delegation.detail.child_session_id,
+          turn_id: '00000000-0000-0000-0000-000000000043',
+        },
+      },
+    } as const
+    expect(isCompatibleDetailBody('delegation_update', childDisposition)).toBe(true)
+    expect(
+      isCompatibleDetailBody('delegation_update', {
+        ...childDisposition,
+        detail: {
+          ...childDisposition.detail,
+          provenance: {
+            ...childDisposition.detail.provenance,
+            session_id: '00000000-0000-0000-0000-000000000099',
+          },
+        },
+      }),
+    ).toBe(false)
+    expect(
+      isCompatibleDetailBody(
+        'delegation_update',
+        {
+          ...childDisposition,
+          detail: {
+            ...childDisposition.detail,
+            outcome: 'child_stopped',
+            reason: 'parent_stopped_with_descendants',
+            provenance: {
+              type: 'parent_turn_command',
+              session_id: '00000000-0000-0000-0000-000000000001',
+              turn_id: '00000000-0000-0000-0000-000000000044',
+              command_id: '00000000-0000-0000-0000-000000000045',
+            },
+          },
+        },
+        '00000000-0000-0000-0000-000000000001',
+      ),
+    ).toBe(true)
+    expect(
+      isCompatibleDetailBody(
+        'delegation_update',
+        {
+          ...childDisposition,
+          detail: {
+            ...childDisposition.detail,
+            outcome: 'child_stopped',
+            reason: 'parent_stopped_with_descendants',
+            provenance: {
+              type: 'parent_turn_command',
+              session_id: '00000000-0000-0000-0000-000000000099',
+              turn_id: '00000000-0000-0000-0000-000000000044',
+              command_id: '00000000-0000-0000-0000-000000000045',
+            },
+          },
+        },
+        '00000000-0000-0000-0000-000000000001',
+      ),
+    ).toBe(false)
     expect(
       isCompatibleDetailBody('delegation_update', {
         ...delegation,

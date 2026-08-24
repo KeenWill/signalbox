@@ -1749,6 +1749,61 @@ describe('BoundedSessionHistory', () => {
     ).resolves.toMatchObject({ continuation: { type: 'more_body', body: continuation } })
   })
 
+  it('rejects completed tool arguments without a result continuation', async () => {
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000141',
+            state: {
+              type: 'results_projected',
+              frontier_id: '00000000-0000-0000-0000-000000000341',
+            },
+            projected_member_index: 0,
+            tools: [
+              {
+                request_id: '00000000-0000-0000-0000-000000000241',
+                tool_name: 'workspace_read',
+                approval_posture: 'auto',
+                approval_judge_escalated: false,
+                operator_required: false,
+                arguments: {
+                  text: '{}',
+                  offset_bytes: '0',
+                  total_bytes: '2',
+                  continuation: null,
+                },
+                evidence: {
+                  type: 'physical_attempt',
+                  attempt_id: '00000000-0000-0000-0000-000000000441',
+                  state: 'completed',
+                  effect_posture: 'effect_free',
+                  sandbox_posture: null,
+                  result: null,
+                  failure: null,
+                  cause: null,
+                },
+              },
+            ],
+            goal_events: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 2,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 2,
+      continuation: null,
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('terminal tool evidence requires a cross-field continuation')
+  })
+
   it('accepts a canonical continuation to the next goal member', async () => {
     const cursor = {
       type: 'more_body',

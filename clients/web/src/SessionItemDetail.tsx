@@ -175,6 +175,13 @@ export const isCompatibleDetailBody = (
     if (!subtypeMatches || !compatibleDelegationOutcome(body.detail)) return false
     if ('child_session_id' in body.detail && body.detail.child_session_id === sessionId)
       return false
+    if (body.detail.type === 'child_lifecycle_disposition' || body.detail.type === 'child_result') {
+      const provenanceSessionMatches =
+        body.detail.provenance.type === 'child_turn'
+          ? body.detail.provenance.session_id === body.detail.child_session_id
+          : sessionId === undefined || body.detail.provenance.session_id === sessionId
+      if (!provenanceSessionMatches) return false
+    }
     if (
       body.detail.type === 'child_lifecycle_disposition' &&
       !positiveDecimal(body.detail.event_ordinal)
@@ -286,6 +293,8 @@ const effectiveSettingsFacts = (
       : 'default',
   ],
 ]
+
+const boundedSettingEvidence = (value: unknown): ReactNode => <code>{JSON.stringify(value)}</code>
 
 const TextDetail = ({ label, excerpt }: { label: string; excerpt: TextExcerpt }) => {
   return (
@@ -482,6 +491,13 @@ const detailContent = (body: DetailBody): ReactNode => {
                   ['Installed version', body.detail.installed_defaults_version],
                   ['Prior model', modelSelection(body.detail.prior_model)],
                   ['Installed model', modelSelection(body.detail.installed_model)],
+                  ['Caller override', boundedSettingEvidence(body.detail.caller_override)],
+                  ['Prior settings', boundedSettingEvidence(body.detail.prior_settings)],
+                  [
+                    'Installed precedence',
+                    boundedSettingEvidence(body.detail.installed_settings.precedence),
+                  ],
+                  ['Adjustments', boundedSettingEvidence(body.detail.adjustments)],
                   ...effectiveSettingsFacts(body.detail.installed_settings),
                 ]
               : [
@@ -491,6 +507,13 @@ const detailContent = (body: DetailBody): ReactNode => {
                   ['Defaults version', body.detail.defaults_version],
                   ['Requested model', modelSelection(body.detail.requested_model)],
                   ['Selected model', body.detail.selected_direct_id],
+                  [
+                    'Adjusted from selection',
+                    body.detail.adjusted_from_selection_id ?? 'not adjusted',
+                  ],
+                  ['Per-call override', boundedSettingEvidence(body.detail.per_call_override)],
+                  ['Settings precedence', boundedSettingEvidence(body.detail.settings.precedence)],
+                  ['Adjustments', boundedSettingEvidence(body.detail.adjustments)],
                   ...effectiveSettingsFacts(body.detail.settings),
                 ]
           }
