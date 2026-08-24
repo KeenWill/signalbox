@@ -90,7 +90,7 @@ struct CatalogFacts {
     version: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct IndirectReference {
     object_number: u64,
     generation: u64,
@@ -795,23 +795,8 @@ fn object_streams_fit_expansion_limit(
         {
             StreamLength::Direct(_) => None,
             StreamLength::Indirect(reference) => {
-                let entry = parsed
-                    .live_entries
-                    .iter()
-                    .find(|entry| entry.reference == reference)
+                let length = resolve_integer_object(bytes, parsed, reference, &mut BTreeSet::new())
                     .ok_or(FileMediaProviderFailure::Failed)?;
-                let XrefLocation::Uncompressed(offset) = entry.location else {
-                    return Err(FileMediaProviderFailure::Failed);
-                };
-                let offset =
-                    usize::try_from(offset).map_err(|_| FileMediaProviderFailure::Failed)?;
-                let length = indirect_integer_object(
-                    bytes
-                        .get(offset..)
-                        .ok_or(FileMediaProviderFailure::Failed)?,
-                    reference,
-                )
-                .ok_or(FileMediaProviderFailure::Failed)?;
                 Some((reference, length))
             }
         };
@@ -835,6 +820,65 @@ fn object_streams_fit_expansion_limit(
         }
     }
     Ok(true)
+}
+
+fn resolve_integer_object(
+    bytes: &[u8],
+    parsed: &ParsedXref,
+    reference: IndirectReference,
+    resolving: &mut BTreeSet<IndirectReference>,
+) -> Option<u64> {
+    if !resolving.insert(reference) {
+        return None;
+    }
+    let resolved = (|| {
+        let entry = parsed
+            .live_entries
+            .iter()
+            .find(|entry| entry.reference == reference)?;
+        match entry.location {
+            XrefLocation::Uncompressed(offset) => {
+                let offset = usize::try_from(offset).ok()?;
+                indirect_integer_object(bytes.get(offset..)?, reference)
+            }
+            XrefLocation::Compressed {
+                stream_object,
+                index,
+            } => {
+                let (stream_reference, stream_offset) =
+                    object_stream_offset(parsed, stream_object)?;
+                let stream_offset = usize::try_from(stream_offset).ok()?;
+                let stream_bytes = bytes.get(stream_offset..)?;
+                let resolved_length =
+                    match object_stream_declared_length(stream_bytes, stream_reference)? {
+                        StreamLength::Direct(_) => None,
+                        StreamLength::Indirect(length_reference) => Some((
+                            length_reference,
+                            resolve_integer_object(bytes, parsed, length_reference, resolving)?,
+                        )),
+                    };
+                let object = object_stream_object(
+                    stream_bytes,
+                    stream_reference,
+                    reference,
+                    index,
+                    MAX_OBJECT_STREAM_BYTES,
+                    resolved_length,
+                )?;
+                parse_integer_object_value(&object)
+            }
+        }
+    })();
+    resolving.remove(&reference);
+    resolved
+}
+
+fn parse_integer_object_value(bytes: &[u8]) -> Option<u64> {
+    let mut cursor = 0;
+    skip_pdf_space_and_comments(bytes, &mut cursor);
+    let value = parse_nonnegative_integer(bytes, &mut cursor)?;
+    skip_pdf_space_and_comments(bytes, &mut cursor);
+    (cursor == bytes.len()).then_some(value)
 }
 
 fn collect_pages(document: &Document) -> Result<Vec<(u32, lopdf::ObjectId)>, PageCollectionError> {
@@ -1433,6 +1477,10 @@ fn skip_literal_string(bytes: &[u8], cursor: &mut usize) -> Option<()> {
 fn skip_hex_string(bytes: &[u8], cursor: &mut usize) -> Option<()> {
     *cursor += 1;
     while *bytes.get(*cursor)? != b'>' {
+        let byte = *bytes.get(*cursor)?;
+        if !byte.is_ascii_hexdigit() && !is_pdf_whitespace(byte) {
+            return None;
+        }
         *cursor += 1;
     }
     *cursor += 1;
@@ -1686,7 +1734,12 @@ fn inferred_xref_stream_length(bytes: &[u8], stream_start: usize) -> Option<usiz
                 return None;
             }
             let mut stream_end = stream_start.checked_add(relative)?;
-            while stream_end > stream_start && is_pdf_whitespace(*bytes.get(stream_end - 1)?) {
+            if stream_end > stream_start && bytes.get(stream_end - 1) == Some(&b'\n') {
+                stream_end -= 1;
+                if stream_end > stream_start && bytes.get(stream_end - 1) == Some(&b'\r') {
+                    stream_end -= 1;
+                }
+            } else if stream_end > stream_start && bytes.get(stream_end - 1) == Some(&b'\r') {
                 stream_end -= 1;
             }
             stream_end.checked_sub(stream_start)
@@ -2166,7 +2219,6 @@ fn parse_lopdf_object(bytes: &[u8], cursor: &mut usize, depth: usize) -> Option<
 
 fn catalog_facts(bytes: &[u8], expected: IndirectReference) -> Option<CatalogFacts> {
     let mut cursor = 0;
-    skip_pdf_space_and_comments(bytes, &mut cursor);
     if parse_unsigned(bytes, &mut cursor) != Some(expected.object_number) {
         return None;
     }
@@ -2643,6 +2695,20 @@ mod tests {
     }
 
     #[test]
+    fn indirect_length_xref_stream_preserves_trailing_nul_payload() {
+        let stream = [0, 0, 0, 1, 17, 0, 1, 42, 0];
+        let mut bytes =
+            b"2 0 obj\n<< /Type /XRef /Size 3 /Root 1 0 R /W [1 1 1] /Index [0 3] /Length 3 0 R >>\nstream\n"
+                .to_vec();
+        bytes.extend_from_slice(&stream);
+        bytes.extend_from_slice(b"\nendstream\nendobj");
+
+        let parsed = parse_xref_structure(&bytes).expect("xref stream with trailing NUL");
+
+        assert!(valid_xref_targets(&parsed, 128));
+    }
+
+    #[test]
     fn classic_xref_rejects_overlapping_subsections() {
         let bytes = b"xref\n1 2\n0000000017 00000 n\n0000000042 00000 n\n2 1\n0000000064 00000 n\ntrailer\n<< /Size 3 /Root 1 0 R >>";
 
@@ -2904,6 +2970,21 @@ mod tests {
     }
 
     #[test]
+    fn hexadecimal_string_skipping_rejects_non_hexadecimal_bytes() {
+        let mut cursor = 0;
+
+        assert!(skip_pdf_object(b"<GG>", &mut cursor, 0).is_none());
+    }
+
+    #[test]
+    fn hexadecimal_string_skipping_accepts_whitespace_and_odd_digits() {
+        let mut cursor = 0;
+
+        assert!(skip_pdf_object(b"<A 0f>", &mut cursor, 0).is_some());
+        assert_eq!(cursor, 6);
+    }
+
+    #[test]
     fn hybrid_xref_stream_entries_are_merged_before_preflight() {
         let supplemental_offset = b"%PDF-1.5\n".len();
         let entry_count = MAX_OBJECTS + 1;
@@ -2965,6 +3046,22 @@ mod tests {
         assert!(catalog_facts(b"7 0 obj\n<< /Type /Pages /Count 0 >>\nendobj", root).is_none());
         assert!(catalog_facts(b"7 0 obj\n<< /Type /Catalog >>\nendobj", root).is_none());
         assert!(catalog_facts(b"7 0 obj\n<< /Type /Catalog /Pages 8 0 R >>", root).is_none());
+    }
+
+    #[test]
+    fn root_probe_requires_xref_offset_at_object_header() {
+        let root = IndirectReference {
+            object_number: 7,
+            generation: 0,
+        };
+
+        assert!(
+            catalog_facts(
+                b"% misplaced xref offset\n7 0 obj\n<< /Type /Catalog /Pages 8 0 R >>\nendobj",
+                root,
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -3050,6 +3147,55 @@ mod tests {
                 object_number: 8,
                 generation: 0,
             })
+        );
+    }
+
+    #[test]
+    fn compressed_integer_resolves_an_object_stream_length() {
+        let length_object = b"6 0 42";
+        let mut bytes = format!(
+            "5 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length {} >>\nstream\n",
+            length_object.len()
+        )
+        .into_bytes();
+        bytes.extend_from_slice(length_object);
+        bytes.extend_from_slice(b"\nendstream\nendobj");
+        let parsed = ParsedXref {
+            facts: TrailerFacts::default(),
+            live_entries: vec![
+                LiveXrefEntry {
+                    reference: IndirectReference {
+                        object_number: 5,
+                        generation: 0,
+                    },
+                    location: XrefLocation::Uncompressed(0),
+                },
+                LiveXrefEntry {
+                    reference: IndirectReference {
+                        object_number: 6,
+                        generation: 0,
+                    },
+                    location: XrefLocation::Compressed {
+                        stream_object: 5,
+                        index: 0,
+                    },
+                },
+            ],
+            declared_objects: BTreeSet::from([5, 6]),
+            object_limit_exceeded: false,
+        };
+
+        assert_eq!(
+            resolve_integer_object(
+                &bytes,
+                &parsed,
+                IndirectReference {
+                    object_number: 6,
+                    generation: 0,
+                },
+                &mut BTreeSet::new(),
+            ),
+            Some(42)
         );
     }
 
