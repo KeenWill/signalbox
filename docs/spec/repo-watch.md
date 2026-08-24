@@ -968,7 +968,11 @@ decision remains. It may dismiss a blocking review only when GitHub reports it
 among the pull request's latest opinionated `CHANGES_REQUESTED` reviews and its
 associated commit differs from the exact current head. The current convergence
 evidence must otherwise pass: zero unresolved threads, zero non-green gating
-checks, and nonconflicting mergeability. Every effective blocking review must
+checks, a settled head, and nonconflicting mergeability. An unsettled head has
+not finished registering and completing its exact-head checks, so its empty
+non-green list is the absence of evidence rather than evidence of a green head;
+requiring settlement keeps a dismissal from racing checks that have yet to
+report. Every effective blocking review must
 target a superseded head; one current-head blocker prevents every dismissal for
 that assessment. A current-head review is never dismissed automatically. Why: a
 new review is live judgment, while a stale aggregate decision whose complete
@@ -989,7 +993,12 @@ failure, a later poll observes the named review directly: an already dismissed
 review completes the audit, a newer pull-request head supersedes the intent, and
 a review decision cleared by another actor is recorded as cleared elsewhere. A
 still-blocking intent is retried only when a current poll again proves the full
-dismissal predicate. The pending-intent projection makes every unsettled
+dismissal predicate. Recovery renews its ownership token immediately before
+observing each intent, because a deeply paginated batch can outlive the claim
+lease; an intent whose lease another watcher has since taken is left to that
+watcher, and a lease lost between the renewal and the terminal write likewise
+leaves that one intent to its new claimant rather than abandoning the rest of
+the batch. The pending-intent projection makes every unsettled
 external action directly observable. The next poll observes the dismissal
 through the ordinary review and convergence projections; no synthetic approval
 is created and no fresh review is requested.

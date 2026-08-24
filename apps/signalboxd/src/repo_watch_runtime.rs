@@ -52,6 +52,7 @@ use signalbox_persistence::repo_watch::{
     PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest, RepoWatchCursor,
     RepoWatchCursorCandidate, RepoWatchCursorGeneration, RepoWatchObservedReviewState,
     RepoWatchPlannedStaleReviewClearance, RepoWatchStaleReviewClearanceOutcome,
+    RepoWatchStaleReviewClearanceRenewal, RepoWatchStoreError,
 };
 use signalbox_persistence::repo_watch_dispatch::{
     PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError,
@@ -2517,7 +2518,7 @@ impl RepositoryWatchTask {
                             .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
                         continue;
                     }
-                    if !self
+                    if self
                         .store
                         .renew_stale_review_clearance_claim(
                             clearance.clearance_id(),
@@ -2525,6 +2526,7 @@ impl RepositoryWatchTask {
                         )
                         .await
                         .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+                        == RepoWatchStaleReviewClearanceRenewal::Lost
                     {
                         continue;
                     }
@@ -2572,6 +2574,23 @@ impl RepositoryWatchTask {
             .await
             .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
         for clearance in &pending {
+            // Observing a batch row costs provider requests, so a deeply
+            // paginated batch can outlive the two-minute lease taken when it
+            // was claimed. Re-establish ownership immediately before each row:
+            // a lease another watcher has since taken belongs to that watcher,
+            // and skipping the row leaves it to them instead of acting twice.
+            if self
+                .store
+                .renew_stale_review_clearance_claim(
+                    clearance.clearance_id(),
+                    clearance.claim_token(),
+                )
+                .await
+                .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+                == RepoWatchStaleReviewClearanceRenewal::Lost
+            {
+                continue;
+            }
             match self
                 .poller
                 .observe_stale_review_clearance(clearance)
@@ -2590,7 +2609,12 @@ impl RepositoryWatchTask {
                     outcome,
                     provider_state,
                 } => {
-                    self.store
+                    // The lease can still expire between the renewal above and
+                    // this write. That intent now belongs to its new claimant,
+                    // whose own scan will settle it; failing the attempt here
+                    // would instead abandon every row the batch has left.
+                    match self
+                        .store
                         .record_stale_review_clearance_outcome(
                             clearance.clearance_id(),
                             clearance.claim_token(),
@@ -2598,7 +2622,11 @@ impl RepositoryWatchTask {
                             provider_state,
                         )
                         .await
-                        .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+                    {
+                        Ok(()) => {}
+                        Err(RepoWatchStoreError::StaleReviewClearanceMismatch) => continue,
+                        Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
+                    }
                 }
             }
         }
@@ -4420,9 +4448,12 @@ impl GitHubRepositoryPoller {
         &self,
         assessment: &RepoWatchConvergenceAssessment,
     ) -> Result<Vec<RepoWatchStaleReviewClearanceCandidate>, RepositoryWatchAttemptError> {
+        // Mirrors the candidate rule so a head that cannot yield a candidate
+        // costs no provider request. The domain type re-checks every gate.
         if assessment.review_decision() != RepoWatchReviewDecision::ChangesRequested
             || !assessment.unresolved_threads().is_empty()
             || !assessment.non_green_gating_checks().is_empty()
+            || !assessment.settled()
             || assessment.mergeable_state() == MergeableState::Conflicting
         {
             return Ok(Vec::new());
@@ -9175,7 +9206,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inv069_current_head_review_is_not_a_clearance_candidate() {
+    async fn inv072_current_head_review_is_not_a_clearance_candidate() {
         let response = ScriptedResponse::post(
             RequestTarget(String::from(THREADS_TARGET)),
             ResponseBody(blocking_reviews(HEAD_SHA)),

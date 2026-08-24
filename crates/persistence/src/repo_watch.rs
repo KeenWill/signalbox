@@ -428,11 +428,56 @@ impl From<sqlx::Error> for RepoWatchStoreError {
     }
 }
 
+/// One stale-review clearance intent's durable identity.
+///
+/// Distinct from its claim token so the two cannot be transposed at a call
+/// site: they are both UUIDs, and swapping them turns a valid renewal, record,
+/// or release into a silent no-op against a row that does not exist.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RepoWatchStaleReviewClearanceId(Uuid);
+
+impl RepoWatchStaleReviewClearanceId {
+    pub const fn new(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> Uuid {
+        self.0
+    }
+}
+
+/// One clearance claim's ownership token.
+///
+/// Every write that acts on a claimed intent carries this token, so a watcher
+/// whose lease expired and was taken over cannot act on the newer claimant's
+/// intent.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RepoWatchStaleReviewClearanceClaimToken(Uuid);
+
+impl RepoWatchStaleReviewClearanceClaimToken {
+    pub const fn new(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> Uuid {
+        self.0
+    }
+}
+
+/// Whether a claim renewal still owns its intent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchStaleReviewClearanceRenewal {
+    /// The lease was extended; this watcher still owns the intent.
+    Retained,
+    /// Another watcher has claimed the intent since this lease was taken.
+    Lost,
+}
+
 /// Durable intent created before one stale review dismissal request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchPlannedStaleReviewClearance {
-    clearance_id: Uuid,
-    claim_token: Uuid,
+    clearance_id: RepoWatchStaleReviewClearanceId,
+    claim_token: RepoWatchStaleReviewClearanceClaimToken,
     number: PullRequestNumber,
     current_head_sha: CommitSha,
     base_branch: BranchName,
@@ -444,11 +489,11 @@ pub struct RepoWatchPlannedStaleReviewClearance {
 }
 
 impl RepoWatchPlannedStaleReviewClearance {
-    pub const fn clearance_id(&self) -> Uuid {
+    pub const fn clearance_id(&self) -> RepoWatchStaleReviewClearanceId {
         self.clearance_id
     }
 
-    pub const fn claim_token(&self) -> Uuid {
+    pub const fn claim_token(&self) -> RepoWatchStaleReviewClearanceClaimToken {
         self.claim_token
     }
 
@@ -993,8 +1038,8 @@ impl PostgresRepoWatchStore {
                 continue;
             };
             planned.push(RepoWatchPlannedStaleReviewClearance {
-                clearance_id: stored.clearance_id,
-                claim_token,
+                clearance_id: RepoWatchStaleReviewClearanceId::new(stored.clearance_id),
+                claim_token: RepoWatchStaleReviewClearanceClaimToken::new(claim_token),
                 number: candidate.number(),
                 current_head_sha: candidate.current_head_sha().clone(),
                 base_branch: BranchName::try_new(assessment.base_branch.clone())
@@ -1111,7 +1156,10 @@ impl PostgresRepoWatchStore {
             .fetch_optional(&mut *transaction)
             .await?;
             if let Some(claim_token) = acquired {
-                claimed.push(decode_pending_clearance(row, claim_token)?);
+                claimed.push(decode_pending_clearance(
+                    row,
+                    RepoWatchStaleReviewClearanceClaimToken::new(claim_token),
+                )?);
             }
         }
         let next_after = claimed
@@ -1125,7 +1173,7 @@ impl PostgresRepoWatchStore {
                  SET after_clearance_id = EXCLUDED.after_clearance_id",
         )
         .bind(repository.as_str())
-        .bind(next_after)
+        .bind(next_after.map(RepoWatchStaleReviewClearanceId::get))
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -1135,9 +1183,9 @@ impl PostgresRepoWatchStore {
     /// Renews the exact ownership token immediately before provider delivery.
     pub async fn renew_stale_review_clearance_claim(
         &self,
-        clearance_id: Uuid,
-        claim_token: Uuid,
-    ) -> Result<bool, RepoWatchStoreError> {
+        clearance_id: RepoWatchStaleReviewClearanceId,
+        claim_token: RepoWatchStaleReviewClearanceClaimToken,
+    ) -> Result<RepoWatchStaleReviewClearanceRenewal, RepoWatchStoreError> {
         let renewed = sqlx::query_scalar::<_, Uuid>(
             "UPDATE repo_watch_stale_review_clearance_claim
                 SET claimed_until = clock_timestamp() + interval '2 minutes'
@@ -1145,18 +1193,21 @@ impl PostgresRepoWatchStore {
                 AND claim_token = $2
               RETURNING clearance_id",
         )
-        .bind(clearance_id)
-        .bind(claim_token)
+        .bind(clearance_id.get())
+        .bind(claim_token.get())
         .fetch_optional(&self.pool)
         .await?;
-        Ok(renewed.is_some())
+        Ok(match renewed {
+            Some(_) => RepoWatchStaleReviewClearanceRenewal::Retained,
+            None => RepoWatchStaleReviewClearanceRenewal::Lost,
+        })
     }
 
     /// Appends the first terminal provider observation for one clearance.
     pub async fn record_stale_review_clearance_outcome(
         &self,
-        clearance_id: Uuid,
-        claim_token: Uuid,
+        clearance_id: RepoWatchStaleReviewClearanceId,
+        claim_token: RepoWatchStaleReviewClearanceClaimToken,
         outcome: RepoWatchStaleReviewClearanceOutcome,
         provider_state: RepoWatchObservedReviewState,
     ) -> Result<(), RepoWatchStoreError> {
@@ -1170,8 +1221,8 @@ impl PostgresRepoWatchStore {
                 AND claim_token = $2
              ON CONFLICT (clearance_id) DO NOTHING",
         )
-        .bind(clearance_id)
-        .bind(claim_token)
+        .bind(clearance_id.get())
+        .bind(claim_token.get())
         .bind(repo_watch_stale_review_clearance_outcome_to_str(outcome))
         .bind(repo_watch_observed_review_state_to_str(provider_state))
         .execute(&mut *transaction)
@@ -1185,8 +1236,8 @@ impl PostgresRepoWatchStore {
               WHERE clearance_id = $1
                 AND claim_token = $2",
         )
-        .bind(clearance_id)
-        .bind(claim_token)
+        .bind(clearance_id.get())
+        .bind(claim_token.get())
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -1198,16 +1249,16 @@ impl PostgresRepoWatchStore {
     /// same intent for retry.
     pub async fn release_stale_review_clearance_claim(
         &self,
-        clearance_id: Uuid,
-        claim_token: Uuid,
+        clearance_id: RepoWatchStaleReviewClearanceId,
+        claim_token: RepoWatchStaleReviewClearanceClaimToken,
     ) -> Result<(), RepoWatchStoreError> {
         sqlx::query(
             "DELETE FROM repo_watch_stale_review_clearance_claim
               WHERE clearance_id = $1
                 AND claim_token = $2",
         )
-        .bind(clearance_id)
-        .bind(claim_token)
+        .bind(clearance_id.get())
+        .bind(claim_token.get())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1302,7 +1353,7 @@ struct PendingClearanceRow {
 
 fn decode_pending_clearance(
     row: PendingClearanceRow,
-    claim_token: Uuid,
+    claim_token: RepoWatchStaleReviewClearanceClaimToken,
 ) -> Result<RepoWatchPlannedStaleReviewClearance, RepoWatchStoreError> {
     repo_watch_stale_review_clearance_reason_from_str(&row.reason_kind)
         .ok_or(RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
@@ -1330,7 +1381,7 @@ fn decode_pending_clearance(
         return Err(RepoWatchPersistenceCorruption::InvalidStoredDomainValue.into());
     }
     Ok(RepoWatchPlannedStaleReviewClearance {
-        clearance_id: row.clearance_id,
+        clearance_id: RepoWatchStaleReviewClearanceId::new(row.clearance_id),
         claim_token,
         number,
         current_head_sha,

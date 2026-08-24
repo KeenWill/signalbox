@@ -612,6 +612,11 @@ impl RepoWatchStaleReviewClearanceCandidate {
         if assessment.review_decision() != RepoWatchReviewDecision::ChangesRequested
             || !assessment.unresolved_threads().is_empty()
             || !assessment.non_green_gating_checks().is_empty()
+            // An unsettled head has not finished registering and completing its
+            // exact-head checks, so an empty non-green list is the absence of
+            // evidence rather than evidence of a green head. Dismissing a
+            // blocking review then races the checks that have yet to report.
+            || !assessment.settled()
             || assessment.mergeable_state() == MergeableState::Conflicting
             || &reviewed_head_sha == assessment.head_sha()
             || !Self::review_node_id_is_valid(&review_node_id)
@@ -2991,7 +2996,7 @@ mod tests {
     }
 
     #[test]
-    fn inv069_current_head_blocking_review_is_not_clearable() -> Result<(), Box<dyn Error>> {
+    fn inv072_current_head_blocking_review_is_not_clearable() -> Result<(), Box<dyn Error>> {
         let assessment = convergence_assessment(ConvergenceFacts {
             base_branch: BASE_BRANCH,
             mergeable_state: MergeableState::Mergeable,
@@ -3046,6 +3051,29 @@ mod tests {
             unresolved_threads: Vec::new(),
             gating_check_count: 1,
             non_green_gating_checks: vec![CheckRunName::try_new(String::from(CHECK_NAME))?],
+        })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            REVIEW_NODE_ID.to_owned(),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
+
+    #[test]
+    fn unsettled_head_prevents_stale_review_clearance() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            settled: false,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
         })?;
 
         let result = RepoWatchStaleReviewClearanceCandidate::try_new(
