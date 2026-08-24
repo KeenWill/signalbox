@@ -666,19 +666,18 @@ jobs:
   # build and run jobs share the same runner image and absolute work-path shape,
   # which keeps paths embedded in nextest archives valid across their pods.
   # Each test starts its own pinned PostgreSQL container through testcontainers,
-  # so four test processes can run without sharing database state.
+  # so concurrent test processes never share database state.
   #
   # The matrix is generated from `.github/postgres-integration-suites.toml`:
   # one runner per shard, so a suite declaring one shard costs one runner and
   # still travels the same archive-and-partition path a sharded suite does.
-  # Persistence, runner, and signalboxd are sharded according to their measured
-  # test-execution cost. Program-runtime, terminal-client, and
-  # approval-judge-eval remain whole because each finishes in about a minute.
+  # Persistence is sharded according to its measured test-execution cost; every
+  # other suite runs whole because it fits well inside the job timeout.
   #
-  # Runner cost, stated plainly: this asks for more runners than the matrix it
-  # replaces. The run matrix currently expands to 13 shards after the one
-  # shared build. The shards compile nothing and run for minutes; the build's
-  # single cache key replaces the old per-suite keys that evicted one another.
+  # The run matrix currently expands to eight shards after the one shared
+  # build.
+  # The shards compile nothing and run for minutes; the build's single cache
+  # key replaces the old per-suite keys that evicted one another.
       - name: Publish this run's target dir as the cache seed
         # Seeds come only from pushes and same-repository pull requests, never
         # from forks; a unique temporary link keeps concurrent publishers from
@@ -702,18 +701,15 @@ jobs:
     # workspace: their permission and atomicity contracts require local /tmp.
     env:
       TMPDIR: /tmp
-    # Measured against the shards rather than guessed. The former three
-    # persistence partitions were balanced but had grown to roughly 8m15s each;
-    # runner took about eight minutes whole, and signalboxd about five. The
-    # manifest splits those suites more finely without changing test selection.
+    # Measured against the shards rather than guessed. With database state in
+    # memory and sixteen tests per shard, the recombined shards run about two
+    # to nine minutes clean.
     #
-    # Ten minutes did not leave room for the slow path. A shard whose tests
-    # actually fail runs about two minutes longer than a clean one (9.68m
-    # observed against a 7.4m median), so the cap sat within noise of exactly
-    # the runs whose results matter most — and a job the cap kills is reported
-    # as `cancelled`, which reads as an infrastructure problem and hides the
-    # test failure underneath it. Fifteen minutes is about twice the median,
-    # leaves the p90 at half the cap, and still bounds a genuinely hung job.
+    # A shard whose tests actually fail runs about two minutes longer than a
+    # clean one, and a job the cap kills is reported as `cancelled`, which
+    # reads as an infrastructure problem and hides the test failure underneath
+    # it. Fifteen minutes leaves the longest clean shard two-thirds of the cap
+    # and still bounds a genuinely hung job.
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -740,7 +736,10 @@ jobs:
       # `--run-ignored only` is `-- --ignored`, `--no-fail-fast` is unchanged,
       # and the archive fixes the package and feature selection at build time.
       # nextest runs each test in its own process rather than on a shared
-      # thread pool; eight concurrent tests is the cap. One per-test retry
+      # thread pool; sixteen concurrent tests is the cap. Each test can consume
+      # a 512 MiB PostgreSQL tmpfs, so the cap permits 8 GiB of tmpfs per job
+      # before PostgreSQL process memory; re-check the externally provisioned
+      # signalbox-docker pod memory limit before raising it. One per-test retry
       # absorbs a transient container-start failure without rerunning a whole
       # shard, while a repeat failure still fails the gate.
       - name: Run the ${{ matrix.suite }} partition
@@ -757,7 +756,7 @@ jobs:
           --run-ignored only
           --no-fail-fast
           --retries 1
-          --test-threads 8
+          --test-threads 16
           -E "$FILTER"
 
   # Preserve the existing required-check name while the suites build once and
