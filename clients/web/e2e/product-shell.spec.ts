@@ -56,6 +56,7 @@ test('navigates from Attention to Sessions with the shared semantic link', async
   await page.getByRole('link', { name: /Sessions/ }).click()
   await expect(page).toHaveURL(/\/sessions$/)
   await expect(page.getByRole('heading', { name: 'Sessions', level: 1 })).toBeVisible()
+  await expect(page.getByRole('main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

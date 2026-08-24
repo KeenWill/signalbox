@@ -63,6 +63,42 @@ export const derivativeDigest = (view: WebBlobAvailableView): string | undefined
 const readAsciiTag = (bytes: Uint8Array, offset: number, length = 4): string =>
   String.fromCharCode(...bytes.subarray(offset, offset + length))
 
+const readGifFrameDimensions = (bytes: Uint8Array): { width: number; height: number } | null => {
+  if (bytes.length < 13 || !readAsciiTag(bytes, 0, 6).startsWith('GIF8')) return null
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const canvasWidth = view.getUint16(6, true)
+  const canvasHeight = view.getUint16(8, true)
+  const packedFields = bytes[10] ?? 0
+  let offset = 13
+  if ((packedFields & 0x80) !== 0) offset += 3 * 2 ** ((packedFields & 0x07) + 1)
+  while (offset < bytes.length) {
+    const marker = bytes[offset]
+    offset += 1
+    if (marker === 0x21) {
+      if (offset >= bytes.length) return null
+      offset += 1
+      while (offset < bytes.length) {
+        const length = bytes[offset] ?? 0
+        offset += 1
+        if (length === 0) break
+        offset += length
+        if (offset > bytes.length) return null
+      }
+      continue
+    }
+    if (marker !== 0x2c || offset + 9 > bytes.length) return null
+    const left = view.getUint16(offset, true)
+    const top = view.getUint16(offset + 2, true)
+    const width = view.getUint16(offset + 4, true)
+    const height = view.getUint16(offset + 6, true)
+    if (width === 0 || height === 0 || left + width > canvasWidth || top + height > canvasHeight) {
+      return null
+    }
+    return { width, height }
+  }
+  return null
+}
+
 export const readImageDimensions = (
   bytes: Uint8Array,
 ): { width: number; height: number } | null => {
@@ -70,9 +106,8 @@ export const readImageDimensions = (
   if (bytes.length >= 24 && view.getUint32(0) === 0x89504e47 && view.getUint32(4) === 0x0d0a1a0a) {
     return { width: view.getUint32(16), height: view.getUint32(20) }
   }
-  if (bytes.length >= 10 && new TextDecoder().decode(bytes.subarray(0, 6)).startsWith('GIF8')) {
-    return { width: view.getUint16(6, true), height: view.getUint16(8, true) }
-  }
+  if (bytes.length >= 6 && readAsciiTag(bytes, 0, 6).startsWith('GIF8'))
+    return readGifFrameDimensions(bytes)
   if (
     bytes.length >= 25 &&
     readAsciiTag(bytes, 0) === 'RIFF' &&
@@ -399,6 +434,16 @@ export function ArtifactRenderer({
           </div>
         </dl>
         <div className="artifact-actions">
+          {automaticStatus === 'failed' && (
+            <span className="sr-only" role="alert">
+              Preview image failed to load for {displayName(descriptor)}. Retry the preview check.
+            </span>
+          )}
+          {originalStatus === 'failed' && (
+            <span className="sr-only" role="alert">
+              Original image failed to load for {displayName(descriptor)}. Retry the original check.
+            </span>
+          )}
           {originalRequested && originalAdmitted && (
             <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
               Original admitted for {displayName(descriptor)}

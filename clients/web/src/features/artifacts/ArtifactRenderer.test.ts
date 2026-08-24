@@ -115,13 +115,21 @@ describe('artifact renderer compatibility', () => {
   })
 
   it('reads bounded GIF dimensions for pixel admission', () => {
-    const bytes = new Uint8Array(10)
-    bytes.set(new TextEncoder().encode('GIF89a'))
-    const view = new DataView(bytes.buffer)
-    view.setUint16(6, 320, true)
-    view.setUint16(8, 240, true)
+    const bytes = new Uint8Array([
+      0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x80, 0x02, 0xe0, 0x01, 0x00, 0x00, 0x00, 0x2c, 0x00,
+      0x00, 0x00, 0x00, 0x40, 0x01, 0xf0, 0x00, 0x00,
+    ])
 
     expect(readImageDimensions(bytes)).toEqual({ width: 320, height: 240 })
+  })
+
+  it('rejects a GIF frame outside its declared logical screen', () => {
+    const bytes = new Uint8Array([
+      0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00,
+      0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00,
+    ])
+
+    expect(readImageDimensions(bytes)).toBeNull()
   })
 
   it('reads bounded JPEG dimensions for pixel admission', () => {

@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
-import { type Dispatch, type FormEvent, type RefObject, type SetStateAction, useRef } from 'react'
+import type { Dispatch, FormEvent, RefObject, SetStateAction } from 'react'
 import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
 import {
   type BlobDescriptorInput,
@@ -55,7 +55,6 @@ export function ArtifactInspector({
   onStateChange: Dispatch<SetStateAction<ArtifactInspectorState>>
 }) {
   const queryClient = useQueryClient()
-  const resolvedStatusRef = useRef<HTMLSpanElement>(null)
   const { digest, mediaType, displayFilename, request } = state
   const descriptor = useQuery({
     queryKey: request
@@ -160,7 +159,7 @@ export function ArtifactInspector({
                 const restoreFocus = document.activeElement === event.currentTarget
                 void descriptor.refetch().then((result) => {
                   if (result.isSuccess && restoreFocus) {
-                    requestAnimationFrame(() => resolvedStatusRef.current?.focus())
+                    requestAnimationFrame(() => digestInputRef?.current?.focus())
                   }
                 })
               }}
@@ -172,14 +171,7 @@ export function ArtifactInspector({
       )}
       {descriptor.data && (
         <>
-          <span
-            ref={resolvedStatusRef}
-            className="sr-only"
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
-            tabIndex={-1}
-          >
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
             Resolved artifact {descriptor.data.display_filename[0] ?? descriptor.data.digest}
           </span>
           <ArtifactRenderer

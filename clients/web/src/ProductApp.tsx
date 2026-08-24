@@ -94,9 +94,11 @@ const surfaceCopy: Record<
 
 function ProductNavigation({
   active,
+  context,
   onNavigate,
 }: {
   active: ProductRouteId
+  context: CommandContext
   onNavigate?: () => void
 }) {
   return (
@@ -114,7 +116,20 @@ function ProductNavigation({
             params={{ surface: route.id }}
             className={active === route.id ? 'product-link active' : 'product-link'}
             aria-current={active === route.id ? 'page' : undefined}
-            onClick={onNavigate}
+            onClick={(event) => {
+              if (
+                event.button !== 0 ||
+                event.metaKey ||
+                event.ctrlKey ||
+                event.shiftKey ||
+                event.altKey
+              ) {
+                return
+              }
+              event.preventDefault()
+              onNavigate?.()
+              invokeCommand(`navigate.${route.id}`, context)
+            }}
           >
             <span>{route.label}</span>
             <small>{route.description}</small>
@@ -125,7 +140,20 @@ function ProductNavigation({
         className="scenario-entry"
         to="/scenario/$scenarioId"
         params={{ scenarioId: 'streaming' }}
-        onClick={onNavigate}
+        onClick={(event) => {
+          if (
+            event.button !== 0 ||
+            event.metaKey ||
+            event.ctrlKey ||
+            event.shiftKey ||
+            event.altKey
+          ) {
+            return
+          }
+          event.preventDefault()
+          onNavigate?.()
+          invokeCommand('navigate.scenario', context)
+        }}
       >
         Scenario studio <span aria-hidden="true">↗</span>
       </Link>
@@ -434,7 +462,17 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
-      callback: () => {
+      callback: (event) => {
+        const target = event.target
+        if (
+          binding.commandId === 'surface.escape' &&
+          (target instanceof HTMLInputElement ||
+            target instanceof HTMLTextAreaElement ||
+            target instanceof HTMLSelectElement ||
+            (target instanceof HTMLElement && target.isContentEditable))
+        ) {
+          return
+        }
         if (store.getState().app.overlay === null && !(artifactOpen && inspectorInSheet)) {
           if (
             binding.commandId === 'layout.toggle' &&
@@ -507,6 +545,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         return
       }
       event.preventDefault()
+      event.stopPropagation()
       artifactSideWasOpen.current = false
       setArtifactOpen(false)
       requestAnimationFrame(() => artifactButtonRef.current?.focus())
@@ -530,7 +569,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   return (
     <div className={`product-shell layout-${app.layout}`}>
       <aside className="product-navigation-pane">
-        <ProductNavigation active={surface} />
+        <ProductNavigation active={surface} context={context} />
       </aside>
       <main className="product-main" tabIndex={-1} ref={primaryRef}>
         <header className="product-header">
@@ -640,6 +679,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             </Dialog.Close>
             <ProductNavigation
               active={surface}
+              context={context}
               onNavigate={() => {
                 navigationSelectedRoute.current = true
                 dispatch(actions.overlaySet(null))

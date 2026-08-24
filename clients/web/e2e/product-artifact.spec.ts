@@ -426,6 +426,7 @@ test('recovers after a descriptor response violates the generated contract', asy
   await expect(
     page.getByRole('article', { name: `Artifact ${imageArtifact.display_filename[0]}` }),
   ).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Digest' })).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
