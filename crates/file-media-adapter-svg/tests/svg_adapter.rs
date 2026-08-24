@@ -427,6 +427,15 @@ async fn leading_text_before_non_svg_root_is_unknown() -> Result<(), Box<dyn Err
 }
 
 #[tokio::test]
+async fn invalid_declaration_before_non_svg_root_is_unknown() -> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(br#"<?xml?><foo/>"#).into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
 async fn dtd_bearing_svg_is_malformed_without_svg_declaration() -> Result<(), Box<dyn Error>> {
     let source = SvgFixture::raw(br#"<!DOCTYPE svg><svg xmlns="http://www.w3.org/2000/svg"/>"#)
         .into_source()?;
@@ -597,6 +606,15 @@ async fn declaration_after_comment_is_rejected() -> Result<(), Box<dyn Error>> {
 async fn forbidden_attribute_control_character_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed!(
         SvgFixture::raw(b"<svg xmlns=\"http://www.w3.org/2000/svg\" aria-label=\"a\x01b\"/>"),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn dimension_with_trailing_decimal_point_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="1.px"/>"#,),
         "malformed_svg",
     )
     .await

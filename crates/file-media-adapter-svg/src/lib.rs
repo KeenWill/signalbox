@@ -496,7 +496,9 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
             }
             Event::Decl(declaration) if !root_seen && !declaration_seen && !prolog_event_seen => {
                 declaration_seen = true;
-                validate_declaration(&declaration, source_encoding)?;
+                if validate_declaration(&declaration, source_encoding).is_err() {
+                    pending_prolog_issue = Some(ParseIssue::Malformed);
+                }
             }
             Event::Comment(comment) => {
                 let decoded = comment.xml10_content().map_err(|_| ParseIssue::Malformed)?;
@@ -1182,12 +1184,54 @@ fn is_xml_whitespace(value: &str) -> bool {
 }
 
 fn parse_nonnegative_finite(value: &str) -> Result<f64, ParseIssue> {
+    if !valid_number_token(value) {
+        return Err(ParseIssue::Malformed);
+    }
     let parsed = value.parse::<f64>().map_err(|_| ParseIssue::Malformed)?;
     if parsed.is_finite() && parsed >= 0.0 {
         Ok(parsed)
     } else {
         Err(ParseIssue::Malformed)
     }
+}
+
+fn valid_number_token(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut position = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    let integer_start = position;
+    while bytes.get(position).is_some_and(u8::is_ascii_digit) {
+        position += 1;
+    }
+    let integer_digits = position > integer_start;
+    let mut fraction_digits = false;
+    if bytes.get(position) == Some(&b'.') {
+        position += 1;
+        let fraction_start = position;
+        while bytes.get(position).is_some_and(u8::is_ascii_digit) {
+            position += 1;
+        }
+        fraction_digits = position > fraction_start;
+        if !fraction_digits {
+            return false;
+        }
+    }
+    if !integer_digits && !fraction_digits {
+        return false;
+    }
+    if matches!(bytes.get(position), Some(b'e' | b'E')) {
+        position += 1;
+        if matches!(bytes.get(position), Some(b'+' | b'-')) {
+            position += 1;
+        }
+        let exponent_start = position;
+        while bytes.get(position).is_some_and(u8::is_ascii_digit) {
+            position += 1;
+        }
+        if position == exponent_start {
+            return false;
+        }
+    }
+    position == bytes.len()
 }
 
 fn parse_view_box(value: &str) -> Result<[f64; 4], ParseIssue> {
