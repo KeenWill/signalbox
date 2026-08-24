@@ -291,6 +291,12 @@ fn timestamp_to_offset(
         .map_err(|_| UsageProjectionCorruption::Invalid("timestamp"))
 }
 
+/// Reports whether one application timestamp can cross this adapter boundary.
+#[must_use]
+pub fn usage_timestamp_is_representable(timestamp: UsageTimestampMicros) -> bool {
+    timestamp_to_offset(timestamp).is_ok()
+}
+
 const fn provenance_storage(provenance: UsageProvenance) -> &'static str {
     match provenance {
         UsageProvenance::Reported => "reported",
@@ -465,5 +471,13 @@ mod tests {
                 .expect("fixture timestamp decodes");
 
         assert_eq!(decoded, timestamp);
+    }
+
+    #[test]
+    fn timestamp_representability_rejects_values_outside_time_range() {
+        let timestamp = UsageTimestampMicros::new(i64::MAX as u64)
+            .expect("the application timestamp maximum is admitted");
+
+        assert!(!usage_timestamp_is_representable(timestamp));
     }
 }

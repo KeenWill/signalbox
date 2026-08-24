@@ -43,7 +43,9 @@ use signalbox_persistence::search::{SearchRepository, SearchRepositoryError};
 use signalbox_persistence::session_timeline::{
     SessionTimelineRepository, SessionTimelineRepositoryError,
 };
-use signalbox_persistence::usage::{UsageRepository, UsageRepositoryError};
+use signalbox_persistence::usage::{
+    UsageRepository, UsageRepositoryError, usage_timestamp_is_representable,
+};
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
     WebContractBootstrap, WebContractExample, WebDollarAmount, WebNullableU64,
@@ -714,7 +716,8 @@ fn parse_usage_timestamp(value: &str) -> Option<UsageTimestampMicros> {
     {
         return None;
     }
-    UsageTimestampMicros::new(value.parse().ok()?).ok()
+    let timestamp = UsageTimestampMicros::new(value.parse().ok()?).ok()?;
+    usage_timestamp_is_representable(timestamp).then_some(timestamp)
 }
 
 fn parse_model_call_id(value: &str) -> Option<ModelCallId> {
@@ -845,16 +848,10 @@ fn usage_cost_dto(
             ProcessModelCallInputTokenSemantics::CacheExclusive
         }
         UsageInputTokenSemantics::CacheInclusive => {
-            if tokens.input.is_none()
-                || tokens.cache_creation_input.is_none()
-                || tokens.cache_read_input.is_none()
-            {
-                return unavailable(WebUsageCostUnavailableReason::IncompleteCacheAxes);
-            }
             let cache_total = tokens
                 .cache_creation_input
                 .and_then(|creation| tokens.cache_read_input?.checked_add(creation));
-            if cache_total.is_none_or(|cache| tokens.input.is_none_or(|input| input < cache)) {
+            if cache_total.is_some_and(|cache| tokens.input.is_some_and(|input| input < cache)) {
                 return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
             }
             ProcessModelCallInputTokenSemantics::CacheInclusive
@@ -1496,7 +1493,6 @@ mod tests {
     use signalbox_domain::{ProviderModelIdentity, ResolvedProviderTarget};
     use signalbox_web_contract::{
         MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebContractBootstrap, WebContractExample,
-        WebUsageCost, WebUsageCostUnavailableReason,
     };
     use tokio::sync::{mpsc, watch};
     use tower::ServiceExt as _;
@@ -1945,9 +1941,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn valid_usage_filters_are_parsed_before_projection_availability_is_reported() {
+    async fn representable_usage_filters_are_parsed_before_projection_availability_is_reported() {
         let request = Request::get(
-            "/api/usage/calls?from_micros=0&to_micros=9223372036854775807&provenance=estimated&call_kind=approval_judge&order=oldest&max_items=100",
+            "/api/usage/calls?from_micros=0&to_micros=1777777777123456&provenance=estimated&call_kind=approval_judge&order=oldest&max_items=100",
         )
         .header(header::HOST, "localhost")
         .body(Body::empty())
@@ -1962,6 +1958,26 @@ mod tests {
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"]["code"], "usage_projection_unavailable");
+    }
+
+    #[tokio::test]
+    async fn usage_filters_reject_timestamps_outside_persistence_range() {
+        let request = Request::get(
+            "/api/usage/calls?to_micros=9223372036854775807&order=oldest&max_items=100",
+        )
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .expect("the request is valid");
+        let response = production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_usage_query");
     }
 
     #[tokio::test]
@@ -2021,7 +2037,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_usage_cost_names_incomplete_cache_coverage() {
+    fn configured_usage_cost_prices_independent_axes_with_incomplete_cache_coverage() {
         let configuration = example_model_configuration();
         let cost = usage_cost_dto(
             &configuration,
@@ -2036,13 +2052,10 @@ mod tests {
             },
             true,
         );
+        let cost = serde_json::to_value(cost).expect("cost serializes");
 
-        assert_eq!(
-            cost,
-            WebUsageCost::Unavailable {
-                reason: WebUsageCostUnavailableReason::IncompleteCacheAxes,
-            }
-        );
+        assert_eq!(cost["status"], "derived");
+        assert_ne!(cost["amount_usd"], "0");
     }
 
     #[tokio::test]

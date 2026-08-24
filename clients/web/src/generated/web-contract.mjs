@@ -759,7 +759,7 @@ const schemas = {
     "$defs": {
       "WebDollarAmount": {
         "description": "Canonical nonnegative fixed-point USD amount derived by the daemon.",
-        "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,28})?$",
+        "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,27}[1-9])?$",
         "type": "string"
       },
       "WebNullableU64": {
@@ -969,6 +969,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebUsageCall"
         },
+        "maxItems": 100,
         "type": "array"
       },
       "continuation": {
@@ -992,7 +993,7 @@ const schemas = {
     "$defs": {
       "WebDollarAmount": {
         "description": "Canonical nonnegative fixed-point USD amount derived by the daemon.",
-        "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,28})?$",
+        "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,27}[1-9])?$",
         "type": "string"
       },
       "WebNullableU64": {
@@ -1202,6 +1203,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebUsageAggregateGroup"
         },
+        "maxItems": 256,
         "type": "array"
       },
       "truncated": {
@@ -1324,6 +1326,9 @@ function assertSchema(root, schema, value, path) {
     if (!Array.isArray(value)) {
       fail(path, "an array");
     }
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+      fail(path, `at most ${schema.maxItems} items`);
+    }
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${path}[${index}]`));
     return;
   }
@@ -1353,6 +1358,13 @@ function assertSchema(root, schema, value, path) {
   }
   if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {
     fail(path, `a string matching ${schema.pattern}`);
+  }
+  if (
+    schema.type === "string" &&
+    schema.pattern === "^(0|[1-9][0-9]*)(\\.[0-9]{0,27}[1-9])?$" &&
+    BigInt(value.replace(".", "")) > 79228162514264337593543950335n
+  ) {
+    fail(path, "a rust_decimal coefficient");
   }
   if (
     schema.type === "string" &&
@@ -1398,10 +1410,28 @@ export function decodeWebSearchPage(value) {
 
 export function decodeWebUsageSummary(value) {
   assertSchema(schemas.WebUsageSummary, schemas.WebUsageSummary, value, "usage_summary");
+  value.groups.forEach((group, index) => {
+    assertUsageEvidence(group.tokens, group.cost, `usage_summary.groups[${index}]`);
+    for (const axis of ["input", "output", "cache_creation_input", "cache_read_input"]) {
+      if (group.coverage[axis] !== (group.tokens[axis] !== null)) {
+        fail(`usage_summary.groups[${index}].coverage.${axis}`, "consistent with token evidence");
+      }
+    }
+  });
   return value;
 }
 
 export function decodeWebUsageCallPage(value) {
   assertSchema(schemas.WebUsageCallPage, schemas.WebUsageCallPage, value, "usage_call_page");
+  value.calls.forEach((call, index) =>
+    assertUsageEvidence(call.tokens, call.cost, `usage_call_page.calls[${index}]`),
+  );
   return value;
+}
+
+function assertUsageEvidence(tokens, cost, path) {
+  const hasTokenEvidence = Object.values(tokens).some((value) => value !== null);
+  if (cost.status === "derived" && !hasTokenEvidence) {
+    fail(`${path}.cost`, "unavailable without token evidence");
+  }
 }

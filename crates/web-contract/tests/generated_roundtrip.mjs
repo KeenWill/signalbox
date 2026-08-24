@@ -8,6 +8,7 @@ import {
   decodeWebContractExample,
   decodeWebSessionTimelineDescriptor,
   decodeWebSessionTimelineWindow,
+  decodeWebUsageCallPage,
   decodeWebUsageSummary,
 } from "../../../clients/web/src/generated/web-contract.mjs";
 
@@ -162,4 +163,117 @@ test("generated usage decoder preserves nullable axes and labeled cost", () => {
   assert.equal(summary.groups[0].cost.status, "derived");
   assert.equal(summary.groups[0].cost.rate_version, "fixture-v2");
   assert.equal(summary.groups[0].cost.label, "metered_equivalent");
+});
+
+function usageGroup() {
+  return {
+    call_kind: "model_call",
+    model_id: "00000000-0000-0000-0000-000000000041",
+    provenance: "estimated",
+    input_semantics: "cache_exclusive",
+    coverage: {
+      input: true,
+      output: false,
+      cache_creation_input: false,
+      cache_read_input: false,
+    },
+    call_count: "1",
+    tokens: {
+      input: "17",
+      output: null,
+      cache_creation_input: null,
+      cache_read_input: null,
+    },
+    cost: {
+      status: "derived",
+      amount_usd: "0.17",
+      rate_version: "fixture-v2",
+      label: "metered_equivalent",
+    },
+  };
+}
+
+function usageCall() {
+  return {
+    call_kind: "model_call",
+    call_id: "00000000-0000-0000-0000-000000000051",
+    session_id: "00000000-0000-0000-0000-000000000052",
+    turn_id: "00000000-0000-0000-0000-000000000053",
+    model_id: "00000000-0000-0000-0000-000000000041",
+    provenance: "estimated",
+    input_semantics: "cache_exclusive",
+    tokens: {
+      input: "17",
+      output: null,
+      cache_creation_input: null,
+      cache_read_input: null,
+    },
+    recorded_at_micros: "1777777777123456",
+    cost: {
+      status: "derived",
+      amount_usd: "0.17",
+      rate_version: "fixture-v2",
+      label: "metered_equivalent",
+    },
+  };
+}
+
+test("generated usage decoder enforces collection ceilings", () => {
+  assert.throws(
+    () => decodeWebUsageSummary({
+      groups: Array.from({ length: 257 }, usageGroup),
+      truncated: true,
+    }),
+    /at most 256 items/,
+  );
+  assert.throws(
+    () => decodeWebUsageCallPage({
+      calls: Array.from({ length: 101 }, usageCall),
+      continuation: null,
+    }),
+    /at most 100 items/,
+  );
+});
+
+test("generated usage decoder rejects noncanonical dollar amounts", () => {
+  const trailingZero = usageGroup();
+  trailingZero.cost.amount_usd = "0.170";
+  const oversizedCoefficient = usageGroup();
+  oversizedCoefficient.cost.amount_usd = "79228162514264337593543950336";
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [trailingZero], truncated: false }),
+    /one recognized variant/,
+  );
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [oversizedCoefficient], truncated: false }),
+    /one recognized variant/,
+  );
+});
+
+test("generated usage summary rejects contradictory coverage", () => {
+  const group = usageGroup();
+  group.coverage.input = false;
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [group], truncated: false }),
+    /consistent with token evidence/,
+  );
+});
+
+test("generated summary and call decoders reject derived cost without tokens", () => {
+  const group = usageGroup();
+  group.coverage.input = false;
+  group.tokens.input = null;
+  const call = usageCall();
+  call.tokens.input = null;
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [group], truncated: false }),
+    /unavailable without token evidence/,
+  );
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [call], continuation: null }),
+    /unavailable without token evidence/,
+  );
 });

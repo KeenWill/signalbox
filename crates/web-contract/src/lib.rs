@@ -461,7 +461,7 @@ pub enum WebUsageCostUnavailableReason {
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct WebDollarAmount(
-    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)(\.[0-9]{1,28})?$"))] String,
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)(\.[0-9]{0,27}[1-9])?$"))] String,
 );
 
 impl WebDollarAmount {
@@ -490,8 +490,14 @@ impl<'de> Deserialize<'de> for WebDollarAmount {
             !fractional.is_empty()
                 && fractional.len() <= 28
                 && fractional.bytes().all(|byte| byte.is_ascii_digit())
+                && !fractional.ends_with('0')
         });
-        if !whole_is_canonical || !fractional_is_canonical {
+        let coefficient = format!("{whole}{}", fractional.unwrap_or_default());
+        let significant_coefficient = coefficient.trim_start_matches('0');
+        let coefficient_fits = significant_coefficient.len() < 29
+            || (significant_coefficient.len() == 29
+                && significant_coefficient <= "79228162514264337593543950335");
+        if !whole_is_canonical || !fractional_is_canonical || !coefficient_fits {
             return Err(de::Error::custom(
                 "dollar amount must be a canonical nonnegative decimal",
             ));
@@ -532,6 +538,7 @@ pub struct WebUsageAggregateGroup {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebUsageSummary {
+    #[schemars(length(max = 256))]
     pub groups: Vec<WebUsageAggregateGroup>,
     pub truncated: bool,
 }
@@ -564,6 +571,7 @@ pub struct WebUsageCallCursor {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebUsageCallPage {
+    #[schemars(length(max = 100))]
     pub calls: Vec<WebUsageCall>,
     pub continuation: Option<WebUsageCallCursor>,
 }
@@ -826,6 +834,9 @@ function assertSchema(root, schema, value, path) {{
     if (!Array.isArray(value)) {{
       fail(path, "an array");
     }}
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {{
+      fail(path, `at most ${{schema.maxItems}} items`);
+    }}
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${{path}}[${{index}}]`));
     return;
   }}
@@ -855,6 +866,13 @@ function assertSchema(root, schema, value, path) {{
   }}
   if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {{
     fail(path, `a string matching ${{schema.pattern}}`);
+  }}
+  if (
+    schema.type === "string" &&
+    schema.pattern === "^(0|[1-9][0-9]*)(\\.[0-9]{{0,27}}[1-9])?$" &&
+    BigInt(value.replace(".", "")) > 79228162514264337593543950335n
+  ) {{
+    fail(path, "a rust_decimal coefficient");
   }}
   if (
     schema.type === "string" &&
@@ -900,12 +918,30 @@ export function decodeWebSearchPage(value) {{
 
 export function decodeWebUsageSummary(value) {{
   assertSchema(schemas.WebUsageSummary, schemas.WebUsageSummary, value, "usage_summary");
+  value.groups.forEach((group, index) => {{
+    assertUsageEvidence(group.tokens, group.cost, `usage_summary.groups[${{index}}]`);
+    for (const axis of ["input", "output", "cache_creation_input", "cache_read_input"]) {{
+      if (group.coverage[axis] !== (group.tokens[axis] !== null)) {{
+        fail(`usage_summary.groups[${{index}}].coverage.${{axis}}`, "consistent with token evidence");
+      }}
+    }}
+  }});
   return value;
 }}
 
 export function decodeWebUsageCallPage(value) {{
   assertSchema(schemas.WebUsageCallPage, schemas.WebUsageCallPage, value, "usage_call_page");
+  value.calls.forEach((call, index) =>
+    assertUsageEvidence(call.tokens, call.cost, `usage_call_page.calls[${{index}}]`),
+  );
   return value;
+}}
+
+function assertUsageEvidence(tokens, cost, path) {{
+  const hasTokenEvidence = Object.values(tokens).some((value) => value !== null);
+  if (cost.status === "derived" && !hasTokenEvidence) {{
+    fail(`${{path}}.cost`, "unavailable without token evidence");
+  }}
 }}
 "##,
         contract_name = WEB_CONTRACT_NAME,
@@ -1157,5 +1193,9 @@ mod tests {
         );
         assert!(serde_json::from_str::<WebDollarAmount>(r#""0""#).is_ok());
         assert!(serde_json::from_str::<WebDollarAmount>(r#""0.17""#).is_ok());
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""0.170""#).is_err());
+        assert!(
+            serde_json::from_str::<WebDollarAmount>(r#""79228162514264337593543950336""#).is_err()
+        );
     }
 }
