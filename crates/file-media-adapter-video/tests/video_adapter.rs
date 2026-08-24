@@ -125,6 +125,12 @@ fn declaration_registers_mp4_and_webm_under_available_isolation() -> Result<(), 
     let registry = registry()?;
 
     assert_eq!(registry.providers(), &[declaration()?]);
+    for reader in registry.providers()[0].readers() {
+        let probe = reader.probe();
+        assert_eq!(probe.suffix_bytes(), 0);
+        assert_eq!(probe.range_count(), 1);
+        assert_eq!(probe.cumulative_bytes(), probe.prefix_bytes());
+    }
     Ok(())
 }
 
@@ -457,6 +463,25 @@ async fn duplicate_mp4_sample_tables_are_malformed() -> Result<(), Box<dyn Error
 }
 
 #[tokio::test]
+async fn duplicate_mp4_media_information_boxes_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_duplicate_media_information(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn supported_brand_is_probed_from_a_partially_buffered_file_type_box()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_large_file_type_box().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
 async fn unsupported_ebml_read_version_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::webm_with_unsupported_ebml_read_version(),
@@ -508,6 +533,11 @@ async fn audio_only_webm_is_not_claimed_as_video() -> Result<(), Box<dyn Error>>
 
     assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
     Ok(())
+}
+
+#[tokio::test]
+async fn webm_without_tracks_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(VideoFixture::webm_without_tracks(), "malformed_video").await
 }
 
 #[tokio::test]

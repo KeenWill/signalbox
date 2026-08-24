@@ -93,10 +93,16 @@ impl FileMediaProvider for VideoProvider {
         Box::pin(async move {
             let kind = require_reader(reader)?;
             require_active(cancellation)?;
-            let length = source.byte_length().get().min(PROBE_BYTES);
+            let source_bytes = source.byte_length().get();
+            let length = source_bytes.min(PROBE_BYTES);
             let bytes = read_range(source, 0, length).await?;
             require_active(cancellation)?;
             if kind.matches_probe(&bytes) {
+                if source_bytes == length
+                    && matches!(parse(kind, &bytes, source_bytes), Err(VideoIssue::NoVideo))
+                {
+                    return Ok(ProcessorProbeOutput::NoMatch);
+                }
                 Ok(ProcessorProbeOutput::Candidate {
                     media_type: String::from(kind.media_type()),
                     strength: ProbeStrength::StructuralCandidate,
@@ -128,7 +134,15 @@ impl FileMediaProvider for VideoProvider {
             }
             match parse(kind, &bytes, source_bytes) {
                 Ok(metadata) => validated_output(kind, request.evidence, &metadata),
-                Err(VideoIssue::NoVideo) => Ok(ProcessorValidationOutput::NoMatch),
+                Err(VideoIssue::NoVideo)
+                    if request.evidence
+                        == ValidationEvidence::DeclaredCandidateStructurallyValidated =>
+                {
+                    Ok(ProcessorValidationOutput::NoMatch)
+                }
+                Err(VideoIssue::NoVideo) => {
+                    Ok(malformed_validation(kind, VideoIssue::NoVideo.reason()))
+                }
                 Err(VideoIssue::Encrypted) => Ok(ProcessorValidationOutput::EncryptedOrLocked {
                     media_type: String::from(kind.media_type()),
                 }),
@@ -201,7 +215,7 @@ fn reader_declaration(
         reader: FileReaderName::try_new(kind.reader())?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(kind.media_type())?],
-        probe: ProbeDeclaration::new(PROBE_BYTES, 0, 1, METADATA_BYTES),
+        probe: ProbeDeclaration::new(PROBE_BYTES, 0, 1, PROBE_BYTES),
         views: vec![metadata_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,
@@ -242,10 +256,49 @@ impl VideoKind {
 }
 
 fn matches_mp4_probe(bytes: &[u8]) -> bool {
-    let Ok((box_type, payload, _)) = mp4_box_at(bytes, 0, true) else {
+    let Some(header) = bytes.get(..8) else {
         return false;
     };
-    box_type == MP4_FTYP && supported_ftyp(payload)
+    if header[4..8] != MP4_FTYP {
+        return false;
+    }
+    let size32 = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+    let (header_bytes, declared_size) = if size32 == 1 {
+        let Some(extended) = bytes.get(8..16) else {
+            return false;
+        };
+        let size = u64::from_be_bytes([
+            extended[0],
+            extended[1],
+            extended[2],
+            extended[3],
+            extended[4],
+            extended[5],
+            extended[6],
+            extended[7],
+        ]);
+        let Ok(size) = usize::try_from(size) else {
+            return false;
+        };
+        (16_usize, size)
+    } else if size32 >= 8 {
+        (8_usize, size32 as usize)
+    } else {
+        return false;
+    };
+    let Some(payload_size) = declared_size.checked_sub(header_bytes) else {
+        return false;
+    };
+    if payload_size < 8 || !(payload_size - 8).is_multiple_of(4) {
+        return false;
+    }
+    let available_end = declared_size.min(bytes.len());
+    let Some(payload) = bytes.get(header_bytes..available_end) else {
+        return false;
+    };
+    payload.len() >= 8
+        && (supported_mp4_brand(&payload[..4])
+            || payload[8..].chunks_exact(4).any(supported_mp4_brand))
 }
 
 fn supported_ftyp(payload: &[u8]) -> bool {
@@ -482,6 +535,7 @@ fn parse_mp4_boxes(
     let mut handler_seen = false;
     let mut track_header_seen = false;
     let mut media_header_seen = false;
+    let mut media_information_seen = false;
     let mut sample_table_seen = false;
     let mut sample_description_seen = false;
     while cursor < bytes.len() {
@@ -601,6 +655,10 @@ fn parse_mp4_boxes(
                 state.video_track_declared |= track_evidence.video_handler;
             }
             MP4_MINF if scope == Mp4Scope::Media => {
+                if media_information_seen {
+                    return Err(VideoIssue::Malformed);
+                }
+                media_information_seen = true;
                 track_evidence.include(parse_mp4_boxes(
                     payload,
                     depth + 1,
@@ -1254,7 +1312,12 @@ fn parse_webm(bytes: &[u8], source_bytes: u64) -> Result<VideoMetadata, VideoIss
         source_bytes,
         &mut state,
     )?;
-    if !state.header_seen || !state.doc_type_seen || !state.segment_seen || !state.info_seen {
+    if !state.header_seen
+        || !state.doc_type_seen
+        || !state.segment_seen
+        || !state.info_seen
+        || !state.tracks_seen
+    {
         return Err(VideoIssue::Malformed);
     }
     if state.video_tracks == 0 {

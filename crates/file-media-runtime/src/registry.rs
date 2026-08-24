@@ -437,7 +437,6 @@ impl FileMediaRegistry {
             }),
             SanitizedValidation::NoMatch
                 if evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated
-                    || evidence == ValidationEvidence::StructuralValidation
                     || evidence == ValidationEvidence::StreamingTextValidation =>
             {
                 Ok(FileInspection::Unknown {

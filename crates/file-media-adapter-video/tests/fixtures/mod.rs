@@ -477,6 +477,39 @@ impl VideoFixture {
         Self::new(FixtureKind::Mp4, mp4_bytes_with_tracks(&[track]))
     }
 
+    pub fn mp4_with_duplicate_media_information() -> Self {
+        let mut sample_description = vec![0_u8; 8];
+        sample_description[4..8].copy_from_slice(&1_u32.to_be_bytes());
+        sample_description.extend_from_slice(&avc1_sample_entry());
+        let sample_table = mp4_box(*b"stbl", &mp4_box(*b"stsd", &sample_description));
+        let media_information = mp4_box(*b"minf", &sample_table);
+        let mut handler = vec![0_u8; 24];
+        handler[8..12].copy_from_slice(b"vide");
+        let media = mp4_box(
+            *b"mdia",
+            &[
+                mp4_box(*b"mdhd", &[0_u8; 24]),
+                mp4_box(*b"hdlr", &handler),
+                media_information.clone(),
+                media_information,
+            ]
+            .concat(),
+        );
+        let track = mp4_box(*b"trak", &[tkhd(1), media].concat());
+        Self::new(FixtureKind::Mp4, mp4_bytes_with_tracks(&[track]))
+    }
+
+    pub fn mp4_with_large_file_type_box() -> Self {
+        let mut payload = b"avif\0\0\0\0isom".to_vec();
+        payload.resize(520, 0);
+        let ordinary = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
+        let movie = ordinary[ftyp().len()..].to_vec();
+        Self::new(
+            FixtureKind::Mp4,
+            [mp4_box(*b"ftyp", &payload), movie].concat(),
+        )
+    }
+
     pub fn audio_only_mp4() -> Self {
         let mut movie_header = vec![0_u8; 100];
         movie_header[12..16].copy_from_slice(&MP4_TIMESCALE.to_be_bytes());
@@ -536,6 +569,12 @@ impl VideoFixture {
         let track_entry = ebml_element(&[0xae], &[track_number, track_type, codec_id].concat());
         let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
         let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn webm_without_tracks() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &info);
         Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
     }
 
