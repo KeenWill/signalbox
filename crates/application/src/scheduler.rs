@@ -1011,12 +1011,12 @@ where
                                 if completed_priority == EligibilityHintPriority::Ordinary {
                                     ordinary_in_flight = ordinary_in_flight.saturating_sub(1);
                                 }
-                                if succeeded
-                                    && completed_priority == EligibilityHintPriority::DispatchStart
+                                if let Some(continuation_priority) =
+                                    pass_continuation_priority(completed_priority, succeeded)
                                 {
                                     enqueue_pending_hint(
                                         session,
-                                        EligibilityHintPriority::Ordinary,
+                                        continuation_priority,
                                         &in_flight_sessions,
                                         &mut pending_reruns,
                                         &mut pending_hints,
@@ -1096,12 +1096,12 @@ where
                                 if completed_priority == EligibilityHintPriority::Ordinary {
                                     ordinary_in_flight = ordinary_in_flight.saturating_sub(1);
                                 }
-                                if succeeded
-                                    && completed_priority == EligibilityHintPriority::DispatchStart
+                                if let Some(continuation_priority) =
+                                    pass_continuation_priority(completed_priority, succeeded)
                                 {
                                     enqueue_pending_hint(
                                         session,
-                                        EligibilityHintPriority::Ordinary,
+                                        continuation_priority,
                                         &in_flight_sessions,
                                         &mut pending_reruns,
                                         &mut pending_hints,
@@ -1167,6 +1167,19 @@ fn record_pending_rerun(
         .entry(session)
         .and_modify(|pending| *pending = (*pending).max(priority))
         .or_insert(priority);
+}
+
+fn pass_continuation_priority(
+    completed_priority: EligibilityHintPriority,
+    succeeded: bool,
+) -> Option<EligibilityHintPriority> {
+    match (completed_priority, succeeded) {
+        (EligibilityHintPriority::DispatchStart, true) => Some(EligibilityHintPriority::Ordinary),
+        (EligibilityHintPriority::DispatchStart, false) => {
+            Some(EligibilityHintPriority::DispatchStart)
+        }
+        (EligibilityHintPriority::Ordinary, _) => None,
+    }
 }
 
 fn enqueue_pending_hint(
@@ -1406,7 +1419,7 @@ mod tests {
         GoalPassDisposition, InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
         MINIMUM_DISPATCH_START_BACKLOG_CAPACITY, PendingHintQueues, ReconciliationSweepInterval,
         SCHEDULER_PASS_ADMISSION_CAP, SchedulerLoop, SchedulerLoopExit, enqueue_pending_hint,
-        ordinary_pass_limit, take_admissible_hint,
+        ordinary_pass_limit, pass_continuation_priority, take_admissible_hint,
     };
     use crate::{
         OperatorFailureClass, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
@@ -1839,26 +1852,43 @@ mod tests {
         );
 
         assert_eq!(nudge.nudge(ordinary), EligibilityNudgeOutcome::Enqueued);
-        for dispatch_start in &dispatch_starts {
-            assert_eq!(
-                nudge.nudge_dispatch_start(*dispatch_start),
-                EligibilityNudgeOutcome::Enqueued
-            );
-        }
+        let enqueue_outcomes = dispatch_starts
+            .iter()
+            .copied()
+            .map(|dispatch_start| nudge.nudge_dispatch_start(dispatch_start))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            enqueue_outcomes,
+            vec![EligibilityNudgeOutcome::Enqueued; dispatch_starts.len()]
+        );
         assert_eq!(
             nudge.nudge_dispatch_start(overflow),
             EligibilityNudgeOutcome::DroppedAtCapacity
         );
 
-        let mut retained = HashSet::new();
-        while let Some(session) = source.take_pending_dispatch_start() {
-            retained.insert(session);
-        }
+        let retained =
+            std::iter::from_fn(|| source.take_pending_dispatch_start()).collect::<HashSet<_>>();
         assert_eq!(
             retained,
             dispatch_starts.into_iter().collect::<HashSet<_>>()
         );
         assert!(!retained.contains(&overflow));
+    }
+
+    #[test]
+    fn inv069_failed_dispatch_start_pass_retains_reserved_priority() {
+        assert_eq!(
+            pass_continuation_priority(EligibilityHintPriority::DispatchStart, false),
+            Some(EligibilityHintPriority::DispatchStart)
+        );
+        assert_eq!(
+            pass_continuation_priority(EligibilityHintPriority::DispatchStart, true),
+            Some(EligibilityHintPriority::Ordinary)
+        );
+        assert_eq!(
+            pass_continuation_priority(EligibilityHintPriority::Ordinary, false),
+            None
+        );
     }
 
     #[tokio::test]

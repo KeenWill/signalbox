@@ -714,6 +714,12 @@ impl PostgresRepoWatchDispatchStore {
                            AND expired.action_ordinal = lease.action_ordinal
                     )
                     AND NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_dispatch_start_lease_quarantine AS quarantined
+                         WHERE quarantined.dispatch_id = lease.dispatch_id
+                           AND quarantined.action_ordinal = lease.action_ordinal
+                    )
+                    AND NOT EXISTS (
                         SELECT 1 FROM repo_watch_dispatch_release AS released
                          WHERE released.dispatch_id = lease.dispatch_id
                     )
