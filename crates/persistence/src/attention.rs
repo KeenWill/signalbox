@@ -407,8 +407,18 @@ fn classify_state(
     phase: Option<&str>,
     terminal: Option<&str>,
 ) -> Result<AttentionState, AttentionRepositoryError> {
-    if matches!(runner, Some("runner_lost" | "runner_lost_before_pin")) {
-        return Ok(AttentionState::RunnerLost);
+    match runner {
+        Some("runner_lost" | "runner_lost_before_pin") => {
+            return Ok(AttentionState::RunnerLost);
+        }
+        None | Some("unpinned" | "pinned" | "runner_abandoned") => {}
+        Some(value) => {
+            return Err(AttentionCorruption::Unsupported {
+                field: "runner state",
+                value: value.to_owned(),
+            }
+            .into());
+        }
     }
     if goal == Some("blocked") {
         return Ok(AttentionState::Blocked);
@@ -543,6 +553,61 @@ mod tests {
             .unwrap(),
             AttentionState::AwaitingToolRecovery
         );
+    }
+
+    #[test]
+    fn runner_placement_vocabulary_has_deliberate_attention_semantics() {
+        assert_eq!(
+            classify_state(
+                Some("runner_lost_before_pin"),
+                None,
+                Some("queued"),
+                None,
+                None
+            )
+            .unwrap(),
+            AttentionState::RunnerLost
+        );
+        assert_eq!(
+            classify_state(
+                Some("runner_lost"),
+                Some("blocked"),
+                Some("active"),
+                Some("running"),
+                None
+            )
+            .unwrap(),
+            AttentionState::RunnerLost
+        );
+        assert_eq!(
+            classify_state(
+                Some("unpinned"),
+                Some("blocked"),
+                Some("active"),
+                Some("running"),
+                None
+            )
+            .unwrap(),
+            AttentionState::Blocked
+        );
+        assert_eq!(
+            classify_state(Some("pinned"), None, Some("queued"), None, None).unwrap(),
+            AttentionState::Queued
+        );
+        assert_eq!(
+            classify_state(Some("runner_abandoned"), None, None, None, None).unwrap(),
+            AttentionState::Idle
+        );
+
+        let error = classify_state(Some("future_runner_state"), None, None, None, None)
+            .expect_err("unknown runner placement states must fail closed");
+        assert!(matches!(
+            error,
+            AttentionRepositoryError::Corruption(AttentionCorruption::Unsupported {
+                field: "runner state",
+                ..
+            })
+        ));
     }
 
     #[test]

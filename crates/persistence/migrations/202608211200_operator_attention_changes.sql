@@ -8,9 +8,17 @@ RETURNS bigint
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    PERFORM pg_advisory_xact_lock(
-        hashtextextended('signalbox.operator_attention_change', 0)
-    );
+    -- Outbox-producing transactions already hold this row through commit.
+    -- Direct attention facts take the same lock, so every publisher uses one
+    -- lock order and attention cursors remain commit-monotonic.
+    PERFORM 1
+      FROM outbox_sequence_state
+     WHERE singleton
+     FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'attention sequence requires outbox sequence state'
+            USING ERRCODE = '23503';
+    END IF;
     RETURN nextval('operator_attention_change_sequence');
 END;
 $$;
@@ -40,8 +48,23 @@ BEGIN
         CASE NEW.event_kind
             WHEN 'session_created' THEN 'session'
             WHEN 'session_model_settings_changed' THEN 'session'
+            WHEN 'goal_turn_retired' THEN 'goal'
             WHEN 'runner_state_transition' THEN 'runner'
-            ELSE 'turn'
+            WHEN 'delegation_update' THEN 'turn'
+            WHEN 'delegation_wake' THEN 'turn'
+            WHEN 'turn_model_settings_resolved' THEN 'turn'
+            WHEN 'input_accepted' THEN 'turn'
+            WHEN 'turn_activated' THEN 'turn'
+            WHEN 'turn_failed' THEN 'turn'
+            WHEN 'model_call_transition' THEN 'turn'
+            WHEN 'tool_batch_transition' THEN 'turn'
+            WHEN 'tool_approval_decided' THEN 'turn'
+            WHEN 'context_compacted' THEN 'turn'
+            WHEN 'turn_completed' THEN 'turn'
+            WHEN 'turn_refused' THEN 'turn'
+            WHEN 'turn_cancelled' THEN 'turn'
+            WHEN 'turn_reconciliation_required' THEN 'turn'
+            ELSE NULL
         END
     );
     RETURN NULL;
@@ -101,19 +124,32 @@ CREATE TRIGGER runner_placement_records_operator_attention_change
 AFTER INSERT ON runner_session_placement_record
 FOR EACH ROW EXECUTE FUNCTION record_operator_attention_runner_change();
 
--- Existing sessions receive only their authoritative command-claim time. No
--- historical activity time is inferred from UUID identity bits.
-WITH creation_commands AS (
-    SELECT created_session_id AS session_id, command_id
-      FROM create_session_command
+-- Existing owner-created sessions use their authoritative command-claim time.
+-- Delegated children have no creation command; their mandatory version-one
+-- placement is written in the spawning transaction and supplies its durable
+-- creation timestamp. No historical time is inferred from UUID identity bits.
+WITH creation_activity AS (
+    SELECT creation.created_session_id AS session_id,
+           command.claimed_at AS recorded_at
+      FROM create_session_command AS creation
+      JOIN durable_command AS command USING (command_id)
     UNION ALL
-    SELECT created_session_id, command_id
-      FROM create_session_from_imported_frontier_command
+    SELECT creation.created_session_id, command.claimed_at
+      FROM create_session_from_imported_frontier_command AS creation
+      JOIN durable_command AS command USING (command_id)
+    UNION ALL
+    SELECT delegated.session_id, placement.recorded_at
+      FROM session AS delegated
+      JOIN session_placement_event AS placement
+        ON placement.session_id = delegated.session_id
+       AND placement.version = 1
+       AND placement.prior_version IS NULL
+       AND placement.event_kind = 'created'
+     WHERE delegated.creation_cause = 'delegated'
 )
 INSERT INTO operator_attention_change (session_id, fact_kind, recorded_at)
-SELECT creation.session_id, 'session', command.claimed_at
-  FROM creation_commands AS creation
-  JOIN durable_command AS command USING (command_id);
+SELECT creation.session_id, 'session', creation.recorded_at
+  FROM creation_activity AS creation;
 
 CREATE TRIGGER operator_attention_change_is_append_only
 BEFORE UPDATE OR DELETE ON operator_attention_change
