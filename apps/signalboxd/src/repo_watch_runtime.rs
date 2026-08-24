@@ -126,9 +126,9 @@ const WEBHOOK_DRAIN_STALL_THRESHOLD: Duration = Duration::from_secs(60);
 // Pending delivery records are durable, so cancellation leaves the unfinished
 // work for the existing bounded backoff path to retry.
 const WEBHOOK_DRAIN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
-// Cleanup is best-effort after cancellation: the next attempt also drains the
-// shared child set before spawning, so timing out here cannot let unfinished
-// children interleave with later work.
+// Every shared child-set join uses this bound. A later attempt may retry the
+// join, but it never spawns alongside survivors or wedges the scheduler while
+// waiting for a child that does not finish cancellation.
 const WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 // Shutdown gives a retained targeted completion a short grace period, then
 // aborts and joins it so a wedged database operation cannot prevent the
@@ -1017,9 +1017,11 @@ impl RepositoryWatchTask {
 
     async fn run(mut self, shutdown: watch::Receiver<bool>) {
         self.run_until_stop(shutdown).await;
-        // A targeted cursor/terminal completion is deliberately detached from
+        // A targeted terminal/cursor completion is deliberately detached from
         // drain cancellation, but repository shutdown must still join it before
-        // the supervisor can report that this task stopped cleanly.
+        // the supervisor can report that this task stopped cleanly. The durable
+        // terminal handoff precedes cursor advancement, so aborting after this
+        // grace period cannot leave an advanced cursor with a pending delivery.
         if timeout(
             WEBHOOK_TARGETED_COMPLETION_SHUTDOWN_TIMEOUT,
             self.settle_webhook_targeted_completion(),
@@ -1035,7 +1037,7 @@ impl RepositoryWatchTask {
                 repository = %self.repository.as_str(),
                 timeout_seconds = WEBHOOK_TARGETED_COMPLETION_SHUTDOWN_TIMEOUT.as_secs(),
                 cause_code = "webhook_targeted_completion_shutdown_timed_out",
-                "repository-watch aborted a retained targeted completion during shutdown"
+                "repository-watch aborted a retained targeted completion after its durable handoff deadline"
             );
         }
     }
@@ -2300,6 +2302,13 @@ impl RepositoryWatchTask {
         .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
         let supersession_epoch = self.webhook_shadow_supersession_epoch;
         self.webhook_targeted_completion = Some(tokio::spawn(async move {
+            // Persist the terminal disposition and its exact projections first.
+            // This is the durable recovery handoff: if shutdown later aborts
+            // cursor advancement, restart excludes the delivery without losing
+            // its projections, and an ordinary poll can advance the old cursor.
+            record_webhook_terminal_request(&webhook_store, key, &terminal)
+                .await
+                .map_err(TargetedWebhookCompletionError::Terminal)?;
             let outcome = store
                 .commit(&repository, request)
                 .await
@@ -2314,9 +2323,6 @@ impl RepositoryWatchTask {
                     return Err(TargetedWebhookCompletionError::Persistence);
                 }
             }
-            record_webhook_terminal_request(&webhook_store, key, &terminal)
-                .await
-                .map_err(TargetedWebhookCompletionError::Terminal)?;
             Ok(TargetedWebhookCompletion {
                 shadow,
                 supersession_epoch,
@@ -3413,6 +3419,14 @@ struct GitHubRepositoryPoller {
         tokio::sync::Mutex<JoinSet<Result<RepoWatchPullRequestState, RepositoryWatchAttemptError>>>,
 }
 
+async fn drain_pull_request_fetches(
+    fetches: &mut JoinSet<Result<RepoWatchPullRequestState, RepositoryWatchAttemptError>>,
+) -> Result<(), RepositoryWatchAttemptError> {
+    timeout(WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT, fetches.shutdown())
+        .await
+        .map_err(|_| RepositoryWatchAttemptError::PullRequestFetchAbandoned)
+}
+
 struct PullRequestFreshness {
     updated_at: String,
     settlement: PullRequestSettlement,
@@ -3645,8 +3659,9 @@ impl GitHubRepositoryPoller {
         // A cancelled attempt drops this future mid-collection, which aborts
         // the children without joining them; they stay behind in the shared
         // set. Join any such survivor before spawning, so no child of an
-        // earlier attempt can interleave with this one.
-        fetches.shutdown().await;
+        // earlier attempt can interleave with this one. A wedged survivor
+        // fails this attempt back to the scheduler after a bounded wait.
+        drain_pull_request_fetches(&mut fetches).await?;
         let collected = self
             .collect_pull_request_fetches(
                 pull_numbers,
@@ -3660,8 +3675,9 @@ impl GitHubRepositoryPoller {
         // An aborted task only stops at its next await, so it can still charge
         // wire bytes, touch cache entries, or record freshness after this
         // attempt returns, landing that state in the next attempt. Wait for
-        // every task to finish before the caller can begin another poll.
-        fetches.shutdown().await;
+        // every task to finish before the caller can begin another poll, but
+        // return to the scheduler if a child does not finish cancellation.
+        drain_pull_request_fetches(&mut fetches).await?;
         let mut pull_requests = collected?;
         pull_requests.sort_by_key(|pull_request| pull_request.context().number().get());
         Ok(pull_requests)
@@ -3672,7 +3688,8 @@ impl GitHubRepositoryPoller {
     /// stop means no child is still resolving credentials, holding a
     /// connection, or touching shared state.
     async fn drain_fetches(&self) {
-        self.fetches.lock().await.shutdown().await;
+        let mut fetches = self.fetches.lock().await;
+        let _ = drain_pull_request_fetches(&mut fetches).await;
     }
 
     async fn collect_pull_request_fetches(
