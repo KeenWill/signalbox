@@ -88,6 +88,7 @@ impl FileMediaProvider for SvgProvider {
                     strength: ProbeStrength::StructuralCandidate,
                 },
                 ProbeRoot::MalformedSvg => malformed_probe(MALFORMED_REASON),
+                ProbeRoot::ActiveSvg => malformed_probe(ACTIVE_CONTENT_REASON),
                 ProbeRoot::Other => ProcessorProbeOutput::NoMatch,
             })
         })
@@ -106,7 +107,8 @@ impl FileMediaProvider for SvgProvider {
             if request.media_type.as_str() != MEDIA_TYPE {
                 return Err(FileMediaProviderFailure::Failed);
             }
-            if source.byte_length().get() > SOURCE_BYTES {
+            let maximum_source_bytes = SOURCE_BYTES.min(request.maximum_source_bytes);
+            if source.byte_length().get() > maximum_source_bytes {
                 return Ok(malformed_validation(SOURCE_SIZE_REASON));
             }
             let bytes = read_all(source).await?;
@@ -263,6 +265,7 @@ impl ParseIssue {
 enum ProbeRoot {
     Svg,
     MalformedSvg,
+    ActiveSvg,
     Other,
 }
 
@@ -271,13 +274,16 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
     let mut buffer = Vec::new();
     let mut declaration_is_utf8 = true;
     let mut forbidden_prolog_event = false;
+    let mut active_prolog_event = false;
     loop {
         match reader.read_resolved_event_into(&mut buffer) {
             Ok((namespace, Event::Start(start) | Event::Empty(start))) => {
                 if start.local_name().as_ref() != b"svg" || !is_svg_namespace(&namespace) {
                     return ProbeRoot::Other;
                 }
-                return if declaration_is_utf8 && !forbidden_prolog_event {
+                return if active_prolog_event {
+                    ProbeRoot::ActiveSvg
+                } else if declaration_is_utf8 && !forbidden_prolog_event {
                     ProbeRoot::Svg
                 } else {
                     ProbeRoot::MalformedSvg
@@ -286,11 +292,14 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
             Ok((_, Event::Decl(declaration))) => {
                 declaration_is_utf8 = declaration_uses_utf8(&declaration).unwrap_or(false);
             }
-            Ok((_, Event::DocType(_) | Event::PI(_) | Event::GeneralRef(_) | Event::CData(_))) => {
+            Ok((_, Event::PI(_))) => {
+                active_prolog_event = true;
+            }
+            Ok((_, Event::DocType(_) | Event::GeneralRef(_) | Event::CData(_))) => {
                 forbidden_prolog_event = true;
             }
             Ok((_, Event::Text(text))) => match text.xml10_content() {
-                Ok(text) if text.trim().is_empty() => {}
+                Ok(text) if is_xml_whitespace(&text) => {}
                 _ => return ProbeRoot::Other,
             },
             Ok((_, Event::Eof)) | Err(_) => return ProbeRoot::Other,
@@ -388,7 +397,7 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     return Err(ParseIssue::Malformed);
                 }
                 let decoded = text.xml10_content().map_err(|_| ParseIssue::Malformed)?;
-                if depth == 0 && !decoded.trim().is_empty() {
+                if depth == 0 && !is_xml_whitespace(&decoded) {
                     return Err(ParseIssue::Malformed);
                 }
                 if depth == 0 {
@@ -772,16 +781,33 @@ fn parse_dimension(value: &str) -> Result<Option<f64>, ParseIssue> {
     if let Ok(parsed) = parse_nonnegative_finite(value) {
         return Ok(Some(parsed));
     }
-    if let Some(number) = value.strip_suffix("px") {
-        return parse_nonnegative_finite(number).map(Some);
-    }
-    for unit in ["%", "em", "ex", "in", "cm", "mm", "pt", "pc"] {
-        if let Some(number) = value.strip_suffix(unit) {
+    for unit in [
+        "dvmax", "dvmin", "lvmax", "lvmin", "svmax", "svmin", "rcap", "dvb", "dvh", "dvi", "dvw",
+        "lvb", "lvh", "lvi", "lvw", "rch", "rem", "rex", "ric", "rlh", "svb", "svh", "svi", "svw",
+        "vmax", "vmin", "cap", "ch", "cm", "em", "ex", "ic", "in", "lh", "mm", "pc", "pt", "vb",
+        "vh", "vi", "vw", "q", "%",
+    ] {
+        if let Some(number) = strip_ascii_case_suffix(value, unit) {
             parse_nonnegative_finite(number)?;
             return Ok(None);
         }
     }
+    if let Some(number) = strip_ascii_case_suffix(value, "px") {
+        return parse_nonnegative_finite(number).map(Some);
+    }
     Err(ParseIssue::Malformed)
+}
+
+fn strip_ascii_case_suffix<'a>(value: &'a str, suffix: &str) -> Option<&'a str> {
+    let split = value.len().checked_sub(suffix.len())?;
+    let (number, candidate) = value.split_at(split);
+    candidate.eq_ignore_ascii_case(suffix).then_some(number)
+}
+
+fn is_xml_whitespace(value: &str) -> bool {
+    value
+        .chars()
+        .all(|character| matches!(character, ' ' | '\t' | '\n' | '\r'))
 }
 
 fn parse_nonnegative_finite(value: &str) -> Result<f64, ParseIssue> {

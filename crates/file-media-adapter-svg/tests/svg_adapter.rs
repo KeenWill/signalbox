@@ -234,6 +234,26 @@ async fn oversized_source_is_a_typed_validation_limit() -> Result<(), Box<dyn Er
 }
 
 #[tokio::test]
+async fn lowered_validation_ceiling_is_a_typed_validation_limit() -> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::ordinary().into_source()?;
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 64;
+    let request = InspectionRequest {
+        source: source
+            .file_use()
+            .map_err(|_| FileMediaFailure::ProcessorFailed)?,
+        visible_part: None,
+    };
+    let inspection = registry_with(ceilings)?
+        .inspect(&DirectProcessor::new(), request, &source, &NeverCancelled)
+        .await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Malformed);
+    assert_eq!(malformed_reason(&inspection)?, "source_size_limit");
+    Ok(())
+}
+
+#[tokio::test]
 async fn malformed_dimension_is_rejected_before_metadata_output() -> Result<(), Box<dyn Error>> {
     assert_malformed(SvgFixture::malformed_dimension(), "malformed_svg").await
 }
@@ -393,6 +413,46 @@ async fn relative_dimension_units_are_valid_without_numeric_metadata() -> Result
     assert_eq!(body["width"], serde_json::Value::Null);
     assert_eq!(body["height"], serde_json::Value::Null);
     Ok(())
+}
+
+#[tokio::test]
+async fn modern_relative_dimension_units_are_valid_without_numeric_metadata()
+-> Result<(), Box<dyn Error>> {
+    let source =
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="1rem" height="2dvh"/>"#)
+            .into_source()?;
+    let result = read(
+        &DirectProcessor::new(),
+        &source,
+        "metadata",
+        serde_json::json!({}),
+    )
+    .await?;
+    let body = complete_structure(result)?;
+
+    assert_eq!(body["width"], serde_json::Value::Null);
+    assert_eq!(body["height"], serde_json::Value::Null);
+    Ok(())
+}
+
+#[tokio::test]
+async fn non_xml_whitespace_outside_root_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        SvgFixture::raw("\u{00a0}<svg xmlns=\"http://www.w3.org/2000/svg\"/>".as_bytes()),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn prolog_processing_instruction_is_active_content() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        SvgFixture::raw(
+            br#"<?xml-stylesheet href="x.css"?><svg xmlns="http://www.w3.org/2000/svg"/>"#,
+        ),
+        "active_content",
+    )
+    .await
 }
 
 #[tokio::test]
@@ -612,9 +672,13 @@ async fn adversarial_decoder_text_is_rejected_by_registry_sanitization()
 }
 
 fn registry() -> Result<FileMediaRegistry, Box<dyn Error>> {
+    registry_with(FileMediaCeilings::version_one())
+}
+
+fn registry_with(ceilings: FileMediaCeilings) -> Result<FileMediaRegistry, Box<dyn Error>> {
     Ok(FileMediaRegistry::try_new(
         vec![declaration()?],
-        FileMediaCeilings::version_one(),
+        ceilings,
         ProcessorIsolation::Available,
     )?)
 }
