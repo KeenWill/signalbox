@@ -23,7 +23,9 @@ pub(crate) async fn probe(
     } else {
         ProbeExtent::TruncatedPrefix
     };
-    let candidate = !json_adapter::has_json_structure(&prefix, extent)
+    let json_suppresses_csv = matches!(extent, ProbeExtent::CompleteSource)
+        && json_adapter::has_json_structure(&prefix, extent);
+    let candidate = !json_suppresses_csv
         && source::probe_utf8(&prefix).is_some_and(|text| has_record_structure(text, extent));
     if candidate {
         Ok(ProcessorProbeOutput::Candidate {
@@ -171,7 +173,7 @@ fn parse_table(text: &str, maximum_container_entries: u64) -> Result<CsvTable, &
     Ok(CsvTable { headers, rows })
 }
 
-fn has_record_structure(text: &str, extent: ProbeExtent) -> bool {
+pub(crate) fn has_record_structure(text: &str, extent: ProbeExtent) -> bool {
     let Some(evidence) = first_two_strict_records(text, extent) else {
         return false;
     };

@@ -43,6 +43,15 @@ pub(crate) fn json_array_formatted_like_csv() -> Vec<u8> {
     b"[[1,2],\n[3,4],\n[5,6]]".to_vec()
 }
 
+pub(crate) fn csv_with_json_consistent_truncated_prefix() -> Vec<u8> {
+    let mut bytes = b"[0,0,0,\n".to_vec();
+    while bytes.len() <= 4_096 {
+        bytes.extend_from_slice(b"0,0,0,\n");
+    }
+    bytes.extend_from_slice(b"x,0,0,\n");
+    bytes
+}
+
 pub(crate) fn bracket_prefixed_prose() -> Vec<u8> {
     b"[section]\nbody".to_vec()
 }

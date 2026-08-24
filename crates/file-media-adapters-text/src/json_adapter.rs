@@ -12,7 +12,8 @@ use signalbox_file_media_runtime::{
 };
 
 use crate::{
-    JSON_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, STRUCTURED_VIEW_NAME, read_input_is_empty, source,
+    JSON_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, STRUCTURED_VIEW_NAME, csv_adapter, read_input_is_empty,
+    source,
 };
 
 pub(crate) async fn probe(
@@ -55,7 +56,10 @@ pub(crate) fn has_json_structure(prefix: &[u8], extent: ProbeExtent) -> bool {
             Ok(()) => true,
             Err(error) => error.is_eof(),
         },
-        ProbeExtent::TruncatedPrefix => incomplete_json_prefix(text),
+        ProbeExtent::TruncatedPrefix => {
+            incomplete_json_prefix(text)
+                && !csv_adapter::has_record_structure(text, ProbeExtent::TruncatedPrefix)
+        }
     }
 }
 
