@@ -624,7 +624,15 @@ impl RepoWatchStaleReviewClearanceCandidate {
             // blocker" the dismissal claims to clear would be the sole gate the
             // head ever had, and the review would be dismissed off zero checks.
             || assessment.gating_check_count() == 0
-            || assessment.mergeable_state() == MergeableState::Conflicting
+            // Affirmative mergeability, not merely the absence of a known
+            // conflict. `Unknown` is GitHub still computing the merge, so it is
+            // the absence of evidence rather than evidence of a mergeable head,
+            // and the durable planner's predicate requires
+            // `mergeable_state = 'mergeable'` outright. Refusing only
+            // `Conflicting` here would let this public constructor mint a
+            // candidate the durable planner refuses, leaving the in-memory rule
+            // looser than the SQL it is meant to mirror.
+            || assessment.mergeable_state() != MergeableState::Mergeable
             || &reviewed_head_sha == assessment.head_sha()
             || !Self::review_node_id_is_valid(&review_node_id)
         {
@@ -3133,6 +3141,36 @@ mod tests {
             gating_check_count: 1,
             non_green_gating_checks: Vec::new(),
         })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            REVIEW_NODE_ID.to_owned(),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
+
+    /// The durable planner admits a clearance only against an assessment row
+    /// carrying `mergeable_state = 'mergeable'`, so the in-memory rule must
+    /// refuse `Unknown` too and not merely `Conflicting`. A settled head whose
+    /// mergeability GitHub is still computing is the absence of evidence, and
+    /// admitting it here would mint a candidate the durable planner refuses.
+    #[test]
+    fn unknown_mergeability_prevents_stale_review_clearance() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Unknown,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+        assert_eq!(assessment.mergeable_state(), MergeableState::Unknown);
+        assert!(assessment.settled());
 
         let result = RepoWatchStaleReviewClearanceCandidate::try_new(
             &assessment,
