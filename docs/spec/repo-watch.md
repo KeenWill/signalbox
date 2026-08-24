@@ -976,14 +976,22 @@ checks that have yet to report. A head carrying no gating check at all presents
 that same empty non-green list, which is why the reference convergence rule
 counts it blocked and why clearance refuses it: the dismissed review would be
 the only gate that head ever had. Both the in-memory candidate rule and the
-durable eligibility query enforce the positive count, so neither admits an
-intent the other would refuse. Every effective blocking review must target a
-superseded head; one current-head blocker prevents every dismissal for that
-assessment. A current-head review is never dismissed automatically. Why: a new
-review is live judgment, while a stale aggregate decision whose complete thread
-inventory is resolved is forge state that alone prevents an otherwise finished
-head from converging. The following ordinary poll observes the dismissal and may
-then seal convergence; dismissal itself does not stop dispatch.
+durable eligibility query enforce that count, the settled head, and
+mergeability, so neither admits an intent the other would refuse. The durable
+query proves each term against the recorded assessment rather than against the
+watcher that raised the candidate, because the assessment it reads is whichever
+watcher recorded one last: a newer assessment appended for the unchanged cursor
+while this watcher reconciled must carry the predicate itself, or the intent
+would claim the review was the head's only blocker while the evidence it names
+records another. Settlement is recorded only for a mergeability GitHub has
+decided, so the query admits `mergeable` alone and refuses nothing the in-memory
+rule admits. Every effective blocking review must target a superseded head; one
+current-head blocker prevents every dismissal for that assessment. A
+current-head review is never dismissed automatically. Why: a new review is live
+judgment, while a stale aggregate decision whose complete thread inventory is
+resolved is forge state that alone prevents an otherwise finished head from
+converging. The following ordinary poll observes the dismissal and may then seal
+convergence; dismissal itself does not stop dispatch.
 
 **Implemented behavior.** Before sending GitHub's review-dismissal mutation, the
 daemon appends a unique intent naming the assessment, repository, pull request,

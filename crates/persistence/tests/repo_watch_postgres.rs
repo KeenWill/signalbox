@@ -197,6 +197,14 @@ fn pull_request_with_threads(
     head: &str,
     threads: Vec<RepoWatchThreadObservation>,
 ) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
+    pull_request_state(head, threads, MergeableState::Mergeable)
+}
+
+fn pull_request_state(
+    head: &str,
+    threads: Vec<RepoWatchThreadObservation>,
+    mergeable_state: MergeableState,
+) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
     Ok(RepoWatchPullRequestState::try_new(
         RepoWatchPullRequestStateInput {
             context: PullRequestEventContext::new(PullRequestEventContextInput {
@@ -212,7 +220,7 @@ fn pull_request_with_threads(
                 author: Some(RepoWatchAuthorLogin::try_new(AUTHOR.to_owned())?),
             }),
             lifecycle: RepoWatchPullRequestLifecycle::Open,
-            mergeable_state: MergeableState::Mergeable,
+            mergeable_state,
             completed_check_suites: vec![RepoWatchCheckSuiteObservation::new(
                 GitHubObjectId::new(CHECK_SUITE_ID.try_into()?),
                 RepoWatchCheckCompletionGeneration::try_new(String::from(
@@ -310,6 +318,74 @@ fn stale_review_clearance_candidate(
         RepoWatchAuthorLogin::try_new(REVIEW_REVIEWER.to_owned())?,
         CommitSha::try_new(REVIEW_COMMIT.to_owned())?,
     )?)
+}
+
+/// The same stale-review evidence for a head that has not finished registering
+/// and completing its exact-head checks, so its empty non-green list is the
+/// absence of evidence rather than evidence of a green head.
+fn unsettled_stale_review_assessment(
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state: MergeableState::Mergeable,
+            settled: false,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
+}
+
+/// The same stale-review evidence recorded while GitHub had not decided the
+/// head's mergeability. `unknown` is that pending state, never affirmative
+/// evidence that the head merges.
+fn undecided_mergeability_stale_review_assessment(
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state: MergeableState::Unknown,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
+}
+
+/// The cursor an assessment carrying `unknown` mergeability is recorded
+/// against: recorded evidence must restate the observed mergeable state.
+fn undecided_mergeability_candidate(
+    head: &str,
+) -> Result<RepoWatchCursorCandidate, Box<dyn Error>> {
+    Ok(RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: vec![pull_request_state(
+                head,
+                Vec::new(),
+                MergeableState::Unknown,
+            )?],
+            workflow_runs: Vec::new(),
+            branch_heads: vec![RepoWatchBranchHead::new(
+                BranchName::try_new(BASE_BRANCH.to_owned())?,
+                CommitSha::try_new(BASE_REVISION.to_owned())?,
+            )],
+        })?,
+    )))
 }
 
 /// Stale-review evidence for a head that ran no gating check at all. Its empty
@@ -1449,6 +1525,106 @@ async fn a_recorded_assessment_without_a_gating_check_plans_no_clearance()
                 &repository,
                 RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
                 &[stale_review_assessment(INITIAL_HEAD, BASE_REVISION)?],
+            )
+            .await?,
+    );
+    let candidate = stale_review_clearance_candidate(&clearable_stale_review_assessment(
+        INITIAL_HEAD,
+        BASE_REVISION,
+    )?)?;
+
+    let planned = store
+        .plan_stale_review_clearances(&repository, generation, &[candidate])
+        .await;
+
+    assert!(matches!(
+        planned,
+        Err(RepoWatchStoreError::StaleReviewClearanceMismatch)
+    ));
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_stale_review_clearance")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(intents, 0);
+    Ok(())
+}
+
+/// Another watcher can append a newer assessment for the unchanged cursor while
+/// this watcher reconciles the candidate it raised, and the durable gate reads
+/// that newest row. An unsettled head has not finished registering and
+/// completing its exact-head checks, so planning against it would link a
+/// dismissal intent claiming `only_stale_review_blocks` to evidence recording a
+/// second blocker.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_unsettled_newer_assessment_plans_no_clearance() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let assessment = clearable_stale_review_assessment(INITIAL_HEAD, BASE_REVISION)?;
+    let generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+                std::slice::from_ref(&assessment),
+            )
+            .await?,
+    );
+    store
+        .record_convergence_assessments(
+            &repository,
+            generation,
+            &[unsettled_stale_review_assessment(
+                INITIAL_HEAD,
+                BASE_REVISION,
+            )?],
+        )
+        .await?;
+
+    let planned = store
+        .plan_stale_review_clearances(
+            &repository,
+            generation,
+            &[stale_review_clearance_candidate(&assessment)?],
+        )
+        .await;
+
+    assert!(matches!(
+        planned,
+        Err(RepoWatchStoreError::StaleReviewClearanceMismatch)
+    ));
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_stale_review_clearance")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(intents, 0);
+    Ok(())
+}
+
+/// The durable gate proves mergeability against the recorded row rather than
+/// inferring it from the settlement recorded beside it, so evidence GitHub had
+/// not decided plans nothing even when its writer called the head settled.
+/// `unknown` is that pending state, and dismissing against it would claim the
+/// review was the head's only blocker while the recorded evidence names
+/// mergeability as another.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_undecided_mergeability_assessment_plans_no_clearance() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    undecided_mergeability_candidate(INITIAL_HEAD)?,
+                    Vec::new(),
+                ),
+                &[undecided_mergeability_stale_review_assessment(
+                    INITIAL_HEAD,
+                    BASE_REVISION,
+                )?],
             )
             .await?,
     );

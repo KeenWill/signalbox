@@ -6368,18 +6368,19 @@ mod tests {
         RepoWatchBranchHead, RepoWatchConvergenceAssessment, RepoWatchConvergenceAssessmentInput,
         RepoWatchCursorGeneration, RepoWatchObservation, RepoWatchPullRequestLifecycle,
         RepoWatchReactionObservation, RepoWatchReviewDecision, RepoWatchReviewObservation,
-        RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
-        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchChildExit,
-        RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, RepositoryWatchTask,
-        RepositoryWatchWake, ResourceKey, ReviewState, TargetedPollOutcome, TargetedPullRequest,
-        Url, UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_RETRY_DELAY,
-        WEBHOOK_DRAIN_RETRY_MAX_DELAY, WebhookDrain, WebhookDrainOutcome, WebhookDrainRetry,
-        WebhookPayloadPurgeSchedule, WebhookPollInterrupt, WorkflowName, WorkflowResponse,
-        await_poll_or_interrupt, derive_repo_watch_events, dispatch_context_json,
-        inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
-        normalize_checks_outcome, normalize_pull_request_context, object_id,
-        observe_webhook_work_before_drain, owed_dispatch_context_json_parts, rule_activation_error,
-        run_until_shutdown, supervise_repository_tasks, targeted_pull_requests,
+        RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
+        RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
+        RepositoryWatchChildExit, RepositoryWatchRuntimeConstructionError,
+        RepositoryWatchRuntimeError, RepositoryWatchTask, RepositoryWatchWake, ResourceKey,
+        ReviewState, TargetedPollOutcome, TargetedPullRequest, Url,
+        UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_RETRY_DELAY, WEBHOOK_DRAIN_RETRY_MAX_DELAY,
+        WebhookDrain, WebhookDrainOutcome, WebhookDrainRetry, WebhookPayloadPurgeSchedule,
+        WebhookPollInterrupt, WorkflowName, WorkflowResponse, await_poll_or_interrupt,
+        derive_repo_watch_events, dispatch_context_json, inspect_webhook_drain,
+        next_cadence_deadline, next_repository_wake, normalize_checks_outcome,
+        normalize_pull_request_context, object_id, observe_webhook_work_before_drain,
+        owed_dispatch_context_json_parts, rule_activation_error, run_until_shutdown,
+        supervise_repository_tasks, targeted_pull_requests,
     };
     use signalbox_application::{
         InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
@@ -6678,8 +6679,18 @@ mod tests {
         pool: &PgPool,
         rest_base: Url,
     ) -> Result<WebhookTaskFixture, Box<dyn Error>> {
-        let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?;
         let observation = complete_typed_observation().await;
+        task_against(pool, rest_base, observation).await
+    }
+
+    /// The same task fixture over a caller-chosen committed cursor, for a test
+    /// whose behavior depends on what that cursor observes.
+    async fn task_against(
+        pool: &PgPool,
+        rest_base: Url,
+        observation: RepoWatchObservation,
+    ) -> Result<WebhookTaskFixture, Box<dyn Error>> {
+        let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?;
         let store = PostgresRepoWatchStore::new(pool.clone());
         store
             .commit(
@@ -7939,6 +7950,80 @@ mod tests {
         ]
     }
 
+    /// The same complete sweep over a pull request whose only remaining
+    /// convergence blocker is its aggregate review decision: GitHub reports it
+    /// mergeable and every review thread is resolved. This is the state a stale
+    /// blocking review may be dismissed against, so it is the cursor a clearance
+    /// is planned and dismissed from.
+    fn review_only_blocked_observation_responses() -> Vec<ScriptedResponse> {
+        vec![
+            ScriptedResponse::ok(
+                RequestTarget(PULLS_TARGET.to_owned()),
+                ResponseBody(pulls_with_one()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(BRANCHES_TARGET.to_owned()),
+                ResponseBody(branches()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_DETAIL_TARGET.to_owned()),
+                ResponseBody(mergeable_pull_detail()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(CHECK_SUITES_TARGET.to_owned()),
+                ResponseBody(check_suites()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(COMPLETED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+                ResponseBody(check_runs()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(QUEUED_SUITE_CHECK_RUNS_TARGET.to_owned()),
+                ResponseBody(empty_check_runs().to_owned()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEWS_TARGET.to_owned()),
+                ResponseBody(reviews()),
+            ),
+            ScriptedResponse::post(
+                RequestTarget(THREADS_TARGET.to_owned()),
+                ResponseBody(review_only_blocked_convergence()),
+            ),
+            ScriptedResponse::post(
+                RequestTarget(THREADS_TARGET.to_owned()),
+                ResponseBody(empty_threads()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
+                ResponseBody(pull_reactions()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(ISSUE_COMMENTS_TARGET.to_owned()),
+                ResponseBody(issue_comments()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(ISSUE_COMMENT_REACTIONS_TARGET.to_owned()),
+                ResponseBody(issue_comment_reactions()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEW_COMMENTS_TARGET.to_owned()),
+                ResponseBody(review_comments()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(REVIEW_COMMENT_REACTIONS_TARGET.to_owned()),
+                ResponseBody(review_comment_reactions()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(WORKFLOWS_TARGET.to_owned()),
+                ResponseBody(workflows()),
+            ),
+            ScriptedResponse::ok(
+                RequestTarget(MAIN_WORKFLOW_TARGET.to_owned()),
+                ResponseBody(main_workflow_run()),
+            ),
+        ]
+    }
+
     fn complete_pull_request_responses() -> Vec<ScriptedResponse> {
         complete_typed_observation_responses()
             .into_iter()
@@ -8357,6 +8442,17 @@ mod tests {
 
     async fn complete_typed_observation() -> RepoWatchObservation {
         let server = ScriptedServer::start(complete_typed_observation_responses()).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let observation = fixture.poller.poll(None).await.expect("full poll succeeds");
+        server.finish().await;
+        observation
+    }
+
+    /// The observation [`review_only_blocked_assessment`] describes. A first
+    /// poll publishes no freshness, so its own candidate lookup finds the head
+    /// unsettled and short-circuits before any blocking-review request.
+    async fn review_only_blocked_observation() -> RepoWatchObservation {
+        let server = ScriptedServer::start(review_only_blocked_observation_responses()).await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let observation = fixture.poller.poll(None).await.expect("full poll succeeds");
         server.finish().await;
@@ -9380,15 +9476,32 @@ mod tests {
         )
     }
 
-    /// The dismissal mutation is reachable only through a revalidation that
-    /// reports the clearance still holds, and that report requires a settled
-    /// head. Settlement in turn requires a quiesced gating-check inventory, so
-    /// evidence that never carries quiescence makes the whole feature a no-op:
-    /// the candidate lookup short-circuits, the revalidation refuses, and no
-    /// review is ever dismissed. This proves the live path reaches the
-    /// dismissal when the committed poll's freshness backs the re-read.
+    /// The in-memory candidate the committed poll raises for the review
+    /// [`blocking_reviews`] reports, against the evidence
+    /// [`review_only_blocked_assessment`] records.
+    fn stale_review_clearance_candidate() -> RepoWatchStaleReviewClearanceCandidate {
+        RepoWatchStaleReviewClearanceCandidate::try_new(
+            &review_only_blocked_assessment(),
+            String::from(STALE_REVIEW_NODE_ID),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))
+                .expect("fixture reviewer is valid"),
+            CommitSha::try_new(String::from(STALE_REVIEW_HEAD_SHA))
+                .expect("fixture reviewed head is canonical"),
+        )
+        .expect("the review is the fixture head's only convergence blocker")
+    }
+
+    /// Revalidation is the gate the dismissal mutation sits behind, and it
+    /// reports the clearance still holds only for a settled head. Settlement in
+    /// turn requires a quiesced gating-check inventory, so evidence that never
+    /// carries quiescence makes the whole feature a no-op: the candidate lookup
+    /// short-circuits, the revalidation refuses, and no review is ever
+    /// dismissed. This proves the re-read backed by the committed poll's
+    /// freshness passes that gate;
+    /// [`a_planned_clearance_reaches_its_dismissal_mutation`] proves the
+    /// orchestration then issues the mutation.
     #[tokio::test]
-    async fn a_quiesced_inventory_lets_a_planned_clearance_reach_dismissal() {
+    async fn a_quiesced_inventory_revalidates_a_planned_clearance() {
         let server = ScriptedServer::start(vec![
             ScriptedResponse::ok(
                 RequestTarget(String::from(PULL_DETAIL_TARGET)),
@@ -9430,11 +9543,88 @@ mod tests {
 
         assert!(
             holds,
-            "a settled head whose only blocker is a superseded review must reach its dismissal"
+            "a settled head whose only blocker is a superseded review must pass revalidation"
         );
     }
 
-    /// The mirror of the reachability test: a gating check that appeared since
+    /// The whole live path, from the poll that commits the candidate's evidence
+    /// to the provider mutation: the completed poll records its assessment,
+    /// plans the intent durably, revalidates it against a re-read, and sends the
+    /// dismissal. Scripting the mutation as a matched response is what makes
+    /// this end-to-end rather than a revalidation test — a build that stops
+    /// short of `dismiss_review_node` leaves that response unconsumed and no
+    /// terminal outcome recorded.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_planned_clearance_reaches_its_dismissal_mutation() -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let server = ConcurrentScriptedServer::start(vec![
+            ScriptedResponse::ok(
+                RequestTarget(String::from(PULL_DETAIL_TARGET)),
+                ResponseBody(mergeable_pull_detail()),
+            ),
+            ScriptedResponse::post(
+                RequestTarget(String::from(THREADS_TARGET)),
+                ResponseBody(review_only_blocked_convergence()),
+            )
+            .matching_request_body(String::from("RepositoryWatchConvergence")),
+            ScriptedResponse::post(
+                RequestTarget(String::from(THREADS_TARGET)),
+                ResponseBody(empty_threads()),
+            )
+            .matching_request_body(String::from("RepositoryWatchReviewThreads")),
+            ScriptedResponse::post(
+                RequestTarget(String::from(THREADS_TARGET)),
+                ResponseBody(blocking_reviews(STALE_REVIEW_HEAD_SHA)),
+            )
+            .matching_request_body(String::from("RepositoryWatchBlockingReviews")),
+            ScriptedResponse::post(
+                RequestTarget(String::from(THREADS_TARGET)),
+                ResponseBody(dismissed_review(STALE_REVIEW_NODE_ID)),
+            )
+            .matching_request_body(String::from("RepositoryWatchDismissReview")),
+        ])
+        .await;
+        let observation = review_only_blocked_observation().await;
+        let mut fixture = task_against(&pool, server.base_url.clone(), observation.clone()).await?;
+        let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?;
+        let generation = PostgresRepoWatchStore::new(pool.clone())
+            .load_cursor(&repository)
+            .await?
+            .expect("the fixture commits its cursor")
+            .generation();
+        fixture.task.poller.record_fetched_pull_request(
+            PULL_NUMBER,
+            &listed_pull_request(HEAD_SHA),
+            PullRequestSettlement::Settled,
+            vec![String::from(CHECK_RUN_NAME)],
+        );
+
+        fixture
+            .task
+            .commit_complete_poll(super::PreparedCompletePoll {
+                cursor_generation: Some(generation),
+                candidate: RepoWatchCursorCandidate::new(observation),
+                events: Vec::new(),
+                convergence: vec![review_only_blocked_assessment()],
+                stale_review_clearances: vec![stale_review_clearance_candidate()],
+            })
+            .await
+            .expect("the completed poll commits its evidence and sweeps its clearances");
+        // Asserts that every scripted response was consumed and that every
+        // request matched one, so the dismissal mutation reached the provider
+        // as the mutation it claims to be rather than as some other body.
+        server.finish().await;
+
+        let outcome: String =
+            sqlx::query_scalar("SELECT outcome_kind FROM repo_watch_stale_review_clearance_result")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(outcome, "dismissed");
+        Ok(())
+    }
+
+    /// The mirror of the revalidation test: a gating check that appeared since
     /// the committed poll leaves the inventory unquiesced, the head unsettled,
     /// and the review undismissed. The candidate lookup short-circuits before
     /// its provider request, so only three calls are scripted.

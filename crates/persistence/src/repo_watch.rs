@@ -986,11 +986,25 @@ impl PostgresRepoWatchStore {
                 // in-memory candidate rule does. Without it the durable gate
                 // would admit a head whose sole blocker is the review because
                 // it has no other gate at all.
+                //
+                // Settlement and mergeability are required here for the same
+                // reason, and against the row rather than against the writer:
+                // the assessment this reads is whichever watcher recorded it
+                // last, so a newer assessment appended for the unchanged cursor
+                // while this watcher reconciled must be proven to carry the
+                // clearance predicate itself. An unsettled head's empty
+                // non-green list is the absence of evidence, and `unknown`
+                // mergeability is GitHub still computing rather than affirmative
+                // evidence; either would link a dismissal intent claiming
+                // `only_stale_review_blocks` to an assessment recording another
+                // blocker. The daemon records settlement only for a decided
+                // mergeability, so admitting `mergeable` alone refuses no intent
+                // the in-memory rule admits.
                 "SELECT assessment_id, base_branch, base_revision
                    FROM (
                          SELECT assessment_id, head_sha, base_branch, base_revision, review_decision,
                                 unresolved_threads, non_green_gating_checks,
-                                mergeable_state, verdict_kind, gating_check_count
+                                mergeable_state, settled, verdict_kind, gating_check_count
                            FROM repo_watch_pull_request_convergence_assessment
                           WHERE repository = $1
                             AND pull_request_number = $2
@@ -1002,7 +1016,8 @@ impl PostgresRepoWatchStore {
                     AND cardinality(current.unresolved_threads) = 0
                     AND cardinality(current.non_green_gating_checks) = 0
                     AND current.gating_check_count > 0
-                    AND current.mergeable_state <> 'conflicting'
+                    AND current.settled
+                    AND current.mergeable_state = 'mergeable'
                     AND current.verdict_kind = 'not_converged'",
             )
             .bind(repository.as_str())
