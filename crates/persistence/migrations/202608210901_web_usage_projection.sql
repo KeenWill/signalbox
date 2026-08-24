@@ -111,7 +111,6 @@ CREATE TABLE web_usage_call_projection (
     session_id uuid NOT NULL,
     turn_id uuid,
     resolved_provider_model_identity_id uuid NOT NULL,
-    credential_reference text NOT NULL,
     credential_profile_label text NOT NULL,
     usage_provenance_kind text NOT NULL,
     usage_input_includes_cache_tokens boolean,
@@ -125,8 +124,6 @@ CREATE TABLE web_usage_call_projection (
         CHECK (call_kind IN ('model_call', 'approval_judge', 'context_compaction')),
     CONSTRAINT web_usage_provenance_closed
         CHECK (usage_provenance_kind IN ('reported', 'estimated')),
-    CONSTRAINT web_usage_credential_reference_nonempty
-        CHECK (char_length(credential_reference) > 0),
     CONSTRAINT web_usage_credential_profile_label_bounded
         CHECK (
             char_length(credential_profile_label) > 0
@@ -220,14 +217,13 @@ AS $$
 BEGIN
     INSERT INTO web_usage_call_projection (
         model_call_id, call_kind, session_id, turn_id,
-        resolved_provider_model_identity_id, credential_reference,
-        credential_profile_label,
+        resolved_provider_model_identity_id, credential_profile_label,
         usage_provenance_kind, usage_input_includes_cache_tokens,
         input_tokens, output_tokens,
         cache_creation_input_tokens, cache_read_input_tokens
     ) VALUES (
         NEW.model_call_id, 'model_call', NEW.session_id, NEW.turn_id,
-        NEW.resolved_provider_model_identity_id, NEW.credential_reference,
+        NEW.resolved_provider_model_identity_id,
         bounded_web_usage_profile(NEW.credential_reference),
         NEW.usage_provenance_kind, NEW.usage_input_includes_cache_tokens,
         NEW.usage_input_tokens, NEW.usage_output_tokens,
@@ -245,14 +241,13 @@ AS $$
 BEGIN
     INSERT INTO web_usage_call_projection (
         model_call_id, call_kind, session_id, turn_id,
-        resolved_provider_model_identity_id, credential_reference,
-        credential_profile_label,
+        resolved_provider_model_identity_id, credential_profile_label,
         usage_provenance_kind, usage_input_includes_cache_tokens,
         input_tokens, output_tokens,
         cache_creation_input_tokens, cache_read_input_tokens
     ) VALUES (
         NEW.model_call_id, 'approval_judge', NEW.session_id, NEW.turn_id,
-        NEW.resolved_provider_model_identity_id, NEW.credential_reference,
+        NEW.resolved_provider_model_identity_id,
         bounded_web_usage_profile(NEW.credential_reference),
         NEW.usage_provenance_kind, NEW.usage_input_includes_cache_tokens,
         NEW.input_tokens, NEW.output_tokens,
@@ -269,14 +264,13 @@ AS $$
 BEGIN
     INSERT INTO web_usage_call_projection (
         model_call_id, call_kind, session_id, turn_id,
-        resolved_provider_model_identity_id, credential_reference,
-        credential_profile_label,
+        resolved_provider_model_identity_id, credential_profile_label,
         usage_provenance_kind, usage_input_includes_cache_tokens,
         input_tokens, output_tokens,
         cache_creation_input_tokens, cache_read_input_tokens
     ) VALUES (
         NEW.model_call_id, 'context_compaction', NEW.session_id, NULL,
-        NEW.resolved_provider_model_identity_id, NEW.credential_reference,
+        NEW.resolved_provider_model_identity_id,
         bounded_web_usage_profile(NEW.credential_reference),
         'reported', NEW.usage_input_includes_cache_tokens,
         NEW.input_tokens, NEW.output_tokens,
@@ -291,14 +285,13 @@ $$;
 -- fabricated; all subsequent rows record their terminal statement time.
 INSERT INTO web_usage_call_projection (
     model_call_id, call_kind, session_id, turn_id,
-    resolved_provider_model_identity_id, credential_reference,
-    credential_profile_label,
+    resolved_provider_model_identity_id, credential_profile_label,
     usage_provenance_kind, usage_input_includes_cache_tokens,
     input_tokens, output_tokens,
     cache_creation_input_tokens, cache_read_input_tokens
 )
 SELECT model_call_id, 'model_call', session_id, turn_id,
-       resolved_provider_model_identity_id, credential_reference,
+       resolved_provider_model_identity_id,
        bounded_web_usage_profile(credential_reference),
        usage_provenance_kind, usage_input_includes_cache_tokens,
        usage_input_tokens, usage_output_tokens,
@@ -308,14 +301,13 @@ SELECT model_call_id, 'model_call', session_id, turn_id,
 
 INSERT INTO web_usage_call_projection (
     model_call_id, call_kind, session_id, turn_id,
-    resolved_provider_model_identity_id, credential_reference,
-    credential_profile_label,
+    resolved_provider_model_identity_id, credential_profile_label,
     usage_provenance_kind, usage_input_includes_cache_tokens,
     input_tokens, output_tokens,
     cache_creation_input_tokens, cache_read_input_tokens
 )
 SELECT model_call_id, 'approval_judge', session_id, turn_id,
-       resolved_provider_model_identity_id, credential_reference,
+       resolved_provider_model_identity_id,
        bounded_web_usage_profile(credential_reference),
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens, output_tokens,
@@ -325,14 +317,13 @@ SELECT model_call_id, 'approval_judge', session_id, turn_id,
 
 INSERT INTO web_usage_call_projection (
     model_call_id, call_kind, session_id, turn_id,
-    resolved_provider_model_identity_id, credential_reference,
-    credential_profile_label,
+    resolved_provider_model_identity_id, credential_profile_label,
     usage_provenance_kind, usage_input_includes_cache_tokens,
     input_tokens, output_tokens,
     cache_creation_input_tokens, cache_read_input_tokens
 )
 SELECT model_call_id, 'context_compaction', session_id, NULL,
-       resolved_provider_model_identity_id, credential_reference,
+       resolved_provider_model_identity_id,
        bounded_web_usage_profile(credential_reference),
        'reported', usage_input_includes_cache_tokens, input_tokens, output_tokens,
        cache_creation_input_tokens, cache_read_input_tokens

@@ -504,6 +504,18 @@ async fn oversized_credential_references_receive_bounded_distinct_usage_labels()
             .iter()
             .all(|index| !index.contains("exact_reference"))
     );
+    let projection_retains_exact_reference: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM information_schema.columns
+              WHERE table_schema = current_schema()
+                AND table_name = 'web_usage_call_projection'
+                AND column_name = 'credential_reference'
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(!projection_retains_exact_reference);
 
     pool.close().await;
     drop(container);
