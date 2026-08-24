@@ -2,6 +2,7 @@
 
 use std::{borrow::Cow, collections::HashSet, error::Error, num::NonZeroU64, str::FromStr};
 
+use iri_string::types::IriReferenceStr;
 use quick_xml::{
     NsReader,
     escape::unescape,
@@ -115,6 +116,7 @@ impl FileMediaProvider for SvgProvider {
             require_active(cancellation)?;
             match parse_svg(&bytes, ParseMode::MetadataOnly) {
                 Ok(parsed) => validated_output(request.evidence, &parsed),
+                Err(ParseIssue::NoMatch) => Ok(ProcessorValidationOutput::NoMatch),
                 Err(issue) => Ok(malformed_validation(issue.reason())),
             }
         })
@@ -241,6 +243,7 @@ impl ParseMode {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ParseIssue {
+    NoMatch,
     Malformed,
     ActiveContent,
     ExternalReference,
@@ -252,6 +255,7 @@ enum ParseIssue {
 impl ParseIssue {
     const fn reason(self) -> &'static str {
         match self {
+            Self::NoMatch => MALFORMED_REASON,
             Self::Malformed | Self::TextOutput => MALFORMED_REASON,
             Self::ActiveContent => ACTIVE_CONTENT_REASON,
             Self::ExternalReference => EXTERNAL_REFERENCE_REASON,
@@ -340,6 +344,7 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
     let mut root_closed = false;
     let mut declaration_seen = false;
     let mut prolog_event_seen = false;
+    let mut invalid_document_text_before_root = false;
     loop {
         match reader
             .read_event_into(&mut buffer)
@@ -348,6 +353,9 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
             Event::Start(start) => {
                 validate_qname(start.name().as_ref())?;
                 let (namespace, _) = reader.resolver().resolve_element(start.name());
+                if !root_seen && invalid_document_text_before_root {
+                    return Err(ParseIssue::Malformed);
+                }
                 prolog_event_seen = true;
                 inspect_element(
                     &start,
@@ -372,6 +380,9 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
             Event::Empty(empty) => {
                 validate_qname(empty.name().as_ref())?;
                 let (namespace, _) = reader.resolver().resolve_element(empty.name());
+                if !root_seen && invalid_document_text_before_root {
+                    return Err(ParseIssue::Malformed);
+                }
                 prolog_event_seen = true;
                 inspect_element(
                     &empty,
@@ -416,7 +427,10 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                 }
                 let decoded = text.xml10_content().map_err(|_| ParseIssue::Malformed)?;
                 if depth == 0 && !is_xml_whitespace(&decoded) {
-                    return Err(ParseIssue::Malformed);
+                    if root_seen {
+                        return Err(ParseIssue::Malformed);
+                    }
+                    invalid_document_text_before_root = true;
                 }
                 if depth == 0 {
                     prolog_event_seen = true;
@@ -466,6 +480,7 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
             Event::DocType(_) => return Err(ParseIssue::Malformed),
             Event::PI(_) => return Err(ParseIssue::ActiveContent),
             Event::Eof if root_seen && root_closed && depth == 0 => break,
+            Event::Eof if !root_seen => return Err(ParseIssue::NoMatch),
             Event::Eof => return Err(ParseIssue::Malformed),
         }
         buffer.clear();
@@ -495,7 +510,16 @@ fn inspect_element(
     let name = binding.as_ref();
     if depth == 0 {
         if !is_svg_element(namespace, name, b"svg") {
-            return Err(ParseIssue::Malformed);
+            let declares_default_svg_namespace = element.attributes().any(|attribute| {
+                attribute.is_ok_and(|attribute| {
+                    attribute.key.as_ref() == b"xmlns" && attribute.value.as_ref() == SVG_NAMESPACE
+                })
+            });
+            return Err(if name == b"svg" && declares_default_svg_namespace {
+                ParseIssue::Malformed
+            } else {
+                ParseIssue::NoMatch
+            });
         }
     } else if is_svg_element(namespace, name, b"svg") {
         return Err(ParseIssue::NestedSvg);
@@ -960,30 +984,10 @@ fn validate_namespace_declaration(name: &[u8], value: &[u8]) -> Result<(), Parse
 }
 
 fn valid_iri_reference(value: &[u8]) -> bool {
-    let mut index = 0;
-    while let Some(&byte) = value.get(index) {
-        if byte == b'%' {
-            if !value
-                .get(index + 1..index + 3)
-                .is_some_and(|escape| escape.iter().all(u8::is_ascii_hexdigit))
-            {
-                return false;
-            }
-            index += 3;
-            continue;
-        }
-        if byte.is_ascii_control()
-            || byte == b' '
-            || matches!(
-                byte,
-                b'<' | b'>' | b'\"' | b'{' | b'}' | b'|' | b'\\' | b'^' | b'`'
-            )
-        {
-            return false;
-        }
-        index += 1;
-    }
-    true
+    std::str::from_utf8(value)
+        .ok()
+        .and_then(|value| IriReferenceStr::new(value).ok())
+        .is_some()
 }
 
 fn require_reader(reader: &ReaderIdentity) -> Result<(), FileMediaProviderFailure> {

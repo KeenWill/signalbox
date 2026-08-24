@@ -321,6 +321,25 @@ async fn foreign_namespaced_svg_root_is_unknown_without_svg_declaration()
 }
 
 #[tokio::test]
+async fn foreign_namespaced_svg_root_is_unknown_with_svg_declaration() -> Result<(), Box<dyn Error>>
+{
+    let source = SvgFixture::raw(br#"<x:svg xmlns:x="urn:example"/>"#).into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn plain_text_is_unknown_with_svg_declaration() -> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(b"not SVG").into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
 async fn dtd_bearing_svg_is_malformed_without_svg_declaration() -> Result<(), Box<dyn Error>> {
     let source = SvgFixture::raw(br#"<!DOCTYPE svg><svg xmlns="http://www.w3.org/2000/svg"/>"#)
         .into_source()?;
@@ -683,6 +702,17 @@ async fn invalid_namespace_iri_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed!(
         SvgFixture::raw(
             br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:p="urn:bad value"><p:path/></svg>"#,
+        ),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn invalid_namespace_iri_authority_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:p="http://["><p:path/></svg>"#,
         ),
         "malformed_svg",
     )
