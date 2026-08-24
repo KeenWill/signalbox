@@ -395,6 +395,18 @@ async fn usage_projection_has_combined_selection_indexes() -> Result<(), Box<dyn
         combined_index_definition
             .contains("session_id, call_kind, recorded_at DESC, model_call_id DESC")
     );
+    let turn_kind_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_turn_kind_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        turn_kind_index_definition
+            .contains("turn_id, call_kind, recorded_at DESC, model_call_id DESC")
+    );
     let session_model_index_definition: String = sqlx::query_scalar(
         "SELECT indexdef FROM pg_indexes
           WHERE schemaname = current_schema()

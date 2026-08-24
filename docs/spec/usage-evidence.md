@@ -66,7 +66,8 @@ transactions commit.
 
 Indexes led by session, turn, target, provenance, call kind, combined
 session/call-kind selection, combined session/provenance selection, combined
-session/target selection, combined target/provenance selection, and combined
+session/target selection, combined turn/call-kind selection, combined
+target/provenance selection, combined target/call-kind selection, and combined
 provenance/call-kind selection support selective chronological pages.
 
 ## Browser/API presentation and configured cost
