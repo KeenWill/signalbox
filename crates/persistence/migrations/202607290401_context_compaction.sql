@@ -73,17 +73,24 @@ CREATE TABLE context_compaction_model_call (
             OR
             (state_kind = 'terminal' AND terminal_disposition_kind IS NOT NULL)
         ),
-    CONSTRAINT context_compaction_model_call_usage_nonnegative
+    CONSTRAINT context_compaction_model_call_usage_u64
         CHECK (
-            (input_tokens IS NULL OR input_tokens >= 0)
-            AND (output_tokens IS NULL OR output_tokens >= 0)
+            (
+                input_tokens IS NULL
+                OR input_tokens BETWEEN 0 AND 18446744073709551615
+            )
+            AND (
+                output_tokens IS NULL
+                OR output_tokens BETWEEN 0 AND 18446744073709551615
+            )
             AND (
                 cache_read_input_tokens IS NULL
-                OR cache_read_input_tokens >= 0
+                OR cache_read_input_tokens BETWEEN 0 AND 18446744073709551615
             )
             AND (
                 cache_creation_input_tokens IS NULL
-                OR cache_creation_input_tokens >= 0
+                OR cache_creation_input_tokens
+                    BETWEEN 0 AND 18446744073709551615
             )
         ),
     CONSTRAINT context_compaction_model_call_session_key

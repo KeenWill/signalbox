@@ -54,8 +54,9 @@ is not exposed because transaction start timestamps can become visible behind an
 already emitted oldest-first cursor when concurrent transactions commit.
 
 Indexes led by session, turn, target, provenance, call kind, combined
-session/call-kind selection, combined session/provenance selection, and combined
-provenance/call-kind selection support selective chronological pages.
+session/call-kind selection, combined session/provenance selection, combined
+session/target selection, and combined provenance/call-kind selection support
+selective chronological pages.
 
 ## Open edges
 

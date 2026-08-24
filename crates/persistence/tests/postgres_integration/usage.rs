@@ -316,7 +316,8 @@ async fn usage_half_open_time_range_excludes_earlier_evidence() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn usage_projection_has_session_terminal_order_index() -> Result<(), Box<dyn Error>> {
+async fn usage_projection_has_combined_selection_indexes_and_canonical_token_bound()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let index_definition: String = sqlx::query_scalar(
         "SELECT indexdef FROM pg_indexes
@@ -340,6 +341,26 @@ async fn usage_projection_has_session_terminal_order_index() -> Result<(), Box<d
         combined_index_definition
             .contains("session_id, call_kind, recorded_at DESC, model_call_id DESC")
     );
+    let session_model_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_session_model_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(session_model_index_definition.contains(
+        "session_id, resolved_provider_model_identity_id, recorded_at DESC, model_call_id DESC"
+    ));
+    let compaction_usage_constraint: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid)
+           FROM pg_constraint
+          WHERE conrelid = 'context_compaction_model_call'::regclass
+            AND conname = 'context_compaction_model_call_usage_u64'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(compaction_usage_constraint.contains("18446744073709551615"));
 
     pool.close().await;
     drop(container);
