@@ -484,10 +484,7 @@ async fn inspect_bounded(
     };
     match pages_entry.location {
         XrefLocation::Uncompressed(pages_offset) => {
-            let pages_length = budget
-                .remaining_bytes
-                .min(ROOT_VALIDATION_BYTES)
-                .min(source_length - pages_offset);
+            let pages_length = budget.remaining_bytes.min(source_length - pages_offset);
             if !budget.can_read(pages_length) {
                 return Ok(malformed_validation());
             }
@@ -686,10 +683,25 @@ fn collect_pages(document: &Document) -> Result<Vec<(u32, lopdf::ObjectId)>, Pag
         let dictionary = document
             .get_dictionary(object_id)
             .map_err(|_| PageCollectionError::Malformed)?;
-        match dictionary.get(b"Kids") {
-            Ok(kids) => {
-                let kids = kids
-                    .as_array()
+        let node_type = dictionary
+            .get(b"Type")
+            .and_then(lopdf::Object::as_name)
+            .map_err(|_| PageCollectionError::Malformed)?;
+        match node_type {
+            b"Pages" => {
+                let count = dictionary
+                    .get(b"Count")
+                    .and_then(lopdf::Object::as_i64)
+                    .map_err(|_| PageCollectionError::Malformed)?;
+                if count < 0 {
+                    return Err(PageCollectionError::Malformed);
+                }
+                if usize::try_from(count).map_or(true, |count| count > MAX_PAGES) {
+                    return Err(PageCollectionError::Limit);
+                }
+                let kids = dictionary
+                    .get(b"Kids")
+                    .and_then(lopdf::Object::as_array)
                     .map_err(|_| PageCollectionError::Malformed)?;
                 if pending
                     .len()
@@ -706,7 +718,10 @@ fn collect_pages(document: &Document) -> Result<Vec<(u32, lopdf::ObjectId)>, Pag
                     );
                 }
             }
-            Err(LopdfError::DictKey(_)) => {
+            b"Page" => {
+                if dictionary.has(b"Kids") {
+                    return Err(PageCollectionError::Malformed);
+                }
                 if pages.len() == MAX_PAGES {
                     return Err(PageCollectionError::Limit);
                 }
@@ -714,7 +729,7 @@ fn collect_pages(document: &Document) -> Result<Vec<(u32, lopdf::ObjectId)>, Pag
                     u32::try_from(pages.len() + 1).map_err(|_| PageCollectionError::Limit)?;
                 pages.push((page_number, object_id));
             }
-            Err(_) => return Err(PageCollectionError::Malformed),
+            _ => return Err(PageCollectionError::Malformed),
         }
     }
     Ok(pages)
@@ -827,12 +842,7 @@ fn valid_header(bytes: &[u8]) -> bool {
 }
 
 fn has_pdf_trailer(bytes: &[u8]) -> bool {
-    bytes
-        .windows(b"%%EOF".len())
-        .any(|window| window == b"%%EOF")
-        && bytes
-            .windows(b"startxref".len())
-            .any(|window| window == b"startxref")
+    startxref_offset(bytes).is_some()
 }
 
 fn startxref_offset(bytes: &[u8]) -> Option<u64> {
@@ -841,7 +851,13 @@ fn startxref_offset(bytes: &[u8]) -> Option<u64> {
         .rposition(|window| window == b"startxref")?;
     let mut cursor = marker.checked_add(b"startxref".len())?;
     skip_pdf_space_and_comments(bytes, &mut cursor);
-    parse_unsigned(bytes, &mut cursor)
+    let offset = parse_unsigned(bytes, &mut cursor)?;
+    skip_pdf_whitespace(bytes, &mut cursor);
+    if !consume_keyword(bytes, &mut cursor, b"%%EOF") {
+        return None;
+    }
+    skip_pdf_whitespace(bytes, &mut cursor);
+    (cursor == bytes.len()).then_some(offset)
 }
 
 fn parse_xref_structure(bytes: &[u8]) -> Option<ParsedXref> {
@@ -1006,7 +1022,9 @@ fn parse_trailer_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(TrailerF
         let value_start = cursor;
         skip_pdf_object(bytes, &mut cursor, 0)?;
         match key.as_slice() {
-            b"Encrypt" => facts.encrypted = true,
+            b"Encrypt" => {
+                facts.encrypted = parse_encryption_value(bytes, value_start, cursor)?;
+            }
             b"Root" => {
                 let mut value_cursor = value_start;
                 facts.root = Some(parse_indirect_reference(bytes, &mut value_cursor)?);
@@ -1050,6 +1068,19 @@ fn parse_trailer_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(TrailerF
             _ => {}
         }
     }
+}
+
+fn parse_encryption_value(bytes: &[u8], start: usize, end: usize) -> Option<bool> {
+    let mut cursor = start;
+    if consume_keyword(bytes, &mut cursor, b"null") {
+        return (cursor == end).then_some(false);
+    }
+    if bytes.get(start..end)?.starts_with(b"<<") {
+        return Some(true);
+    }
+    cursor = start;
+    parse_indirect_reference(bytes, &mut cursor)?;
+    (cursor == end).then_some(true)
 }
 
 fn skip_pdf_object(bytes: &[u8], cursor: &mut usize, depth: usize) -> Option<()> {
@@ -1465,7 +1496,7 @@ fn pages_dictionary_is_valid(bytes: &[u8]) -> bool {
     cursor += 2;
     let mut pages = false;
     let mut kids = false;
-    let mut count = false;
+    let mut count = None;
     loop {
         skip_pdf_space_and_comments(bytes, &mut cursor);
         if bytes
@@ -1474,7 +1505,10 @@ fn pages_dictionary_is_valid(bytes: &[u8]) -> bool {
         {
             cursor += 2;
             skip_pdf_space_and_comments(bytes, &mut cursor);
-            return pages && kids && count && cursor == bytes.len();
+            return pages
+                && kids
+                && count.is_some_and(|count| count <= MAX_PAGES as u64)
+                && cursor == bytes.len();
         }
         let Some(key) = parse_name(bytes, &mut cursor) else {
             return false;
@@ -1491,8 +1525,7 @@ fn pages_dictionary_is_valid(bytes: &[u8]) -> bool {
             }
             b"Kids" => kids = bytes.get(value_start) == Some(&b'['),
             b"Count" => {
-                count = parse_unsigned(bytes, &mut value_cursor).is_some();
-                count &= value_cursor == cursor;
+                count = parse_unsigned(bytes, &mut value_cursor).filter(|_| value_cursor == cursor);
             }
             _ => {}
         }
@@ -1710,7 +1743,7 @@ fn object_is_pages(bytes: &[u8], expected: IndirectReference) -> bool {
     cursor += 2;
     let mut pages = false;
     let mut kids = false;
-    let mut count = false;
+    let mut count = None;
     loop {
         skip_pdf_space_and_comments(bytes, &mut cursor);
         if bytes
@@ -1735,12 +1768,14 @@ fn object_is_pages(bytes: &[u8], expected: IndirectReference) -> bool {
             kids = bytes.get(value_start) == Some(&b'[');
         } else if key == b"Count" {
             let mut value_cursor = value_start;
-            count = parse_unsigned(bytes, &mut value_cursor).is_some();
-            count &= value_cursor == cursor;
+            count = parse_unsigned(bytes, &mut value_cursor).filter(|_| value_cursor == cursor);
         }
     }
     skip_pdf_space_and_comments(bytes, &mut cursor);
-    pages && kids && count && consume_keyword(bytes, &mut cursor, b"endobj")
+    pages
+        && kids
+        && count.is_some_and(|count| count <= MAX_PAGES as u64)
+        && consume_keyword(bytes, &mut cursor, b"endobj")
 }
 
 fn consume_stream_line_end(bytes: &[u8], cursor: &mut usize) -> Option<()> {
@@ -1877,11 +1912,13 @@ fn token_end(bytes: &[u8], mut cursor: usize) -> Option<usize> {
 }
 
 fn consume_keyword(bytes: &[u8], cursor: &mut usize, keyword: &[u8]) -> bool {
-    if bytes
-        .get(*cursor..)
-        .is_some_and(|tail| tail.starts_with(keyword))
+    let Some(end) = cursor.checked_add(keyword.len()) else {
+        return false;
+    };
+    if bytes.get(*cursor..end) == Some(keyword)
+        && bytes.get(end).is_none_or(|byte| is_pdf_delimiter(*byte))
     {
-        *cursor += keyword.len();
+        *cursor = end;
         true
     } else {
         false
@@ -2059,6 +2096,27 @@ mod tests {
             startxref_offset(b"startxref % offset comment\n42\n%%EOF"),
             Some(42)
         );
+    }
+
+    #[test]
+    fn startxref_requires_a_following_terminal_eof() {
+        assert_eq!(startxref_offset(b"%%EOF\nstartxref\n42"), None);
+        assert_eq!(startxref_offset(b"startxref\n42\n%%EOF\n"), Some(42));
+    }
+
+    #[test]
+    fn keyword_consumption_requires_a_token_boundary() {
+        let mut cursor = 0;
+        assert!(!consume_keyword(b"endobjjunk", &mut cursor, b"endobj"));
+        assert_eq!(cursor, 0);
+        assert!(consume_keyword(b"endobj\n", &mut cursor, b"endobj"));
+    }
+
+    #[test]
+    fn null_encrypt_value_is_treated_as_absent() {
+        let (facts, _) =
+            parse_trailer_dictionary(b"<< /Encrypt null >>", 0).expect("trailer dictionary");
+        assert!(!facts.encrypted);
     }
 
     #[test]
@@ -2305,6 +2363,8 @@ mod tests {
         assert!(!pages_dictionary_is_valid(
             b"<< /Type /Pages /Kids [] /Count 9 0 R >>"
         ));
+        let over_limit = format!("<< /Type /Pages /Kids [] /Count {} >>", MAX_PAGES + 1);
+        assert!(!pages_dictionary_is_valid(over_limit.as_bytes()));
     }
 
     #[test]
@@ -2381,6 +2441,27 @@ mod tests {
         assert!(!object_is_pages(
             b"9 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj",
             pages
+        ));
+        let over_limit = format!(
+            "8 0 obj\n<< /Type /Pages /Count {} /Kids [] >>\nendobj",
+            MAX_PAGES + 1
+        );
+        assert!(!object_is_pages(over_limit.as_bytes(), pages));
+    }
+
+    #[test]
+    fn page_collection_requires_typed_page_tree_nodes() {
+        let mut document = Document::with_version("1.5");
+        let pages_id = document.add_object(Dictionary::new());
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+
+        assert!(matches!(
+            collect_pages(&document),
+            Err(PageCollectionError::Malformed)
         ));
     }
 
