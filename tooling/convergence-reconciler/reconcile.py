@@ -57,6 +57,7 @@ query($ids: [ID!]!) {
       closedAt
       title
       body
+      lastEditedAt
       url
       isDraft
       author { login }
@@ -478,6 +479,10 @@ query($id: ID!, $after: String!) {
                     reviewed_oid is None
                     or submitted_at is None
                     or review.get("state") == "DISMISSED"
+                    or (
+                        isinstance(pull_request.get("body_last_edited_at"), str)
+                        and pull_request["body_last_edited_at"] > submitted_at
+                    )
                 ):
                     continue
                 request_times = [
@@ -560,6 +565,8 @@ query($id: ID!, $after: String!) {
                     persisted_review_id
                 )
                 == persisted_head
+                and record.get("authenticated_review_body")
+                == pull_request["body"]
             )
             if (
                 review_still_valid
@@ -603,7 +610,7 @@ query($id: ID!, $after: String!) {
                 review_id for review_id in current_ids if review_id not in known_ids
             ]
             prior_base = record.get("review_wave_base_oid")
-            persisted_head = record.get("authenticated_review_head")
+            persisted_head = record.get("head_oid")
             material_base_forward = False
             if (
                 isinstance(prior_base, str)
@@ -1396,6 +1403,7 @@ def normalize_pull_request(node: dict[str, Any]) -> dict[str, Any]:
         "state": node["state"],
         "title": node["title"],
         "body": node.get("body") or "",
+        "body_last_edited_at": node.get("lastEditedAt"),
         "url": node["url"],
         "is_draft": node["isDraft"],
         "author_login": pull_request_author,
@@ -1686,20 +1694,35 @@ def load_config(argv: Sequence[str] | None = None) -> Config:
     command_timeout_seconds = positive_number(
         selected("command_timeout_seconds", 60), "command_timeout_seconds"
     )
+    state_file = configured_path(
+        selected("state_file", default_state_file()), "state_file"
+    )
+    log_file_value = selected("log_file")
+    log_file = (
+        configured_path(log_file_value, "log_file")
+        if log_file_value is not None
+        else None
+    )
     return Config(
         repository=str(repository),
         head_pattern=str(selected("head_pattern", "agent/*")),
         interval_seconds=interval_seconds,
         cool_off_seconds=cool_off_seconds,
         command_timeout_seconds=command_timeout_seconds,
-        state_file=Path(selected("state_file", default_state_file())),
-        log_file=Path(selected("log_file")) if selected("log_file") else None,
+        state_file=state_file,
+        log_file=log_file,
         active_command=active_command,
         dispatch_command=dispatch_command,
         summary=str(selected("summary", "text")),
         dry_run=dry_run,
         once=once,
     )
+
+
+def configured_path(value: Any, name: str) -> Path:
+    if isinstance(value, (str, os.PathLike)):
+        return Path(value)
+    raise ValueError(f"{name} must be a filesystem path")
 
 
 def parse_bool(value: Any, name: str) -> bool:
@@ -1774,6 +1797,7 @@ def load_state(path: Path, repository: str) -> dict[str, Any]:
             "terminal_at",
             "authenticated_review_head",
             "authenticated_review_id",
+            "authenticated_review_body",
             "last_dispatched_head",
         ):
             value = record.get(field)
@@ -1940,6 +1964,7 @@ def process_pull_request(
     )
     if pull_request["head_oid"] in pull_request["quiet_review_head_oids"]:
         record["authenticated_review_head"] = pull_request["head_oid"]
+        record["authenticated_review_body"] = pull_request.get("body", "")
         review_id = pull_request.get("authenticated_review_ids", {}).get(
             pull_request["head_oid"]
         )

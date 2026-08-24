@@ -15,6 +15,7 @@ from reconcile import (
     GitHubGraphQL,
     choose_decision,
     comment_only_patch,
+    configured_path,
     evaluate_convergence,
     load_state,
     meaningful_line_count,
@@ -456,6 +457,12 @@ class DecisionTests(unittest.TestCase):
 
 
 class InputValidationTests(unittest.TestCase):
+    def test_non_path_configuration_is_rejected_as_value_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "state_file"):
+            configured_path([], "state_file")
+        with self.assertRaisesRegex(ValueError, "log_file"):
+            configured_path({}, "log_file")
+
     def test_non_string_repository_is_rejected_as_malformed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
@@ -531,11 +538,34 @@ class GitHubGraphQLTests(unittest.TestCase):
             "_persisted_record": {
                 "authenticated_review_head": "head",
                 "authenticated_review_id": "review-a",
+                "authenticated_review_body": "description",
             },
             "head_oid": "head",
+            "body": "description",
             "authenticated_quiet_review_oids": [],
             "authenticated_review_ids": {},
             "observed_codex_reviews": {"review-b": "head"},
+            "quiet_review_head_oids": [],
+        }
+
+        client._restore_persisted_review_evidence([pull_request])
+
+        self.assertEqual(pull_request["authenticated_quiet_review_oids"], [])
+        self.assertEqual(pull_request["quiet_review_head_oids"], [])
+
+    def test_persisted_review_is_invalidated_by_description_edit(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "_persisted_record": {
+                "authenticated_review_head": "head",
+                "authenticated_review_id": "review-a",
+                "authenticated_review_body": "reviewed description",
+            },
+            "head_oid": "head",
+            "body": "edited description",
+            "authenticated_quiet_review_oids": [],
+            "authenticated_review_ids": {},
+            "observed_codex_reviews": {"review-a": "head"},
             "quiet_review_head_oids": [],
         }
 
@@ -575,7 +605,7 @@ class GitHubGraphQLTests(unittest.TestCase):
         ]
         pull_request = {
             "_persisted_record": {
-                "authenticated_review_head": "reviewed-head",
+                "head_oid": "reviewed-head",
                 "known_codex_review_ids": [
                     "review-1", "review-2", "review-3", "review-4"
                 ],
@@ -605,6 +635,37 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(pull_request["review_wave_ids"], ["review-5"])
         self.assertFalse(thread["isDispositioned"])
         self.assertFalse(thread["isEscalated"])
+
+    def test_description_edit_after_review_invalidates_fresh_evidence(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        head = "a" * 40
+        pull_request = {
+            "head_oid": head,
+            "body_last_edited_at": "2026-08-16T10:02:00Z",
+            "check_rollup_state": "SUCCESS",
+            "checks": [],
+            "review_threads": [],
+            "_review_comments": [
+                {
+                    "authorAssociation": "OWNER",
+                    "body": f"@codex review\nExact head {head}",
+                    "createdAt": "2026-08-16T10:00:00Z",
+                }
+            ],
+            "_reviews": [
+                {
+                    "id": "review-node",
+                    "author": {"login": "chatgpt-codex-connector"},
+                    "submittedAt": "2026-08-16T10:01:00Z",
+                    "commit": {"oid": head},
+                    "comments": {"totalCount": 0},
+                }
+            ],
+        }
+
+        client._finalize_review_evidence([pull_request])
+
+        self.assertEqual(pull_request["quiet_review_head_oids"], [])
 
     def test_fixing_commit_verification_failure_aborts_snapshot(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
