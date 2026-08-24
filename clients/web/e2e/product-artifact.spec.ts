@@ -72,13 +72,20 @@ const submitArtifactWithoutMouse = async (page: Page) => {
   await page.keyboard.press('Enter')
   const digest = page.getByRole('textbox', { name: 'Digest' })
   await expect(digest).toBeFocused()
+  // The inspector keeps its fields across close/reopen, so a second keyboard pass must
+  // replace the retained values instead of appending to them: select-all before typing,
+  // and rewind the presentation select to its first option before stepping to Image.
+  await page.keyboard.press('ControlOrMeta+a')
   await page.keyboard.type(imageArtifact.digest)
   await page.keyboard.press('Tab')
   await expect(page.getByRole('combobox', { name: 'Typed presentation' })).toBeFocused()
+  await page.keyboard.press('Home')
   await page.keyboard.press('ArrowDown')
   await page.keyboard.press('Tab')
+  await page.keyboard.press('ControlOrMeta+a')
   await page.keyboard.type(imageArtifact.declared_media_type)
   await page.keyboard.press('Tab')
+  await page.keyboard.press('ControlOrMeta+a')
   await page.keyboard.type(imageArtifact.display_filename[0] ?? '')
   await page.keyboard.press('Tab')
   const descriptorRequest = page.waitForRequest('**/api/blobs/**/descriptor?*')
