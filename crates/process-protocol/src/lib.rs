@@ -4270,6 +4270,11 @@ pub enum RejectionDetail {
         /// Authoritative active turn.
         active_turn_id: CanonicalUuid,
     },
+    /// A commissioned target already has a live session.
+    CommissionTargetBusy {
+        /// Authoritative live session currently owning the target.
+        session_id: CanonicalUuid,
+    },
     /// The caller named a turn that no longer holds the session slot.
     ActiveTurnMismatch {
         /// Target session.
@@ -4598,6 +4603,7 @@ impl RejectionDetail {
             | Self::SessionPlacementVersionExhausted { .. }
             | Self::GoalCommandRejected { .. }
             | Self::ActiveTurnPresent { .. }
+            | Self::CommissionTargetBusy { .. }
             | Self::ActiveTurnMismatch { .. }
             | Self::NoActiveTurn { .. }
             | Self::TurnNotAwaitingReconciliation { .. }
@@ -8112,6 +8118,7 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         | RejectionDetail::UnsupportedServiceTier { .. }
         | RejectionDetail::GoalCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
+        | RejectionDetail::CommissionTargetBusy { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
         | RejectionDetail::NoActiveTurn { .. }
         | RejectionDetail::TurnNotAwaitingReconciliation { .. }
@@ -8218,6 +8225,7 @@ fn validate_conversation_import_detail(
         | RejectionDetail::SessionPlacementVersionExhausted { .. }
         | RejectionDetail::GoalCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
+        | RejectionDetail::CommissionTargetBusy { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
         | RejectionDetail::NoActiveTurn { .. }
         | RejectionDetail::TurnNotAwaitingReconciliation { .. }
