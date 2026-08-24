@@ -7,28 +7,21 @@ use std::{error::Error, str::FromStr};
 
 use signalbox_file_media_runtime::{
     CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider, FileMediaProviderDeclaration,
-    FileMediaProviderFuture, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    FileReaderName, FileReaderProviderName, FileReaderRevision, ProbeDeclaration, ProcessorFailure,
-    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
-    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
-    ReaderIdentity, ReasonCode, StreamingTextFallback, VerifiedBlobSource,
+    FileMediaProviderFailure, FileMediaProviderFuture, FileMediaProviderReadRequest,
+    FileMediaProviderValidationRequest, FileReaderName, FileReaderProviderName, FileReaderRevision,
+    ProbeDeclaration, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
+    ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
+    ReaderDeclarationInput, ReaderIdentity, ReasonCode, StreamingTextFallback, VerifiedBlobSource,
 };
 
 const PROVIDER_NAME: &str = "signalbox_audio";
 const READER_REVISION: &str = "v1";
 const METADATA_VIEW_NAME: &str = "metadata";
 /// Hard safety ceiling covering the exact probe prefix and possible one-byte suffix.
-const AUDIO_PROBE_CUMULATIVE_BYTES: u64 = 65;
+const AUDIO_PROBE_CUMULATIVE_BYTES: u64 = 68;
 
 /// Hard safety ceiling bounding whole-source worker memory while admitting ordinary audio.
 pub const MAX_AUDIO_SOURCE_BYTES: u64 = 64 * 1_024 * 1_024;
-/// Hard safety ceiling bounding decoder expansion by channel count.
-pub const MAX_AUDIO_CHANNELS: usize = 8;
-/// Hard safety ceiling bounding decoder work by sample rate.
-pub const MAX_AUDIO_SAMPLE_RATE_HZ: u32 = 192_000;
-/// Hard safety ceiling bounding full-decode latency by presented duration.
-pub const MAX_AUDIO_DURATION_SECONDS: u64 = 60;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AdapterFormat {
     Wav,
@@ -77,24 +70,7 @@ impl AdapterFormat {
 
 fn mp3_signature(prefix: &[u8]) -> bool {
     let audio = if prefix.starts_with(b"ID3") {
-        let Some(header) = prefix.get(..10) else {
-            return false;
-        };
-        if header[6..10].iter().any(|byte| byte & 0x80 != 0) {
-            return false;
-        }
-        let Some(tag_length) = header[6..10].iter().try_fold(0_usize, |length, byte| {
-            length
-                .checked_mul(128)
-                .and_then(|value| value.checked_add(usize::from(*byte)))
-        }) else {
-            return false;
-        };
-        let footer_length = if header[5] & 0x10 == 0 { 0 } else { 10 };
-        let Some(audio_offset) = 10_usize
-            .checked_add(tag_length)
-            .and_then(|value| value.checked_add(footer_length))
-        else {
+        let Some(audio_offset) = id3_audio_offset(prefix) else {
             return false;
         };
         let Some(audio) = prefix.get(audio_offset..) else {
@@ -105,6 +81,30 @@ fn mp3_signature(prefix: &[u8]) -> bool {
         prefix
     };
     audio.get(..4).is_some_and(valid_mp3_frame_header)
+}
+
+fn id3_audio_offset(bytes: &[u8]) -> Option<usize> {
+    let header = bytes.get(..10)?;
+    let major = header[3];
+    let revision = header[4];
+    let flags = header[5];
+    let legal_flags = match major {
+        2 => 0xc0,
+        3 => 0xe0,
+        4 => 0xf0,
+        _ => return None,
+    };
+    if revision == 0xff
+        || flags & !legal_flags != 0
+        || header[6..10].iter().any(|byte| byte & 0x80 != 0)
+    {
+        return None;
+    }
+    let tag_length = header[6..10].iter().try_fold(0_usize, |length, byte| {
+        length.checked_mul(128)?.checked_add(usize::from(*byte))
+    })?;
+    let footer_length = usize::from(major == 4 && flags & 0x10 != 0) * 10;
+    10_usize.checked_add(tag_length)?.checked_add(footer_length)
 }
 
 fn valid_mp3_frame_header(bytes: &[u8]) -> bool {
@@ -234,7 +234,9 @@ fn metadata_view() -> Result<ReadViewDeclaration, Box<dyn Error + Send + Sync>> 
         ReadViewName::try_new(METADATA_VIEW_NAME)?,
         String::from("Decodes the audio and returns its channel count and sample rate."),
         CanonicalJsonObjectSchema::try_new(r#"{"additionalProperties":false,"type":"object"}"#)?,
-        ReadAccessPattern::Streaming,
+        ReadAccessPattern::Streaming {
+            maximum_ranges: 512,
+        },
         ReadViewBounds::Structured {
             source_bytes: MAX_AUDIO_SOURCE_BYTES,
             output_bytes: 256,
@@ -245,11 +247,11 @@ fn metadata_view() -> Result<ReadViewDeclaration, Box<dyn Error + Send + Sync>> 
     )?)
 }
 
-fn format_for_reader(reader: &ReaderIdentity) -> Result<AdapterFormat, ProcessorFailure> {
+fn format_for_reader(reader: &ReaderIdentity) -> Result<AdapterFormat, FileMediaProviderFailure> {
     AdapterFormat::ALL
         .into_iter()
         .find(|format| format.reader_name() == reader.reader().as_str())
-        .ok_or(ProcessorFailure::Protocol)
+        .ok_or(FileMediaProviderFailure::Failed)
 }
 
 fn options_are_empty(options: &serde_json::Value) -> bool {

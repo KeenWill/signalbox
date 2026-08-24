@@ -9,52 +9,52 @@ use support::{DirectProcessor, MemorySource};
 #[tokio::test]
 async fn wav_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>> {
     let format = FixtureFormat::Wav;
-    let source = MemorySource::new(fixtures::valid(format)?);
-    let expected = serde_json::json!({"channels": 1, "sample_rate_hz": 8_000});
+    let fixture = fixtures::valid_fixture(format)?;
+    let source = MemorySource::new(fixture.bytes().to_vec());
 
-    let inspection = support::inspect(&source, format.media_type()).await?;
-    support::assert_validated_media(inspection, "audio/wav");
-    let result = support::read(&source, format.media_type(), &DirectProcessor::provider()).await?;
-    support::assert_structured(result, &expected);
+    let inspection = support::inspect(&source, fixture.media_type()).await?;
+    support::assert_validated_media(inspection, fixture.media_type());
+    let result = support::read(&source, fixture.media_type(), &DirectProcessor::provider()).await?;
+    support::assert_structured(result, fixture.expected_metadata());
     Ok(())
 }
 
 #[tokio::test]
 async fn mp3_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>> {
     let format = FixtureFormat::Mp3;
-    let source = MemorySource::new(fixtures::valid(format)?);
-    let expected = serde_json::json!({"channels": 1, "sample_rate_hz": 8_000});
+    let fixture = fixtures::valid_fixture(format)?;
+    let source = MemorySource::new(fixture.bytes().to_vec());
 
-    let inspection = support::inspect(&source, format.media_type()).await?;
-    support::assert_validated_media(inspection, "audio/mpeg");
-    let result = support::read(&source, format.media_type(), &DirectProcessor::provider()).await?;
-    support::assert_structured(result, &expected);
+    let inspection = support::inspect(&source, fixture.media_type()).await?;
+    support::assert_validated_media(inspection, fixture.media_type());
+    let result = support::read(&source, fixture.media_type(), &DirectProcessor::provider()).await?;
+    support::assert_structured(result, fixture.expected_metadata());
     Ok(())
 }
 
 #[tokio::test]
 async fn flac_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>> {
     let format = FixtureFormat::Flac;
-    let source = MemorySource::new(fixtures::valid(format)?);
-    let expected = serde_json::json!({"channels": 1, "sample_rate_hz": 8_000});
+    let fixture = fixtures::valid_fixture(format)?;
+    let source = MemorySource::new(fixture.bytes().to_vec());
 
-    let inspection = support::inspect(&source, format.media_type()).await?;
-    support::assert_validated_media(inspection, "audio/flac");
-    let result = support::read(&source, format.media_type(), &DirectProcessor::provider()).await?;
-    support::assert_structured(result, &expected);
+    let inspection = support::inspect(&source, fixture.media_type()).await?;
+    support::assert_validated_media(inspection, fixture.media_type());
+    let result = support::read(&source, fixture.media_type(), &DirectProcessor::provider()).await?;
+    support::assert_structured(result, fixture.expected_metadata());
     Ok(())
 }
 
 #[tokio::test]
 async fn ogg_opus_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>> {
     let format = FixtureFormat::OggOpus;
-    let source = MemorySource::new(fixtures::valid(format)?);
-    let expected = serde_json::json!({"channels": 1, "sample_rate_hz": 48_000});
+    let fixture = fixtures::valid_fixture(format)?;
+    let source = MemorySource::new(fixture.bytes().to_vec());
 
-    let inspection = support::inspect(&source, format.media_type()).await?;
-    support::assert_validated_media(inspection, "audio/ogg");
-    let result = support::read(&source, format.media_type(), &DirectProcessor::provider()).await?;
-    support::assert_structured(result, &expected);
+    let inspection = support::inspect(&source, fixture.media_type()).await?;
+    support::assert_validated_media(inspection, fixture.media_type());
+    let result = support::read(&source, fixture.media_type(), &DirectProcessor::provider()).await?;
+    support::assert_structured(result, fixture.expected_metadata());
     Ok(())
 }
 
@@ -133,12 +133,15 @@ async fn mp3_truncation_is_malformed() -> Result<(), Box<dyn Error>> {
 
 #[tokio::test]
 async fn mp3_malformed_bytes_are_rejected() -> Result<(), Box<dyn Error>> {
-    assert_reason(
-        FixtureFormat::Mp3,
-        fixtures::malformed(FixtureFormat::Mp3),
-        "malformed_audio",
-    )
-    .await
+    let format = FixtureFormat::Mp3;
+    let source = MemorySource::new(fixtures::malformed(format));
+
+    let inspection = support::inspect(&source, format.media_type()).await?;
+    assert!(matches!(
+        inspection,
+        signalbox_file_media_runtime::FileInspection::Unknown { .. }
+    ));
+    Ok(())
 }
 
 #[tokio::test]
@@ -159,6 +162,42 @@ async fn mp3_duration_over_limit_is_rejected() -> Result<(), Box<dyn Error>> {
         "duration_limit_exceeded",
     )
     .await
+}
+
+#[tokio::test]
+async fn mp3_probe_reads_the_frame_after_a_long_id3_tag() -> Result<(), Box<dyn Error>> {
+    let format = FixtureFormat::Mp3;
+    let source = MemorySource::new(fixtures::mp3_with_long_id3_tag()?);
+
+    let inspection = support::inspect(&source, format.media_type()).await?;
+    support::assert_validated_media(inspection, format.media_type());
+    Ok(())
+}
+
+#[tokio::test]
+async fn mp3_probe_rejects_an_invalid_id3_version() -> Result<(), Box<dyn Error>> {
+    let format = FixtureFormat::Mp3;
+    let source = MemorySource::new(fixtures::mp3_with_id3_header(5, 0)?);
+
+    let inspection = support::inspect(&source, format.media_type()).await?;
+    assert!(matches!(
+        inspection,
+        signalbox_file_media_runtime::FileInspection::Unknown { .. }
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn mp3_probe_rejects_invalid_id3_flags() -> Result<(), Box<dyn Error>> {
+    let format = FixtureFormat::Mp3;
+    let source = MemorySource::new(fixtures::mp3_with_id3_header(4, 0x01)?);
+
+    let inspection = support::inspect(&source, format.media_type()).await?;
+    assert!(matches!(
+        inspection,
+        signalbox_file_media_runtime::FileInspection::Unknown { .. }
+    ));
+    Ok(())
 }
 
 #[tokio::test]
@@ -262,6 +301,26 @@ async fn ogg_opus_duration_uses_presented_samples_after_trimming() -> Result<(),
 }
 
 #[tokio::test]
+async fn ogg_opus_requires_an_isolated_identification_header_page() -> Result<(), Box<dyn Error>> {
+    let format = FixtureFormat::OggOpus;
+    let source = MemorySource::new(fixtures::ogg_opus_with_shared_identification_page()?);
+
+    let inspection = support::inspect(&source, format.media_type()).await?;
+    support::assert_malformed_reason(inspection, "malformed_audio");
+    Ok(())
+}
+
+#[tokio::test]
+async fn ogg_opus_rejects_regressing_page_granules() -> Result<(), Box<dyn Error>> {
+    let format = FixtureFormat::OggOpus;
+    let source = MemorySource::new(fixtures::ogg_opus_with_regressing_granule()?);
+
+    let inspection = support::inspect(&source, format.media_type()).await?;
+    support::assert_malformed_reason(inspection, "malformed_audio");
+    Ok(())
+}
+
+#[tokio::test]
 async fn registry_sanitizer_keeps_injection_shaped_metadata_as_data() -> Result<(), Box<dyn Error>>
 {
     let format = FixtureFormat::Wav;
@@ -298,7 +357,6 @@ async fn registry_sanitizer_rejects_nul_bearing_decoder_output() -> Result<(), B
     Ok(())
 }
 
-#[track_caller]
 async fn assert_reason(
     format: FixtureFormat,
     bytes: Vec<u8>,

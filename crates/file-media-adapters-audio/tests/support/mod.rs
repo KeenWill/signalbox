@@ -6,10 +6,11 @@ use signalbox_file_media_runtime::{
     AttachmentKind, CancellationSignal, DeclaredMediaType, FileDigest, FileInspection,
     FileMediaCeilings, FileMediaFailure, FileMediaProcessCeilings, FileMediaProcessor,
     FileMediaProcessorFuture, FileMediaProvider, FileMediaProviderReadRequest,
-    FileMediaProviderValidationRequest, FileMediaRegistry, FileReadRequest, FileReadResult,
-    FileUse, InspectionRequest, NeverCancelled, ProcessorIsolation, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadViewName, ReaderIdentity, SourceReadError,
-    SourceReadFuture, VerifiedBlobSource,
+    FileMediaProviderValidationRequest, FileMediaRegistry, FileReadInput, FileReadRequest,
+    FileReadResult, FileUse, InspectionRequest, NeverCancelled, ProcessorBoundaryFailure,
+    ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadViewName, ReaderIdentity, SourceReadError, SourceReadFuture,
+    VerifiedBlobSource,
 };
 
 pub(crate) struct MemorySource {
@@ -27,7 +28,7 @@ impl MemorySource {
         Ok(FileUse::new(
             self.digest(),
             self.byte_length(),
-            AttachmentKind::Audio,
+            AttachmentKind::File,
             DeclaredMediaType::try_new(media_type)?,
             None,
         ))
@@ -93,7 +94,12 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
-        self.provider.probe(reader, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .probe(reader, source, cancellation)
+                .await
+                .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+        })
     }
 
     fn validate<'a>(
@@ -103,7 +109,12 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
-        self.provider.inspect(reader, request, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .inspect(reader, request, source, cancellation)
+                .await
+                .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+        })
     }
 
     fn read<'a>(
@@ -114,7 +125,12 @@ impl FileMediaProcessor for DirectProcessor {
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
         match &self.read_behavior {
-            ReadBehavior::Provider => self.provider.read(reader, request, source, cancellation),
+            ReadBehavior::Provider => Box::pin(async move {
+                self.provider
+                    .read(reader, request, source, cancellation)
+                    .await
+                    .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+            }),
             ReadBehavior::InjectedStructured(body_json) => {
                 let body_json = body_json.clone();
                 Box::pin(async move {
@@ -204,7 +220,9 @@ pub(crate) async fn read(
                     visible_part: None,
                 },
                 view,
-                options: serde_json::json!({}),
+                input: FileReadInput::Initial {
+                    options: serde_json::json!({}),
+                },
             },
             source,
             &NeverCancelled,

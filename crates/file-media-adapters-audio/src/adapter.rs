@@ -1,10 +1,11 @@
-use std::io::Cursor;
+use std::{io::Cursor, num::NonZeroU64};
 
 use ogg::PacketReader;
 use opus_rs::OpusDecoder;
 use signalbox_file_media_runtime::{
-    CancellationSignal, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    ProbeStrength, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
+    CancellationSignal, FileMediaProviderFailure, FileMediaProviderReadRequest,
+    FileMediaProviderValidationRequest, FileReadInput, MAX_AUDIO_CHANNELS, MAX_AUDIO_CLIP_SECONDS,
+    MAX_AUDIO_SAMPLE_RATE_HZ, ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput,
     ProcessorValidationOutput, ValidationEvidence, VerifiedBlobSource,
 };
 use symphonia::{
@@ -17,8 +18,8 @@ use symphonia::{
 };
 
 use crate::{
-    AdapterFormat, MAX_AUDIO_CHANNELS, MAX_AUDIO_DURATION_SECONDS, MAX_AUDIO_SAMPLE_RATE_HZ,
-    MAX_AUDIO_SOURCE_BYTES, options_are_empty, source,
+    AdapterFormat, MAX_AUDIO_SOURCE_BYTES, id3_audio_offset, options_are_empty, source,
+    valid_mp3_frame_header,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,9 +32,37 @@ pub(crate) async fn probe(
     format: AdapterFormat,
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
-) -> Result<ProcessorProbeOutput, ProcessorFailure> {
+) -> Result<ProcessorProbeOutput, FileMediaProviderFailure> {
     let prefix = source::read_probe_prefix(source, cancellation).await?;
-    if format.matches_signature(&prefix) {
+    let matches = if format == AdapterFormat::Mp3 && prefix.starts_with(b"ID3") {
+        let Some(audio_offset) = id3_audio_offset(&prefix) else {
+            return Ok(ProcessorProbeOutput::NoMatch);
+        };
+        if let Some(header) = prefix.get(audio_offset..audio_offset.saturating_add(4)) {
+            valid_mp3_frame_header(header)
+        } else {
+            let Ok(offset) = u64::try_from(audio_offset) else {
+                return Ok(ProcessorProbeOutput::NoMatch);
+            };
+            let Some(remaining) = source.byte_length().get().checked_sub(offset) else {
+                return Ok(ProcessorProbeOutput::NoMatch);
+            };
+            if remaining < 4 {
+                return Ok(ProcessorProbeOutput::NoMatch);
+            }
+            let header = source
+                .read_range(
+                    offset,
+                    NonZeroU64::new(4).ok_or(FileMediaProviderFailure::Failed)?,
+                )
+                .await
+                .map_err(|_| FileMediaProviderFailure::Failed)?;
+            valid_mp3_frame_header(&header)
+        }
+    } else {
+        format.matches_signature(&prefix)
+    };
+    if matches {
         Ok(ProcessorProbeOutput::Candidate {
             media_type: String::from(format.media_type()),
             strength: ProbeStrength::Strong,
@@ -48,9 +77,9 @@ pub(crate) async fn inspect(
     request: FileMediaProviderValidationRequest,
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
-) -> Result<ProcessorValidationOutput, ProcessorFailure> {
+) -> Result<ProcessorValidationOutput, FileMediaProviderFailure> {
     if request.media_type.as_str() != format.media_type() {
-        return Err(ProcessorFailure::Protocol);
+        return Err(FileMediaProviderFailure::Failed);
     }
     let Some(bytes) = source::read_complete(source, cancellation).await? else {
         return Ok(validation_failure(
@@ -75,8 +104,12 @@ pub(crate) async fn read(
     request: FileMediaProviderReadRequest,
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
-) -> Result<ProcessorReadOutput, ProcessorFailure> {
-    if request.view.as_str() != "metadata" || !options_are_empty(&request.options) {
+) -> Result<ProcessorReadOutput, FileMediaProviderFailure> {
+    let valid_input = matches!(
+        &request.input,
+        FileReadInput::Initial { options } if options_are_empty(options)
+    );
+    if request.view.as_str() != "metadata" || !valid_input {
         return Ok(ProcessorReadOutput::InvalidViewArguments);
     }
     let Some(bytes) = source::read_complete(source, cancellation).await? else {
@@ -84,7 +117,7 @@ pub(crate) async fn read(
             maximum_bytes: MAX_AUDIO_SOURCE_BYTES,
         });
     };
-    let metadata = decode(format, &bytes).map_err(|_| ProcessorFailure::Failed)?;
+    let metadata = decode(format, &bytes).map_err(|_| FileMediaProviderFailure::Failed)?;
     Ok(ProcessorReadOutput::Structured {
         body_json: metadata_json(metadata)?,
         truncated: false,
@@ -157,8 +190,18 @@ fn decode_with_symphonia(
             return Err("malformed_audio");
         }
         metadata = Some(observed);
+        let decoded_packet_frames =
+            u64::try_from(decoded.frames()).map_err(|_| "duration_limit_exceeded")?;
+        let trimmed_frames = packet
+            .trim_start
+            .get()
+            .checked_add(packet.trim_end.get())
+            .ok_or("duration_limit_exceeded")?;
+        let presented_packet_frames = decoded_packet_frames
+            .checked_sub(trimmed_frames)
+            .ok_or("malformed_audio")?;
         decoded_frames = decoded_frames
-            .checked_add(u64::try_from(decoded.frames()).map_err(|_| "duration_limit_exceeded")?)
+            .checked_add(presented_packet_frames)
             .ok_or("duration_limit_exceeded")?;
         validate_duration(decoded_frames, observed.sample_rate_hz)?;
     }
@@ -171,6 +214,13 @@ fn decode_ogg_opus(bytes: &[u8]) -> Result<AudioMetadata, &'static str> {
         .read_packet()
         .map_err(|_| "malformed_audio")?
         .ok_or("malformed_audio")?;
+    if !head.first_in_stream()
+        || !head.first_in_page()
+        || !head.last_in_page()
+        || head.absgp_page() != 0
+    {
+        return Err("malformed_audio");
+    }
     let (metadata, pre_skip) = parse_opus_head(&head.data)?;
     let serial = head.stream_serial();
     let tags = packets
@@ -187,6 +237,7 @@ fn decode_ogg_opus(bytes: &[u8]) -> Result<AudioMetadata, &'static str> {
     let mut decoded_frames = 0_u64;
     let mut audio_packets = 0_u64;
     let mut final_granule = None;
+    let mut completed_page_granule = 0_u64;
     let mut saw_end_of_stream = false;
     while let Some(packet) = packets.read_packet().map_err(|_| "malformed_audio")? {
         if saw_end_of_stream || packet.stream_serial() != serial || packet.data.is_empty() {
@@ -203,7 +254,12 @@ fn decode_ogg_opus(bytes: &[u8]) -> Result<AudioMetadata, &'static str> {
             .ok_or("duration_limit_exceeded")?;
         validate_ogg_decode_bound(decoded_frames, pre_skip)?;
         if packet.last_in_page() {
-            final_granule = Some(packet.absgp_page());
+            let granule = packet.absgp_page();
+            if granule < completed_page_granule {
+                return Err("malformed_audio");
+            }
+            completed_page_granule = granule;
+            final_granule = Some(granule);
         }
         if packet.last_in_stream() {
             saw_end_of_stream = true;
@@ -227,23 +283,7 @@ fn mp3_audio_bytes(bytes: &[u8]) -> Result<&[u8], &'static str> {
     if !bytes.starts_with(b"ID3") {
         return Ok(bytes);
     }
-    let header = bytes.get(..10).ok_or("malformed_audio")?;
-    if header[6..10].iter().any(|byte| byte & 0x80 != 0) {
-        return Err("malformed_audio");
-    }
-    let tag_length = header[6..10]
-        .iter()
-        .try_fold(0_usize, |length, byte| {
-            length
-                .checked_mul(128)
-                .and_then(|value| value.checked_add(usize::from(*byte)))
-        })
-        .ok_or("malformed_audio")?;
-    let footer_length = if header[5] & 0x10 == 0 { 0 } else { 10 };
-    let audio_offset = 10_usize
-        .checked_add(tag_length)
-        .and_then(|value| value.checked_add(footer_length))
-        .ok_or("malformed_audio")?;
+    let audio_offset = id3_audio_offset(bytes).ok_or("malformed_audio")?;
     bytes.get(audio_offset..).ok_or("malformed_audio")
 }
 
@@ -325,16 +365,27 @@ fn valid_opus_tags(bytes: &[u8]) -> bool {
         let Some(comment) = bytes.get(data_offset..next) else {
             return false;
         };
-        if std::str::from_utf8(comment).is_err() {
+        if !valid_opus_comment(comment) {
             return false;
         }
         offset = next;
     }
-    true
+    offset == bytes.len()
+}
+
+fn valid_opus_comment(comment: &[u8]) -> bool {
+    let Some(separator) = comment.iter().position(|byte| *byte == b'=') else {
+        return false;
+    };
+    separator > 0
+        && comment[..separator]
+            .iter()
+            .all(|byte| matches!(*byte, 0x20..=0x3c | 0x3e..=0x7d))
+        && std::str::from_utf8(comment).is_ok()
 }
 
 fn validate_shape(metadata: AudioMetadata) -> Result<(), &'static str> {
-    if metadata.channels == 0 || metadata.channels > MAX_AUDIO_CHANNELS {
+    if metadata.channels == 0 || metadata.channels > usize::from(MAX_AUDIO_CHANNELS) {
         return Err("channel_limit_exceeded");
     }
     if metadata.sample_rate_hz == 0 || metadata.sample_rate_hz > MAX_AUDIO_SAMPLE_RATE_HZ {
@@ -345,7 +396,7 @@ fn validate_shape(metadata: AudioMetadata) -> Result<(), &'static str> {
 
 fn validate_duration(decoded_frames: u64, sample_rate_hz: u32) -> Result<(), &'static str> {
     let maximum_frames = u64::from(sample_rate_hz)
-        .checked_mul(MAX_AUDIO_DURATION_SECONDS)
+        .checked_mul(u64::from(MAX_AUDIO_CLIP_SECONDS))
         .ok_or("duration_limit_exceeded")?;
     if decoded_frames > maximum_frames {
         return Err("duration_limit_exceeded");
@@ -355,7 +406,7 @@ fn validate_duration(decoded_frames: u64, sample_rate_hz: u32) -> Result<(), &'s
 
 fn validate_ogg_decode_bound(decoded_frames: u64, pre_skip: u16) -> Result<(), &'static str> {
     let maximum_decoded_frames = 48_000_u64
-        .checked_mul(MAX_AUDIO_DURATION_SECONDS)
+        .checked_mul(u64::from(MAX_AUDIO_CLIP_SECONDS))
         .and_then(|frames| frames.checked_add(u64::from(pre_skip)))
         .and_then(|frames| frames.checked_add(5_760))
         .ok_or("duration_limit_exceeded")?;
@@ -365,12 +416,12 @@ fn validate_ogg_decode_bound(decoded_frames: u64, pre_skip: u16) -> Result<(), &
     Ok(())
 }
 
-fn metadata_json(metadata: AudioMetadata) -> Result<String, ProcessorFailure> {
+fn metadata_json(metadata: AudioMetadata) -> Result<String, FileMediaProviderFailure> {
     serde_json::to_string(&serde_json::json!({
         "channels": metadata.channels,
         "sample_rate_hz": metadata.sample_rate_hz,
     }))
-    .map_err(|_| ProcessorFailure::Failed)
+    .map_err(|_| FileMediaProviderFailure::Failed)
 }
 
 fn malformed(format: AdapterFormat, reason: &str) -> ProcessorValidationOutput {
@@ -422,6 +473,17 @@ mod tests {
         tags.extend_from_slice(&1_u32.to_le_bytes());
         tags.extend_from_slice(&1_u32.to_le_bytes());
         tags.push(0xff);
+
+        assert!(!valid_opus_tags(&tags));
+    }
+
+    #[test]
+    fn opus_tags_rejects_a_comment_without_a_field_name_separator() {
+        let mut tags = b"OpusTags".to_vec();
+        tags.extend_from_slice(&0_u32.to_le_bytes());
+        tags.extend_from_slice(&1_u32.to_le_bytes());
+        tags.extend_from_slice(&11_u32.to_le_bytes());
+        tags.extend_from_slice(b"not-a-field");
 
         assert!(!valid_opus_tags(&tags));
     }

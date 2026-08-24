@@ -12,12 +12,39 @@ pub(crate) enum FixtureFormat {
     OggOpus,
 }
 
+pub(crate) struct ValidFixture {
+    bytes: Vec<u8>,
+    media_type: &'static str,
+    expected_metadata: serde_json::Value,
+}
+
+impl ValidFixture {
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub(crate) const fn media_type(&self) -> &'static str {
+        self.media_type
+    }
+
+    pub(crate) const fn expected_metadata(&self) -> &serde_json::Value {
+        &self.expected_metadata
+    }
+}
+
 struct OggOpusFixture {
     packet_count: usize,
     frame_size: usize,
     pre_skip: u16,
     final_granule: u64,
     ending: OggEnding,
+    head_ending: HeadEnding,
+    first_audio_page_granule: Option<u64>,
+}
+
+enum HeadEnding {
+    IsolatedPage,
+    SharedPage,
 }
 
 enum OggEnding {
@@ -47,8 +74,26 @@ pub(crate) fn valid(format: FixtureFormat) -> Result<Vec<u8>, Box<dyn Error>> {
             pre_skip: 0,
             final_granule: 4_800,
             ending: OggEnding::EndOfStream,
+            head_ending: HeadEnding::IsolatedPage,
+            first_audio_page_granule: None,
         }),
     }
+}
+
+pub(crate) fn valid_fixture(format: FixtureFormat) -> Result<ValidFixture, Box<dyn Error>> {
+    let sample_rate_hz = if matches!(format, FixtureFormat::OggOpus) {
+        48_000
+    } else {
+        8_000
+    };
+    Ok(ValidFixture {
+        bytes: valid(format)?,
+        media_type: format.media_type(),
+        expected_metadata: serde_json::json!({
+            "channels": 1,
+            "sample_rate_hz": sample_rate_hz
+        }),
+    })
 }
 
 pub(crate) fn truncated(format: FixtureFormat) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -90,6 +135,8 @@ pub(crate) fn duration_bomb(format: FixtureFormat) -> Result<Vec<u8>, Box<dyn Er
             pre_skip: 0,
             final_granule: 2_880_960,
             ending: OggEnding::EndOfStream,
+            head_ending: HeadEnding::IsolatedPage,
+            first_audio_page_granule: None,
         }),
     }
 }
@@ -101,6 +148,8 @@ pub(crate) fn ogg_opus_without_end_of_stream() -> Result<Vec<u8>, Box<dyn Error>
         pre_skip: 0,
         final_granule: 4_800,
         ending: OggEnding::EndOfPage,
+        head_ending: HeadEnding::IsolatedPage,
+        first_audio_page_granule: None,
     })
 }
 
@@ -111,7 +160,50 @@ pub(crate) fn ogg_opus_trimmed_to_duration_limit() -> Result<Vec<u8>, Box<dyn Er
         pre_skip: 312,
         final_granule: 2_880_312,
         ending: OggEnding::EndOfStream,
+        head_ending: HeadEnding::IsolatedPage,
+        first_audio_page_granule: None,
     })
+}
+
+pub(crate) fn ogg_opus_with_shared_identification_page() -> Result<Vec<u8>, Box<dyn Error>> {
+    ogg_opus(OggOpusFixture {
+        packet_count: 1,
+        frame_size: 960,
+        pre_skip: 0,
+        final_granule: 960,
+        ending: OggEnding::EndOfStream,
+        head_ending: HeadEnding::SharedPage,
+        first_audio_page_granule: None,
+    })
+}
+
+pub(crate) fn ogg_opus_with_regressing_granule() -> Result<Vec<u8>, Box<dyn Error>> {
+    ogg_opus(OggOpusFixture {
+        packet_count: 2,
+        frame_size: 960,
+        pre_skip: 0,
+        final_granule: 480,
+        ending: OggEnding::EndOfStream,
+        head_ending: HeadEnding::IsolatedPage,
+        first_audio_page_granule: Some(960),
+    })
+}
+
+pub(crate) fn mp3_with_long_id3_tag() -> Result<Vec<u8>, Box<dyn Error>> {
+    let encoded = mp3(8_000, 800)?;
+    let audio = encoded.get(10..).ok_or("missing MP3 audio")?;
+    let tag_length = 128_usize;
+    let mut tagged = b"ID3\x04\x00\x00\x00\x00\x01\x00".to_vec();
+    tagged.resize(10 + tag_length, 0);
+    tagged.extend_from_slice(audio);
+    Ok(tagged)
+}
+
+pub(crate) fn mp3_with_id3_header(major: u8, flags: u8) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut bytes = mp3(8_000, 800)?;
+    bytes[3] = major;
+    bytes[5] = flags;
+    Ok(bytes)
 }
 
 fn wav(sample_rate_hz: u32, frames: usize) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -247,16 +339,17 @@ fn ogg_opus(fixture: OggOpusFixture) -> Result<Vec<u8>, Box<dyn Error>> {
     encoded.truncate(packet_bytes);
 
     let mut writer = PacketWriter::new(Vec::new());
-    writer.write_packet(
-        opus_head(fixture.pre_skip),
-        SERIAL,
-        PacketWriteEndInfo::EndPage,
-        0,
-    )?;
+    let head_end = match fixture.head_ending {
+        HeadEnding::IsolatedPage => PacketWriteEndInfo::EndPage,
+        HeadEnding::SharedPage => PacketWriteEndInfo::NormalPacket,
+    };
+    writer.write_packet(opus_head(fixture.pre_skip), SERIAL, head_end, 0)?;
     writer.write_packet(opus_tags(), SERIAL, PacketWriteEndInfo::NormalPacket, 0)?;
     for packet_index in 0..fixture.packet_count {
         let final_packet = packet_index + 1 == fixture.packet_count;
-        let end = if final_packet {
+        let end = if packet_index == 0 && fixture.first_audio_page_granule.is_some() {
+            PacketWriteEndInfo::EndPage
+        } else if final_packet {
             match fixture.ending {
                 OggEnding::EndOfStream => PacketWriteEndInfo::EndStream,
                 OggEnding::EndOfPage => PacketWriteEndInfo::EndPage,
@@ -264,7 +357,9 @@ fn ogg_opus(fixture: OggOpusFixture) -> Result<Vec<u8>, Box<dyn Error>> {
         } else {
             PacketWriteEndInfo::NormalPacket
         };
-        let granule = if final_packet {
+        let granule = if packet_index == 0 && fixture.first_audio_page_granule.is_some() {
+            fixture.first_audio_page_granule.unwrap_or(0)
+        } else if final_packet {
             fixture.final_granule
         } else {
             u64::try_from(packet_index + 1)? * u64::try_from(fixture.frame_size)?
