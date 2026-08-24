@@ -77,6 +77,7 @@ const schemas = {
             "$ref": "#/$defs/WebAttentionActivityKind"
           },
           "unix_milliseconds": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           }
         },
@@ -109,6 +110,7 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "generation": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "need_summary": {
@@ -131,15 +133,19 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "actionable": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "completed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "escalated": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "failed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           }
         },
@@ -179,6 +185,7 @@ const schemas = {
             ]
           },
           "current_turn_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": [
               "string",
               "null"
@@ -201,6 +208,7 @@ const schemas = {
             "$ref": "#/$defs/WebAttentionActivity"
           },
           "session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": "string"
           },
           "state": {
@@ -220,12 +228,14 @@ const schemas = {
     "additionalProperties": false,
     "properties": {
       "continuation_after_session_id": {
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
         "type": [
           "string",
           "null"
         ]
       },
       "cursor": {
+        "pattern": "^(0|[1-9][0-9]*)$",
         "type": "string"
       },
       "summaries": {
@@ -261,6 +271,7 @@ const schemas = {
             "$ref": "#/$defs/WebAttentionActivityKind"
           },
           "unix_milliseconds": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           }
         },
@@ -293,6 +304,7 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "generation": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "need_summary": {
@@ -315,15 +327,19 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "actionable": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "completed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "escalated": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "failed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           }
         },
@@ -339,12 +355,14 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "continuation_after_session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": [
               "string",
               "null"
             ]
           },
           "cursor": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "summaries": {
@@ -389,6 +407,7 @@ const schemas = {
             ]
           },
           "current_turn_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": [
               "string",
               "null"
@@ -411,6 +430,7 @@ const schemas = {
             "$ref": "#/$defs/WebAttentionActivity"
           },
           "session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": "string"
           },
           "state": {
@@ -449,6 +469,7 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "cursor": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "kind": {
@@ -474,6 +495,7 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "cursor": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "kind": {
@@ -738,6 +760,9 @@ function assertSchema(root, schema, value, path) {
   if (schema.type === "string") {
     if (typeof value !== "string") {
       fail(path, "string");
+    }
+    if (schema.pattern !== undefined && !new RegExp(schema.pattern, "u").test(value)) {
+      fail(path, `a string matching ${schema.pattern}`);
     }
     if (schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) {
       fail(path, `at most ${schema.maxLength} Unicode scalar values`);

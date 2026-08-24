@@ -22,6 +22,7 @@ export const reduceAttentionEvent = (
     return { kind: 'projection', snapshot: current }
   }
   if (BigInt(event.cursor) <= BigInt(current.cursor)) return { kind: 'resync' }
+  if (event.summaries.length === 0) return { kind: 'resync' }
 
   const updateSessionIds = new Set(event.summaries.map((summary) => summary.session_id))
   if (updateSessionIds.size !== event.summaries.length) return { kind: 'resync' }
@@ -87,6 +88,7 @@ export const synchronizeAttention = async ({
           return
         }
         firstEvent = false
+        const cursorBeforeReduction = projection?.cursor
         const reduction = reduceAttentionEvent(projection, event)
         if (reduction.kind === 'resync') {
           resyncs += 1
@@ -100,7 +102,14 @@ export const synchronizeAttention = async ({
         }
         const acceptance = onProjection(reduction.snapshot)
         projection = acceptance.snapshot
-        if (event.kind === 'update' && acceptance.accepted) resyncs = 0
+        if (
+          event.kind === 'update' &&
+          acceptance.accepted &&
+          cursorBeforeReduction !== undefined &&
+          BigInt(acceptance.snapshot.cursor) > BigInt(cursorBeforeReduction)
+        ) {
+          resyncs = 0
+        }
         transition('live')
       }
       if (!restart) {

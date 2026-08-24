@@ -19,13 +19,14 @@ const bootstrapFixture = {
 
 const sessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
 const laterSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6e'
+const turnId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c70'
 const attentionFixture = {
-  continuation_after_session_id: sessionId,
+  continuation_after_session_id: null,
   cursor: '17',
   summaries: [
     {
       action: 'decide_approval',
-      current_turn_id: 'turn-31',
+      current_turn_id: turnId,
       goal_block: null,
       judge: { actionable: '2', completed: '7', escalated: '1', failed: '0' },
       last_activity: { kind: 'approval_judge', unix_milliseconds: '1724200000000' },
@@ -128,10 +129,18 @@ describe('SameOriginProductTransport', () => {
   })
 
   it('decodes one bounded attention page and preserves its typed continuation', async () => {
+    const summaries = Array.from({ length: MAX_ATTENTION_SNAPSHOT_ITEMS }, (_, index) => ({
+      ...attentionFixture.summaries[0],
+      session_id: `018f1840-6f3d-7a8b-9c1d-${(
+        BigInt(`0x${sessionId.slice(-12)}`) + BigInt(index + 1)
+      )
+        .toString(16)
+        .padStart(12, '0')}`,
+    }))
     const pagedFixture = {
       ...attentionFixture,
-      continuation_after_session_id: laterSessionId,
-      summaries: [{ ...attentionFixture.summaries[0], session_id: laterSessionId }],
+      continuation_after_session_id: summaries.at(-1)?.session_id,
+      summaries,
     }
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(pagedFixture)))
     vi.stubGlobal('fetch', fetchMock)
@@ -215,12 +224,10 @@ describe('SameOriginProductTransport', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
-      'attention cursor must be a canonical unsigned 64-bit integer',
+      'attention_snapshot.cursor must be a string matching',
     )
     const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
-    await expect(events.next()).rejects.toThrow(
-      'attention cursor must be a canonical unsigned 64-bit integer',
-    )
+    await expect(events.next()).rejects.toThrow('attention_event must be one recognized variant')
   })
 
   it('rejects an attention snapshot beyond the contract item ceiling', async () => {
@@ -383,7 +390,7 @@ describe('SameOriginProductTransport', () => {
         new Response(
           JSON.stringify({
             ...attentionFixture,
-            continuation_after_session_id: 'not-a-uuid',
+            continuation_after_session_id: null,
             summaries: [malformedIdentity],
           }),
         ),
@@ -394,10 +401,10 @@ describe('SameOriginProductTransport', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
-      'attention summary session identity must be a canonical UUID',
+      'attention_snapshot.summaries[0].session_id must be a string matching',
     )
     await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
-      'attention cursor must be a canonical unsigned 64-bit integer',
+      'attention_snapshot.summaries[0].judge.failed must be a string matching',
     )
   })
 

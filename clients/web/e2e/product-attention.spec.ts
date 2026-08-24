@@ -13,15 +13,17 @@ const bootstrapFixture = {
 const approvalSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c61'
 const blockedSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c62'
 const lostRunnerSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c63'
-const idleSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c64'
+const idleSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c90'
+const approvalTurnId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c71'
+const blockedTurnId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c72'
 
 const attentionFixture = {
-  continuation_after_session_id: lostRunnerSessionId,
+  continuation_after_session_id: null,
   cursor: '42',
   summaries: [
     {
       action: 'decide_approval',
-      current_turn_id: 'turn-approval',
+      current_turn_id: approvalTurnId,
       goal_block: null,
       judge: { actionable: '2', completed: '7', escalated: '1', failed: '0' },
       last_activity: { kind: 'approval_judge', unix_milliseconds: '1787342400000' },
@@ -30,7 +32,7 @@ const attentionFixture = {
     },
     {
       action: 'provide_goal_need',
-      current_turn_id: 'turn-blocked',
+      current_turn_id: blockedTurnId,
       goal_block: {
         generation: '3',
         need_summary: 'Choose the repository that should receive the release branch.',
@@ -69,6 +71,23 @@ const nextAttentionFixture = {
   ],
 } as const
 
+const continuedAttentionFixture = {
+  ...attentionFixture,
+  continuation_after_session_id: `018f1840-6f3d-7a8b-9c1d-${(
+    BigInt(`0x${approvalSessionId.slice(-12)}`) + 31n
+  )
+    .toString(16)
+    .padStart(12, '0')}`,
+  summaries: Array.from({ length: 32 }, (_, index) => ({
+    ...attentionFixture.summaries[0],
+    session_id: `018f1840-6f3d-7a8b-9c1d-${(
+      BigInt(`0x${approvalSessionId.slice(-12)}`) + BigInt(index)
+    )
+      .toString(16)
+      .padStart(12, '0')}`,
+  })),
+} as const
+
 const installAttentionScenario = async (page: Page) => {
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
   await page.route('**/api/attention**', (route) => {
@@ -83,6 +102,23 @@ const installAttentionScenario = async (page: Page) => {
       return route.fulfill({ json: nextAttentionFixture })
     }
     return route.fulfill({ json: attentionFixture })
+  })
+}
+
+const installAttentionPagingScenario = async (page: Page) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/attention**', (route) => {
+    const requestUrl = new URL(route.request().url())
+    if (requestUrl.pathname.endsWith('/follow')) {
+      return route.fulfill({
+        body: `${JSON.stringify({ kind: 'snapshot', snapshot: continuedAttentionFixture })}\n`,
+        contentType: 'application/x-ndjson',
+      })
+    }
+    if (requestUrl.searchParams.has('after_session_id')) {
+      return route.fulfill({ json: nextAttentionFixture })
+    }
+    return route.fulfill({ json: continuedAttentionFixture })
   })
 }
 
@@ -109,7 +145,7 @@ const installFailedAttentionPageScenario = async (page: Page) => {
     const requestUrl = new URL(route.request().url())
     if (requestUrl.pathname.endsWith('/follow')) {
       return route.fulfill({
-        body: `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n`,
+        body: `${JSON.stringify({ kind: 'snapshot', snapshot: continuedAttentionFixture })}\n`,
         contentType: 'application/x-ndjson',
       })
     }
@@ -125,7 +161,7 @@ const installFailedAttentionPageScenario = async (page: Page) => {
         status: 503,
       })
     }
-    return route.fulfill({ json: attentionFixture })
+    return route.fulfill({ json: continuedAttentionFixture })
   })
 }
 
@@ -215,10 +251,10 @@ test('replaces the current bounded page instead of accumulating attention histor
   page,
 }) => {
   const problems = watchBrowser(page)
-  await installAttentionScenario(page)
+  await installAttentionPagingScenario(page)
   await page.goto('/attention')
 
-  await expect(page.getByRole('listitem')).toHaveCount(attentionFixture.summaries.length)
+  await expect(page.getByRole('listitem')).toHaveCount(continuedAttentionFixture.summaries.length)
   await page.getByRole('button', { name: /Next page/ }).click()
   await expect(page.getByRole('listitem')).toHaveCount(nextAttentionFixture.summaries.length)
   await expect(page.getByText(idleSessionId)).toBeVisible()

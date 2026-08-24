@@ -13,7 +13,7 @@ import {
   Sun,
   X,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AttentionSurface } from './AttentionSurface'
 import {
   type CommandContext,
@@ -297,6 +297,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
   const surfaceEscape = useRef<(() => boolean) | null>(null)
+  const [focusAfterBootstrapRecovery, setFocusAfterBootstrapRecovery] = useState(false)
   const registerSurfaceEscape = useCallback((handler: (() => boolean) | null) => {
     surfaceEscape.current = handler
   }, [])
@@ -340,6 +341,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
 
+  useEffect(() => {
+    if (!focusAfterBootstrapRecovery || !bootstrap.isSuccess) return
+    setFocusAfterBootstrapRecovery(false)
+    const frame = requestAnimationFrame(() => primaryRef.current?.focus())
+    return () => cancelAnimationFrame(frame)
+  }, [bootstrap.isSuccess, focusAfterBootstrapRecovery])
+
   const copy = surfaceCopy[surface]
   const bootstrapTransportFailure =
     bootstrap.error instanceof ProductRequestError && bootstrap.error.kind === 'transport'
@@ -358,7 +366,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               : 'Attention reads will begin after the generated bootstrap contract validates.'}
           </p>
           {bootstrap.isError && (
-            <button type="button" onClick={() => void bootstrap.refetch()}>
+            <button
+              type="button"
+              onClick={() => {
+                setFocusAfterBootstrapRecovery(true)
+                void bootstrap.refetch()
+              }}
+            >
               Retry contract check
             </button>
           )}

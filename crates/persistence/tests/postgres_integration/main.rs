@@ -72,10 +72,11 @@ use signalbox_domain::{
     ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
     ModelCallTerminalOutcome, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
     ModelSelectionOverride, ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence,
-    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
+    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments, OverrideDeniedToolRequest,
+    OverrideDeniedToolRequestRejectedResult, OverrideDeniedToolRequestResult,
     PerInputConfigurationChoices, PhysicalCancellationModelCallTurnIdentities,
     PreparedCreateSession, PreparedModelCallRequest, ProviderModelCallFailureCause,
-    ProviderModelIdentity, ProviderReportedTokenUsage, ReasoningLevel,
+    ProviderModelIdentity, ProviderReportedTokenUsage, ReasoningLevel, RecordedUserOverride,
     RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SemanticTranscriptEntryRef, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
@@ -86,12 +87,12 @@ use signalbox_domain::{
     SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
     SubmitInputResult, ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution,
     ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
-    ToolBatchExecutionFailure, ToolCallProposal, ToolDecisionRationale, ToolDenialReason,
-    ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail,
-    ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequestId,
-    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
-    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
-    TurnId, UserContent,
+    ToolBatchExecutionFailure, ToolCallProposal, ToolDecisionRationale, ToolDecisionSource,
+    ToolDenialReason, ToolDispatchAuthority, ToolEffectClass, ToolExecutionError,
+    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolPermissionDefault,
+    ToolRequestId, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
+    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
+    TurnConfigurationProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR, ModelCredentialFamilyCatalog,
@@ -1844,6 +1845,23 @@ async fn postgres_before_approval_event_migration()
     for migration in MIGRATOR
         .iter()
         .take_while(|migration| migration.version < 202608030001)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
+    Ok((container, pool, database_url))
+}
+
+async fn postgres_before_attention_migration()
+-> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
+    let (container, pool, database_url) = unmigrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .take_while(|migration| migration.version < 202608211200)
     {
         connection.apply("_sqlx_migrations", migration).await?;
     }

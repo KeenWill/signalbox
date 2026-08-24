@@ -1,4 +1,5 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import { webContractBootstrapFixture } from '../src/product.fixture'
 
 interface BrowserProblems {
   consoleErrors: string[]
@@ -461,7 +462,9 @@ test('Escape closes the command palette', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('the command palette opens keyboard help without closing it', async ({ page }) => {
+test('the command palette opens keyboard help with available product navigation', async ({
+  page,
+}) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
   await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
@@ -469,7 +472,26 @@ test('the command palette opens keyboard help without closing it', async ({ page
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   await page.getByRole('button', { name: /Open keyboard help/ }).click()
-  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  const help = page.getByRole('dialog', { name: 'Keyboard help' })
+  await expect(help).toBeVisible()
+  await expect(help.getByText('Go to Attention', { exact: true })).toBeVisible()
+  await expect(help.getByText('Go to Sessions', { exact: true })).toBeVisible()
+  await expect(help.getByText('Go to Settings', { exact: true })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('returns from the scenario studio through the command palette', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
+  await page.goto('/scenario/streaming')
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /Go to Attention/ }).click()
+
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

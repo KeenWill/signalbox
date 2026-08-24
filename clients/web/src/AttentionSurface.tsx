@@ -33,6 +33,9 @@ export const activityTime = (unixMilliseconds: string) => {
 
 const queryKey = (after: string | null) => ['production', 'attention', after] as const
 
+const snapshotsMatch = (left: WebAttentionSnapshot, right: WebAttentionSnapshot): boolean =>
+  JSON.stringify(left) === JSON.stringify(right)
+
 export function AttentionSurface({
   registerEscapeHandler,
 }: {
@@ -80,6 +83,13 @@ export function AttentionSurface({
       onPhase: (next) => dispatch(actions.attentionSyncSet(next)),
       onProjection: (snapshot) => {
         const queryProjection = queryClient.getQueryData<WebAttentionSnapshot>(queryKey(null))
+        if (
+          queryProjection &&
+          queryProjection.cursor === snapshot.cursor &&
+          !snapshotsMatch(queryProjection, snapshot)
+        ) {
+          throw new TypeError('attention projections diverged at the same cursor')
+        }
         const projection =
           queryProjection && BigInt(queryProjection.cursor) >= BigInt(snapshot.cursor)
             ? queryProjection
@@ -149,11 +159,16 @@ export function AttentionSurface({
     setAfter(null)
   }
   const restartMonitor = () => {
+    focusReplacement.current = true
     void attention.refetch().then(() => {
       setMonitorGeneration((generation) => generation + 1)
     })
   }
   const monitorCanRestart = phase === 'failed' || phase === 'stale'
+  const retryAttention = () => {
+    focusReplacement.current = true
+    void attention.refetch()
+  }
 
   return (
     <div className="surface-body attention-live-surface">
@@ -180,7 +195,7 @@ export function AttentionSurface({
                 ? `${attention.error.code}: ${attention.error.message}`
                 : 'The response did not match the generated web contract.'}
             </p>
-            <button ref={errorFocus} type="button" onClick={() => void attention.refetch()}>
+            <button ref={errorFocus} type="button" onClick={retryAttention}>
               Retry
             </button>
             {after && (

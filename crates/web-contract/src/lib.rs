@@ -179,6 +179,7 @@ pub enum WebAttentionActivityKind {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionGoalBlock {
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
     pub generation: String,
     pub reason: WebAttentionBlockedReason,
     /// At most 128 Unicode scalar values; exact text is in session detail.
@@ -189,15 +190,20 @@ pub struct WebAttentionGoalBlock {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionJudgeFacts {
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
     pub actionable: String,
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
     pub completed: String,
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
     pub escalated: String,
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
     pub failed: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionActivity {
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
     pub unix_milliseconds: String,
     pub kind: WebAttentionActivityKind,
 }
@@ -205,7 +211,13 @@ pub struct WebAttentionActivity {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionSummary {
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
     pub session_id: String,
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
     pub current_turn_id: Option<String>,
     pub state: WebAttentionState,
     pub action: Option<WebAttentionAction>,
@@ -217,9 +229,13 @@ pub struct WebAttentionSummary {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionSnapshot {
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
     pub cursor: String,
     #[schemars(length(max = 32))]
     pub summaries: Vec<WebAttentionSummary>,
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
     pub continuation_after_session_id: Option<String>,
 }
 
@@ -230,11 +246,13 @@ pub enum WebAttentionStreamEvent {
         snapshot: WebAttentionSnapshot,
     },
     Update {
+        #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
         cursor: String,
         #[schemars(length(max = 32))]
         summaries: Vec<WebAttentionSummary>,
     },
     ResyncRequired {
+        #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
         cursor: String,
     },
 }
@@ -482,6 +500,9 @@ function assertSchema(root, schema, value, path) {{
   if (schema.type === "string") {{
     if (typeof value !== "string") {{
       fail(path, "string");
+    }}
+    if (schema.pattern !== undefined && !new RegExp(schema.pattern, "u").test(value)) {{
+      fail(path, `a string matching ${{schema.pattern}}`);
     }}
     if (schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) {{
       fail(path, `at most ${{schema.maxLength}} Unicode scalar values`);
@@ -755,5 +776,21 @@ mod tests {
         let encoded = r#"{"kind":"resync_required","cursor":"1","unexpected":true}"#;
 
         assert!(serde_json::from_str::<WebAttentionStreamEvent>(encoded).is_err());
+    }
+
+    #[test]
+    fn attention_runtime_decoder_enforces_string_patterns() {
+        let runtime = generated_artifacts()
+            .expect("the Rust schemas can generate browser artifacts")
+            .into_iter()
+            .find(|artifact| artifact.path == "clients/web/src/generated/web-contract.mjs")
+            .expect("the runtime decoder artifact exists")
+            .contents;
+
+        assert!(runtime.contains("new RegExp(schema.pattern, \"u\").test(value)"));
+        assert!(runtime.contains(r#""pattern": "^(0|[1-9][0-9]*)$""#));
+        assert!(runtime.contains(
+            r#""pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$""#,
+        ));
     }
 }

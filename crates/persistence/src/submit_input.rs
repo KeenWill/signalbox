@@ -687,6 +687,7 @@ impl SubmitInputRepository {
                 | CommandKind::ReplaceSessionDefaults
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::DecideToolRequest
+                | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
@@ -780,6 +781,7 @@ where
             | CommandKind::ReplaceSessionDefaults
             | CommandKind::ReplaceSessionMetadata
             | CommandKind::DecideToolRequest
+            | CommandKind::OverrideDeniedToolRequest
             | CommandKind::ReviewWorkflow
             | CommandKind::ReviewOrchestration
             | CommandKind::CompactSession
@@ -822,6 +824,7 @@ where
                 | CommandKind::ReplaceSessionDefaults
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::DecideToolRequest
+                | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession

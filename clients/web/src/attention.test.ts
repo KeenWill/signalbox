@@ -7,9 +7,10 @@ import type { ProductTransport } from './product'
 const sessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
 const earlierSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6c'
 const anotherSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6e'
+const turnId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c70'
 const summary = {
   action: 'decide_approval',
-  current_turn_id: 'turn-31',
+  current_turn_id: turnId,
   goal_block: null,
   judge: { actionable: '2', completed: '7', escalated: '1', failed: '0' },
   last_activity: { kind: 'approval_judge', unix_milliseconds: '1724200000000' },

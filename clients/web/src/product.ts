@@ -16,9 +16,10 @@ export const MAX_ATTENTION_SNAPSHOT_ITEMS = 32
 const MAX_UNSIGNED_64 = 18_446_744_073_709_551_615n
 const SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+const CANONICAL_NONNEGATIVE_INTEGER_PATTERN = /^(0|[1-9]\d*)$/
 
 const validateCursor = (cursor: string): void => {
-  if (!/^(0|[1-9]\d*)$/.test(cursor) || BigInt(cursor) > MAX_UNSIGNED_64) {
+  if (!CANONICAL_NONNEGATIVE_INTEGER_PATTERN.test(cursor) || BigInt(cursor) > MAX_UNSIGNED_64) {
     throw new TypeError('attention cursor must be a canonical unsigned 64-bit integer')
   }
 }
@@ -43,6 +44,12 @@ type AttentionSummary = WebAttentionSnapshot['summaries'][number]
 const validateAttentionSummary = (summary: AttentionSummary): void => {
   if (!SESSION_ID_PATTERN.test(summary.session_id)) {
     throw new TypeError('attention summary session identity must be a canonical UUID')
+  }
+  if (summary.current_turn_id != null && !SESSION_ID_PATTERN.test(summary.current_turn_id)) {
+    throw new TypeError('attention summary current-turn identity must be a canonical UUID')
+  }
+  if (!CANONICAL_NONNEGATIVE_INTEGER_PATTERN.test(summary.last_activity.unix_milliseconds)) {
+    throw new TypeError('attention activity timestamp must be a canonical nonnegative integer')
   }
   for (const count of [
     summary.judge.actionable,
@@ -79,6 +86,12 @@ const validateAttentionSummary = (summary: AttentionSummary): void => {
   ) {
     throw new TypeError('blocked attention summary must include goal-block evidence')
   }
+  if (summary.goal_block != null) {
+    validateCursor(summary.goal_block.generation)
+    if (summary.state !== 'blocked' && summary.state !== 'runner_lost') {
+      throw new TypeError('attention summary state and goal-block evidence are incoherent')
+    }
+  }
 }
 
 const validateAttentionSnapshot = (
@@ -112,6 +125,9 @@ const validateAttentionSnapshot = (
   const continuation = snapshot.continuation_after_session_id ?? null
   if (continuation !== null && continuation !== lastSessionId) {
     throw new TypeError('attention snapshot continuation does not match its last session identity')
+  }
+  if (continuation !== null && snapshot.summaries.length !== MAX_ATTENTION_SNAPSHOT_ITEMS) {
+    throw new TypeError('continued attention snapshot must contain a full contract page')
   }
   return snapshot
 }
