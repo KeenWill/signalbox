@@ -1,12 +1,15 @@
 use std::{error::Error, fmt, num::NonZeroU64, str::FromStr, sync::Arc};
 
 use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
+use serde_json::value::RawValue;
 
 const SHA256_PREFIX: &str = "sha256:";
 // numeric-bound: not-a-bound - fixed lowercase SHA-256 hexadecimal width
 const SHA256_HEX_BYTES: usize = 64;
 // numeric-bound: ceiling - bounds retained caller media-type text
 const MAX_DECLARED_MEDIA_TYPE_BYTES: usize = 255;
+// numeric-bound: ceiling - enforces the RFC 6838 restricted-name token width
+const MAX_MEDIA_TYPE_TOKEN_BYTES: usize = 127;
 // numeric-bound: ceiling - bounds retained caller display-name text
 const MAX_DISPLAY_FILENAME_BYTES: usize = 255;
 // numeric-bound: ceiling - bounds registry identity and selector storage
@@ -17,6 +20,8 @@ const MAX_REVISION_BYTES: usize = 32;
 const MAX_SCHEMA_BYTES: usize = 65_536;
 // numeric-bound: ceiling - bounds retained and parsed processor-metadata memory
 const MAX_METADATA_BYTES: usize = 16_384;
+// numeric-bound: ceiling - bounds retained untrusted continuation state
+const MAX_CONTINUATION_CURSOR_BYTES: usize = 1_024;
 
 /// SHA-256 identity at the provider-neutral boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -261,8 +266,14 @@ impl FromStr for CanonicalMediaType {
 }
 
 fn valid_media_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| {
+    if value.len() > MAX_MEDIA_TYPE_TOKEN_BYTES {
+        return false;
+    }
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && bytes.all(|byte| {
             byte.is_ascii_lowercase()
                 || byte.is_ascii_digit()
                 || matches!(
@@ -477,15 +488,80 @@ impl BoundedMetadata {
 pub(crate) fn parse_json_without_duplicate_members(
     value: &str,
 ) -> Result<serde_json::Value, serde_json::Error> {
+    parse_json_without_duplicate_members_bounded(
+        value,
+        crate::MAX_STRUCTURED_NODES,
+        crate::MAX_OBSERVED_CONTAINER_ENTRIES,
+    )
+}
+
+pub(crate) fn parse_json_without_duplicate_members_bounded(
+    value: &str,
+    maximum_nodes: u64,
+    maximum_container_entries: u64,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let raw = serde_json::from_str::<Box<RawValue>>(value)?;
+    let mut budget = JsonParseBudget {
+        remaining_nodes: maximum_nodes,
+        maximum_container_entries,
+    };
+    parse_raw_json(raw.get(), 0, &mut budget)
+}
+
+struct JsonParseBudget {
+    remaining_nodes: u64,
+    maximum_container_entries: u64,
+}
+
+impl JsonParseBudget {
+    fn admit_node(&mut self) -> Result<(), serde_json::Error> {
+        self.remaining_nodes = self.remaining_nodes.checked_sub(1).ok_or_else(|| {
+            serde_json::Error::custom("JSON node count exceeds the effective ceiling")
+        })?;
+        Ok(())
+    }
+
+    fn admits_container_entries(&self, entries: u64) -> bool {
+        entries <= self.maximum_container_entries
+    }
+}
+
+fn parse_raw_json(
+    value: &str,
+    depth: u32,
+    budget: &mut JsonParseBudget,
+) -> Result<serde_json::Value, serde_json::Error> {
+    budget.admit_node()?;
+    match value.trim_start().as_bytes().first() {
+        Some(b'{') if depth < crate::MAX_STRUCTURED_DEPTH => {
+            deserialize_seed(value, DuplicateAwareObject { depth, budget })
+        }
+        Some(b'[') if depth < crate::MAX_STRUCTURED_DEPTH => {
+            deserialize_seed(value, DuplicateAwareArray { depth, budget })
+        }
+        Some(b'{' | b'[') => Err(serde_json::Error::custom(
+            "JSON nesting depth exceeds the compiled ceiling",
+        )),
+        _ => serde_json::from_str(value),
+    }
+}
+
+fn deserialize_seed<Seed>(value: &str, seed: Seed) -> Result<serde_json::Value, serde_json::Error>
+where
+    for<'de> Seed: DeserializeSeed<'de, Value = serde_json::Value>,
+{
     let mut deserializer = serde_json::Deserializer::from_str(value);
-    let parsed = DuplicateAwareJson.deserialize(&mut deserializer)?;
+    let parsed = seed.deserialize(&mut deserializer)?;
     deserializer.end()?;
     Ok(parsed)
 }
 
-struct DuplicateAwareJson;
+struct DuplicateAwareObject<'a> {
+    depth: u32,
+    budget: &'a mut JsonParseBudget,
+}
 
-impl<'de> DeserializeSeed<'de> for DuplicateAwareJson {
+impl<'de> DeserializeSeed<'de> for DuplicateAwareObject<'_> {
     type Value = serde_json::Value;
 
     fn deserialize<Deserializer>(
@@ -495,54 +571,84 @@ impl<'de> DeserializeSeed<'de> for DuplicateAwareJson {
     where
         Deserializer: serde::Deserializer<'de>,
     {
-        deserializer.deserialize_any(DuplicateAwareJsonVisitor)
+        deserializer.deserialize_map(DuplicateAwareObjectVisitor {
+            depth: self.depth,
+            budget: self.budget,
+        })
     }
 }
 
-struct DuplicateAwareJsonVisitor;
+struct DuplicateAwareArray<'a> {
+    depth: u32,
+    budget: &'a mut JsonParseBudget,
+}
 
-impl<'de> Visitor<'de> for DuplicateAwareJsonVisitor {
+impl<'de> DeserializeSeed<'de> for DuplicateAwareArray<'_> {
+    type Value = serde_json::Value;
+
+    fn deserialize<Deserializer>(
+        self,
+        deserializer: Deserializer,
+    ) -> Result<Self::Value, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(DuplicateAwareArrayVisitor {
+            depth: self.depth,
+            budget: self.budget,
+        })
+    }
+}
+
+struct DuplicateAwareObjectVisitor<'a> {
+    depth: u32,
+    budget: &'a mut JsonParseBudget,
+}
+
+impl<'de> Visitor<'de> for DuplicateAwareObjectVisitor<'_> {
     type Value = serde_json::Value;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("JSON without duplicate object members")
     }
 
-    fn visit_bool<Error>(self, value: bool) -> Result<Self::Value, Error> {
-        Ok(serde_json::Value::Bool(value))
-    }
-
-    fn visit_i64<Error>(self, value: i64) -> Result<Self::Value, Error> {
-        Ok(serde_json::Value::Number(value.into()))
-    }
-
-    fn visit_u64<Error>(self, value: u64) -> Result<Self::Value, Error> {
-        Ok(serde_json::Value::Number(value.into()))
-    }
-
-    fn visit_f64<Error>(self, value: f64) -> Result<Self::Value, Error>
+    fn visit_map<Access>(self, mut object: Access) -> Result<Self::Value, Access::Error>
     where
-        Error: serde::de::Error,
+        Access: MapAccess<'de>,
     {
-        serde_json::Number::from_f64(value)
-            .map(serde_json::Value::Number)
-            .ok_or_else(|| Error::custom("non-finite JSON number"))
+        let mut values = std::collections::BTreeMap::new();
+        let mut entries = 0_u64;
+        while let Some(name) = object.next_key::<String>()? {
+            entries = entries
+                .checked_add(1)
+                .ok_or_else(|| Access::Error::custom("JSON container entry count overflowed"))?;
+            if !self.budget.admits_container_entries(entries) {
+                return Err(Access::Error::custom(
+                    "JSON container entries exceed the effective ceiling",
+                ));
+            }
+            if values.contains_key(&name) {
+                return Err(Access::Error::custom("duplicate JSON object member"));
+            }
+            let raw = object.next_value::<Box<RawValue>>()?;
+            let value = parse_raw_json(raw.get(), self.depth + 1, self.budget)
+                .map_err(Access::Error::custom)?;
+            values.insert(name, value);
+        }
+        Ok(serde_json::Value::Object(values.into_iter().collect()))
     }
+}
 
-    fn visit_str<Error>(self, value: &str) -> Result<Self::Value, Error> {
-        Ok(serde_json::Value::String(value.to_owned()))
-    }
+struct DuplicateAwareArrayVisitor<'a> {
+    depth: u32,
+    budget: &'a mut JsonParseBudget,
+}
 
-    fn visit_string<Error>(self, value: String) -> Result<Self::Value, Error> {
-        Ok(serde_json::Value::String(value))
-    }
+impl<'de> Visitor<'de> for DuplicateAwareArrayVisitor<'_> {
+    type Value = serde_json::Value;
 
-    fn visit_none<Error>(self) -> Result<Self::Value, Error> {
-        Ok(serde_json::Value::Null)
-    }
-
-    fn visit_unit<Error>(self) -> Result<Self::Value, Error> {
-        Ok(serde_json::Value::Null)
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("JSON array without duplicate object members")
     }
 
     fn visit_seq<Access>(self, mut sequence: Access) -> Result<Self::Value, Access::Error>
@@ -550,25 +656,22 @@ impl<'de> Visitor<'de> for DuplicateAwareJsonVisitor {
         Access: SeqAccess<'de>,
     {
         let mut values = Vec::new();
-        while let Some(value) = sequence.next_element_seed(DuplicateAwareJson)? {
-            values.push(value);
+        let mut entries = 0_u64;
+        while let Some(raw) = sequence.next_element::<Box<RawValue>>()? {
+            entries = entries
+                .checked_add(1)
+                .ok_or_else(|| Access::Error::custom("JSON container entry count overflowed"))?;
+            if !self.budget.admits_container_entries(entries) {
+                return Err(Access::Error::custom(
+                    "JSON container entries exceed the effective ceiling",
+                ));
+            }
+            values.push(
+                parse_raw_json(raw.get(), self.depth + 1, self.budget)
+                    .map_err(Access::Error::custom)?,
+            );
         }
         Ok(serde_json::Value::Array(values))
-    }
-
-    fn visit_map<Access>(self, mut object: Access) -> Result<Self::Value, Access::Error>
-    where
-        Access: MapAccess<'de>,
-    {
-        let mut values = serde_json::Map::new();
-        while let Some(name) = object.next_key::<String>()? {
-            if values.contains_key(&name) {
-                return Err(Access::Error::custom("duplicate JSON object member"));
-            }
-            let value = object.next_value_seed(DuplicateAwareJson)?;
-            values.insert(name, value);
-        }
-        Ok(serde_json::Value::Object(values))
     }
 }
 
@@ -597,6 +700,35 @@ impl VisiblePartSelector {
     }
 }
 
+/// Checked opaque continuation cursor returned by one bounded read.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ReadContinuationCursor(Arc<str>);
+
+impl ReadContinuationCursor {
+    /// Admits one bounded control-free restart-ephemeral cursor.
+    pub fn try_new(value: impl Into<Arc<str>>) -> Result<Self, RegistryValueError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > MAX_CONTINUATION_CURSOR_BYTES
+            || value.contains('\0')
+            || value.chars().any(char::is_control)
+        {
+            return Err(RegistryValueError::Continuation);
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrows the opaque cursor spelling.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the owned opaque cursor spelling.
+    pub fn into_string(self) -> String {
+        self.0.to_string()
+    }
+}
+
 /// Closed construction failure for provider-neutral checked values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegistryValueError {
@@ -616,6 +748,8 @@ pub enum RegistryValueError {
     Metadata,
     /// Invalid visible-part selector.
     Selector,
+    /// Invalid read-continuation cursor.
+    Continuation,
 }
 
 impl fmt::Display for RegistryValueError {
@@ -629,6 +763,7 @@ impl fmt::Display for RegistryValueError {
             Self::Schema => "view schema is invalid",
             Self::Metadata => "processor metadata is invalid",
             Self::Selector => "visible-part selector is invalid",
+            Self::Continuation => "read continuation cursor is invalid",
         })
     }
 }
@@ -639,11 +774,51 @@ impl Error for RegistryValueError {}
 mod tests {
     use super::*;
 
+    fn nested_metadata(depth: u32) -> String {
+        let depth = usize::try_from(depth).expect("compiled depth ceiling fits usize");
+        format!("{{\"value\":{}0{}}}", "[".repeat(depth), "]".repeat(depth))
+    }
+
+    fn flat_array(entries: usize) -> String {
+        format!("[{}]", vec!["0"; entries].join(","))
+    }
+
+    #[test]
+    fn bounded_parser_rejects_nodes_during_deserialization() {
+        let input = flat_array(2);
+
+        let outcome = parse_json_without_duplicate_members_bounded(&input, 2, 2);
+
+        assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn bounded_parser_rejects_container_entries_during_deserialization() {
+        let input = flat_array(2);
+
+        let outcome = parse_json_without_duplicate_members_bounded(&input, 3, 1);
+
+        assert!(outcome.is_err());
+    }
+
     #[test]
     fn canonical_media_types_reject_parameters_and_uppercase() {
         assert!(CanonicalMediaType::from_str("text/plain").is_ok());
         assert!(CanonicalMediaType::from_str("text/plain; charset=utf-8").is_err());
         assert!(CanonicalMediaType::from_str("Text/plain").is_err());
+        assert!(CanonicalMediaType::from_str("!text/plain").is_err());
+        assert!(CanonicalMediaType::from_str("text/!plain").is_err());
+        assert!(CanonicalMediaType::from_str(&format!("{}/b", "a".repeat(128))).is_err());
+        assert!(CanonicalMediaType::from_str(&format!("a/{}", "b".repeat(128))).is_err());
+    }
+
+    #[test]
+    fn metadata_rejects_nesting_above_the_compiled_ceiling() {
+        let input = nested_metadata(crate::MAX_STRUCTURED_DEPTH);
+
+        let outcome = BoundedMetadata::try_new(&input);
+
+        assert_eq!(outcome, Err(RegistryValueError::Metadata));
     }
 
     #[test]
@@ -664,6 +839,51 @@ mod tests {
         let outcome = BoundedMetadata::try_new(r#"{"kind":"safe","kind":"attacker"}"#);
 
         assert_eq!(outcome, Err(RegistryValueError::Metadata));
+    }
+
+    #[test]
+    fn metadata_preserves_arbitrary_precision_numbers() {
+        let input = r#"{"n":123456789012345678901234567890}"#;
+        let metadata = BoundedMetadata::try_new(input)
+            .expect("arbitrary-precision fixture remains valid metadata");
+
+        assert_eq!(metadata.as_str(), input);
+    }
+
+    #[test]
+    fn metadata_preserves_reserved_number_key_objects() {
+        let input = r#"{"$serde_json::private::Number":"1"}"#;
+        let metadata = BoundedMetadata::try_new(input)
+            .expect("the reserved spelling remains an ordinary object member");
+
+        assert_eq!(metadata.as_str(), input);
+        assert_eq!(
+            metadata.value()["$serde_json::private::Number"],
+            serde_json::Value::String(String::from("1"))
+        );
+    }
+
+    #[test]
+    fn metadata_preserves_nested_reserved_number_key_objects() {
+        let input = r#"{"nested":{"$serde_json::private::Number":"1","tail":true}}"#;
+        let metadata = BoundedMetadata::try_new(input)
+            .expect("nested reserved spelling remains ordinary object data");
+
+        assert_eq!(metadata.as_str(), input);
+        assert_eq!(
+            metadata.value()["nested"]["$serde_json::private::Number"],
+            serde_json::Value::String(String::from("1"))
+        );
+    }
+
+    #[test]
+    fn metadata_canonicalizes_object_members_lexically() {
+        let input = r#"{"z":0,"a":{"z":0,"a":1}}"#;
+        let expected = r#"{"a":{"a":1,"z":0},"z":0}"#;
+        let metadata = BoundedMetadata::try_new(input)
+            .expect("unordered object fixture remains valid metadata");
+
+        assert_eq!(metadata.as_str(), expected);
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 use std::{collections::BTreeMap, error::Error, fmt, future::Future, pin::Pin, str::FromStr};
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -17,8 +18,9 @@ use signalbox_domain::{
     ToolResultText,
 };
 use signalbox_file_media_runtime::{
-    AttachmentKind, FileDigest, FileInspection, FileMediaFailure, FileReadResult, ReadOutputKind,
-    ReadViewName, VisiblePartSelector,
+    AttachmentKind, CanonicalMediaType, FileDigest, FileInspection, FileMediaFailure,
+    FileReadInput, FileReadResult, MAX_PROCESSOR_FRAME_BYTES, ReadContinuationCursor,
+    ReadOutputKind, ReadViewName, VisiblePartSelector,
 };
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
@@ -28,8 +30,12 @@ pub use signalbox_file_media_runtime::{FILE_INSPECT_NAME, FILE_READ_NAME};
 
 const INVALID_INSPECT_ARGUMENTS: &str =
     "expected exactly a canonical digest and optional visible-part selector";
-const INVALID_READ_ARGUMENTS: &str =
-    "expected exactly a canonical digest, view, object options, and optional selector";
+const INVALID_READ_ARGUMENTS: &str = "expected a canonical digest, view, optional selector, and exactly one of object options or continuation";
+const RESULT_TOO_LARGE_DETAIL: &str = r#"{"status":"result_too_large"}"#;
+// numeric-bound: ceiling - reserves processor-frame space for validated evidence and framing
+const MAX_INITIAL_OPTIONS_BYTES: usize = MAX_PROCESSOR_FRAME_BYTES / 4;
+// numeric-bound: hard safety ceiling - bounds recursive JSON serialization and destruction work
+const MAX_FILE_READ_ARGUMENT_DEPTH: usize = 256;
 
 /// Checked service request for `file_inspect`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,7 +69,22 @@ impl FileInspectServiceRequest {
 pub struct FileReadServiceRequest {
     target: FileInspectServiceRequest,
     view: ReadViewName,
-    options: BTreeMap<String, Value>,
+    input: FileReadServiceInput,
+}
+
+/// Closed checked input mode for the `file_read` service.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FileReadServiceInput {
+    /// Initial request carrying object options.
+    Initial {
+        /// Provider-owned view options.
+        options: BTreeMap<String, Value>,
+    },
+    /// Continuation request carrying a prior-page cursor.
+    Continuation {
+        /// Checked opaque cursor.
+        cursor: ReadContinuationCursor,
+    },
 }
 
 impl FileReadServiceRequest {
@@ -77,9 +98,30 @@ impl FileReadServiceRequest {
         &self.view
     }
 
-    /// Borrows structured model-supplied options.
-    pub const fn options(&self) -> &BTreeMap<String, Value> {
-        &self.options
+    /// Borrows structured model-supplied options on an initial request.
+    pub const fn options(&self) -> Option<&BTreeMap<String, Value>> {
+        match &self.input {
+            FileReadServiceInput::Initial { options } => Some(options),
+            FileReadServiceInput::Continuation { .. } => None,
+        }
+    }
+
+    /// Borrows the checked prior-page cursor on a continuation request.
+    pub const fn continuation(&self) -> Option<&ReadContinuationCursor> {
+        match &self.input {
+            FileReadServiceInput::Initial { .. } => None,
+            FileReadServiceInput::Continuation { cursor } => Some(cursor),
+        }
+    }
+
+    /// Converts the checked service input into the neutral runtime input.
+    pub fn into_runtime_input(self) -> FileReadInput {
+        match self.input {
+            FileReadServiceInput::Initial { options } => FileReadInput::Initial {
+                options: Value::Object(options.into_iter().collect()),
+            },
+            FileReadServiceInput::Continuation { cursor } => FileReadInput::Continuation { cursor },
+        }
     }
 }
 
@@ -126,8 +168,10 @@ struct FileReadArguments {
     digest: String,
     /// Exact provider-owned view returned by file_inspect.
     view: String,
-    /// Object options validated by the selected view.
-    options: BTreeMap<String, Value>,
+    /// Object options validated by the selected view on an initial request.
+    options: Option<BTreeMap<String, Value>>,
+    /// Opaque cursor returned by the preceding file_read result.
+    continuation: Option<String>,
     /// Visible-part selector returned by attachment inspection.
     visible_part: Option<String>,
 }
@@ -278,8 +322,23 @@ fn decode_inspect(
 fn decode_read(
     arguments: &NormalizedToolArguments,
 ) -> Result<FileReadServiceRequest, InvalidFileMediaArguments> {
-    let decoded: FileReadArguments =
-        serde_json::from_str(arguments.as_str()).map_err(|_| InvalidFileMediaArguments)?;
+    if !json_container_depth_fits(arguments.as_str(), MAX_FILE_READ_ARGUMENT_DEPTH) {
+        return Err(InvalidFileMediaArguments);
+    }
+    let decoded: FileReadArguments = decode_without_recursion_limit(arguments.as_str())?;
+    let continuation = decoded
+        .continuation
+        .map(ReadContinuationCursor::try_new)
+        .transpose()
+        .map_err(|_| InvalidFileMediaArguments)?;
+    let input = match (decoded.options, continuation) {
+        (Some(options), None) if initial_options_fit(&options) => {
+            FileReadServiceInput::Initial { options }
+        }
+        (Some(_), None) => return Err(InvalidFileMediaArguments),
+        (None, Some(cursor)) => FileReadServiceInput::Continuation { cursor },
+        (Some(_), Some(_)) | (None, None) => return Err(InvalidFileMediaArguments),
+    };
     Ok(FileReadServiceRequest {
         target: FileInspectServiceRequest {
             digest: FileDigest::from_str(&decoded.digest).map_err(|_| InvalidFileMediaArguments)?,
@@ -290,8 +349,58 @@ fn decode_read(
                 .map_err(|_| InvalidFileMediaArguments)?,
         },
         view: ReadViewName::try_new(decoded.view).map_err(|_| InvalidFileMediaArguments)?,
-        options: decoded.options,
+        input,
     })
+}
+
+fn decode_without_recursion_limit<T: for<'de> Deserialize<'de>>(
+    encoded: &str,
+) -> Result<T, InvalidFileMediaArguments> {
+    let mut deserializer = serde_json::Deserializer::from_str(encoded);
+    deserializer.disable_recursion_limit();
+    let stacked = serde_stacker::Deserializer::new(&mut deserializer);
+    let decoded = T::deserialize(stacked).map_err(|_| InvalidFileMediaArguments)?;
+    deserializer.end().map_err(|_| InvalidFileMediaArguments)?;
+    Ok(decoded)
+}
+
+fn initial_options_fit(options: &BTreeMap<String, Value>) -> bool {
+    serde_json::to_vec(options).is_ok_and(|encoded| encoded.len() <= MAX_INITIAL_OPTIONS_BYTES)
+}
+
+fn json_container_depth_fits(encoded: &str, maximum_depth: usize) -> bool {
+    let mut depth = 0_usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in encoded.bytes() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth = match depth.checked_add(1) {
+                    Some(depth) if depth <= maximum_depth => depth,
+                    _ => return false,
+                };
+            }
+            b'}' | b']' => {
+                depth = match depth.checked_sub(1) {
+                    Some(depth) => depth,
+                    None => return false,
+                };
+            }
+            _ => {}
+        }
+    }
+    depth == 0 && !in_string && !escaped
 }
 
 /// Generic executor for both file/media tools.
@@ -412,13 +521,7 @@ fn inspection_evidence(inspection: FileInspection) -> ToolExecutorEvidence {
             "media_type": media_type.as_str(),
             "reason_code": reason_code.as_str(),
         })),
-        FileInspection::Ambiguous { media_types, .. } => known_failure(json!({
-            "status": "ambiguous",
-            "media_types": media_types
-                .iter()
-                .map(|media_type| media_type.as_str())
-                .collect::<Vec<_>>(),
-        })),
+        FileInspection::Ambiguous { media_types, .. } => ambiguous_failure(&media_types),
         FileInspection::DeclaredMismatch {
             declared, detected, ..
         } => known_failure(json!({
@@ -431,6 +534,30 @@ fn inspection_evidence(inspection: FileInspection) -> ToolExecutorEvidence {
             "media_type": media_type.as_str(),
         })),
     }
+}
+
+fn ambiguous_failure(media_types: &[CanonicalMediaType]) -> ToolExecutorEvidence {
+    let mut projected = Vec::new();
+    for media_type in media_types {
+        projected.push(media_type.as_str());
+        let candidate = json!({
+            "status": "ambiguous",
+            "media_types": &projected,
+            "truncated": true,
+        });
+        if ToolExecutionErrorDetail::try_new(candidate.to_string()).is_err() {
+            projected.pop();
+            return known_failure(json!({
+                "status": "ambiguous",
+                "media_types": projected,
+                "truncated": true,
+            }));
+        }
+    }
+    known_failure(json!({
+        "status": "ambiguous",
+        "media_types": projected,
+    }))
 }
 
 fn read_evidence(result: FileReadResult) -> ToolExecutorEvidence {
@@ -455,7 +582,9 @@ fn continuation_cursor(
 ) -> Option<String> {
     match continuation {
         signalbox_file_media_runtime::ReadContinuation::Complete => None,
-        signalbox_file_media_runtime::ReadContinuation::More { cursor } => Some(cursor),
+        signalbox_file_media_runtime::ReadContinuation::More { cursor } => {
+            Some(cursor.into_string())
+        }
     }
 }
 
@@ -511,7 +640,9 @@ fn completed_json(value: Value) -> ToolExecutorEvidence {
 }
 
 fn known_failure(value: Value) -> ToolExecutorEvidence {
-    let detail = ToolExecutionErrorDetail::try_new(value.to_string()).ok();
+    let detail = ToolExecutionErrorDetail::try_new(value.to_string())
+        .or_else(|_| ToolExecutionErrorDetail::try_new(String::from(RESULT_TOO_LARGE_DETAIL)))
+        .ok();
     ToolExecutorEvidence::KnownFailed { detail }
 }
 
@@ -562,6 +693,44 @@ mod tests {
             .expect("fixture arguments are admitted")
     }
 
+    fn oversized_initial_options(digest: FileDigest) -> String {
+        serde_json::json!({
+            "digest": digest.to_string(),
+            "view": "body_text",
+            "options": {"value": "x".repeat(MAX_INITIAL_OPTIONS_BYTES)},
+            "visible_part": null,
+        })
+        .to_string()
+    }
+
+    fn deeply_nested_initial_options(digest: FileDigest) -> String {
+        let nested = format!("{}0{}", "[".repeat(160), "]".repeat(160));
+        format!(
+            r#"{{"digest":"{digest}","view":"body_text","options":{{"nested":{nested}}},"visible_part":null}}"#
+        )
+    }
+
+    fn excessively_nested_initial_options(digest: FileDigest) -> String {
+        let nested = format!(
+            "{}0{}",
+            "[".repeat(MAX_FILE_READ_ARGUMENT_DEPTH),
+            "]".repeat(MAX_FILE_READ_ARGUMENT_DEPTH)
+        );
+        format!(
+            r#"{{"digest":"{digest}","view":"body_text","options":{{"nested":{nested}}},"visible_part":null}}"#
+        )
+    }
+
+    fn many_long_media_types() -> Vec<CanonicalMediaType> {
+        (0..32)
+            .map(|index| {
+                format!("application/x-{index:02}-{}", "a".repeat(110))
+                    .parse()
+                    .expect("fixture media type is canonical")
+            })
+            .collect()
+    }
+
     #[test]
     fn stable_catalog_exposes_exact_inspect_and_read_names() {
         let (catalog, _executor) = FileMediaTools::try_new(UnusedService)
@@ -610,17 +779,99 @@ mod tests {
     }
 
     #[test]
-    fn encoded_read_result_cannot_exceed_tool_result_text_bound() {
+    fn read_arguments_accept_a_returned_continuation_without_options() {
+        let digest = FileDigest::from_bytes([0x22; 32]).to_string();
+        let supplied = format!(
+            r#"{{"digest":"{digest}","view":"body_text","continuation":"next-page","visible_part":null}}"#
+        );
+
+        let decoded = decode_read(&arguments(&supplied))
+            .expect("a checked prior-page cursor forms a continuation request");
+
+        assert!(decoded.options().is_none());
+        assert_eq!(
+            decoded
+                .continuation()
+                .expect("the continuation remains present")
+                .as_str(),
+            "next-page"
+        );
+    }
+
+    #[test]
+    fn read_arguments_reject_initial_options_that_cannot_fit_the_processor_frame() {
+        let supplied = oversized_initial_options(FileDigest::from_bytes([0x33; 32]));
+
+        let outcome = decode_read(&arguments(&supplied));
+
+        assert_eq!(outcome, Err(InvalidFileMediaArguments));
+    }
+
+    #[test]
+    fn read_arguments_preserve_deep_options_for_adapter_validation() {
+        let supplied = deeply_nested_initial_options(FileDigest::from_bytes([0x44; 32]));
+
+        let decoded = decode_read(&arguments(&supplied))
+            .expect("deep bounded options remain available to the selected adapter");
+
+        assert!(decoded.options().is_some());
+    }
+
+    #[test]
+    fn read_arguments_reject_options_beyond_the_contract_depth_ceiling() {
+        let supplied = excessively_nested_initial_options(FileDigest::from_bytes([0x55; 32]));
+
+        let outcome = decode_read(&arguments(&supplied));
+
+        assert_eq!(outcome, Err(InvalidFileMediaArguments));
+    }
+
+    #[test]
+    fn oversized_ambiguity_inventory_preserves_ambiguous_status() {
+        let media_types = many_long_media_types();
+
+        let evidence = ambiguous_failure(&media_types);
+
+        let ToolExecutorEvidence::KnownFailed {
+            detail: Some(detail),
+        } = evidence
+        else {
+            panic!("ambiguous evidence remains a typed known failure");
+        };
+        let projected: Value =
+            serde_json::from_str(detail.as_str()).expect("bounded ambiguity detail remains JSON");
+        assert_eq!(projected["status"], "ambiguous");
+        assert_eq!(projected["truncated"], true);
+    }
+
+    #[test]
+    fn maximum_admitted_text_result_fits_tool_result_text_bound() {
         let result = FileReadResult::Text {
-            body: "\"".repeat(786_432),
+            body: "\u{1f}".repeat(signalbox_file_media_runtime::MAX_TEXT_BODY_BYTES),
             continuation: signalbox_file_media_runtime::ReadContinuation::Complete,
         };
 
         let evidence = read_evidence(result);
 
-        assert!(matches!(
-            evidence,
-            ToolExecutorEvidence::KnownFailed { detail: Some(_) }
-        ));
+        let ToolExecutorEvidence::CompletedText(text) = evidence else {
+            panic!("the maximum admitted worst-case text must fit the tool result");
+        };
+        assert!(ToolResultText::try_new(text).is_ok());
+    }
+
+    #[test]
+    fn oversized_known_failure_retains_compact_typed_evidence() {
+        let evidence = known_failure(json!({
+            "status": "ambiguous",
+            "media_types": ["x".repeat(4_096)],
+        }));
+
+        let ToolExecutorEvidence::KnownFailed {
+            detail: Some(detail),
+        } = evidence
+        else {
+            panic!("an oversized known failure must retain fallback detail");
+        };
+        assert_eq!(detail.as_str(), RESULT_TOO_LARGE_DETAIL);
     }
 }
