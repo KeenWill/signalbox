@@ -360,6 +360,35 @@ describe('HttpImportApi correlation', () => {
     )
   })
 
+  it('rejects exact source-session evidence beyond the preview ceiling', async () => {
+    const exact = 'a'.repeat(513)
+    stubCrypto(exactSourceSessionDigest)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              items: [
+                {
+                  ...summary(firstId),
+                  source_session_id: { leading_text: exact, completeness: 'complete' },
+                  source_session_id_sha256: exactSourceSessionDigest,
+                },
+              ],
+              next_cursor: null,
+              search_correlation: searchCorrelation,
+              exact_source_session_id_sha256: exactSourceSessionDigest,
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).list({ source_session_id: exact, limit: 1 }),
+    ).rejects.toBeInstanceOf(ImportListCorrelationError)
+  })
+
   it('rejects duplicate entry identities in a correlated window', async () => {
     vi.stubGlobal(
       'fetch',
@@ -525,6 +554,49 @@ describe('HttpImportApi correlation', () => {
                   imported_conversation_id: secondId,
                   imported_entry_id: secondId,
                   position: 1,
+                },
+              },
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).descriptor(firstId),
+    ).rejects.toBeInstanceOf(ImportDescriptorCorrelationError)
+  })
+
+  it('rejects a zero-entry descriptor', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              imported_conversation_id: firstId,
+              display_title: null,
+              raw_record_count: 0,
+              entry_count: 0,
+              source: {
+                format: 'claude_code_session_jsonl_v2',
+                source_digest_sha256: exactSourceSessionDigest,
+                source_session_id: null,
+              },
+              sizes: {
+                raw_source_bytes: 0,
+                normalized_source_record_bytes: 0,
+                normalized_entry_bytes: 0,
+              },
+              timeline: {
+                first: {
+                  imported_conversation_id: firstId,
+                  imported_entry_id: secondId,
+                  position: 1,
+                },
+                latest: {
+                  imported_conversation_id: firstId,
+                  imported_entry_id: secondId,
+                  position: 0,
                 },
               },
             }),

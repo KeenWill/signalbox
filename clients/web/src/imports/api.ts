@@ -113,6 +113,8 @@ const correlateListPage = (
       if (
         evidence === undefined ||
         evidence === null ||
+        new TextEncoder().encode(evidence.leading_text).byteLength >
+          MAX_IMPORT_TEXT_PREVIEW_BYTES ||
         (evidence.completeness === 'complete'
           ? evidence.leading_text !== request.source_session_id
           : !request.source_session_id.startsWith(evidence.leading_text))
@@ -343,6 +345,7 @@ export class HttpImportApi implements ImportApi {
       descriptor.imported_conversation_id !== importedConversationId ||
       descriptor.timeline.first.imported_conversation_id !== importedConversationId ||
       descriptor.timeline.latest.imported_conversation_id !== importedConversationId ||
+      descriptor.entry_count === 0 ||
       descriptor.timeline.first.position !== 1 ||
       descriptor.timeline.latest.position !== descriptor.entry_count ||
       !SHA256_HEX.test(descriptor.source.source_digest_sha256)

@@ -331,9 +331,9 @@ impl ImportedConversationDiscoveryRepository {
                     $6::bigint AS source_session_maximum_bytes,
                     declared_entry_count, display_title, display_title_state
                FROM imported_conversation
-              WHERE ($1::uuid IS NULL OR imported_conversation_id > $1)
-                AND ($2::text IS NULL OR source_format = $2)
-                AND ($3::smallint IS NULL OR converter_version = $3)
+              WHERE imported_conversation_id > COALESCE($1, '00000000-0000-0000-0000-000000000000'::uuid)
+                AND source_format = COALESCE($2, source_format)
+                AND converter_version = COALESCE($3, converter_version)
                 AND sha256(source_session_id) = sha256($4)
                 AND source_session_id = $4
               ORDER BY imported_conversation_id
@@ -347,7 +347,9 @@ impl ImportedConversationDiscoveryRepository {
             .bind(source_session_maximum_bytes)
             .fetch_all(&self.pool)
             .await?
-        } else {
+        } else if let (Some(source_format), Some(converter_version), Some(after)) =
+            (source_format, converter_version, after)
+        {
             sqlx::query(
                 "SELECT imported_conversation_id, source_format, converter_version,
                     substring(source_session_id FROM 1 FOR $5::integer) AS source_session_prefix,
@@ -356,15 +358,71 @@ impl ImportedConversationDiscoveryRepository {
                     $5::bigint AS source_session_maximum_bytes,
                     declared_entry_count, display_title, display_title_state
                FROM imported_conversation
-              WHERE ($1::uuid IS NULL OR imported_conversation_id > $1)
-                AND ($2::text IS NULL OR source_format = $2)
-                AND ($3::smallint IS NULL OR converter_version = $3)
+              WHERE imported_conversation_id > $1
+                AND source_format = $2
+                AND converter_version = $3
               ORDER BY imported_conversation_id
               LIMIT $4",
             )
             .bind(after)
             .bind(source_format)
             .bind(converter_version)
+            .bind(limit)
+            .bind(source_session_maximum_bytes)
+            .fetch_all(&self.pool)
+            .await?
+        } else if let (Some(source_format), Some(converter_version)) =
+            (source_format, converter_version)
+        {
+            sqlx::query(
+                "SELECT imported_conversation_id, source_format, converter_version,
+                    substring(source_session_id FROM 1 FOR $4::integer) AS source_session_prefix,
+                    octet_length(source_session_id)::bigint AS source_session_bytes,
+                    NULL::bytea AS source_session_digest,
+                    $4::bigint AS source_session_maximum_bytes,
+                    declared_entry_count, display_title, display_title_state
+               FROM imported_conversation
+              WHERE source_format = $1
+                AND converter_version = $2
+              ORDER BY imported_conversation_id
+              LIMIT $3",
+            )
+            .bind(source_format)
+            .bind(converter_version)
+            .bind(limit)
+            .bind(source_session_maximum_bytes)
+            .fetch_all(&self.pool)
+            .await?
+        } else if let Some(after) = after {
+            sqlx::query(
+                "SELECT imported_conversation_id, source_format, converter_version,
+                    substring(source_session_id FROM 1 FOR $3::integer) AS source_session_prefix,
+                    octet_length(source_session_id)::bigint AS source_session_bytes,
+                    NULL::bytea AS source_session_digest,
+                    $3::bigint AS source_session_maximum_bytes,
+                    declared_entry_count, display_title, display_title_state
+               FROM imported_conversation
+              WHERE imported_conversation_id > $1
+              ORDER BY imported_conversation_id
+              LIMIT $2",
+            )
+            .bind(after)
+            .bind(limit)
+            .bind(source_session_maximum_bytes)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT imported_conversation_id, source_format, converter_version,
+                    substring(source_session_id FROM 1 FOR $2::integer) AS source_session_prefix,
+                    octet_length(source_session_id)::bigint AS source_session_bytes,
+                    NULL::bytea AS source_session_digest,
+                    $2::bigint AS source_session_maximum_bytes,
+                    declared_entry_count, display_title, display_title_state
+               FROM imported_conversation
+              ORDER BY imported_conversation_id
+              LIMIT $1",
+            )
             .bind(limit)
             .bind(source_session_maximum_bytes)
             .fetch_all(&self.pool)

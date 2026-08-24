@@ -605,26 +605,14 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                     <button
                       type="button"
                       onClick={() => invokeCommand('imports.continue.resume', commandContext)}
-                      disabled={
-                        !selectedFrontier ||
-                        modelSelectionMissing ||
-                        descriptorQuery.isError ||
-                        continuation.isPending ||
-                        hasRetainedCommand
-                      }
+                      disabled={!canContinueImport}
                     >
                       Resume
                     </button>
                     <button
                       type="button"
                       onClick={() => invokeCommand('imports.continue.fork', commandContext)}
-                      disabled={
-                        !selectedFrontier ||
-                        modelSelectionMissing ||
-                        descriptorQuery.isError ||
-                        continuation.isPending ||
-                        hasRetainedCommand
-                      }
+                      disabled={!canContinueImport}
                     >
                       Fork
                     </button>
