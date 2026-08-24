@@ -736,13 +736,13 @@ returned snippet is at most 512 UTF-8 bytes. Results have a stable strict
 newest-address-first keyset order by `(event_sequence, projection_id)`; the
 adapter fetches at most one item beyond the requested page to decide whether to
 return a continuation. A bounded per-term GIN probe runs first: a query
-containing a term with no match returns an empty page immediately, a query
-whose rarest term stays under a fixed candidate cap is served from that term's
+containing a term with no match returns an empty page immediately, a query whose
+rarest term stays under a fixed candidate cap is served from that term's
 index-driven candidate set, and only queries in which every term is common use
 the newest-first keyset traversal, whose page then fills within a bounded
 ordered prefix. Snippets and validity checks are computed for returned rows
-only, never per examined candidate. Search never materializes or scans a
-session transcript in the browser.
+only, never per examined candidate. Search never materializes or scans a session
+transcript in the browser.
 
 ## Semantic transcript entries
 
