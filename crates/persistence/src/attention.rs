@@ -13,7 +13,9 @@ use signalbox_application::{
 use signalbox_domain::{GoalBlockedReasonKind, SessionId, TurnId};
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
-use crate::mapping::goal_blocked_reason_from_str;
+use crate::mapping::{
+    GoalEventDiscriminator, goal_blocked_reason_from_str, goal_event_kind_from_str,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AttentionCorruption {
@@ -265,16 +267,11 @@ const SELECT_IDENTITY: &str = summary_sql!(
            facts.attention_turn_state_kind,
            facts.attention_turn_active_phase_kind,
            facts.attention_turn_terminal_disposition_kind,
-           activity.fact_kind, activity.recorded_at
+           facts.attention_activity_kind AS fact_kind,
+           facts.attention_activity_recorded_at AS recorded_at
       FROM session AS session_row
       LEFT JOIN session_metadata AS metadata USING (session_id)
       LEFT JOIN session_timeline_fact AS facts USING (session_id)
-      LEFT JOIN LATERAL (
-          SELECT change.fact_kind, change.recorded_at
-            FROM operator_attention_change AS change
-           WHERE change.session_id = session_row.session_id
-           ORDER BY change.change_sequence DESC LIMIT 1
-      ) AS activity ON true
      WHERE ($2::uuid[] IS NOT NULL
             AND session_row.session_id = ANY($2)
             AND NOT COALESCE(metadata.archived, false))
@@ -312,16 +309,11 @@ const SELECT_LAST_ACTIVITY: &str = summary_sql!(
            facts.attention_turn_state_kind,
            facts.attention_turn_active_phase_kind,
            facts.attention_turn_terminal_disposition_kind,
-           activity.fact_kind, activity.recorded_at
-      FROM session AS session_row
+           facts.attention_activity_kind AS fact_kind,
+           facts.attention_activity_recorded_at AS recorded_at
+      FROM session_timeline_fact AS facts
+      JOIN session AS session_row USING (session_id)
       LEFT JOIN session_metadata AS metadata USING (session_id)
-      LEFT JOIN session_timeline_fact AS facts USING (session_id)
-      LEFT JOIN LATERAL (
-          SELECT change.fact_kind, change.recorded_at
-            FROM operator_attention_change AS change
-           WHERE change.session_id = session_row.session_id
-           ORDER BY change.change_sequence DESC LIMIT 1
-      ) AS activity ON true
      WHERE ($6::text IS NULL
             OR strpos(COALESCE(metadata.title, ''), $6) > 0
             OR strpos(session_row.session_id::text, $6) > 0)
@@ -333,9 +325,10 @@ const SELECT_LAST_ACTIVITY: &str = summary_sql!(
                 WHERE stored.session_id = session_row.session_id
                   AND stored.tag = required.tag))
        AND ($9::timestamptz IS NULL
-            OR activity.recorded_at < $9
-            OR (activity.recorded_at = $9 AND session_row.session_id > $3))
-     ORDER BY activity.recorded_at DESC, session_row.session_id LIMIT $1
+            OR facts.attention_activity_recorded_at < $9
+            OR (facts.attention_activity_recorded_at = $9
+                AND session_row.session_id > $3))
+     ORDER BY facts.attention_activity_recorded_at DESC, session_row.session_id LIMIT $1
     "#,
     "ORDER BY selected.recorded_at DESC, selected.session_id"
 );
@@ -457,10 +450,13 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
     let turn_state = row.try_get::<Option<String>, _>("turn_state")?;
     let phase = row.try_get::<Option<String>, _>("active_phase_kind")?;
     let terminal = row.try_get::<Option<String>, _>("terminal_disposition_kind")?;
-    let goal_state = row.try_get::<Option<String>, _>("goal_state")?;
+    let goal_state = row
+        .try_get::<Option<String>, _>("goal_state")?
+        .map(|value| decode_goal_event_kind(&value))
+        .transpose()?;
     let state = classify_state(
         runner.as_deref(),
-        goal_state.as_deref(),
+        goal_state,
         turn_state.as_deref(),
         phase.as_deref(),
         terminal.as_deref(),
@@ -479,7 +475,7 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
         .try_get::<Option<sqlx::types::time::OffsetDateTime>, _>("recorded_at")?
         .ok_or(AttentionCorruption::Missing("activity timestamp"))?;
     let goal_block = if state == AttentionState::Blocked {
-        decode_goal_block(row, goal_state.as_deref())?
+        decode_goal_block(row, goal_state)?
     } else {
         None
     };
@@ -515,7 +511,7 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
 
 fn classify_state(
     runner: Option<&str>,
-    goal: Option<&str>,
+    goal: Option<GoalEventDiscriminator>,
     turn: Option<&str>,
     phase: Option<&str>,
     terminal: Option<&str>,
@@ -523,7 +519,7 @@ fn classify_state(
     if matches!(runner, Some("runner_lost" | "runner_lost_before_pin")) {
         return Ok(AttentionState::RunnerLost);
     }
-    if goal == Some("blocked") {
+    if goal == Some(GoalEventDiscriminator::Blocked) {
         return Ok(AttentionState::Blocked);
     }
     match (turn, phase, terminal) {
@@ -549,9 +545,9 @@ fn classify_state(
 
 fn decode_goal_block(
     row: &PgRow,
-    goal_state: Option<&str>,
+    goal_state: Option<GoalEventDiscriminator>,
 ) -> Result<Option<AttentionGoalBlock>, AttentionRepositoryError> {
-    if goal_state != Some("blocked") {
+    if goal_state != Some(GoalEventDiscriminator::Blocked) {
         return Ok(None);
     }
     let stored_reason = required_string(row, "blocked_reason")?;
@@ -579,6 +575,16 @@ fn decode_goal_block(
         reason,
         need_summary: required_string(row, "need_summary")?,
     }))
+}
+
+fn decode_goal_event_kind(value: &str) -> Result<GoalEventDiscriminator, AttentionRepositoryError> {
+    goal_event_kind_from_str(value).ok_or_else(|| {
+        AttentionCorruption::Unsupported {
+            field: "goal event kind",
+            value: value.to_owned(),
+        }
+        .into()
+    })
 }
 
 fn decode_activity_kind(value: &str) -> Result<AttentionActivityKind, AttentionRepositoryError> {
@@ -630,7 +636,7 @@ mod tests {
         assert_eq!(
             classify_state(
                 Some("runner_lost"),
-                Some("blocked"),
+                Some(GoalEventDiscriminator::Blocked),
                 Some("active"),
                 Some("running"),
                 None
@@ -639,7 +645,14 @@ mod tests {
             AttentionState::RunnerLost
         );
         assert_eq!(
-            classify_state(None, Some("blocked"), Some("active"), Some("running"), None).unwrap(),
+            classify_state(
+                None,
+                Some(GoalEventDiscriminator::Blocked),
+                Some("active"),
+                Some("running"),
+                None,
+            )
+            .unwrap(),
             AttentionState::Blocked
         );
         assert_eq!(
@@ -653,5 +666,10 @@ mod tests {
             .unwrap(),
             AttentionState::AwaitingApproval
         );
+    }
+
+    #[test]
+    fn goal_event_kind_decoding_rejects_unknown_storage_values() {
+        assert!(decode_goal_event_kind("future_goal_state").is_err());
     }
 }

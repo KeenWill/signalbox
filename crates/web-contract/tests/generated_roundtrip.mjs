@@ -255,6 +255,25 @@ test("generated attention decoder requires the nullable current turn field", () 
   );
 });
 
+test("generated attention decoder requires identities for turn-backed states", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ state: "active" })],
+        }),
+      ),
+    /current_turn_id must be a turn identity for state active/,
+  );
+});
+
+test("generated attention decoder rejects totals below the returned page", () => {
+  assert.throws(
+    () => decodeWebAttentionSnapshot(attentionSnapshot({ total: "0" })),
+    /total must be at least the number of returned summaries/,
+  );
+});
+
 test("generated attention decoder rejects contradictory title truncation", () => {
   assert.throws(
     () =>

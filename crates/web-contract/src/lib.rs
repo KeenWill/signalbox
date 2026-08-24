@@ -934,6 +934,9 @@ function assertAttentionSnapshot(snapshot, path) {{
   snapshot.summaries.forEach((summary, index) =>
     assertAttentionSummary(summary, `${{path}}.summaries[${{index}}]`),
   );
+  if (BigInt(snapshot.total) < BigInt(snapshot.summaries.length)) {{
+    fail(`${{path}}.total`, "at least the number of returned summaries");
+  }}
   const continuationKind = snapshot.continuation?.kind ?? null;
   const expectedContinuationKind = {{
     last_activity_descending: "last_activity",
@@ -957,6 +960,16 @@ function assertAttentionSummary(summary, path) {{
   }}[summary.state];
   if (summary.action !== expectedAction) {{
     fail(`${{path}}.action`, `the action required by state ${{summary.state}}`);
+  }}
+  const turnBacked = [
+    "active",
+    "queued",
+    "awaiting_approval",
+    "ambiguous",
+    "awaiting_reconciliation",
+  ].includes(summary.state);
+  if (turnBacked && summary.current_turn_id === null) {{
+    fail(`${{path}}.current_turn_id`, `a turn identity for state ${{summary.state}}`);
   }}
   const hasGoalBlock = Object.hasOwn(summary, "goal_block") && summary.goal_block !== null;
   if ((summary.state === "blocked") !== hasGoalBlock) {{
