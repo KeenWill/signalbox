@@ -49,7 +49,12 @@ pub(crate) async fn inspect(
     let Some(bytes) = source::read_complete(source, cancellation).await? else {
         return Ok(malformed(format, "source_too_large"));
     };
-    let metadata = match decode(format, &bytes) {
+    let metadata = match decode(
+        format,
+        &bytes,
+        request.maximum_image_axis,
+        request.maximum_decoded_image_pixels,
+    ) {
         Ok(metadata) => metadata,
         Err(reason) => return Ok(malformed(format, reason)),
     };
@@ -66,7 +71,10 @@ pub(crate) async fn read(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorReadOutput, ProcessorFailure> {
-    if request.view.as_str() != "metadata" || !options_are_empty(&request.options) {
+    let signalbox_file_media_runtime::FileReadInput::Initial { options } = &request.input else {
+        return Ok(ProcessorReadOutput::InvalidViewArguments);
+    };
+    if request.view.as_str() != "metadata" || !options_are_empty(options) {
         return Ok(ProcessorReadOutput::InvalidViewArguments);
     }
     let Some(bytes) = source::read_complete(source, cancellation).await? else {
@@ -74,7 +82,13 @@ pub(crate) async fn read(
             maximum_bytes: MAX_IMAGE_SOURCE_BYTES,
         });
     };
-    let metadata = decode(format, &bytes).map_err(|_| ProcessorFailure::Failed)?;
+    let metadata = decode(
+        format,
+        &bytes,
+        request.maximum_image_axis,
+        request.maximum_decoded_image_pixels,
+    )
+    .map_err(|_| ProcessorFailure::Failed)?;
     Ok(ProcessorReadOutput::Structured {
         body_json: metadata_json(metadata)?,
         truncated: false,
@@ -82,24 +96,31 @@ pub(crate) async fn read(
     })
 }
 
-fn decode(format: AdapterFormat, bytes: &[u8]) -> Result<ImageMetadata, &'static str> {
+fn decode(
+    format: AdapterFormat,
+    bytes: &[u8],
+    maximum_axis: u32,
+    maximum_pixels: u64,
+) -> Result<ImageMetadata, &'static str> {
     let dimensions = ImageReader::with_format(Cursor::new(bytes), format.image_format())
         .into_dimensions()
         .map_err(|_| "malformed_image")?;
-    if dimensions.0 > MAX_IMAGE_AXIS || dimensions.1 > MAX_IMAGE_AXIS {
+    let maximum_axis = maximum_axis.min(MAX_IMAGE_AXIS);
+    let maximum_pixels = maximum_pixels.min(MAX_IMAGE_DECODED_PIXELS);
+    if dimensions.0 > maximum_axis || dimensions.1 > maximum_axis {
         return Err("dimension_limit_exceeded");
     }
     let pixels = u64::from(dimensions.0)
         .checked_mul(u64::from(dimensions.1))
         .ok_or("pixel_limit_exceeded")?;
-    if pixels > MAX_IMAGE_DECODED_PIXELS {
+    if pixels > maximum_pixels {
         return Err("pixel_limit_exceeded");
     }
 
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format.image_format());
     let mut limits = Limits::default();
-    limits.max_image_width = Some(MAX_IMAGE_AXIS);
-    limits.max_image_height = Some(MAX_IMAGE_AXIS);
+    limits.max_image_width = Some(maximum_axis);
+    limits.max_image_height = Some(maximum_axis);
     limits.max_alloc = Some(MAX_DECODER_ALLOCATION_BYTES);
     reader.limits(limits);
     let image = reader.decode().map_err(|_| "malformed_image")?;

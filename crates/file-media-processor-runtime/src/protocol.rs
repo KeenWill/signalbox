@@ -403,6 +403,8 @@ pub(crate) struct WireValidationRequest {
     evidence: ValidationEvidence,
     maximum_source_bytes: u64,
     maximum_ranges: u32,
+    maximum_image_axis: u32,
+    maximum_decoded_image_pixels: u64,
 }
 
 impl From<&FileMediaProviderValidationRequest> for WireValidationRequest {
@@ -413,6 +415,8 @@ impl From<&FileMediaProviderValidationRequest> for WireValidationRequest {
             evidence: request.evidence,
             maximum_source_bytes: request.maximum_source_bytes,
             maximum_ranges: request.maximum_ranges,
+            maximum_image_axis: request.maximum_image_axis,
+            maximum_decoded_image_pixels: request.maximum_decoded_image_pixels,
         }
     }
 }
@@ -428,6 +432,8 @@ impl TryFrom<WireValidationRequest> for FileMediaProviderValidationRequest {
             evidence: value.evidence,
             maximum_source_bytes: value.maximum_source_bytes,
             maximum_ranges: value.maximum_ranges,
+            maximum_image_axis: value.maximum_image_axis,
+            maximum_decoded_image_pixels: value.maximum_decoded_image_pixels,
         })
     }
 }
@@ -442,6 +448,8 @@ pub(crate) struct WireReadRequest {
     view: String,
     options: Option<serde_json::Value>,
     continuation: Option<String>,
+    maximum_image_axis: u32,
+    maximum_decoded_image_pixels: u64,
 }
 
 impl From<&FileMediaProviderReadRequest> for WireReadRequest {
@@ -462,6 +470,8 @@ impl From<&FileMediaProviderReadRequest> for WireReadRequest {
             view: request.view.as_str().to_owned(),
             options,
             continuation,
+            maximum_image_axis: request.maximum_image_axis,
+            maximum_decoded_image_pixels: request.maximum_decoded_image_pixels,
         }
     }
 }
@@ -487,6 +497,8 @@ impl TryFrom<WireReadRequest> for FileMediaProviderReadRequest {
             metadata: BoundedMetadata::try_new(&value.metadata_json).map_err(map_value_error)?,
             view: ReadViewName::try_new(value.view).map_err(map_value_error)?,
             input,
+            maximum_image_axis: value.maximum_image_axis,
+            maximum_decoded_image_pixels: value.maximum_decoded_image_pixels,
         })
     }
 }

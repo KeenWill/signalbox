@@ -22,13 +22,13 @@ use signalbox_file_media_linux_sandbox::{
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProcessCeilings, FileMediaProcessor, FileMediaProcessorFuture,
     FileMediaProviderDeclaration, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    FileReadInput, MAX_PROBE_CUMULATIVE_BYTES, MAX_PROBE_PREFIX_BYTES, MAX_PROBE_RANGES,
-    MAX_PROBE_SUFFIX_BYTES, MAX_READ_RANGES, MAX_READ_SOURCE_BYTES, MAX_READERS_PER_PROVIDER,
-    MAX_REGISTRY_READERS, MAX_VALIDATION_RANGES, MAX_VALIDATION_SOURCE_BYTES, MAX_WORKER_TASKS,
-    ProbeDeclaration, ProcessorBoundaryFailure, ProcessorFailure, ProcessorIsolation,
-    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
-    ReadViewDeclaration, ReaderDeclaration, ReaderIdentity, VerifiedBlobSource,
-    provider_declaration_inventory_fits, read_options_fit,
+    FileReadInput, MAX_DECODED_IMAGE_PIXELS, MAX_IMAGE_AXIS, MAX_PROBE_CUMULATIVE_BYTES,
+    MAX_PROBE_PREFIX_BYTES, MAX_PROBE_RANGES, MAX_PROBE_SUFFIX_BYTES, MAX_READ_RANGES,
+    MAX_READ_SOURCE_BYTES, MAX_READERS_PER_PROVIDER, MAX_REGISTRY_READERS, MAX_VALIDATION_RANGES,
+    MAX_VALIDATION_SOURCE_BYTES, MAX_WORKER_TASKS, ProbeDeclaration, ProcessorBoundaryFailure,
+    ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadAccessPattern, ReadViewDeclaration, ReaderDeclaration,
+    ReaderIdentity, VerifiedBlobSource, provider_declaration_inventory_fits, read_options_fit,
 };
 use tokio::{
     io::AsyncReadExt as _,
@@ -501,6 +501,10 @@ impl FileMediaProcessor for SandboxedFileMediaProcessor {
                 || request.maximum_source_bytes > MAX_VALIDATION_SOURCE_BYTES
                 || request.maximum_ranges == 0
                 || request.maximum_ranges > MAX_VALIDATION_RANGES
+                || request.maximum_image_axis == 0
+                || request.maximum_image_axis > MAX_IMAGE_AXIS
+                || request.maximum_decoded_image_pixels == 0
+                || request.maximum_decoded_image_pixels > MAX_DECODED_IMAGE_PIXELS
             {
                 return Err(ProcessorFailure::Protocol.into());
             }
@@ -537,6 +541,13 @@ impl FileMediaProcessor for SandboxedFileMediaProcessor {
             let declaration = self.reader(reader)?;
             require_file_use_source(&request.source, source)?;
             if !direct_read_input_fits(&request.input) {
+                return Err(ProcessorFailure::Protocol.into());
+            }
+            if request.maximum_image_axis == 0
+                || request.maximum_image_axis > MAX_IMAGE_AXIS
+                || request.maximum_decoded_image_pixels == 0
+                || request.maximum_decoded_image_pixels > MAX_DECODED_IMAGE_PIXELS
+            {
                 return Err(ProcessorFailure::Protocol.into());
             }
             let view = declaration

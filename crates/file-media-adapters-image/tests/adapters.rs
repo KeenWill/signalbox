@@ -4,6 +4,7 @@ mod support;
 use std::error::Error;
 
 use fixtures::FixtureFormat;
+use signalbox_file_media_runtime::FileMediaCeilings;
 use support::{DirectProcessor, MemorySource};
 
 #[tokio::test]
@@ -44,6 +45,35 @@ async fn webp_hostile_inputs_fail_typed_within_ceilings() -> Result<(), Box<dyn 
 #[tokio::test]
 async fn gif_hostile_inputs_fail_typed_within_ceilings() -> Result<(), Box<dyn Error>> {
     assert_hostile(FixtureFormat::Gif).await
+}
+
+#[tokio::test]
+async fn lowered_image_axis_is_enforced_during_metadata_validation() -> Result<(), Box<dyn Error>> {
+    let format = FixtureFormat::Png;
+    let source = MemorySource::new(fixtures::valid(format)?);
+    let ceilings = FileMediaCeilings {
+        image_axis: 2,
+        ..FileMediaCeilings::version_one()
+    };
+
+    let inspection = support::inspect_with_ceilings(&source, format.media_type(), ceilings).await?;
+    support::assert_malformed_reason(inspection, "dimension_limit_exceeded");
+    Ok(())
+}
+
+#[tokio::test]
+async fn lowered_decoded_pixels_are_enforced_during_metadata_validation()
+-> Result<(), Box<dyn Error>> {
+    let format = FixtureFormat::Png;
+    let source = MemorySource::new(fixtures::valid(format)?);
+    let ceilings = FileMediaCeilings {
+        decoded_image_pixels: 5,
+        ..FileMediaCeilings::version_one()
+    };
+
+    let inspection = support::inspect_with_ceilings(&source, format.media_type(), ceilings).await?;
+    support::assert_malformed_reason(inspection, "pixel_limit_exceeded");
+    Ok(())
 }
 
 #[tokio::test]

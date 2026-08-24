@@ -389,6 +389,10 @@ pub struct FileMediaProviderValidationRequest {
     pub maximum_source_bytes: u64,
     /// Maximum exact ranges the processor broker may serve.
     pub maximum_ranges: u32,
+    /// Effective maximum image width or height for decoded-image work.
+    pub maximum_image_axis: u32,
+    /// Effective maximum decoded image pixels.
+    pub maximum_decoded_image_pixels: u64,
 }
 
 /// Provider request to interpret one validated file through one view.
@@ -406,6 +410,10 @@ pub struct FileMediaProviderReadRequest {
     pub view: ReadViewName,
     /// Closed initial-options or continuation input.
     pub input: crate::FileReadInput,
+    /// Effective maximum image width or height for decoded-image work.
+    pub maximum_image_axis: u32,
+    /// Effective maximum decoded image pixels.
+    pub maximum_decoded_image_pixels: u64,
 }
 
 /// Adapter-owned execution failure inside an isolated worker.

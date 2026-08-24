@@ -8,11 +8,11 @@ use std::{error::Error, str::FromStr};
 use image::ImageFormat;
 use signalbox_file_media_runtime::{
     CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider, FileMediaProviderDeclaration,
-    FileMediaProviderFuture, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    FileReaderName, FileReaderProviderName, FileReaderRevision, ProbeDeclaration, ProcessorFailure,
-    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
-    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
-    ReaderIdentity, ReasonCode, StreamingTextFallback, VerifiedBlobSource,
+    FileMediaProviderFailure, FileMediaProviderFuture, FileMediaProviderReadRequest,
+    FileMediaProviderValidationRequest, FileReaderName, FileReaderProviderName, FileReaderRevision,
+    ProbeDeclaration, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
+    ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
+    ReaderDeclarationInput, ReaderIdentity, ReasonCode, StreamingTextFallback, VerifiedBlobSource,
 };
 
 const PROVIDER_NAME: &str = "signalbox_image";
@@ -96,7 +96,9 @@ impl FileMediaProvider for ImageFamilyProvider {
     ) -> FileMediaProviderFuture<'a, ProcessorProbeOutput> {
         Box::pin(async move {
             let format = format_for_reader(reader)?;
-            adapter::probe(format, source, cancellation).await
+            adapter::probe(format, source, cancellation)
+                .await
+                .map_err(|_| FileMediaProviderFailure::Failed)
         })
     }
 
@@ -109,7 +111,9 @@ impl FileMediaProvider for ImageFamilyProvider {
     ) -> FileMediaProviderFuture<'a, ProcessorValidationOutput> {
         Box::pin(async move {
             let format = format_for_reader(reader)?;
-            adapter::inspect(format, request, source, cancellation).await
+            adapter::inspect(format, request, source, cancellation)
+                .await
+                .map_err(|_| FileMediaProviderFailure::Failed)
         })
     }
 
@@ -122,7 +126,9 @@ impl FileMediaProvider for ImageFamilyProvider {
     ) -> FileMediaProviderFuture<'a, ProcessorReadOutput> {
         Box::pin(async move {
             let format = format_for_reader(reader)?;
-            adapter::read(format, request, source, cancellation).await
+            adapter::read(format, request, source, cancellation)
+                .await
+                .map_err(|_| FileMediaProviderFailure::Failed)
         })
     }
 }
@@ -168,7 +174,7 @@ fn metadata_view() -> Result<ReadViewDeclaration, Box<dyn Error + Send + Sync>> 
         ReadViewName::try_new(METADATA_VIEW_NAME)?,
         String::from("Decodes the primary raster and returns dimensions and channel count."),
         CanonicalJsonObjectSchema::try_new(r#"{"additionalProperties":false,"type":"object"}"#)?,
-        ReadAccessPattern::Streaming,
+        ReadAccessPattern::Streaming { maximum_ranges: 1 },
         ReadViewBounds::Structured {
             source_bytes: MAX_IMAGE_SOURCE_BYTES,
             output_bytes: 256,
@@ -179,11 +185,11 @@ fn metadata_view() -> Result<ReadViewDeclaration, Box<dyn Error + Send + Sync>> 
     )?)
 }
 
-fn format_for_reader(reader: &ReaderIdentity) -> Result<AdapterFormat, ProcessorFailure> {
+fn format_for_reader(reader: &ReaderIdentity) -> Result<AdapterFormat, FileMediaProviderFailure> {
     AdapterFormat::ALL
         .into_iter()
         .find(|format| format.reader_name() == reader.reader().as_str())
-        .ok_or(ProcessorFailure::Protocol)
+        .ok_or(FileMediaProviderFailure::Failed)
 }
 
 fn options_are_empty(options: &serde_json::Value) -> bool {

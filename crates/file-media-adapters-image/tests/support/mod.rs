@@ -6,8 +6,9 @@ use signalbox_file_media_runtime::{
     FileMediaCeilings, FileMediaFailure, FileMediaProcessor, FileMediaProcessorFuture,
     FileMediaProvider, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
     FileMediaRegistry, FileReadRequest, FileReadResult, FileUse, InspectionRequest, NeverCancelled,
-    ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    ReadViewName, ReaderIdentity, SourceReadError, SourceReadFuture, VerifiedBlobSource,
+    ProcessorBoundaryFailure, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadViewName, ReaderIdentity, SourceReadError,
+    SourceReadFuture, VerifiedBlobSource,
 };
 
 pub(crate) struct MemorySource {
@@ -92,7 +93,11 @@ impl FileMediaProcessor for DirectProcessor {
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
         let future = self.provider.probe(reader, source, cancellation);
-        Box::pin(async move { future.await.map_err(Into::into) })
+        Box::pin(async move {
+            future
+                .await
+                .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+        })
     }
 
     fn validate<'a>(
@@ -103,7 +108,11 @@ impl FileMediaProcessor for DirectProcessor {
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
         let future = self.provider.inspect(reader, request, source, cancellation);
-        Box::pin(async move { future.await.map_err(Into::into) })
+        Box::pin(async move {
+            future
+                .await
+                .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+        })
     }
 
     fn read<'a>(
@@ -116,7 +125,11 @@ impl FileMediaProcessor for DirectProcessor {
         match &self.read_behavior {
             ReadBehavior::Provider => {
                 let future = self.provider.read(reader, request, source, cancellation);
-                Box::pin(async move { future.await.map_err(Into::into) })
+                Box::pin(async move {
+                    future
+                        .await
+                        .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+                })
             }
             ReadBehavior::InjectedStructured(body_json) => {
                 let body_json = body_json.clone();
@@ -132,12 +145,16 @@ impl FileMediaProcessor for DirectProcessor {
     }
 }
 
-fn registry() -> Result<FileMediaRegistry, Box<dyn Error>> {
+fn registry_with(ceilings: FileMediaCeilings) -> Result<FileMediaRegistry, Box<dyn Error>> {
     Ok(FileMediaRegistry::try_new(
         vec![image_family_declaration().map_err(|error| error.to_string())?],
-        FileMediaCeilings::version_one(),
+        ceilings,
         ProcessorIsolation::Available,
     )?)
+}
+
+fn registry() -> Result<FileMediaRegistry, Box<dyn Error>> {
+    registry_with(FileMediaCeilings::version_one())
 }
 
 pub(crate) async fn inspect(
@@ -145,6 +162,24 @@ pub(crate) async fn inspect(
     media_type: &str,
 ) -> Result<FileInspection, Box<dyn Error>> {
     Ok(registry()?
+        .inspect(
+            &DirectProcessor::provider(),
+            InspectionRequest {
+                source: source.file_use(media_type)?,
+                visible_part: None,
+            },
+            source,
+            &NeverCancelled,
+        )
+        .await?)
+}
+
+pub(crate) async fn inspect_with_ceilings(
+    source: &MemorySource,
+    media_type: &str,
+    ceilings: FileMediaCeilings,
+) -> Result<FileInspection, Box<dyn Error>> {
+    Ok(registry_with(ceilings)?
         .inspect(
             &DirectProcessor::provider(),
             InspectionRequest {
@@ -176,7 +211,9 @@ pub(crate) async fn read(
                     visible_part: None,
                 },
                 view,
-                options: serde_json::json!({}),
+                input: signalbox_file_media_runtime::FileReadInput::Initial {
+                    options: serde_json::json!({}),
+                },
             },
             source,
             &NeverCancelled,

@@ -3948,7 +3948,7 @@ dependencies = [
  "signalbox-file-media-processor-runtime",
  "signalbox-file-media-runtime",
  "tokio",
- ]
+]
 
 [[package]]
 name = "signalbox-file-media-linux-sandbox"
