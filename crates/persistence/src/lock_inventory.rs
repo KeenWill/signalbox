@@ -211,11 +211,20 @@ pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION: &str = "WITH 
             )
           WHERE singleton";
 
+/// Claims one due window of automatic reconciliations.
+///
+/// The attempt budget (`$2`) and the retry ladder (`$3`..`$7`, in seconds) are
+/// bound by the caller from `ModelCallReconciliationAttempt` rather than written
+/// here. They were literals, which meant the schedule this daemon actually
+/// enforces lived only in this string: the Rust ladder had no production reader,
+/// so the two could diverge in either direction with nothing failing. The CASE
+/// has one arm per admitted attempt, so its arity is part of the contract — the
+/// caller asserts it against the budget at compile time.
 pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_CLAIM: &str = "WITH due AS (
                 SELECT turn_id
                   FROM automatic_model_call_reconciliation
                  WHERE state_kind = 'scheduled'
-                   AND attempt_count < 5
+                   AND attempt_count < $2
                    AND next_attempt_at <= statement_timestamp()
                  ORDER BY next_attempt_at, turn_id
                  LIMIT $1
@@ -226,11 +235,11 @@ pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_CLAIM: &str = "WITH due AS 
                        state_kind = 'attempting',
                        next_attempt_at = statement_timestamp()
                            + (CASE recovery.attempt_count + 1
-                                WHEN 1 THEN 120
-                                WHEN 2 THEN 240
-                                WHEN 3 THEN 480
-                                WHEN 4 THEN 960
-                                ELSE 1800
+                                WHEN 1 THEN $3::bigint
+                                WHEN 2 THEN $4::bigint
+                                WHEN 3 THEN $5::bigint
+                                WHEN 4 THEN $6::bigint
+                                ELSE $7::bigint
                               END * interval '1 second')
                   FROM due
                  WHERE recovery.turn_id = due.turn_id

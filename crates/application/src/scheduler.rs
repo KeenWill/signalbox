@@ -48,6 +48,21 @@ const BASELINE_NUDGE_BUFFER_CAPACITY: usize = 1_024;
 // numeric-bound: tunable - controls concurrent authoritative scheduler passes
 const SCHEDULER_PASS_ADMISSION_CAP: usize = 16;
 /// Longest wall-clock tenure of one admitted authoritative pass.
+///
+/// This bounds *occupancy*, not turn duration, and the difference matters: one
+/// admitted pass drives a turn's entire model/tools loop, including provider
+/// retry-backoff sleeps, and returns only at a terminal or durable-park outcome.
+/// A healthy multi-round turn can therefore reach this ceiling while making
+/// continuous durable progress, so reaching it is not evidence that anything is
+/// wedged — it is only the point at which the scheduler reclaims the slot, so
+/// that one long-running session cannot hold one indefinitely.
+///
+/// Expiry consequently hands the turn to a recovery path that decides for
+/// itself, and that path requires the turn's durable evidence to be unchanged
+/// across a confirmation delay before terminalizing it — the same
+/// unchanged-evidence requirement both liveness watchdogs impose. A pass that
+/// expired while progressing has its turn left active and eligibility nudged, so
+/// a fresh pass may be admitted for it.
 // numeric-bound: ceiling - bounds one authoritative pass's scheduler occupancy
 const SCHEDULER_PASS_OCCUPANCY_BOUND: Duration = Duration::from_secs(15 * 60);
 

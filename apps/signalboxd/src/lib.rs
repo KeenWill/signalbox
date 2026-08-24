@@ -12,10 +12,11 @@ use signalbox_application::{
     EligibilityNudge, EligibilityPass, InProcessAttemptDispatchGate, InProcessToolDispatchGate,
     ModelCallExecutionError, ModelCallExecutionOutcome, ModelCallExecutionService,
     ModelCallProvider, OperatorFailureClass, SchedulerPassExpiryHandler, ScriptedModelCallError,
-    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnIdGenerator,
-    StartEligibleTurnOutcome, StartEligibleTurnService, StartEligibleTurnTransaction, ToolCatalog,
-    ToolExecutionService, ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor,
-    UuidV7ModelCallExecutionIdGenerator, UuidV7StartupScanIdGenerator, UuidV7ToolLoopIdGenerator,
+    ScriptedModelCallProvider, ScriptedModelCallStep, StaleTurnCandidate,
+    StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
+    StartEligibleTurnTransaction, ToolCatalog, ToolExecutionService, ToolExecutionServiceError,
+    ToolExecutionServiceOutcome, ToolExecutor, UuidV7ModelCallExecutionIdGenerator,
+    UuidV7StartupScanIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
     ActivatedTurn, AssistantText, ContextFrontierId, DirectModelSelection, ModelCallId,
@@ -936,6 +937,58 @@ where
     }
 }
 
+/// What one inventory observation settles about an expired pass's turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExpiredPassObservation {
+    /// The expected turn was seen once. Nothing is settled: one observation
+    /// cannot distinguish a wedged turn from a working one.
+    AwaitingConfirmation(StaleTurnCandidate),
+    /// Durable evidence stood still between two observations, so the turn is
+    /// wedged and recovery may terminalize it.
+    Confirmed(StaleTurnCandidate),
+    /// Durable evidence advanced between two observations, so the expired pass
+    /// was progressing and its turn must be left alone.
+    Progressing {
+        /// The evidence this path proposed the turn on.
+        previous: StaleTurnCandidate,
+        /// The later evidence that advanced past it.
+        observed: StaleTurnCandidate,
+    },
+    /// Another turn holds the session's slot now.
+    Superseded(TurnId),
+    /// The session holds no recoverable active turn.
+    Absent,
+}
+
+/// Decides what one expiry observation settles, given the previous one.
+///
+/// The occupancy ceiling bounds a pass's tenure, which is not the same claim as
+/// "this turn stopped progressing": one admitted pass drives a turn's whole
+/// model/tools loop, including provider retry-backoff sleeps, so a turn making
+/// continuous durable progress can reach the ceiling. Recovery never re-admits
+/// the pass it replaced, so terminalizing on tenure alone would fail a healthy
+/// turn outright. This is the unchanged-evidence requirement both liveness
+/// watchdogs impose and the ceiling by itself lacks: the turn is terminalized
+/// only once its evidence — the attempt holding its tenure and the session's
+/// outbox frontier — has stood still across a whole confirmation delay.
+fn classify_expired_pass_observation(
+    expected_turn: TurnId,
+    unconfirmed: Option<StaleTurnCandidate>,
+    observed: Option<StaleTurnCandidate>,
+) -> ExpiredPassObservation {
+    let Some(observed) = observed else {
+        return ExpiredPassObservation::Absent;
+    };
+    if observed.turn() != expected_turn {
+        return ExpiredPassObservation::Superseded(observed.turn());
+    }
+    match unconfirmed {
+        Some(previous) if previous == observed => ExpiredPassObservation::Confirmed(observed),
+        Some(previous) => ExpiredPassObservation::Progressing { previous, observed },
+        None => ExpiredPassObservation::AwaitingConfirmation(observed),
+    }
+}
+
 async fn recover_expired_scheduler_pass(
     recovery: SchedulerPassOccupancyRecovery,
     session: SessionId,
@@ -946,29 +999,29 @@ async fn recover_expired_scheduler_pass(
     // retries while the independent liveness scan remains the durable
     // backstop for the still-active turn.
     let mut candidate = None;
+    // The first matching observation only proposes a turn. Expiry means the
+    // pass ran out of tenure, which is not the same as the turn standing still:
+    // one admitted pass drives a whole model/tools loop, so a healthy turn with
+    // several exchanges, or one riding out provider backoff, can reach the
+    // ceiling while making continuous durable progress. Terminalizing on tenure
+    // alone would fail such a turn outright, because recovery never re-admits
+    // the pass it replaced. So this path adopts the requirement both watchdogs
+    // already have and the ceiling alone lacks: the turn's durable evidence must
+    // be unchanged across a whole retry delay before it may be terminalized.
+    let mut unconfirmed: Option<StaleTurnCandidate> = None;
     for attempt in 1_u32..=EXPIRED_PASS_RECOVERY_ATTEMPTS {
         if candidate.is_none() {
-            match timeout(
+            let observation = match timeout(
                 EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND,
                 inventory.recoverable_active_turn(session),
             )
             .await
             {
-                Ok(Ok(Some(observed))) if observed.turn() == expected_turn => {
-                    candidate = Some(observed);
-                }
-                Ok(Ok(Some(observed))) => {
-                    tracing::info!(
-                        cause_code = "scheduler_pass_occupancy_recovery_superseded",
-                        session_id = %session.as_uuid(),
-                        expected_turn_id = %expected_turn.as_uuid(),
-                        observed_turn_id = %observed.turn().as_uuid(),
-                        attempt,
-                        "expired scheduler-pass turn was superseded before recovery"
-                    );
-                    return;
-                }
-                Ok(Ok(None)) => return,
+                Ok(Ok(observed)) => Some(classify_expired_pass_observation(
+                    expected_turn,
+                    unconfirmed,
+                    observed,
+                )),
                 Ok(Err(error)) => {
                     tracing::error!(
                         failure_class = ?error.operator_failure_class(),
@@ -978,6 +1031,7 @@ async fn recover_expired_scheduler_pass(
                         attempt,
                         "scheduler pass expiry could not capture its durable turn correlation"
                     );
+                    None
                 }
                 Err(_) => {
                     tracing::error!(
@@ -989,7 +1043,45 @@ async fn recover_expired_scheduler_pass(
                         attempt_bound_seconds = EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND.as_secs(),
                         "scheduler pass expiry correlation read exceeded its bound"
                     );
+                    None
                 }
+            };
+            match observation {
+                Some(ExpiredPassObservation::Confirmed(observed)) => candidate = Some(observed),
+                Some(ExpiredPassObservation::AwaitingConfirmation(observed)) => {
+                    unconfirmed = Some(observed);
+                }
+                Some(ExpiredPassObservation::Progressing { previous, observed }) => {
+                    // The pass expired while its turn was working. Nudge so a
+                    // fresh pass can be admitted for the still-active turn; the
+                    // slot-held watchdog, whose own ceiling is ledger-gated on
+                    // unchanged evidence, remains the durable backstop if the
+                    // turn stalls later.
+                    let _ = recovery.eligibility_nudge.nudge(session);
+                    tracing::info!(
+                        cause_code = "scheduler_pass_occupancy_progress_observed",
+                        session_id = %session.as_uuid(),
+                        turn_id = %expected_turn.as_uuid(),
+                        attempt,
+                        previous_evidence = ?previous.evidence(),
+                        observed_evidence = ?observed.evidence(),
+                        "expired scheduler pass was still making durable progress; turn left active"
+                    );
+                    return;
+                }
+                Some(ExpiredPassObservation::Superseded(observed_turn)) => {
+                    tracing::info!(
+                        cause_code = "scheduler_pass_occupancy_recovery_superseded",
+                        session_id = %session.as_uuid(),
+                        expected_turn_id = %expected_turn.as_uuid(),
+                        observed_turn_id = %observed_turn.as_uuid(),
+                        attempt,
+                        "expired scheduler-pass turn was superseded before recovery"
+                    );
+                    return;
+                }
+                Some(ExpiredPassObservation::Absent) => return,
+                None => {}
             }
             if candidate.is_none() {
                 if attempt < EXPIRED_PASS_RECOVERY_ATTEMPTS {
@@ -2190,8 +2282,9 @@ mod tests {
         ApprovalJudgeBranchAuthority, ApprovalJudgeBranchAuthorityInput,
         ApprovalJudgeDispatchAuthority, ApprovalJudgePullRequestAuthority,
         ApprovalJudgePullRequestAuthorityInput, ClassifyOperatorFailure, EligibilityPass,
-        OperatorFailureClass, SchedulerPassExpiryHandler, StartEligibleTurnIdGenerator,
-        StartEligibleTurnOutcome, StartEligibleTurnService, StartEligibleTurnTransaction,
+        OperatorFailureClass, SchedulerPassExpiryHandler, StaleTurnCandidate,
+        StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
+        StartEligibleTurnTransaction, TurnLivenessEvidence,
     };
     use signalbox_domain::{
         AcceptedInputTurnActivationIdentities, ActivatedTurn, ContextFrontierId,
@@ -2202,12 +2295,13 @@ mod tests {
 
     use super::{
         APPROVAL_JUDGE_SYSTEM_PROMPT, ActivatedTurnExecution, ActivatedTurnPass,
-        ActivatedTurnPassError, ApprovalJudgeModelError, FailedApprovalJudgeDisposition,
-        FatalExecutionGuardState, FatalExecutionOccupancyExpiry, FatalExecutionSignal,
-        FatalExecutionSupervisor, JudgeRequestFields, MAX_QUOTED_CONTEXT_BYTES,
-        SessionAuthorityContext, TokenUsage, TurnPassExecutionStage, activation_session_matches,
-        reconcile_retained_once, render_dispatch_authority, render_judge_request_payload,
-        render_session_authority_context, supervise_execution, supervise_execution_for_session,
+        ActivatedTurnPassError, ApprovalJudgeModelError, ExpiredPassObservation,
+        FailedApprovalJudgeDisposition, FatalExecutionGuardState, FatalExecutionOccupancyExpiry,
+        FatalExecutionSignal, FatalExecutionSupervisor, JudgeRequestFields,
+        MAX_QUOTED_CONTEXT_BYTES, SessionAuthorityContext, TokenUsage, TurnPassExecutionStage,
+        activation_session_matches, classify_expired_pass_observation, reconcile_retained_once,
+        render_dispatch_authority, render_judge_request_payload, render_session_authority_context,
+        supervise_execution, supervise_execution_for_session,
     };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3398,6 +3492,145 @@ mod tests {
         assert_eq!(
             super::judge_failure_disposition(ApprovalJudgeModelError::UnconfiguredTarget),
             FailedApprovalJudgeDisposition::KnownFailed
+        );
+    }
+
+    fn expiry_candidate(
+        session: SessionId,
+        turn: TurnId,
+        attempt: TurnAttemptId,
+        outbox_frontier: Option<u64>,
+    ) -> StaleTurnCandidate {
+        StaleTurnCandidate::new(
+            session,
+            turn,
+            TurnLivenessEvidence::new(attempt, outbox_frontier),
+        )
+    }
+
+    /// One observation may not terminalize: the occupancy ceiling bounds a
+    /// pass's tenure, and a turn making continuous durable progress reaches it
+    /// just as a wedged one does.
+    #[test]
+    fn one_expiry_observation_only_proposes_the_turn() {
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let turn = TurnId::from_uuid(Uuid::now_v7());
+        let observed = expiry_candidate(
+            session,
+            turn,
+            TurnAttemptId::from_uuid(Uuid::now_v7()),
+            Some(7),
+        );
+
+        assert_eq!(
+            classify_expired_pass_observation(turn, None, Some(observed)),
+            ExpiredPassObservation::AwaitingConfirmation(observed)
+        );
+    }
+
+    #[test]
+    fn unchanged_expiry_evidence_confirms_the_turn_for_recovery() {
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let turn = TurnId::from_uuid(Uuid::now_v7());
+        let observed = expiry_candidate(
+            session,
+            turn,
+            TurnAttemptId::from_uuid(Uuid::now_v7()),
+            Some(7),
+        );
+
+        assert_eq!(
+            classify_expired_pass_observation(turn, Some(observed), Some(observed)),
+            ExpiredPassObservation::Confirmed(observed)
+        );
+    }
+
+    /// A turn whose session emitted an outbox event between observations was
+    /// working, not wedged, so the expired pass must not terminalize it.
+    #[test]
+    fn an_advanced_outbox_frontier_spares_the_expired_pass_turn() {
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let turn = TurnId::from_uuid(Uuid::now_v7());
+        let attempt = TurnAttemptId::from_uuid(Uuid::now_v7());
+        let previous = expiry_candidate(session, turn, attempt, Some(7));
+        let observed = expiry_candidate(session, turn, attempt, Some(8));
+
+        assert_eq!(
+            classify_expired_pass_observation(turn, Some(previous), Some(observed)),
+            ExpiredPassObservation::Progressing { previous, observed }
+        );
+    }
+
+    /// The same turn on a later physical attempt has also progressed.
+    #[test]
+    fn an_advanced_attempt_spares_the_expired_pass_turn() {
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let turn = TurnId::from_uuid(Uuid::now_v7());
+        let previous = expiry_candidate(
+            session,
+            turn,
+            TurnAttemptId::from_uuid(Uuid::now_v7()),
+            Some(7),
+        );
+        let observed = expiry_candidate(
+            session,
+            turn,
+            TurnAttemptId::from_uuid(Uuid::now_v7()),
+            Some(7),
+        );
+
+        assert_eq!(
+            classify_expired_pass_observation(turn, Some(previous), Some(observed)),
+            ExpiredPassObservation::Progressing { previous, observed }
+        );
+    }
+
+    /// A session that emits its first outbox event between observations moves
+    /// from absent to present evidence, which is progress like any other.
+    #[test]
+    fn a_first_outbox_event_spares_the_expired_pass_turn() {
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let turn = TurnId::from_uuid(Uuid::now_v7());
+        let attempt = TurnAttemptId::from_uuid(Uuid::now_v7());
+        let previous = expiry_candidate(session, turn, attempt, None);
+        let observed = expiry_candidate(session, turn, attempt, Some(1));
+
+        assert_eq!(
+            classify_expired_pass_observation(turn, Some(previous), Some(observed)),
+            ExpiredPassObservation::Progressing { previous, observed }
+        );
+    }
+
+    #[test]
+    fn a_different_turn_supersedes_the_expired_pass() {
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let expected = TurnId::from_uuid(Uuid::now_v7());
+        let successor = TurnId::from_uuid(Uuid::now_v7());
+        let observed = expiry_candidate(
+            session,
+            successor,
+            TurnAttemptId::from_uuid(Uuid::now_v7()),
+            Some(7),
+        );
+
+        assert_eq!(
+            classify_expired_pass_observation(expected, None, Some(observed)),
+            ExpiredPassObservation::Superseded(successor)
+        );
+        // A pending confirmation does not make a successor recoverable either.
+        assert_eq!(
+            classify_expired_pass_observation(expected, Some(observed), Some(observed)),
+            ExpiredPassObservation::Superseded(successor)
+        );
+    }
+
+    #[test]
+    fn no_recoverable_active_turn_ends_the_expired_pass_handoff() {
+        let turn = TurnId::from_uuid(Uuid::now_v7());
+
+        assert_eq!(
+            classify_expired_pass_observation(turn, None, None),
+            ExpiredPassObservation::Absent
         );
     }
 }

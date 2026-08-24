@@ -162,7 +162,7 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — ninety-two files, `202607180001` through
+`crates/persistence/migrations/` — ninety-five files, `202607180001` through
 `202608210500` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
@@ -915,20 +915,29 @@ Locks per transaction, in acquisition order:
   Abandoned-attempt settlement examines and updates at most 64 due
   recovery/attempt pairs from one materialized page. Supersession maintenance
   later locks its own singleton cursor row `FOR UPDATE`, then examines and
-  updates at most 64 recovery rows from one materialized keyset page. Claiming
-  finally locks at most 64 due recovery rows `FOR UPDATE SKIP LOCKED`,
-  increments their durable attempt ordinal, sets the exact backoff deadline, and
-  inserts the attempt rows in the same transaction. No reconciliation path may
-  acquire either cursor row while holding a recovery-row lock in the reverse of
-  this order. Applying a claim first performs the immutable delegated-parent
-  lookup. When the claimed session is a delegated child, it locks the
-  parent/child endpoint session rows `FOR NO KEY UPDATE` in ascending
-  session-identity order; it then takes the child's `session_scheduler` row
-  `FOR UPDATE`, reconstitutes the complete scheduling projection, and uses the
-  existing reconciliation-required write transaction. A nondelegated claim takes
-  only the scheduler lock. Operator reconciliation uses the same
-  endpoint-before-scheduler prefix, so automatic reconciliation never introduces
-  the reverse child-scheduler-to-parent-session order.
+  updates at most 64 recovery rows from one materialized keyset page. Exhaustion
+  parks at most 64 `scheduled` recoveries that spent the whole attempt budget
+  and whose turn still holds the exact matching `awaiting_model_call_recovery`
+  wait; a recovery whose turn no longer holds that wait is left for supersession
+  rather than parked, because an exhaustion park raises an operator alert that
+  cannot be retracted. Rows over the window are reached by the next scan, since
+  every row this statement selects is also written. `attempting` recoveries are
+  never exhausted directly: settlement returns them to `scheduled` first, which
+  is what closes their attempt-history row. Claiming finally locks at most 64
+  due recovery rows `FOR UPDATE SKIP LOCKED`, increments their durable attempt
+  ordinal, sets the exact backoff deadline, and inserts the attempt rows in the
+  same transaction. The attempt budget and the retry ladder claiming applies are
+  bound from the domain attempt type, not written into the statement. No
+  reconciliation path may acquire either cursor row while holding a recovery-row
+  lock in the reverse of this order. Applying a claim first performs the
+  immutable delegated-parent lookup. When the claimed session is a delegated
+  child, it locks the parent/child endpoint session rows `FOR NO KEY UPDATE` in
+  ascending session-identity order; it then takes the child's
+  `session_scheduler` row `FOR UPDATE`, reconstitutes the complete scheduling
+  projection, and uses the existing reconciliation-required write transaction. A
+  nondelegated claim takes only the scheduler lock. Operator reconciliation uses
+  the same endpoint-before-scheduler prefix, so automatic reconciliation never
+  introduces the reverse child-scheduler-to-parent-session order.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result

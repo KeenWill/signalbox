@@ -72,6 +72,9 @@ const STALE_TURN_LOCK_UNAVAILABLE_CAUSE: &str = "turn_liveness_scheduler_row_bus
 /// Why one turn-liveness pass produced no decision.
 const PASS_FAILURE_CAUSE: &str = "turn_liveness_pass_failed";
 
+/// Why a slot-held inventory read decided nothing within its bound.
+const SLOT_HELD_PAGE_TIMEOUT_CAUSE: &str = "turn_liveness_slot_held_page_timed_out";
+
 /// How many turns one scan terminalizes before leaving the rest.
 ///
 /// Terminalizations run one at a time, each a short transaction under the
@@ -506,7 +509,10 @@ where
                 report_turn_liveness_failure(&error);
                 return None;
             }
-            Err(_) => return None,
+            Err(_) => {
+                report_slot_held_page_timeout("paging");
+                return None;
+            }
         };
         cursor = page.resume_after;
         active.extend(page.candidates);
@@ -525,7 +531,10 @@ where
             report_turn_liveness_failure(&error);
             return None;
         }
-        Err(_) => return None,
+        Err(_) => {
+            report_slot_held_page_timeout("rotation_ceiling_probe");
+            return None;
+        }
     };
     if probe.rows == 0 {
         return Some(active);
@@ -931,16 +940,34 @@ fn report_turn_liveness_failure(error: &TurnLivenessRepositoryError) {
     );
 }
 
+/// Reports a slot-held inventory read that exceeded its bound.
+///
+/// The slot-held scan is the durable backstop for a turn whose scheduler pass
+/// expired, so a read that keeps timing out silently would retire that backstop
+/// invisibly: `reconcile_slot_held_turns` returns at its first statement on
+/// every scan and no turn is ever reached. Every sibling bound in this file and
+/// in the scheduler-expiry path emits a cause code, and so does this one.
+fn report_slot_held_page_timeout(phase: &'static str) {
+    tracing::error!(
+        failure_class = ?signalbox_application::OperatorFailureClass::Infrastructure { commit_ambiguous: false },
+        cause_code = SLOT_HELD_PAGE_TIMEOUT_CAUSE,
+        phase,
+        attempt_bound_seconds = RECOVERY_ATTEMPT_BOUND.as_secs(),
+        "slot-held inventory read exceeded its bound; the slot-held backstop made no progress this scan"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         InventoryPage, PASS_FAILURE_CAUSE, QUIESCENT_ROTATION_PAGE_CEILING, QuiescentInventory,
-        RECOVERY_ATTEMPT_BOUND, ROTATION_CEILING_CAUSE, STALE_TURN_AMBIGUOUS_CAUSE,
-        STALE_TURN_LOCK_UNAVAILABLE_CAUSE, STALE_TURN_STEERING_BLOCKED_CAUSE,
-        STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE, SlotHeldInventory,
-        StaleTurnTerminalizer, TERMINALIZATION_DEFERRED_CAUSE, TERMINALIZATIONS_PER_SCAN,
-        TerminalizationWindow, TurnLivenessWake, drain_quiescent_rotation,
-        drain_slot_held_rotation, next_turn_liveness_wake, reconcile_turn_liveness,
+        RECOVERY_ATTEMPT_BOUND, ROTATION_CEILING_CAUSE, SLOT_HELD_PAGE_TIMEOUT_CAUSE,
+        STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_LOCK_UNAVAILABLE_CAUSE,
+        STALE_TURN_STEERING_BLOCKED_CAUSE, STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE,
+        SlotHeldInventory, StaleTurnTerminalizer, TERMINALIZATION_DEFERRED_CAUSE,
+        TERMINALIZATIONS_PER_SCAN, TerminalizationWindow, TurnLivenessWake,
+        drain_quiescent_rotation, drain_slot_held_rotation, next_turn_liveness_wake,
+        reconcile_turn_liveness,
     };
     use signalbox_application::{
         StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
@@ -1485,6 +1512,10 @@ mod tests {
         assert_eq!(
             STALE_TURN_LOCK_UNAVAILABLE_CAUSE,
             "turn_liveness_scheduler_row_busy"
+        );
+        assert_eq!(
+            SLOT_HELD_PAGE_TIMEOUT_CAUSE,
+            "turn_liveness_slot_held_page_timed_out"
         );
         assert_ne!(STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE);
         assert_ne!(STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_TERMINAL_CAUSE);

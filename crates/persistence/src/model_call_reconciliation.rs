@@ -28,6 +28,42 @@ use crate::{
 // numeric-bound: ceiling - bounds reconciliation transactions started per watchdog scan
 const CLAIM_WINDOW: i64 = 64;
 
+/// How long one claim scan waits for a row lock before giving the turn up.
+///
+/// The scan's caller also bounds this transaction with a client-side timeout,
+/// but dropping a future does not cancel the statement the server is running:
+/// the backend keeps waiting for the lock and the pooled connection stays
+/// checked out for the full real wait, so the client bound bounds only the
+/// daemon's patience. `lock_timeout` bounds the database work itself and raises
+/// `55P03`, which this repository already treats as the clean, classifiable
+/// "row was busy" signal. It is set before anything is read or written, so the
+/// scan either holds its singleton rows or has touched nothing.
+// numeric-bound: ceiling - bounds one claim scan's wait for a contended row
+const CLAIM_LOCK_WAIT: &str = "1s";
+
+/// The claim statement carries one `CASE` arm per admitted attempt, so its
+/// arity is part of the contract with the domain budget: admitting another
+/// attempt requires another arm and another bound parameter.
+const _: () = assert!(ModelCallReconciliationAttempt::budget() == 5);
+
+/// Returns the product attempt budget as the claim statement's parameter.
+fn attempt_budget() -> i32 {
+    i32::try_from(ModelCallReconciliationAttempt::budget()).unwrap_or(i32::MAX)
+}
+
+/// Returns the retry delay after `ordinal` fails, in whole seconds.
+///
+/// This is the only place the enforced retry schedule is chosen. It reads the
+/// domain ladder so that the schedule the daemon runs and the schedule the
+/// specification states cannot drift apart unnoticed.
+fn retry_backoff_seconds(ordinal: u32) -> Result<i64, ModelCallReconciliationRepositoryError> {
+    let attempt = ModelCallReconciliationAttempt::try_from_u32(ordinal).ok_or(
+        ModelCallReconciliationRepositoryError::Corruption("attempt ordinal"),
+    )?;
+    i64::try_from(attempt.retry_backoff().as_secs())
+        .map_err(|_| ModelCallReconciliationRepositoryError::Corruption("retry backoff"))
+}
+
 /// Failure while discovering, claiming, or applying automatic reconciliation.
 #[derive(Debug)]
 pub enum ModelCallReconciliationRepositoryError {
@@ -169,14 +205,22 @@ impl PostgresModelCallReconciliationRepository {
         &self,
     ) -> Result<ModelCallReconciliationBatch, ModelCallReconciliationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+            .bind(CLAIM_LOCK_WAIT)
+            .execute(&mut *transaction)
+            .await?;
         discover_recoveries(&mut transaction, CLAIM_WINDOW).await?;
         settle_abandoned_attempts(&mut transaction, CLAIM_WINDOW).await?;
         mark_superseded_recoveries(&mut transaction, CLAIM_WINDOW).await?;
-        let exhausted_rows = mark_exhausted_recoveries(&mut transaction).await?;
-        let rows = sqlx::query(crate::lock_inventory::AUTOMATIC_MODEL_CALL_RECONCILIATION_CLAIM)
-            .bind(CLAIM_WINDOW)
-            .fetch_all(&mut *transaction)
-            .await?;
+        let exhausted_rows = mark_exhausted_recoveries(&mut transaction, CLAIM_WINDOW).await?;
+        let mut claim =
+            sqlx::query(crate::lock_inventory::AUTOMATIC_MODEL_CALL_RECONCILIATION_CLAIM)
+                .bind(CLAIM_WINDOW)
+                .bind(attempt_budget());
+        for ordinal in 1..=ModelCallReconciliationAttempt::budget() {
+            claim = claim.bind(retry_backoff_seconds(ordinal)?);
+        }
+        let rows = claim.fetch_all(&mut *transaction).await?;
         transaction.commit().await.map_err(Self::commit_error)?;
 
         let mut claimed = Vec::with_capacity(rows.len());
@@ -325,7 +369,18 @@ impl PostgresModelCallReconciliationRepository {
         };
         let reconciliation = match reconciliation {
             Ok(reconciliation) if reconciliation.call().id() == claimed.call() => reconciliation,
-            Ok(_) | Err(_) => {
+            // The aggregate produced a transition, but for a different call than
+            // the one this attempt claimed. Reported apart from a refused
+            // transition because the two are different defects: this one means
+            // the durable wait and the claim disagree about which call is
+            // ambiguous, and it is the fail-closed path an operator reads a
+            // park from, so the two must not arrive under one cause.
+            Ok(_) => {
+                return Err(ModelCallReconciliationRepositoryError::Corruption(
+                    "reconciled call identity for exact wait",
+                ));
+            }
+            Err(_) => {
                 return Err(ModelCallReconciliationRepositoryError::Corruption(
                     "aggregate transition for exact wait",
                 ));
@@ -442,20 +497,60 @@ async fn mark_superseded_recoveries(
     Ok(())
 }
 
+/// Parks the recoveries that spent the whole attempt budget without settling.
+///
+/// This is the one statement in the claim scan that raises an operator-visible
+/// alert, and an exhaustion park cannot be retracted, so it carries the same two
+/// guards its siblings do:
+///
+/// * A window, like every other statement in `claim_due`. The returned rows
+///   become one `warn!` each in the daemon, so an unbounded result set would let
+///   one scan emit an unbounded alert burst. Rows over the window are not lost:
+///   the ones this scan retires leave the predicate, so the next scan reaches
+///   the rest. No cursor is needed for the same reason — unlike supersession,
+///   every row this statement selects is also written.
+/// * A `turn_lifecycle` correlation, exactly the one supersession uses one
+///   statement earlier. Without it a recovery whose turn already reached a
+///   terminal state — the turn ended while the recovery row was still pending —
+///   would park an operator against a wait that no longer exists. Such a row is
+///   left for supersession, which is its correct disposition.
+///
+/// Only `scheduled` rows are exhausted. An `attempting` row at the budget is a
+/// daemon that was lost mid-attempt; `settle_abandoned_attempts` normalizes it
+/// to `scheduled` first, which is what closes its `attempting` attempt-history
+/// row. Exhausting it here instead would strand that row `attempting` with
+/// `finished_at IS NULL` forever, because settlement never revisits an exhausted
+/// recovery — destroying the evidence trail for precisely the parks an operator
+/// is being alerted about.
 async fn mark_exhausted_recoveries(
     connection: &mut PgConnection,
+    window: i64,
 ) -> Result<Vec<sqlx::postgres::PgRow>, ModelCallReconciliationRepositoryError> {
     let rows = sqlx::query(
-        "UPDATE automatic_model_call_reconciliation
+        "WITH page AS (
+            SELECT recovery.turn_id
+              FROM automatic_model_call_reconciliation AS recovery
+             WHERE recovery.state_kind = 'scheduled'
+               AND recovery.attempt_count = $2
+               AND EXISTS (
+                    SELECT 1 FROM turn_lifecycle AS lifecycle
+                     WHERE lifecycle.turn_id = recovery.turn_id
+                       AND lifecycle.session_id = recovery.session_id
+                       AND lifecycle.state_kind = 'active'
+                       AND lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
+                       AND NOT lifecycle.delegation_runtime_terminal
+                       AND lifecycle.recovery_model_call_id = recovery.model_call_id
+               )
+             LIMIT $1
+         )
+         UPDATE automatic_model_call_reconciliation AS recovery
             SET state_kind = 'exhausted', exhausted_at = statement_timestamp()
-          WHERE state_kind IN ('scheduled', 'attempting')
-            AND attempt_count = 5
-            AND (
-                state_kind = 'scheduled'
-                OR next_attempt_at <= statement_timestamp()
-            )
-      RETURNING session_id, turn_id, model_call_id",
+           FROM page
+          WHERE recovery.turn_id = page.turn_id
+      RETURNING recovery.session_id, recovery.turn_id, recovery.model_call_id",
     )
+    .bind(window)
+    .bind(attempt_budget())
     .fetch_all(connection)
     .await?;
     Ok(rows)
