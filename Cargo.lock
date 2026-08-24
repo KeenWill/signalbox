@@ -3911,6 +3911,7 @@ dependencies = [
  "signalbox-test-bin",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -451,6 +451,7 @@ impl<C: Clone> EventDecoder<C> {
             None => match self.read_output_last_message() {
                 Ok(Some(agent_message)) => agent_message,
                 Ok(None) => {
+                    report_response_envelope_rejection("missing");
                     return boundary_loss_before_envelope(
                         self.exchange,
                         self.usage,
@@ -460,6 +461,7 @@ impl<C: Clone> EventDecoder<C> {
                     );
                 }
                 Err(detail) => {
+                    report_response_envelope_rejection("retained_message_unavailable");
                     return boundary_loss_before_envelope(
                         self.exchange,
                         self.usage,
@@ -469,6 +471,7 @@ impl<C: Clone> EventDecoder<C> {
             },
         };
         if let Err(error) = validate_provider_json_nesting(agent_message.as_bytes()) {
+            report_response_envelope_rejection("nesting_bound");
             return boundary_loss_before_envelope(
                 self.exchange,
                 self.usage,
@@ -492,6 +495,7 @@ impl<C: Clone> EventDecoder<C> {
         let envelope: ModelEnvelope = match serde_json::from_str(&agent_message) {
             Ok(envelope) => envelope,
             Err(_) => {
+                report_response_envelope_rejection("shape");
                 return boundary_loss_before_envelope(
                     self.exchange,
                     self.usage,
@@ -513,13 +517,16 @@ impl<C: Clone> EventDecoder<C> {
         };
         let mut content = match self.decode_content(&envelope, &mut *sink) {
             Ok(content) => content,
-            Err(detail) => {
+            Err(failure) => {
+                report_response_envelope_rejection(failure.stage);
                 return boundary_loss_after_envelope(
                     self.exchange,
                     self.usage,
                     Some(reported_finish.clone()),
                     &envelope,
-                    LossCause::ResponseUnintelligible { detail },
+                    LossCause::ResponseUnintelligible {
+                        detail: failure.detail,
+                    },
                 );
             }
         };
@@ -554,6 +561,7 @@ impl<C: Clone> EventDecoder<C> {
             &envelope.text,
             reported_finish.clone(),
         ) {
+            report_response_envelope_rejection("observation_projection");
             return boundary_loss_after_envelope(
                 self.exchange,
                 self.usage,
@@ -597,6 +605,7 @@ impl<C: Clone> EventDecoder<C> {
                 && self.output_contract_name.is_none()
                 && envelope.outcome != EnvelopeOutcome::Refused
             {
+                report_response_envelope_rejection("streamed_completion_empty");
                 return boundary_loss_after_envelope(
                     self.exchange,
                     self.usage,
@@ -666,9 +675,12 @@ impl<C: Clone> EventDecoder<C> {
         &self,
         envelope: &ModelEnvelope,
         sink: &mut RedactingSink<'_, C>,
-    ) -> Result<Vec<AssistantPart>, String> {
+    ) -> Result<Vec<AssistantPart>, ResponseEnvelopeFailure> {
         if envelope.outcome == EnvelopeOutcome::Refused && !envelope.tool_calls.is_empty() {
-            return Err("a refusal envelope also proposed tools".to_string());
+            return Err(ResponseEnvelopeFailure::new(
+                "refusal_with_tools",
+                "a refusal envelope also proposed tools",
+            ));
         }
         let mut content = Vec::new();
         // Consults the held lookbehind (including the emitted thread-id and
@@ -702,7 +714,10 @@ impl<C: Clone> EventDecoder<C> {
         let mut clean_ids = HashSet::new();
         for call in &envelope.tool_calls {
             if call.id.is_empty() || !raw_ids.insert(call.id.as_str()) {
-                return Err("tool call ids must be nonempty and distinct".to_string());
+                return Err(ResponseEnvelopeFailure::new(
+                    "tool_call_id",
+                    "tool call ids must be nonempty and distinct",
+                ));
             }
             // An id is clean only if neither the stateless scan nor the held
             // cross-fragment lookbehind (including the same-envelope final
@@ -718,9 +733,12 @@ impl<C: Clone> EventDecoder<C> {
             let allowed = self.declared_tools.contains(&call.name)
                 || self.output_contract_name.as_deref() == Some(call.name.as_str());
             if !allowed {
-                return Err(format!(
-                    "response proposed undeclared tool `{}`",
-                    sink.redact_provider_id(final_text_context, &call.name)
+                return Err(ResponseEnvelopeFailure::new(
+                    "undeclared_tool",
+                    format!(
+                        "response proposed undeclared tool `{}`",
+                        sink.redact_provider_id(final_text_context, &call.name)
+                    ),
                 ));
             }
             // The envelope carries the argument object as JSON text inside a
@@ -728,7 +746,8 @@ impl<C: Clone> EventDecoder<C> {
             // object (see `wire::EnvelopeToolCall`). Parsing here restores
             // the trait contract: the contained JSON object reaches the
             // caller byte-verbatim when it is credential-shape clean.
-            validate_tool_arguments(&call.arguments, &call.name)?;
+            validate_tool_arguments(&call.arguments, &call.name)
+                .map_err(|detail| ResponseEnvelopeFailure::new("tool_arguments", detail))?;
             // The id consults the same held lookbehind the arguments do —
             // including the same-envelope final text — so an id extending a
             // credential marker gets a safe surrogate instead of leaking.
@@ -763,27 +782,37 @@ impl<C: Clone> EventDecoder<C> {
                 .iter()
                 .all(|call| &call.name == contract_name)
             {
-                return Err(format!(
-                    "structured output permits only `{contract_name}` proposals"
+                return Err(ResponseEnvelopeFailure::new(
+                    "structured_output_tool",
+                    format!("structured output permits only `{contract_name}` proposals"),
                 ));
             }
         } else {
             match &self.tool_requirement {
                 ToolRequirement::Optional => {}
                 ToolRequirement::Any if envelope.tool_calls.is_empty() => {
-                    return Err("tool choice requires a proposal".to_string());
+                    return Err(ResponseEnvelopeFailure::new(
+                        "required_tool_missing",
+                        "tool choice requires a proposal",
+                    ));
                 }
                 ToolRequirement::Named(name)
                     if envelope.tool_calls.is_empty()
                         || !envelope.tool_calls.iter().all(|call| &call.name == name) =>
                 {
-                    return Err(format!("tool choice permits only `{name}`"));
+                    return Err(ResponseEnvelopeFailure::new(
+                        "named_tool_mismatch",
+                        format!("tool choice permits only `{name}`"),
+                    ));
                 }
                 ToolRequirement::Any | ToolRequirement::Named(_) => {}
             }
         }
         if content.is_empty() && self.output_contract_name.is_none() {
-            return Err("response envelope carries no completion material".to_string());
+            return Err(ResponseEnvelopeFailure::new(
+                "completion_empty",
+                "response envelope carries no completion material",
+            ));
         }
         Ok(content)
     }
@@ -854,6 +883,28 @@ impl<C: Clone> EventDecoder<C> {
             .ok_or_else(|| DecodeFailure::new("response has too many ordered parts"))?;
         Ok(index)
     }
+}
+
+struct ResponseEnvelopeFailure {
+    stage: &'static str,
+    detail: String,
+}
+
+impl ResponseEnvelopeFailure {
+    fn new(stage: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            stage,
+            detail: detail.into(),
+        }
+    }
+}
+
+fn report_response_envelope_rejection(stage: &'static str) {
+    tracing::warn!(
+        cause_code = "codex_response_envelope_rejected",
+        stage,
+        "Codex completed-turn response envelope was rejected"
+    );
 }
 
 fn validate_item_identity(item: &ItemIdentity) -> Result<(), DecodeFailure> {
