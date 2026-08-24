@@ -266,17 +266,7 @@ impl SandboxedFileMediaProcessor {
         if result.is_err() {
             running.terminate().await;
         }
-        if let Ok(Ok(Ok(diagnostics))) =
-            tokio::time::timeout(CLEANUP_TIMEOUT, &mut stderr_task).await
-            && result.is_err()
-            && std::env::var_os("CI").is_some()
-            && !diagnostics.is_empty()
-        {
-            eprintln!(
-                "file-media sandbox probe stderr: {}",
-                String::from_utf8_lossy(&diagnostics)
-            );
-        }
+        let _ = tokio::time::timeout(CLEANUP_TIMEOUT, &mut stderr_task).await;
         result
     }
 
