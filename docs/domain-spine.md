@@ -6579,7 +6579,7 @@ impl UsageCallPageLimit {
     pub const fn get(self) -> u16;
 }
 
-pub enum UsageCallOrder { NewestFirst }
+pub enum UsageCallOrder { NewestFirst, OldestFirst }
 
 pub struct UsageCallCursor {
     pub recorded_at: UsageTimestampMicros,

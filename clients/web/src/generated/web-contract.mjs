@@ -1110,7 +1110,7 @@ const schemas = {
             "$ref": "#/$defs/WebUuid"
           },
           "profile_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebUsageProfileId"
           },
           "provenance": {
             "$ref": "#/$defs/WebUsageProvenance"
@@ -1239,6 +1239,12 @@ const schemas = {
           "cache_exclusive",
           "cache_inclusive"
         ],
+        "type": "string"
+      },
+      "WebUsageProfileId": {
+        "description": "Non-secret bounded profile identity retained by usage summaries.",
+        "maxLength": 256,
+        "minLength": 1,
         "type": "string"
       },
       "WebUsageProvenance": {
@@ -1602,13 +1608,19 @@ export function decodeWebSearchPage(value) {
 
 export function decodeWebUsageSummary(value) {
   assertSchema(schemas.WebUsageSummary, schemas.WebUsageSummary, value, "usage_summary");
+  const encoder = new TextEncoder();
   value.groups.forEach((group, index) => {
     assertUsageEvidence(
       group.input_semantics,
       group.tokens,
       group.cost,
       `usage_summary.groups[${index}]`,
+      true,
     );
+    const profileBytes = encoder.encode(group.profile_id).length;
+    if (profileBytes === 0 || profileBytes > 256) {
+      fail(`usage_summary.groups[${index}].profile_id`, "1 through 256 UTF-8 bytes");
+    }
     for (const axis of ["input", "output", "cache_creation_input", "cache_read_input"]) {
       if (group.coverage[axis] !== (group.tokens[axis] !== null)) {
         fail(`usage_summary.groups[${index}].coverage.${axis}`, "consistent with token evidence");
@@ -1630,7 +1642,15 @@ export function decodeWebUsageCallPage(value, order) {
       call.tokens,
       call.cost,
       `usage_call_page.calls[${index}]`,
+      false,
     );
+    const isCompaction = call.call_kind === "context_compaction";
+    if (isCompaction !== (call.turn_id === null)) {
+      fail(
+        `usage_call_page.calls[${index}].turn_id`,
+        "null exactly for context compaction calls",
+      );
+    }
     const key = { recordedAt: BigInt(call.recorded_at_micros), callId: call.call_id };
     if (previousKey !== null) {
       const comparison = key.recordedAt === previousKey.recordedAt
@@ -1658,7 +1678,7 @@ export function decodeWebUsageCallPage(value, order) {
   return value;
 }
 
-function assertUsageEvidence(inputSemantics, tokens, cost, path) {
+function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInvalidBreakdown) {
   const hasTokenEvidence = Object.values(tokens).some((value) => value !== null);
   const incompleteCacheAxes =
     inputSemantics === "cache_inclusive" &&
@@ -1693,7 +1713,7 @@ function assertUsageEvidence(inputSemantics, tokens, cost, path) {
     (cost.reason === "no_token_evidence" ||
       cost.reason === "unknown_input_semantics" ||
       cost.reason === "incomplete_cache_axes" ||
-      cost.reason === "invalid_cache_breakdown")
+      (cost.reason === "invalid_cache_breakdown" && !allowHiddenInvalidBreakdown))
   ) {
     fail(`${path}.cost.reason`, "consistent with token evidence and input semantics");
   }

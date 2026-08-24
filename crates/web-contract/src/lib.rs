@@ -731,13 +731,42 @@ pub enum WebUsageCost {
     },
 }
 
+/// Non-secret bounded profile identity retained by usage summaries.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebUsageProfileId(#[schemars(length(min = 1, max = 256))] String);
+
+impl WebUsageProfileId {
+    /// Wraps a profile identity already validated by the persistence boundary.
+    #[must_use]
+    pub fn from_bounded(value: String) -> Self {
+        debug_assert!(!value.is_empty() && value.len() <= 256);
+        Self(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebUsageProfileId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.is_empty() || value.len() > 256 {
+            return Err(de::Error::custom(
+                "usage profile identity must contain 1 through 256 UTF-8 bytes",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
 /// One compatibility-preserving usage and configured-cost summary row.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebUsageAggregateGroup {
     pub call_kind: WebUsageCallKind,
     pub model_id: WebUuid,
-    pub profile_id: String,
+    pub profile_id: WebUsageProfileId,
     pub provenance: WebUsageProvenance,
     pub input_semantics: WebUsageInputSemantics,
     pub coverage: WebUsageTokenCoverage,
@@ -1239,13 +1268,19 @@ export function decodeWebSearchPage(value) {{
 
 export function decodeWebUsageSummary(value) {{
   assertSchema(schemas.WebUsageSummary, schemas.WebUsageSummary, value, "usage_summary");
+  const encoder = new TextEncoder();
   value.groups.forEach((group, index) => {{
     assertUsageEvidence(
       group.input_semantics,
       group.tokens,
       group.cost,
       `usage_summary.groups[${{index}}]`,
+      true,
     );
+    const profileBytes = encoder.encode(group.profile_id).length;
+    if (profileBytes === 0 || profileBytes > 256) {{
+      fail(`usage_summary.groups[${{index}}].profile_id`, "1 through 256 UTF-8 bytes");
+    }}
     for (const axis of ["input", "output", "cache_creation_input", "cache_read_input"]) {{
       if (group.coverage[axis] !== (group.tokens[axis] !== null)) {{
         fail(`usage_summary.groups[${{index}}].coverage.${{axis}}`, "consistent with token evidence");
@@ -1267,7 +1302,15 @@ export function decodeWebUsageCallPage(value, order) {{
       call.tokens,
       call.cost,
       `usage_call_page.calls[${{index}}]`,
+      false,
     );
+    const isCompaction = call.call_kind === "context_compaction";
+    if (isCompaction !== (call.turn_id === null)) {{
+      fail(
+        `usage_call_page.calls[${{index}}].turn_id`,
+        "null exactly for context compaction calls",
+      );
+    }}
     const key = {{ recordedAt: BigInt(call.recorded_at_micros), callId: call.call_id }};
     if (previousKey !== null) {{
       const comparison = key.recordedAt === previousKey.recordedAt
@@ -1295,7 +1338,7 @@ export function decodeWebUsageCallPage(value, order) {{
   return value;
 }}
 
-function assertUsageEvidence(inputSemantics, tokens, cost, path) {{
+function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInvalidBreakdown) {{
   const hasTokenEvidence = Object.values(tokens).some((value) => value !== null);
   const incompleteCacheAxes =
     inputSemantics === "cache_inclusive" &&
@@ -1330,7 +1373,7 @@ function assertUsageEvidence(inputSemantics, tokens, cost, path) {{
     (cost.reason === "no_token_evidence" ||
       cost.reason === "unknown_input_semantics" ||
       cost.reason === "incomplete_cache_axes" ||
-      cost.reason === "invalid_cache_breakdown")
+      (cost.reason === "invalid_cache_breakdown" && !allowHiddenInvalidBreakdown))
   ) {{
     fail(`${{path}}.cost.reason`, "consistent with token evidence and input semantics");
   }}

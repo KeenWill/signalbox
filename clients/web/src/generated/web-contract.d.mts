@@ -139,7 +139,7 @@ type WebUsageAggregateGroup = {
   readonly coverage: WebUsageTokenCoverage;
   readonly input_semantics: WebUsageInputSemantics;
   readonly model_id: WebUuid;
-  readonly profile_id: string;
+  readonly profile_id: WebUsageProfileId;
   readonly provenance: WebUsageProvenance;
   readonly tokens: WebUsageAggregateTokenAxes;
 };
@@ -186,6 +186,8 @@ type WebUsageCostLabel = "real" | "metered_equivalent";
 type WebUsageCostUnavailableReason = "no_token_evidence" | "unknown_input_semantics" | "incomplete_cache_axes" | "invalid_cache_breakdown" | "configuration_unavailable";
 
 type WebUsageInputSemantics = "unknown" | "cache_exclusive" | "cache_inclusive";
+
+type WebUsageProfileId = string;
 
 type WebUsageProvenance = "reported" | "estimated";
 

@@ -99,7 +99,8 @@ SELECT model_call_id, call_kind, session_id, turn_id,
 
 const CALLS_OLDEST_SQL: &str = "
 SELECT model_call_id, call_kind, session_id, turn_id,
-       resolved_provider_model_identity_id, credential_reference,
+       resolved_provider_model_identity_id,
+       bounded_web_usage_profile(credential_reference) AS credential_reference,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens, output_tokens,
        cache_creation_input_tokens, cache_read_input_tokens, recorded_at
@@ -512,6 +513,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn both_call_orders_apply_the_bounded_profile_projection() {
+        assert!(CALLS_NEWEST_SQL.contains("bounded_web_usage_profile(credential_reference)"));
+        assert!(CALLS_OLDEST_SQL.contains("bounded_web_usage_profile(credential_reference)"));
+    }
+
+    #[test]
     fn timestamp_conversion_preserves_exact_microseconds() {
         let timestamp =
             UsageTimestampMicros::new(1_777_777_777_123_456).expect("fixture timestamp fits");
@@ -523,10 +530,15 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_representability_rejects_values_outside_time_range() {
-        let timestamp = UsageTimestampMicros::new(i64::MAX as u64)
+    fn timestamp_representability_admits_the_application_maximum() {
+        let timestamp = UsageTimestampMicros::new(253_402_300_799_999_999)
             .expect("the application timestamp maximum is admitted");
 
-        assert!(!usage_timestamp_is_representable(timestamp));
+        assert!(usage_timestamp_is_representable(timestamp));
+        assert_eq!(
+            decode_timestamp(timestamp_to_offset(timestamp).expect("maximum timestamp converts"))
+                .expect("maximum timestamp decodes"),
+            timestamp
+        );
     }
 }

@@ -792,7 +792,9 @@ fn usage_aggregate_dto(
     WebUsageAggregateGroup {
         call_kind: usage_call_kind_dto(group.key.call_kind),
         model_id: web_uuid(group.key.model.identity().into_uuid()),
-        profile_id: group.key.credential_profile.clone(),
+        profile_id: signalbox_web_contract::WebUsageProfileId::from_bounded(
+            group.key.credential_profile.clone(),
+        ),
         provenance: usage_provenance_dto(group.key.provenance),
         input_semantics: usage_input_semantics_dto(group.key.input_semantics),
         coverage: WebUsageTokenCoverage {

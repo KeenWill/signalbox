@@ -384,6 +384,54 @@ test("generated usage decoder rejects spurious invalid cache breakdowns", () => 
   );
 });
 
+test("generated usage summary preserves hidden constituent breakdown failures", () => {
+  const group = usageGroup();
+  group.input_semantics = "cache_inclusive";
+  group.coverage.cache_creation_input = true;
+  group.coverage.cache_read_input = true;
+  group.tokens.input = "101";
+  group.tokens.cache_creation_input = "2";
+  group.tokens.cache_read_input = "0";
+  group.cost = { status: "unavailable", reason: "invalid_cache_breakdown" };
+
+  assert.equal(
+    decodeWebUsageSummary({ groups: [group], truncated: false }).groups[0],
+    group,
+  );
+});
+
+test("generated usage decoder bounds profile identities by UTF-8 bytes", () => {
+  const empty = usageGroup();
+  empty.profile_id = "";
+  const oversized = usageGroup();
+  oversized.profile_id = "é".repeat(129);
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [empty], truncated: false }),
+    /at least 1 characters|1 through 256 UTF-8 bytes/,
+  );
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [oversized], truncated: false }),
+    /1 through 256 UTF-8 bytes/,
+  );
+});
+
+test("generated usage decoder correlates call kind with turn presence", () => {
+  const compaction = usageCall();
+  compaction.call_kind = "context_compaction";
+  const ordinary = usageCall();
+  ordinary.turn_id = null;
+
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [compaction], continuation: null }, "newest"),
+    /null exactly for context compaction calls/,
+  );
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [ordinary], continuation: null }, "newest"),
+    /null exactly for context compaction calls/,
+  );
+});
+
 test("generated usage decoders reject cost states inconsistent with evidence", () => {
   const unknownSemantics = usageCall();
   unknownSemantics.input_semantics = "unknown";
