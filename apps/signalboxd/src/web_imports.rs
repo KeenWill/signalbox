@@ -338,7 +338,13 @@ async fn execute_continuation(
             import_not_found()
         }
         Ok(CreateSessionFromImportedFrontierOutcome::ImportedFrontierNotFound { .. }) => {
-            invalid_request("selected imported frontier no longer resolves")
+            // The frontier decoded successfully and failed only against durable application
+            // state, so this is an application rejection, not a trust-boundary failure.
+            application_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "import_frontier_not_found",
+                "selected imported frontier no longer resolves",
+            )
         }
         Ok(CreateSessionFromImportedFrontierOutcome::ConflictingReuse { .. }) => {
             conflicting_reuse()
