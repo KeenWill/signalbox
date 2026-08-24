@@ -2,21 +2,26 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
-import { fallbackDescriptor } from '../src/features/artifacts/artifactScenario'
+import {
+  artifactScenario,
+  fallbackDescriptor,
+  imageDescriptor,
+  imageOriginalView,
+  imagePreviewView,
+  imageThumbnailView,
+  jpegDescriptor,
+  jpegOriginalView,
+} from '../src/features/artifacts/artifactScenario'
 
 interface BrowserProblems {
   consoleErrors: string[]
   pageErrors: string[]
 }
 
-const previewPath =
-  '/api/blobs/sha256:071d25f582ba9e6a8725e198dab884d70a3d7ce3ea84a74c66e65a1443c41a8e/content/image-png'
-const originalPath =
-  '/api/blobs/sha256:3729b2319da081a0710ba27da7af330c1236325cf8ed0a619cf132375bb0fc1e/content/image-png'
-const thumbnailPath =
-  '/api/blobs/sha256:e3f49e726a8b33752609b0f159cac0e185d6f02f6f72e872652e5df849ee5490/content/image-png'
-const jpegOriginalPath =
-  '/api/blobs/sha256:11ce39dce155c991152fad639d7ba25efab3f14e9eb921f20d1dbde5b67cb29e/content/image-jpeg'
+const previewPath = imagePreviewView.content_url
+const originalPath = imageOriginalView.content_url
+const thumbnailPath = imageThumbnailView.content_url
+const jpegOriginalPath = jpegOriginalView.content_url
 const remotePath = 'https://media.example.test/remote-status-diagram.png'
 const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.meta.url))
 const originalFixture = readFileSync(new URL('./fixtures/original.png', import.meta.url))
@@ -26,23 +31,24 @@ const jpegOriginalFixture = readFileSync(new URL('./fixtures/original.jpg', impo
 // pixels even when geometry is identical. Keep that measured host allowance local to this fixture.
 const MOBILE_ARTIFACT_RASTERIZATION_TOLERANCE = 0.08
 
+const sha256Digest = (bytes: Buffer): string =>
+  `sha256:${createHash('sha256').update(bytes).digest('hex')}`
+
+const previewOutputDigest = imagePreviewView.derivations[0]?.output_digests[0]
+const thumbnailOutputDigest = imageThumbnailView.derivations[0]?.output_digests[0]
+if (previewOutputDigest === undefined || thumbnailOutputDigest === undefined) {
+  throw new Error('the preview and thumbnail fixtures must advertise derivation output digests')
+}
+
 test('fixture bytes match their advertised immutable identities', () => {
-  expect(createHash('sha256').update(originalFixture).digest('hex')).toBe(
-    '3729b2319da081a0710ba27da7af330c1236325cf8ed0a619cf132375bb0fc1e',
-  )
-  expect(originalFixture.byteLength).toBe(33749)
-  expect(createHash('sha256').update(previewFixture).digest('hex')).toBe(
-    '071d25f582ba9e6a8725e198dab884d70a3d7ce3ea84a74c66e65a1443c41a8e',
-  )
-  expect(previewFixture.byteLength).toBe(215370)
-  expect(createHash('sha256').update(thumbnailFixture).digest('hex')).toBe(
-    'e3f49e726a8b33752609b0f159cac0e185d6f02f6f72e872652e5df849ee5490',
-  )
-  expect(thumbnailFixture.byteLength).toBe(93)
-  expect(createHash('sha256').update(jpegOriginalFixture).digest('hex')).toBe(
-    '11ce39dce155c991152fad639d7ba25efab3f14e9eb921f20d1dbde5b67cb29e',
-  )
-  expect(jpegOriginalFixture.byteLength).toBe(761)
+  expect(sha256Digest(originalFixture)).toBe(imageDescriptor.digest)
+  expect(String(originalFixture.byteLength)).toBe(imageOriginalView.byte_length)
+  expect(sha256Digest(previewFixture)).toBe(previewOutputDigest)
+  expect(String(previewFixture.byteLength)).toBe(imagePreviewView.byte_length)
+  expect(sha256Digest(thumbnailFixture)).toBe(thumbnailOutputDigest)
+  expect(String(thumbnailFixture.byteLength)).toBe(imageThumbnailView.byte_length)
+  expect(sha256Digest(jpegOriginalFixture)).toBe(jpegDescriptor.digest)
+  expect(String(jpegOriginalFixture.byteLength)).toBe(jpegOriginalView.byte_length)
 })
 
 const watchBrowser = (page: Page): BrowserProblems => {
@@ -74,17 +80,25 @@ const expectOnlyExpectedFailedResourceError = (
   expect(problems.consoleErrors.length).toBeLessThanOrEqual(expectedPaths.length)
 }
 
-const failRouteAndRecordPath = async (page: Page, path: string): Promise<string[]> => {
+// Observe every HTTP error response the browser receives, rather than recording inside the
+// intentional route: an unrelated failed response is then caught by the exact-path assertion even
+// when the browser emits no console diagnostic for it.
+const watchFailedResponses = (page: Page): string[] => {
   const failedResponsePaths: string[] = []
+  page.on('response', (response) => {
+    if (response.status() >= 400) failedResponsePaths.push(new URL(response.url()).pathname)
+  })
+  return failedResponsePaths
+}
+
+const failRouteOnce = async (page: Page, path: string): Promise<void> => {
   await page.route(
     `**${path}`,
     async (route) => {
-      failedResponsePaths.push(path)
       await route.fulfill({ status: 500, body: 'unavailable' })
     },
     { times: 1 },
   )
-  return failedResponsePaths
 }
 
 const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
@@ -153,7 +167,8 @@ test('selects a bounded image view and keeps an animation-capable original downl
 
 test('advances from a failed preview to its admitted thumbnail', async ({ page }) => {
   const problems = watchBrowser(page)
-  const failedResponsePaths = await failRouteAndRecordPath(page, previewPath)
+  const failedResponsePaths = watchFailedResponses(page)
+  await failRouteOnce(page, previewPath)
   await page.goto('/scenario/blobs')
 
   const artifact = page.getByRole('article', { name: 'Artifact orbital-map.png' })
@@ -167,8 +182,9 @@ test('retries a bounded JPEG original and hides obsolete automatic failure statu
   page,
 }) => {
   const problems = watchBrowser(page)
-  const failedPreviewPaths = await failRouteAndRecordPath(page, thumbnailPath)
-  const failedOriginalPaths = await failRouteAndRecordPath(page, jpegOriginalPath)
+  const failedResponsePaths = watchFailedResponses(page)
+  await failRouteOnce(page, thumbnailPath)
+  await failRouteOnce(page, jpegOriginalPath)
   await page.goto('/scenario/blobs')
 
   const artifact = page.getByRole('article', { name: 'Artifact bounded-photo.jpg' })
@@ -187,11 +203,32 @@ test('retries a bounded JPEG original and hides obsolete automatic failure statu
     'true',
   )
   await expect(artifact.getByText('No admitted inline image view could be loaded')).toHaveCount(0)
-  expectOnlyExpectedFailedResourceError(
-    problems,
-    [...failedPreviewPaths, ...failedOriginalPaths],
-    [thumbnailPath, jpegOriginalPath],
+  expectOnlyExpectedFailedResourceError(problems, failedResponsePaths, [
+    thumbnailPath,
+    jpegOriginalPath,
+  ])
+})
+
+test('restores a loaded original after leaving and reopening the scenario', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/blobs')
+
+  const artifact = page.getByRole('article', { name: 'Artifact bounded-photo.jpg' })
+  await artifact.scrollIntoViewIfNeeded()
+  await artifact.getByRole('button', { name: 'Load original' }).click()
+  await expect(artifact.getByRole('img', { name: 'Original of bounded-photo.jpg' })).toBeVisible()
+
+  await page.getByRole('link', { name: /Streaming session/ }).click()
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeVisible()
+  await page.getByRole('link', { name: /Blob evidence/ }).click()
+
+  await artifact.scrollIntoViewIfNeeded()
+  await expect(artifact.getByRole('img', { name: 'Original of bounded-photo.jpg' })).toBeVisible()
+  await expect(artifact.getByRole('button', { name: 'Original loaded' })).toHaveAttribute(
+    'aria-disabled',
+    'true',
   )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
 test('expands text through a bounded keyboard action', async ({ page }) => {
@@ -301,6 +338,9 @@ test('captures desktop dark artifact evidence', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.goto('/scenario/blobs')
   await expect(page.getByRole('heading', { name: 'Artifact renderers' })).toBeVisible()
+  // Pixel tolerances absorb small text drift, so the record count is pinned functionally: stale
+  // whole-panel evidence cannot pass by tolerance alone when the scenario inventory changes.
+  await expect(page.getByText(`${artifactScenario.length} typed records`)).toBeVisible()
   await expect(page.getByRole('region', { name: 'Artifact renderers' })).toHaveScreenshot(
     'artifacts-desktop-dark.png',
   )
@@ -353,6 +393,7 @@ test('captures desktop light artifact evidence', async ({ page }, testInfo) => {
   await page.getByRole('button', { name: 'Use light theme' }).focus()
   await page.keyboard.press('Enter')
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
+  await expect(page.getByText(`${artifactScenario.length} typed records`)).toBeVisible()
   await expect(page.getByRole('region', { name: 'Artifact renderers' })).toHaveScreenshot(
     'artifacts-desktop-light.png',
   )
@@ -365,6 +406,7 @@ test('captures mobile artifact evidence', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/scenario/blobs')
   await expect(page.getByRole('heading', { name: 'Artifact renderers' })).toBeVisible()
+  await expect(page.getByText(`${artifactScenario.length} typed records`)).toBeVisible()
   await expect(page.getByRole('region', { name: 'Artifact renderers' })).toHaveScreenshot(
     'artifacts-mobile-dark.png',
     { maxDiffPixelRatio: MOBILE_ARTIFACT_RASTERIZATION_TOLERANCE },
