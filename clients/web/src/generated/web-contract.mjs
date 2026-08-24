@@ -1762,7 +1762,16 @@ function validateWebImportEntryWindow(value) {
 }
 
 function validateWebImportContinuation(value, path) {
+  assertUuid(value.command_id, `${path}.command_id`);
   validateWebImportFrontier(value.frontier, `${path}.frontier`);
+  if (path === "import_continuation_request") {
+    const selection = value.initial_model_selection;
+    if (selection.kind === "direct") {
+      assertUuid(selection.selection_id, `${path}.initial_model_selection.selection_id`);
+    } else {
+      assertUuid(selection.alias_id, `${path}.initial_model_selection.alias_id`);
+    }
+  }
   if (path === "import_continuation_response") {
     assertUuid(value.session_id, `${path}.session_id`);
   }
