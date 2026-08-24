@@ -177,6 +177,24 @@ impl VideoFixture {
             .with_reported_byte_length(u64::try_from(source_bytes).unwrap_or(u64::MAX))
     }
 
+    pub fn partially_buffered_movie_with_nested_movie_tail() -> Self {
+        let ordinary = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
+        let ftyp_bytes = ftyp().len();
+        let movie_payload = ordinary[ftyp_bytes + 8..].to_vec();
+        let source_bytes = METADATA_BYTES + 1024;
+        let movie_size = source_bytes - ftyp_bytes;
+        let filler_payload_bytes = METADATA_BYTES - ftyp_bytes - 8 - movie_payload.len() - 16;
+        let mut bytes = ftyp();
+        bytes.extend_from_slice(&u32::try_from(movie_size).unwrap_or(u32::MAX).to_be_bytes());
+        bytes.extend_from_slice(b"moov");
+        bytes.extend_from_slice(&movie_payload);
+        bytes.extend_from_slice(&mp4_box(*b"free", &vec![0_u8; filler_payload_bytes]));
+        bytes.extend_from_slice(&512_u32.to_be_bytes());
+        bytes.extend_from_slice(b"moov");
+        Self::new(FixtureKind::Mp4, bytes)
+            .with_reported_byte_length(u64::try_from(source_bytes).unwrap_or(u64::MAX))
+    }
+
     pub fn large_mp4_with_partial_header_at_metadata_cutoff() -> Self {
         let mut bytes = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
         let filler_payload_bytes = METADATA_BYTES - bytes.len() - 8 - 4;
@@ -342,6 +360,33 @@ impl VideoFixture {
         Self::new(FixtureKind::Mp4, mp4_bytes(MP4_TIMESCALE, u32::MAX))
     }
 
+    pub fn fragmented_mp4_with_unknown_movie_duration() -> Self {
+        let mut fixture = Self::fragmented_mp4_with_movie_extends_duration();
+        if let Some(movie_header_type) = fixture
+            .bytes
+            .windows(4)
+            .position(|window| window == b"mvhd")
+        {
+            let duration_offset = movie_header_type + 4 + 16;
+            fixture.bytes[duration_offset..duration_offset + 4]
+                .copy_from_slice(&u32::MAX.to_be_bytes());
+        }
+        fixture
+    }
+
+    pub fn mp4_with_zero_media_timescale() -> Self {
+        let mut fixture = Self::ordinary_mp4();
+        if let Some(media_header_type) = fixture
+            .bytes
+            .windows(4)
+            .position(|window| window == b"mdhd")
+        {
+            let timescale_offset = media_header_type + 4 + 12;
+            fixture.bytes[timescale_offset..timescale_offset + 4].fill(0);
+        }
+        fixture
+    }
+
     pub fn mp4_with_zero_sized_nested_configuration() -> Self {
         let mut payload = vec![0_u8; 78];
         payload[6..8].copy_from_slice(&1_u16.to_be_bytes());
@@ -445,7 +490,7 @@ impl VideoFixture {
         let stsd = mp4_box(*b"stsd", &sample_description);
         let sample_table = mp4_box(*b"stbl", &[stsd.clone(), stsd].concat());
         let media_information = mp4_box(*b"minf", &sample_table);
-        let media_header = mp4_box(*b"mdhd", &[0_u8; 24]);
+        let media_header = mdhd(MP4_TIMESCALE);
         let mut handler = vec![0_u8; 24];
         handler[8..12].copy_from_slice(b"vide");
         let media = mp4_box(
@@ -467,7 +512,7 @@ impl VideoFixture {
         let media = mp4_box(
             *b"mdia",
             &[
-                mp4_box(*b"mdhd", &[0_u8; 24]),
+                mdhd(MP4_TIMESCALE),
                 mp4_box(*b"hdlr", &handler),
                 media_information,
             ]
@@ -488,7 +533,7 @@ impl VideoFixture {
         let media = mp4_box(
             *b"mdia",
             &[
-                mp4_box(*b"mdhd", &[0_u8; 24]),
+                mdhd(MP4_TIMESCALE),
                 mp4_box(*b"hdlr", &handler),
                 media_information.clone(),
                 media_information,
@@ -588,7 +633,7 @@ impl VideoFixture {
         sample_description.extend_from_slice(&avc1_sample_entry());
         let sample_table = mp4_box(*b"stbl", &mp4_box(*b"stsd", &sample_description));
         let media_information = mp4_box(*b"minf", &sample_table);
-        let media_header = mp4_box(*b"mdhd", &[0_u8; 24]);
+        let media_header = mdhd(MP4_TIMESCALE);
         let media = mp4_box(
             *b"mdia",
             &[media_header, mp4_box(*b"hdlr", &handler), media_information].concat(),
@@ -630,7 +675,7 @@ impl VideoFixture {
         sample_description.extend_from_slice(&avc1_sample_entry());
         let sample_table = mp4_box(*b"stbl", &mp4_box(*b"stsd", &sample_description));
         let media_information = mp4_box(*b"minf", &sample_table);
-        let media_header = mp4_box(*b"mdhd", &[0_u8; 24]);
+        let media_header = mdhd(MP4_TIMESCALE);
         let media = mp4_box(
             *b"mdia",
             &[media_header, mp4_box(*b"hdlr", &handler), media_information].concat(),
@@ -663,6 +708,30 @@ impl VideoFixture {
             &[mp4_box(*b"mvhd", &movie_header), track].concat(),
         );
         Self::new(FixtureKind::Mp4, [ftyp(), movie].concat())
+    }
+
+    pub fn mp4_with_handler_sample_entry_mismatch() -> Self {
+        let valid_track = mp4_track(1, avc1_sample_entry());
+        let mut handler = vec![0_u8; 24];
+        handler[8..12].copy_from_slice(b"soun");
+        let mut sample_description = vec![0_u8; 8];
+        sample_description[4..8].copy_from_slice(&1_u32.to_be_bytes());
+        sample_description.extend_from_slice(&avc1_sample_entry());
+        let sample_table = mp4_box(*b"stbl", &mp4_box(*b"stsd", &sample_description));
+        let media = mp4_box(
+            *b"mdia",
+            &[
+                mdhd(MP4_TIMESCALE),
+                mp4_box(*b"hdlr", &handler),
+                mp4_box(*b"minf", &sample_table),
+            ]
+            .concat(),
+        );
+        let mismatched_track = mp4_box(*b"trak", &[tkhd(2), media].concat());
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_tracks(&[valid_track, mismatched_track]),
+        )
     }
 
     pub fn webm_track_missing_number_and_codec() -> Self {
@@ -732,6 +801,35 @@ impl VideoFixture {
         bytes.push(0x1f);
         Self::new(FixtureKind::Webm, bytes)
             .with_reported_byte_length(u64::try_from(METADATA_BYTES + 64).unwrap_or(u64::MAX))
+    }
+
+    pub fn webm_child_extending_past_known_segment() -> Self {
+        let header = ebml_header();
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let tracks = ebml_element(
+            &[0x16, 0x54, 0xae, 0x6b],
+            &webm_track_entry(ContentProtection::Clear),
+        );
+        let segment_size = METADATA_BYTES;
+        let segment_size_bytes = ebml_size(segment_size);
+        let child_header = [vec![0xec], ebml_size(4096)].concat();
+        let fixed_bytes = header.len()
+            + 4
+            + segment_size_bytes.len()
+            + info.len()
+            + tracks.len()
+            + child_header.len();
+        let filler_total = METADATA_BYTES - fixed_bytes;
+        let filler = ebml_element(&[0xec], &vec![0_u8; filler_total - 4]);
+        let mut bytes = header;
+        bytes.extend_from_slice(&[0x18, 0x53, 0x80, 0x67]);
+        bytes.extend_from_slice(&segment_size_bytes);
+        bytes.extend_from_slice(&info);
+        bytes.extend_from_slice(&tracks);
+        bytes.extend_from_slice(&filler);
+        bytes.extend_from_slice(&child_header);
+        Self::new(FixtureKind::Webm, bytes)
+            .with_reported_byte_length(u64::try_from(METADATA_BYTES + 4096).unwrap_or(u64::MAX))
     }
 
     pub fn webm_with_partial_vint_at_actual_eof() -> Self {
@@ -840,7 +938,7 @@ fn mp4_bytes_with_sample_entry(timescale: u32, duration: u32, sample_entry: Vec<
     sample_description.extend_from_slice(&sample_entry);
     let sample_table = mp4_box(*b"stbl", &mp4_box(*b"stsd", &sample_description));
     let media_information = mp4_box(*b"minf", &sample_table);
-    let media_header = mp4_box(*b"mdhd", &[0_u8; 24]);
+    let media_header = mdhd(MP4_TIMESCALE);
     let media = mp4_box(
         *b"mdia",
         &[media_header, mp4_box(*b"hdlr", &handler), media_information].concat(),
@@ -865,7 +963,7 @@ fn mp4_track(track_id: u32, sample_entry: Vec<u8>) -> Vec<u8> {
     let media = mp4_box(
         *b"mdia",
         &[
-            mp4_box(*b"mdhd", &[0_u8; 24]),
+            mdhd(MP4_TIMESCALE),
             mp4_box(*b"hdlr", &handler),
             media_information,
         ]
@@ -889,6 +987,12 @@ fn tkhd(track_id: u32) -> Vec<u8> {
     let mut payload = vec![0_u8; 84];
     payload[12..16].copy_from_slice(&track_id.to_be_bytes());
     mp4_box(*b"tkhd", &payload)
+}
+
+fn mdhd(timescale: u32) -> Vec<u8> {
+    let mut payload = vec![0_u8; 24];
+    payload[12..16].copy_from_slice(&timescale.to_be_bytes());
+    mp4_box(*b"mdhd", &payload)
 }
 
 fn ftyp() -> Vec<u8> {

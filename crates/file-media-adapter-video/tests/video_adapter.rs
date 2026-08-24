@@ -259,6 +259,15 @@ async fn partially_buffered_mp4_movie_validates_complete_prefix_metadata()
 }
 
 #[tokio::test]
+async fn partially_buffered_nested_mp4_movie_is_recursive() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::partially_buffered_movie_with_nested_movie_tail(),
+        "recursive_container",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn partial_mp4_header_at_metadata_cutoff_is_an_accepted_truncated_tail()
 -> Result<(), Box<dyn Error>> {
     let source = VideoFixture::large_mp4_with_partial_header_at_metadata_cutoff().into_source()?;
@@ -415,6 +424,27 @@ async fn unknown_mp4_movie_duration_reports_unavailable_duration() -> Result<(),
     assert_eq!(inspection.status(), FileInspectionStatus::Validated);
     assert_eq!(body["duration_milliseconds"], serde_json::Value::Null);
     Ok(())
+}
+
+#[tokio::test]
+async fn fragmented_unknown_movie_duration_uses_movie_extends_duration()
+-> Result<(), Box<dyn Error>> {
+    let fixture = VideoFixture::fragmented_mp4_with_unknown_movie_duration();
+    let expected_duration = fixture.expected_duration_milliseconds();
+    let (inspection, body) = inspect_and_read_metadata(fixture).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    assert_eq!(body["duration_milliseconds"], expected_duration);
+    Ok(())
+}
+
+#[tokio::test]
+async fn zero_mp4_media_timescale_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_zero_media_timescale(),
+        "malformed_video",
+    )
+    .await
 }
 
 #[tokio::test]
@@ -645,6 +675,15 @@ async fn mp4_track_with_split_media_evidence_is_malformed() -> Result<(), Box<dy
 }
 
 #[tokio::test]
+async fn mp4_handler_and_sample_entry_mismatch_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_handler_sample_entry_mismatch(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn partial_webm_header_at_metadata_cutoff_is_an_accepted_truncated_tail()
 -> Result<(), Box<dyn Error>> {
     let source = VideoFixture::large_webm_with_partial_header_at_metadata_cutoff().into_source()?;
@@ -658,6 +697,15 @@ async fn partial_webm_header_at_metadata_cutoff_is_an_accepted_truncated_tail()
 async fn partial_webm_vint_at_actual_eof_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::webm_with_partial_vint_at_actual_eof(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn partial_webm_child_cannot_extend_past_known_segment() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_child_extending_past_known_segment(),
         "malformed_video",
     )
     .await
