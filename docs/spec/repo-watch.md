@@ -972,14 +972,13 @@ checks, a settled head, and nonconflicting mergeability. An unsettled head has
 not finished registering and completing its exact-head checks, so its empty
 non-green list is the absence of evidence rather than evidence of a green head;
 requiring settlement keeps a dismissal from racing checks that have yet to
-report. Every effective blocking review must
-target a superseded head; one current-head blocker prevents every dismissal for
-that assessment. A current-head review is never dismissed automatically. Why: a
-new review is live judgment, while a stale aggregate decision whose complete
-thread inventory is resolved is forge state that alone prevents an otherwise
-finished head from converging. The following ordinary poll observes the
-dismissal and may then seal convergence; dismissal itself does not stop
-dispatch.
+report. Every effective blocking review must target a superseded head; one
+current-head blocker prevents every dismissal for that assessment. A
+current-head review is never dismissed automatically. Why: a new review is live
+judgment, while a stale aggregate decision whose complete thread inventory is
+resolved is forge state that alone prevents an otherwise finished head from
+converging. The following ordinary poll observes the dismissal and may then seal
+convergence; dismissal itself does not stop dispatch.
 
 **Implemented behavior.** Before sending GitHub's review-dismissal mutation, the
 daemon appends a unique intent naming the assessment, repository, pull request,
@@ -998,10 +997,10 @@ observing each intent, because a deeply paginated batch can outlive the claim
 lease; an intent whose lease another watcher has since taken is left to that
 watcher, and a lease lost between the renewal and the terminal write likewise
 leaves that one intent to its new claimant rather than abandoning the rest of
-the batch. The pending-intent projection makes every unsettled
-external action directly observable. The next poll observes the dismissal
-through the ordinary review and convergence projections; no synthetic approval
-is created and no fresh review is requested.
+the batch. The pending-intent projection makes every unsettled external action
+directly observable. The next poll observes the dismissal through the ordinary
+review and convergence projections; no synthetic approval is created and no
+fresh review is requested.
 
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,
