@@ -319,22 +319,34 @@ async fn usage_half_open_time_range_excludes_earlier_evidence() -> Result<(), Bo
 async fn incomplete_cache_inclusive_aggregates_are_not_normalization_safe()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x95_100;
     let fixture = terminal_reported_usage_call(
         &pool,
-        0x95_100,
+        seed,
         ProviderReportedTokenUsage::unreported().with_input_tokens(Some(FIRST_INPUT_TOKENS)),
     )
     .await?;
+    let source_frontier = Uuid::from_u128(seed + 0x80);
     sqlx::query(
-        "UPDATE web_usage_call_projection
-            SET usage_input_includes_cache_tokens = true,
-                cache_creation_input_tokens = NULL,
-                cache_read_input_tokens = NULL
-          WHERE model_call_id = $1",
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
     )
-    .bind(fixture.call.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(source_frontier)
     .execute(&pool)
     .await?;
+    let mut connection = pool.acquire().await?;
+    insert_completed_context_compaction_call(
+        &mut connection,
+        Uuid::from_u128(seed + 0x81),
+        fixture.session.into_uuid(),
+        Uuid::from_u128(seed + 0x82),
+        Uuid::from_u128(seed + 0x83),
+        source_frontier,
+    )
+    .await?;
+    drop(connection);
 
     let report = UsageRepository::new(pool.clone())
         .aggregate(UsageQuery {
@@ -344,7 +356,7 @@ async fn incomplete_cache_inclusive_aggregates_are_not_normalization_safe()
                 turn: None,
                 model: None,
                 provenance: None,
-                call_kind: None,
+                call_kind: Some(signalbox_application::UsageCallKind::ContextCompaction),
             },
         })
         .await?;
@@ -478,8 +490,10 @@ async fn context_compaction_input_semantics_preserve_history_and_pin_new_calls()
     .expect_err("new compaction calls must pin input semantics");
     assert!(
         missing_semantics_error
-            .to_string()
-            .contains("compaction input-token semantics must be pinned")
+            .as_database_error()
+            .is_some_and(|error| error
+                .message()
+                .contains("compaction input-token semantics must be pinned"))
     );
 
     sqlx::query(
@@ -507,8 +521,10 @@ async fn context_compaction_input_semantics_preserve_history_and_pin_new_calls()
     .expect_err("pinned compaction input semantics must be immutable");
     assert!(
         changed_semantics_error
-            .to_string()
-            .contains("compaction input-token semantics are immutable")
+            .as_database_error()
+            .is_some_and(|error| error
+                .message()
+                .contains("compaction input-token semantics are immutable"))
     );
 
     pool.close().await;
