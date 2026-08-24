@@ -1,7 +1,21 @@
 -- Dedicated terminal model-call usage projection for bounded browser reads.
 -- Token evidence is copied exactly once when its canonical ordinary,
--- approval-judge, or context-compaction call becomes terminal. Dollar cost remains a read-time
--- derivation from versioned deployment rates and is deliberately not stored.
+-- approval-judge, or context-compaction call becomes terminal. Dollar cost
+-- remains a read-time derivation from versioned deployment rates and is
+-- deliberately not stored.
+
+CREATE FUNCTION bounded_web_usage_profile(value text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+AS $$
+    SELECT CASE
+        WHEN octet_length(value) <= 256 THEN value
+        ELSE 'oversized-md5:' || md5(value)
+    END
+$$;
 
 CREATE TABLE web_usage_call_projection (
     model_call_id uuid PRIMARY KEY,
@@ -24,8 +38,6 @@ CREATE TABLE web_usage_call_projection (
         CHECK (usage_provenance_kind IN ('reported', 'estimated')),
     CONSTRAINT web_usage_credential_reference_nonempty
         CHECK (char_length(credential_reference) > 0),
-    CONSTRAINT web_usage_credential_reference_bounded
-        CHECK (octet_length(credential_reference) <= 256),
     CONSTRAINT web_usage_turn_shape
         CHECK ((call_kind = 'context_compaction') = (turn_id IS NULL)),
     CONSTRAINT web_usage_token_axes_u64
