@@ -506,38 +506,34 @@ fn render_frontier_messages<'a>(
 fn projected_tool_content_bytes<'a>(
     tool_entries: impl IntoIterator<Item = &'a ResolvedToolConversationEntry>,
 ) -> usize {
-    tool_entries
-        .into_iter()
-        .fold(0_usize, |total, entry| {
-            let bytes = match entry {
-                ResolvedToolConversationEntry::AssistantToolUse { request, .. } => {
-                    request.arguments().as_str().len()
-                }
-                ResolvedToolConversationEntry::ExecutionResult { attempt, .. } => {
-                    match attempt.end() {
-                        ToolAttemptEnd::Completed { result } => match result {
-                            ToolResultContent::Text(text) => text.as_str().len(),
-                        },
-                        ToolAttemptEnd::KnownFailed { error } => {
-                            error.detail().map_or(0, |detail| detail.as_str().len())
-                        }
-                        // Neither shape renders, so neither retains content.
-                        ToolAttemptEnd::AwaitingChild { .. } | ToolAttemptEnd::Ambiguous => 0,
+    tool_entries.into_iter().fold(0_usize, |total, entry| {
+        let bytes = match entry {
+            ResolvedToolConversationEntry::AssistantToolUse { request, .. } => {
+                request.arguments().as_str().len()
+            }
+            ResolvedToolConversationEntry::ExecutionResult { attempt, .. } => {
+                match attempt.end() {
+                    ToolAttemptEnd::Completed { result } => match result {
+                        ToolResultContent::Text(text) => text.as_str().len(),
+                    },
+                    ToolAttemptEnd::KnownFailed { error } => {
+                        error.detail().map_or(0, |detail| detail.as_str().len())
                     }
+                    // Neither shape renders, so neither retains content.
+                    ToolAttemptEnd::AwaitingChild { .. } | ToolAttemptEnd::Ambiguous => 0,
                 }
-                ResolvedToolConversationEntry::Denied { approval, .. } => {
-                    match approval.decision() {
-                        ToolApprovalDecision::Deny { reason } => {
-                            reason.as_ref().map_or(0, |reason| reason.as_str().len())
-                        }
-                        ToolApprovalDecision::Approve => 0,
-                    }
+            }
+            ResolvedToolConversationEntry::Denied { approval, .. } => match approval.decision() {
+                ToolApprovalDecision::Deny { reason } => {
+                    reason.as_ref().map_or(0, |reason| reason.as_str().len())
                 }
-                // A closed request renders a fixed marker carrying no content.
-                ResolvedToolConversationEntry::Closed { .. } => 0,
-            };
-            total.saturating_add(bytes)
-        })
+                ToolApprovalDecision::Approve => 0,
+            },
+            // A closed request renders a fixed marker carrying no content.
+            ResolvedToolConversationEntry::Closed { .. } => 0,
+        };
+        total.saturating_add(bytes)
+    })
 }
 
 /// A checked prepared call plus its provider-neutral ordered messages.
@@ -5656,34 +5652,31 @@ mod tests {
             &tool_entries,
         )
         .expect("the fixture frontier renders");
-        let rendered = operation
-            .messages()
-            .iter()
-            .fold(0_usize, |total, message| {
-                let bytes = match message {
-                    ModelConversationMessage::AssistantToolUse { request, .. } => {
-                        request.arguments().as_str().len()
+        let rendered = operation.messages().iter().fold(0_usize, |total, message| {
+            let bytes = match message {
+                ModelConversationMessage::AssistantToolUse { request, .. } => {
+                    request.arguments().as_str().len()
+                }
+                ModelConversationMessage::ToolResult { content, .. } => match content {
+                    ModelToolResultContent::Success(ToolResultContent::Text(text)) => {
+                        text.as_str().len()
                     }
-                    ModelConversationMessage::ToolResult { content, .. } => match content {
-                        ModelToolResultContent::Success(ToolResultContent::Text(text)) => {
-                            text.as_str().len()
-                        }
-                        ModelToolResultContent::ExecutionError(error) => {
-                            error.detail().map_or(0, |detail| detail.as_str().len())
-                        }
-                        ModelToolResultContent::Denied { reason } => {
-                            reason.as_ref().map_or(0, |reason| reason.as_str().len())
-                        }
-                        ModelToolResultContent::ClosedByTurnEnd => 0,
-                        // Delegation results render from their frontier payload
-                        // rather than from resolved tool evidence, so they are
-                        // outside this accounting on both sides.
-                        ModelToolResultContent::Delegation(_) => 0,
-                    },
-                    _ => 0,
-                };
-                total + bytes
-            });
+                    ModelToolResultContent::ExecutionError(error) => {
+                        error.detail().map_or(0, |detail| detail.as_str().len())
+                    }
+                    ModelToolResultContent::Denied { reason } => {
+                        reason.as_ref().map_or(0, |reason| reason.as_str().len())
+                    }
+                    ModelToolResultContent::ClosedByTurnEnd => 0,
+                    // Delegation results render from their frontier payload
+                    // rather than from resolved tool evidence, so they are
+                    // outside this accounting on both sides.
+                    ModelToolResultContent::Delegation(_) => 0,
+                },
+                _ => 0,
+            };
+            total + bytes
+        });
         assert!(
             rendered > 0,
             "the fixture must retain content for the comparison to mean anything"
