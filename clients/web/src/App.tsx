@@ -178,6 +178,13 @@ export function Workspace({
   }, [knownId, searchUsageSource])
 
   const revealSearchResult = async (result: WebSearchPage['results'][number]) => {
+    // Global search admits hits from other sessions, but this development transport exposes exactly
+    // one session's timeline and addresses it by event sequence alone. Revealing a foreign hit here
+    // would select whatever unrelated evidence occupies the same address, so fail closed until a
+    // per-session timeline source exists to route the reveal through.
+    if (result.session_id !== SEARCH_USAGE_SCENARIO_SESSION_ID) {
+      throw new TypeError('search result belongs to a session this transport cannot reveal')
+    }
     const address = Number(result.address.event_sequence)
     if (!Number.isSafeInteger(address) || address < 1) {
       throw new TypeError('scenario search result address is not safely representable')

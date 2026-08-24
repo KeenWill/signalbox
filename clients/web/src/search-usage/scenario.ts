@@ -16,6 +16,8 @@ const SEARCH_RESULT_COUNT = 72
 const USAGE_CALL_COUNT = 240
 const MODEL_ALPHA = '00000000-0000-0000-0000-000000001001'
 const MODEL_BETA = '00000000-0000-0000-0000-000000001002'
+const PROFILE_ALPHA = 'profile-alpha'
+const PROFILE_BETA = 'profile-beta'
 
 export interface SearchUsageScenarioDiagnostics {
   searchReads: number
@@ -28,11 +30,16 @@ const uuidAt = (namespace: number, index: number): string =>
   `00000000-0000-0000-${String(namespace).padStart(4, '0')}-${String(index).padStart(12, '0')}`
 
 const searchResult = (query: string, index: number): WebSearchPage['results'][number] => {
-  const address = index === 0 ? SEARCH_USAGE_FAR_ADDRESS : String(777_777 + index * 13)
+  // The contract orders a search page strictly descending by (address, projection id), so the
+  // scenario walks addresses down from the far address rather than up from it.
+  const address = String(Number(SEARCH_USAGE_FAR_ADDRESS) - index * 13)
   const contentClass = index % 9 === 0 ? 'derived_text_artifact' : 'assistant_transcript'
   const snippet = `${query} — bounded lexical evidence at durable address ${address}`
   return {
     session_id: SEARCH_USAGE_SCENARIO_SESSION_ID,
+    // The contract anchors a search continuation to the final result's projection id, so the
+    // scenario numbers projections one past the index the pager slices on.
+    projection_id: String(index + 1),
     address: { event_sequence: address },
     source:
       contentClass === 'derived_text_artifact'
@@ -86,6 +93,7 @@ const usageGroups = (): WebUsageSummary['groups'] => [
   {
     call_kind: 'model_call',
     model_id: MODEL_ALPHA,
+    profile_id: PROFILE_ALPHA,
     provenance: 'reported',
     input_semantics: 'cache_exclusive',
     coverage: {
@@ -111,6 +119,7 @@ const usageGroups = (): WebUsageSummary['groups'] => [
   {
     call_kind: 'model_call',
     model_id: MODEL_BETA,
+    profile_id: PROFILE_BETA,
     provenance: 'estimated',
     input_semantics: 'cache_exclusive',
     coverage: {
@@ -136,6 +145,7 @@ const usageGroups = (): WebUsageSummary['groups'] => [
   {
     call_kind: 'approval_judge',
     model_id: MODEL_ALPHA,
+    profile_id: PROFILE_ALPHA,
     provenance: 'reported',
     input_semantics: 'cache_exclusive',
     coverage: {
@@ -223,21 +233,23 @@ export class SearchUsageScenarioSource implements SearchUsageSource {
     const calls = Array.from({ length: USAGE_CALL_COUNT }, (_, index) => usageCall(index)).filter(
       (call) => matchesUsageFilters(call, request.filters),
     )
-    if (request.order === 'oldest') calls.reverse()
     const start = request.after
       ? Math.max(calls.findIndex((call) => call.call_id === request.after?.call_id) + 1, 0)
       : 0
     const page = calls.slice(start, start + request.maxItems)
     const end = start + page.length
-    return decodeWebUsageCallPage({
-      calls: page,
-      continuation:
-        end < calls.length
-          ? {
-              call_id: page.at(-1)?.call_id,
-              recorded_at_micros: page.at(-1)?.recorded_at_micros,
-            }
-          : null,
-    })
+    return decodeWebUsageCallPage(
+      {
+        calls: page,
+        continuation:
+          end < calls.length
+            ? {
+                call_id: page.at(-1)?.call_id,
+                recorded_at_micros: page.at(-1)?.recorded_at_micros,
+              }
+            : null,
+      },
+      request.order,
+    )
   }
 }

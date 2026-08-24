@@ -4,11 +4,20 @@ import { getCoreRowModel, type LegacyColumnDef, useLegacyTable } from '@tanstack
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { Search } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { WebSearchPage, WebUsageCallPage } from './generated/web-contract.mjs'
+import type {
+  WebSearchPage,
+  WebUsageCallKind,
+  WebUsageCallPage,
+} from './generated/web-contract.mjs'
 import type { SearchUsageSource, UsageFilters } from './search-usage/model'
 
 const SEARCH_PAGE_ITEMS = 72
 const USAGE_PAGE_ITEMS = 100
+// Tunable effective ceilings: repeated "Load next bounded page" evicts the oldest retained page
+// instead of accumulating every visited page for the lifetime of the surface, so retained browser
+// records stay bounded by pages x per-page items rather than by how long an operator paginates.
+const SEARCH_RETAINED_PAGES = 6
+const USAGE_RETAINED_PAGES = 6
 const SEARCH_OVERSCAN_ROWS = 6
 const USAGE_OVERSCAN_ROWS = 8
 
@@ -17,10 +26,9 @@ export interface SearchUsageRouteState {
   q: string
   searchScope: 'global' | 'session'
   usageSession: 'all' | 'current'
-  usageOrder: 'newest' | 'oldest'
   provenance?: 'reported' | 'estimated'
   modelId?: string
-  callKind?: 'model_call' | 'approval_judge'
+  callKind?: WebUsageCallKind
 }
 
 export const defaultSearchUsageRouteState: SearchUsageRouteState = {
@@ -28,7 +36,6 @@ export const defaultSearchUsageRouteState: SearchUsageRouteState = {
   q: '',
   searchScope: 'global',
   usageSession: 'all',
-  usageOrder: 'newest',
 }
 
 type SearchResult = WebSearchPage['results'][number]
@@ -337,6 +344,9 @@ export function SearchUsageWorkbench({
         signal,
       ),
     getNextPageParam: (lastPage) => lastPage.continuation ?? undefined,
+    // The search contract carries forward continuations only, so no backward page param exists.
+    getPreviousPageParam: () => undefined,
+    maxPages: SEARCH_RETAINED_PAGES,
   })
   const results = searchQuery.data?.pages.flatMap((page) => page.results) ?? []
 
@@ -355,15 +365,18 @@ export function SearchUsageWorkbench({
     queryFn: ({ signal }) => source.usageSummary(filters, signal),
   })
   const usageCalls = useInfiniteQuery({
-    queryKey: ['search-usage', 'calls', filters, route.usageOrder],
+    queryKey: ['search-usage', 'calls', filters],
     enabled: route.view === 'usage',
     initialPageParam: undefined as WebUsageCallPage['continuation'],
     queryFn: ({ pageParam, signal }) =>
       source.usageCalls(
-        { filters, order: route.usageOrder, maxItems: USAGE_PAGE_ITEMS, after: pageParam },
+        { filters, order: 'newest', maxItems: USAGE_PAGE_ITEMS, after: pageParam },
         signal,
       ),
     getNextPageParam: (lastPage) => lastPage.continuation ?? undefined,
+    // The usage-call contract carries forward continuations only, so no backward page param exists.
+    getPreviousPageParam: () => undefined,
+    maxPages: USAGE_RETAINED_PAGES,
   })
   const calls = usageCalls.data?.pages.flatMap((page) => page.calls) ?? []
 
@@ -481,22 +494,6 @@ export function SearchUsageWorkbench({
                 onClick={() => onRouteChange({ usageSession: 'current' })}
               >
                 Current session
-              </button>
-            </fieldset>
-            <fieldset className="segmented" aria-label="Usage call order">
-              <button
-                type="button"
-                aria-pressed={route.usageOrder === 'newest'}
-                onClick={() => onRouteChange({ usageOrder: 'newest' })}
-              >
-                Newest
-              </button>
-              <button
-                type="button"
-                aria-pressed={route.usageOrder === 'oldest'}
-                onClick={() => onRouteChange({ usageOrder: 'oldest' })}
-              >
-                Oldest
               </button>
             </fieldset>
             {(route.modelId || route.provenance || route.callKind) && (

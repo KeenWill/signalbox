@@ -2,6 +2,7 @@ import type {
   WebApiErrorResponse,
   WebContractBootstrap,
   WebSearchPage,
+  WebUsageCallKind,
   WebUsageCallPage,
   WebUsageSummary,
 } from '../generated/web-contract.mjs'
@@ -37,12 +38,14 @@ export interface UsageFilters {
   turnId?: string
   modelId?: string
   provenance?: 'reported' | 'estimated'
-  callKind?: 'model_call' | 'approval_judge'
+  callKind?: WebUsageCallKind
 }
 
 export interface UsageCallsRequest {
   filters: UsageFilters
-  order: 'newest' | 'oldest'
+  // The implemented usage-call contract admits newest-first paging only; its decoder rejects any
+  // other order rather than trusting a differently ordered page.
+  order: 'newest'
   maxItems: number
   after?: WebUsageCallPage['continuation']
 }
@@ -250,7 +253,7 @@ export class HttpSearchUsageSource implements SearchUsageSource {
     const response = await this.request(`/api/usage/calls?${query}`, { signal })
     if (!response.ok) return throwApiError(response)
     return validateUsageCallPage(
-      decodeWebUsageCallPage(await readBoundedJson(response)),
+      decodeWebUsageCallPage(await readBoundedJson(response), request.order),
       requestedItems,
       this.limits,
     )

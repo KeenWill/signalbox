@@ -22,33 +22,39 @@ const rootRoute = createRootRoute({ component: () => <Outlet /> })
 const routeString = (value: unknown): string | undefined =>
   typeof value === 'string' ? value : undefined
 
+// A sparse URL must not report absent parameters as explicit `undefined`: the scenario screen
+// spreads this result over `defaultSearchUsageRouteState`, so a present-but-undefined property
+// would overwrite its default instead of falling back to it.
+const withoutAbsent = (state: Partial<SearchUsageRouteState>): Partial<SearchUsageRouteState> =>
+  Object.fromEntries(
+    Object.entries(state).filter(([, value]) => value !== undefined),
+  ) as Partial<SearchUsageRouteState>
+
 const validateScenarioSearch = (
   search: Record<string, unknown>,
 ): Partial<SearchUsageRouteState> => {
   const view = routeString(search.view)
   const searchScope = routeString(search.searchScope)
   const usageSession = routeString(search.usageSession)
-  const usageOrder = routeString(search.usageOrder)
   const provenance = routeString(search.provenance)
   const callKind = routeString(search.callKind)
-  return {
+  return withoutAbsent({
     view: view === 'usage' ? 'usage' : view === 'search' ? 'search' : undefined,
     q: routeString(search.q),
     searchScope:
       searchScope === 'session' ? 'session' : searchScope === 'global' ? 'global' : undefined,
     usageSession:
       usageSession === 'current' ? 'current' : usageSession === 'all' ? 'all' : undefined,
-    usageOrder: usageOrder === 'oldest' ? 'oldest' : usageOrder === 'newest' ? 'newest' : undefined,
     provenance:
       provenance === 'reported' ? 'reported' : provenance === 'estimated' ? 'estimated' : undefined,
     modelId: routeString(search.modelId),
     callKind:
-      callKind === 'model_call'
-        ? 'model_call'
-        : callKind === 'approval_judge'
-          ? 'approval_judge'
-          : undefined,
-  }
+      callKind === 'model_call' ||
+      callKind === 'approval_judge' ||
+      callKind === 'context_compaction'
+        ? callKind
+        : undefined,
+  })
 }
 
 const indexRoute = createRoute({

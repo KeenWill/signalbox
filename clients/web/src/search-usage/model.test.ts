@@ -33,6 +33,7 @@ const searchPage = {
   results: [
     {
       session_id: SEARCH_USAGE_SCENARIO_SESSION_ID,
+      projection_id: '1',
       address: { event_sequence: SEARCH_USAGE_FAR_ADDRESS },
       source: {
         kind: 'turn_transcript_entry',
@@ -126,9 +127,11 @@ describe('HttpSearchUsageSource', () => {
       ) as typeof fetch
     const source = await HttpSearchUsageSource.connect(request)
 
+    // The generated decoder now owns the UTF-8 boundary rule and rejects before the adapter's own
+    // highlight validation runs, so accept either layer's refusal of a split code point.
     await expect(
       source.search({ text: 'evidence', scope: { kind: 'global' }, maxItems: 10 }),
-    ).rejects.toThrow('invalid highlight bounds')
+    ).rejects.toThrow(/invalid highlight bounds|UTF-8 boundaries/)
   })
 })
 
@@ -149,6 +152,6 @@ describe('SearchUsageScenarioSource', () => {
 
     expect(first.results[0]?.address.event_sequence).toBe(SEARCH_USAGE_FAR_ADDRESS)
     expect(first.continuation?.projection_id).toBe('2')
-    expect(second.results[0]?.address.event_sequence).toBe('777803')
+    expect(second.results[0]?.address.event_sequence).toBe('777751')
   })
 })
