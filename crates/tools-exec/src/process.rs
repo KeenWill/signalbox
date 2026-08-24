@@ -1122,6 +1122,40 @@ struct GitWorktreeIdentity {
 
 #[cfg(target_os = "linux")]
 impl WorkspaceDirectoryIdentity {
+    fn duplicate(&self) -> Result<Self, ProcessSpawnFailure> {
+        let directory =
+            rustix::io::dup(&self._directory).map_err(|_| ProcessSpawnFailure::Other)?;
+        let bind_source = PathBuf::from(format!(
+            "/proc/self/fd/{}",
+            rustix::fd::AsRawFd::as_raw_fd(&directory)
+        ));
+        Ok(Self {
+            bind_source,
+            _directory: directory,
+        })
+    }
+
+    fn parent(&self) -> Result<Self, ProcessSpawnFailure> {
+        let directory = rustix::fs::openat(
+            &self._directory,
+            "..",
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(workspace_directory_failure)?;
+        let bind_source = PathBuf::from(format!(
+            "/proc/self/fd/{}",
+            rustix::fd::AsRawFd::as_raw_fd(&directory)
+        ));
+        Ok(Self {
+            bind_source,
+            _directory: directory,
+        })
+    }
+
     fn inherit(mut self) -> Result<Self, ProcessSpawnFailure> {
         self._directory = inherited_descriptor_above_standard_streams(self._directory)
             .map_err(|_| ProcessSpawnFailure::Other)?;
@@ -1215,6 +1249,7 @@ impl<Runner: ProcessRunner> CommandExecution for UnsandboxedCommandRunner<Runner
         #[cfg(target_os = "linux")]
         let git_worktree = pin_sandbox_linked_worktree(
             &self.workspace_identity,
+            &execution_directory,
             &arguments.working_directory,
             &arguments.program,
             &arguments.arguments,
@@ -1244,6 +1279,7 @@ impl<Runner: ProcessRunner> CommandExecution for UnsandboxedCommandRunner<Runner
 #[cfg(target_os = "linux")]
 fn pin_sandbox_linked_worktree(
     workspace: &WorkspaceIdentity,
+    execution_directory: &WorkspaceDirectoryIdentity,
     working_directory: &str,
     program: &str,
     arguments: &[String],
@@ -1251,13 +1287,9 @@ fn pin_sandbox_linked_worktree(
     if Path::new(program).file_name()? != "git" || git_arguments_select_repository(arguments) {
         return None;
     }
-    let mut candidate = Path::new(working_directory).to_owned();
+    let mut candidate = normalized_relative_path(Path::new(working_directory))?;
+    let mut worktree = execution_directory.duplicate().ok()?;
     loop {
-        let relative = candidate.to_str()?;
-        let worktree = workspace
-            .pin_relative_directory(relative)
-            .and_then(WorkspaceDirectoryIdentity::inherit)
-            .ok()?;
         if let Some(administration) =
             pin_linked_worktree_at_candidate(workspace, &worktree, &candidate)
         {
@@ -1272,19 +1304,52 @@ fn pin_sandbox_linked_worktree(
         if !candidate.pop() {
             return None;
         }
+        worktree = worktree.parent().ok()?;
     }
 }
 
 #[cfg(target_os = "linux")]
+fn normalized_relative_path(path: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(name) => normalized.push(name),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(normalized)
+}
+
+#[cfg(target_os = "linux")]
 fn git_arguments_select_repository(arguments: &[String]) -> bool {
-    arguments.iter().any(|argument| {
-        argument == "init"
-            || argument.starts_with("-C")
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        if argument == "--" {
+            return false;
+        }
+        if argument == "--bare"
+            || argument == "-C"
+            || argument.starts_with("-C") && argument.len() > 2
             || argument == "--git-dir"
             || argument.starts_with("--git-dir=")
             || argument == "--work-tree"
             || argument.starts_with("--work-tree=")
-    })
+        {
+            return true;
+        }
+        if !argument.starts_with('-') || argument == "-" {
+            return argument == "init";
+        }
+        if matches!(
+            argument.as_str(),
+            "-c" | "--config-env" | "--namespace" | "--super-prefix"
+        ) {
+            index += 1;
+        }
+        index += 1;
+    }
+    false
 }
 
 #[cfg(target_os = "linux")]
@@ -1305,8 +1370,8 @@ fn pin_linked_worktree_at_candidate(
     worktree: &WorkspaceDirectoryIdentity,
     relative_worktree: &Path,
 ) -> Option<WorkspaceDirectoryIdentity> {
-    let metadata = std::fs::metadata(&worktree.bind_source).ok()?;
-    if metadata.uid() != rustix::process::geteuid().as_raw() {
+    let effective_uid = rustix::process::geteuid().as_raw();
+    if descriptor_uid(&worktree._directory)? != effective_uid {
         return None;
     }
     let marker = read_bounded_regular_file(
@@ -1314,7 +1379,10 @@ fn pin_linked_worktree_at_candidate(
         GIT_ADMINISTRATION_MARKER,
         GIT_DIRECTORY_MARKER_MAX_BYTES,
     )?;
-    let marker = std::str::from_utf8(&marker).ok()?;
+    if marker.uid != effective_uid {
+        return None;
+    }
+    let marker = std::str::from_utf8(&marker.bytes).ok()?;
     let target = marker.strip_prefix(GIT_DIRECTORY_MARKER_PREFIX)?;
     let target = target.strip_suffix('\n').unwrap_or(target);
     if target.contains('\r') || target.contains('\n') {
@@ -1326,8 +1394,19 @@ fn pin_linked_worktree_at_candidate(
         .pin_relative_directory(relative)
         .and_then(WorkspaceDirectoryIdentity::inherit)
         .ok()?;
-    repair_linked_worktree_backlink(workspace, &administration, relative_worktree)?;
+    if descriptor_uid(&administration._directory)? != effective_uid {
+        return None;
+    }
+    let host_worktree = worktree.bind_source.canonicalize().ok()?;
+    repair_linked_worktree_backlink(&administration, relative_worktree, &host_worktree)?;
     Some(administration)
+}
+
+#[cfg(target_os = "linux")]
+struct BoundedRegularFile {
+    bytes: Vec<u8>,
+    mode: u32,
+    uid: u32,
 }
 
 #[cfg(target_os = "linux")]
@@ -1335,7 +1414,7 @@ fn read_bounded_regular_file(
     directory: &rustix::fd::OwnedFd,
     name: &str,
     maximum_bytes: u64,
-) -> Option<Vec<u8>> {
+) -> Option<BoundedRegularFile> {
     let descriptor = rustix::fs::openat(
         directory,
         name,
@@ -1359,32 +1438,41 @@ fn read_bounded_regular_file(
     if bytes.len() as u64 > maximum_bytes {
         return None;
     }
-    Some(bytes)
+    Some(BoundedRegularFile {
+        bytes,
+        mode: metadata.mode(),
+        uid: metadata.uid(),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn descriptor_uid(descriptor: &rustix::fd::OwnedFd) -> Option<u32> {
+    Some(rustix::fs::fstat(descriptor).ok()?.st_uid)
 }
 
 #[cfg(target_os = "linux")]
 fn repair_linked_worktree_backlink(
-    workspace: &WorkspaceIdentity,
     administration: &WorkspaceDirectoryIdentity,
     relative_worktree: &Path,
+    host_worktree: &Path,
 ) -> Option<()> {
     let backlink = read_bounded_regular_file(
         &administration._directory,
         GIT_WORKTREE_BACKLINK,
         GIT_DIRECTORY_MARKER_MAX_BYTES,
     )?;
+    if backlink.uid != rustix::process::geteuid().as_raw() {
+        return None;
+    }
     let expected_sandbox_backlink = Path::new(SANDBOX_WORKSPACE)
         .join(relative_worktree)
         .join(GIT_ADMINISTRATION_MARKER);
-    let host_backlink = workspace
-        .canonical_path
-        .join(relative_worktree)
-        .join(GIT_ADMINISTRATION_MARKER);
+    let host_backlink = host_worktree.join(GIT_ADMINISTRATION_MARKER);
     let encoded = format!("{}\n", host_backlink.display());
-    if backlink == encoded.as_bytes() {
+    if backlink.bytes == encoded.as_bytes() {
         return Some(());
     }
-    if backlink != format!("{}\n", expected_sandbox_backlink.display()).as_bytes() {
+    if backlink.bytes != format!("{}\n", expected_sandbox_backlink.display()).as_bytes() {
         return None;
     }
     let temporary_name = linked_worktree_backlink_temporary_name();
@@ -1396,7 +1484,12 @@ fn repair_linked_worktree_backlink(
             | rustix::fs::OFlags::EXCL
             | rustix::fs::OFlags::NOFOLLOW
             | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        rustix::fs::Mode::from_bits_truncate(backlink.mode),
+    )
+    .ok()?;
+    rustix::fs::fchmod(
+        &descriptor,
+        rustix::fs::Mode::from_bits_truncate(backlink.mode),
     )
     .ok()?;
     let mut temporary = std::fs::File::from(descriptor);
@@ -3095,6 +3188,38 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn git_repository_selection_parses_only_the_global_prefix_and_command() {
+        assert!(git_arguments_select_repository(&[String::from("init")]));
+        assert!(git_arguments_select_repository(&[
+            String::from("--bare"),
+            String::from("status"),
+        ]));
+        assert!(!git_arguments_select_repository(&[
+            String::from("add"),
+            String::from("init"),
+        ]));
+        assert!(!git_arguments_select_repository(&[
+            String::from("add"),
+            String::from("--"),
+            String::from("--bare"),
+        ]));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linked_worktree_relative_paths_normalize_curdir_components() {
+        assert_eq!(
+            normalized_relative_path(Path::new(".")),
+            Some(PathBuf::new())
+        );
+        assert_eq!(
+            normalized_relative_path(Path::new("./linked/./src")),
+            Some(PathBuf::from("linked/src"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn cleanup_supervision_failure_remains_distinct() {
         let outcome = supervisor_outcome(
             SupervisorStatus::SupervisionFailed {
@@ -4190,9 +4315,18 @@ mod tests {
             administration.join(GIT_WORKTREE_BACKLINK),
             format!("{SANDBOX_WORKSPACE}/{SANDBOX_LINKED_WORKTREE_DIRECTORY}/.git\n"),
         )?;
+        std::fs::set_permissions(
+            administration.join(GIT_WORKTREE_BACKLINK),
+            std::fs::Permissions::from_mode(0o640),
+        )?;
         let workspace_identity = WorkspaceIdentity::capture(&workspace.path)?;
+        let execution_directory = workspace_identity
+            .pin_relative_directory(SANDBOX_LINKED_WORKTREE_DIRECTORY)
+            .and_then(WorkspaceDirectoryIdentity::inherit)
+            .map_err(|_| std::io::Error::other("pinned execution directory"))?;
         let pinned = pin_sandbox_linked_worktree(
             &workspace_identity,
+            &execution_directory,
             SANDBOX_LINKED_WORKTREE_DIRECTORY,
             "git",
             &[String::from("status")],
@@ -4242,6 +4376,104 @@ mod tests {
             std::fs::read_to_string(administration.join(GIT_WORKTREE_BACKLINK))?,
             format!("{}/linked/.git\n", workspace.path.display())
         );
+        assert_eq!(
+            std::fs::metadata(administration.join(GIT_WORKTREE_BACKLINK))?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linked_worktree_discovery_uses_the_initially_pinned_directory() -> Result<(), Box<dyn Error>>
+    {
+        let workspace = ReplacementWorkspace::new()?;
+        let worktree = workspace.path.join(SANDBOX_LINKED_WORKTREE_DIRECTORY);
+        let retired = workspace.path.join("retired-linked");
+        let administration = workspace.path.join(SANDBOX_LINKED_ADMINISTRATION_RELATIVE);
+        std::fs::create_dir_all(&worktree)?;
+        std::fs::create_dir_all(&administration)?;
+        std::fs::write(
+            worktree.join(GIT_ADMINISTRATION_MARKER),
+            format!("{GIT_DIRECTORY_MARKER_PREFIX}{SANDBOX_LINKED_ADMINISTRATION_PATH}\n"),
+        )?;
+        std::fs::write(
+            administration.join(GIT_WORKTREE_BACKLINK),
+            format!("{SANDBOX_WORKSPACE}/{SANDBOX_LINKED_WORKTREE_DIRECTORY}/.git\n"),
+        )?;
+        let workspace_identity = WorkspaceIdentity::capture(&workspace.path)?;
+        let execution_directory = workspace_identity
+            .pin_relative_directory(SANDBOX_LINKED_WORKTREE_DIRECTORY)
+            .and_then(WorkspaceDirectoryIdentity::inherit)
+            .map_err(|_| std::io::Error::other("pinned execution directory"))?;
+        std::fs::rename(&worktree, &retired)?;
+        std::fs::create_dir(&worktree)?;
+
+        let pinned = pin_sandbox_linked_worktree(
+            &workspace_identity,
+            &execution_directory,
+            SANDBOX_LINKED_WORKTREE_DIRECTORY,
+            "git",
+            &[String::from("status")],
+        )
+        .ok_or_else(|| std::io::Error::other("pinned original linked worktree"))?;
+
+        assert_eq!(
+            pinned.worktree.bind_source.canonicalize()?,
+            retired.canonicalize()?
+        );
+        assert_ne!(
+            pinned.worktree.bind_source.canonicalize()?,
+            worktree.canonicalize()?
+        );
+        assert_eq!(
+            std::fs::read_to_string(administration.join(GIT_WORKTREE_BACKLINK))?,
+            format!("{}/.git\n", retired.display())
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn workspace_root_linked_worktree_normalizes_the_default_directory()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let administration = workspace.path.join("administration");
+        std::fs::create_dir(&administration)?;
+        std::fs::write(
+            workspace.path.join(GIT_ADMINISTRATION_MARKER),
+            format!("{GIT_DIRECTORY_MARKER_PREFIX}/workspace/administration\n"),
+        )?;
+        std::fs::write(
+            administration.join(GIT_WORKTREE_BACKLINK),
+            format!("{SANDBOX_WORKSPACE}/.git\n"),
+        )?;
+        let workspace_identity = WorkspaceIdentity::capture(&workspace.path)?;
+        let execution_directory = workspace_identity
+            .pin_relative_directory(".")
+            .and_then(WorkspaceDirectoryIdentity::inherit)
+            .map_err(|_| std::io::Error::other("pinned workspace root"))?;
+
+        let pinned = pin_sandbox_linked_worktree(
+            &workspace_identity,
+            &execution_directory,
+            ".",
+            "git",
+            &[String::from("status")],
+        )
+        .ok_or_else(|| std::io::Error::other("pinned root linked worktree"))?;
+
+        assert_eq!(
+            pinned.worktree.bind_source.canonicalize()?,
+            workspace.path.canonicalize()?
+        );
+        assert_eq!(
+            std::fs::read_to_string(administration.join(GIT_WORKTREE_BACKLINK))?,
+            format!("{}/.git\n", workspace.path.display())
+        );
         Ok(())
     }
 
@@ -4264,8 +4496,13 @@ mod tests {
             format!("{SANDBOX_WORKSPACE}/{SANDBOX_LINKED_WORKTREE_DIRECTORY}/.git\n"),
         )?;
         let workspace_identity = WorkspaceIdentity::capture(&workspace.path)?;
+        let execution_directory = workspace_identity
+            .pin_relative_directory("linked/src")
+            .and_then(WorkspaceDirectoryIdentity::inherit)
+            .map_err(|_| std::io::Error::other("pinned nested execution directory"))?;
         let pinned = pin_sandbox_linked_worktree(
             &workspace_identity,
+            &execution_directory,
             "linked/src",
             "git",
             &[String::from("status")],
