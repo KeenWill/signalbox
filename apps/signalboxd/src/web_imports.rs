@@ -194,7 +194,7 @@ async fn read_entry_window(
         Ok(None) => import_not_found(),
         Err(ImportedConversationDiscoveryError::Request(
             ImportedConversationDiscoveryRequestError::PositionOutOfRange,
-        )) => invalid_request("imported entry-window position is outside the timeline"),
+        )) => position_out_of_range(),
         Err(error) => discovery_error(error),
     }
 }
@@ -227,7 +227,6 @@ struct CanonicalContinuationRequest {
     relationship: ImportedSessionRelationship,
     web_relationship: WebImportedSessionRelationship,
     model_selection: ModelSelectionRequest,
-    web_frontier: WebImportContinuationReference,
 }
 
 fn canonical_continuation_request(
@@ -270,7 +269,6 @@ fn canonical_continuation_request(
         relationship,
         web_relationship: request.relationship,
         model_selection,
-        web_frontier: request.frontier,
     })
 }
 
@@ -473,10 +471,18 @@ fn web_frontier(frontier: ImportedContinuationReference) -> WebImportContinuatio
 }
 
 fn continuation_response(request: CanonicalContinuationRequest, session: Uuid) -> Response {
+    // The receipt spells every identity from the canonical domain values, never from the
+    // caller's request text: `Uuid::parse_str` admits noncanonical spellings the generated
+    // browser contract would refuse to decode, and an undecodable receipt for a committed
+    // command would make every exact replay fail the same way.
     Json(WebImportContinuationResponse {
         command_id: request.command_id.as_uuid().to_string(),
         session_id: session.to_string(),
-        frontier: request.web_frontier,
+        frontier: WebImportContinuationReference {
+            imported_conversation_id: request.conversation.into_uuid().to_string(),
+            imported_entry_id: request.entry.into_uuid().to_string(),
+            position: request.position.as_u64().to_string(),
+        },
         relationship: request.web_relationship,
     })
     .into_response()
@@ -572,7 +578,7 @@ fn discovery_error(error: ImportedConversationDiscoveryError) -> Response {
         ),
         ImportedConversationDiscoveryError::Request(
             ImportedConversationDiscoveryRequestError::PositionOutOfRange,
-        ) => invalid_request("imported entry-window position is outside the timeline"),
+        ) => position_out_of_range(),
         ImportedConversationDiscoveryError::Request(
             ImportedConversationDiscoveryRequestError::WindowTooLarge,
         ) => invalid_request("imported entry window exceeds the contract bound"),
@@ -623,6 +629,16 @@ fn invalid_import_contract() -> Response {
 
 fn invalid_request(message: &'static str) -> Response {
     transport_error(StatusCode::BAD_REQUEST, "invalid_import_request", message)
+}
+
+// A syntactically valid position that exceeds the stored entry count is rejected only after
+// reading current application state, so it is an application decision, not a transport one.
+fn position_out_of_range() -> Response {
+    application_error(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "import_position_out_of_range",
+        "imported entry-window position is outside the timeline",
+    )
 }
 
 fn import_not_found() -> Response {
