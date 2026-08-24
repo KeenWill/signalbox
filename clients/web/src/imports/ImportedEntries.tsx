@@ -28,7 +28,13 @@ const sourceLabel = (entry: WebImportedEntry): string => {
 }
 
 const entryText = (entry: WebImportedEntry): string => {
-  if (!entry.text) return entry.content_kind.replaceAll('_', ' ')
+  if (entry.content_kind !== 'text') {
+    if (entry.text !== null && entry.text !== undefined) {
+      throw new TypeError('non-text imported entry carries text evidence')
+    }
+    return entry.content_kind.replaceAll('_', ' ')
+  }
+  if (!entry.text) throw new TypeError('imported text entry is missing typed text evidence')
   switch (entry.text.kind) {
     case 'not_attested':
       return 'Text not attested by source'
@@ -46,7 +52,7 @@ export function ImportedEntries({
   commandContext,
 }: {
   entries: readonly WebImportedEntry[]
-  logicalEntryCount: string
+  logicalEntryCount?: string
   selected: WebImportContinuationReference | null
   commandContext: CommandContext
 }) {
@@ -105,7 +111,9 @@ export function ImportedEntries({
               role="option"
               aria-selected={isSelected}
               aria-posinset={safeAriaInteger(entry.frontier.position)}
-              aria-setsize={safeAriaInteger(logicalEntryCount)}
+              aria-setsize={
+                logicalEntryCount === undefined ? undefined : safeAriaInteger(logicalEntryCount)
+              }
               className="import-entry-row"
               data-testid={`import-entry-${entry.frontier.position}`}
               key={entry.frontier.imported_entry_id}

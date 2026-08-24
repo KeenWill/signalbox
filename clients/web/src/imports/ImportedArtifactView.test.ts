@@ -27,6 +27,20 @@ describe('imported artifact projection', () => {
       kind: 'text',
       content: attestedText,
       characterCount: [...attestedText].length,
+      sourceComplete: true,
+    })
+  })
+
+  it('preserves a server-truncated source projection as incomplete', () => {
+    const artifact = projectImportedEntryArtifact({
+      ...importedText,
+      text: { kind: 'attested', leading_text: attestedText, completeness: 'truncated' },
+    })
+
+    expect(artifact).toMatchObject({
+      kind: 'text',
+      content: attestedText,
+      sourceComplete: false,
     })
   })
 
@@ -69,5 +83,11 @@ describe('imported artifact projection', () => {
     expect(() => projectImportedEntryArtifact({ ...importedText, text: null })).toThrow(
       'missing typed text evidence',
     )
+  })
+
+  it('rejects text evidence attached to a non-text entry', () => {
+    expect(() =>
+      projectImportedEntryArtifact({ ...importedText, content_kind: 'document' }),
+    ).toThrow('non-text imported entry carries text evidence')
   })
 })

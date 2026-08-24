@@ -11,6 +11,9 @@ export const projectImportedEntryArtifact = (entry: WebImportedEntry): ArtifactI
     displayName: `Imported entry ${BigInt(entry.frontier.position).toLocaleString()}`,
   }
   if (entry.content_kind !== 'text') {
+    if (entry.text !== null && entry.text !== undefined) {
+      throw new TypeError('non-text imported entry carries text evidence')
+    }
     return {
       ...identity,
       kind: 'blocked',
@@ -42,6 +45,7 @@ export const projectImportedEntryArtifact = (entry: WebImportedEntry): ArtifactI
     kind: 'text',
     content: entry.text.leading_text,
     characterCount: [...entry.text.leading_text].length,
+    sourceComplete: entry.text.completeness === 'complete',
   }
 }
 

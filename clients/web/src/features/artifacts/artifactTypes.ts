@@ -20,6 +20,7 @@ export interface TextArtifact extends ArtifactIdentity {
   // The owning input boundary supplies at most the expanded projection and the full count.
   content: string
   characterCount: number
+  sourceComplete?: boolean
 }
 
 export interface CodeArtifact extends ArtifactIdentity {

@@ -60,7 +60,7 @@ export function ImportsTable({
         header: 'Source session evidence',
         cell: ({ row }) => {
           const evidence = row.original.source_session_id
-          if (!evidence) return 'Not attested'
+          if (!evidence) return 'Unknown or inconsistent source-session evidence'
           return `${evidence.leading_text}${evidence.completeness === 'truncated' ? '…' : ''}`
         },
       },

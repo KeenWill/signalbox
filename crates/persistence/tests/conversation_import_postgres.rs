@@ -2509,11 +2509,16 @@ async fn imported_discovery_classifies_short_content_encodings_as_corruption()
         ImportedConversationRepository::new(pool.clone()),
     );
     importer
-        .execute(br#"{\"type\":\"user\",\"message\":{\"content\":\"evidence\"}}"#)
+        .execute(br#"{"type":"user","message":{"content":"evidence"}}"#)
         .await?;
     let discovery = ImportedConversationDiscoveryRepository::new(pool.clone());
 
-    for short_length in 1_usize..=3 {
+    async fn assert_short_encoding_is_corrupt(
+        pool: &PgPool,
+        discovery: &ImportedConversationDiscoveryRepository,
+        conversation: ImportedConversationId,
+        short_length: usize,
+    ) -> Result<(), Box<dyn Error>> {
         sqlx::query(
             "UPDATE imported_transcript_entry
                 SET content_encoding = $2
@@ -2541,7 +2546,12 @@ async fn imported_discovery_classifies_short_content_encodings_as_corruption()
                 ImportedConversationDiscoveryCorruption::InvalidEntryEncoding
             )
         ));
+        Ok(())
     }
+
+    assert_short_encoding_is_corrupt(&pool, &discovery, conversation, 1).await?;
+    assert_short_encoding_is_corrupt(&pool, &discovery, conversation, 2).await?;
+    assert_short_encoding_is_corrupt(&pool, &discovery, conversation, 3).await?;
 
     pool.close().await;
     drop(container);

@@ -1171,6 +1171,14 @@ test("generated imports decoders enforce canonical decimal u64 strings", () => {
 
   assert.deepEqual(decodeWebImportDescriptor(descriptor), descriptor);
   assert.throws(
+    () =>
+      decodeWebImportDescriptor({
+        ...descriptor,
+        timeline: { ...descriptor.timeline, first: { ...frontier, imported_entry_id: "entry" } },
+      }),
+    /imported_entry_id must be a canonical lowercase UUID/,
+  );
+  assert.throws(
     () => decodeWebImportDescriptor({ ...descriptor, entry_count: "01" }),
     /entry_count must be a nonnegative canonical decimal u64 string/,
   );
@@ -1205,6 +1213,14 @@ test("generated imports decoders enforce canonical decimal u64 strings", () => {
     ],
   };
   assert.deepEqual(decodeWebImportEntryWindow(window), window);
+  assert.throws(
+    () =>
+      decodeWebImportEntryWindow({
+        ...window,
+        items: [{ ...window.items[0], content_kind: "document" }],
+      }),
+    /text must be present exactly for text content/,
+  );
   assert.throws(
     () =>
       decodeWebImportEntryWindow({

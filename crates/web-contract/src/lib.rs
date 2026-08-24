@@ -969,6 +969,8 @@ function assertCanonicalNonnegativeU64(value, path) {{
 }}
 
 function validateWebImportFrontier(value, path) {{
+  assertUuid(value.imported_conversation_id, `${{path}}.imported_conversation_id`);
+  assertUuid(value.imported_entry_id, `${{path}}.imported_entry_id`);
   assertCanonicalU64(value.position, `${{path}}.position`);
 }}
 
@@ -1002,6 +1004,10 @@ function validateWebImportEntryWindow(value) {{
     validateWebImportFrontier(item.frontier, `${{path}}.frontier`);
     assertCanonicalU64(item.raw_record_position, `${{path}}.raw_record_position`);
     assertCanonicalU64(item.record_entry_position, `${{path}}.record_entry_position`);
+    const hasText = item.text !== undefined && item.text !== null;
+    if ((item.content_kind === "text") !== hasText) {{
+      throw new TypeError(`${{path}}.text must be present exactly for text content`);
+    }}
   }});
 }}
 

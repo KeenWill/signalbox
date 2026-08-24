@@ -287,6 +287,29 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   )
 }
 
+function ImportsCapabilityState({ bootstrapPending }: { bootstrapPending: boolean }) {
+  return (
+    <section className="surface-empty" aria-labelledby="imports-capability-heading">
+      <AlertTriangle aria-hidden="true" />
+      <div>
+        <span className="availability-tag">
+          {bootstrapPending ? 'Checking capability' : 'Capability unavailable'}
+        </span>
+        <h2 id="imports-capability-heading">
+          {bootstrapPending
+            ? 'Checking whether import discovery is available'
+            : 'Import discovery is not exposed by this daemon'}
+        </h2>
+        <p>
+          {bootstrapPending
+            ? 'The imports workspace will open only after the bootstrap contract advertises it.'
+            : 'The current bootstrap contract does not advertise imported-conversation discovery.'}
+        </p>
+      </div>
+    </section>
+  )
+}
+
 const reviewEvidenceUnavailable: ArtifactItem = {
   id: 'review-evidence-unavailable',
   displayName: 'Review evidence',
@@ -541,13 +564,16 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       />
     ) : surface === 'settings' ? (
       <SettingsSurface />
-    ) : surface === 'imports' ? (
+    ) : surface === 'imports' && bootstrap.data?.capabilities.import_discovery === true ? (
       <ImportsWorkspace
         api={productImportApi}
         scenario={false}
+        continuationAvailable={bootstrap.data?.capabilities.imported_continuations === true}
         presentation="product"
         onCommandContext={updateImportsCommandContext}
       />
+    ) : surface === 'imports' ? (
+      <ImportsCapabilityState bootstrapPending={bootstrap.isPending} />
     ) : surface === 'reviews' ? (
       <ReviewsArtifactSurface commandContext={context} />
     ) : (

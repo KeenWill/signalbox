@@ -16,6 +16,7 @@ use crate::conversation_import::{
     DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_PENDING, DISPLAY_TITLE_STATE_UNDERIVABLE,
     decode_format, decode_source_speaker, encode_format, positive_u64,
 };
+use crate::conversation_import_codec::decode_content;
 
 /// Exact filters and exclusive keyset position for one imports page.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -457,10 +458,13 @@ impl ImportedConversationDiscoveryRepository {
             "SELECT imported_entry_position, imported_transcript_entry_id,
                     raw_record_position, record_entry_position, source_speaker_kind,
                     substring(content_encoding FROM 1 FOR 12) AS content_header,
+                    CASE WHEN octet_length(content_encoding) >= 3
+                              AND get_byte(content_encoding, 2) <> 1
+                         THEN content_encoding END AS complete_non_text_content,
                     CASE WHEN octet_length(content_encoding) >= 4
                               AND get_byte(content_encoding, 2) = 1
                               AND get_byte(content_encoding, 3) = 2
-                         THEN substring(content_encoding FROM 13 FOR $4) END
+                         THEN substring(content_encoding FROM 13 FOR ($4)::integer) END
                          AS content_text_prefix,
                     octet_length(content_encoding)::bigint AS content_bytes,
                     $4::bigint AS content_projected_bytes
@@ -624,26 +628,38 @@ fn checked_content_projection(
         }
         1 => checked_text_projection(&header, row, total_bytes, projected_bytes)
             .map(ImportedEntryContentProjection::Text),
-        2 => {
-            checked_required_attestation_prefix(&header, total_bytes, 4)?;
-            Ok(ImportedEntryContentProjection::ToolCall)
-        }
-        3 => {
-            checked_required_attestation_prefix(&header, total_bytes, 3)?;
-            Ok(ImportedEntryContentProjection::ToolResult)
-        }
-        4 => {
-            checked_required_attestation_prefix(&header, total_bytes, 2)?;
-            Ok(ImportedEntryContentProjection::Thinking)
-        }
+        2 => checked_non_text_content(row, |content| {
+            matches!(
+                content,
+                signalbox_domain::ImportedTranscriptContent::ToolCall { .. }
+            )
+        })
+        .map(|()| ImportedEntryContentProjection::ToolCall),
+        3 => checked_non_text_content(row, |content| {
+            matches!(
+                content,
+                signalbox_domain::ImportedTranscriptContent::ToolResult { .. }
+            )
+        })
+        .map(|()| ImportedEntryContentProjection::ToolResult),
+        4 => checked_non_text_content(row, |content| {
+            matches!(
+                content,
+                signalbox_domain::ImportedTranscriptContent::Thinking { .. }
+            )
+        })
+        .map(|()| ImportedEntryContentProjection::Thinking),
         5 => {
             checked_single_text_attestation(&header, total_bytes)?;
             Ok(ImportedEntryContentProjection::RedactedThinking)
         }
-        6 => {
-            checked_required_attestation_prefix(&header, total_bytes, 1)?;
-            Ok(ImportedEntryContentProjection::Document)
-        }
+        6 => checked_non_text_content(row, |content| {
+            matches!(
+                content,
+                signalbox_domain::ImportedTranscriptContent::Document { .. }
+            )
+        })
+        .map(|()| ImportedEntryContentProjection::Document),
         7 if header.get(3).is_some_and(|tag| *tag <= 4) && total_bytes == 4 => {
             Ok(ImportedEntryContentProjection::MessageContentAbsent)
         }
@@ -655,21 +671,22 @@ fn checked_content_projection(
     }
 }
 
-fn checked_required_attestation_prefix(
-    header: &[u8],
-    total_bytes: i64,
-    required_attestations: i64,
+fn checked_non_text_content(
+    row: &PgRow,
+    expected: impl FnOnce(&signalbox_domain::ImportedTranscriptContent) -> bool,
 ) -> Result<(), ImportedConversationDiscoveryError> {
-    let minimum_bytes = 3_i64
-        .checked_add(required_attestations)
-        .ok_or(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
-    if total_bytes < minimum_bytes {
-        return Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into());
-    }
-    match header.get(3) {
-        Some(0 | 1) => Ok(()),
-        Some(2) if header.len() >= 5 => Ok(()),
-        _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
+    let encoded: Option<Vec<u8>> = row.try_get("complete_non_text_content")?;
+    let content = encoded
+        .as_deref()
+        .ok_or(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)
+        .and_then(|bytes| {
+            decode_content(bytes)
+                .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)
+        })?;
+    if expected(&content) {
+        Ok(())
+    } else {
+        Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into())
     }
 }
 

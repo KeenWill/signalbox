@@ -131,6 +131,7 @@ function TextBody({ artifact, commandContext }: RendererProps<TextArtifact>) {
       />
       <BoundedFooter
         omittedCharacters={bounded.omittedCharacters}
+        sourceIncomplete={artifact.sourceComplete === false}
         canExpand={canExpand}
         expanded={expanded}
         onToggle={() =>
@@ -170,6 +171,7 @@ function CodeBody({ artifact, commandContext }: RendererProps<CodeArtifact>) {
       />
       <BoundedFooter
         omittedCharacters={bounded.omittedCharacters}
+        sourceIncomplete={false}
         canExpand={canExpand}
         expanded={expanded}
         onToggle={() =>
@@ -186,11 +188,13 @@ function CodeBody({ artifact, commandContext }: RendererProps<CodeArtifact>) {
 
 function BoundedFooter({
   omittedCharacters,
+  sourceIncomplete,
   canExpand,
   expanded,
   onToggle,
 }: {
   omittedCharacters: number
+  sourceIncomplete: boolean
   canExpand: boolean
   expanded: boolean
   onToggle: () => void
@@ -198,9 +202,11 @@ function BoundedFooter({
   return (
     <footer className="artifact-bounded-footer">
       <span>
-        {omittedCharacters > 0
-          ? `${omittedCharacters.toLocaleString()} characters remain outside this bounded view`
-          : 'Complete bounded content shown'}
+        {sourceIncomplete
+          ? 'Source content continues beyond this bounded projection'
+          : omittedCharacters > 0
+            ? `${omittedCharacters.toLocaleString()} characters remain outside this bounded view`
+            : 'Complete bounded content shown'}
       </span>
       {(canExpand || expanded) && (
         <button type="button" onClick={onToggle}>

@@ -42,12 +42,13 @@ const formatOptions: ReadonlyArray<{ value: FormatFilter; label: string }> = [
 ]
 
 const isRetryableContinuationError = (error: unknown): boolean =>
-  !(error instanceof ImportReceiptCorrelationError) &&
-  (!(error instanceof ImportApiError) ||
-    ['continuation_commit_ambiguous', 'continuation_unavailable'].includes(error.detail.error.code))
+  error instanceof ImportReceiptCorrelationError ||
+  !(error instanceof ImportApiError) ||
+  ['continuation_commit_ambiguous', 'continuation_unavailable'].includes(error.detail.error.code)
 
 const isAmbiguousContinuationError = (error: unknown): boolean =>
-  error instanceof ImportApiError && error.detail.error.code === 'continuation_commit_ambiguous'
+  error instanceof ImportReceiptCorrelationError ||
+  (error instanceof ImportApiError && error.detail.error.code === 'continuation_commit_ambiguous')
 
 const decimalLabel = (value: string): string => BigInt(value).toLocaleString()
 
@@ -63,11 +64,13 @@ const byteLabel = (value: string): string => {
 export function ImportsWorkspace({
   api,
   scenario,
+  continuationAvailable = true,
   presentation = 'standalone',
   onCommandContext,
 }: {
   api: ImportApi
   scenario: boolean
+  continuationAvailable?: boolean
   presentation?: 'standalone' | 'product'
   onCommandContext?: (context: CommandContext | null) => void
 }) {
@@ -89,6 +92,7 @@ export function ImportsWorkspace({
   const [modelKind, setModelKind] = useState<ModelKind>('direct')
   const [modelSelectionId, setModelSelectionId] = useState(scenario ? SCENARIO_MODEL_SELECTION : '')
   const [pendingCommand, setPendingCommand] = useState<WebImportContinuationRequest | null>(null)
+  const [continuationAmbiguous, setContinuationAmbiguous] = useState(false)
   const queryScope = scenario ? 'scenario' : 'production'
   const hasRetainedCommand = pendingCommand !== null
 
@@ -104,6 +108,7 @@ export function ImportsWorkspace({
   const importsQuery = useQuery({
     queryKey: ['imports', queryScope, 'catalog', listRequest],
     queryFn: ({ signal }) => api.list(listRequest, signal),
+    gcTime: 0,
   })
   const imports = importsQuery.data
   const firstImport = imports?.items[0]?.imported_conversation_id ?? null
@@ -151,9 +156,16 @@ export function ImportsWorkspace({
   const continuation = useMutation({
     mutationFn: (request: WebImportContinuationRequest) =>
       api.continueImport(request.frontier.imported_conversation_id, request),
-    onSuccess: () => setPendingCommand(null),
+    onSuccess: () => {
+      setPendingCommand(null)
+      setContinuationAmbiguous(false)
+    },
     onError: (error) => {
-      if (!isRetryableContinuationError(error)) setPendingCommand(null)
+      if (isAmbiguousContinuationError(error)) setContinuationAmbiguous(true)
+      if (!isRetryableContinuationError(error)) {
+        setPendingCommand(null)
+        setContinuationAmbiguous(false)
+      }
     },
   })
   const resetContinuation = continuation.reset
@@ -294,11 +306,10 @@ export function ImportsWorkspace({
 
   const retryableContinuationFailure =
     continuation.isError && isRetryableContinuationError(continuation.error)
-  const ambiguousContinuationFailure =
-    continuation.isError && isAmbiguousContinuationError(continuation.error)
+  const ambiguousContinuationFailure = continuation.isError && continuationAmbiguous
 
   const continueAt = (relationship: WebImportedSessionRelationship) => {
-    if (!selectedFrontier || modelSelectionId.trim().length === 0) return
+    if (!continuationAvailable || !selectedFrontier || modelSelectionId.trim().length === 0) return
     const request: WebImportContinuationRequest = {
       command_id: crypto.randomUUID(),
       frontier: selectedFrontier,
@@ -309,6 +320,7 @@ export function ImportsWorkspace({
           : { kind: 'alias', alias_id: modelSelectionId.trim() },
     }
     setPendingCommand(request)
+    setContinuationAmbiguous(false)
     continuation.mutate(request)
   }
 
@@ -483,7 +495,7 @@ export function ImportsWorkspace({
                                 ? '…'
                                 : ''
                             }`
-                          : 'Not attested'}
+                          : 'Unknown or inconsistent source-session evidence'}
                       </dd>
                     </div>
                     <div>
@@ -544,14 +556,24 @@ export function ImportsWorkspace({
                     <button
                       type="button"
                       onClick={() => continueAt('resume')}
-                      disabled={!selectedFrontier || continuation.isPending || hasRetainedCommand}
+                      disabled={
+                        !continuationAvailable ||
+                        !selectedFrontier ||
+                        continuation.isPending ||
+                        hasRetainedCommand
+                      }
                     >
                       Resume
                     </button>
                     <button
                       type="button"
                       onClick={() => continueAt('fork')}
-                      disabled={!selectedFrontier || continuation.isPending || hasRetainedCommand}
+                      disabled={
+                        !continuationAvailable ||
+                        !selectedFrontier ||
+                        continuation.isPending ||
+                        hasRetainedCommand
+                      }
                     >
                       Fork
                     </button>
@@ -565,6 +587,7 @@ export function ImportsWorkspace({
                             type="button"
                             onClick={() => {
                               setPendingCommand(null)
+                              setContinuationAmbiguous(false)
                               continuation.reset()
                             }}
                           >
@@ -574,6 +597,9 @@ export function ImportsWorkspace({
                       </>
                     )}
                   </div>
+                  {!continuationAvailable && (
+                    <p role="status">Imported continuation is not advertised by this daemon.</p>
+                  )}
                   {retryableContinuationFailure && pendingCommand && (
                     <p role="alert">
                       The exact command for import{' '}
@@ -620,9 +646,7 @@ export function ImportsWorkspace({
                 {entryWindow && (
                   <ImportedEntries
                     entries={entryWindow.items}
-                    logicalEntryCount={
-                      descriptorQuery.data?.entry_count ?? entryWindow.last_position
-                    }
+                    logicalEntryCount={descriptorQuery.data?.entry_count}
                     selected={selectedFrontier}
                     commandContext={commandContext}
                   />

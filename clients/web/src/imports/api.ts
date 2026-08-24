@@ -16,6 +16,17 @@ import {
 import { readBoundedJson } from '../session-timeline/model'
 
 const MAX_IMPORT_RESPONSE_BYTES = 1024 * 1024
+const MAX_IMPORT_SOURCE_SESSION_BYTES = 512
+const DEFAULT_IMPORT_WINDOW_RADIUS = 50
+const utf8 = new TextEncoder()
+
+const boundedUtf8Prefix = (value: string, maximumBytes: number): string => {
+  const bytes = utf8.encode(value)
+  if (bytes.byteLength <= maximumBytes) return value
+  let end = maximumBytes
+  while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end -= 1
+  return new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, end))
+}
 
 export interface ImportApi {
   list(request: WebImportListRequest, signal?: AbortSignal): Promise<WebImportListPage>
@@ -100,8 +111,14 @@ const correlateListPage = (
     const sourceSessionCorrelates =
       requestedSourceSessionId === undefined ||
       requestedSourceSessionId === null ||
-      (item.source_session_id?.completeness === 'complete' &&
-        item.source_session_id.leading_text === requestedSourceSessionId)
+      (item.source_session_id !== undefined &&
+        item.source_session_id !== null &&
+        item.source_session_id.leading_text ===
+          boundedUtf8Prefix(requestedSourceSessionId, MAX_IMPORT_SOURCE_SESSION_BYTES) &&
+        item.source_session_id.completeness ===
+          (utf8.encode(requestedSourceSessionId).byteLength > MAX_IMPORT_SOURCE_SESSION_BYTES
+            ? 'truncated'
+            : 'complete'))
     if (
       (previousId !== undefined && itemId <= previousId) ||
       (requestedFormat !== undefined &&
@@ -159,6 +176,10 @@ const correlateEntryWindow = (
       decimalPosition(entry.frontier.position) === firstPosition + BigInt(index)
     )
   })
+  const requestedBefore = BigInt(request.before ?? DEFAULT_IMPORT_WINDOW_RADIUS)
+  const requestedAfter = BigInt(request.after ?? DEFAULT_IMPORT_WINDOW_RADIUS)
+  const returnedBefore = anchorPosition - firstPosition
+  const returnedAfter = lastPosition - anchorPosition
   if (
     expectedAnchor === undefined ||
     window.items.length === 0 ||
@@ -166,6 +187,8 @@ const correlateEntryWindow = (
     firstPosition > anchorPosition ||
     lastPosition < anchorPosition ||
     lastPosition - firstPosition + 1n !== BigInt(window.items.length) ||
+    (window.has_before && returnedBefore !== requestedBefore) ||
+    (window.has_after && returnedAfter !== requestedAfter) ||
     !positionsCorrelate ||
     !window.items.some((entry) => entry.frontier.position === window.anchor_position)
   ) {

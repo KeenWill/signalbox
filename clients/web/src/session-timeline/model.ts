@@ -55,11 +55,11 @@ export const readBoundedJson = async (
     }
   }
   if (response.body === null) {
-    const text = await response.text()
-    if (new TextEncoder().encode(text).byteLength > maximumBytes) {
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    if (bytes.byteLength > maximumBytes) {
       throw new TypeError('timeline response exceeds the browser byte ceiling')
     }
-    return JSON.parse(text)
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
   }
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
@@ -80,7 +80,7 @@ export const readBoundedJson = async (
     bytes.set(chunk, offset)
     offset += chunk.byteLength
   }
-  return JSON.parse(new TextDecoder().decode(bytes))
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
 }
 
 const decimalU64 = (value: string): bigint => {
