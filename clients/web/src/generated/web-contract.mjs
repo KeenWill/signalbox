@@ -65,8 +65,7 @@ const schemas = {
         "enum": [
           "provide_goal_need",
           "decide_approval",
-          "reconcile_turn",
-          "restore_runner"
+          "reconcile_turn"
         ],
         "type": "string"
       },
@@ -77,6 +76,7 @@ const schemas = {
             "$ref": "#/$defs/WebAttentionActivityKind"
           },
           "unix_milliseconds": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           }
         },
@@ -109,6 +109,7 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "generation": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "need_summary": {
@@ -131,15 +132,19 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "actionable": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "completed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "escalated": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "failed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           }
         },
@@ -179,6 +184,7 @@ const schemas = {
             ]
           },
           "current_turn_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": [
               "string",
               "null"
@@ -201,6 +207,7 @@ const schemas = {
             "$ref": "#/$defs/WebAttentionActivity"
           },
           "session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": "string"
           },
           "state": {
@@ -220,12 +227,14 @@ const schemas = {
     "additionalProperties": false,
     "properties": {
       "continuation_after_session_id": {
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
         "type": [
           "string",
           "null"
         ]
       },
       "cursor": {
+        "pattern": "^(0|[1-9][0-9]*)$",
         "type": "string"
       },
       "summaries": {
@@ -249,8 +258,7 @@ const schemas = {
         "enum": [
           "provide_goal_need",
           "decide_approval",
-          "reconcile_turn",
-          "restore_runner"
+          "reconcile_turn"
         ],
         "type": "string"
       },
@@ -261,6 +269,7 @@ const schemas = {
             "$ref": "#/$defs/WebAttentionActivityKind"
           },
           "unix_milliseconds": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           }
         },
@@ -293,6 +302,7 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "generation": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "need_summary": {
@@ -315,15 +325,19 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "actionable": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "completed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "escalated": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "failed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           }
         },
@@ -339,12 +353,14 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "continuation_after_session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": [
               "string",
               "null"
             ]
           },
           "cursor": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "summaries": {
@@ -389,6 +405,7 @@ const schemas = {
             ]
           },
           "current_turn_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": [
               "string",
               "null"
@@ -411,6 +428,7 @@ const schemas = {
             "$ref": "#/$defs/WebAttentionActivity"
           },
           "session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             "type": "string"
           },
           "state": {
@@ -449,6 +467,7 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "cursor": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "kind": {
@@ -474,6 +493,7 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "cursor": {
+            "pattern": "^(0|[1-9][0-9]*)$",
             "type": "string"
           },
           "kind": {
@@ -611,6 +631,22 @@ function fail(path, expected) {
   throw new TypeError(`${path} must be ${expected}`);
 }
 
+function isWellFormedUnicode(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        return false;
+      }
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function resolveReference(root, reference) {
   const prefix = "#/$defs/";
   if (!reference.startsWith(prefix)) {
@@ -739,6 +775,12 @@ function assertSchema(root, schema, value, path) {
     if (typeof value !== "string") {
       fail(path, "string");
     }
+    if (!isWellFormedUnicode(value)) {
+      fail(path, "well-formed Unicode scalar values");
+    }
+    if (schema.pattern !== undefined && !new RegExp(schema.pattern, "u").test(value)) {
+      fail(path, `a string matching ${schema.pattern}`);
+    }
     if (schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) {
       fail(path, `at most ${schema.maxLength} Unicode scalar values`);
     }
@@ -752,6 +794,59 @@ function assertSchema(root, schema, value, path) {
   }
   if (typeof value !== schema.type) {
     fail(path, schema.type);
+  }
+}
+
+function assertAttentionSummary(summary, path) {
+  const action = summary.action ?? null;
+  const goalBlock = summary.goal_block ?? null;
+  const valid =
+    (summary.state === "blocked" &&
+      (action === "provide_goal_need" ||
+        (action === null && goalBlock?.reason === "execution_failure"))) ||
+    (summary.state === "awaiting_approval" &&
+      (action === null || action === "decide_approval")) ||
+    (summary.state === "ambiguous" && action === "reconcile_turn") ||
+    ([
+      "active",
+      "queued",
+      "awaiting_tool_recovery",
+      "awaiting_reconciliation",
+      "runner_lost",
+      "idle",
+    ].includes(summary.state) && action === null);
+  if (!valid) {
+    fail(`${path}.action`, `consistent with attention state ${JSON.stringify(summary.state)}`);
+  }
+  const validGoalBlock =
+    (summary.state === "blocked" && goalBlock !== null) ||
+    summary.state === "runner_lost" ||
+    (summary.state !== "blocked" && goalBlock === null);
+  if (!validGoalBlock) {
+    fail(
+      `${path}.goal_block`,
+      `consistent with attention state ${JSON.stringify(summary.state)}`,
+    );
+  }
+}
+
+function assertAttentionSummaries(summaries, path) {
+  summaries.forEach((summary, index) =>
+    assertAttentionSummary(summary, `${path}[${index}]`),
+  );
+}
+
+function assertAttentionSnapshot(snapshot, path) {
+  assertAttentionSummaries(snapshot.summaries, `${path}.summaries`);
+  const continuation = snapshot.continuation_after_session_id ?? null;
+  if (continuation !== null) {
+    const last = snapshot.summaries.at(-1);
+    if (last === undefined || continuation !== last.session_id) {
+      fail(
+        `${path}.continuation_after_session_id`,
+        "the last returned session identity",
+      );
+    }
   }
 }
 
@@ -775,10 +870,16 @@ export function decodeWebApiErrorResponse(value) {
 
 export function decodeWebAttentionSnapshot(value) {
   assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
+  assertAttentionSnapshot(value, "attention_snapshot");
   return value;
 }
 
 export function decodeWebAttentionStreamEvent(value) {
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
+  if (value.kind === "snapshot") {
+    assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
+  } else if (value.kind === "update") {
+    assertAttentionSummaries(value.summaries, "attention_event.summaries");
+  }
   return value;
 }

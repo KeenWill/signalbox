@@ -68,7 +68,6 @@ pub enum AttentionAction {
     ProvideGoalNeed,
     DecideApproval,
     ReconcileTurn,
-    RestoreRunner,
 }
 
 /// Typed blocked-goal reason retained without parsing goal prose.
