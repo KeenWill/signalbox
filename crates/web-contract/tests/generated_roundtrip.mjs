@@ -160,3 +160,22 @@ test("generated snapshot decoder rejects the removed restore action", () => {
     cursor: "1", summaries: [{ ...idleSummary, action: "restore_runner" }], continuation_after_session_id: null,
   }), /one recognized variant/);
 });
+
+test("generated snapshot decoder rejects a mismatched continuation", () => {
+  assert.throws(() => decodeWebAttentionSnapshot({
+    cursor: "1",
+    summaries: [idleSummary],
+    continuation_after_session_id: "00000000-0000-0000-0000-000000000002",
+  }), /continuation_after_session_id must be the last returned session identity/);
+});
+
+test("generated stream decoder rejects a continuation for an empty page", () => {
+  assert.throws(() => decodeWebAttentionStreamEvent({
+    kind: "snapshot",
+    snapshot: {
+      cursor: "1",
+      summaries: [],
+      continuation_after_session_id: "00000000-0000-0000-0000-000000000001",
+    },
+  }), /continuation_after_session_id must be the last returned session identity/);
+});
