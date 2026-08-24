@@ -1,11 +1,16 @@
+//! Provider, reader, probe, and view declarations governed by
+//! `docs/spec/file-and-media.md`.
+
 use std::{error::Error, fmt, future::Future, pin::Pin};
 
 use crate::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileReaderName,
-    FileReaderProviderName, FileReaderRevision, FileUse, ProcessorFailure, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadViewName, ReaderIdentity, ReasonCode,
-    VerifiedBlobSource,
+    FileReaderProviderName, FileReaderRevision, FileUse, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadViewName, ReaderIdentity, ReasonCode, VerifiedBlobSource,
 };
+
+// numeric-bound: ceiling - bounds retained model-facing view-description memory
+const MAX_VIEW_DESCRIPTION_BYTES: usize = 512;
 
 /// Strength of one byte-derived probe candidate.
 #[derive(
@@ -80,7 +85,10 @@ pub enum StreamingTextFallback {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadAccessPattern {
     /// Monotonic streaming access.
-    Streaming,
+    Streaming {
+        /// Maximum sequential range requests for one read.
+        maximum_ranges: u32,
+    },
     /// Bounded exact-range access.
     RandomAccess {
         /// Maximum ranges requested for one read.
@@ -205,7 +213,7 @@ impl ReadViewDeclaration {
         bounds: ReadViewBounds,
     ) -> Result<Self, RegistryDeclarationError> {
         if description.is_empty()
-            || description.len() > 512
+            || description.len() > MAX_VIEW_DESCRIPTION_BYTES
             || description.contains('\0')
             || description.chars().any(char::is_control)
         {
@@ -399,6 +407,10 @@ pub struct FileMediaProviderValidationRequest {
     pub media_type: CanonicalMediaType,
     /// Evidence path requested by the registry.
     pub evidence: crate::ValidationEvidence,
+    /// Maximum cumulative source bytes the processor broker may serve.
+    pub maximum_source_bytes: u64,
+    /// Maximum exact ranges the processor broker may serve.
+    pub maximum_ranges: u32,
 }
 
 /// Provider request to interpret one validated file through one view.
@@ -414,13 +426,28 @@ pub struct FileMediaProviderReadRequest {
     pub metadata: crate::BoundedMetadata,
     /// Exact provider-owned view.
     pub view: ReadViewName,
-    /// Model-supplied options retained as structured data.
-    pub options: serde_json::Value,
+    /// Closed initial-options or continuation input.
+    pub input: crate::FileReadInput,
 }
+
+/// Adapter-owned execution failure inside an isolated worker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileMediaProviderFailure {
+    /// The adapter could not complete its bounded format operation.
+    Failed,
+}
+
+impl fmt::Display for FileMediaProviderFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("file media adapter failed")
+    }
+}
+
+impl Error for FileMediaProviderFailure {}
 
 /// Boxed adapter future used by isolated worker-side provider implementations.
 pub type FileMediaProviderFuture<'a, Output> =
-    Pin<Box<dyn Future<Output = Result<Output, ProcessorFailure>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<Output, FileMediaProviderFailure>> + Send + 'a>>;
 
 /// Worker-side format adapter contract.
 ///

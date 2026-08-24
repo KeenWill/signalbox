@@ -10,9 +10,10 @@ use signalbox_file_media_runtime::{
     CancellationSignal, FileInspection, FileInspectionStatus, FileMediaCeilings, FileMediaFailure,
     FileMediaProcessor, FileMediaProcessorFuture, FileMediaProvider, FileMediaProviderReadRequest,
     FileMediaProviderValidationRequest, FileMediaRegistry, FileMediaRegistryConstructionError,
-    FileReadRequest, FileReadResult, InspectionRequest, NeverCancelled, ProcessorIsolation,
-    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation,
-    ReadViewName, ReaderIdentity, VerifiedBlobSource,
+    FileReadInput, FileReadRequest, FileReadResult, InspectionRequest, NeverCancelled,
+    ProcessorBoundaryFailure, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation, ReadViewName, ReaderIdentity,
+    VerifiedBlobSource,
 };
 
 struct DirectProcessor {
@@ -34,7 +35,12 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
-        self.provider.probe(reader, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .probe(reader, source, cancellation)
+                .await
+                .map_err(map_provider_failure)
+        })
     }
 
     fn validate<'a>(
@@ -44,7 +50,12 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
-        self.provider.inspect(reader, request, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .inspect(reader, request, source, cancellation)
+                .await
+                .map_err(map_provider_failure)
+        })
     }
 
     fn read<'a>(
@@ -54,8 +65,19 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
-        self.provider.read(reader, request, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .read(reader, request, source, cancellation)
+                .await
+                .map_err(map_provider_failure)
+        })
     }
+}
+
+fn map_provider_failure(
+    _: signalbox_file_media_runtime::FileMediaProviderFailure,
+) -> ProcessorBoundaryFailure {
+    ProcessorFailure::Failed.into()
 }
 
 #[test]
@@ -114,6 +136,12 @@ async fn concatenated_tar_segments_are_all_inspected() -> Result<(), Box<dyn Err
 #[tokio::test]
 async fn zip_with_preamble_validates_and_enumerates() -> Result<(), Box<dyn Error>> {
     assert_valid_inventory(valid_inventory(ArchiveFixture::zip_with_preamble()?).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn declared_zip_after_probe_prefix_validates_and_enumerates() -> Result<(), Box<dyn Error>> {
+    assert_valid_inventory(valid_inventory(ArchiveFixture::zip_after_long_preamble()?).await?);
     Ok(())
 }
 
@@ -347,6 +375,23 @@ async fn disguised_recursive_zip_payload_is_rejected() -> Result<(), Box<dyn Err
 }
 
 #[tokio::test]
+async fn zip_signature_text_is_not_a_recursive_archive() -> Result<(), Box<dyn Error>> {
+    assert_valid_inventory(
+        valid_inventory(ArchiveFixture::zip_with_signature_text_payload()?).await?,
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn recursive_zip_split_across_gzip_members_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::gzip_with_split_zip_signature()?).await?,
+        "recursive_container",
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn disguised_empty_zip_payload_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         malformed_inspection(ArchiveFixture::disguised_empty_zip()?).await?,
@@ -440,6 +485,15 @@ async fn excessive_zip_entry_count_is_a_typed_bounded_failure() -> Result<(), Bo
 #[tokio::test]
 async fn unknown_bytes_remain_a_typed_unknown_inspection() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::unknown(b"not an archive".to_vec())?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_unanchored_zip_signature_remains_unknown() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::unknown(b"plain bytes PK\x03\x04 without a ZIP".to_vec())?;
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
 
     assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
@@ -565,7 +619,7 @@ async fn read(
             visible_part: None,
         },
         view: ReadViewName::try_new("entries").map_err(|_| FileMediaFailure::ProcessorFailed)?,
-        options,
+        input: FileReadInput::Initial { options },
     };
     registry()
         .map_err(|_| FileMediaFailure::ProcessorFailed)?
@@ -576,7 +630,11 @@ async fn read(
 fn malformed_reason(inspection: &FileInspection) -> Result<&str, Box<dyn Error>> {
     match inspection {
         FileInspection::Malformed { reason_code, .. } => Ok(reason_code.as_str()),
-        _ => Err("expected malformed archive".into()),
+        FileInspection::Validated(_)
+        | FileInspection::Unknown { .. }
+        | FileInspection::Ambiguous { .. }
+        | FileInspection::DeclaredMismatch { .. }
+        | FileInspection::EncryptedOrLocked { .. } => Err("expected malformed archive".into()),
     }
 }
 
@@ -586,6 +644,10 @@ fn complete_structure(result: FileReadResult) -> Result<serde_json::Value, Box<d
             body,
             continuation: ReadContinuation::Complete,
         } => Ok(body),
-        _ => Err("expected complete structured result".into()),
+        FileReadResult::Text { .. }
+        | FileReadResult::Structured {
+            continuation: ReadContinuation::More { .. },
+            ..
+        } => Err("expected complete structured result".into()),
     }
 }

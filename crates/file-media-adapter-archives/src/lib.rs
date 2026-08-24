@@ -11,12 +11,12 @@ use std::{
 use flate2::bufread::GzDecoder;
 use signalbox_file_media_runtime::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider,
-    FileMediaProviderDeclaration, FileMediaProviderFuture, FileMediaProviderReadRequest,
-    FileMediaProviderValidationRequest, FileReaderName, FileReaderProviderName, FileReaderRevision,
-    ProbeDeclaration, ProbeStrength, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds, ReadViewDeclaration,
-    ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
-    StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
+    FileMediaProviderDeclaration, FileMediaProviderFailure, FileMediaProviderFuture,
+    FileMediaProviderReadRequest, FileMediaProviderValidationRequest, FileReadInput,
+    FileReaderName, FileReaderProviderName, FileReaderRevision, ProbeDeclaration, ProbeStrength,
+    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
+    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
+    ReaderIdentity, ReasonCode, StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
 };
 use zip::{CompressionMethod, ZipArchive};
 
@@ -33,14 +33,30 @@ const SPECIAL_ENTRY_REASON: &str = "special_entry";
 const SOURCE_SIZE_REASON: &str = "source_size_limit";
 const UNSUPPORTED_COMPRESSION_REASON: &str = "unsupported_compression_method";
 const UNSUPPORTED_DICTIONARY_REASON: &str = "unsupported_dictionary";
+// numeric-bound: hard safety ceiling - bounds probe I/O and retained signature evidence
 const PROBE_BYTES: u64 = 1_024;
+// numeric-bound: hard safety ceiling - bounds whole-archive memory and decode latency
 const SOURCE_BYTES: u64 = 256 * 1024;
+// numeric-bound: hard safety ceiling - bounds archive inventory memory and enumeration work
 const MAX_ENTRIES: usize = 1_000;
+// numeric-bound: hard safety ceiling - bounds one decoded entry's memory and CPU work
 const MAX_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
+// numeric-bound: hard safety ceiling - bounds aggregate decompression memory and CPU work
 const MAX_EXPANDED_BYTES: u64 = 16 * 1024 * 1024;
+// numeric-bound: hard safety ceiling - bounds retained untrusted entry-name memory
 const MAX_NAME_BYTES: usize = 512;
-const OUTPUT_BYTES: usize = 768 * 1024;
+// numeric-bound: hard safety ceiling - bounds one structured tool result
+const OUTPUT_BYTES: usize = 500_000;
+// numeric-bound: hard safety ceiling - bounds retained recursive-format prefix evidence
 const PREFIX_BYTES: usize = 1_024;
+// numeric-bound: hard safety ceiling - bounds sequential source request fan-out
+const READ_RANGES: u32 = 256;
+// numeric-bound: hard safety ceiling - bounds structured result nesting
+const OUTPUT_DEPTH: u32 = 5;
+// numeric-bound: hard safety ceiling - bounds structured result traversal work
+const OUTPUT_NODES: u64 = 5_000;
+// numeric-bound: hard safety ceiling - bounds aggregate structured string memory
+const OUTPUT_STRING_BYTES: usize = 480_000;
 
 /// ZIP, TAR, GZIP, and Zstandard provider for the isolated worker.
 #[derive(Clone, Copy, Debug, Default)]
@@ -71,7 +87,7 @@ impl FileMediaProvider for ArchiveProvider {
             let kind = require_reader(reader)?;
             require_active(cancellation)?;
             let length = source.byte_length().get().min(PROBE_BYTES);
-            let prefix = ProbePrefix(read_range(source, 0, length).await?);
+            let prefix = ProbePrefix(read_range(source, SourceRange { offset: 0, length }).await?);
             require_active(cancellation)?;
             if kind.matches_probe(prefix.as_bytes()) {
                 let strength = if source.byte_length().get() <= SOURCE_BYTES
@@ -81,7 +97,10 @@ impl FileMediaProvider for ArchiveProvider {
                 {
                     let complete = read_complete_after_prefix(source, prefix).await?;
                     require_active(cancellation)?;
-                    kind.probe_strength_with_complete_bytes(&complete)
+                    let Some(strength) = kind.probe_strength_with_complete_bytes(&complete) else {
+                        return Ok(ProcessorProbeOutput::NoMatch);
+                    };
+                    strength
                 } else {
                     kind.probe_strength(prefix.as_bytes())
                 };
@@ -106,20 +125,32 @@ impl FileMediaProvider for ArchiveProvider {
             let kind = require_reader(reader)?;
             require_active(cancellation)?;
             if request.media_type.as_str() != kind.media_type() {
-                return Err(ProcessorFailure::Protocol);
+                return Err(FileMediaProviderFailure::Failed);
             }
+            let mut complete = None;
             if request.evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated {
                 let length = source.byte_length().get().min(PROBE_BYTES);
-                let prefix = read_range(source, 0, length).await?;
+                let prefix = read_range(source, SourceRange { offset: 0, length }).await?;
                 require_active(cancellation)?;
                 if !kind.matches_probe(&prefix) {
-                    return Ok(ProcessorValidationOutput::NoMatch);
+                    if kind != ArchiveKind::Zip || source.byte_length().get() > SOURCE_BYTES {
+                        return Ok(ProcessorValidationOutput::NoMatch);
+                    }
+                    let bytes = read_all(source).await?;
+                    require_active(cancellation)?;
+                    if ZipArchive::new(Cursor::new(&bytes)).is_err() {
+                        return Ok(ProcessorValidationOutput::NoMatch);
+                    }
+                    complete = Some(bytes);
                 }
             }
             if source.byte_length().get() > SOURCE_BYTES {
                 return Ok(malformed_validation(kind, SOURCE_SIZE_REASON));
             }
-            let bytes = read_all(source).await?;
+            let bytes = match complete {
+                Some(bytes) => bytes,
+                None => read_all(source).await?,
+            };
             require_active(cancellation)?;
             match enumerate(kind, &bytes) {
                 Ok(summary) => validated_output(kind, request.evidence, &summary),
@@ -142,10 +173,16 @@ impl FileMediaProvider for ArchiveProvider {
             let kind = require_reader(reader)?;
             require_active(cancellation)?;
             if request.detected_media_type.as_str() != kind.media_type() {
-                return Err(ProcessorFailure::Protocol);
+                return Err(FileMediaProviderFailure::Failed);
             }
-            if !empty_options(&request.options) {
-                return Ok(ProcessorReadOutput::InvalidViewArguments);
+            match &request.input {
+                FileReadInput::Initial { options } if empty_options(options) => {}
+                FileReadInput::Initial { .. } => {
+                    return Ok(ProcessorReadOutput::InvalidViewArguments);
+                }
+                FileReadInput::Continuation { .. } => {
+                    return Ok(ProcessorReadOutput::UnsupportedView);
+                }
             }
             if request.view.as_str() != ENTRIES_VIEW {
                 return Ok(ProcessorReadOutput::UnsupportedView);
@@ -172,7 +209,7 @@ impl FileMediaProvider for ArchiveProvider {
                     | ArchiveIssue::Special
                     | ArchiveIssue::UnsupportedCompression
                     | ArchiveIssue::UnsupportedDictionary,
-                ) => Err(ProcessorFailure::Failed),
+                ) => Err(FileMediaProviderFailure::Failed),
             }
         })
     }
@@ -182,9 +219,9 @@ impl FileMediaProvider for ArchiveProvider {
 pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
     let provider = FileReaderProviderName::try_new(PROVIDER_NAME)?;
     let readers = [
-        ArchiveKind::Zip,
-        ArchiveKind::Tar,
         ArchiveKind::Gzip,
+        ArchiveKind::Tar,
+        ArchiveKind::Zip,
         ArchiveKind::Zstd,
     ]
     .into_iter()
@@ -207,13 +244,15 @@ fn reader_declaration(
         ReadViewName::try_new(ENTRIES_VIEW)?,
         String::from("Enumerates bounded hostile-name-safe archive contents without extraction."),
         CanonicalJsonObjectSchema::try_new(r#"{"additionalProperties":false,"type":"object"}"#)?,
-        ReadAccessPattern::Streaming,
+        ReadAccessPattern::Streaming {
+            maximum_ranges: READ_RANGES,
+        },
         ReadViewBounds::Structured {
             source_bytes: SOURCE_BYTES,
             output_bytes: OUTPUT_BYTES,
-            depth: 5,
-            nodes: 5_000,
-            string_bytes: 600 * 1024,
+            depth: OUTPUT_DEPTH,
+            nodes: OUTPUT_NODES,
+            string_bytes: OUTPUT_STRING_BYTES,
         },
     )?;
     Ok(ReaderDeclaration::try_new(ReaderDeclarationInput {
@@ -274,13 +313,16 @@ impl ArchiveKind {
         }
     }
 
-    fn probe_strength_with_complete_bytes(self, source: &CompleteSource) -> ProbeStrength {
+    fn probe_strength_with_complete_bytes(self, source: &CompleteSource) -> Option<ProbeStrength> {
         let structurally_valid_zip = ZipArchive::new(Cursor::new(source.as_bytes())).is_ok();
         match self {
-            Self::Zip if structurally_valid_zip => ProbeStrength::Strong,
-            Self::Gzip | Self::Zstd if structurally_valid_zip => ProbeStrength::StructuralCandidate,
+            Self::Zip if structurally_valid_zip => Some(ProbeStrength::Strong),
+            Self::Zip if !zip_signature_at_start(source.probe_prefix()) => None,
+            Self::Gzip | Self::Zstd if structurally_valid_zip => {
+                Some(ProbeStrength::StructuralCandidate)
+            }
             Self::Zip | Self::Gzip | Self::Zstd | Self::Tar => {
-                self.probe_strength(source.probe_prefix())
+                Some(self.probe_strength(source.probe_prefix()))
             }
         }
     }
@@ -469,6 +511,7 @@ fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
     let mut remaining = bytes;
     let mut first_name = None;
     let mut expanded = 0_u64;
+    let mut detector = RecursiveDetector::new();
     while !remaining.is_empty() {
         let name = match gzip_name(remaining)? {
             Some(name) => checked_name_text(&latin1_name(name))?,
@@ -484,10 +527,7 @@ fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
         let maximum = MAX_EXPANDED_BYTES
             .checked_sub(expanded)
             .ok_or(ArchiveIssue::Expansion)?;
-        let (member_expanded, recursive) = count_reader(&mut decoder, maximum)?;
-        if recursive {
-            return Err(ArchiveIssue::Recursive);
-        }
+        let member_expanded = count_reader_with_detector(&mut decoder, maximum, &mut detector)?;
         expanded = bounded_total(expanded, member_expanded)?;
         let consumed = usize::try_from(decoder.into_inner().position())
             .map_err(|_| ArchiveIssue::Malformed)?;
@@ -495,6 +535,9 @@ fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
             return Err(ArchiveIssue::Malformed);
         }
         remaining = remaining.get(consumed..).ok_or(ArchiveIssue::Malformed)?;
+    }
+    if detector.detected() {
+        return Err(ArchiveIssue::Recursive);
     }
     let name = first_name.ok_or(ArchiveIssue::Malformed)?;
     Ok(single_stream_summary(name, expanded))
@@ -525,8 +568,17 @@ fn single_stream_summary(name: String, expanded: u64) -> ArchiveSummary {
 }
 
 fn count_reader(reader: &mut dyn Read, maximum: u64) -> Result<(u64, bool), ArchiveIssue> {
-    let mut total = 0_u64;
     let mut detector = RecursiveDetector::new();
+    let total = count_reader_with_detector(reader, maximum, &mut detector)?;
+    Ok((total, detector.detected()))
+}
+
+fn count_reader_with_detector(
+    reader: &mut dyn Read,
+    maximum: u64,
+    detector: &mut RecursiveDetector,
+) -> Result<u64, ArchiveIssue> {
+    let mut total = 0_u64;
     let mut buffer = [0_u8; 8192];
     loop {
         let count = reader
@@ -543,21 +595,19 @@ fn count_reader(reader: &mut dyn Read, maximum: u64) -> Result<(u64, bool), Arch
         }
         detector.observe(&buffer[..count]);
     }
-    Ok((total, detector.detected()))
+    Ok(total)
 }
 
 struct RecursiveDetector {
     prefix: Vec<u8>,
-    zip_tail: Vec<u8>,
-    zip_detected: bool,
+    complete: Vec<u8>,
 }
 
 impl RecursiveDetector {
     fn new() -> Self {
         Self {
             prefix: Vec::with_capacity(PREFIX_BYTES),
-            zip_tail: Vec::with_capacity(3),
-            zip_detected: false,
+            complete: Vec::new(),
         }
     }
 
@@ -565,18 +615,11 @@ impl RecursiveDetector {
         let remaining = PREFIX_BYTES.saturating_sub(self.prefix.len());
         self.prefix
             .extend_from_slice(&bytes[..bytes.len().min(remaining)]);
-
-        let mut searchable = Vec::with_capacity(self.zip_tail.len() + bytes.len());
-        searchable.extend_from_slice(&self.zip_tail);
-        searchable.extend_from_slice(bytes);
-        self.zip_detected |= zip_header(&searchable);
-        let tail_start = searchable.len().saturating_sub(3);
-        self.zip_tail.clear();
-        self.zip_tail.extend_from_slice(&searchable[tail_start..]);
+        self.complete.extend_from_slice(bytes);
     }
 
     fn detected(&self) -> bool {
-        self.zip_detected || recursive_bytes(&self.prefix)
+        ZipArchive::new(Cursor::new(&self.complete)).is_ok() || recursive_bytes(&self.prefix)
     }
 }
 
@@ -620,10 +663,7 @@ fn recursive_name(name: &str) -> bool {
 }
 
 fn recursive_bytes(bytes: &[u8]) -> bool {
-    zip_header(bytes)
-        || bytes.starts_with(b"\x1f\x8b\x08")
-        || zstd_header(bytes)
-        || tar_header(bytes)
+    bytes.starts_with(b"\x1f\x8b\x08") || zstd_header(bytes) || tar_header(bytes)
 }
 
 fn zip_header(bytes: &[u8]) -> bool {
@@ -784,13 +824,13 @@ fn validated_output(
     kind: ArchiveKind,
     evidence: ValidationEvidence,
     summary: &ArchiveSummary,
-) -> Result<ProcessorValidationOutput, ProcessorFailure> {
+) -> Result<ProcessorValidationOutput, FileMediaProviderFailure> {
     let metadata_json = serde_json::to_string(&serde_json::json!({
         "entries": summary.entries.len(),
         "expanded_bytes": summary.expanded_bytes,
         "format": kind.reader(),
     }))
-    .map_err(|_| ProcessorFailure::Failed)?;
+    .map_err(|_| FileMediaProviderFailure::Failed)?;
     Ok(ProcessorValidationOutput::Validated {
         media_type: String::from(kind.media_type()),
         evidence,
@@ -801,7 +841,7 @@ fn validated_output(
 fn entries_output(
     kind: ArchiveKind,
     summary: &ArchiveSummary,
-) -> Result<ProcessorReadOutput, ProcessorFailure> {
+) -> Result<ProcessorReadOutput, FileMediaProviderFailure> {
     let entries: Vec<_> = summary
         .entries
         .iter()
@@ -818,7 +858,7 @@ fn entries_output(
         "expanded_bytes": summary.expanded_bytes,
         "format": kind.reader(),
     }))
-    .map_err(|_| ProcessorFailure::Failed)?;
+    .map_err(|_| FileMediaProviderFailure::Failed)?;
     Ok(ProcessorReadOutput::Structured {
         body_json,
         truncated: false,
@@ -826,8 +866,15 @@ fn entries_output(
     })
 }
 
-async fn read_all(source: &dyn VerifiedBlobSource) -> Result<Vec<u8>, ProcessorFailure> {
-    read_range(source, 0, source.byte_length().get()).await
+async fn read_all(source: &dyn VerifiedBlobSource) -> Result<Vec<u8>, FileMediaProviderFailure> {
+    read_range(
+        source,
+        SourceRange {
+            offset: 0,
+            length: source.byte_length().get(),
+        },
+    )
+    .await
 }
 
 struct ProbePrefix(Vec<u8>);
@@ -853,54 +900,67 @@ impl CompleteSource {
 async fn read_complete_after_prefix(
     source: &dyn VerifiedBlobSource,
     prefix: ProbePrefix,
-) -> Result<CompleteSource, ProcessorFailure> {
-    let total =
-        usize::try_from(source.byte_length().get()).map_err(|_| ProcessorFailure::Failed)?;
+) -> Result<CompleteSource, FileMediaProviderFailure> {
+    let total = usize::try_from(source.byte_length().get())
+        .map_err(|_| FileMediaProviderFailure::Failed)?;
     let mut bytes = prefix.0;
     if bytes.len() < total {
-        let offset = u64::try_from(bytes.len()).map_err(|_| ProcessorFailure::Failed)?;
+        let offset = u64::try_from(bytes.len()).map_err(|_| FileMediaProviderFailure::Failed)?;
         let remaining = source
             .byte_length()
             .get()
             .checked_sub(offset)
-            .ok_or(ProcessorFailure::Failed)?;
-        bytes.extend_from_slice(&read_range(source, offset, remaining).await?);
+            .ok_or(FileMediaProviderFailure::Failed)?;
+        bytes.extend_from_slice(
+            &read_range(
+                source,
+                SourceRange {
+                    offset,
+                    length: remaining,
+                },
+            )
+            .await?,
+        );
     }
     if bytes.len() != total {
-        return Err(ProcessorFailure::Failed);
+        return Err(FileMediaProviderFailure::Failed);
     }
     Ok(CompleteSource(bytes))
 }
 
-async fn read_range(
-    source: &dyn VerifiedBlobSource,
+struct SourceRange {
     offset: u64,
     length: u64,
-) -> Result<Vec<u8>, ProcessorFailure> {
-    let length = NonZeroU64::new(length).ok_or(ProcessorFailure::Failed)?;
-    source
-        .read_range(offset, length)
-        .await
-        .map_err(|_| ProcessorFailure::Failed)
 }
 
-fn require_reader(reader: &ReaderIdentity) -> Result<ArchiveKind, ProcessorFailure> {
+async fn read_range(
+    source: &dyn VerifiedBlobSource,
+    range: SourceRange,
+) -> Result<Vec<u8>, FileMediaProviderFailure> {
+    let length = NonZeroU64::new(range.length).ok_or(FileMediaProviderFailure::Failed)?;
+    source
+        .read_range(range.offset, length)
+        .await
+        .map_err(|_| FileMediaProviderFailure::Failed)
+}
+
+fn require_reader(reader: &ReaderIdentity) -> Result<ArchiveKind, FileMediaProviderFailure> {
     if reader.provider().as_str() != PROVIDER_NAME || reader.revision().as_str() != READER_REVISION
     {
-        return Err(ProcessorFailure::Protocol);
+        return Err(FileMediaProviderFailure::Failed);
     }
     match reader.reader().as_str() {
         "zip" => Ok(ArchiveKind::Zip),
         "tar" => Ok(ArchiveKind::Tar),
         "gzip" => Ok(ArchiveKind::Gzip),
         "zstd" => Ok(ArchiveKind::Zstd),
-        _ => Err(ProcessorFailure::Protocol),
+        _ => Err(FileMediaProviderFailure::Failed),
     }
 }
 
-fn require_active(cancellation: &dyn CancellationSignal) -> Result<(), ProcessorFailure> {
+fn require_active(cancellation: &dyn CancellationSignal) -> Result<(), FileMediaProviderFailure> {
     if cancellation.is_cancelled() {
-        Err(ProcessorFailure::Cancelled)
+        Err(FileMediaProviderFailure::Failed)
     } else {
         Ok(())
     }

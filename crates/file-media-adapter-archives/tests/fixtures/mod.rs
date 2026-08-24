@@ -59,6 +59,21 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn zip_after_long_preamble() -> Result<Self, Box<dyn Error>> {
+        let mut bytes = vec![b'x'; 1_025];
+        bytes.extend_from_slice(&zip_bytes(&[(
+            "docs/readme.txt",
+            PAYLOAD,
+            ZipEntryKind::File,
+        )])?);
+        Ok(Self {
+            bytes,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "docs/readme.txt",
+        })
+    }
+
     pub fn legacy_named_zip() -> Result<Self, Box<dyn Error>> {
         let mut bytes = zip_bytes(&[("cafe.txt", PAYLOAD, ZipEntryKind::File)])?;
         set_legacy_filename(&mut bytes, b"caf\x82.txt")?;
@@ -165,6 +180,18 @@ impl ArchiveFixture {
             media_type: "application/gzip",
             expected_format: "gzip",
             expected_name: "payload.txt",
+        })
+    }
+
+    pub fn gzip_with_split_zip_signature() -> Result<Self, Box<dyn Error>> {
+        let nested = zip_bytes(&[("nested.txt", PAYLOAD, ZipEntryKind::File)])?;
+        let mut bytes = gzip_bytes("payload.bin", &nested[..2])?;
+        bytes.extend_from_slice(&gzip_bytes("payload.bin", &nested[2..])?);
+        Ok(Self {
+            bytes,
+            media_type: "application/gzip",
+            expected_format: "gzip",
+            expected_name: "payload.bin",
         })
     }
 
@@ -323,6 +350,19 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn zip_with_signature_text_payload() -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            bytes: zip_bytes(&[(
+                "payload.bin",
+                b"ordinary text containing PK\x03\x04 but no nested archive",
+                ZipEntryKind::File,
+            )])?,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload.bin",
+        })
+    }
+
     pub fn disguised_empty_zip() -> Result<Self, Box<dyn Error>> {
         let writer = ZipWriter::new(std::io::Cursor::new(Vec::new()));
         let empty_zip = writer.finish()?.into_inner();
@@ -391,8 +431,9 @@ impl ArchiveFixture {
     }
 
     pub fn recursive_zstd() -> Result<Self, Box<dyn Error>> {
+        let nested = zip_bytes(&[("nested.txt", PAYLOAD, ZipEntryKind::File)])?;
         Ok(Self {
-            bytes: zstd::stream::encode_all(b"PK\x03\x04nested".as_slice(), 1)?,
+            bytes: zstd::stream::encode_all(nested.as_slice(), 1)?,
             media_type: "application/zstd",
             expected_format: "zstd",
             expected_name: "content",
