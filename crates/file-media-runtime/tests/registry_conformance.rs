@@ -637,16 +637,17 @@ fn strong_validation_no_match_is_processor_failure() {
 }
 
 #[test]
-fn structural_validation_no_match_is_processor_failure() {
+fn structural_validation_no_match_becomes_unknown() {
     let outcome = selection_inspection(
         SelectionProbe::Structural,
         SelectionValidation::NoMatch,
         SYNTHETIC_MEDIA_TYPE,
         SYNTHETIC_MEDIA_TYPE,
         StreamingTextFallback::Disabled,
-    );
+    )
+    .expect("structural no-match should fall through");
 
-    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+    assert!(matches!(outcome, FileInspection::Unknown { .. }));
 }
 
 #[test]

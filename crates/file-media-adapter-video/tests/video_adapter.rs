@@ -243,6 +243,16 @@ async fn ordinary_large_mp4_validates_from_the_bounded_metadata_prefix()
 }
 
 #[tokio::test]
+async fn partially_buffered_mp4_movie_validates_complete_prefix_metadata()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::large_mp4_with_partially_buffered_movie().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
 async fn partial_mp4_header_at_metadata_cutoff_is_an_accepted_truncated_tail()
 -> Result<(), Box<dyn Error>> {
     let source = VideoFixture::large_mp4_with_partial_header_at_metadata_cutoff().into_source()?;
@@ -284,6 +294,15 @@ async fn mp4_box_declared_past_actual_source_end_is_malformed() -> Result<(), Bo
 #[tokio::test]
 async fn header_only_avc1_sample_entry_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(VideoFixture::header_only_avc1_mp4(), "malformed_video").await
+}
+
+#[tokio::test]
+async fn zero_width_mp4_visual_sample_entry_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_zero_width_sample_entry(),
+        "malformed_video",
+    )
+    .await
 }
 
 #[tokio::test]
@@ -429,6 +448,15 @@ async fn duplicate_mp4_sample_descriptions_are_malformed() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
+async fn duplicate_mp4_sample_tables_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_duplicate_sample_tables(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn unsupported_ebml_read_version_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::webm_with_unsupported_ebml_read_version(),
@@ -453,6 +481,33 @@ async fn webm_video_track_with_audio_codec_is_malformed() -> Result<(), Box<dyn 
         "malformed_video",
     )
     .await
+}
+
+#[tokio::test]
+async fn webm_other_track_with_video_codec_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_other_track_with_video_codec(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn audio_only_mp4_is_not_claimed_as_video() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::audio_only_mp4().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn audio_only_webm_is_not_claimed_as_video() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::audio_only_webm().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
 }
 
 #[tokio::test]

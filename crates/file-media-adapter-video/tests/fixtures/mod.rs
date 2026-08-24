@@ -155,6 +155,28 @@ impl VideoFixture {
             .with_reported_byte_length(u64::try_from(source_bytes).unwrap_or(u64::MAX))
     }
 
+    pub fn large_mp4_with_partially_buffered_movie() -> Self {
+        let ordinary = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
+        let ftyp_bytes = ftyp().len();
+        let movie_payload = ordinary[ftyp_bytes + 8..].to_vec();
+        let source_bytes = METADATA_BYTES + 1024;
+        let movie_size = source_bytes - ftyp_bytes;
+        let trailing_box_size = movie_size - 8 - movie_payload.len();
+        let mut bytes = ftyp();
+        bytes.extend_from_slice(&u32::try_from(movie_size).unwrap_or(u32::MAX).to_be_bytes());
+        bytes.extend_from_slice(b"moov");
+        bytes.extend_from_slice(&movie_payload);
+        bytes.extend_from_slice(
+            &u32::try_from(trailing_box_size)
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
+        bytes.extend_from_slice(b"free");
+        bytes.resize(METADATA_BYTES, 0);
+        Self::new(FixtureKind::Mp4, bytes)
+            .with_reported_byte_length(u64::try_from(source_bytes).unwrap_or(u64::MAX))
+    }
+
     pub fn large_mp4_with_partial_header_at_metadata_cutoff() -> Self {
         let mut bytes = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
         let filler_payload_bytes = METADATA_BYTES - bytes.len() - 8 - 4;
@@ -198,6 +220,15 @@ impl VideoFixture {
         Self::new(
             FixtureKind::Mp4,
             mp4_bytes_with_sample_entry(MP4_TIMESCALE, MP4_DURATION_UNITS, mp4_box(*b"avc1", &[])),
+        )
+    }
+
+    pub fn mp4_with_zero_width_sample_entry() -> Self {
+        let mut sample_entry = avc1_sample_entry();
+        sample_entry[32..34].copy_from_slice(&0_u16.to_be_bytes());
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(MP4_TIMESCALE, MP4_DURATION_UNITS, sample_entry),
         )
     }
 
@@ -425,6 +456,35 @@ impl VideoFixture {
         Self::new(FixtureKind::Mp4, mp4_bytes_with_tracks(&[track]))
     }
 
+    pub fn mp4_with_duplicate_sample_tables() -> Self {
+        let mut sample_description = vec![0_u8; 8];
+        sample_description[4..8].copy_from_slice(&1_u32.to_be_bytes());
+        sample_description.extend_from_slice(&avc1_sample_entry());
+        let sample_table = mp4_box(*b"stbl", &mp4_box(*b"stsd", &sample_description));
+        let media_information = mp4_box(*b"minf", &[sample_table.clone(), sample_table].concat());
+        let mut handler = vec![0_u8; 24];
+        handler[8..12].copy_from_slice(b"vide");
+        let media = mp4_box(
+            *b"mdia",
+            &[
+                mp4_box(*b"mdhd", &[0_u8; 24]),
+                mp4_box(*b"hdlr", &handler),
+                media_information,
+            ]
+            .concat(),
+        );
+        let track = mp4_box(*b"trak", &[tkhd(1), media].concat());
+        Self::new(FixtureKind::Mp4, mp4_bytes_with_tracks(&[track]))
+    }
+
+    pub fn audio_only_mp4() -> Self {
+        let mut movie_header = vec![0_u8; 100];
+        movie_header[12..16].copy_from_slice(&MP4_TIMESCALE.to_be_bytes());
+        movie_header[16..20].copy_from_slice(&MP4_DURATION_UNITS.to_be_bytes());
+        let movie = mp4_box(*b"moov", &mp4_box(*b"mvhd", &movie_header));
+        Self::new(FixtureKind::Mp4, [ftyp(), movie].concat())
+    }
+
     pub fn webm_with_unsupported_ebml_read_version() -> Self {
         let read_version = ebml_element(&[0x42, 0xf7], &[0xff]);
         Self::new(
@@ -445,6 +505,33 @@ impl VideoFixture {
         let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
         let track_number = ebml_element(&[0xd7], &[1]);
         let track_type = ebml_element(&[0x83], &[1]);
+        let codec_id = ebml_element(&[0x86], b"A_OPUS");
+        let track_entry = ebml_element(&[0xae], &[track_number, track_type, codec_id].concat());
+        let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
+        let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn webm_other_track_with_video_codec() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let video_track = webm_track_entry(ContentProtection::Clear);
+        let track_number = ebml_element(&[0xd7], &[2]);
+        let track_type = ebml_element(&[0x83], &[0x11]);
+        let codec_id = ebml_element(&[0x86], b"V_VP9");
+        let mismatched_track =
+            ebml_element(&[0xae], &[track_number, track_type, codec_id].concat());
+        let tracks = ebml_element(
+            &[0x16, 0x54, 0xae, 0x6b],
+            &[video_track, mismatched_track].concat(),
+        );
+        let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn audio_only_webm() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let track_number = ebml_element(&[0xd7], &[1]);
+        let track_type = ebml_element(&[0x83], &[2]);
         let codec_id = ebml_element(&[0x86], b"A_OPUS");
         let track_entry = ebml_element(&[0xae], &[track_number, track_type, codec_id].concat());
         let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
