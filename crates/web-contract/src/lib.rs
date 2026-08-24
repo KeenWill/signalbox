@@ -340,7 +340,11 @@ pub struct WebSessionTimelineWindow {
     pub session_id: WebSessionId,
     pub items: Vec<WebSessionTimelineItem>,
     pub projected_structured_bytes: u32,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub continuation_before: Option<WebTimelineAddress>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub continuation_after: Option<WebTimelineAddress>,
 }
 
@@ -526,6 +530,14 @@ pub struct WebSessionTimelineDetailPage {
     pub continuation: Option<WebTimelineDetailContinuation>,
 }
 
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 /// Layer that owns one browser API failure.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -607,8 +619,10 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     let error_schema = canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value());
     let descriptor_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineDescriptor).to_value());
-    let window_schema =
+    let mut window_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
+    make_property_nullable(&mut window_schema, "continuation_before")?;
+    make_property_nullable(&mut window_schema, "continuation_after")?;
     let detail_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineDetailPage).to_value());
     let example = WebContractExample {
@@ -655,6 +669,18 @@ fn canonical_schema(mut schema: Value) -> Value {
     // must not change checked-in artifacts.
     schema.sort_all_objects();
     schema
+}
+
+fn make_property_nullable(
+    schema: &mut Value,
+    property_name: &str,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(&format!("/properties/{property_name}"))
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    let concrete = property.take();
+    *property = json!({ "anyOf": [concrete, { "type": "null" }] });
+    Ok(())
 }
 
 fn runtime_module(

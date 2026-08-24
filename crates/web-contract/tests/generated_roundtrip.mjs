@@ -528,3 +528,16 @@ test("generated window decoder rejects an invalid session ID", () => {
     /matching/,
   );
 });
+
+test("generated window decoder requires both continuation fields", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionTimelineWindow({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        items: [],
+        projected_structured_bytes: 0,
+        continuation_before: null,
+      }),
+    /continuation_after must be present/,
+  );
+});

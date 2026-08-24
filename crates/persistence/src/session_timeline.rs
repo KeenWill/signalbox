@@ -263,6 +263,11 @@ impl SessionTimelineRepository {
         {
             return Err(SessionTimelineCorruption::InvalidOrdinal("window totals").into());
         }
+        if item_count == descriptor.sizes.item_count
+            && (first != descriptor.bounds.first || latest != descriptor.bounds.latest)
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window bounds").into());
+        }
         let continuation_before = match first.zip(descriptor.bounds.first) {
             Some((loaded, bound)) if loaded > bound => TimelineContinuation::MoreAt(loaded),
             _ => TimelineContinuation::Exhausted,
