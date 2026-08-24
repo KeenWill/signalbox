@@ -102,14 +102,16 @@ const productNavigationCommandIds: Record<ProductRouteId, CommandId> = {
   settings: 'navigate.settings',
 }
 
-function ProductNavigation({
+export function ProductNavigation({
   active,
   context,
   onNavigate,
+  disabled = false,
 }: {
   active: ProductRouteId
   context: CommandContext
   onNavigate?: () => void
+  disabled?: boolean
 }) {
   return (
     <div className="product-navigation">
@@ -126,7 +128,13 @@ function ProductNavigation({
             params={{ surface: route.id }}
             className={active === route.id ? 'product-link active' : 'product-link'}
             aria-current={active === route.id ? 'page' : undefined}
+            aria-disabled={disabled || undefined}
+            tabIndex={disabled ? -1 : undefined}
             onClick={(event) => {
+              if (disabled) {
+                event.preventDefault()
+                return
+              }
               if (
                 event.button === 0 &&
                 !event.altKey &&
@@ -149,7 +157,13 @@ function ProductNavigation({
         className="scenario-entry"
         to="/scenario/$scenarioId"
         params={{ scenarioId: 'streaming' }}
+        aria-disabled={disabled || undefined}
+        tabIndex={disabled ? -1 : undefined}
         onClick={(event) => {
+          if (disabled) {
+            event.preventDefault()
+            return
+          }
           if (
             event.button === 0 &&
             !event.altKey &&

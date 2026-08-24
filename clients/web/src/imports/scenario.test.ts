@@ -65,4 +65,34 @@ describe('ScenarioImportApi', () => {
 
     expect(page.items).toHaveLength(2)
   })
+
+  it('replays one command identity while assigning distinct sessions to distinct commands', async () => {
+    const api = new ScenarioImportApi()
+    const frontier = {
+      imported_conversation_id: firstImportId,
+      imported_entry_id: '00000000-0000-7000-8000-000000000002',
+      position: 1,
+    }
+    const firstRequest = {
+      command_id: '00000000-0000-7000-8000-000000000003',
+      frontier,
+      relationship: 'resume' as const,
+      initial_model_selection: {
+        kind: 'direct' as const,
+        selection_id: '00000000-0000-7000-8000-000000000004',
+      },
+    }
+    const secondRequest = {
+      ...firstRequest,
+      command_id: '00000000-0000-7000-8000-000000000005',
+      relationship: 'fork' as const,
+    }
+
+    const first = await api.continueImport(firstImportId, firstRequest)
+    const replay = await api.continueImport(firstImportId, firstRequest)
+    const second = await api.continueImport(firstImportId, secondRequest)
+
+    expect(replay.session_id).toBe(first.session_id)
+    expect(second.session_id).not.toBe(first.session_id)
+  })
 })

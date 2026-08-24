@@ -398,6 +398,88 @@ describe('HttpImportApi correlation', () => {
             JSON.stringify({
               anchor_position: 1,
               first_position: 1,
+              last_position: 1,
+              has_before: false,
+              has_after: true,
+              items: [
+                {
+                  frontier: {
+                    imported_conversation_id: firstId,
+                    imported_entry_id: secondId,
+                    position: 1,
+                  },
+                  raw_record_position: 1,
+                  record_entry_position: 1,
+                  source_speaker: 'not_attested',
+                  content_kind: 'message_content_absent',
+                  text: null,
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).entries(
+        firstId,
+        { anchor: 'first', before: 0, after: 2 },
+        undefined,
+        3,
+      ),
+    ).rejects.toBeInstanceOf(ImportWindowCorrelationError)
+  })
+
+  it('rejects zero source ordinals in a correlated window', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              anchor_position: 1,
+              first_position: 1,
+              last_position: 1,
+              has_before: false,
+              has_after: false,
+              items: [
+                {
+                  frontier: {
+                    imported_conversation_id: firstId,
+                    imported_entry_id: secondId,
+                    position: 1,
+                  },
+                  raw_record_position: 0,
+                  record_entry_position: 1,
+                  source_speaker: 'not_attested',
+                  content_kind: 'message_content_absent',
+                  text: null,
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).entries(
+        firstId,
+        { anchor: 'first', before: 0, after: 0 },
+        undefined,
+        1,
+      ),
+    ).rejects.toBeInstanceOf(ImportWindowCorrelationError)
+  })
+
+  it('rejects duplicate entry identities in a correlated window', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              anchor_position: 1,
+              first_position: 1,
               last_position: 2,
               has_before: false,
               has_after: false,
@@ -521,6 +603,81 @@ describe('HttpImportApi correlation', () => {
     await expect(
       new HttpImportApi(() => Promise.resolve()).list({ limit: 2 }),
     ).rejects.toBeInstanceOf(ImportListCorrelationError)
+  })
+
+  it('rejects descriptor frontiers outside the immutable timeline bounds', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              items: [
+                {
+                  ...summary(firstId),
+                  source_session_id: {
+                    leading_text: 'a'.repeat(513),
+                    completeness: 'truncated',
+                  },
+                },
+              ],
+              next_cursor: null,
+              search_correlation: null,
+              exact_source_session_id_sha256: null,
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).list({ limit: 1 }),
+    ).rejects.toBeInstanceOf(ImportListCorrelationError)
+  })
+
+  it('rejects descriptor source-session evidence beyond the preview ceiling', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              imported_conversation_id: firstId,
+              display_title: null,
+              raw_record_count: 1,
+              entry_count: 1,
+              source: {
+                format: 'claude_code_session_jsonl_v2',
+                source_digest_sha256: exactSourceSessionDigest,
+                source_session_id: {
+                  leading_text: 'a'.repeat(513),
+                  completeness: 'truncated',
+                },
+              },
+              sizes: {
+                raw_source_bytes: 1,
+                normalized_source_record_bytes: 1,
+                normalized_entry_bytes: 1,
+              },
+              timeline: {
+                first: {
+                  imported_conversation_id: firstId,
+                  imported_entry_id: secondId,
+                  position: 1,
+                },
+                latest: {
+                  imported_conversation_id: firstId,
+                  imported_entry_id: secondId,
+                  position: 1,
+                },
+              },
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).descriptor(firstId),
+    ).rejects.toBeInstanceOf(ImportDescriptorCorrelationError)
   })
 
   it('rejects descriptor frontiers outside the immutable timeline bounds', async () => {

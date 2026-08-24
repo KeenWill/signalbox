@@ -86,11 +86,13 @@ export function OverlaySurfaces({
   activeId,
   importsSurface = false,
   navigationDisabled = false,
+  navigationContent,
 }: {
   context: CommandContext
   activeId: string
   importsSurface?: boolean
   navigationDisabled?: boolean
+  navigationContent?: React.ReactNode
 }) {
   const overlay = useAppSelector((state) => state.app.overlay)
   const close = () => invokeCommand('surface.escape', context)
@@ -151,11 +153,17 @@ export function OverlaySurfaces({
       </DialogFrame>
       <DialogFrame
         open={overlay === 'navigation'}
-        title="Development scenarios"
-        description="Deterministic projections exercise the real client shell."
+        title={navigationContent ? 'Product navigation' : 'Development scenarios'}
+        description={
+          navigationContent
+            ? 'Choose a Signalbox product surface.'
+            : 'Deterministic projections exercise the real client shell.'
+        }
         onClose={close}
       >
-        <ScenarioNavigation activeId={activeId} onSelect={close} disabled={navigationDisabled} />
+        {navigationContent ?? (
+          <ScenarioNavigation activeId={activeId} onSelect={close} disabled={navigationDisabled} />
+        )}
       </DialogFrame>
     </>
   )

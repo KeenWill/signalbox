@@ -1,5 +1,6 @@
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
 import { Menu } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
@@ -17,9 +18,10 @@ import type {
   WebImportedSessionRelationship,
   WebImportFormat,
 } from '../generated/web-contract.mjs'
+import { ProductNavigation } from '../ProductApp'
 import { ScenarioNavigation } from '../ScenarioNavigation'
 import { type DiagnosticSnapshot, IconCommand, OverlaySurfaces } from '../Surfaces'
-import { store } from '../state'
+import { store, useAppSelector } from '../state'
 import { type ImportApi, ImportApiError, ImportReceiptCorrelationError } from './api'
 import { ImportedEntries } from './ImportedEntries'
 import { ImportsTable } from './ImportsTable'
@@ -30,6 +32,8 @@ const IMPORT_PAGE_ITEMS = 100
 const IMPORT_WINDOW_RADIUS = 50
 const EMPTY_FILTER = ''
 const SCENARIO_MODEL_SELECTION = '00000000-0000-7000-8000-000000000777'
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const NIL_UUID = '00000000-0000-0000-0000-000000000000'
 
 type FormatFilter = WebImportFormat | typeof EMPTY_FILTER
 type ModelKind = 'direct' | 'alias'
@@ -56,6 +60,8 @@ const byteLabel = (bytes: number): string => {
 
 export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: boolean }) {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  const overlay = useAppSelector((state) => state.app.overlay)
   const queryScope = scenario ? 'scenario' : 'production'
   const [format, setFormat] = useState<FormatFilter>(EMPTY_FILTER)
   const [sourceSession, setSourceSession] = useState('')
@@ -179,10 +185,12 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     },
     [entryWindow?.items, hasRetainedCommand, resetContinuation],
   )
-  const modelSelectionMissing = modelSelectionId.trim().length === 0
+  const normalizedModelSelectionId = modelSelectionId.trim()
+  const modelSelectionInvalid =
+    !CANONICAL_UUID.test(normalizedModelSelectionId) || normalizedModelSelectionId === NIL_UUID
   const canContinueImport =
     selectedFrontier !== null &&
-    !modelSelectionMissing &&
+    !modelSelectionInvalid &&
     !importsQuery.isError &&
     !descriptorQuery.isError &&
     !windowQuery.isError &&
@@ -197,8 +205,8 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
         relationship,
         initial_model_selection:
           modelKind === 'direct'
-            ? { kind: 'direct', selection_id: modelSelectionId.trim() }
-            : { kind: 'alias', alias_id: modelSelectionId.trim() },
+            ? { kind: 'direct', selection_id: normalizedModelSelectionId }
+            : { kind: 'alias', alias_id: normalizedModelSelectionId },
       }
       if (!storeRetainedCommand(queryScope, request)) {
         setRetainedStorageFailed(true)
@@ -208,7 +216,14 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       setPendingCommand(request)
       continuation.mutate(request)
     },
-    [canContinueImport, continuation, modelKind, modelSelectionId, queryScope, selectedFrontier],
+    [
+      canContinueImport,
+      continuation,
+      modelKind,
+      normalizedModelSelectionId,
+      queryScope,
+      selectedFrontier,
+    ],
   )
   const retryExactCommand = useCallback(() => {
     if (!pendingCommand || continuation.isPending) return
@@ -230,7 +245,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
         document.querySelector<HTMLElement>('[aria-label="Imported source entries"]')?.focus(),
       importEntryIds,
       selectedImportEntry: selectedFrontier?.imported_entry_id ?? null,
-      canSelectImportEntry: !hasRetainedCommand,
+      canSelectImportEntry: !hasRetainedCommand && overlay === null,
       selectImportEntry,
       canContinueImport,
       continueImport: continueAt,
@@ -238,6 +253,9 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       retryImport: retryExactCommand,
       canAbandonImport: canRecoverRetainedCommand,
       abandonImport: abandonExactCommand,
+      navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      navigateScenario: () =>
+        void navigate({ to: '/scenario/$scenarioId', params: { scenarioId: 'streaming' } }),
     }),
     [
       abandonExactCommand,
@@ -246,6 +264,8 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       continueAt,
       hasRetainedCommand,
       importEntryIds,
+      navigate,
+      overlay,
       retryExactCommand,
       selectImportEntry,
       selectedFrontier?.imported_entry_id,
@@ -364,17 +384,22 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     <>
       <div className="imports-shell">
         <aside className="navigation-pane imports-navigation">
-          <ScenarioNavigation
-            activeId={scenario ? 'imports' : 'production-imports'}
-            disabled={hasRetainedCommand}
-          />
+          {scenario ? (
+            <ScenarioNavigation activeId="imports" disabled={hasRetainedCommand} />
+          ) : (
+            <ProductNavigation
+              active="imports"
+              context={commandContext}
+              disabled={hasRetainedCommand}
+            />
+          )}
         </aside>
         <main className="imports-workspace">
           <header className="imports-header">
             <IconCommand
               id="navigation.open"
               context={commandContext}
-              label="Open scenarios"
+              label={scenario ? 'Open scenarios' : 'Open product navigation'}
               className="icon-button imports-mobile-navigation"
             >
               <Menu />
@@ -704,6 +729,16 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
         activeId={scenario ? 'imports' : 'production-imports'}
         importsSurface
         navigationDisabled={hasRetainedCommand}
+        navigationContent={
+          scenario ? undefined : (
+            <ProductNavigation
+              active="imports"
+              context={commandContext}
+              disabled={hasRetainedCommand}
+              onNavigate={() => invokeCommand('surface.escape', commandContext)}
+            />
+          )
+        }
       />
     </>
   )
