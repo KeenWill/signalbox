@@ -904,6 +904,8 @@ enum RetainedModelCallExecutionStateKind {
     PreparedFailure {
         /// Session owning the exact prepared call.
         session: SessionId,
+        /// Turn closed by the exact prepared call.
+        turn: TurnId,
         /// Prepared call whose guarded failure closure remains pending.
         call: ModelCallId,
         /// Exact application reason that must survive the retained retry.
@@ -1438,13 +1440,21 @@ where
             match retained.state {
                 RetainedModelCallExecutionStateKind::PreparedFailure {
                     session,
+                    turn,
                     call,
                     cause,
                 } => match self.failure.reread_failure(session, call).await {
                     Ok(RetainedPreparedFailureStatus::Pending) => {
-                        return self.commit_prepared_failure(session, call, cause).await;
+                        return self
+                            .commit_prepared_failure(session, turn, call, cause)
+                            .await;
                     }
                     Ok(RetainedPreparedFailureStatus::AlreadyCommitted) => {
+                        report_turn_terminalization(
+                            session,
+                            turn,
+                            TurnTerminalOutcome::from(cause),
+                        );
                         return Ok(match cause {
                             PreparedModelCallFailureCause::CapabilityKnownFailure => {
                                 ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(call)
@@ -1461,6 +1471,7 @@ where
                         self.retained_state = Some(RetainedModelCallExecutionState {
                             state: RetainedModelCallExecutionStateKind::PreparedFailure {
                                 session,
+                                turn,
                                 call,
                                 cause,
                             },
@@ -1669,6 +1680,7 @@ where
             return self
                 .commit_prepared_failure(
                     session,
+                    turn,
                     call,
                     PreparedModelCallFailureCause::ToolRoundLimitReached,
                 )
@@ -1688,6 +1700,7 @@ where
                 return self
                     .commit_prepared_failure(
                         session,
+                        turn,
                         call,
                         PreparedModelCallFailureCause::CapabilityKnownFailure,
                     )
@@ -1794,6 +1807,7 @@ where
     async fn commit_prepared_failure(
         &mut self,
         session: SessionId,
+        turn: TurnId,
         call: ModelCallId,
         cause: PreparedModelCallFailureCause,
     ) -> Result<
@@ -1837,6 +1851,7 @@ where
                     self.retained_state = Some(RetainedModelCallExecutionState {
                         state: RetainedModelCallExecutionStateKind::PreparedFailure {
                             session,
+                            turn,
                             call,
                             cause,
                         },
@@ -3917,11 +3932,19 @@ mod tests {
     #[test]
     fn s15_automatic_tool_round_bound_counts_current_turn_producing_calls() {
         let current_turn = identity(2, TurnId::from_uuid);
-        let below_limit = current_turn_tool_rounds(31);
-        assert_eq!(automatic_tool_round_count(current_turn, &below_limit), 31);
+        let below_limit_count = 31;
+        let below_limit = current_turn_tool_rounds(below_limit_count);
+        assert_eq!(
+            automatic_tool_round_count(current_turn, &below_limit),
+            below_limit_count as usize
+        );
 
-        let at_limit = current_turn_tool_rounds(32);
-        assert_eq!(automatic_tool_round_count(current_turn, &at_limit), 32);
+        let at_limit_count = 32;
+        let at_limit = current_turn_tool_rounds(at_limit_count);
+        assert_eq!(
+            automatic_tool_round_count(current_turn, &at_limit),
+            at_limit_count as usize
+        );
 
         let one_multi_request_round = one_current_batch_with_inherited_tool_history();
         assert_eq!(
@@ -5130,6 +5153,7 @@ mod tests {
     async fn capability_failure_commit_retains_evidence_across_handoff() {
         let (request, _) = prepared_fixture();
         let session = request.session();
+        let turn = request.turn();
         let call = request.call().id();
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
@@ -5160,6 +5184,7 @@ mod tests {
             Some(&RetainedModelCallExecutionState {
                 state: RetainedModelCallExecutionStateKind::PreparedFailure {
                     session,
+                    turn,
                     call,
                     cause: PreparedModelCallFailureCause::CapabilityKnownFailure,
                 },
@@ -5199,6 +5224,7 @@ mod tests {
             Some(RetainedModelCallExecutionState {
                 state: RetainedModelCallExecutionStateKind::PreparedFailure {
                     session,
+                    turn,
                     call,
                     cause: PreparedModelCallFailureCause::CapabilityKnownFailure,
                 },
@@ -5253,12 +5279,8 @@ mod tests {
         // accept a terminal turn written against an unrelated fixture session,
         // and checking the session alone would accept one written against
         // another call of this session.
-        let [committed] = failure.recorded.as_slice() else {
-            panic!(
-                "expected exactly one failure-commit attempt, got {}",
-                failure.recorded.len()
-            )
-        };
+        assert_eq!(failure.recorded.len(), 1);
+        let committed = &failure.recorded[0];
         assert_eq!(committed.session, session);
         assert_eq!(
             committed.call, prepared_call,
@@ -5382,12 +5404,8 @@ mod tests {
         // A count alone accepts `fail_prepared` called with an unrelated
         // session or call, which would terminalize something other than the
         // saturated turn while this test still claimed it was closed.
-        let [committed] = failure.recorded.as_slice() else {
-            panic!(
-                "expected exactly one failure-commit attempt, got {}",
-                failure.recorded.len()
-            )
-        };
+        assert_eq!(failure.recorded.len(), 1);
+        let committed = &failure.recorded[0];
         assert_eq!(committed.session, session);
         assert_eq!(committed.call, saturated_call);
         assert_eq!(
@@ -5415,6 +5433,7 @@ mod tests {
         let (request, tool_entries, _) =
             tool_round_saturated_fixture(MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN);
         let session = request.session();
+        let turn = request.turn();
         let call = request.call().id();
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
@@ -5445,6 +5464,7 @@ mod tests {
             Some(&RetainedModelCallExecutionState {
                 state: RetainedModelCallExecutionStateKind::PreparedFailure {
                     session,
+                    turn,
                     call,
                     cause: PreparedModelCallFailureCause::ToolRoundLimitReached,
                 },

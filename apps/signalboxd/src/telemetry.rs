@@ -931,6 +931,11 @@ impl RecordedValues {
             .filter(|(name, _value)| name.as_str() != "message")
             .map(|(name, value)| {
                 let value = value.trim_matches('"');
+                if matches!(name.as_str(), "tool_round_limit" | "observed_tool_rounds") {
+                    let value = value.parse::<u64>().ok()?;
+                    let value = i64::try_from(value).ok()?;
+                    return Some(KeyValue::new(name.clone(), value));
+                }
                 let value = if name.ends_with("_id") {
                     uuid::Uuid::parse_str(value).ok()?.to_string()
                 } else {
