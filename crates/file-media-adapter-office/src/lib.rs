@@ -47,7 +47,7 @@ const XML_MALFORMED: &str = "xml_malformed";
 // oversized output is rejected before worker framing and registry sanitization.
 const ZIP_PREFIX_BYTES: u64 = 4;
 const ZIP_SUFFIX_BYTES: u64 = 65_536;
-const EOCD_PRECEDING_BYTES: u64 = 77;
+const EOCD_PRECEDING_BYTES: u64 = 97;
 const VALIDATION_SOURCE_BYTES: u64 = 262_144;
 const CONTENT_TYPES_COMPRESSED_BYTES: u64 = 64 * 1024;
 const PACKAGE_RELS_COMPRESSED_BYTES: u64 = 8 * 1024;
@@ -67,6 +67,11 @@ const PACKAGE_RELATIONSHIPS_NAMESPACE: &[u8] =
     b"http://schemas.openxmlformats.org/package/2006/relationships";
 const OFFICE_RELATIONSHIPS_NAMESPACE: &[u8] =
     b"http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+const WORDPROCESSINGML_NAMESPACE: &[u8] =
+    b"http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const SPREADSHEETML_NAMESPACE: &[u8] = b"http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+const PRESENTATIONML_NAMESPACE: &[u8] =
+    b"http://schemas.openxmlformats.org/presentationml/2006/main";
 const DOCX_MAIN_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
 const XLSX_MAIN_CONTENT_TYPE: &str =
@@ -1076,6 +1081,7 @@ fn validate_content_types(
     let mut content_types_prefix = None;
     let mut kinds = Vec::new();
     let mut part_names = HashSet::new();
+    let mut default_types = std::collections::HashMap::new();
     loop {
         match reader
             .read_event_into(&mut buffer)
@@ -1101,6 +1107,13 @@ fn validate_content_types(
                         &mut kinds,
                         &mut part_names,
                     )?;
+                } else if depth == 1
+                    && local_name(start.name().as_ref()) == b"Default"
+                    && content_types_prefix.as_deref().is_some_and(|root_prefix| {
+                        element_uses_content_types_namespace(&reader, &start, root_prefix)
+                    })
+                {
+                    collect_default_content_type(&reader, &start, &mut default_types)?;
                 }
                 depth = depth
                     .checked_add(1)
@@ -1114,6 +1127,15 @@ fn validate_content_types(
                     }) =>
             {
                 collect_content_type_kind(&reader, &empty, entries, &mut kinds, &mut part_names)?;
+            }
+            Event::Empty(empty)
+                if depth == 1
+                    && local_name(empty.name().as_ref()) == b"Default"
+                    && content_types_prefix.as_deref().is_some_and(|root_prefix| {
+                        element_uses_content_types_namespace(&reader, &empty, root_prefix)
+                    }) =>
+            {
+                collect_default_content_type(&reader, &empty, &mut default_types)?;
             }
             Event::Empty(empty) if depth == 0 => {
                 if saw_root || local_name(empty.name().as_ref()) != b"Types" {
@@ -1135,6 +1157,20 @@ fn validate_content_types(
             _ => {}
         }
         buffer.clear();
+    }
+    for kind in [OfficeKind::Docx, OfficeKind::Xlsx, OfficeKind::Pptx] {
+        let expected_part = format!("/{}", kind.marker());
+        let extension = kind
+            .marker()
+            .rsplit_once('.')
+            .map(|(_, extension)| extension)
+            .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+        if !part_names.contains(&expected_part)
+            && default_types.get(extension).map(String::as_str) == Some(kind.main_content_type())
+            && entries.iter().any(|entry| entry.name == kind.marker())
+        {
+            kinds.push(kind);
+        }
     }
     kinds.sort_by_key(|kind| kind.reader());
     kinds.dedup();
@@ -1239,6 +1275,35 @@ fn collect_content_type_kind(
         {
             kinds.push(kind);
         }
+    }
+    Ok(())
+}
+
+fn collect_default_content_type(
+    reader: &Reader<Cursor<&[u8]>>,
+    element: &quick_xml::events::BytesStart<'_>,
+    default_types: &mut std::collections::HashMap<String, String>,
+) -> Result<(), ValidationIssue> {
+    let mut extension = None;
+    let mut content_type = None;
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
+        let value = attribute
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+            .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
+        match attribute.key.as_ref() {
+            b"Extension" => extension = Some(value.into_owned().to_ascii_lowercase()),
+            b"ContentType" => content_type = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    let (Some(extension), Some(content_type)) = (extension, content_type) else {
+        return Ok(());
+    };
+    if content_type.eq_ignore_ascii_case(VBA_PROJECT_CONTENT_TYPE)
+        || default_types.insert(extension, content_type).is_some()
+    {
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
     }
     Ok(())
 }
@@ -1435,8 +1500,13 @@ fn read_spreadsheet_text<R: Read + std::io::Seek>(
             }
             Err(ReadIssue::Failed) => return Err(ProcessorFailure::Failed),
         };
-        let text = spreadsheet_worksheet_text(&worksheet, &shared_strings)
-            .map_err(|_| ProcessorFailure::Failed)?;
+        let text = match spreadsheet_worksheet_text(&worksheet, &shared_strings) {
+            Ok(text) => text,
+            Err(XmlIssue::OutputTooLarge) => {
+                return Ok(ProcessorReadOutput::OutputUnitTooLarge);
+            }
+            Err(XmlIssue::Malformed) => return Err(ProcessorFailure::Failed),
+        };
         if append_bounded(&mut output, &text).is_err() {
             return Ok(ProcessorReadOutput::OutputUnitTooLarge);
         }
@@ -1464,19 +1534,18 @@ fn ordered_relationship_ids(
     let mut depth = 0_usize;
     let mut list_depth = None;
     let mut ids = Vec::new();
-    let mut relationship_prefixes = HashSet::new();
+    let mut namespace_scopes = vec![std::collections::HashMap::new()];
     loop {
         match reader
             .read_event_into(&mut buffer)
             .map_err(|_| XmlIssue::Malformed)?
         {
             Event::Start(element) => {
-                collect_namespace_prefixes(
-                    &reader,
-                    &element,
-                    OFFICE_RELATIONSHIPS_NAMESPACE,
-                    &mut relationship_prefixes,
-                )?;
+                let mut scope = namespace_scopes
+                    .last()
+                    .cloned()
+                    .ok_or(XmlIssue::Malformed)?;
+                apply_namespace_declarations(&reader, &element, &mut scope)?;
                 if local_name(element.name().as_ref()) == list_name {
                     if list_depth.is_some() {
                         return Err(XmlIssue::Malformed);
@@ -1485,32 +1554,25 @@ fn ordered_relationship_ids(
                 } else if local_name(element.name().as_ref()) == item_name
                     && list_depth == depth.checked_sub(1)
                 {
-                    ids.push(required_relationship_id(
-                        &reader,
-                        &element,
-                        &relationship_prefixes,
-                    )?);
+                    ids.push(required_relationship_id(&reader, &element, &scope)?);
                 }
+                namespace_scopes.push(scope);
                 depth = depth.checked_add(1).ok_or(XmlIssue::Malformed)?;
             }
             Event::Empty(element)
                 if local_name(element.name().as_ref()) == item_name
                     && list_depth == depth.checked_sub(1) =>
             {
-                collect_namespace_prefixes(
-                    &reader,
-                    &element,
-                    OFFICE_RELATIONSHIPS_NAMESPACE,
-                    &mut relationship_prefixes,
-                )?;
-                ids.push(required_relationship_id(
-                    &reader,
-                    &element,
-                    &relationship_prefixes,
-                )?);
+                let mut scope = namespace_scopes
+                    .last()
+                    .cloned()
+                    .ok_or(XmlIssue::Malformed)?;
+                apply_namespace_declarations(&reader, &element, &mut scope)?;
+                ids.push(required_relationship_id(&reader, &element, &scope)?);
             }
             Event::End(element) => {
                 depth = depth.checked_sub(1).ok_or(XmlIssue::Malformed)?;
+                namespace_scopes.pop().ok_or(XmlIssue::Malformed)?;
                 if local_name(element.name().as_ref()) == list_name {
                     list_depth = None;
                 }
@@ -1525,23 +1587,25 @@ fn ordered_relationship_ids(
     Ok(ids)
 }
 
-fn collect_namespace_prefixes(
+fn apply_namespace_declarations(
     reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
-    namespace: &[u8],
-    prefixes: &mut HashSet<Vec<u8>>,
+    scope: &mut std::collections::HashMap<Vec<u8>, Vec<u8>>,
 ) -> Result<(), XmlIssue> {
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
-        let Some(prefix) = attribute.key.as_ref().strip_prefix(b"xmlns:") else {
+        let key = attribute.key.as_ref();
+        let prefix = if key == b"xmlns" {
+            b"".as_slice()
+        } else if let Some(prefix) = key.strip_prefix(b"xmlns:") {
+            prefix
+        } else {
             continue;
         };
         let value = attribute
             .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
             .map_err(|_| XmlIssue::Malformed)?;
-        if value.as_bytes() == namespace {
-            prefixes.insert(prefix.to_vec());
-        }
+        scope.insert(prefix.to_vec(), value.as_bytes().to_vec());
     }
     Ok(())
 }
@@ -1549,7 +1613,7 @@ fn collect_namespace_prefixes(
 fn required_relationship_id(
     reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
-    relationship_prefixes: &HashSet<Vec<u8>>,
+    namespace_scope: &std::collections::HashMap<Vec<u8>, Vec<u8>>,
 ) -> Result<String, XmlIssue> {
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
@@ -1559,7 +1623,10 @@ fn required_relationship_id(
         };
         let prefix = &name[..separator];
         let local = &name[separator + 1..];
-        if local == b"id" && relationship_prefixes.contains(prefix) {
+        if local == b"id"
+            && namespace_scope.get(prefix).map(Vec::as_slice)
+                == Some(OFFICE_RELATIONSHIPS_NAMESPACE)
+        {
             return Ok(attribute
                 .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
                 .map_err(|_| XmlIssue::Malformed)?
@@ -1799,6 +1866,7 @@ fn spreadsheet_shared_strings(bytes: &[u8]) -> Result<Vec<String>, XmlIssue> {
 }
 
 fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String, XmlIssue> {
+    validate_xml_root(bytes, b"worksheet", SPREADSHEETML_NAMESPACE)?;
     let transcoded = transcode_xml(bytes)?;
     let mut reader = Reader::from_reader(Cursor::new(transcoded.as_ref()));
     reader.config_mut().trim_text(false);
@@ -1963,6 +2031,8 @@ fn read_entry<R: Read + std::io::Seek>(
 }
 
 fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> {
+    let (expected_root, expected_namespace) = expected_text_root(kind);
+    validate_xml_root(bytes, expected_root, expected_namespace)?;
     let transcoded = transcode_xml(bytes)?;
     let mut reader = Reader::from_reader(Cursor::new(transcoded.as_ref()));
     reader.config_mut().trim_text(false);
@@ -1988,7 +2058,10 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                 element_depth = element_depth.checked_add(1).ok_or(XmlIssue::Malformed)?;
                 let qualified_name = start.name();
                 let name = local_name(qualified_name.as_ref());
-                if name == b"AlternateContent" {
+                let selected = alternate_depth.is_none() || fallback_depth.is_some();
+                if (name == b"tab" || name == b"br" || name == b"cr") && selected {
+                    append_xml_text(&mut output, if name == b"tab" { "\t" } else { "\n" })?;
+                } else if name == b"AlternateContent" {
                     if alternate_depth.replace(element_depth).is_some() {
                         return Err(XmlIssue::Malformed);
                     }
@@ -2082,6 +2155,98 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
         buffer.clear();
     }
     Ok(output)
+}
+
+fn expected_text_root(kind: OfficeKind) -> (&'static [u8], &'static [u8]) {
+    match kind {
+        OfficeKind::Docx => (b"document", WORDPROCESSINGML_NAMESPACE),
+        OfficeKind::Xlsx => (b"worksheet", SPREADSHEETML_NAMESPACE),
+        OfficeKind::Pptx => (b"sld", PRESENTATIONML_NAMESPACE),
+    }
+}
+
+fn validate_xml_root(
+    bytes: &[u8],
+    expected_name: &[u8],
+    expected_namespace: &[u8],
+) -> Result<(), XmlIssue> {
+    let transcoded = transcode_xml(bytes)?;
+    let mut reader = Reader::from_reader(Cursor::new(transcoded.as_ref()));
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let mut depth = 0_usize;
+    let mut saw_root = false;
+    loop {
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(|_| XmlIssue::Malformed)?
+        {
+            Event::Start(element) => {
+                if depth == 0 {
+                    if saw_root
+                        || !element_is_expected_root(
+                            &reader,
+                            &element,
+                            expected_name,
+                            expected_namespace,
+                        )
+                    {
+                        return Err(XmlIssue::Malformed);
+                    }
+                    saw_root = true;
+                }
+                depth = depth.checked_add(1).ok_or(XmlIssue::Malformed)?;
+            }
+            Event::Empty(element) if depth == 0 => {
+                if saw_root
+                    || !element_is_expected_root(
+                        &reader,
+                        &element,
+                        expected_name,
+                        expected_namespace,
+                    )
+                {
+                    return Err(XmlIssue::Malformed);
+                }
+                saw_root = true;
+            }
+            Event::End(_) => {
+                depth = depth.checked_sub(1).ok_or(XmlIssue::Malformed)?;
+            }
+            Event::Text(text) if depth == 0 => {
+                let decoded = text.xml10_content().map_err(|_| XmlIssue::Malformed)?;
+                if !decoded.trim().is_empty() {
+                    return Err(XmlIssue::Malformed);
+                }
+            }
+            Event::CData(_) if depth == 0 => return Err(XmlIssue::Malformed),
+            Event::GeneralRef(_) if depth == 0 => return Err(XmlIssue::Malformed),
+            Event::DocType(_) => return Err(XmlIssue::Malformed),
+            Event::Eof if saw_root && depth == 0 => break,
+            Event::Eof => return Err(XmlIssue::Malformed),
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(())
+}
+
+fn element_is_expected_root(
+    reader: &Reader<Cursor<&[u8]>>,
+    element: &quick_xml::events::BytesStart<'_>,
+    expected_name: &[u8],
+    expected_namespace: &[u8],
+) -> bool {
+    if local_name(element.name().as_ref()) != expected_name {
+        return false;
+    }
+    let qualified_name = element.name();
+    let name = qualified_name.as_ref();
+    let prefix = name
+        .iter()
+        .position(|byte| *byte == b':')
+        .map_or(b"".as_slice(), |separator| &name[..separator]);
+    namespace_declaration(reader, element, prefix).as_deref() == Some(expected_namespace)
 }
 
 fn transcode_xml(bytes: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, XmlIssue> {
@@ -2466,7 +2631,24 @@ mod tests {
 
         let result = validate_content_types(xml.as_bytes(), &[docx_main_entry()]);
 
-        assert!(matches!(result, Ok(kinds) if kinds == vec![OfficeKind::Docx]));
+        assert_eq!(
+            result.expect("the Office family should validate"),
+            vec![OfficeKind::Docx]
+        );
+    }
+
+    #[test]
+    fn content_types_resolve_main_parts_from_defaults() {
+        let xml = concat!(
+            "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">",
+            "<Default Extension=\"xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>",
+            "</Types>"
+        );
+
+        let result = validate_content_types(xml.as_bytes(), &[docx_main_entry()]);
+
+        let kinds = result.expect("a matching default should type the main part");
+        assert_eq!(kinds, vec![OfficeKind::Docx]);
     }
 
     #[test]
@@ -2482,7 +2664,10 @@ mod tests {
 
         let result = validate_content_types(&bytes, &[docx_main_entry()]);
 
-        assert!(matches!(result, Ok(kinds) if kinds == vec![OfficeKind::Docx]));
+        assert_eq!(
+            result.expect("the Office family should validate"),
+            vec![OfficeKind::Docx]
+        );
     }
 
     #[test]
@@ -2547,7 +2732,10 @@ mod tests {
 
         let result = validate_package_relationships(&bytes, &[OfficeKind::Docx]);
 
-        assert!(matches!(result, Ok(kinds) if kinds == vec![OfficeKind::Docx]));
+        assert_eq!(
+            result.expect("the Office family should validate"),
+            vec![OfficeKind::Docx]
+        );
     }
 
     #[test]
@@ -2635,29 +2823,32 @@ mod tests {
 
     #[test]
     fn text_extraction_decodes_numeric_references() {
-        let xml = b"<w:document><w:t>&#65;&#x42;</w:t></w:document>";
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:t>&#65;&#x42;</w:t></w:document>"#;
 
         let result = extract_xml_text(xml, OfficeKind::Docx);
 
-        assert!(matches!(result, Ok(text) if text == "AB"));
+        assert_eq!(result.expect("numeric references should decode"), "AB");
     }
 
     #[test]
     fn text_extraction_preserves_cdata() {
-        let xml = b"<w:document><w:t><![CDATA[A&B]]></w:t></w:document>";
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:t><![CDATA[A&B]]></w:t></w:document>"#;
 
         let result = extract_xml_text(xml, OfficeKind::Docx);
 
-        assert!(matches!(result, Ok(text) if text == "A&B"));
+        assert_eq!(result.expect("CDATA should be preserved"), "A&B");
     }
 
     #[test]
     fn text_extraction_selects_markup_compatibility_fallback() {
-        let xml = br#"<w:document xmlns:w="urn:w" xmlns:mc="urn:mc"><mc:AlternateContent><mc:Choice Requires="w14"><w:p><w:t>choice</w:t></w:p></mc:Choice><mc:Fallback><w:p><w:t>fallback</w:t></w:p></mc:Fallback></mc:AlternateContent></w:document>"#;
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="urn:mc"><mc:AlternateContent><mc:Choice Requires="w14"><w:p><w:t>choice</w:t></w:p></mc:Choice><mc:Fallback><w:p><w:t>fallback</w:t></w:p></mc:Fallback></mc:AlternateContent></w:document>"#;
 
         let result = extract_xml_text(xml, OfficeKind::Docx);
 
-        assert!(matches!(result, Ok(text) if text == "fallback\n"));
+        assert_eq!(
+            result.expect("the fallback branch should extract"),
+            "fallback\n"
+        );
     }
 
     #[test]
@@ -2666,7 +2857,10 @@ mod tests {
 
         let result = presentation_relationship_ids(xml);
 
-        assert!(matches!(result, Ok(ids) if ids == vec![String::from("rId1")]));
+        assert_eq!(
+            result.expect("the relationship ID should parse"),
+            vec![String::from("rId1")]
+        );
     }
 
     #[test]
@@ -2675,8 +2869,9 @@ mod tests {
 
         let result = workbook_relationship_ids(xml);
 
-        assert!(
-            matches!(result, Ok(ids) if ids == vec![String::from("rId2"), String::from("rId1")])
+        assert_eq!(
+            result.expect("sheet relationship IDs should preserve order"),
+            vec![String::from("rId2"), String::from("rId1")]
         );
     }
 
@@ -2686,17 +2881,33 @@ mod tests {
 
         let result = workbook_relationship_ids(xml);
 
-        assert!(matches!(result, Ok(ids) if ids == vec![String::from("rId1")]));
+        assert_eq!(
+            result.expect("the relationship ID should parse"),
+            vec![String::from("rId1")]
+        );
+    }
+
+    #[test]
+    fn relationship_ids_use_the_current_namespace_scope() {
+        let xml = br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:o="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet xmlns:r="urn:extension" r:id="metadata" o:id="rId1"/></sheets></workbook>"#;
+
+        let result = workbook_relationship_ids(xml);
+
+        let ids = result.expect("the element-local namespace scope should be used");
+        assert_eq!(ids, vec![String::from("rId1")]);
     }
 
     #[test]
     fn worksheet_shared_strings_follow_cell_occurrence_order() {
-        let xml = br#"<worksheet><sheetData><row><c t="s"><v>1</v></c><c t="s"><v>1</v></c></row></sheetData></worksheet>"#;
+        let xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c t="s"><v>1</v></c><c t="s"><v>1</v></c></row></sheetData></worksheet>"#;
         let shared = vec![String::from("unused"), String::from("used")];
 
         let result = spreadsheet_worksheet_text(xml, &shared);
 
-        assert!(matches!(result, Ok(text) if text == "used\nused\n"));
+        assert_eq!(
+            result.expect("shared-string cells should extract"),
+            "used\nused\n"
+        );
     }
 
     #[test]
@@ -2706,16 +2917,22 @@ mod tests {
 
         let result = spreadsheet_shared_strings(xml);
 
-        assert!(matches!(result, Ok(strings) if strings == vec![String::from("R&D!")]));
+        assert_eq!(
+            result.expect("shared strings should decode references"),
+            vec![String::from("R&D!")]
+        );
     }
 
     #[test]
     fn worksheet_inline_strings_follow_cell_occurrence_order() {
-        let xml = br#"<worksheet><sheetData><row><c t="inlineStr"><is><t>first</t></is></c><c t="inlineStr"><is><r><t>second</t></r><r><t> value</t></r></is></c></row></sheetData></worksheet>"#;
+        let xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c t="inlineStr"><is><t>first</t></is></c><c t="inlineStr"><is><r><t>second</t></r><r><t> value</t></r></is></c></row></sheetData></worksheet>"#;
 
         let result = spreadsheet_worksheet_text(xml, &[]);
 
-        assert!(matches!(result, Ok(text) if text == "first\nsecond value\n"));
+        assert_eq!(
+            result.expect("inline strings should preserve order"),
+            "first\nsecond value\n"
+        );
     }
 
     #[test]
@@ -2741,7 +2958,12 @@ mod tests {
 
         let result = workbook_shared_strings_target(xml);
 
-        assert!(matches!(result, Ok(Some(target)) if target == "xl/tables/strings.xml"));
+        assert_eq!(
+            result
+                .expect("the shared-string relationship should parse")
+                .expect("a shared-string target should be present"),
+            "xl/tables/strings.xml"
+        );
     }
 
     #[test]
@@ -2760,20 +2982,75 @@ mod tests {
 
     #[test]
     fn inline_strings_decode_references_and_skip_phonetic_runs() {
-        let xml = br#"<worksheet><sheetData><row><c t="inlineStr"><is><t>R&amp;D</t><rPh><t>phonetic</t></rPh><r><t>&#33;</t></r></is></c></row></sheetData></worksheet>"#;
+        let xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c t="inlineStr"><is><t>R&amp;D</t><rPh><t>phonetic</t></rPh><r><t>&#33;</t></r></is></c></row></sheetData></worksheet>"#;
 
         let result = spreadsheet_worksheet_text(xml, &[]);
 
-        assert!(matches!(result, Ok(text) if text == "R&D!\n"));
+        assert_eq!(
+            result.expect("inline strings should decode references"),
+            "R&D!\n"
+        );
     }
 
     #[test]
     fn text_extraction_preserves_word_carriage_returns() {
-        let xml = b"<w:document><w:t>first</w:t><w:cr/><w:t>second</w:t></w:document>";
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:t>first</w:t><w:cr/><w:t>second</w:t></w:document>"#;
 
         let result = extract_xml_text(xml, OfficeKind::Docx);
 
-        assert!(matches!(result, Ok(text) if text == "first\nsecond"));
+        assert_eq!(
+            result.expect("Word carriage returns should extract"),
+            "first\nsecond"
+        );
+    }
+
+    #[test]
+    fn text_extraction_preserves_expanded_word_controls() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:t>first</w:t><w:tab></w:tab><w:t>second</w:t><w:br></w:br><w:t>third</w:t><w:cr></w:cr><w:t>fourth</w:t></w:document>"#;
+
+        let result = extract_xml_text(xml, OfficeKind::Docx);
+
+        let text = result.expect("expanded Word controls should extract");
+        assert_eq!(text, "first\tsecond\nthird\nfourth");
+    }
+
+    #[test]
+    fn text_extraction_rejects_unrelated_docx_roots() {
+        let xml = br#"<evil xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:t>spoofed</w:t></evil>"#;
+
+        let result = extract_xml_text(xml, OfficeKind::Docx);
+
+        assert!(matches!(result, Err(XmlIssue::Malformed)));
+    }
+
+    #[test]
+    fn text_extraction_rejects_unrelated_pptx_roots() {
+        let xml = br#"<evil xmlns:a="urn:a"><a:t>spoofed</a:t></evil>"#;
+
+        let result = extract_xml_text(xml, OfficeKind::Pptx);
+
+        assert!(matches!(result, Err(XmlIssue::Malformed)));
+    }
+
+    #[test]
+    fn worksheet_extraction_rejects_unrelated_roots() {
+        let xml = br#"<evil><c t="inlineStr"><is><t>spoofed</t></is></c></evil>"#;
+
+        let result = spreadsheet_worksheet_text(xml, &[]);
+
+        assert!(matches!(result, Err(XmlIssue::Malformed)));
+    }
+
+    #[test]
+    fn worksheet_reports_the_declared_output_limit() {
+        let value = "x".repeat(MAX_TEXT_BODY_BYTES);
+        let xml = format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c t="inlineStr"><is><t>{value}</t></is></c></row></sheetData></worksheet>"#
+        );
+
+        let result = spreadsheet_worksheet_text(xml.as_bytes(), &[]);
+
+        assert!(matches!(result, Err(XmlIssue::OutputTooLarge)));
     }
 
     #[test]
@@ -2804,18 +3081,18 @@ mod tests {
 
     #[test]
     fn text_extraction_transcodes_utf16_little_endian() {
-        let xml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?><w:document><w:t>wide text</w:t></w:document>";
+        let xml = r#"<?xml version="1.0" encoding="UTF-16"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:t>wide text</w:t></w:document>"#;
         let mut bytes = vec![0xff, 0xfe];
         bytes.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
 
         let result = extract_xml_text(&bytes, OfficeKind::Docx);
 
-        assert!(matches!(result, Ok(text) if text == "wide text"));
+        assert_eq!(result.expect("UTF-16 text should transcode"), "wide text");
     }
 
     #[test]
     fn text_extraction_rejects_character_data_outside_the_root() {
-        let xml = b"outside<w:document><w:t>inside</w:t></w:document>";
+        let xml = br#"outside<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:t>inside</w:t></w:document>"#;
 
         let result = extract_xml_text(xml, OfficeKind::Docx);
 
@@ -2867,6 +3144,11 @@ mod tests {
         let result = central_directory_fields(&bytes, 76, suffix_start);
 
         assert!(matches!(result, Ok((3, 123, 456))));
+    }
+
+    #[test]
+    fn zip64_trailer_budget_covers_the_maximum_comment() {
+        assert_eq!(EOCD_PRECEDING_BYTES, 21 + 20 + 56);
     }
 
     fn docx_main_entry() -> CentralEntry {

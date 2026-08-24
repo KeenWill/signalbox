@@ -32,7 +32,7 @@ impl OfficeFixture {
     pub fn docx() -> Result<Self, Box<dyn Error>> {
         let expected_text = "generated docx text";
         let document = format!(
-            r#"<?xml version="1.0"?><w:document xmlns:w="urn:w"><w:body><w:p><w:r><w:t>{expected_text}</w:t></w:r></w:p></w:body></w:document>"#
+            r#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{expected_text}</w:t></w:r></w:p></w:body></w:document>"#
         );
         Self::package(
             DOCX_MEDIA_TYPE,
@@ -62,7 +62,7 @@ impl OfficeFixture {
                 ),
                 (
                     "xl/worksheets/sheet1.xml",
-                    b"<worksheet><sheetData><row><c t=\"s\"><v>0</v></c></row></sheetData></worksheet>".as_slice(),
+                    br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c t="s"><v>0</v></c></row></sheetData></worksheet>"#.as_slice(),
                     EntryKind::File,
                 ),
                 ("xl/sharedStrings.xml", shared.as_bytes(), EntryKind::File),
@@ -88,7 +88,7 @@ impl OfficeFixture {
                 ),
                 (
                     "xl/worksheets/sheet1.xml",
-                    b"<worksheet><sheetData><row><c t=\"s\"><v>0</v></c><c t=\"s\"><v>1</v></c></row></sheetData></worksheet>".as_slice(),
+                    br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c t="s"><v>0</v></c><c t="s"><v>1</v></c></row></sheetData></worksheet>"#.as_slice(),
                     EntryKind::File,
                 ),
                 ("xl/sharedStrings.xml", shared.as_slice(), EntryKind::File),
@@ -99,9 +99,9 @@ impl OfficeFixture {
     pub fn pptx() -> Result<Self, Box<dyn Error>> {
         let expected_text = "generated pptx text";
         let slide = format!(
-            r#"<?xml version="1.0"?><p:sld xmlns:p="urn:p" xmlns:a="urn:a"><a:p><a:r><a:t>{expected_text}</a:t></a:r></a:p></p:sld>"#
+            r#"<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="urn:a"><a:p><a:r><a:t>{expected_text}</a:t></a:r></a:p></p:sld>"#
         );
-        let presentation = br#"<?xml version="1.0"?><p:presentation xmlns:p="urn:p" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>"#;
+        let presentation = br#"<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>"#;
         let relationships = br#"<?xml version="1.0"?><Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#;
         Self::package(
             PPTX_MEDIA_TYPE,
@@ -123,10 +123,10 @@ impl OfficeFixture {
     }
 
     pub fn reordered_pptx() -> Result<Self, Box<dyn Error>> {
-        let presentation = br#"<?xml version="1.0"?><p:presentation xmlns:p="urn:p" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId r:id="rId2"/><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>"#;
+        let presentation = br#"<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId r:id="rId2"/><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>"#;
         let relationships = br#"<?xml version="1.0"?><Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/></Relationships>"#;
-        let first = b"<p:sld><a:p><a:t>first</a:t></a:p></p:sld>";
-        let second = b"<p:sld><a:p><a:t>second</a:t></a:p></p:sld>";
+        let first = br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><a:p><a:t>first</a:t></a:p></p:sld>"#;
+        let second = br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><a:p><a:t>second</a:t></a:p></p:sld>"#;
         Self::package(
             PPTX_MEDIA_TYPE,
             "second\nfirst\n",
@@ -162,7 +162,7 @@ impl OfficeFixture {
     }
 
     pub fn macro_enabled_docx() -> Result<Self, Box<dyn Error>> {
-        let document = b"<?xml version=\"1.0\"?><w:document/>";
+        let document = br#"<?xml version=\"1.0\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>"#;
         let content_types = content_types_xml(&[("word/document.xml", DOCM_MAIN_CONTENT_TYPE)]);
         let mut fixture = Self::package_with_content_types(
             DOCX_MEDIA_TYPE,
@@ -175,7 +175,7 @@ impl OfficeFixture {
     }
 
     pub fn vba_part_in_macro_free_docx() -> Result<Self, Box<dyn Error>> {
-        let document = b"<?xml version=\"1.0\"?><w:document/>";
+        let document = br#"<?xml version=\"1.0\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>"#;
         let mut fixture = Self::package(
             DOCX_MEDIA_TYPE,
             "",
@@ -189,7 +189,7 @@ impl OfficeFixture {
     }
 
     pub fn mixed_docx_xlsx() -> Result<Self, Box<dyn Error>> {
-        let document = b"<?xml version=\"1.0\"?><w:document/>";
+        let document = br#"<?xml version=\"1.0\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>"#;
         let workbook = b"<?xml version=\"1.0\"?><workbook/>";
         let content_types = content_types_xml(&[
             ("word/document.xml", DOCX_MAIN_CONTENT_TYPE),
@@ -207,7 +207,7 @@ impl OfficeFixture {
     }
 
     pub fn large_opaque_part_docx() -> Result<Self, Box<dyn Error>> {
-        let document = b"<?xml version=\"1.0\"?><w:document><w:t>bounded text</w:t></w:document>";
+        let document = br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:t>bounded text</w:t></w:document>"#;
         let image = vec![0_u8; 5 * 1024 * 1024];
         Self::package(
             DOCX_MEDIA_TYPE,
@@ -233,14 +233,14 @@ impl OfficeFixture {
             "",
             &[(
                 "word/document.xml",
-                b"<w:document/><w:document/>".as_slice(),
+                br#"<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>"#.as_slice(),
                 EntryKind::File,
             )],
         )
     }
 
     pub fn duplicate_document_part_docx() -> Result<Self, Box<dyn Error>> {
-        let document = b"<?xml version=\"1.0\"?><w:document/>";
+        let document = br#"<?xml version=\"1.0\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>"#;
         let mut fixture = Self::package(
             DOCX_MEDIA_TYPE,
             "",
@@ -259,7 +259,7 @@ impl OfficeFixture {
     }
 
     pub fn zip_slip_docx() -> Result<Self, Box<dyn Error>> {
-        let document = b"<?xml version=\"1.0\"?><w:document/>";
+        let document = br#"<?xml version=\"1.0\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>"#;
         let mut fixture = Self::package(
             DOCX_MEDIA_TYPE,
             "",
@@ -273,7 +273,7 @@ impl OfficeFixture {
     }
 
     pub fn symlink_docx() -> Result<Self, Box<dyn Error>> {
-        let document = b"<?xml version=\"1.0\"?><w:document/>";
+        let document = br#"<?xml version=\"1.0\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>"#;
         let mut fixture = Self::package(
             DOCX_MEDIA_TYPE,
             "",
@@ -287,7 +287,7 @@ impl OfficeFixture {
     }
 
     pub fn recursive_docx() -> Result<Self, Box<dyn Error>> {
-        let document = b"<?xml version=\"1.0\"?><w:document/>";
+        let document = br#"<?xml version=\"1.0\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>"#;
         let mut fixture = Self::package(
             DOCX_MEDIA_TYPE,
             "",
@@ -323,7 +323,9 @@ impl OfficeFixture {
         let content_types = content_types_xml(&[("word/document.xml", DOCX_MAIN_CONTENT_TYPE)]);
         writer.write_all(content_types.as_bytes())?;
         writer.start_file("word/document.xml", options)?;
-        writer.write_all(b"<?xml version=\"1.0\"?><w:document/>")?;
+        writer.write_all(
+            br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#,
+        )?;
         for index in 0..9_999 {
             writer.start_file(format!("word/empty-{index}.xml"), options)?;
         }
@@ -343,7 +345,7 @@ impl OfficeFixture {
             "",
             &[(
                 "word/document.xml",
-                b"<?xml version=\"1.0\"?><w:document><w:t>unterminated".as_slice(),
+                br#"<?xml version=\"1.0\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:t>unterminated"#.as_slice(),
                 EntryKind::File,
             )],
         )
@@ -352,7 +354,7 @@ impl OfficeFixture {
     pub fn output_bomb_docx() -> Result<Self, Box<dyn Error>> {
         let text = "x".repeat(768 * 1024 + 1);
         let document = format!(
-            r#"<?xml version="1.0"?><w:document xmlns:w="urn:w"><w:p><w:t>{text}</w:t></w:p></w:document>"#
+            r#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:t>{text}</w:t></w:p></w:document>"#
         );
         Self::package(
             DOCX_MEDIA_TYPE,
