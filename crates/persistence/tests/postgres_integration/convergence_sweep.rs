@@ -12,10 +12,10 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     BranchName, CommitSha, DangerousToolAutoApproval, DescendantTerminationScope,
-    DirectModelSelection, DurableCommandId, GoalStatement, GoalUserAction, GoalUserCommand,
-    ModelSelectionRequest, PullRequestNumber, RepositorySlug, SessionConfigurationDefaults,
-    SessionId, SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, UserContent,
+    DirectModelSelection, DurableCommandId, GoalCommandResult, GoalStatement, GoalUserAction,
+    GoalUserCommand, ModelSelectionRequest, PullRequestNumber, RepositorySlug,
+    SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
+    SessionTemplateName, SessionTemplateProvenance, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -39,6 +39,11 @@ const INACTIVE_PULL_REQUEST: u64 = 893;
 const UNRESOLVED_THREADS: u64 = 3;
 const RETRY_DELAY_SECONDS: u64 = 60;
 const RETRY_DELAY_CAP_SECONDS: u64 = 15 * 60;
+/// A cap low enough to bind before the retry budget parks the target. The
+/// production pair (60s base, 900s cap) never reaches its cap — the largest
+/// delay it computes is the fourth, 480s — so it leaves `least(..., cap)`
+/// unexercised.
+const BINDING_RETRY_DELAY_CAP_SECONDS: u64 = 100;
 const RETRY_BUDGET: i16 = 5;
 const MODEL_SELECTION_ID: u128 = 0x89_200;
 const FIRST_PENDING_COMMAND: u128 = 0x89_210;
@@ -353,6 +358,71 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn retry_backoff_saturates_at_the_configured_cap() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
+    let repository = repository()?;
+    let observation = observation()?;
+    let policy = ConvergenceSweepRetryPolicy {
+        backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
+        backoff_cap: Duration::from_secs(BINDING_RETRY_DELAY_CAP_SECONDS),
+    };
+
+    for attempt in 1..RETRY_BUDGET {
+        let disposition = store
+            .record_failure(
+                Uuid::from_u128(u128::from(attempt.unsigned_abs())),
+                &repository,
+                pull_request(),
+                Some(&observation),
+                ConvergenceSweepFailureKind::FactsFetch,
+                policy,
+            )
+            .await?;
+        assert_eq!(
+            disposition,
+            ConvergenceSweepFailureDisposition::RetryScheduled
+        );
+    }
+
+    let retry_delays: Vec<i64> = sqlx::query_scalar(
+        "SELECT round(EXTRACT(EPOCH FROM (retry_not_before - recorded_at)))::bigint
+           FROM convergence_sweep_event
+          WHERE repository = $1 AND pull_request_number = $2
+            AND retry_not_before IS NOT NULL
+          ORDER BY consecutive_failures",
+    )
+    .bind(repository.as_str())
+    .bind(rust_decimal::Decimal::from(pull_request().get()))
+    .fetch_all(&pool)
+    .await?;
+
+    // Unbounded doubling would be 60, 120, 240, 480; the cap binds from the
+    // second delay on. Removing `least(..., cap)` from the statement fails here.
+    assert_eq!(
+        retry_delays,
+        vec![
+            i64::try_from(RETRY_DELAY_SECONDS)?,
+            i64::try_from(BINDING_RETRY_DELAY_CAP_SECONDS)?,
+            i64::try_from(BINDING_RETRY_DELAY_CAP_SECONDS)?,
+            i64::try_from(BINDING_RETRY_DELAY_CAP_SECONDS)?,
+        ]
+    );
+
+    // The runtime gates retries on `retry_ready()`, not on the raw column: a
+    // target whose backoff has not elapsed must read back as not ready.
+    let state = store
+        .load_target(&repository, pull_request())
+        .await?
+        .expect("the recorded failures enrolled the target");
+    assert!(!state.is_parked());
+    assert!(!state.retry_ready());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
     let store = PostgresConvergenceSweepStore::new(pool);
@@ -454,7 +524,10 @@ async fn locked_admission_rejects_a_recent_terminal_dispatch_during_cool_off()
             |_| None,
         )
         .await?;
-    assert!(matches!(stopped, GoalCommandHandlingOutcome::Recorded(_)));
+    assert!(matches!(
+        stopped,
+        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_))
+    ));
 
     let second = store
         .commission_after_cool_off(
@@ -887,7 +960,10 @@ async fn stale_inactive_session_cannot_park_a_newer_dispatch() -> Result<(), Box
         .await?
         .expect("the target remains enrolled");
 
-    assert!(matches!(stopped, GoalCommandHandlingOutcome::Recorded(_)));
+    assert!(matches!(
+        stopped,
+        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_))
+    ));
     assert_ne!(latest_session, stale_session);
     assert_eq!(
         disposition,

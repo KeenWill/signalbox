@@ -1425,6 +1425,18 @@ fn blocker_text(blocker: &PullRequestConvergenceBlocker) -> String {
 
 #[cfg(test)]
 mod tests {
+    use signalbox_application::InProcessEligibilityWorkSource;
+    use signalbox_persistence::{
+        disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+        disposable_test_container_labels, local_test_connection_options, migrate,
+        scheduler::PostgresEligibilitySweep,
+    };
+    use sqlx::postgres::PgPoolOptions;
+    use testcontainers_modules::{
+        postgres::Postgres as TestPostgres,
+        testcontainers::{self, ImageExt, runners::AsyncRunner},
+    };
+
     use super::*;
 
     fn sha(value: char) -> CommitSha {
@@ -1943,5 +1955,307 @@ mod tests {
             ),
             Err(CensusError::Shape)
         );
+    }
+
+    // `reconcile_target` sequences the store primitives, and the branches it
+    // takes before the provider census are reachable against a real database
+    // with no network: the parked / `retry_ready` gate, the committed-dispatch
+    // projection repair, and the census-failure path. The branches after a
+    // successful census are not reachable here — `GRAPHQL_URL` is a const with
+    // no injection seam, so a hand-built runtime cannot be pointed at a local
+    // server. Every fixture below resolves its credential from a path that does
+    // not exist, which makes `fetch` fail before it opens a connection.
+
+    const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+    const DATABASE_NAME: &str = "signalbox_convergence_sweep";
+    const DATABASE_USER: &str = "signalbox";
+    const DATABASE_PASSWORD: &str = "signalbox-test-only";
+    const FIXTURE_REPOSITORY: &str = "signalbox/repository";
+    const FIXTURE_PULL_REQUEST: u64 = 892;
+    const FIXTURE_HEAD_SHA: &str = "1111111111111111111111111111111111111111";
+    const FIXTURE_HEAD_REPOSITORY: &str = "contributor/repository";
+    const FIXTURE_HEAD_BRANCH: &str = "agent/convergence";
+    const FIXTURE_BASE_BRANCH: &str = "main";
+    const FIXTURE_TEMPLATE: &str = "review-response";
+    const FIXTURE_UNRESOLVED_THREADS: u64 = 3;
+    const FIXTURE_RETRY_BUDGET: usize = 5;
+
+    async fn migrated_postgres()
+    -> Result<(testcontainers::ContainerAsync<TestPostgres>, PgPool), Box<dyn Error>> {
+        let container = TestPostgres::default()
+            .with_db_name(DATABASE_NAME)
+            .with_user(DATABASE_USER)
+            .with_password(DATABASE_PASSWORD)
+            .with_cmd(disposable_postgres_server_args())
+            .with_mount(disposable_postgres_state_tmpfs())
+            .with_tag(POSTGRES_IMAGE_TAG)
+            .with_labels(disposable_test_container_labels())
+            .start()
+            .await?;
+        let host = container.get_host().await?;
+        let port = container.get_host_port_ipv4(5432).await?;
+        let database_url =
+            format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect_with(local_test_connection_options(&database_url)?)
+            .await?;
+        migrate(&pool).await?;
+        Ok((container, pool))
+    }
+
+    fn fixture_repository() -> RepositorySlug {
+        RepositorySlug::try_new(FIXTURE_REPOSITORY.to_owned()).expect("fixture repository is valid")
+    }
+
+    fn fixture_pull_request() -> PullRequestNumber {
+        PullRequestNumber::new(
+            std::num::NonZeroU64::new(FIXTURE_PULL_REQUEST).expect("fixture number is positive"),
+        )
+    }
+
+    fn fixture_observation() -> ConvergenceSweepObservation {
+        ConvergenceSweepObservation::new(
+            CommitSha::try_new(FIXTURE_HEAD_SHA.to_owned()).expect("fixture SHA is valid"),
+            FIXTURE_UNRESOLVED_THREADS,
+        )
+    }
+
+    /// A target whose credential path does not exist, so `fetch` fails at its
+    /// first step and no request is ever issued.
+    fn fixture_target() -> SweepTarget {
+        let reference = CredentialReference::new("fixture-credential");
+        SweepTarget {
+            repository: fixture_repository(),
+            pull_request: fixture_pull_request(),
+            credentials: FileCredentialAccess::new_bounded(
+                std::path::PathBuf::from("/nonexistent/convergence-sweep-fixture-credential"),
+                reference.clone(),
+                MAX_CREDENTIAL_BYTES,
+            ),
+            credential_reference: reference,
+        }
+    }
+
+    /// Builds the runtime over a live pool. The returned work source is held by
+    /// the caller so the nudge channel stays open for the runtime's lifetime.
+    fn fixture_runtime(
+        pool: &PgPool,
+        cool_off: Duration,
+    ) -> Result<
+        (
+            ConvergenceSweepRuntime,
+            InProcessEligibilityWorkSource<PostgresEligibilitySweep>,
+        ),
+        Box<dyn Error>,
+    > {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let models = crate::configuration::checked_in_example_configuration()?;
+        let credential_pin = models.session_credential_pin();
+        let (eligibility_nudge, work_source) =
+            InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+        let runtime = ConvergenceSweepRuntime {
+            client: Client::builder().build()?,
+            targets: vec![fixture_target()].into_boxed_slice(),
+            interval: Duration::from_secs(60),
+            cool_off,
+            template: signalbox_domain::SessionTemplateName::try_new(FIXTURE_TEMPLATE.to_owned())?,
+            templates: SessionTemplateConfiguration::default(),
+            models,
+            commissioned: PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin),
+            state: PostgresConvergenceSweepStore::new(pool.clone()),
+            eligibility_nudge,
+        };
+        Ok((runtime, work_source))
+    }
+
+    async fn recorded_events(pool: &PgPool) -> Result<i64, Box<dyn Error>> {
+        Ok(sqlx::query_scalar(
+            "SELECT count(*) FROM convergence_sweep_event
+              WHERE repository = $1 AND pull_request_number = $2",
+        )
+        .bind(FIXTURE_REPOSITORY)
+        .bind(rust_decimal::Decimal::from(FIXTURE_PULL_REQUEST))
+        .fetch_one(pool)
+        .await?)
+    }
+
+    async fn target_state(pool: &PgPool) -> Result<(String, i16), Box<dyn Error>> {
+        Ok(sqlx::query_as(
+            "SELECT state_kind, consecutive_failures FROM convergence_sweep_target
+              WHERE repository = $1 AND pull_request_number = $2",
+        )
+        .bind(FIXTURE_REPOSITORY)
+        .bind(rust_decimal::Decimal::from(FIXTURE_PULL_REQUEST))
+        .fetch_one(pool)
+        .await?)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_census_failure_schedules_a_retry_for_the_target() -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let (runtime, _work_source) = fixture_runtime(&pool, Duration::from_secs(60))?;
+        let target = fixture_target();
+
+        runtime
+            .reconcile_target(&target, Instant::now() + Duration::from_secs(30))
+            .await;
+
+        let failure: String = sqlx::query_scalar(
+            "SELECT failure_kind FROM convergence_sweep_event
+              WHERE repository = $1 AND pull_request_number = $2
+                AND failure_kind IS NOT NULL",
+        )
+        .bind(FIXTURE_REPOSITORY)
+        .bind(rust_decimal::Decimal::from(FIXTURE_PULL_REQUEST))
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(failure, "facts_fetch");
+        assert_eq!(target_state(&pool).await?, (String::from("retry_wait"), 1));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_target_inside_its_retry_backoff_is_left_alone() -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let (runtime, _work_source) = fixture_runtime(&pool, Duration::from_secs(60))?;
+        let target = fixture_target();
+        runtime
+            .state
+            .record_failure(
+                uuid::Uuid::now_v7(),
+                &target.repository,
+                target.pull_request,
+                Some(&fixture_observation()),
+                ConvergenceSweepFailureKind::FactsFetch,
+                ConvergenceSweepRetryPolicy {
+                    backoff_base: RETRY_BACKOFF_BASE,
+                    backoff_cap: RETRY_BACKOFF_CAP,
+                },
+            )
+            .await?;
+        let before = recorded_events(&pool).await?;
+
+        runtime
+            .reconcile_target(&target, Instant::now() + Duration::from_secs(30))
+            .await;
+
+        // The backoff has not elapsed, so the gate returns before the census and
+        // the failure lineage is untouched.
+        assert_eq!(recorded_events(&pool).await?, before);
+        assert_eq!(target_state(&pool).await?, (String::from("retry_wait"), 1));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_parked_target_is_left_alone() -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let (runtime, _work_source) = fixture_runtime(&pool, Duration::from_secs(60))?;
+        let target = fixture_target();
+        for _ in 0..FIXTURE_RETRY_BUDGET {
+            runtime
+                .state
+                .record_failure(
+                    uuid::Uuid::now_v7(),
+                    &target.repository,
+                    target.pull_request,
+                    Some(&fixture_observation()),
+                    ConvergenceSweepFailureKind::FactsFetch,
+                    ConvergenceSweepRetryPolicy {
+                        backoff_base: RETRY_BACKOFF_BASE,
+                        backoff_cap: RETRY_BACKOFF_CAP,
+                    },
+                )
+                .await?;
+        }
+        let before = recorded_events(&pool).await?;
+        assert_eq!(target_state(&pool).await?.0, "parked");
+
+        runtime
+            .reconcile_target(&target, Instant::now() + Duration::from_secs(30))
+            .await;
+
+        // A parked target waits for an operator, never for another census.
+        assert_eq!(recorded_events(&pool).await?, before);
+        assert_eq!(target_state(&pool).await?.0, "parked");
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_committed_dispatch_is_projected_before_any_census() -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let (runtime, _work_source) = fixture_runtime(&pool, Duration::from_secs(60))?;
+        let target = fixture_target();
+        let observation = fixture_observation();
+        let command = DurableCommandId::from_uuid(uuid::Uuid::from_u128(0x89_204));
+        runtime
+            .state
+            .begin_commission(
+                &target.repository,
+                target.pull_request,
+                &observation,
+                [17; 32],
+                command,
+            )
+            .await?;
+        let request = CommissionDispatchRequest::try_new(
+            command,
+            signalbox_domain::SessionTemplateName::try_new(FIXTURE_TEMPLATE.to_owned())?,
+            CommissionedDispatchFence::PullRequest {
+                repository: target.repository.clone(),
+                pull_request: target.pull_request,
+                head_sha: CommitSha::try_new(FIXTURE_HEAD_SHA.to_owned())?,
+                head_repository: RepositorySlug::try_new(FIXTURE_HEAD_REPOSITORY.to_owned())?,
+                head_branch: BranchName::try_new(FIXTURE_HEAD_BRANCH.to_owned())?,
+                base_branch: BranchName::try_new(FIXTURE_BASE_BRANCH.to_owned())?,
+            },
+            GoalStatement::try_new("Converge the pull request.".to_owned())?,
+            UserContent::try_text("Respond to the review.".to_owned())
+                .expect("fixture content is admitted"),
+        )?;
+        let prepared = request.prepare(
+            &mut UuidV7CommissionedDispatchIdGenerator,
+            signalbox_domain::SessionTemplateProvenance::new(
+                signalbox_domain::SessionTemplateName::try_new(FIXTURE_TEMPLATE.to_owned())?,
+                signalbox_domain::SessionTemplateContentDigest::from_bytes([7; 32]),
+            ),
+            signalbox_domain::SessionConfigurationDefaults::complete(
+                signalbox_domain::ModelSelectionRequest::Direct(
+                    signalbox_domain::DirectModelSelection::from_uuid(uuid::Uuid::from_u128(
+                        0x89_200,
+                    )),
+                ),
+                signalbox_domain::DangerousToolAutoApproval::Disabled,
+                Some(signalbox_domain::SessionSystemPrompt::try_new(
+                    "Respond to review findings.".to_owned(),
+                )?),
+            ),
+        )?;
+        let outcome = runtime.commissioned.commission(prepared, |_| None).await?;
+        let CommissionDispatchOutcome::Dispatched { dispatch, session } = outcome else {
+            panic!("a fresh fixture must dispatch: {outcome:?}");
+        };
+
+        runtime
+            .reconcile_target(&target, Instant::now() + Duration::from_secs(30))
+            .await;
+
+        // The projection repair runs before the census and returns, so the
+        // missing credential never produces a failure for this tick.
+        let projected: (uuid::Uuid, uuid::Uuid) = sqlx::query_as(
+            "SELECT last_dispatch_id, last_session_id FROM convergence_sweep_target
+              WHERE repository = $1 AND pull_request_number = $2",
+        )
+        .bind(FIXTURE_REPOSITORY)
+        .bind(rust_decimal::Decimal::from(FIXTURE_PULL_REQUEST))
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(projected, (dispatch.into_uuid(), session.into_uuid()));
+        assert_eq!(target_state(&pool).await?, (String::from("observed"), 0));
+        Ok(())
     }
 }

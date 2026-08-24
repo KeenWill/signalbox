@@ -43,11 +43,19 @@ ALTER TABLE convergence_sweep_target
             AND parked_session_id IS NOT NULL
             AND parked_dispatched_at IS NOT NULL)
     ),
+    -- NOT VALID: the backfill above cannot fill a target that was parked as
+    -- 'no_model_activity' on an external session, which sets neither
+    -- census_dispatch_id nor last_dispatch_id. 202608210400's parked arm
+    -- permits exactly that row, so a database that already applied 0400-0403
+    -- can hold one and a validating constraint would abort this migration.
+    -- The constraint is enforced for every row written from here on; the
+    -- runtime never re-parks an already-parked target, so no legacy row is
+    -- rewritten through it.
     ADD CONSTRAINT convergence_sweep_inactivity_park_has_dispatch CHECK (
         state_kind <> 'parked'
         OR failure_kind <> 'no_model_activity'
         OR parked_dispatch_id IS NOT NULL
-    );
+    ) NOT VALID;
 
 CREATE OR REPLACE VIEW convergence_sweep_parked_target AS
 SELECT target.repository,
