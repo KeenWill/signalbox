@@ -18,9 +18,9 @@ most 256 UTF-8 bytes. References of at most 250 bytes use an `exact:` label,
 while longer references use a stable `digest-md5:` label. These discriminators
 make literal names and digest labels disjoint. Exact canonical references remain
 a private grouping dimension, so the bounded label cannot combine otherwise
-distinct evidence. Each physical token axis is either absent or an
-exact integer in the `u64` domain. Aggregate token sums use `u128`, so every sum
-admitted by the bounded source-call ceiling remains exact.
+distinct evidence. Each physical token axis is either absent or an exact integer
+in the `u64` domain. Aggregate token sums use `u128`, so every sum admitted by
+the bounded source-call ceiling remains exact.
 
 ## Compatibility grouping
 
