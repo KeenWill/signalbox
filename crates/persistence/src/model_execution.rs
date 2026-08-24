@@ -21,8 +21,8 @@ use signalbox_application::{
     FailPreparedModelCallTransaction, ModelCallAuthorizationReread, ModelCallCredentialReference,
     ModelCallObservationCommitOutcome, ModelCallTerminalIdentityCandidates, OperatorFailureClass,
     PrepareModelCallOutcome, PrepareModelCallTransaction, PrepareToolContinuationOutcome,
-    ResolvedToolConversationEntry, RetainedCapabilityFailureStatus,
-    RetainedModelCallObservationStatus,
+    ResolvedToolConversationEntry, RetainedModelCallObservationStatus,
+    RetainedPreparedFailureStatus,
 };
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, ActiveTurnPhase,
@@ -1359,7 +1359,7 @@ impl PostgresModelCallRepository {
         finish_commit(transaction, result).await
     }
 
-    /// Atomically closes a trustworthy capability failure before send.
+    /// Atomically closes a trustworthy prepared failure before send.
     pub async fn fail_prepared_call<NextTurn>(
         &self,
         session: SessionId,
@@ -1385,7 +1385,7 @@ impl PostgresModelCallRepository {
                 )
                 .map_err(|_| {
                     ModelCallRepositoryError::InvalidTransition(
-                        "capability failure requires a Prepared call",
+                        "prepared failure requires a Prepared call",
                     )
                 })?;
             persist_failed_with_delegated_child_result(
@@ -1401,12 +1401,12 @@ impl PostgresModelCallRepository {
         finish_commit(transaction, result).await
     }
 
-    /// Rereads whether an unchanged pre-send capability failure committed.
-    pub async fn reread_capability_failure(
+    /// Rereads whether an unchanged pre-send prepared failure committed.
+    pub async fn reread_prepared_failure(
         &self,
         session: SessionId,
         call: ModelCallId,
-    ) -> Result<RetainedCapabilityFailureStatus, ModelCallRepositoryError> {
+    ) -> Result<RetainedPreparedFailureStatus, ModelCallRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_session(&mut transaction, session).await?;
@@ -1422,7 +1422,7 @@ impl PostgresModelCallRepository {
             .fetch_optional(&mut *transaction)
             .await?
             .ok_or(ModelCallCorruption::Missing(
-                "retained capability-failure model call",
+                "retained prepared-failure model call",
             ))?;
             let (turn, attempt, source_frontier, state, disposition) = stored;
             match (state.as_str(), disposition.as_deref()) {
@@ -1433,10 +1433,10 @@ impl PostgresModelCallRepository {
                     )?;
                     execution.resume_prepared_call().map_err(|_| {
                         ModelCallRepositoryError::InvalidTransition(
-                            "retained capability failure could not resume Prepared",
+                            "retained prepared failure could not resume Prepared",
                         )
                     })?;
-                    Ok(RetainedCapabilityFailureStatus::Pending)
+                    Ok(RetainedPreparedFailureStatus::Pending)
                 }
                 ("terminal", Some("known_failed")) => {
                     let transition_history_matches = sqlx::query_scalar::<_, bool>(
@@ -1490,10 +1490,10 @@ impl PostgresModelCallRepository {
                     )
                     .await?;
                     if transition_history_matches && closure_matches && delegated_result_matches {
-                        Ok(RetainedCapabilityFailureStatus::AlreadyCommitted)
+                        Ok(RetainedPreparedFailureStatus::AlreadyCommitted)
                     } else {
                         Err(ModelCallRepositoryError::InvalidTransition(
-                            "retained capability failure durable closure is incomplete",
+                            "retained prepared failure durable closure is incomplete",
                         ))
                     }
                 }
@@ -1508,15 +1508,15 @@ impl PostgresModelCallRepository {
                     )
                     .await?
                     {
-                        Ok(RetainedCapabilityFailureStatus::Cancelled)
+                        Ok(RetainedPreparedFailureStatus::Cancelled)
                     } else {
                         Err(ModelCallRepositoryError::InvalidTransition(
-                            "retained capability failure cancellation closure is incomplete",
+                            "retained prepared failure cancellation closure is incomplete",
                         ))
                     }
                 }
                 _ => Err(ModelCallRepositoryError::InvalidTransition(
-                    "retained capability failure durable state changed",
+                    "retained prepared failure durable state changed",
                 )),
             }
         }
@@ -2523,6 +2523,7 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
         &mut self,
         session: SessionId,
         call: ModelCallId,
+        _cause: signalbox_application::PreparedModelCallFailureCause,
         identities: FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
     ) -> Result<FailedModelCallTurn, Self::Error>
@@ -2543,8 +2544,8 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
         &mut self,
         session: SessionId,
         call: ModelCallId,
-    ) -> Result<RetainedCapabilityFailureStatus, Self::Error> {
-        self.reread_capability_failure(session, call).await
+    ) -> Result<RetainedPreparedFailureStatus, Self::Error> {
+        self.reread_prepared_failure(session, call).await
     }
 }
 

@@ -703,23 +703,36 @@ pub trait FailPreparedModelCallTransaction {
         &mut self,
         session: SessionId,
         call: ModelCallId,
+        cause: PreparedModelCallFailureCause,
         identities: FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
     ) -> impl Future<Output = Result<FailedModelCallTurn, Self::Error>> + Send
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
 
-    /// Rereads whether a retained capability-failure closure committed.
+    /// Rereads whether a retained prepared-call failure closure committed.
     fn reread_failure(
         &mut self,
         session: SessionId,
         call: ModelCallId,
-    ) -> impl Future<Output = Result<RetainedCapabilityFailureStatus, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<RetainedPreparedFailureStatus, Self::Error>> + Send;
 }
 
-/// Authoritative status of one retained pre-send capability failure.
+/// Application-owned reason for closing a prepared call before provider entry.
+///
+/// This vocabulary stays separate from provider-runtime cause codes because no
+/// physical model call has been dispatched when either variant applies.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RetainedCapabilityFailureStatus {
+pub enum PreparedModelCallFailureCause {
+    /// Provider capability preparation reported a trustworthy local failure.
+    CapabilityKnownFailure,
+    /// The current turn already contains the maximum automatic tool rounds.
+    ToolRoundLimitReached,
+}
+
+/// Authoritative status of one retained pre-send prepared-call failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetainedPreparedFailureStatus {
     /// The exact call remains `Prepared`; the closure may be resubmitted.
     Pending,
     /// The exact known-failure closure is already represented durably.
@@ -887,12 +900,16 @@ pub struct RetainedModelCallExecutionState {
 
 #[derive(Debug, Eq, PartialEq)]
 enum RetainedModelCallExecutionStateKind {
-    /// Capability preparation proved an ordinary pre-send known failure.
-    CapabilityKnownFailure {
+    /// A provider-neutral prepared-call failure remains to be reconciled.
+    PreparedFailure {
         /// Session owning the exact prepared call.
         session: SessionId,
-        /// Prepared call whose guarded known-failure closure remains pending.
+        /// Turn closed by the exact prepared call.
+        turn: TurnId,
+        /// Prepared call whose guarded failure closure remains pending.
         call: ModelCallId,
+        /// Exact application reason that must survive the retained retry.
+        cause: PreparedModelCallFailureCause,
     },
     /// Ambiguous authorization still has same-incarnation proof of no send.
     AuthorizationNonConsumption {
@@ -1081,8 +1098,12 @@ pub enum ModelCallExecutionOutcome {
     TargetUnavailable(Box<FailedModelCallTurn>),
     /// A trustworthy local capability failure closed the prepared call.
     CapabilityKnownFailure(Box<FailedModelCallTurn>),
-    /// A retained capability failure's earlier commit was proven to have landed.
+    /// A retained prepared failure's earlier commit was proven to have landed.
     CapabilityFailureAlreadyCommitted(ModelCallId),
+    /// The automatic tool-round limit closed the prepared call and turn.
+    ToolRoundLimitReached(Box<FailedModelCallTurn>),
+    /// A retained tool-round-limit closure was proven to have landed.
+    ToolRoundLimitAlreadyCommitted(ModelCallId),
     /// The provider observation committed its authoritative result.
     ObservationCommitted(Box<ModelCallTerminalOutcome>),
     /// An availability failure committed and left the turn on a fresh attempt.
@@ -1106,10 +1127,10 @@ pub enum ModelCallExecutionError<
     Render(ModelFrontierRenderingError),
     /// Credential lookup or capability preparation failed as an operator error.
     CapabilityPreparation(ProviderError),
-    /// The guarded trustworthy-capability-failure transaction failed.
-    CapabilityFailureCommit(FailureError),
-    /// Authoritative reread of a retained capability failure failed.
-    CapabilityFailureReread(FailureError),
+    /// The guarded prepared-call failure transaction failed.
+    PreparedFailureCommit(FailureError),
+    /// Authoritative reread of a retained prepared-call failure failed.
+    PreparedFailureReread(FailureError),
     /// Durable send authorization failed.
     Authorization(AuthorizationError),
     /// Authoritative reread after an ambiguous authorization also failed.
@@ -1154,16 +1175,16 @@ where
             Self::CapabilityPreparation(error) => {
                 write!(formatter, "model-call capability stage failed: {error}")
             }
-            Self::CapabilityFailureCommit(error) => {
+            Self::PreparedFailureCommit(error) => {
                 write!(
                     formatter,
-                    "model-call capability-failure commit failed: {error}"
+                    "model-call prepared-failure commit failed: {error}"
                 )
             }
-            Self::CapabilityFailureReread(error) => {
+            Self::PreparedFailureReread(error) => {
                 write!(
                     formatter,
-                    "model-call capability-failure reread failed: {error}"
+                    "model-call prepared-failure reread failed: {error}"
                 )
             }
             Self::Authorization(error) => {
@@ -1229,7 +1250,7 @@ where
             Self::CapabilityPreparation(error) | Self::Provider(error) => {
                 error.operator_failure_class()
             }
-            Self::CapabilityFailureCommit(error) | Self::CapabilityFailureReread(error) => {
+            Self::PreparedFailureCommit(error) | Self::PreparedFailureReread(error) => {
                 error.operator_failure_class()
             }
             Self::Authorization(error) => error.operator_failure_class(),
@@ -1244,8 +1265,8 @@ where
             Self::Prepare(_) => "model_call_prepare",
             Self::Render(_) => "model_call_render",
             Self::CapabilityPreparation(_) => "model_call_capability_preparation",
-            Self::CapabilityFailureCommit(_) => "model_call_capability_failure_commit",
-            Self::CapabilityFailureReread(_) => "model_call_capability_failure_reread",
+            Self::PreparedFailureCommit(_) => "model_call_prepared_failure_commit",
+            Self::PreparedFailureReread(_) => "model_call_prepared_failure_reread",
             Self::Authorization(_) => "model_call_authorization",
             Self::AuthorizationReread { .. } => "model_call_authorization_reread",
             Self::AuthorizationReconciliation(_) => "model_call_authorization_reconciliation",
@@ -1377,7 +1398,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
                 observation, ..
             }) => Some(observation),
             Some(
-                RetainedModelCallExecutionStateKind::CapabilityKnownFailure { .. }
+                RetainedModelCallExecutionStateKind::PreparedFailure { .. }
                 | RetainedModelCallExecutionStateKind::AuthorizationNonConsumption { .. },
             )
             | None => None,
@@ -1417,31 +1438,47 @@ where
     > {
         if let Some(retained) = self.retained_state.take() {
             match retained.state {
-                RetainedModelCallExecutionStateKind::CapabilityKnownFailure { session, call } => {
-                    match self.failure.reread_failure(session, call).await {
-                        Ok(RetainedCapabilityFailureStatus::Pending) => {
-                            return self.commit_capability_known_failure(session, call).await;
-                        }
-                        Ok(RetainedCapabilityFailureStatus::AlreadyCommitted) => {
-                            return Ok(
-                                ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(call),
-                            );
-                        }
-                        Ok(RetainedCapabilityFailureStatus::Cancelled) => {
-                            return Ok(ModelCallExecutionOutcome::NoWork);
-                        }
-                        Err(error) => {
-                            self.retained_state = Some(RetainedModelCallExecutionState {
-                                state:
-                                    RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
-                                        session,
-                                        call,
-                                    },
-                            });
-                            return Err(ModelCallExecutionError::CapabilityFailureReread(error));
-                        }
+                RetainedModelCallExecutionStateKind::PreparedFailure {
+                    session,
+                    turn,
+                    call,
+                    cause,
+                } => match self.failure.reread_failure(session, call).await {
+                    Ok(RetainedPreparedFailureStatus::Pending) => {
+                        return self
+                            .commit_prepared_failure(session, turn, call, cause)
+                            .await;
                     }
-                }
+                    Ok(RetainedPreparedFailureStatus::AlreadyCommitted) => {
+                        report_turn_terminalization(
+                            session,
+                            turn,
+                            TurnTerminalOutcome::from(cause),
+                        );
+                        return Ok(match cause {
+                            PreparedModelCallFailureCause::CapabilityKnownFailure => {
+                                ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(call)
+                            }
+                            PreparedModelCallFailureCause::ToolRoundLimitReached => {
+                                ModelCallExecutionOutcome::ToolRoundLimitAlreadyCommitted(call)
+                            }
+                        });
+                    }
+                    Ok(RetainedPreparedFailureStatus::Cancelled) => {
+                        return Ok(ModelCallExecutionOutcome::NoWork);
+                    }
+                    Err(error) => {
+                        self.retained_state = Some(RetainedModelCallExecutionState {
+                            state: RetainedModelCallExecutionStateKind::PreparedFailure {
+                                session,
+                                turn,
+                                call,
+                                cause,
+                            },
+                        });
+                        return Err(ModelCallExecutionError::PreparedFailureReread(error));
+                    }
+                },
                 RetainedModelCallExecutionStateKind::AuthorizationNonConsumption {
                     session: retained_session,
                     prepared,
@@ -1630,8 +1667,24 @@ where
             &tool_entries,
         )
         .map_err(ModelCallExecutionError::Render)?;
-        if automatic_tool_round_limit_reached(turn, operation.messages()) {
-            return self.commit_capability_known_failure(session, call).await;
+        let observed_tool_rounds = automatic_tool_round_count(turn, operation.messages());
+        if observed_tool_rounds >= MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN {
+            tracing::warn!(
+                session_id = %session.as_uuid(),
+                turn_id = %turn.as_uuid(),
+                model_call_id = %call.into_uuid(),
+                tool_round_limit = MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN,
+                observed_tool_rounds,
+                "automatic tool-round limit reached"
+            );
+            return self
+                .commit_prepared_failure(
+                    session,
+                    turn,
+                    call,
+                    PreparedModelCallFailureCause::ToolRoundLimitReached,
+                )
+                .await;
         }
         let preparation_cancellation = self.authorization.cancellation_signal(session, call);
         let capability = match self
@@ -1644,7 +1697,14 @@ where
                 return Ok(ModelCallExecutionOutcome::NoWork);
             }
             Ok(ModelCallCapabilityPreparation::KnownFailure) => {
-                return self.commit_capability_known_failure(session, call).await;
+                return self
+                    .commit_prepared_failure(
+                        session,
+                        turn,
+                        call,
+                        PreparedModelCallFailureCause::CapabilityKnownFailure,
+                    )
+                    .await;
             }
             Err(error) => {
                 return Err(ModelCallExecutionError::CapabilityPreparation(error));
@@ -1744,10 +1804,12 @@ where
             .await
     }
 
-    async fn commit_capability_known_failure(
+    async fn commit_prepared_failure(
         &mut self,
         session: SessionId,
+        turn: TurnId,
         call: ModelCallId,
+        cause: PreparedModelCallFailureCause,
     ) -> Result<
         ModelCallExecutionOutcome,
         ModelCallExecutionError<
@@ -1764,18 +1826,20 @@ where
             let next_turn = move |_| ids.next_turn_id();
             match self
                 .failure
-                .fail_prepared(session, call, identities, next_turn)
+                .fail_prepared(session, call, cause, identities, next_turn)
                 .await
             {
                 Ok(failed) => {
-                    report_turn_terminalization(
-                        failed.session(),
-                        failed.turn(),
-                        TurnTerminalOutcome::CapabilityKnownFailure,
-                    );
-                    return Ok(ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(
-                        failed,
-                    )));
+                    let terminal_outcome = TurnTerminalOutcome::from(cause);
+                    report_turn_terminalization(failed.session(), failed.turn(), terminal_outcome);
+                    return Ok(match cause {
+                        PreparedModelCallFailureCause::CapabilityKnownFailure => {
+                            ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(failed))
+                        }
+                        PreparedModelCallFailureCause::ToolRoundLimitReached => {
+                            ModelCallExecutionOutcome::ToolRoundLimitReached(Box::new(failed))
+                        }
+                    });
                 }
                 Err(error)
                     if error.operator_failure_class()
@@ -1785,12 +1849,14 @@ where
                 }
                 Err(error) => {
                     self.retained_state = Some(RetainedModelCallExecutionState {
-                        state: RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
+                        state: RetainedModelCallExecutionStateKind::PreparedFailure {
                             session,
+                            turn,
                             call,
+                            cause,
                         },
                     });
-                    return Err(ModelCallExecutionError::CapabilityFailureCommit(error));
+                    return Err(ModelCallExecutionError::PreparedFailureCommit(error));
                 }
             }
         }
@@ -2113,6 +2179,7 @@ enum TurnTerminalOutcome {
     Refused,
     TargetUnavailable,
     CapabilityKnownFailure,
+    ToolRoundLimitReached,
 }
 
 impl TurnTerminalOutcome {
@@ -2125,6 +2192,16 @@ impl TurnTerminalOutcome {
             Self::Refused => "refused",
             Self::TargetUnavailable => "target_unavailable",
             Self::CapabilityKnownFailure => "capability_known_failure",
+            Self::ToolRoundLimitReached => "tool_round_limit_reached",
+        }
+    }
+}
+
+impl From<PreparedModelCallFailureCause> for TurnTerminalOutcome {
+    fn from(cause: PreparedModelCallFailureCause) -> Self {
+        match cause {
+            PreparedModelCallFailureCause::CapabilityKnownFailure => Self::CapabilityKnownFailure,
+            PreparedModelCallFailureCause::ToolRoundLimitReached => Self::ToolRoundLimitReached,
         }
     }
 }
@@ -2195,7 +2272,7 @@ fn report_turn_terminalization(
         "turn terminalized"
     );
 }
-fn automatic_tool_round_limit_reached(turn: TurnId, messages: &[ModelConversationMessage]) -> bool {
+fn automatic_tool_round_count(turn: TurnId, messages: &[ModelConversationMessage]) -> usize {
     messages
         .iter()
         .filter_map(|message| match message {
@@ -2208,7 +2285,6 @@ fn automatic_tool_round_limit_reached(turn: TurnId, messages: &[ModelConversatio
         })
         .collect::<BTreeSet<_>>()
         .len()
-        >= MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN
 }
 
 /// One deterministic scripted-provider action.
@@ -2434,7 +2510,12 @@ impl ModelCallProvider for ScriptedModelCallProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, num::NonZeroU64, sync::Arc};
+    use std::{
+        collections::VecDeque,
+        io::{self, Write},
+        num::NonZeroU64,
+        sync::{Arc, Mutex as StdMutex},
+    };
 
     use expect_test::expect;
     use signalbox_domain::{
@@ -2460,9 +2541,49 @@ mod tests {
         ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestOrdinal,
         ToolRequestReconstitutionInput, ToolResultText, TranscriptAncestry,
     };
+    use tracing::instrument::WithSubscriber as _;
     use uuid::Uuid;
 
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct CapturedTelemetry(Arc<StdMutex<Vec<u8>>>);
+
+    struct CapturedTelemetryWriter(Arc<StdMutex<Vec<u8>>>);
+
+    impl Write for CapturedTelemetryWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("captured telemetry remains available")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedTelemetry {
+        type Writer = CapturedTelemetryWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedTelemetryWriter(Arc::clone(&self.0))
+        }
+    }
+
+    impl CapturedTelemetry {
+        fn text(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .expect("captured telemetry remains available")
+                    .clone(),
+            )
+            .expect("captured telemetry is UTF-8")
+        }
+    }
 
     fn identity<Identity>(value: u128, from_uuid: impl FnOnce(Uuid) -> Identity) -> Identity {
         from_uuid(Uuid::from_u128(value))
@@ -3404,6 +3525,7 @@ mod tests {
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
+            _cause: PreparedModelCallFailureCause,
             _identities: FailedModelCallTurnIdentities,
             _next_reclassified_turn: NextTurn,
         ) -> Result<FailedModelCallTurn, Self::Error>
@@ -3417,15 +3539,15 @@ mod tests {
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
-        ) -> Result<RetainedCapabilityFailureStatus, Self::Error> {
-            panic!("unused capability-failure reread")
+        ) -> Result<RetainedPreparedFailureStatus, Self::Error> {
+            panic!("unused prepared-failure reread")
         }
     }
 
     #[derive(Debug)]
     struct FakeFailure {
         errors: VecDeque<FakeError>,
-        rereads: VecDeque<Result<RetainedCapabilityFailureStatus, FakeError>>,
+        rereads: VecDeque<Result<RetainedPreparedFailureStatus, FakeError>>,
         calls: usize,
         reread_calls: usize,
     }
@@ -3437,6 +3559,7 @@ mod tests {
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
+            _cause: PreparedModelCallFailureCause,
             _identities: FailedModelCallTurnIdentities,
             _next_reclassified_turn: NextTurn,
         ) -> Result<FailedModelCallTurn, Self::Error>
@@ -3454,7 +3577,7 @@ mod tests {
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
-        ) -> Result<RetainedCapabilityFailureStatus, Self::Error> {
+        ) -> Result<RetainedPreparedFailureStatus, Self::Error> {
             self.reread_calls += 1;
             self.rereads
                 .pop_front()
@@ -3472,6 +3595,7 @@ mod tests {
     struct FailPreparedCall {
         session: SessionId,
         call: ModelCallId,
+        cause: PreparedModelCallFailureCause,
         identities: FailedModelCallTurnIdentities,
     }
 
@@ -3489,6 +3613,7 @@ mod tests {
             &mut self,
             session: SessionId,
             call: ModelCallId,
+            cause: PreparedModelCallFailureCause,
             identities: FailedModelCallTurnIdentities,
             _next_reclassified_turn: NextTurn,
         ) -> Result<FailedModelCallTurn, Self::Error>
@@ -3499,6 +3624,7 @@ mod tests {
             self.recorded.push(FailPreparedCall {
                 session,
                 call,
+                cause,
                 identities,
             });
             self.results
@@ -3510,7 +3636,7 @@ mod tests {
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
-        ) -> Result<RetainedCapabilityFailureStatus, Self::Error> {
+        ) -> Result<RetainedPreparedFailureStatus, Self::Error> {
             panic!("a committed capability failure is never reread")
         }
     }
@@ -3851,19 +3977,25 @@ mod tests {
     #[test]
     fn s15_automatic_tool_round_bound_counts_current_turn_producing_calls() {
         let current_turn = identity(2, TurnId::from_uuid);
-        let below_limit = current_turn_tool_rounds(31);
-        assert!(!automatic_tool_round_limit_reached(
-            current_turn,
-            &below_limit
-        ));
+        let below_limit_count = 31;
+        let below_limit = current_turn_tool_rounds(below_limit_count);
+        assert_eq!(
+            automatic_tool_round_count(current_turn, &below_limit),
+            below_limit_count as usize
+        );
 
-        let at_limit = current_turn_tool_rounds(32);
-        assert!(automatic_tool_round_limit_reached(current_turn, &at_limit));
+        let at_limit_count = 32;
+        let at_limit = current_turn_tool_rounds(at_limit_count);
+        assert_eq!(
+            automatic_tool_round_count(current_turn, &at_limit),
+            at_limit_count as usize
+        );
 
         let one_multi_request_round = one_current_batch_with_inherited_tool_history();
-        assert!(
-            !automatic_tool_round_limit_reached(current_turn, &one_multi_request_round),
-            "one current-turn batch and inherited history consume one round"
+        assert_eq!(
+            automatic_tool_round_count(current_turn, &one_multi_request_round),
+            1,
+            "one current-turn batch and inherited history consume one round",
         );
     }
 
@@ -5066,6 +5198,7 @@ mod tests {
     async fn capability_failure_commit_retains_evidence_across_handoff() {
         let (request, _) = prepared_fixture();
         let session = request.session();
+        let turn = request.turn();
         let call = request.call().id();
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
@@ -5075,7 +5208,7 @@ mod tests {
             },
             FakeFailure {
                 errors: [FakeError::Infrastructure, FakeError::Infrastructure].into(),
-                rereads: [Ok(RetainedCapabilityFailureStatus::Pending)].into(),
+                rereads: [Ok(RetainedPreparedFailureStatus::Pending)].into(),
                 calls: 0,
                 reread_calls: 0,
             },
@@ -5087,19 +5220,21 @@ mod tests {
 
         assert!(matches!(
             service.execute(session).await,
-            Err(ModelCallExecutionError::CapabilityFailureCommit(
+            Err(ModelCallExecutionError::PreparedFailureCommit(
                 FakeError::Infrastructure
             ))
         ));
-        assert!(matches!(
+        assert_eq!(
             service.retained_state(),
-            Some(RetainedModelCallExecutionState {
-                state: RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
-                    session: retained_session,
-                    call: retained_call,
+            Some(&RetainedModelCallExecutionState {
+                state: RetainedModelCallExecutionStateKind::PreparedFailure {
+                    session,
+                    turn,
+                    call,
+                    cause: PreparedModelCallFailureCause::CapabilityKnownFailure,
                 },
-            }) if *retained_session == session && *retained_call == call
-        ));
+            })
+        );
 
         let (ids, prepare, failure, authorization, observation, provider, gate, catalog, retained) =
             service.into_parts();
@@ -5120,7 +5255,7 @@ mod tests {
         );
         assert!(matches!(
             resumed.execute(identity(99, SessionId::from_uuid)).await,
-            Err(ModelCallExecutionError::CapabilityFailureCommit(
+            Err(ModelCallExecutionError::PreparedFailureCommit(
                 FakeError::Infrastructure
             ))
         ));
@@ -5129,15 +5264,17 @@ mod tests {
         assert_eq!(failure.calls, 2);
         assert_eq!(failure.reread_calls, 1);
         assert_eq!(provider.capability_preparation_count(), 1);
-        assert!(matches!(
+        assert_eq!(
             retained,
             Some(RetainedModelCallExecutionState {
-                state: RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
-                    session: retained_session,
-                    call: retained_call,
+                state: RetainedModelCallExecutionStateKind::PreparedFailure {
+                    session,
+                    turn,
+                    call,
+                    cause: PreparedModelCallFailureCause::CapabilityKnownFailure,
                 },
-            }) if retained_session == session && retained_call == call
-        ));
+            })
+        );
     }
 
     /// A capability failure that commits terminalizes the turn: the service
@@ -5187,12 +5324,8 @@ mod tests {
         // accept a terminal turn written against an unrelated fixture session,
         // and checking the session alone would accept one written against
         // another call of this session.
-        let [committed] = failure.recorded.as_slice() else {
-            panic!(
-                "expected exactly one failure-commit attempt, got {}",
-                failure.recorded.len()
-            )
-        };
+        assert_eq!(failure.recorded.len(), 1);
+        let committed = &failure.recorded[0];
         assert_eq!(committed.session, session);
         assert_eq!(
             committed.call, prepared_call,
@@ -5274,13 +5407,12 @@ mod tests {
         assert!(retained.is_none());
     }
 
-    /// A turn that already recorded the maximum automatic tool rounds
-    /// terminalizes as a capability failure before the provider is entered at
-    /// all. Without this bound a model that keeps requesting tools drives an
-    /// unbounded paid provider loop the operator never asked for and cannot
-    /// stop.
+    /// S15 / INV-071: a turn that reaches the automatic tool-round limit closes
+    /// with its distinct terminal reason before provider entry. This prevents
+    /// a runaway paid provider loop without misreporting saturation as a
+    /// capability failure.
     #[tokio::test]
-    async fn s15_a_turn_at_the_automatic_tool_round_bound_fails_before_provider_entry() {
+    async fn s15_inv071_tool_round_limit_fires_before_provider_entry() {
         let (request, tool_entries, failed) =
             tool_round_saturated_fixture(MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN);
         let session = request.session();
@@ -5303,13 +5435,26 @@ mod tests {
             ScriptedModelCallProvider::new([]),
             InProcessAttemptDispatchGate::default(),
         );
+        let captured = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(captured.clone())
+            .finish();
 
         assert_eq!(
             service
                 .execute(session)
+                .with_subscriber(subscriber)
                 .await
-                .expect("the saturated turn closes as a capability failure"),
-            ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(failed))
+                .expect("the saturated turn closes with its own terminal reason"),
+            ModelCallExecutionOutcome::ToolRoundLimitReached(Box::new(failed))
+        );
+        assert!(
+            captured
+                .text()
+                .contains("terminal_outcome=\"tool_round_limit_reached\""),
+            "the service terminalization must expose the INV-071 label"
         );
         let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
         assert_eq!(prepare.calls, 1);
@@ -5317,14 +5462,14 @@ mod tests {
         // A count alone accepts `fail_prepared` called with an unrelated
         // session or call, which would terminalize something other than the
         // saturated turn while this test still claimed it was closed.
-        let [committed] = failure.recorded.as_slice() else {
-            panic!(
-                "expected exactly one failure-commit attempt, got {}",
-                failure.recorded.len()
-            )
-        };
+        assert_eq!(failure.recorded.len(), 1);
+        let committed = &failure.recorded[0];
         assert_eq!(committed.session, session);
         assert_eq!(committed.call, saturated_call);
+        assert_eq!(
+            committed.cause,
+            PreparedModelCallFailureCause::ToolRoundLimitReached
+        );
         assert_eq!(
             provider.capability_preparation_count(),
             0,
@@ -5335,6 +5480,67 @@ mod tests {
             0,
             "a saturated turn must not reach provider interaction"
         );
+        assert!(retained.is_none());
+    }
+
+    /// INV-071: an ambiguous tool-round-limit closure retains its exact cause,
+    /// then an authoritative reread maps the landed closure to the distinct
+    /// already-committed outcome without entering the provider.
+    #[tokio::test]
+    async fn inv071_tool_round_limit_ambiguous_commit_round_trips_retained_cause() {
+        let (request, tool_entries, _) =
+            tool_round_saturated_fixture(MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN);
+        let session = request.session();
+        let turn = request.turn();
+        let call = request.call().id();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready_with_tool_evidence(request, tool_entries))].into(),
+                calls: 0,
+            },
+            FakeFailure {
+                errors: [FakeError::CommitAmbiguous].into(),
+                rereads: [Ok(RetainedPreparedFailureStatus::AlreadyCommitted)].into(),
+                calls: 0,
+                reread_calls: 0,
+            },
+            UnusedAuthorization,
+            UnusedObservation,
+            ScriptedModelCallProvider::new([]),
+            InProcessAttemptDispatchGate::default(),
+        );
+
+        assert!(matches!(
+            service.execute(session).await,
+            Err(ModelCallExecutionError::PreparedFailureCommit(
+                FakeError::CommitAmbiguous
+            ))
+        ));
+        assert_eq!(
+            service.retained_state(),
+            Some(&RetainedModelCallExecutionState {
+                state: RetainedModelCallExecutionStateKind::PreparedFailure {
+                    session,
+                    turn,
+                    call,
+                    cause: PreparedModelCallFailureCause::ToolRoundLimitReached,
+                },
+            })
+        );
+        assert_eq!(
+            service
+                .execute(identity(99, SessionId::from_uuid))
+                .await
+                .expect("the reread proves the tool-round closure landed"),
+            ModelCallExecutionOutcome::ToolRoundLimitAlreadyCommitted(call)
+        );
+        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        assert_eq!(prepare.calls, 1);
+        assert_eq!(failure.calls, 1);
+        assert_eq!(failure.reread_calls, 1);
+        assert_eq!(provider.capability_preparation_count(), 0);
+        assert_eq!(provider.interaction_count(), 0);
         assert!(retained.is_none());
     }
 
@@ -5353,7 +5559,7 @@ mod tests {
             },
             FakeFailure {
                 errors: [FakeError::Infrastructure].into(),
-                rereads: [Ok(RetainedCapabilityFailureStatus::Cancelled)].into(),
+                rereads: [Ok(RetainedPreparedFailureStatus::Cancelled)].into(),
                 calls: 0,
                 reread_calls: 0,
             },
@@ -5365,7 +5571,7 @@ mod tests {
 
         assert!(matches!(
             service.execute(session).await,
-            Err(ModelCallExecutionError::CapabilityFailureCommit(
+            Err(ModelCallExecutionError::PreparedFailureCommit(
                 FakeError::Infrastructure
             ))
         ));
@@ -5401,7 +5607,7 @@ mod tests {
             },
             FakeFailure {
                 errors: [FakeError::CommitAmbiguous].into(),
-                rereads: [Ok(RetainedCapabilityFailureStatus::AlreadyCommitted)].into(),
+                rereads: [Ok(RetainedPreparedFailureStatus::AlreadyCommitted)].into(),
                 calls: 0,
                 reread_calls: 0,
             },
@@ -5413,7 +5619,7 @@ mod tests {
 
         assert!(matches!(
             service.execute(session).await,
-            Err(ModelCallExecutionError::CapabilityFailureCommit(
+            Err(ModelCallExecutionError::PreparedFailureCommit(
                 FakeError::CommitAmbiguous
             ))
         ));
