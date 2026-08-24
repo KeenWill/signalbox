@@ -426,6 +426,27 @@ describe('HttpImportApi correlation', () => {
     ).rejects.toBeInstanceOf(ImportListCorrelationError)
   })
 
+  it('rejects a zero-entry catalog summary', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              items: [{ ...summary(firstId), entry_count: 0 }],
+              next_cursor: null,
+              search_correlation: null,
+              exact_source_session_id_sha256: null,
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new HttpImportApi(() => Promise.resolve()).list({ limit: 1 }),
+    ).rejects.toBeInstanceOf(ImportListCorrelationError)
+  })
+
   it('carries an exact source session as a raw bounded body', async () => {
     const exact = ' source session '
     stubCrypto(exactSourceSessionDigest)

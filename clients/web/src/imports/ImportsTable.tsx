@@ -21,11 +21,13 @@ const formatLabel = (format: WebImportSummary['format']): string => {
 export function ImportsTable({
   rows,
   selectedId,
+  selectionDisabled,
   onSelect,
   density,
 }: {
   rows: readonly WebImportSummary[]
   selectedId: string | null
+  selectionDisabled: boolean
   onSelect: (id: string) => void
   density: 'compact' | 'comfortable'
 }) {
@@ -40,6 +42,7 @@ export function ImportsTable({
             type="button"
             className="import-select"
             aria-label={`Inspect ${row.original.display_title ?? row.original.imported_conversation_id}`}
+            disabled={selectionDisabled}
             onClick={() => onSelect(row.original.imported_conversation_id)}
           >
             <strong>{row.original.display_title ?? 'Untitled import'}</strong>
@@ -67,7 +70,7 @@ export function ImportsTable({
         },
       },
     ],
-    [onSelect],
+    [onSelect, selectionDisabled],
   )
   const table = useLegacyTable({
     data: [...rows],
