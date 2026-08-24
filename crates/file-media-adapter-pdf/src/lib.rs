@@ -32,6 +32,8 @@ const ROOT_VALIDATION_BYTES: u64 = 4_096;
 const MAX_XREF_STREAM_BYTES: usize = VALIDATION_SOURCE_BYTES as usize;
 // Hard safety ceiling bounds decompressed object streams independently of source layout.
 const MAX_OBJECT_STREAM_BYTES: usize = 1024 * 1024;
+// Hard safety ceiling bounds aggregate object-stream retention before lopdf construction.
+const MAX_TOTAL_OBJECT_STREAM_BYTES: usize = 16 * MAX_OBJECT_STREAM_BYTES;
 const READ_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
 const SOURCE_CHUNK_BYTES: u64 = 256 * 1024;
 // Hard safety ceilings bound worker output and decompression-amplified memory.
@@ -437,7 +439,10 @@ async fn inspect_bounded(
             media_type: String::from(MEDIA_TYPE),
         });
     }
-    if parsed_xref.object_limit_exceeded || !valid_xref_targets(&parsed_xref, source_length) {
+    if parsed_xref.object_limit_exceeded
+        || !effective_size_contains_declarations(&parsed_xref)
+        || !valid_xref_targets(&parsed_xref, source_length)
+    {
         return Ok(malformed_validation());
     }
     let Some((root, root_location)) = root_location(&parsed_xref) else {
@@ -486,7 +491,6 @@ async fn inspect_bounded(
                 budget,
                 &parsed_xref,
                 &stream_bytes,
-                stream_offset,
                 stream_reference,
                 (ROOT_VALIDATION_BYTES, 1),
             )
@@ -597,7 +601,6 @@ async fn inspect_bounded(
                         budget,
                         &parsed_xref,
                         &owned_stream,
-                        stream_offset,
                         stream_reference,
                         (0, 0),
                     )
@@ -782,6 +785,7 @@ fn object_streams_fit_expansion_limit(
             XrefLocation::Uncompressed(_) => None,
         })
         .collect::<BTreeSet<_>>();
+    let mut total_decoded_bytes = 0_usize;
     for stream_object in stream_objects {
         let (stream_reference, stream_offset) =
             object_stream_offset(parsed, stream_object).ok_or(FileMediaProviderFailure::Failed)?;
@@ -808,16 +812,21 @@ fn object_streams_fit_expansion_limit(
         {
             return Err(FileMediaProviderFailure::Failed);
         }
-        if decode_pdf_stream(
+        let Some(decoded) = decode_pdf_stream(
             encoded,
             &facts.filters,
             facts.decode_parameters.as_deref(),
             MAX_OBJECT_STREAM_BYTES,
-        )
-        .is_none()
-        {
+        ) else {
+            return Ok(false);
+        };
+        let Some(total) = total_decoded_bytes.checked_add(decoded.len()) else {
+            return Ok(false);
+        };
+        if total > MAX_TOTAL_OBJECT_STREAM_BYTES {
             return Ok(false);
         }
+        total_decoded_bytes = total;
     }
     Ok(true)
 }
@@ -1696,7 +1705,16 @@ fn parse_xref_chain(bytes: &[u8], start: usize) -> Option<ParsedXref> {
         merge_complete_supplemental_xref(bytes, &mut previous, offset, &mut visited)?;
         merge_previous_xref(&mut parsed, previous);
     }
-    Some(parsed)
+    effective_size_contains_declarations(&parsed).then_some(parsed)
+}
+
+fn effective_size_contains_declarations(parsed: &ParsedXref) -> bool {
+    parsed.facts.size.is_some_and(|size| {
+        parsed
+            .declared_objects
+            .iter()
+            .all(|object_number| *object_number < size)
+    })
 }
 
 fn merge_complete_supplemental_xref(
@@ -1935,12 +1953,35 @@ fn pages_dictionary_is_valid(bytes: &[u8]) -> bool {
             b"Type" => {
                 pages = parse_name(bytes, &mut value_cursor).as_deref() == Some(b"Pages");
             }
-            b"Kids" => kids = bytes.get(value_start) == Some(&b'['),
+            b"Kids" => kids = kids_array_contains_only_references(bytes, value_start, cursor),
             b"Count" => {
                 count = parse_nonnegative_integer(bytes, &mut value_cursor)
                     .filter(|_| value_cursor == cursor);
             }
             _ => {}
+        }
+    }
+}
+
+fn kids_array_contains_only_references(bytes: &[u8], start: usize, end: usize) -> bool {
+    let mut cursor = start;
+    if bytes.get(cursor) != Some(&b'[') {
+        return false;
+    }
+    cursor += 1;
+    let mut references = 0_usize;
+    loop {
+        skip_pdf_space_and_comments(bytes, &mut cursor);
+        if bytes.get(cursor) == Some(&b']') {
+            cursor += 1;
+            return cursor == end;
+        }
+        if parse_indirect_reference(bytes, &mut cursor).is_none() {
+            return false;
+        }
+        references += 1;
+        if references > MAX_PAGES {
+            return false;
         }
     }
 }
@@ -1985,9 +2026,11 @@ fn parse_object_stream(
                 facts.is_object_stream =
                     parse_name(bytes, &mut value_cursor).as_deref() == Some(b"ObjStm");
             }
-            b"N" => facts.count = Some(parse_nonnegative_integer(bytes, &mut value_cursor)?),
+            b"N" => {
+                facts.count = Some(parse_nonnegative_integer_value(bytes, value_start, cursor)?);
+            }
             b"First" => {
-                facts.first = Some(parse_nonnegative_integer(bytes, &mut value_cursor)?);
+                facts.first = Some(parse_nonnegative_integer_value(bytes, value_start, cursor)?);
             }
             b"Length" => {
                 facts.length = Some(parse_stream_length(bytes, value_start, cursor)?);
@@ -2100,7 +2143,6 @@ async fn resolve_object_stream_length(
     budget: &mut ValidationBudget,
     parsed: &ParsedXref,
     stream_bytes: &[u8],
-    stream_offset: u64,
     stream_reference: IndirectReference,
     reservation: (u64, u32),
 ) -> Result<Option<(IndirectReference, u64)>, FileMediaProviderFailure> {
@@ -2109,40 +2151,98 @@ async fn resolve_object_stream_length(
     else {
         return Ok(None);
     };
-    let Some(entry) = parsed
-        .live_entries
-        .iter()
-        .find(|entry| entry.reference == reference)
-    else {
-        return Ok(None);
-    };
-    let XrefLocation::Uncompressed(offset) = entry.location else {
-        return Ok(None);
-    };
-    let stream_end = stream_offset
-        .checked_add(
-            u64::try_from(stream_bytes.len()).map_err(|_| FileMediaProviderFailure::Failed)?,
-        )
-        .ok_or(FileMediaProviderFailure::Failed)?;
-    if offset >= stream_offset && offset < stream_end {
-        let relative = usize::try_from(offset - stream_offset)
-            .map_err(|_| FileMediaProviderFailure::Failed)?;
-        return Ok(
-            indirect_integer_object(&stream_bytes[relative..], reference)
-                .map(|length| (reference, length)),
-        );
-    }
-    let Some(available) = source.byte_length().get().checked_sub(offset) else {
-        return Ok(None);
-    };
-    let length = budget
-        .available_after_reserving(reservation.0, reservation.1)
-        .min(available);
-    if !budget.can_read(length) {
-        return Ok(None);
-    }
-    let bytes = read_validation_range(source, budget, offset, length).await?;
-    Ok(indirect_integer_object(&bytes, reference).map(|length| (reference, length)))
+    let length = resolve_bounded_integer_object(
+        source,
+        budget,
+        parsed,
+        reference,
+        reservation,
+        &mut BTreeSet::new(),
+    )
+    .await?;
+    Ok(length.map(|length| (reference, length)))
+}
+
+fn resolve_bounded_integer_object<'a>(
+    source: &'a dyn VerifiedBlobSource,
+    budget: &'a mut ValidationBudget,
+    parsed: &'a ParsedXref,
+    reference: IndirectReference,
+    reservation: (u64, u32),
+    resolving: &'a mut BTreeSet<IndirectReference>,
+) -> FileMediaProviderFuture<'a, Option<u64>> {
+    Box::pin(async move {
+        if !resolving.insert(reference) {
+            return Ok(None);
+        }
+        let result = async {
+            let entry = parsed
+                .live_entries
+                .iter()
+                .find(|entry| entry.reference == reference)?;
+            match entry.location {
+                XrefLocation::Uncompressed(offset) => {
+                    let available = source.byte_length().get().checked_sub(offset)?;
+                    let length = budget
+                        .available_after_reserving(reservation.0, reservation.1)
+                        .min(available);
+                    if !budget.can_read(length) {
+                        return None;
+                    }
+                    let bytes = read_validation_range(source, budget, offset, length)
+                        .await
+                        .ok()?;
+                    indirect_integer_object(&bytes, reference)
+                }
+                XrefLocation::Compressed {
+                    stream_object,
+                    index,
+                } => {
+                    let (stream_reference, stream_offset) =
+                        object_stream_offset(parsed, stream_object)?;
+                    let available = source.byte_length().get().checked_sub(stream_offset)?;
+                    let length = budget
+                        .available_after_reserving(reservation.0, reservation.1)
+                        .min(available);
+                    if !budget.can_read(length) {
+                        return None;
+                    }
+                    let bytes = read_validation_range(source, budget, stream_offset, length)
+                        .await
+                        .ok()?;
+                    let resolved_length =
+                        match object_stream_declared_length(&bytes, stream_reference)? {
+                            StreamLength::Direct(_) => None,
+                            StreamLength::Indirect(length_reference) => Some((
+                                length_reference,
+                                resolve_bounded_integer_object(
+                                    source,
+                                    budget,
+                                    parsed,
+                                    length_reference,
+                                    reservation,
+                                    resolving,
+                                )
+                                .await
+                                .ok()??,
+                            )),
+                        };
+                    object_stream_object(
+                        &bytes,
+                        stream_reference,
+                        reference,
+                        index,
+                        MAX_OBJECT_STREAM_BYTES,
+                        resolved_length,
+                    )
+                    .and_then(|object| parse_integer_object_value(&object))
+                }
+            }
+        }
+        .await;
+        resolving.remove(&reference);
+        Ok(result)
+    })
 }
 
 fn decode_pdf_stream(
@@ -3686,5 +3786,199 @@ mod tests {
             collect_pages(&document),
             Err(PageCollectionError::Limit)
         ));
+    }
+    #[test]
+    fn newest_size_bounds_merged_xrefs() {
+        let mut b = b"%PDF-1.5\n".to_vec();
+        let prev = b.len();
+        b.extend_from_slice(b"xref\n7 1\n0000000009 00000 n\ntrailer\n<< /Size 8 /Root 1 0 R >>\n");
+        let latest = b.len();
+        b.extend_from_slice(
+            format!(
+                "xref\n2 1\n0000000042 00000 n\ntrailer\n<< /Size 3 /Root 1 0 R /Prev {prev} >>\n"
+            )
+            .as_bytes(),
+        );
+        assert!(parse_xref_chain(&b, latest).is_none());
+    }
+
+    #[test]
+    fn compressed_pages_require_reference_kids() {
+        assert!(!pages_dictionary_is_valid(
+            b"<< /Type /Pages /Kids [1 0 R 2] /Count 2 >>"
+        ));
+        assert!(pages_dictionary_is_valid(
+            b"<< /Type /Pages /Kids [1 0 R 2 0 R] /Count 2 >>"
+        ));
+    }
+
+    #[test]
+    fn object_stream_n_requires_integer_token() {
+        let b =
+            b"5 0 obj\n<< /Type /ObjStm /N 1.0 /First 0 /Length 0 >>\nstream\n\nendstream\nendobj";
+        let r = IndirectReference {
+            object_number: 5,
+            generation: 0,
+        };
+        assert!(parse_object_stream(b, r, None).is_none());
+    }
+
+    #[test]
+    fn object_stream_first_requires_integer_token() {
+        let b =
+            b"5 0 obj\n<< /Type /ObjStm /N 1 /First 4.0 /Length 0 >>\nstream\n\nendstream\nendobj";
+        let r = IndirectReference {
+            object_number: 5,
+            generation: 0,
+        };
+        assert!(parse_object_stream(b, r, None).is_none());
+    }
+
+    fn aggregate_stream_fixture() -> (Vec<u8>, ParsedXref) {
+        let mut z = Stream::new(Dictionary::new(), vec![b'a'; MAX_OBJECT_STREAM_BYTES]);
+        z.compress().expect("compress");
+        let count = MAX_TOTAL_OBJECT_STREAM_BYTES / MAX_OBJECT_STREAM_BYTES + 1;
+        let mut b = Vec::new();
+        let mut entries = Vec::new();
+        let mut declared = BTreeSet::new();
+        for i in 0..count {
+            let stream = u64::try_from(i * 2 + 1).expect("stream");
+            let target = stream + 1;
+            let offset = u64::try_from(b.len()).expect("offset");
+            b.extend_from_slice(format!("{stream} 0 obj\n<< /Type /ObjStm /N 1 /First 0 /Length {} /Filter /FlateDecode >>\nstream\n",z.content.len()).as_bytes());
+            b.extend_from_slice(&z.content);
+            b.extend_from_slice(b"\nendstream\nendobj\n");
+            entries.push(LiveXrefEntry {
+                reference: IndirectReference {
+                    object_number: stream,
+                    generation: 0,
+                },
+                location: XrefLocation::Uncompressed(offset),
+            });
+            entries.push(LiveXrefEntry {
+                reference: IndirectReference {
+                    object_number: target,
+                    generation: 0,
+                },
+                location: XrefLocation::Compressed {
+                    stream_object: stream,
+                    index: 0,
+                },
+            });
+            declared.insert(stream);
+            declared.insert(target);
+        }
+        (
+            b,
+            ParsedXref {
+                facts: TrailerFacts::default(),
+                live_entries: entries,
+                declared_objects: declared,
+                object_limit_exceeded: false,
+            },
+        )
+    }
+
+    #[test]
+    fn complete_preflight_bounds_aggregate_stream_expansion() {
+        let (b, p) = aggregate_stream_fixture();
+        assert!(!object_streams_fit_expansion_limit(&b, &p).expect("preflight"));
+    }
+
+    struct UnitSource {
+        bytes: Vec<u8>,
+        length: NonZeroU64,
+    }
+    impl UnitSource {
+        fn new(bytes: Vec<u8>) -> Self {
+            let length =
+                NonZeroU64::new(u64::try_from(bytes.len()).expect("length")).expect("nonempty");
+            Self { bytes, length }
+        }
+    }
+    impl VerifiedBlobSource for UnitSource {
+        fn digest(&self) -> signalbox_file_media_runtime::FileDigest {
+            signalbox_file_media_runtime::FileDigest::from_bytes([0x50; 32])
+        }
+        fn byte_length(&self) -> NonZeroU64 {
+            self.length
+        }
+        fn read_range(
+            &self,
+            o: u64,
+            l: NonZeroU64,
+        ) -> signalbox_file_media_runtime::SourceReadFuture<'_> {
+            let value = usize::try_from(o)
+                .ok()
+                .and_then(|s| {
+                    usize::try_from(l.get())
+                        .ok()
+                        .and_then(|n| s.checked_add(n).map(|e| (s, e)))
+                })
+                .and_then(|(s, e)| self.bytes.get(s..e).map(<[u8]>::to_vec))
+                .ok_or(signalbox_file_media_runtime::SourceReadError::RangeOutOfBounds);
+            Box::pin(async move { value })
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_resolves_compressed_stream_length() {
+        let holder=b"9 0 obj\n<< /Type /ObjStm /N 1 /First 5 /Length 6 >>\nstream\n20 0 6\nendstream\nendobj\n";
+        let offset = u64::try_from(holder.len()).expect("offset");
+        let target=b"5 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length 20 0 R >>\nstream\n7 0 x!\nendstream\nendobj";
+        let mut bytes = holder.to_vec();
+        bytes.extend_from_slice(target);
+        let source = UnitSource::new(bytes);
+        let entries = vec![
+            LiveXrefEntry {
+                reference: IndirectReference {
+                    object_number: 9,
+                    generation: 0,
+                },
+                location: XrefLocation::Uncompressed(0),
+            },
+            LiveXrefEntry {
+                reference: IndirectReference {
+                    object_number: 20,
+                    generation: 0,
+                },
+                location: XrefLocation::Compressed {
+                    stream_object: 9,
+                    index: 0,
+                },
+            },
+            LiveXrefEntry {
+                reference: IndirectReference {
+                    object_number: 5,
+                    generation: 0,
+                },
+                location: XrefLocation::Uncompressed(offset),
+            },
+        ];
+        let parsed = ParsedXref {
+            facts: TrailerFacts::default(),
+            live_entries: entries,
+            declared_objects: BTreeSet::from([5, 9, 20]),
+            object_limit_exceeded: false,
+        };
+        let mut budget = ValidationBudget::new(source.byte_length().get(), 4);
+        let stream = IndirectReference {
+            object_number: 5,
+            generation: 0,
+        };
+        let got =
+            resolve_object_stream_length(&source, &mut budget, &parsed, target, stream, (0, 0))
+                .await
+                .expect("resolve");
+        assert_eq!(
+            got,
+            Some((
+                IndirectReference {
+                    object_number: 20,
+                    generation: 0
+                },
+                6
+            ))
+        );
     }
 }
