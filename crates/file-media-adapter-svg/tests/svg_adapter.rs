@@ -217,6 +217,43 @@ async fn invalid_utf8_is_a_typed_malformed_inspection() -> Result<(), Box<dyn Er
 }
 
 #[tokio::test]
+async fn forbidden_xml_character_in_ordinary_text_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(b"<svg xmlns=\"http://www.w3.org/2000/svg\"><text>a\x01b</text></svg>",),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn utf16_little_endian_svg_is_accepted() -> Result<(), Box<dyn Error>> {
+    let xml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?><svg xmlns=\"http://www.w3.org/2000/svg\"><text>ok</text></svg>";
+    let mut bytes = vec![0xff, 0xfe];
+    bytes.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
+    let source = SvgFixture::raw(&bytes).into_source()?;
+
+    assert_eq!(
+        inspect(&DirectProcessor::new(), &source).await?.status(),
+        FileInspectionStatus::Validated
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn utf16_big_endian_svg_is_accepted() -> Result<(), Box<dyn Error>> {
+    let xml = "<?xml version=\"1.0\" encoding=\"UTF-16BE\"?><svg xmlns=\"http://www.w3.org/2000/svg\"><text>ok</text></svg>";
+    let mut bytes = vec![0xfe, 0xff];
+    bytes.extend(xml.encode_utf16().flat_map(u16::to_be_bytes));
+    let source = SvgFixture::raw(&bytes).into_source()?;
+
+    assert_eq!(
+        inspect(&DirectProcessor::new(), &source).await?.status(),
+        FileInspectionStatus::Validated
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn entity_expansion_shape_is_rejected_before_expansion() -> Result<(), Box<dyn Error>> {
     assert_malformed!(SvgFixture::entity_bomb(), "malformed_svg").await
 }

@@ -273,10 +273,20 @@ enum ProbeRoot {
     Other,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum XmlEncoding {
+    Utf8,
+    Utf16Le,
+    Utf16Be,
+}
+
 fn probe_root(bytes: &[u8]) -> ProbeRoot {
-    let mut reader = NsReader::from_reader(bytes);
+    let Ok((document, source_encoding)) = decode_xml(bytes) else {
+        return ProbeRoot::Other;
+    };
+    let mut reader = NsReader::from_reader(document.as_bytes());
     let mut buffer = Vec::new();
-    let mut declaration_is_utf8 = true;
+    let mut declaration_matches_source = true;
     let mut forbidden_prolog_event = false;
     let mut active_prolog_event = false;
     loop {
@@ -287,14 +297,15 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
                 }
                 return if active_prolog_event {
                     ProbeRoot::ActiveSvg
-                } else if declaration_is_utf8 && !forbidden_prolog_event {
+                } else if declaration_matches_source && !forbidden_prolog_event {
                     ProbeRoot::Svg
                 } else {
                     ProbeRoot::MalformedSvg
                 };
             }
             Ok((_, Event::Decl(declaration))) => {
-                declaration_is_utf8 = declaration_uses_utf8(&declaration).unwrap_or(false);
+                declaration_matches_source =
+                    declaration_matches_encoding(&declaration, source_encoding).unwrap_or(false);
             }
             Ok((_, Event::PI(instruction))) => {
                 if instruction
@@ -326,8 +337,8 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
 }
 
 fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
-    std::str::from_utf8(bytes).map_err(|_| ParseIssue::Malformed)?;
-    let mut reader = NsReader::from_reader(bytes);
+    let (document, source_encoding) = decode_xml(bytes)?;
+    let mut reader = NsReader::from_reader(document.as_bytes());
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
     let mut parsed = ParsedSvg {
@@ -426,6 +437,9 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     return Err(ParseIssue::Malformed);
                 }
                 let decoded = text.xml10_content().map_err(|_| ParseIssue::Malformed)?;
+                if !has_only_xml10_characters(&decoded) {
+                    return Err(ParseIssue::Malformed);
+                }
                 if depth == 0 && !is_xml_whitespace(&decoded) {
                     if root_seen {
                         return Err(ParseIssue::Malformed);
@@ -460,7 +474,7 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
             }
             Event::Decl(declaration) if !root_seen && !declaration_seen && !prolog_event_seen => {
                 declaration_seen = true;
-                validate_declaration(&declaration)?;
+                validate_declaration(&declaration, source_encoding)?;
             }
             Event::Comment(comment) => {
                 let decoded = comment.xml10_content().map_err(|_| ParseIssue::Malformed)?;
@@ -1057,16 +1071,21 @@ fn empty_options(options: &serde_json::Value) -> bool {
     options.as_object().is_some_and(serde_json::Map::is_empty)
 }
 
-fn declaration_uses_utf8(declaration: &BytesDecl<'_>) -> Result<bool, ()> {
+fn declaration_matches_encoding(
+    declaration: &BytesDecl<'_>,
+    source_encoding: XmlEncoding,
+) -> Result<bool, ()> {
     match declaration.encoding() {
-        None => Ok(true),
-        Some(Ok(encoding)) => Ok(encoding.as_ref().eq_ignore_ascii_case(b"utf-8")
-            || encoding.as_ref().eq_ignore_ascii_case(b"utf8")),
+        None => Ok(source_encoding == XmlEncoding::Utf8),
+        Some(Ok(encoding)) => Ok(encoding_matches_source(encoding.as_ref(), source_encoding)),
         Some(Err(_)) => Err(()),
     }
 }
 
-fn validate_declaration(declaration: &BytesDecl<'_>) -> Result<(), ParseIssue> {
+fn validate_declaration(
+    declaration: &BytesDecl<'_>,
+    source_encoding: XmlEncoding,
+) -> Result<(), ParseIssue> {
     let mut input = declaration.as_ref();
     input = input.strip_prefix(b"xml").ok_or(ParseIssue::Malformed)?;
     if !input
@@ -1120,7 +1139,7 @@ fn validate_declaration(declaration: &BytesDecl<'_>) -> Result<(), ParseIssue> {
     if let Some((name, encoding)) = attributes.get(index)
         && *name == b"encoding"
     {
-        if !encoding.eq_ignore_ascii_case(b"utf-8") && !encoding.eq_ignore_ascii_case(b"utf8") {
+        if !encoding_matches_source(encoding, source_encoding) {
             return Err(ParseIssue::Malformed);
         }
         index += 1;
@@ -1135,6 +1154,55 @@ fn validate_declaration(declaration: &BytesDecl<'_>) -> Result<(), ParseIssue> {
         return Err(ParseIssue::Malformed);
     }
     Ok(())
+}
+
+fn encoding_matches_source(declared: &[u8], source: XmlEncoding) -> bool {
+    match source {
+        XmlEncoding::Utf8 => {
+            declared.eq_ignore_ascii_case(b"utf-8") || declared.eq_ignore_ascii_case(b"utf8")
+        }
+        XmlEncoding::Utf16Le => {
+            declared.eq_ignore_ascii_case(b"utf-16") || declared.eq_ignore_ascii_case(b"utf-16le")
+        }
+        XmlEncoding::Utf16Be => {
+            declared.eq_ignore_ascii_case(b"utf-16") || declared.eq_ignore_ascii_case(b"utf-16be")
+        }
+    }
+}
+
+fn decode_xml(bytes: &[u8]) -> Result<(Cow<'_, str>, XmlEncoding), ParseIssue> {
+    let (encoding, payload) = if let Some(payload) = bytes.strip_prefix(&[0xff, 0xfe]) {
+        (XmlEncoding::Utf16Le, payload)
+    } else if let Some(payload) = bytes.strip_prefix(&[0xfe, 0xff]) {
+        (XmlEncoding::Utf16Be, payload)
+    } else if bytes.starts_with(&[0x3c, 0x00, 0x3f, 0x00]) {
+        (XmlEncoding::Utf16Le, bytes)
+    } else if bytes.starts_with(&[0x00, 0x3c, 0x00, 0x3f]) {
+        (XmlEncoding::Utf16Be, bytes)
+    } else {
+        let payload = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+        let document = std::str::from_utf8(payload).map_err(|_| ParseIssue::Malformed)?;
+        return Ok((Cow::Borrowed(document), XmlEncoding::Utf8));
+    };
+    if payload.len() % 2 != 0 {
+        return Err(ParseIssue::Malformed);
+    }
+    let little_endian = match encoding {
+        XmlEncoding::Utf16Le => true,
+        XmlEncoding::Utf16Be => false,
+        XmlEncoding::Utf8 => return Err(ParseIssue::Malformed),
+    };
+    let units = payload.chunks_exact(2).map(|pair| {
+        if little_endian {
+            u16::from_le_bytes([pair[0], pair[1]])
+        } else {
+            u16::from_be_bytes([pair[0], pair[1]])
+        }
+    });
+    let document: String = char::decode_utf16(units)
+        .collect::<Result<_, _>>()
+        .map_err(|_| ParseIssue::Malformed)?;
+    Ok((Cow::Owned(document), encoding))
 }
 
 fn trim_ascii_start(mut input: &[u8]) -> &[u8] {
