@@ -51,80 +51,40 @@ impl VerifiedBlobSource for BytesSource {
     }
 }
 
-/// INV-074: registered processors require the real accepted sandbox profile.
+/// INV-081: registered processors require the real accepted sandbox profile.
 #[tokio::test]
-async fn inv074_real_worker_has_the_accepted_isolation_profile() -> Result<(), Box<dyn Error>> {
-    real_worker_profile_scenario().await
-}
-
-/// INV-075: worker source reads pass only through the daemon's bounded broker.
-#[tokio::test]
-async fn inv075_worker_can_read_only_through_the_bounded_broker() -> Result<(), Box<dyn Error>> {
-    bounded_broker_scenario().await
-}
-
-/// INV-076: an incomplete result from a crashed worker is never admitted.
-#[tokio::test]
-async fn inv076_worker_crash_discards_its_incomplete_result() -> Result<(), Box<dyn Error>> {
-    worker_crash_scenario().await
-}
-
-/// INV-077: the daemon wall deadline terminates work without content leakage.
-#[tokio::test]
-async fn inv077_worker_wall_timeout_is_a_content_silent_failure() -> Result<(), Box<dyn Error>> {
-    worker_timeout_scenario().await
-}
-
-/// INV-078: workers may create threads but cannot create descendant processes.
-#[tokio::test]
-async fn inv078_worker_process_creation_is_denied_without_blocking_threads()
--> Result<(), Box<dyn Error>> {
-    worker_descendant_scenario().await
-}
-
-/// INV-079: injection-shaped worker output is sanitized before registry use.
-#[tokio::test]
-async fn inv079_hostile_worker_output_never_propagates() -> Result<(), Box<dyn Error>> {
-    hostile_worker_output_scenario().await
-}
-
-/// INV-080: authoritative cancellation terminates in-flight worker processing.
-#[tokio::test]
-async fn inv080_authoritative_cancellation_terminates_the_worker() -> Result<(), Box<dyn Error>> {
-    worker_cancellation_scenario().await
-}
-
-async fn real_worker_profile_scenario() -> Result<(), Box<dyn Error>> {
-    let Some((processor, _)) = available_processor(FileMediaProcessCeilings::version_one()).await?
-    else {
-        return Ok(());
-    };
-    assert_eq!(
-        processor.verify_isolation().await,
-        ProcessorIsolation::Available
-    );
-    Ok(())
-}
-
-async fn bounded_broker_scenario() -> Result<(), Box<dyn Error>> {
-    let Some((processor, reader)) =
-        available_processor(FileMediaProcessCeilings::version_one()).await?
-    else {
-        return Ok(());
-    };
+#[ignore = "requires the delegated real file-media sandbox profile"]
+async fn inv081_real_worker_has_the_accepted_isolation_profile() -> Result<(), Box<dyn Error>> {
+    let (processor, reader) = available_processor(FileMediaProcessCeilings::version_one()).await?;
     let output = processor
-        .probe(&reader, &BytesSource(vec![b'V']), &NeverCancelled)
+        .probe(&reader, &BytesSource(vec![b'I']), &NeverCancelled)
         .await?;
     assert_eq!(output, successful_probe());
     Ok(())
 }
 
-async fn worker_crash_scenario() -> Result<(), Box<dyn Error>> {
-    let Some((processor, reader)) =
-        available_processor(FileMediaProcessCeilings::version_one()).await?
-    else {
-        return Ok(());
-    };
+/// INV-082: worker source reads pass only through the daemon's bounded broker.
+#[tokio::test]
+#[ignore = "requires the delegated real file-media sandbox profile"]
+async fn inv082_worker_can_read_only_through_the_bounded_broker() -> Result<(), Box<dyn Error>> {
+    let (processor, reader) = available_processor(FileMediaProcessCeilings::version_one()).await?;
+    let output = processor
+        .probe(&reader, &BytesSource(vec![b'V']), &NeverCancelled)
+        .await;
+    assert_eq!(
+        output,
+        Err(ProcessorBoundaryFailure::Processor(
+            ProcessorFailure::Protocol
+        ))
+    );
+    Ok(())
+}
+
+/// INV-083: an incomplete result from a crashed worker is never admitted.
+#[tokio::test]
+#[ignore = "requires the delegated real file-media sandbox profile"]
+async fn inv083_worker_crash_discards_its_incomplete_result() -> Result<(), Box<dyn Error>> {
+    let (processor, reader) = available_processor(FileMediaProcessCeilings::version_one()).await?;
     let output = processor
         .probe(&reader, &BytesSource(vec![b'C']), &NeverCancelled)
         .await;
@@ -137,7 +97,10 @@ async fn worker_crash_scenario() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn worker_timeout_scenario() -> Result<(), Box<dyn Error>> {
+/// INV-084: the daemon wall deadline terminates work without content leakage.
+#[tokio::test]
+#[ignore = "requires the delegated real file-media sandbox profile"]
+async fn inv084_worker_wall_timeout_is_a_content_silent_failure() -> Result<(), Box<dyn Error>> {
     let ceilings = FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
         memory_bytes: 512 * 1024 * 1024,
         cpu_seconds: 60,
@@ -146,9 +109,7 @@ async fn worker_timeout_scenario() -> Result<(), Box<dyn Error>> {
         stderr_bytes: 16_384,
     })
     .ok_or("lowered test ceilings must be valid")?;
-    let Some((processor, reader)) = available_processor(ceilings).await? else {
-        return Ok(());
-    };
+    let (processor, reader) = available_processor(ceilings).await?;
     let output = processor
         .probe(&reader, &BytesSource(vec![b'T']), &NeverCancelled)
         .await;
@@ -161,12 +122,12 @@ async fn worker_timeout_scenario() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn worker_descendant_scenario() -> Result<(), Box<dyn Error>> {
-    let Some((processor, reader)) =
-        available_processor(FileMediaProcessCeilings::version_one()).await?
-    else {
-        return Ok(());
-    };
+/// INV-085: workers may create threads but cannot create descendant processes.
+#[tokio::test]
+#[ignore = "requires the delegated real file-media sandbox profile"]
+async fn inv085_worker_process_creation_is_denied_without_blocking_threads()
+-> Result<(), Box<dyn Error>> {
+    let (processor, reader) = available_processor(FileMediaProcessCeilings::version_one()).await?;
     let output = processor
         .probe(&reader, &BytesSource(vec![b'X']), &NeverCancelled)
         .await?;
@@ -174,11 +135,11 @@ async fn worker_descendant_scenario() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn hostile_worker_output_scenario() -> Result<(), Box<dyn Error>> {
-    let Some((processor, _)) = available_processor(FileMediaProcessCeilings::version_one()).await?
-    else {
-        return Ok(());
-    };
+/// INV-086: injection-shaped worker output is sanitized before registry use.
+#[tokio::test]
+#[ignore = "requires the delegated real file-media sandbox profile"]
+async fn inv086_hostile_worker_output_never_propagates() -> Result<(), Box<dyn Error>> {
+    let (processor, _) = available_processor(FileMediaProcessCeilings::version_one()).await?;
     let source = BytesSource(vec![b'H']);
     let registry = FileMediaRegistry::try_new(
         processor_declarations()?,
@@ -202,12 +163,11 @@ async fn hostile_worker_output_scenario() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn worker_cancellation_scenario() -> Result<(), Box<dyn Error>> {
-    let Some((processor, reader)) =
-        available_processor(FileMediaProcessCeilings::version_one()).await?
-    else {
-        return Ok(());
-    };
+/// INV-087: authoritative cancellation terminates in-flight worker processing.
+#[tokio::test]
+#[ignore = "requires the delegated real file-media sandbox profile"]
+async fn inv087_authoritative_cancellation_terminates_the_worker() -> Result<(), Box<dyn Error>> {
+    let (processor, reader) = available_processor(FileMediaProcessCeilings::version_one()).await?;
     let cancellation = Arc::new(TestCancellation::default());
     let trigger = Arc::clone(&cancellation);
     let cancellation_task = tokio::spawn(async move {
@@ -229,15 +189,12 @@ async fn worker_cancellation_scenario() -> Result<(), Box<dyn Error>> {
 
 async fn available_processor(
     ceilings: FileMediaProcessCeilings,
-) -> Result<Option<(SandboxedFileMediaProcessor, ReaderIdentity)>, Box<dyn Error>> {
+) -> Result<(SandboxedFileMediaProcessor, ReaderIdentity), Box<dyn Error>> {
     let built = processor(ceilings)?;
     if built.0.verify_isolation().await == ProcessorIsolation::Available {
-        return Ok(Some(built));
+        return Ok(built);
     }
-    if std::env::var_os("CI").is_some() {
-        return Err("CI requires the real file-media sandbox profile".into());
-    }
-    Ok(None)
+    Err("the real file-media sandbox profile is unavailable".into())
 }
 
 fn successful_probe() -> ProcessorProbeOutput {
@@ -269,7 +226,7 @@ fn declaration() -> Result<(FileMediaProviderDeclaration, ReaderIdentity), Box<d
         ReadViewName::try_new("text")?,
         String::from("Reads synthetic text."),
         CanonicalJsonObjectSchema::try_new(r#"{"type":"object"}"#)?,
-        ReadAccessPattern::Streaming,
+        ReadAccessPattern::Streaming { maximum_ranges: 1 },
         ReadViewBounds::Text {
             source_bytes: 64,
             output_bytes: 64,

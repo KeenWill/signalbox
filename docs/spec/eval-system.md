@@ -4,10 +4,11 @@
 [program substrate](program-substrate.md): what an evaluation is, how its
 corpus, expectations, trials, and stages are recorded, and how evaluation
 traffic stays unmistakably separate from production traffic. The entire surface
-below is committed ahead of code as Stage 0 of the substrate build, verified
-against PR #580 (`agent/program-substrate-spec`). Execution, registration,
-journaling, and replay are owned by the substrate page and not restated here;
-model scoring is ordinary session traffic owned by
+below other than the explicitly implemented standalone approval-judge harness is
+committed ahead of code as Stage 0. Stage 0 was verified through PR #580
+(`agent/program-substrate-spec`). Execution, registration, journaling, and
+replay are owned by the substrate page and not restated here; model scoring is
+ordinary session traffic owned by
 [model-call execution](model-call-execution.md); the sandboxed process boundary
 for stage executors is owned by [tool loop](tool-loop.md)'s execution surface.
 
@@ -42,6 +43,34 @@ decision this page does not commit.
 
 ## Corpus and expectations
 
+### Standalone approval-judge harness
+
+The implemented `signalbox-approval-judge-eval` workspace crate is the temporary
+standalone evaluation surface for the current three-disposition approval judge,
+verified against this PR (`agent/judge-evals-harness`). Its version-one JSON
+corpus carries each synthetic tool request and frozen authority context; valid
+JSON argument text is normalized by the daemon renderer before judging. It also
+carries an expected `approve`, `deny`, or `escalate_to_human` disposition and
+nonempty free-text label provenance. Its replay uses the daemon's current
+approval-judge prompt, request renderer, structured output contract, and
+decision decoder without entering the daemon's durable decision path. The
+library reports every case verdict, exact-match accuracy, and one-vs-rest
+precision and recall for every disposition; a rate whose denominator is zero has
+no decimal value and retains its zero denominator.
+
+The operator entry point is offline: it consumes a corpus and ordered recorded
+responses, feeds those responses through the repository's deterministic scripted
+model adapter, and emits the scorecard as JSON. Each recorded response names
+both its case id and a fingerprint of the rendered request identity it was
+recorded against — SHA-256 in lowercase hexadecimal over one JSON object with
+bytewise-sorted keys and no insignificant whitespace, covering the case id,
+every request field, and the exact judge system prompt, absent optional fields
+serialized as null — and replay rejects a response whose fingerprint does not
+match the corpus case at its position, including after a case rename or a prompt
+revision. The checked-in seed corpus and response file contain synthetic strings
+only. The existing `signalboxd` live-provider runner remains a separate
+explicitly operator-driven surface and is not part of this offline contract.
+
 **Committed unimplemented functionality.** No present surface stores evaluation
 corpora. A corpus is identified by suite name, version, and content digest; runs
 record the digest they read, and corpus content lives with its project — a
@@ -69,16 +98,16 @@ nothing may become load-bearing about its in-tree location. Per the pre-alpha
 rule in `AGENTS.md`, no compatibility machinery attends any of this: corpus
 formats and storage may change freely until first durable deployment.
 
-**Committed unimplemented functionality.** No present surface checks
-expectations. Expectations are one typed grammar over three check kinds —
-closed-vocabulary labels, typed numeric constraints (exact-within-tolerance,
-range, count, boolean), and reference-artifact comparisons by named continuous
-metric with thresholds — declared per case, each check optional. A case with a
-missing reference degrades that check to `unmeasured` and never loses its row. A
-reference artifact is an immutable blob a case pins by digest under the contract
-[blob storage](blob-storage.md) owns; no named-artifact aggregate is required —
-mutable aliases, producer provenance, and ownership above a blob remain the open
-aggregate question recorded in
+**Committed unimplemented functionality.** No present general substrate surface
+checks the expectation grammar described below. That grammar spans three check
+kinds — closed-vocabulary labels, typed numeric constraints
+(exact-within-tolerance, range, count, boolean), and reference-artifact
+comparisons by named continuous metric with thresholds — declared per case, each
+check optional. A case with a missing reference degrades that check to
+`unmeasured` and never loses its row. A reference artifact is an immutable blob
+a case pins by digest under the contract [blob storage](blob-storage.md) owns;
+no named-artifact aggregate is required — mutable aliases, producer provenance,
+and ownership above a blob remain the open aggregate question recorded in
 [open-questions](../open-questions.md#general-purpose-artifacts), and nothing in
 this grammar depends on it.
 
@@ -152,5 +181,7 @@ judge-specific recording surface in a way that outlives it.
 
 ## Open edges
 
+- Graded approval-judge corpus governance and promotion evaluation:
+  [open-questions](../open-questions.md#graded-approval-judging).
 - Evaluation exporters toward external trackers:
   [open-questions](../open-questions.md#program-substrate-and-evaluations).
