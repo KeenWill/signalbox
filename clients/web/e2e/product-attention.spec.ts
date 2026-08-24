@@ -219,6 +219,20 @@ const installNewerHttpSnapshotScenario = async (page: Page) => {
   })
 }
 
+const installDivergentEqualCursorHttpScenario = async (page: Page) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      body: `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n`,
+      contentType: 'application/x-ndjson',
+    }),
+  )
+  await page.route('**/api/attention', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    await route.fulfill({ json: nextAttentionFixture })
+  })
+}
+
 const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
   test.skip(
     testInfo.project.name !== 'chromium' || process.platform !== 'linux',
@@ -346,6 +360,18 @@ test('keeps a newer HTTP snapshot than an in-flight follower snapshot', async ({
   await expect(page.getByText(idleSessionId)).toBeVisible()
   await expect(page.getByText(approvalSessionId)).toBeHidden()
   await expect(page.getByText('cursor 43')).toBeVisible()
+})
+
+test('rejects a divergent equal-cursor HTTP snapshot after the follower starts', async ({
+  page,
+}) => {
+  await installDivergentEqualCursorHttpScenario(page)
+  await page.goto('/attention')
+
+  await expect(page.getByRole('heading', { name: 'Attention could not be read' })).toBeVisible()
+  await expect(
+    page.getByText('The response did not match the generated web contract.'),
+  ).toBeVisible()
 })
 
 test('captures the dark attention fleet', async ({ page }, testInfo) => {

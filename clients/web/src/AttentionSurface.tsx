@@ -63,6 +63,12 @@ export function AttentionSurface({
       if (after !== null || latestProjection === projectionAtStart || !latestProjection) {
         return snapshot
       }
+      if (
+        latestProjection.cursor === snapshot.cursor &&
+        !snapshotsMatch(latestProjection, snapshot)
+      ) {
+        throw new TypeError('attention projections diverged at the same cursor')
+      }
       return BigInt(latestProjection.cursor) > BigInt(snapshot.cursor) ? latestProjection : snapshot
     },
     gcTime: 0,

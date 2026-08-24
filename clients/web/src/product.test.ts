@@ -358,6 +358,28 @@ describe('SameOriginProductTransport', () => {
     })
   })
 
+  it('accepts an actionless reconciliation summary', async () => {
+    const awaitingReconciliation = {
+      ...attentionFixture.summaries[0],
+      action: null,
+      state: 'awaiting_reconciliation',
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ ...attentionFixture, summaries: [awaitingReconciliation] }),
+          ),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).resolves.toEqual({
+      ...attentionFixture,
+      summaries: [awaitingReconciliation],
+    })
+  })
+
   it('rejects a blocked summary without goal-block evidence', async () => {
     const blockedWithoutEvidence = {
       ...attentionFixture.summaries[0],

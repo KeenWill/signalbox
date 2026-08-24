@@ -65,7 +65,9 @@ test('opens the product at Attention with generated-contract transport status', 
 
   await expect(page).toHaveURL(/\/attention$/)
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
+  await expect(page).toHaveTitle('Attention · Signalbox')
   await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
+  await expect(page.getByRole('status')).toHaveAttribute('aria-live', 'polite')
   await expect(page.getByRole('link', { name: /Attention/ })).toHaveAttribute(
     'aria-current',
     'page',
@@ -81,7 +83,37 @@ test('navigates from Attention to Sessions with the shared semantic link', async
   await page.getByRole('link', { name: /Sessions/ }).click()
   await expect(page).toHaveURL(/\/sessions$/)
   await expect(page.getByRole('heading', { name: 'Sessions', level: 1 })).toBeVisible()
+  await expect(page).toHaveTitle('Sessions · Signalbox')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('presents Settings as browser-local authority', async ({ page }) => {
+  await useDeterministicProductTransport(page)
+  await page.goto('/settings')
+
+  await expect(
+    page.getByRole('heading', { name: 'Workspace preferences are stored in this browser' }),
+  ).toBeVisible()
+  const inspector = page.getByRole('complementary', { name: 'Inspector' })
+  await expect(inspector.getByText('Browser', { exact: true })).toBeVisible()
+  await expect(inspector.getByText('Local preferences', { exact: true })).toBeVisible()
+  await expect(page).toHaveTitle('Settings · Signalbox')
+})
+
+test('clears scenario keyboard help when history returns to the product', async ({ page }) => {
+  await useDeterministicProductTransport(page)
+  await page.goto('/attention')
+  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /Open keyboard help/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+
+  await page.goBack()
+  await expect(page).toHaveURL(/\/attention$/)
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+
+  await expect(page).toHaveURL(/\/sessions$/)
 })
 
 test('completes route switching from the command palette without a mouse', async ({ page }) => {

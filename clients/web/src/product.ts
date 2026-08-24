@@ -66,8 +66,8 @@ const validateAttentionSummary = (summary: AttentionSummary): void => {
       case 'awaiting_approval':
         return summary.action === null || summary.action === undefined ? null : 'decide_approval'
       case 'ambiguous':
-      case 'awaiting_reconciliation':
         return 'reconcile_turn'
+      case 'awaiting_reconciliation':
       case 'runner_lost':
       case 'awaiting_tool_recovery':
         return null

@@ -243,6 +243,22 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   )
 }
 
+function SettingsSurface() {
+  return (
+    <div className="surface-body">
+      <section className="surface-empty" aria-labelledby="settings-authority-heading">
+        <div>
+          <h2 id="settings-authority-heading">Workspace preferences are stored in this browser</h2>
+          <p>
+            Theme, density, and layout remain browser-local. Signalbox does not attribute these
+            presentation choices to daemon authority.
+          </p>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function ProductToolbar({ context }: { context: CommandContext }) {
   const app = useAppSelector(selectApp)
   return (
@@ -342,6 +358,14 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   }, [app.density, app.theme])
 
   useEffect(() => {
+    document.title = `${surfaceCopy[surface].title} · Signalbox`
+  }, [surface])
+
+  useEffect(() => {
+    if (app.overlay === 'help') dispatch(actions.overlaySet(null))
+  }, [app.overlay, dispatch])
+
+  useEffect(() => {
     if (!focusAfterBootstrapRecovery || !bootstrap.isSuccess) return
     setFocusAfterBootstrapRecovery(false)
     const frame = requestAnimationFrame(() => primaryRef.current?.focus())
@@ -378,6 +402,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           )}
         </div>
       </section>
+    ) : surface === 'settings' ? (
+      <SettingsSurface />
     ) : surface === 'sessions' ? (
       <SessionsSurface />
     ) : (
@@ -401,6 +427,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           <p>{copy.question}</p>
           <span
             className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
+            role="status"
+            aria-live="polite"
           >
             {bootstrap.isSuccess
               ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
@@ -425,11 +453,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             </div>
             <div>
               <dt>Authority</dt>
-              <dd>Daemon</dd>
+              <dd>{surface === 'settings' ? 'Browser' : 'Daemon'}</dd>
             </div>
             <div>
               <dt>Cache</dt>
-              <dd>Bounded query</dd>
+              <dd>{surface === 'settings' ? 'Local preferences' : 'Bounded query'}</dd>
             </div>
           </dl>
         </aside>
