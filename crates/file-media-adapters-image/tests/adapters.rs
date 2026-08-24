@@ -11,7 +11,8 @@ use support::{DirectProcessor, MemorySource};
 async fn png_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>> {
     let format = FixtureFormat::Png;
     let source = MemorySource::new(fixtures::valid(format)?);
-    let expected = serde_json::json!({"channels": 4, "height": 2, "width": 3});
+    let (width, height) = fixtures::valid_dimensions();
+    let expected = serde_json::json!({"channels": 4, "height": height, "width": width});
 
     let inspection = support::inspect(&source, "image/png").await?;
     support::assert_validated_media(inspection, "image/png");
@@ -24,7 +25,8 @@ async fn png_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>
 async fn jpeg_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>> {
     let format = FixtureFormat::Jpeg;
     let source = MemorySource::new(fixtures::valid(format)?);
-    let expected = serde_json::json!({"channels": 3, "height": 2, "width": 3});
+    let (width, height) = fixtures::valid_dimensions();
+    let expected = serde_json::json!({"channels": 3, "height": height, "width": width});
 
     let inspection = support::inspect(&source, "image/jpeg").await?;
     support::assert_validated_media(inspection, "image/jpeg");
@@ -37,7 +39,8 @@ async fn jpeg_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error
 async fn webp_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>> {
     let format = FixtureFormat::WebP;
     let source = MemorySource::new(fixtures::valid(format)?);
-    let expected = serde_json::json!({"channels": 4, "height": 2, "width": 3});
+    let (width, height) = fixtures::valid_dimensions();
+    let expected = serde_json::json!({"channels": 4, "height": height, "width": width});
 
     let inspection = support::inspect(&source, "image/webp").await?;
     support::assert_validated_media(inspection, "image/webp");
@@ -50,7 +53,8 @@ async fn webp_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error
 async fn gif_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>> {
     let format = FixtureFormat::Gif;
     let source = MemorySource::new(fixtures::valid(format)?);
-    let expected = serde_json::json!({"channels": 4, "height": 2, "width": 3});
+    let (width, height) = fixtures::valid_dimensions();
+    let expected = serde_json::json!({"channels": 4, "height": height, "width": width});
 
     let inspection = support::inspect(&source, "image/gif").await?;
     support::assert_validated_media(inspection, "image/gif");

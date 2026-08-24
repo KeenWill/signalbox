@@ -2,6 +2,9 @@ use std::{error::Error, io::Cursor};
 
 use image::{DynamicImage, ImageBuffer, ImageError, ImageFormat, Rgba};
 
+const VALID_WIDTH: u32 = 3;
+const VALID_HEIGHT: u32 = 2;
+
 #[derive(Clone, Copy)]
 pub(crate) enum FixtureFormat {
     Png,
@@ -31,7 +34,11 @@ impl FixtureFormat {
 }
 
 pub(crate) fn valid(format: FixtureFormat) -> Result<Vec<u8>, ImageError> {
-    encode(format, 3, 2)
+    encode(format, VALID_WIDTH, VALID_HEIGHT)
+}
+
+pub(crate) const fn valid_dimensions() -> (u32, u32) {
+    (VALID_WIDTH, VALID_HEIGHT)
 }
 
 pub(crate) fn truncated(format: FixtureFormat) -> Result<Vec<u8>, ImageError> {
