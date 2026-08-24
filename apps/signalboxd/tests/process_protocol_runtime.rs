@@ -5,7 +5,7 @@
 )]
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     error::Error,
     fs,
     future::{Future, pending},
@@ -572,22 +572,74 @@ async fn create_imported_session(pool: &PgPool) -> Result<CanonicalUuid, Box<dyn
 #[derive(Clone, Debug)]
 struct ReconciliationWitness {
     completed_cycles: Arc<AtomicUsize>,
+    cycle: Arc<Mutex<ReconciliationCycle>>,
+}
+
+#[derive(Debug, Default)]
+struct ReconciliationCycle {
+    hinted_sessions: HashSet<SessionId>,
+    processed_sessions: HashSet<SessionId>,
+    final_batch_seen: bool,
 }
 
 impl ReconciliationWitness {
     fn new() -> Self {
         Self {
             completed_cycles: Arc::new(AtomicUsize::new(0)),
+            cycle: Arc::new(Mutex::new(ReconciliationCycle::default())),
         }
     }
 
-    fn record_completed_cycle(&self) {
-        self.completed_cycles.fetch_add(1, Ordering::SeqCst);
+    fn record_batch(&self, sessions: &[SessionId], continuation: bool) {
+        let mut cycle = self
+            .cycle
+            .lock()
+            .expect("the reconciliation witness lock is available");
+        cycle.hinted_sessions.extend(sessions.iter().copied());
+        cycle.final_batch_seen = !continuation;
+        self.complete_drained_cycle(&mut cycle);
+    }
+
+    fn record_processed_session(&self, session: SessionId) {
+        let mut cycle = self
+            .cycle
+            .lock()
+            .expect("the reconciliation witness lock is available");
+        cycle.processed_sessions.insert(session);
+        self.complete_drained_cycle(&mut cycle);
+    }
+
+    fn complete_drained_cycle(&self, cycle: &mut ReconciliationCycle) {
+        if cycle.final_batch_seen && cycle.hinted_sessions.is_subset(&cycle.processed_sessions) {
+            self.completed_cycles.fetch_add(1, Ordering::SeqCst);
+            *cycle = ReconciliationCycle::default();
+        }
     }
 
     fn completed_cycles(&self) -> usize {
         self.completed_cycles.load(Ordering::SeqCst)
     }
+}
+
+#[test]
+fn reconciliation_witness_waits_for_final_batch_hints_to_finish() {
+    let witness = ReconciliationWitness::new();
+    let session = SessionId::from_uuid(Uuid::from_u128(1));
+
+    witness.record_batch(&[session], false);
+    assert_eq!(witness.completed_cycles(), 0);
+
+    witness.record_processed_session(session);
+    assert_eq!(witness.completed_cycles(), 1);
+}
+
+#[test]
+fn reconciliation_witness_completes_an_empty_cycle_immediately() {
+    let witness = ReconciliationWitness::new();
+
+    witness.record_batch(&[], false);
+
+    assert_eq!(witness.completed_cycles(), 1);
 }
 
 struct WitnessedEligibilitySweep<Sweep> {
@@ -613,10 +665,48 @@ where
         let witness = self.witness.clone();
         async move {
             let batch = self.inner.find_sessions().await?;
-            if !batch.clone().into_parts().1 {
-                witness.record_completed_cycle();
-            }
+            let (sessions, continuation) = batch.clone().into_parts();
+            witness.record_batch(&sessions, continuation);
             Ok(batch)
+        }
+    }
+}
+
+struct WitnessedEligibilityPass<Pass> {
+    inner: Pass,
+    witness: ReconciliationWitness,
+}
+
+impl<Pass> WitnessedEligibilityPass<Pass> {
+    fn new(inner: Pass, witness: ReconciliationWitness) -> Self {
+        Self { inner, witness }
+    }
+}
+
+impl<Pass> EligibilityPass for WitnessedEligibilityPass<Pass>
+where
+    Pass: EligibilityPass + Send,
+{
+    type Error = Pass::Error;
+
+    fn failure_stage(error: &Self::Error) -> &'static str {
+        Pass::failure_stage(error)
+    }
+
+    fn failure_turn(error: &Self::Error) -> Option<TurnId> {
+        Pass::failure_turn(error)
+    }
+
+    fn run(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self.inner.run(session);
+        let witness = self.witness.clone();
+        async move {
+            let outcome = execution.await;
+            witness.record_processed_session(session);
+            outcome
         }
     }
 }
@@ -2495,6 +2585,7 @@ fn start_fleet_scheduler(
         ),
         execution,
     );
+    let pass = WitnessedEligibilityPass::new(pass, runtime.reconciliation_witness());
     let mut scheduler = SchedulerLoop::new(runtime.take_work_source(), pass);
     Ok(tokio::spawn(async move {
         scheduler.run_until(fatal.wait()).await
