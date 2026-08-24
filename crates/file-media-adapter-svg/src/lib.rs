@@ -1,4 +1,5 @@
 //! Data-only SVG interpretation inside the supervised file-media worker.
+//! Governed by `docs/spec/file-and-media.md`.
 
 use std::{borrow::Cow, collections::HashSet, error::Error, num::NonZeroU64, str::FromStr};
 
@@ -474,7 +475,13 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
             }
             Event::CData(cdata) => {
                 if depth == 0 {
-                    return Err(ParseIssue::Malformed);
+                    if root_seen {
+                        return Err(ParseIssue::Malformed);
+                    }
+                    prolog_event_seen = true;
+                    pending_prolog_issue = Some(ParseIssue::Malformed);
+                    buffer.clear();
+                    continue;
                 }
                 let decoded = cdata.xml10_content().map_err(|_| ParseIssue::Malformed)?;
                 if !has_only_xml10_characters(&decoded) {
@@ -919,6 +926,10 @@ fn is_name_character(character: char) -> bool {
 }
 
 fn parse_dimension(value: &str) -> Result<Option<f64>, ParseIssue> {
+    parse_dimension_with_sign(value, false)
+}
+
+fn parse_dimension_with_sign(value: &str, allow_negative: bool) -> Result<Option<f64>, ParseIssue> {
     let value = value.trim_matches(|character| matches!(character, ' ' | '\t' | '\n' | '\r'));
     if value.eq_ignore_ascii_case("auto") {
         return Ok(None);
@@ -926,7 +937,12 @@ fn parse_dimension(value: &str) -> Result<Option<f64>, ParseIssue> {
     if valid_css_calculation(value) {
         return Ok(None);
     }
-    if let Ok(parsed) = parse_nonnegative_finite(value) {
+    let parse_number = if allow_negative {
+        parse_finite
+    } else {
+        parse_nonnegative_finite
+    };
+    if let Ok(parsed) = parse_number(value) {
         return Ok(Some(parsed));
     }
     for unit in [
@@ -936,12 +952,12 @@ fn parse_dimension(value: &str) -> Result<Option<f64>, ParseIssue> {
         "ex", "ic", "in", "lh", "mm", "pc", "pt", "vb", "vh", "vi", "vw", "q", "%",
     ] {
         if let Some(number) = strip_ascii_case_suffix(value, unit) {
-            parse_nonnegative_finite(number)?;
+            parse_number(number)?;
             return Ok(None);
         }
     }
     if let Some(number) = strip_ascii_case_suffix(value, "px") {
-        return parse_nonnegative_finite(number).map(Some);
+        return parse_number(number).map(Some);
     }
     Err(ParseIssue::Malformed)
 }
@@ -1125,7 +1141,7 @@ impl<'a> CalculationParser<'a> {
         let Ok(token) = core::str::from_utf8(token_bytes) else {
             return None;
         };
-        parse_dimension(token).ok()?;
+        parse_dimension_with_sign(token, true).ok()?;
         Some(if self.position == unit_start {
             CalculationKind::Number
         } else {
@@ -1184,11 +1200,20 @@ fn is_xml_whitespace(value: &str) -> bool {
 }
 
 fn parse_nonnegative_finite(value: &str) -> Result<f64, ParseIssue> {
+    let parsed = parse_finite(value)?;
+    if parsed >= 0.0 {
+        Ok(parsed)
+    } else {
+        Err(ParseIssue::Malformed)
+    }
+}
+
+fn parse_finite(value: &str) -> Result<f64, ParseIssue> {
     if !valid_number_token(value) {
         return Err(ParseIssue::Malformed);
     }
     let parsed = value.parse::<f64>().map_err(|_| ParseIssue::Malformed)?;
-    if parsed.is_finite() && parsed >= 0.0 {
+    if parsed.is_finite() {
         Ok(parsed)
     } else {
         Err(ParseIssue::Malformed)
@@ -1491,7 +1516,7 @@ fn decode_xml(
         let payload = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
         let document = match std::str::from_utf8(payload) {
             Ok(document) => document,
-            Err(error) if allow_truncated_tail && error.error_len().is_none() => {
+            Err(error) if allow_truncated_tail => {
                 std::str::from_utf8(&payload[..error.valid_up_to()])
                     .map_err(|_| ParseIssue::Malformed)?
             }

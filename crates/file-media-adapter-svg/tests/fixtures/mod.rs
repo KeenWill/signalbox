@@ -1,3 +1,6 @@
+//! Test fixtures and in-memory sources for the data-only SVG adapter.
+//! Governed by `docs/spec/file-and-media.md`.
+
 use std::{error::Error, num::NonZeroU64};
 
 use signalbox_file_media_runtime::{

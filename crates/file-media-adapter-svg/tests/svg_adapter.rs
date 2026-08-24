@@ -1,3 +1,6 @@
+//! Contract tests for the data-only SVG adapter.
+//! Governed by `docs/spec/file-and-media.md`.
+
 mod fixtures;
 
 use std::error::Error;
@@ -523,6 +526,15 @@ async fn cdata_in_text_is_extracted_as_inert_text() -> Result<(), Box<dyn Error>
 }
 
 #[tokio::test]
+async fn top_level_cdata_before_non_svg_root_is_unknown() -> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(br#"<![CDATA[x]]><foo/>"#).into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
 async fn forbidden_xml_character_in_cdata_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed!(
         SvgFixture::raw(b"<svg xmlns=\"http://www.w3.org/2000/svg\"><![CDATA[a\x01b]]></svg>",),
@@ -704,6 +716,19 @@ async fn calculated_dimensions_are_valid_without_numeric_metadata() -> Result<()
 async fn calculation_products_are_valid_without_numeric_metadata() -> Result<(), Box<dyn Error>> {
     let source =
         SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(2 * 10px)"/>"#)
+            .into_source()?;
+
+    assert_eq!(
+        inspect(&DirectProcessor::new(), &source).await?.status(),
+        FileInspectionStatus::Validated
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn calculation_allows_negative_dimension_intermediates() -> Result<(), Box<dyn Error>> {
+    let source =
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(-1px + 2px)"/>"#)
             .into_source()?;
 
     assert_eq!(
@@ -1033,6 +1058,19 @@ async fn probe_accepts_root_before_truncated_utf8_character() -> Result<(), Box<
         inspect_as(&DirectProcessor::new(), &source, "application/octet-stream").await?;
 
     assert_ne!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn probe_recognizes_root_before_invalid_utf8() -> Result<(), Box<dyn Error>> {
+    let mut bytes = br#"<svg xmlns="http://www.w3.org/2000/svg">"#.to_vec();
+    bytes.push(0xff);
+    bytes.extend_from_slice(b"</svg>");
+    let source = SvgFixture::raw(&bytes).into_source()?;
+    let inspection =
+        inspect_as(&DirectProcessor::new(), &source, "application/octet-stream").await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Malformed);
     Ok(())
 }
 
