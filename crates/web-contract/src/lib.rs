@@ -317,6 +317,38 @@ impl<'de> Deserialize<'de> for WebU64 {
     }
 }
 
+/// Checked unsigned 128-bit value encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebU128(#[schemars(regex(pattern = r"^(0|[1-9][0-9]{0,38})$"))] String);
+
+impl WebU128 {
+    /// Encodes one unsigned 128-bit value in canonical decimal form.
+    #[must_use]
+    pub fn from_u128(value: u128) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for WebU128 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value
+            .parse::<u128>()
+            .ok()
+            .is_none_or(|parsed| parsed.to_string() != value)
+        {
+            return Err(de::Error::custom(
+                "wire value must be a canonical unsigned 128-bit integer",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
 /// Stable browser-visible location of one durable session event.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -529,6 +561,7 @@ pub struct WebSearchPage {
 pub enum WebUsageCallKind {
     ModelCall,
     ApprovalJudge,
+    ContextCompaction,
 }
 
 /// Closed provenance of one token-evidence projection.
@@ -567,6 +600,25 @@ impl WebNullableU64 {
     }
 }
 
+/// Independently nullable aggregate token axis widened beyond one call.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum WebNullableU128 {
+    Value(WebU128),
+    Null,
+}
+
+impl WebNullableU128 {
+    /// Preserves a missing aggregate axis as an explicit JSON null.
+    #[must_use]
+    pub fn from_option(value: Option<u128>) -> Self {
+        match value {
+            Some(value) => Self::Value(WebU128::from_u128(value)),
+            None => Self::Null,
+        }
+    }
+}
+
 /// Independently nullable token axes; null is never interpreted as zero.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -575,6 +627,16 @@ pub struct WebUsageTokenAxes {
     pub output: WebNullableU64,
     pub cache_creation_input: WebNullableU64,
     pub cache_read_input: WebNullableU64,
+}
+
+/// Aggregate token axes widened beyond one physical call.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageAggregateTokenAxes {
+    pub input: WebNullableU128,
+    pub output: WebNullableU128,
+    pub cache_creation_input: WebNullableU128,
+    pub cache_read_input: WebNullableU128,
 }
 
 /// Explicit presence shape retained by compatibility-preserving aggregates.
@@ -675,11 +737,12 @@ pub enum WebUsageCost {
 pub struct WebUsageAggregateGroup {
     pub call_kind: WebUsageCallKind,
     pub model_id: WebUuid,
+    pub profile_id: String,
     pub provenance: WebUsageProvenance,
     pub input_semantics: WebUsageInputSemantics,
     pub coverage: WebUsageTokenCoverage,
     pub call_count: WebU64,
-    pub tokens: WebUsageTokenAxes,
+    pub tokens: WebUsageAggregateTokenAxes,
     pub cost: WebUsageCost,
 }
 
@@ -699,7 +762,7 @@ pub struct WebUsageCall {
     pub call_kind: WebUsageCallKind,
     pub call_id: WebUuid,
     pub session_id: WebSessionId,
-    pub turn_id: WebUuid,
+    pub turn_id: Option<WebUuid>,
     pub model_id: WebUuid,
     pub provenance: WebUsageProvenance,
     pub input_semantics: WebUsageInputSemantics,
@@ -1046,6 +1109,13 @@ function assertSchema(root, schema, value, path) {{
   ) {{
     fail(path, "an unsigned 64-bit integer");
   }}
+  if (
+    schema.type === "string" &&
+    schema.pattern === "^(0|[1-9][0-9]{{0,38}})$" &&
+    BigInt(value) > 340282366920938463463374607431768211455n
+  ) {{
+    fail(path, "an unsigned 128-bit integer");
+  }}
 }}
 
 export function decodeWebContractBootstrap(value) {{
@@ -1259,7 +1329,8 @@ function assertUsageEvidence(inputSemantics, tokens, cost, path) {{
     cost.status === "unavailable" &&
     (cost.reason === "no_token_evidence" ||
       cost.reason === "unknown_input_semantics" ||
-      cost.reason === "incomplete_cache_axes")
+      cost.reason === "incomplete_cache_axes" ||
+      cost.reason === "invalid_cache_breakdown")
   ) {{
     fail(`${{path}}.cost.reason`, "consistent with token evidence and input semantics");
   }}

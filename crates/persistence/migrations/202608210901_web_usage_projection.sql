@@ -1,13 +1,13 @@
 -- Dedicated terminal model-call usage projection for bounded browser reads.
--- Token evidence is copied exactly once when its canonical ordinary or
--- approval-judge call becomes terminal. Dollar cost remains a read-time
+-- Token evidence is copied exactly once when its canonical ordinary,
+-- approval-judge, or context-compaction call becomes terminal. Dollar cost remains a read-time
 -- derivation from versioned deployment rates and is deliberately not stored.
 
 CREATE TABLE web_usage_call_projection (
     model_call_id uuid PRIMARY KEY,
     call_kind text NOT NULL,
     session_id uuid NOT NULL,
-    turn_id uuid NOT NULL,
+    turn_id uuid,
     resolved_provider_model_identity_id uuid NOT NULL,
     credential_reference text NOT NULL,
     usage_provenance_kind text NOT NULL,
@@ -19,11 +19,15 @@ CREATE TABLE web_usage_call_projection (
     recorded_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
 
     CONSTRAINT web_usage_call_kind_closed
-        CHECK (call_kind IN ('model_call', 'approval_judge')),
+        CHECK (call_kind IN ('model_call', 'approval_judge', 'context_compaction')),
     CONSTRAINT web_usage_provenance_closed
         CHECK (usage_provenance_kind IN ('reported', 'estimated')),
     CONSTRAINT web_usage_credential_reference_nonempty
         CHECK (char_length(credential_reference) > 0),
+    CONSTRAINT web_usage_credential_reference_bounded
+        CHECK (octet_length(credential_reference) <= 256),
+    CONSTRAINT web_usage_turn_shape
+        CHECK ((call_kind = 'context_compaction') = (turn_id IS NULL)),
     CONSTRAINT web_usage_token_axes_u64
         CHECK (
             (
@@ -79,6 +83,15 @@ CREATE INDEX web_usage_by_turn_recorded_call
 CREATE INDEX web_usage_by_model_recorded_call
     ON web_usage_call_projection
        (resolved_provider_model_identity_id, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_provenance_recorded_call
+    ON web_usage_call_projection
+       (usage_provenance_kind, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_kind_recorded_call
+    ON web_usage_call_projection
+       (call_kind, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_provenance_kind_recorded_call
+    ON web_usage_call_projection
+       (usage_provenance_kind, call_kind, recorded_at DESC, model_call_id DESC);
 
 CREATE FUNCTION project_terminal_model_call_usage()
 RETURNS trigger
@@ -125,6 +138,27 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION project_terminal_context_compaction_usage()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO web_usage_call_projection (
+        model_call_id, call_kind, session_id, turn_id,
+        resolved_provider_model_identity_id, credential_reference,
+        usage_provenance_kind, usage_input_includes_cache_tokens,
+        input_tokens, output_tokens,
+        cache_creation_input_tokens, cache_read_input_tokens
+    ) VALUES (
+        NEW.model_call_id, 'context_compaction', NEW.session_id, NULL,
+        NEW.resolved_provider_model_identity_id, NEW.credential_reference,
+        'reported', NULL, NEW.input_tokens, NEW.output_tokens,
+        NEW.cache_creation_input_tokens, NEW.cache_read_input_tokens
+    );
+    RETURN NEW;
+END;
+$$;
+
 -- Existing terminal rows are projected at the migration transaction's exact
 -- timestamp. Signalbox is pre-alpha, so no deployed historical time is
 -- fabricated; all subsequent rows record their terminal transaction time.
@@ -158,6 +192,20 @@ SELECT model_call_id, 'approval_judge', session_id, turn_id,
   FROM tool_approval_judge_model_call
  WHERE state_kind = 'terminal';
 
+INSERT INTO web_usage_call_projection (
+    model_call_id, call_kind, session_id, turn_id,
+    resolved_provider_model_identity_id, credential_reference,
+    usage_provenance_kind, usage_input_includes_cache_tokens,
+    input_tokens, output_tokens,
+    cache_creation_input_tokens, cache_read_input_tokens
+)
+SELECT model_call_id, 'context_compaction', session_id, NULL,
+       resolved_provider_model_identity_id, credential_reference,
+       'reported', NULL, input_tokens, output_tokens,
+       cache_creation_input_tokens, cache_read_input_tokens
+  FROM context_compaction_model_call
+ WHERE state_kind = 'terminal';
+
 CREATE TRIGGER model_call_projects_terminal_usage
 AFTER INSERT OR UPDATE ON model_call
 FOR EACH ROW
@@ -169,6 +217,12 @@ AFTER INSERT OR UPDATE ON tool_approval_judge_model_call
 FOR EACH ROW
 WHEN (NEW.state_kind = 'terminal')
 EXECUTE FUNCTION project_terminal_approval_judge_usage();
+
+CREATE TRIGGER context_compaction_projects_terminal_usage
+AFTER INSERT OR UPDATE ON context_compaction_model_call
+FOR EACH ROW
+WHEN (NEW.state_kind = 'terminal')
+EXECUTE FUNCTION project_terminal_context_compaction_usage();
 
 CREATE TRIGGER web_usage_call_projection_is_append_only
 BEFORE UPDATE OR DELETE ON web_usage_call_projection

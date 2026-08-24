@@ -15,8 +15,28 @@ pub const fn max_usage_call_page_items() -> u16 {
 }
 
 /// Maximum compatibility groups returned by one aggregate read.
+///
+/// This hard safety ceiling protects response memory and serialization latency.
 #[must_use]
 pub const fn max_usage_aggregate_groups() -> u16 {
+    256
+}
+
+/// Maximum terminal calls consumed by one aggregate read.
+///
+/// This hard safety ceiling protects PostgreSQL work and request latency from
+/// growing with the lifetime projection.
+#[must_use]
+pub const fn max_usage_aggregate_calls() -> u16 {
+    10_000
+}
+
+/// Maximum UTF-8 bytes retained for one credential-profile dimension.
+///
+/// This hard safety ceiling keeps bounded pages from carrying unbounded copied
+/// text and matches credential-catalog admission.
+#[must_use]
+pub const fn max_usage_credential_profile_utf8_bytes() -> u16 {
     256
 }
 
@@ -39,7 +59,8 @@ pub struct UsageTimestampMicros(u64);
 impl UsageTimestampMicros {
     /// Admits values representable by PostgreSQL adapter timestamp conversion.
     pub const fn new(value: u64) -> Result<Self, UsageTimestampError> {
-        if value > i64::MAX as u64 {
+        // 9999-12-31T23:59:59.999999Z, the shared PostgreSQL/time boundary.
+        if value > 253_402_300_799_999_999 {
             Err(UsageTimestampError)
         } else {
             Ok(Self(value))
@@ -68,10 +89,8 @@ impl std::error::Error for UsageTimeRangeError {}
 /// Optional half-open terminal-evidence time range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UsageTimeRange {
-    /// Inclusive lower boundary.
-    pub from_inclusive: Option<UsageTimestampMicros>,
-    /// Exclusive upper boundary.
-    pub to_exclusive: Option<UsageTimestampMicros>,
+    from_inclusive: Option<UsageTimestampMicros>,
+    to_exclusive: Option<UsageTimestampMicros>,
 }
 
 impl UsageTimeRange {
@@ -99,6 +118,18 @@ impl UsageTimeRange {
             to_exclusive,
         })
     }
+
+    /// Returns the inclusive lower boundary.
+    #[must_use]
+    pub const fn from_inclusive(self) -> Option<UsageTimestampMicros> {
+        self.from_inclusive
+    }
+
+    /// Returns the exclusive upper boundary.
+    #[must_use]
+    pub const fn to_exclusive(self) -> Option<UsageTimestampMicros> {
+        self.to_exclusive
+    }
 }
 
 /// Closed physical call class represented by canonical usage evidence.
@@ -108,6 +139,8 @@ pub enum UsageCallKind {
     ModelCall,
     /// A delegated tool-approval judge call.
     ApprovalJudge,
+    /// A session-level context-summary production call.
+    ContextCompaction,
 }
 
 /// Closed provenance of token evidence.
@@ -130,17 +163,26 @@ pub enum UsageInputTokenSemantics {
     CacheInclusive,
 }
 
+/// Typed presence state for one independently optional token axis.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum UsageTokenPresence {
+    /// No count was reported for this axis.
+    Absent,
+    /// A count, including zero, was reported for this axis.
+    Present,
+}
+
 /// Presence of every independently optional token axis.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct UsageTokenCoverage {
-    /// Whether input tokens are present.
-    pub input: bool,
-    /// Whether output tokens are present.
-    pub output: bool,
-    /// Whether cache-creation input tokens are present.
-    pub cache_creation_input: bool,
-    /// Whether cache-read input tokens are present.
-    pub cache_read_input: bool,
+    /// Input-token presence.
+    pub input: UsageTokenPresence,
+    /// Output-token presence.
+    pub output: UsageTokenPresence,
+    /// Cache-creation input-token presence.
+    pub cache_creation_input: UsageTokenPresence,
+    /// Cache-read input-token presence.
+    pub cache_read_input: UsageTokenPresence,
 }
 
 /// Independently optional token-axis values.
@@ -161,12 +203,33 @@ impl UsageTokenAxes {
     #[must_use]
     pub const fn coverage(self) -> UsageTokenCoverage {
         UsageTokenCoverage {
-            input: self.input.is_some(),
-            output: self.output.is_some(),
-            cache_creation_input: self.cache_creation_input.is_some(),
-            cache_read_input: self.cache_read_input.is_some(),
+            input: token_presence(self.input),
+            output: token_presence(self.output),
+            cache_creation_input: token_presence(self.cache_creation_input),
+            cache_read_input: token_presence(self.cache_read_input),
         }
     }
+}
+
+const fn token_presence(value: Option<u64>) -> UsageTokenPresence {
+    if value.is_some() {
+        UsageTokenPresence::Present
+    } else {
+        UsageTokenPresence::Absent
+    }
+}
+
+/// Aggregate token-axis sums widened beyond one physical call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UsageAggregateTokenAxes {
+    /// Input-token sum, under the named semantics.
+    pub input: Option<u128>,
+    /// Output-token sum.
+    pub output: Option<u128>,
+    /// Cache-creation input-token sum.
+    pub cache_creation_input: Option<u128>,
+    /// Cache-read input-token sum.
+    pub cache_read_input: Option<u128>,
 }
 
 /// Optional exact filters shared by aggregate and detail reads.
@@ -280,8 +343,8 @@ pub struct UsageCallEvidence {
     pub call: ModelCallId,
     /// Owning session.
     pub session: SessionId,
-    /// Owning turn.
-    pub turn: TurnId,
+    /// Owning turn, absent for session-level context compaction.
+    pub turn: Option<TurnId>,
     /// Resolved provider/model target.
     pub model: ResolvedProviderTarget,
     /// Non-secret credential-profile reference needed for cost labeling.
@@ -330,7 +393,7 @@ pub struct UsageAggregateGroup {
     /// Exact number of calls represented by this group.
     pub call_count: u64,
     /// Sums only for axes present on every call in the group.
-    pub tokens: UsageTokenAxes,
+    pub tokens: UsageAggregateTokenAxes,
     /// Whether aggregate cost derivation matches per-call checked arithmetic.
     pub cost_derivation_safe: bool,
 }
@@ -407,7 +470,7 @@ mod tests {
     #[test]
     fn usage_timestamp_rejects_values_outside_the_postgres_adapter_range() {
         assert_eq!(
-            UsageTimestampMicros::new(i64::MAX as u64 + 1),
+            UsageTimestampMicros::new(253_402_300_800_000_000),
             Err(UsageTimestampError)
         );
     }
@@ -435,10 +498,10 @@ mod tests {
         assert_eq!(
             tokens.coverage(),
             UsageTokenCoverage {
-                input: true,
-                output: false,
-                cache_creation_input: true,
-                cache_read_input: false,
+                input: UsageTokenPresence::Present,
+                output: UsageTokenPresence::Absent,
+                cache_creation_input: UsageTokenPresence::Present,
+                cache_read_input: UsageTokenPresence::Absent,
             }
         );
     }

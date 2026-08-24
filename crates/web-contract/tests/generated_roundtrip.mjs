@@ -177,6 +177,7 @@ test("generated usage decoder preserves nullable axes and labeled cost", () => {
       {
         call_kind: "model_call",
         model_id: "00000000-0000-0000-0000-000000000041",
+        profile_id: "fixture-primary",
         provenance: "estimated",
         input_semantics: "cache_exclusive",
         coverage: {
@@ -213,6 +214,7 @@ function usageGroup() {
   return {
     call_kind: "model_call",
     model_id: "00000000-0000-0000-0000-000000000041",
+    profile_id: "fixture-primary",
     provenance: "estimated",
     input_semantics: "cache_exclusive",
     coverage: {
@@ -367,6 +369,19 @@ test("generated usage decoder accepts an omitted optional continuation", () => {
   const page = { calls: [usageCall()] };
 
   assert.equal(decodeWebUsageCallPage(page, "newest"), page);
+});
+
+test("generated usage decoder rejects spurious invalid cache breakdowns", () => {
+  const call = usageCall();
+  call.cost = {
+    status: "unavailable",
+    reason: "invalid_cache_breakdown",
+  };
+
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [call], continuation: null }, "newest"),
+    /consistent with token evidence and input semantics/,
+  );
 });
 
 test("generated usage decoders reject cost states inconsistent with evidence", () => {

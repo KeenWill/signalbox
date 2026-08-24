@@ -11,6 +11,7 @@ use std::{
     fmt, io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
+    sync::Arc,
 };
 
 use axum::{
@@ -31,9 +32,10 @@ use signalbox_application::{
     SearchContentClass, SearchCursor, SearchPageLimit, SearchQuery, SearchResultSource,
     SearchScope, SearchStrategy, SearchText, SessionTimelineDescriptor, SessionTimelineEventKind,
     SessionTimelineWindow, TimelineAddress, TimelineContinuation, TimelineWindowAnchor,
-    TimelineWindowLimits, UsageAggregateGroup, UsageCallCursor, UsageCallEvidence, UsageCallKind,
-    UsageCallOrder, UsageCallPageLimit, UsageCallQuery, UsageInputTokenSemantics, UsageProvenance,
-    UsageQuery, UsageSelection, UsageTimeRange, UsageTimestampMicros, UsageTokenAxes,
+    TimelineWindowLimits, UsageAggregateGroup, UsageAggregateTokenAxes, UsageCallCursor,
+    UsageCallEvidence, UsageCallKind, UsageCallOrder, UsageCallPageLimit, UsageCallQuery,
+    UsageInputTokenSemantics, UsageProvenance, UsageQuery, UsageSelection, UsageTimeRange,
+    UsageTimestampMicros, UsageTokenAxes, UsageTokenPresence,
 };
 use signalbox_domain::{
     ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId,
@@ -48,15 +50,15 @@ use signalbox_persistence::usage::{
 };
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
-    WebContractBootstrap, WebContractExample, WebDollarAmount, WebNullableU64,
+    WebContractBootstrap, WebContractExample, WebDollarAmount, WebNullableU64, WebNullableU128,
     WebSearchContentClass, WebSearchCursor, WebSearchHighlight, WebSearchPage,
     WebSearchProjectionId, WebSearchResult, WebSearchResultSource, WebSessionId,
     WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
     WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
-    WebTimelineEventSequence, WebU64, WebUsageAggregateGroup, WebUsageCall, WebUsageCallCursor,
-    WebUsageCallKind, WebUsageCallPage, WebUsageCost, WebUsageCostLabel,
-    WebUsageCostUnavailableReason, WebUsageInputSemantics, WebUsageProvenance, WebUsageSummary,
-    WebUsageTokenAxes, WebUsageTokenCoverage, WebUuid,
+    WebTimelineEventSequence, WebU64, WebUsageAggregateGroup, WebUsageAggregateTokenAxes,
+    WebUsageCall, WebUsageCallCursor, WebUsageCallKind, WebUsageCallPage, WebUsageCost,
+    WebUsageCostLabel, WebUsageCostUnavailableReason, WebUsageInputSemantics, WebUsageProvenance,
+    WebUsageSummary, WebUsageTokenAxes, WebUsageTokenCoverage, WebUuid,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -281,7 +283,7 @@ fn production_router_with_model_configuration(
         timeline: pool.clone().map(SessionTimelineRepository::new),
         search: pool.clone().map(SearchRepository::new),
         usage: pool.map(UsageRepository::new),
-        model_configuration,
+        model_configuration: model_configuration.map(Arc::new),
     };
     let session_reads = Router::new()
         .route("/sessions/{session_id}", get(session_descriptor))
@@ -314,7 +316,7 @@ struct WebApiState {
     timeline: Option<SessionTimelineRepository>,
     search: Option<SearchRepository>,
     usage: Option<UsageRepository>,
-    model_configuration: Option<HubModelConfiguration>,
+    model_configuration: Option<Arc<HubModelConfiguration>>,
 }
 
 async fn validate_loopback_host(request: Request, next: Next) -> Response {
@@ -790,24 +792,19 @@ fn usage_aggregate_dto(
     WebUsageAggregateGroup {
         call_kind: usage_call_kind_dto(group.key.call_kind),
         model_id: web_uuid(group.key.model.identity().into_uuid()),
+        profile_id: group.key.credential_profile.clone(),
         provenance: usage_provenance_dto(group.key.provenance),
         input_semantics: usage_input_semantics_dto(group.key.input_semantics),
         coverage: WebUsageTokenCoverage {
-            input: group.key.coverage.input,
-            output: group.key.coverage.output,
-            cache_creation_input: group.key.coverage.cache_creation_input,
-            cache_read_input: group.key.coverage.cache_read_input,
+            input: group.key.coverage.input == UsageTokenPresence::Present,
+            output: group.key.coverage.output == UsageTokenPresence::Present,
+            cache_creation_input: group.key.coverage.cache_creation_input
+                == UsageTokenPresence::Present,
+            cache_read_input: group.key.coverage.cache_read_input == UsageTokenPresence::Present,
         },
         call_count: WebU64::from_u64(group.call_count),
-        tokens: usage_tokens_dto(group.tokens),
-        cost: usage_cost_dto(
-            configuration,
-            group.key.model,
-            &group.key.credential_profile,
-            group.key.input_semantics,
-            group.tokens,
-            group.cost_derivation_safe,
-        ),
+        tokens: usage_aggregate_tokens_dto(group.tokens),
+        cost: usage_aggregate_cost_dto(configuration, &group),
     }
 }
 
@@ -816,7 +813,7 @@ fn usage_call_dto(call: UsageCallEvidence, configuration: &HubModelConfiguration
         call_kind: usage_call_kind_dto(call.call_kind),
         call_id: web_uuid(call.call.into_uuid()),
         session_id: WebSessionId::from_uuid_bytes(*call.session.into_uuid().as_bytes()),
-        turn_id: web_uuid(call.turn.into_uuid()),
+        turn_id: call.turn.map(|turn| web_uuid(turn.into_uuid())),
         model_id: web_uuid(call.model.identity().into_uuid()),
         provenance: usage_provenance_dto(call.provenance),
         input_semantics: usage_input_semantics_dto(call.input_semantics),
@@ -844,10 +841,10 @@ fn usage_cost_dto(
     let unavailable = |reason| WebUsageCost::Unavailable { reason };
     if tokens.coverage()
         == (signalbox_application::UsageTokenCoverage {
-            input: false,
-            output: false,
-            cache_creation_input: false,
-            cache_read_input: false,
+            input: UsageTokenPresence::Absent,
+            output: UsageTokenPresence::Absent,
+            cache_creation_input: UsageTokenPresence::Absent,
+            cache_read_input: UsageTokenPresence::Absent,
         })
     {
         return unavailable(WebUsageCostUnavailableReason::NoTokenEvidence);
@@ -866,10 +863,12 @@ fn usage_cost_dto(
             {
                 return unavailable(WebUsageCostUnavailableReason::IncompleteCacheAxes);
             }
-            let cache_total = tokens
-                .cache_creation_input
-                .and_then(|creation| tokens.cache_read_input?.checked_add(creation));
-            if cache_total.is_some_and(|cache| tokens.input.is_some_and(|input| input < cache)) {
+            let cache_total = tokens.cache_creation_input.zip(tokens.cache_read_input);
+            if cache_total.is_some_and(|(creation, read)| {
+                creation
+                    .checked_add(read)
+                    .is_none_or(|cache| tokens.input.is_some_and(|input| input < cache))
+            }) {
                 return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
             }
             ProcessModelCallInputTokenSemantics::CacheInclusive
@@ -898,10 +897,35 @@ fn usage_cost_dto(
     }
 }
 
+fn usage_aggregate_cost_dto(
+    configuration: &HubModelConfiguration,
+    group: &UsageAggregateGroup,
+) -> WebUsageCost {
+    let tokens = usage_aggregate_tokens_for_cost(group.tokens);
+    let widened_axis_overflowed = group.tokens.input.is_some() != tokens.input.is_some()
+        || group.tokens.output.is_some() != tokens.output.is_some()
+        || group.tokens.cache_creation_input.is_some() != tokens.cache_creation_input.is_some()
+        || group.tokens.cache_read_input.is_some() != tokens.cache_read_input.is_some();
+    if widened_axis_overflowed {
+        return WebUsageCost::Unavailable {
+            reason: WebUsageCostUnavailableReason::ConfigurationUnavailable,
+        };
+    }
+    usage_cost_dto(
+        configuration,
+        group.key.model,
+        &group.key.credential_profile,
+        group.key.input_semantics,
+        tokens,
+        group.cost_derivation_safe,
+    )
+}
+
 const fn usage_call_kind_dto(kind: UsageCallKind) -> WebUsageCallKind {
     match kind {
         UsageCallKind::ModelCall => WebUsageCallKind::ModelCall,
         UsageCallKind::ApprovalJudge => WebUsageCallKind::ApprovalJudge,
+        UsageCallKind::ContextCompaction => WebUsageCallKind::ContextCompaction,
     }
 }
 
@@ -920,12 +944,34 @@ const fn usage_input_semantics_dto(semantics: UsageInputTokenSemantics) -> WebUs
     }
 }
 
+fn usage_aggregate_tokens_for_cost(tokens: UsageAggregateTokenAxes) -> UsageTokenAxes {
+    UsageTokenAxes {
+        input: tokens.input.and_then(|value| u64::try_from(value).ok()),
+        output: tokens.output.and_then(|value| u64::try_from(value).ok()),
+        cache_creation_input: tokens
+            .cache_creation_input
+            .and_then(|value| u64::try_from(value).ok()),
+        cache_read_input: tokens
+            .cache_read_input
+            .and_then(|value| u64::try_from(value).ok()),
+    }
+}
+
 fn usage_tokens_dto(tokens: UsageTokenAxes) -> WebUsageTokenAxes {
     WebUsageTokenAxes {
         input: WebNullableU64::from_option(tokens.input),
         output: WebNullableU64::from_option(tokens.output),
         cache_creation_input: WebNullableU64::from_option(tokens.cache_creation_input),
         cache_read_input: WebNullableU64::from_option(tokens.cache_read_input),
+    }
+}
+
+fn usage_aggregate_tokens_dto(tokens: UsageAggregateTokenAxes) -> WebUsageAggregateTokenAxes {
+    WebUsageAggregateTokenAxes {
+        input: WebNullableU128::from_option(tokens.input),
+        output: WebNullableU128::from_option(tokens.output),
+        cache_creation_input: WebNullableU128::from_option(tokens.cache_creation_input),
+        cache_read_input: WebNullableU128::from_option(tokens.cache_read_input),
     }
 }
 
@@ -2085,6 +2131,31 @@ mod tests {
 
         assert_eq!(cost["status"], "derived");
         assert_ne!(cost["amount_usd"], "0");
+    }
+
+    #[test]
+    fn configured_usage_cost_rejects_an_overflowing_cache_total() {
+        let configuration = example_model_configuration();
+        let cost = usage_cost_dto(
+            &configuration,
+            rated_example_target(),
+            "anthropic-primary",
+            UsageInputTokenSemantics::CacheInclusive,
+            UsageTokenAxes {
+                input: Some(u64::MAX),
+                output: None,
+                cache_creation_input: Some(u64::MAX),
+                cache_read_input: Some(1),
+            },
+            true,
+        );
+
+        assert_eq!(
+            cost,
+            WebUsageCost::Unavailable {
+                reason: WebUsageCostUnavailableReason::InvalidCacheBreakdown,
+            }
+        );
     }
 
     #[test]

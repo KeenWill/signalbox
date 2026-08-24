@@ -868,14 +868,20 @@ const schemas = {
             "$ref": "#/$defs/WebUsageTokenAxes"
           },
           "turn_id": {
-            "$ref": "#/$defs/WebUuid"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebUuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
           "call_kind",
           "call_id",
           "session_id",
-          "turn_id",
           "model_id",
           "provenance",
           "input_semantics",
@@ -906,7 +912,8 @@ const schemas = {
         "description": "Closed physical class of one terminal usage record.",
         "enum": [
           "model_call",
-          "approval_judge"
+          "approval_judge",
+          "context_compaction"
         ],
         "type": "string"
       },
@@ -1059,16 +1066,21 @@ const schemas = {
         "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,27}[1-9])?$",
         "type": "string"
       },
-      "WebNullableU64": {
+      "WebNullableU128": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WebU64"
+            "$ref": "#/$defs/WebU128"
           },
           {
             "type": "null"
           }
         ],
-        "description": "Independently nullable token axes; null is never interpreted as zero."
+        "description": "Independently nullable aggregate token axis widened beyond one call."
+      },
+      "WebU128": {
+        "description": "Checked unsigned 128-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]{0,38})$",
+        "type": "string"
       },
       "WebU64": {
         "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
@@ -1097,16 +1109,20 @@ const schemas = {
           "model_id": {
             "$ref": "#/$defs/WebUuid"
           },
+          "profile_id": {
+            "type": "string"
+          },
           "provenance": {
             "$ref": "#/$defs/WebUsageProvenance"
           },
           "tokens": {
-            "$ref": "#/$defs/WebUsageTokenAxes"
+            "$ref": "#/$defs/WebUsageAggregateTokenAxes"
           }
         },
         "required": [
           "call_kind",
           "model_id",
+          "profile_id",
           "provenance",
           "input_semantics",
           "coverage",
@@ -1116,11 +1132,37 @@ const schemas = {
         ],
         "type": "object"
       },
+      "WebUsageAggregateTokenAxes": {
+        "additionalProperties": false,
+        "description": "Aggregate token axes widened beyond one physical call.",
+        "properties": {
+          "cache_creation_input": {
+            "$ref": "#/$defs/WebNullableU128"
+          },
+          "cache_read_input": {
+            "$ref": "#/$defs/WebNullableU128"
+          },
+          "input": {
+            "$ref": "#/$defs/WebNullableU128"
+          },
+          "output": {
+            "$ref": "#/$defs/WebNullableU128"
+          }
+        },
+        "required": [
+          "input",
+          "output",
+          "cache_creation_input",
+          "cache_read_input"
+        ],
+        "type": "object"
+      },
       "WebUsageCallKind": {
         "description": "Closed physical class of one terminal usage record.",
         "enum": [
           "model_call",
-          "approval_judge"
+          "approval_judge",
+          "context_compaction"
         ],
         "type": "string"
       },
@@ -1206,31 +1248,6 @@ const schemas = {
           "estimated"
         ],
         "type": "string"
-      },
-      "WebUsageTokenAxes": {
-        "additionalProperties": false,
-        "description": "Independently nullable token axes; null is never interpreted as zero.",
-        "properties": {
-          "cache_creation_input": {
-            "$ref": "#/$defs/WebNullableU64"
-          },
-          "cache_read_input": {
-            "$ref": "#/$defs/WebNullableU64"
-          },
-          "input": {
-            "$ref": "#/$defs/WebNullableU64"
-          },
-          "output": {
-            "$ref": "#/$defs/WebNullableU64"
-          }
-        },
-        "required": [
-          "input",
-          "output",
-          "cache_creation_input",
-          "cache_read_input"
-        ],
-        "type": "object"
       },
       "WebUsageTokenCoverage": {
         "additionalProperties": false,
@@ -1455,6 +1472,13 @@ function assertSchema(root, schema, value, path) {
   ) {
     fail(path, "an unsigned 64-bit integer");
   }
+  if (
+    schema.type === "string" &&
+    schema.pattern === "^(0|[1-9][0-9]{0,38})$" &&
+    BigInt(value) > 340282366920938463463374607431768211455n
+  ) {
+    fail(path, "an unsigned 128-bit integer");
+  }
 }
 
 export function decodeWebContractBootstrap(value) {
@@ -1668,7 +1692,8 @@ function assertUsageEvidence(inputSemantics, tokens, cost, path) {
     cost.status === "unavailable" &&
     (cost.reason === "no_token_evidence" ||
       cost.reason === "unknown_input_semantics" ||
-      cost.reason === "incomplete_cache_axes")
+      cost.reason === "incomplete_cache_axes" ||
+      cost.reason === "invalid_cache_breakdown")
   ) {
     fail(`${path}.cost.reason`, "consistent with token evidence and input semantics");
   }

@@ -4,10 +4,11 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    UsageAggregateGroup, UsageAggregateKey, UsageAggregateReport, UsageCallCursor,
-    UsageCallEvidence, UsageCallKind, UsageCallOrder, UsageCallPage, UsageCallQuery,
-    UsageInputTokenSemantics, UsageProvenance, UsageQuery, UsageReader, UsageTimestampMicros,
-    UsageTokenAxes, UsageTokenCoverage, max_usage_aggregate_groups,
+    UsageAggregateGroup, UsageAggregateKey, UsageAggregateReport, UsageAggregateTokenAxes,
+    UsageCallCursor, UsageCallEvidence, UsageCallKind, UsageCallOrder, UsageCallPage,
+    UsageCallQuery, UsageInputTokenSemantics, UsageProvenance, UsageQuery, UsageReader,
+    UsageTimestampMicros, UsageTokenAxes, UsageTokenCoverage, UsageTokenPresence,
+    max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_credential_profile_utf8_bytes,
 };
 use signalbox_domain::{
     ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId,
@@ -15,7 +16,29 @@ use signalbox_domain::{
 use sqlx::{PgPool, Row, postgres::PgRow, types::time::OffsetDateTime};
 use uuid::Uuid;
 
+use crate::mapping::{
+    usage_call_kind_from_str, usage_call_kind_to_str, usage_provenance_from_str,
+    usage_provenance_to_str,
+};
+
 const AGGREGATE_SQL: &str = "
+WITH candidate_calls AS MATERIALIZED (
+    SELECT *
+      FROM web_usage_call_projection
+     WHERE ($1::timestamptz IS NULL OR recorded_at >= $1)
+       AND ($2::timestamptz IS NULL OR recorded_at < $2)
+       AND ($3::uuid IS NULL OR session_id = $3)
+       AND ($4::uuid IS NULL OR turn_id = $4)
+       AND ($5::uuid IS NULL OR resolved_provider_model_identity_id = $5)
+       AND ($6::text IS NULL OR usage_provenance_kind = $6)
+       AND ($7::text IS NULL OR call_kind = $7)
+     ORDER BY recorded_at DESC, model_call_id DESC
+     LIMIT $8
+), bounded_calls AS (
+    SELECT * FROM candidate_calls LIMIT $9
+), bounded_state AS (
+    SELECT count(*) > $9 AS calls_truncated FROM candidate_calls
+)
 SELECT call_kind, resolved_provider_model_identity_id, credential_reference,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens IS NOT NULL AS has_input,
@@ -34,26 +57,21 @@ SELECT call_kind, resolved_provider_model_identity_id, credential_reference,
            OR cache_creation_input_tokens IS NULL
            OR cache_read_input_tokens IS NULL
            OR input_tokens >= cache_creation_input_tokens + cache_read_input_tokens
-       ) AS cost_derivation_safe
-  FROM web_usage_call_projection
- WHERE ($1::timestamptz IS NULL OR recorded_at >= $1)
-   AND ($2::timestamptz IS NULL OR recorded_at < $2)
-   AND ($3::uuid IS NULL OR session_id = $3)
-   AND ($4::uuid IS NULL OR turn_id = $4)
-   AND ($5::uuid IS NULL OR resolved_provider_model_identity_id = $5)
-   AND ($6::text IS NULL OR usage_provenance_kind = $6)
-   AND ($7::text IS NULL OR call_kind = $7)
+       ) AS cost_derivation_safe,
+       bounded_state.calls_truncated
+  FROM bounded_calls
+ CROSS JOIN bounded_state
  GROUP BY call_kind, resolved_provider_model_identity_id, credential_reference,
           usage_provenance_kind, usage_input_includes_cache_tokens,
           input_tokens IS NOT NULL, output_tokens IS NOT NULL,
           cache_creation_input_tokens IS NOT NULL,
-          cache_read_input_tokens IS NOT NULL
+          cache_read_input_tokens IS NOT NULL, bounded_state.calls_truncated
  ORDER BY call_kind, resolved_provider_model_identity_id, credential_reference,
           usage_provenance_kind, usage_input_includes_cache_tokens NULLS FIRST,
           input_tokens IS NOT NULL, output_tokens IS NOT NULL,
           cache_creation_input_tokens IS NOT NULL,
           cache_read_input_tokens IS NOT NULL
- LIMIT $8";
+ LIMIT $10";
 
 const CALLS_NEWEST_SQL: &str = "
 SELECT model_call_id, call_kind, session_id, turn_id,
@@ -192,11 +210,18 @@ impl UsageRepository {
             .bind(filters.model)
             .bind(filters.provenance)
             .bind(filters.call_kind)
+            .bind(i64::from(max_usage_aggregate_calls()) + 1)
+            .bind(i64::from(max_usage_aggregate_calls()))
             .bind(i64::from(max_usage_aggregate_groups()) + 1)
             .fetch_all(&self.pool)
             .await?;
         let limit = usize::from(max_usage_aggregate_groups());
-        let truncated = rows.len() > limit;
+        let source_calls_truncated = rows
+            .first()
+            .map(|row| row.try_get::<bool, _>("calls_truncated"))
+            .transpose()?
+            .unwrap_or(false);
+        let truncated = rows.len() > limit || source_calls_truncated;
         let groups = rows
             .into_iter()
             .take(limit)
@@ -264,12 +289,12 @@ impl QueryBindings {
         Ok(Self {
             from: query
                 .time
-                .from_inclusive
+                .from_inclusive()
                 .map(timestamp_to_offset)
                 .transpose()?,
             to: query
                 .time
-                .to_exclusive
+                .to_exclusive()
                 .map(timestamp_to_offset)
                 .transpose()?,
             session: query.selection.session.map(SessionId::into_uuid),
@@ -278,8 +303,8 @@ impl QueryBindings {
                 .selection
                 .model
                 .map(|model| model.identity().into_uuid()),
-            provenance: query.selection.provenance.map(provenance_storage),
-            call_kind: query.selection.call_kind.map(call_kind_storage),
+            provenance: query.selection.provenance.map(usage_provenance_to_str),
+            call_kind: query.selection.call_kind.map(usage_call_kind_to_str),
         })
     }
 }
@@ -295,20 +320,6 @@ fn timestamp_to_offset(
 #[must_use]
 pub fn usage_timestamp_is_representable(timestamp: UsageTimestampMicros) -> bool {
     timestamp_to_offset(timestamp).is_ok()
-}
-
-const fn provenance_storage(provenance: UsageProvenance) -> &'static str {
-    match provenance {
-        UsageProvenance::Reported => "reported",
-        UsageProvenance::Estimated => "estimated",
-    }
-}
-
-const fn call_kind_storage(kind: UsageCallKind) -> &'static str {
-    match kind {
-        UsageCallKind::ModelCall => "model_call",
-        UsageCallKind::ApprovalJudge => "approval_judge",
-    }
 }
 
 fn decode_call_page(rows: Vec<PgRow>, limit: usize) -> Result<UsageCallPage, UsageRepositoryError> {
@@ -334,14 +345,18 @@ fn decode_call_page(rows: Vec<PgRow>, limit: usize) -> Result<UsageCallPage, Usa
 
 fn decode_call(row: PgRow) -> Result<UsageCallEvidence, UsageRepositoryError> {
     let credential_profile: String = row.try_get("credential_reference")?;
-    if credential_profile.is_empty() {
+    if credential_profile.is_empty()
+        || credential_profile.len() > usize::from(max_usage_credential_profile_utf8_bytes())
+    {
         return Err(UsageProjectionCorruption::Invalid("credential profile").into());
     }
     Ok(UsageCallEvidence {
         call_kind: decode_call_kind(row.try_get("call_kind")?)?,
         call: ModelCallId::from_uuid(row.try_get("model_call_id")?),
         session: SessionId::from_uuid(row.try_get("session_id")?),
-        turn: TurnId::from_uuid(row.try_get("turn_id")?),
+        turn: row
+            .try_get::<Option<Uuid>, _>("turn_id")?
+            .map(TurnId::from_uuid),
         model: decode_model(&row)?,
         credential_profile,
         provenance: decode_provenance(row.try_get("usage_provenance_kind")?)?,
@@ -353,7 +368,9 @@ fn decode_call(row: PgRow) -> Result<UsageCallEvidence, UsageRepositoryError> {
 
 fn decode_aggregate(row: PgRow) -> Result<UsageAggregateGroup, UsageRepositoryError> {
     let credential_profile: String = row.try_get("credential_reference")?;
-    if credential_profile.is_empty() {
+    if credential_profile.is_empty()
+        || credential_profile.len() > usize::from(max_usage_credential_profile_utf8_bytes())
+    {
         return Err(UsageProjectionCorruption::Invalid("credential profile").into());
     }
     let call_count = u64::try_from(row.try_get::<i64, _>("call_count")?)
@@ -368,14 +385,14 @@ fn decode_aggregate(row: PgRow) -> Result<UsageAggregateGroup, UsageRepositoryEr
                 row.try_get("usage_input_includes_cache_tokens")?,
             ),
             coverage: UsageTokenCoverage {
-                input: row.try_get("has_input")?,
-                output: row.try_get("has_output")?,
-                cache_creation_input: row.try_get("has_cache_creation")?,
-                cache_read_input: row.try_get("has_cache_read")?,
+                input: decode_presence(row.try_get("has_input")?),
+                output: decode_presence(row.try_get("has_output")?),
+                cache_creation_input: decode_presence(row.try_get("has_cache_creation")?),
+                cache_read_input: decode_presence(row.try_get("has_cache_read")?),
             },
         },
         call_count,
-        tokens: decode_tokens(&row)?,
+        tokens: decode_aggregate_tokens(&row)?,
         cost_derivation_safe: row.try_get("cost_derivation_safe")?,
     })
 }
@@ -399,6 +416,44 @@ fn decode_tokens(row: &PgRow) -> Result<UsageTokenAxes, UsageRepositoryError> {
             "cache read input tokens",
         )?,
     })
+}
+
+fn decode_aggregate_tokens(row: &PgRow) -> Result<UsageAggregateTokenAxes, UsageRepositoryError> {
+    Ok(UsageAggregateTokenAxes {
+        input: decode_optional_u128(row.try_get("input_tokens")?, "input tokens")?,
+        output: decode_optional_u128(row.try_get("output_tokens")?, "output tokens")?,
+        cache_creation_input: decode_optional_u128(
+            row.try_get("cache_creation_input_tokens")?,
+            "cache creation input tokens",
+        )?,
+        cache_read_input: decode_optional_u128(
+            row.try_get("cache_read_input_tokens")?,
+            "cache read input tokens",
+        )?,
+    })
+}
+
+fn decode_optional_u128(
+    value: Option<Decimal>,
+    field: &'static str,
+) -> Result<Option<u128>, UsageProjectionCorruption> {
+    value
+        .map(|value| {
+            if value.fract().is_zero() && !value.is_sign_negative() {
+                u128::try_from(value).map_err(|_| UsageProjectionCorruption::Invalid(field))
+            } else {
+                Err(UsageProjectionCorruption::Invalid(field))
+            }
+        })
+        .transpose()
+}
+
+const fn decode_presence(value: bool) -> UsageTokenPresence {
+    if value {
+        UsageTokenPresence::Present
+    } else {
+        UsageTokenPresence::Absent
+    }
 }
 
 fn decode_optional_u64(
@@ -429,25 +484,17 @@ fn decode_timestamp(
 }
 
 fn decode_call_kind(value: String) -> Result<UsageCallKind, UsageProjectionCorruption> {
-    match value.as_str() {
-        "model_call" => Ok(UsageCallKind::ModelCall),
-        "approval_judge" => Ok(UsageCallKind::ApprovalJudge),
-        _ => Err(UsageProjectionCorruption::Unsupported {
-            field: "call kind",
-            value,
-        }),
-    }
+    usage_call_kind_from_str(&value).ok_or(UsageProjectionCorruption::Unsupported {
+        field: "call kind",
+        value,
+    })
 }
 
 fn decode_provenance(value: String) -> Result<UsageProvenance, UsageProjectionCorruption> {
-    match value.as_str() {
-        "reported" => Ok(UsageProvenance::Reported),
-        "estimated" => Ok(UsageProvenance::Estimated),
-        _ => Err(UsageProjectionCorruption::Unsupported {
-            field: "usage provenance",
-            value,
-        }),
-    }
+    usage_provenance_from_str(&value).ok_or(UsageProjectionCorruption::Unsupported {
+        field: "usage provenance",
+        value,
+    })
 }
 
 const fn decode_input_semantics(value: Option<bool>) -> UsageInputTokenSemantics {

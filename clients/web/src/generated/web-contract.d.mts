@@ -37,6 +37,8 @@ type WebContractLimits = {
 
 type WebDollarAmount = string;
 
+type WebNullableU128 = WebU128 | null;
+
 type WebNullableU64 = WebU64 | null;
 
 type WebSearchContentClass = "user_transcript" | "assistant_transcript" | "tool_arguments" | "tool_result" | "session_metadata" | "attachment_filename" | "attachment_media_metadata" | "derived_text_artifact";
@@ -126,6 +128,8 @@ type WebTimelineAddress = {
 
 type WebTimelineEventSequence = string;
 
+type WebU128 = string;
+
 type WebU64 = string;
 
 type WebUsageAggregateGroup = {
@@ -135,8 +139,16 @@ type WebUsageAggregateGroup = {
   readonly coverage: WebUsageTokenCoverage;
   readonly input_semantics: WebUsageInputSemantics;
   readonly model_id: WebUuid;
+  readonly profile_id: string;
   readonly provenance: WebUsageProvenance;
-  readonly tokens: WebUsageTokenAxes;
+  readonly tokens: WebUsageAggregateTokenAxes;
+};
+
+type WebUsageAggregateTokenAxes = {
+  readonly cache_creation_input: WebNullableU128;
+  readonly cache_read_input: WebNullableU128;
+  readonly input: WebNullableU128;
+  readonly output: WebNullableU128;
 };
 
 type WebUsageCall = {
@@ -149,7 +161,7 @@ type WebUsageCall = {
   readonly recorded_at_micros: WebU64;
   readonly session_id: WebSessionId;
   readonly tokens: WebUsageTokenAxes;
-  readonly turn_id: WebUuid;
+  readonly turn_id?: WebUuid | null;
 };
 
 type WebUsageCallCursor = {
@@ -157,7 +169,7 @@ type WebUsageCallCursor = {
   readonly recorded_at_micros: WebU64;
 };
 
-type WebUsageCallKind = "model_call" | "approval_judge";
+type WebUsageCallKind = "model_call" | "approval_judge" | "context_compaction";
 
 type WebUsageCost = {
   readonly amount_usd: WebDollarAmount;
