@@ -526,6 +526,26 @@ async fn auto_and_container_dimensions_are_valid_without_numeric_metadata()
 }
 
 #[tokio::test]
+async fn dimensions_admit_surrounding_xml_whitespace() -> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\" 10px \" height=\"\n20\t\"/>",
+    )
+    .into_source()?;
+    let result = read(
+        &DirectProcessor::new(),
+        &source,
+        "metadata",
+        serde_json::json!({}),
+    )
+    .await?;
+    let body = complete_structure(result)?;
+
+    assert_eq!(body["width"], 10.0);
+    assert_eq!(body["height"], 20.0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn non_xml_whitespace_outside_root_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed!(
         SvgFixture::raw("\u{00a0}<svg xmlns=\"http://www.w3.org/2000/svg\"/>".as_bytes()),
@@ -653,6 +673,17 @@ async fn unbound_attribute_prefix_is_rejected() -> Result<(), Box<dyn Error>> {
 async fn reserved_xml_prefix_rebinding_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed!(
         SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xml="urn:evil"/>"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn invalid_namespace_iri_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:p="urn:bad value"><p:path/></svg>"#,
+        ),
         "malformed_svg",
     )
     .await

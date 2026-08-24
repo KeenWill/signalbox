@@ -804,6 +804,7 @@ fn is_name_character(character: char) -> bool {
 }
 
 fn parse_dimension(value: &str) -> Result<Option<f64>, ParseIssue> {
+    let value = value.trim_matches(|character| matches!(character, ' ' | '\t' | '\n' | '\r'));
     if value.eq_ignore_ascii_case("auto") {
         return Ok(None);
     }
@@ -951,10 +952,38 @@ fn validate_namespace_declaration(name: &[u8], value: &[u8]) -> Result<(), Parse
         || (prefix == Some(b"xml") && value != XML_NAMESPACE)
         || (prefix != Some(b"xml") && value == XML_NAMESPACE)
         || prefix.is_some_and(|_| value.is_empty())
+        || (!value.is_empty() && !valid_iri_reference(value))
     {
         return Err(ParseIssue::Malformed);
     }
     Ok(())
+}
+
+fn valid_iri_reference(value: &[u8]) -> bool {
+    let mut index = 0;
+    while let Some(&byte) = value.get(index) {
+        if byte == b'%' {
+            if !value
+                .get(index + 1..index + 3)
+                .is_some_and(|escape| escape.iter().all(u8::is_ascii_hexdigit))
+            {
+                return false;
+            }
+            index += 3;
+            continue;
+        }
+        if byte.is_ascii_control()
+            || byte == b' '
+            || matches!(
+                byte,
+                b'<' | b'>' | b'\"' | b'{' | b'}' | b'|' | b'\\' | b'^' | b'`'
+            )
+        {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 fn require_reader(reader: &ReaderIdentity) -> Result<(), FileMediaProviderFailure> {
