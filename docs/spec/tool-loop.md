@@ -36,9 +36,10 @@ against this PR (`agent/user-override-denials`).
 The change-request-scoped thread mutation contracts and their pre-dispatch
 ownership confirmation are verified through this PR (`agent/thread-ownership`).
 
-The automatic tool-round saturation, 256-round ceiling, and retained-tool-content
-ceiling contracts are verified through this PR (`agent/tool-round-ceiling`) at
-implementation ref `859213c17c09666e36bddee63e63bc9616690685`.
+The automatic tool-round saturation, 256-round ceiling, and
+retained-tool-content ceiling contracts are verified through this PR
+(`agent/tool-round-ceiling`) at implementation ref
+`859213c17c09666e36bddee63e63bc9616690685`.
 
 The daemon blob-read declarations below are the foundation proposal from PR #553
 (`agent/blob-storage-foundation`) and become verified with its implementing
@@ -765,8 +766,8 @@ carries `ToolRoundLimitReached`. The terminal event consequently uses
 The round ceiling bounds latency and provider spend; it does not bound retained
 memory, because it multiplies against the 32-request batch bound and the 1 MiB
 argument and result bounds. Retained tool content is therefore bounded on its
-own terms: at most 256 MiB of projected tool content — request arguments,
-result text, error detail, and denial reasons — may be rendered into one call's
+own terms: at most 256 MiB of projected tool content — request arguments, result
+text, error detail, and denial reasons — may be rendered into one call's
 provider messages. The bound is enforced once the frontier projection names its
 entries and before any of that content is cloned into messages, so an over-bound
 frontier is refused rather than materialized. Exceeding it closes the checkpoint
