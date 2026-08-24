@@ -468,13 +468,38 @@ impl PostgresRepoWatchDispatchStore {
         lock_text(&mut transaction, repository.as_str()).await?;
         let candidate = sqlx::query(
             "SELECT convergence.assessment_id,
-                    convergence.pull_request_number
+                    convergence.pull_request_number,
+                    cutoff.assessment_id IS NOT NULL AS already_cut_off
                FROM repo_watch_pull_request_convergence AS convergence
+               LEFT JOIN repo_watch_convergence_cutoff AS cutoff
+                 ON cutoff.assessment_id = convergence.assessment_id
               WHERE convergence.repository = $1
-                AND NOT EXISTS (
-                    SELECT 1
-                      FROM repo_watch_convergence_cutoff AS cutoff
-                     WHERE cutoff.assessment_id = convergence.assessment_id
+                AND (
+                    cutoff.assessment_id IS NULL
+                    OR EXISTS (
+                        SELECT 1
+                          FROM repo_watch_dispatch_action AS action
+                          JOIN repo_watch_dispatch_batch AS batch
+                            ON batch.dispatch_id = action.dispatch_id
+                          JOIN repo_watch_event AS origin
+                            ON origin.event_id = action.event_id
+                         WHERE origin.repository = convergence.repository
+                           AND origin.pull_request_number =
+                               convergence.pull_request_number
+                           AND batch.admitted_at > cutoff.processed_at
+                           AND EXISTS (
+                                SELECT 1
+                                  FROM goal_event AS commissioned_goal
+                                 WHERE commissioned_goal.session_id = action.session_id
+                           )
+                           AND NOT EXISTS (
+                                SELECT 1
+                                  FROM repo_watch_convergence_cutoff_goal AS cutoff_goal
+                                 WHERE cutoff_goal.assessment_id =
+                                       convergence.assessment_id
+                                   AND cutoff_goal.session_id = action.session_id
+                           )
+                    )
                 )
                 AND EXISTS (
                     SELECT 1
@@ -521,9 +546,11 @@ impl PostgresRepoWatchDispatchStore {
         };
         let assessment_id: Uuid = candidate.try_get("assessment_id")?;
         let pull_request_number: Decimal = candidate.try_get("pull_request_number")?;
+        let already_cut_off: bool = candidate.try_get("already_cut_off")?;
         sqlx::query(
             "INSERT INTO repo_watch_convergence_cutoff (assessment_id)
-             VALUES ($1)",
+             VALUES ($1)
+             ON CONFLICT (assessment_id) DO NOTHING",
         )
         .bind(assessment_id)
         .execute(&mut *transaction)
@@ -531,18 +558,36 @@ impl PostgresRepoWatchDispatchStore {
         let sessions = sqlx::query_scalar::<_, Uuid>(
             "SELECT DISTINCT action.session_id
                FROM repo_watch_dispatch_action AS action
+               JOIN repo_watch_dispatch_batch AS batch
+                 ON batch.dispatch_id = action.dispatch_id
                JOIN repo_watch_event AS origin ON origin.event_id = action.event_id
               WHERE origin.repository = $1
                 AND origin.pull_request_number = $2
+                AND (
+                    NOT $4
+                    OR batch.admitted_at > (
+                        SELECT cutoff.processed_at
+                          FROM repo_watch_convergence_cutoff AS cutoff
+                         WHERE cutoff.assessment_id = $3
+                    )
+                )
                 AND EXISTS (
                     SELECT 1
                       FROM goal_event AS commissioned_goal
                      WHERE commissioned_goal.session_id = action.session_id
                 )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_convergence_cutoff_goal AS cutoff_goal
+                     WHERE cutoff_goal.assessment_id = $3
+                       AND cutoff_goal.session_id = action.session_id
+                )
               ORDER BY action.session_id",
         )
         .bind(repository.as_str())
         .bind(pull_request_number)
+        .bind(assessment_id)
+        .bind(already_cut_off)
         .fetch_all(&mut *transaction)
         .await?;
         let mut cutoff_corruption = None;

@@ -10,31 +10,33 @@ use signalbox_application::{
     ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
     ApprovalJudgeDispatchProvenance, ApprovalJudgePullRequestAuthority, AuthorizeModelCallOutcome,
     CommissionDispatchRequest, CommissionedDispatchFence, ModelCallCredentialReference,
-    RepoWatchBranchHead, RepoWatchDispatchService, RepoWatchDispatchTransaction,
-    RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
-    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate,
-    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver,
+    RepoWatchBranchHead, RepoWatchConvergenceAssessment, RepoWatchConvergenceAssessmentInput,
+    RepoWatchDispatchService, RepoWatchDispatchTransaction, RepoWatchEventContentIdentityV1,
+    RepoWatchEventOccurrenceV1, RepoWatchObservation, RepoWatchPullRequestLifecycle,
+    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
+    RepoWatchStaleReviewClearanceCandidate, RepoWatchTemplateResolver,
     RepoWatchWorkflowRunObservation, StartEligibleTurnOutcome, StartEligibleTurnService,
     UuidV7CommissionedDispatchIdGenerator, UuidV7RepoWatchDispatchIdGenerator,
     UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_domain::{
     AcceptedInputId, ActiveTurnPhase, AssistantResponsePart, BranchName,
-    CancelledModelCallTurnIdentities, CheckConclusion, CommissionedDispatchId, CommitSha,
-    ContextFrontierId, CreateSession, DangerousToolAutoApproval, DelegateApprovalRecommendation,
-    DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, GitHubObjectId, GoalCommandResult, GoalModelProvenance,
-    GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction,
-    GoalUserCommand, InitialToolApproval, MergeableState, ModelCallId, ModelCallTerminalIdentities,
-    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionRequest,
-    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments, ProviderModelIdentity,
-    ProviderReportedTokenUsage, PullRequestBody, PullRequestEventContext,
-    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchActionV1,
-    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1,
-    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
-    RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId,
-    RepoWatchRuleIdentityField, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    CancelledModelCallTurnIdentities, CheckConclusion, CheckRunName, CommissionedDispatchId,
+    CommitSha, ContextFrontierId, CreateSession, DangerousToolAutoApproval,
+    DelegateApprovalRecommendation, DeliveryRequest, DescendantTerminationScope,
+    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities, GitHubObjectId,
+    GoalCommandResult, GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance,
+    GoalState, GoalStatement, GoalUserAction, GoalUserCommand, InitialToolApproval, MergeableState,
+    ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
+    ModelCallTerminalOutcome, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
+    NormalizedToolArguments, ProviderModelIdentity, ProviderReportedTokenUsage, PullRequestBody,
+    PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
+    RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId,
+    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchMatcherV1,
+    RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1,
+    RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleVersion, RepoWatchSingletonScope,
     RepoWatchWorkflowRunAttempt, RepositorySlug, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
     SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
@@ -59,6 +61,11 @@ use signalbox_persistence::{
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
+    operator_status::{
+        ProcessOperatorStatusHeldSlot, ProcessOperatorStatusHeldSlotBlocker,
+        ProcessOperatorStatusItem, ProcessOperatorStatusQueuedObligation,
+        ProcessOperatorStatusRepository,
+    },
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
         RepoWatchCursorCandidate, RepoWatchCursorGeneration, RepoWatchObservedReviewState,
@@ -1666,6 +1673,81 @@ async fn commit_second_merge(
         merged_event(event_id, THIRD_HEAD)?,
     )
     .await
+}
+
+async fn commit_mergeable_head(
+    fixture: &DispatchFixture,
+    event_id: u128,
+    head: &str,
+) -> Result<RepoWatchCursorGeneration, Box<dyn Error>> {
+    commit_mergeable_head_at_base(fixture, event_id, head, BASE_REVISION).await
+}
+
+async fn commit_mergeable_head_at_base(
+    fixture: &DispatchFixture,
+    event_id: u128,
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchCursorGeneration, Box<dyn Error>> {
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let cursor = event_store
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let observation = pull_request_observation_at_base(
+        context(head)?,
+        RepoWatchPullRequestLifecycle::Open,
+        MergeableState::Mergeable,
+        base_revision,
+    )?;
+    let committed = event_store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(
+                Some(cursor.generation()),
+                RepoWatchCursorCandidate::new(observation),
+                vec![identified_event(mergeable_event(
+                    event_id,
+                    head,
+                    MergeableState::Mergeable,
+                )?)],
+            ),
+        )
+        .await?;
+    Ok(generation(committed))
+}
+
+async fn record_merge_ready_head(
+    fixture: &DispatchFixture,
+    event_id: u128,
+    head: &str,
+) -> Result<(), Box<dyn Error>> {
+    let generation = commit_mergeable_head(fixture, event_id, head).await?;
+    PostgresRepoWatchStore::new(fixture.pool.clone())
+        .record_convergence_assessments(
+            &fixture.repository,
+            generation,
+            &[merge_ready_assessment(head)?],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn record_assessment_at_base(
+    fixture: &DispatchFixture,
+    generation: RepoWatchCursorGeneration,
+    head: &str,
+    base_revision: &str,
+    review_decision: RepoWatchReviewDecision,
+) -> Result<(), Box<dyn Error>> {
+    PostgresRepoWatchStore::new(fixture.pool.clone())
+        .record_convergence_assessments(
+            &fixture.repository,
+            generation,
+            &[assessment_at_base(head, base_revision, review_decision)?],
+        )
+        .await?;
+    Ok(())
 }
 
 async fn corrupt_goal_generation(pool: &PgPool, session: SessionId) -> Result<(), Box<dyn Error>> {
@@ -5062,6 +5144,58 @@ async fn stale_cutoff_waits_until_its_sealed_identity_is_current_again()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn returned_sealed_identity_cuts_off_a_later_commission() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    record_merge_ready_head(&fixture, 0x54_620, FIRST_HEAD).await?;
+    assert!(
+        fixture
+            .store
+            .process_next_convergence_cutoff(&fixture.repository, || {
+                DurableCommandId::from_uuid(Uuid::from_u128(0x54_621))
+            })
+            .await?
+    );
+
+    let later = evaluate_conflict(&fixture, 0x54_622, SECOND_HEAD).await?;
+    let (_, later_sessions) = dispatched(later.outcome);
+    let later_session = later_sessions[0];
+    let returned_generation = commit_mergeable_head(&fixture, 0x54_623, FIRST_HEAD).await?;
+    record_assessment_at_base(
+        &fixture,
+        returned_generation,
+        FIRST_HEAD,
+        BASE_REVISION,
+        RepoWatchReviewDecision::Approved,
+    )
+    .await?;
+
+    let returned = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_624))
+        })
+        .await?;
+    let goal = GoalRepository::new(fixture.pool.clone())
+        .load_goal(later_session)
+        .await?
+        .expect("the later commissioned goal remains readable");
+    let cutoff_goal_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_convergence_cutoff_goal
+          WHERE session_id = $1",
+    )
+    .bind(later_session.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(returned);
+    assert_eq!(goal.current().state(), &GoalState::UserStopped);
+    assert_eq!(cutoff_goal_count, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn base_advance_requires_a_fresh_seal_for_cutoff_and_admission() -> Result<(), Box<dyn Error>>
 {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
@@ -5289,6 +5423,7 @@ async fn converged_target_settles_owed_work_without_dispatch() -> Result<(), Box
             &fixture.repository,
             fixture.rule.id(),
             fixture.rule.version(),
+            immediate_retry_policy(),
         )
         .await?
         .expect("released converged-target obligation becomes eligible for settlement");
@@ -6068,6 +6203,7 @@ async fn cooldown_uses_the_terminal_transition_time_not_the_next_evaluation_time
             &fixture.repository,
             fixture.rule.id(),
             fixture.rule.version(),
+            immediate_retry_policy(),
         )
         .await?
         .expect("the elapsed cooldown makes retained work ready");
@@ -6103,6 +6239,7 @@ async fn released_unconverged_dispatch_retains_a_follow_up_obligation() -> Resul
             &fixture.repository,
             fixture.rule.id(),
             fixture.rule.version(),
+            immediate_retry_policy(),
         )
         .await?
         .expect("released unconverged work is owed again");
@@ -6137,6 +6274,7 @@ async fn released_dispatch_follow_up_settles_after_its_target_closes() -> Result
             &fixture.repository,
             fixture.rule.id(),
             fixture.rule.version(),
+            immediate_retry_policy(),
         )
         .await?
         .expect("closed-target work remains available for settlement");

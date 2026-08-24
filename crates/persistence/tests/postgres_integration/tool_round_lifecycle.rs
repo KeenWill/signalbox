@@ -2672,23 +2672,6 @@ async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_succ
     let (fixture, _cancellation_entry, _terminal_frontier, successor) =
         commit_stopped_tool_round(&pool, seed).await?;
 
-    Ok((fixture, cancellation_entry, terminal_frontier))
-}
-
-/// S02 / S07 / S11 / INV-006 / INV-037: the terminal shape committed when a
-/// stop request races a tool-using response reloads through the scheduling
-/// projection, so the interrupt successor activates instead of leaving the
-/// session permanently unloadable.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_successor()
--> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-    let seed = 0x7d00;
-    let (fixture, _cancellation_entry, _terminal_frontier) =
-        commit_stopped_tool_round(&pool, seed).await?;
-    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 21));
-
     let activation = StartEligibleTurnRepository::new(pool.clone())
         .handle(
             fixture.session,

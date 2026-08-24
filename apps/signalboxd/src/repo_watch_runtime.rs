@@ -239,7 +239,7 @@ query RepositoryWatchReviewClearanceState($review: ID!) {
       state
       author { login }
       commit { oid }
-      pullRequest { number headRefOid reviewDecision }
+      pullRequest { number headRefOid }
     }
   }
 }
@@ -1970,6 +1970,101 @@ impl RepositoryWatchTask {
                 .await
             }
             RepoWatchWebhookMappingV1::Patch(patch) => {
+                if self.webhook_primary {
+                    let cursor = self
+                        .store
+                        .load_cursor(&self.repository)
+                        .await
+                        .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+                        .ok_or(RepositoryWatchAttemptError::Persistence)?;
+                    let durable = WebhookShadowBaseline::from_cursor(&cursor);
+                    let applied = match apply_repo_watch_observation_patch_v1(
+                        cursor.candidate().observation(),
+                        &patch,
+                    ) {
+                        Ok(applied) => applied,
+                        Err(_) => {
+                            self.record_webhook_terminal(
+                                pending,
+                                Vec::new(),
+                                RepoWatchWebhookDisposition::Quarantined,
+                                Some("patch_incoherent"),
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                    };
+                    return match applied {
+                        RepoWatchObservationApplyV1::DuplicateState => {
+                            self.record_webhook_terminal(
+                                pending,
+                                Vec::new(),
+                                RepoWatchWebhookDisposition::DuplicateState,
+                                None,
+                            )
+                            .await
+                        }
+                        RepoWatchObservationApplyV1::Superseded => {
+                            self.record_webhook_terminal(
+                                pending,
+                                Vec::new(),
+                                RepoWatchWebhookDisposition::Superseded,
+                                None,
+                            )
+                            .await
+                        }
+                        RepoWatchObservationApplyV1::Ignored(reason) => {
+                            self.record_webhook_terminal(
+                                pending,
+                                Vec::new(),
+                                RepoWatchWebhookDisposition::Ignored,
+                                Some(webhook_ignored_reason_code(reason)),
+                            )
+                            .await
+                        }
+                        RepoWatchObservationApplyV1::Applied(observation) => {
+                            let (projections, _) = shadow_event_projections(
+                                &self.repository,
+                                &durable,
+                                &observation,
+                                None,
+                            )?;
+                            self.commit_primary_webhook_delivery(
+                                pending,
+                                cursor,
+                                observation,
+                                projections,
+                                &[],
+                            )
+                            .await
+                        }
+                        RepoWatchObservationApplyV1::NeedsTargetedRefresh {
+                            observation,
+                            refreshes,
+                        } => {
+                            let (mut projections, _) = shadow_event_projections(
+                                &self.repository,
+                                &durable,
+                                &observation,
+                                None,
+                            )?;
+                            projections.extend(
+                                refreshes
+                                    .iter()
+                                    .map(targeted_query_projection)
+                                    .collect::<Result<Vec<_>, _>>()?,
+                            );
+                            self.commit_primary_webhook_delivery(
+                                pending,
+                                cursor,
+                                observation,
+                                projections,
+                                &refreshes,
+                            )
+                            .await
+                        }
+                    };
+                }
                 let cause = self
                     .seed_webhook_shadow()
                     .await?
@@ -2228,6 +2323,8 @@ impl RepositoryWatchTask {
             | RepoWatchCommitOutcome::Replayed(cursor)
             | RepoWatchCommitOutcome::Unchanged(cursor) => {
                 self.poller.publish_freshness(cursor.generation());
+                self.webhook_shadow = Some(WebhookShadowBaseline::from_cursor(&cursor));
+                self.webhook_shadow_superseded = false;
                 self.process_dispatches().await
             }
             RepoWatchCommitOutcome::Conflict { current: _ } => {
@@ -4785,9 +4882,7 @@ impl GitHubRepositoryPoller {
                 provider_state,
             });
         }
-        if normalize_review_decision(review.pull_request.review_decision.as_deref())?
-            != RepoWatchReviewDecision::ChangesRequested
-        {
+        if provider_state != RepoWatchObservedReviewState::ChangesRequested {
             return Ok(StaleReviewClearanceObservation::Terminal {
                 outcome: RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere,
                 provider_state,
@@ -6207,8 +6302,6 @@ struct ReviewClearancePullRequest {
     number: u64,
     #[serde(rename = "headRefOid")]
     head_ref_oid: String,
-    #[serde(rename = "reviewDecision")]
-    review_decision: Option<String>,
 }
 
 enum StaleReviewClearanceObservation {
