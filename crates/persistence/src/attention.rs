@@ -121,7 +121,7 @@ impl AttentionRepository {
             return Err(AttentionCorruption::Invalid("follow cursor").into());
         }
         let rows = sqlx::query(
-            "SELECT change_sequence, session_id
+            "SELECT change_sequence, session_id, fact_kind
                FROM operator_attention_change
               WHERE change_sequence > $1
               ORDER BY change_sequence
@@ -132,6 +132,16 @@ impl AttentionRepository {
         .fetch_all(&mut *transaction)
         .await?;
         if rows.len() > usize::from(max_attention_change_items()) {
+            transaction.commit().await?;
+            return Ok(AttentionChanges::ResyncRequired { cursor: current });
+        }
+        let membership_changed = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("fact_kind"))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .any(|fact_kind| fact_kind == "session");
+        if membership_changed {
             transaction.commit().await?;
             return Ok(AttentionChanges::ResyncRequired { cursor: current });
         }
@@ -206,21 +216,7 @@ macro_rules! summary_sql {
         concat!(
             "WITH selected AS (",
             $selection,
-            r#"), latest_turn AS (
-    SELECT DISTINCT ON (lifecycle.session_id)
-           lifecycle.session_id, lifecycle.turn_id, lifecycle.state_kind,
-           lifecycle.active_phase_kind, lifecycle.terminal_disposition_kind
-      FROM turn_lifecycle AS lifecycle JOIN selected USING (session_id)
-     WHERE NOT lifecycle.delegation_runtime_terminal
-       AND goal_turn_is_runtime_relevant(lifecycle.session_id, lifecycle.turn_id)
-     ORDER BY lifecycle.session_id,
-              CASE lifecycle.state_kind
-                  WHEN 'active' THEN 0
-                  WHEN 'queued' THEN 1
-                  ELSE 2
-              END,
-              lifecycle.acceptance_position DESC
-), latest_goal AS (
+            r#"), latest_goal AS (
     SELECT DISTINCT ON (goal.session_id)
            goal.session_id, goal.generation::text AS generation, goal.event_kind,
            goal.blocked_reason, LEFT(goal.need, $4) AS need_summary
@@ -232,8 +228,10 @@ macro_rules! summary_sql {
       FROM runner_session_placement_record AS placement JOIN selected USING (session_id)
      ORDER BY placement.session_id, placement.event_ordinal DESC
 )
-SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
-       turn.active_phase_kind, turn.terminal_disposition_kind,
+SELECT selected.session_id, selected.attention_turn_id AS turn_id,
+       selected.attention_turn_state_kind AS turn_state,
+       selected.attention_turn_active_phase_kind AS active_phase_kind,
+       selected.attention_turn_terminal_disposition_kind AS terminal_disposition_kind,
        selected.title_summary, selected.title_truncated, selected.archived,
        selected.active_turn_count, selected.queued_turn_count,
        goal.generation, goal.event_kind AS goal_state, goal.blocked_reason, goal.need_summary,
@@ -242,7 +240,6 @@ SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
        runner.state_kind AS runner_state,
        selected.fact_kind, selected.recorded_at
   FROM selected
-  LEFT JOIN latest_turn AS turn USING (session_id)
   LEFT JOIN latest_goal AS goal USING (session_id)
   LEFT JOIN latest_runner AS runner USING (session_id) "#,
             $ordering
@@ -262,6 +259,10 @@ const SELECT_IDENTITY: &str = summary_sql!(
            facts.approval_judge_completed_count::text AS judge_completed,
            facts.approval_judge_escalated_count::text AS judge_escalated,
            facts.approval_judge_failed_count::text AS judge_failed,
+           facts.attention_turn_id,
+           facts.attention_turn_state_kind,
+           facts.attention_turn_active_phase_kind,
+           facts.attention_turn_terminal_disposition_kind,
            activity.fact_kind, activity.recorded_at
       FROM session AS session_row
       LEFT JOIN session_metadata AS metadata USING (session_id)
@@ -303,6 +304,10 @@ const SELECT_LAST_ACTIVITY: &str = summary_sql!(
            facts.approval_judge_completed_count::text AS judge_completed,
            facts.approval_judge_escalated_count::text AS judge_escalated,
            facts.approval_judge_failed_count::text AS judge_failed,
+           facts.attention_turn_id,
+           facts.attention_turn_state_kind,
+           facts.attention_turn_active_phase_kind,
+           facts.attention_turn_terminal_disposition_kind,
            activity.fact_kind, activity.recorded_at
       FROM session AS session_row
       LEFT JOIN session_metadata AS metadata USING (session_id)
@@ -469,6 +474,11 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
     let recorded_at = row
         .try_get::<Option<sqlx::types::time::OffsetDateTime>, _>("recorded_at")?
         .ok_or(AttentionCorruption::Missing("activity timestamp"))?;
+    let goal_block = if state == AttentionState::Blocked {
+        decode_goal_block(row, goal_state.as_deref())?
+    } else {
+        None
+    };
     Ok(AttentionSummary {
         session: SessionId::from_uuid(row.try_get("session_id")?),
         title_summary: row.try_get("title_summary")?,
@@ -485,7 +495,7 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
             .map_err(|_| AttentionCorruption::Invalid("queued turn count"))?,
         state,
         action,
-        goal_block: decode_goal_block(row, goal_state.as_deref())?,
+        goal_block,
         judge: AttentionJudgeFacts {
             actionable: parse_u64(row, "judge_actionable")?,
             completed: parse_u64(row, "judge_completed")?,

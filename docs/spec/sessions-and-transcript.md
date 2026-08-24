@@ -644,7 +644,7 @@ launder invalid durable state into valid-looking domain values.
 ## Bounded browser session catalog
 
 `GET /api/sessions` is the one fleet-wide session chooser and attention read
-model. It returns at most 32 rows from one read-only repeatable-read snapshot,
+model. It returns at most 16 rows from one read-only repeatable-read snapshot,
 the exact filtered total, and the durable attention-journal cursor. The total
 counts filtered session and metadata rows; it never scans transcript or timeline
 records. Each row carries session identity, a title summary of at most 128

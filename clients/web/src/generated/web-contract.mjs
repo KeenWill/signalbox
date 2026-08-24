@@ -659,7 +659,7 @@ const schemas = {
             "items": {
               "$ref": "#/$defs/WebAttentionSummary"
             },
-            "maxItems": 128,
+            "maxItems": 16,
             "type": "array"
           }
         },

@@ -201,7 +201,8 @@ and its durable change-journal cursor, then emits summary replacements only for
 changed session identities. One incremental read examines at most 128 journal
 records. A larger cursor gap emits `resync_required` with the current cursor and
 ends that stream; it never skips records or continues from a partial gap. The
-HTTP producer retains only the item currently being encoded and waits between
+HTTP producer retains at most one bounded 128-summary replacement batch,
+represented as no more than eight 16-summary update items, and waits between
 empty polls. An initial projection failure returns a typed HTTP error before
 streaming begins. The append-only change journal timestamps commits explicitly;
 historical creation is seeded only from the durable command claim time and never
