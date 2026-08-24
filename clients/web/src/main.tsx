@@ -9,46 +9,58 @@ import {
   Outlet,
   RouterProvider,
 } from '@tanstack/react-router'
-import { StrictMode } from 'react'
+import { lazy, StrictMode, Suspense } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
-import { Workspace } from './App'
 import { HttpImportApi } from './imports/api'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import { ScenarioImportApi } from './imports/scenario'
-import { store } from './state'
+import { ProductApp } from './ProductApp'
+import { type ProductRouteId, productRoutes } from './product'
+import { selectApp, store } from './state'
 import './app.css'
 
 const rootRoute = createRootRoute({ component: () => <Outlet /> })
 const httpImportApi = new HttpImportApi()
 const scenarioImportApi = new ScenarioImportApi()
+const ScenarioWorkspace = lazy(() =>
+  import('./App').then((module) => ({ default: module.Workspace })),
+)
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
-  component: () => (
-    <Navigate to="/scenario/$scenarioId" params={{ scenarioId: 'streaming' }} replace />
-  ),
+  component: () => <Navigate to="/$surface" params={{ surface: 'attention' }} replace />,
+})
+const productRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/$surface',
+  component: () => {
+    const candidate = productRoute.useParams().surface
+    if (!productRoutes.some((route) => route.id === candidate)) {
+      return <Navigate to="/$surface" params={{ surface: 'attention' }} replace />
+    }
+    if (candidate === 'imports') {
+      return <ImportsWorkspace api={httpImportApi} scenario={false} />
+    }
+    return <ProductApp surface={candidate as ProductRouteId} />
+  },
 })
 const scenarioRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/scenario/$scenarioId',
-  component: ScenarioRoute,
-})
-function ScenarioRoute() {
-  const { scenarioId } = scenarioRoute.useParams()
-  return scenarioId === 'imports' ? (
-    <ImportsWorkspace api={scenarioImportApi} scenario />
-  ) : (
-    <Workspace scenarioId={scenarioId} />
-  )
-}
-const importsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/imports',
-  component: () => <ImportsWorkspace api={httpImportApi} scenario={false} />,
+  component: () => {
+    const { scenarioId } = scenarioRoute.useParams()
+    return scenarioId === 'imports' ? (
+      <ImportsWorkspace api={scenarioImportApi} scenario />
+    ) : (
+      <Suspense fallback={<main className="loading">Loading scenario studio…</main>}>
+        <ScenarioWorkspace scenarioId={scenarioId} />
+      </Suspense>
+    )
+  },
 })
 const router = createRouter({
-  routeTree: rootRoute.addChildren([indexRoute, scenarioRoute, importsRoute]),
+  routeTree: rootRoute.addChildren([indexRoute, productRoute, scenarioRoute]),
 })
 // Tunable effective ceiling: retain recently visited scenario projections without growing the
 // development cache for the lifetime of the page.
@@ -68,6 +80,10 @@ declare module '@tanstack/react-router' {
 
 const root = document.getElementById('root')
 if (!root) throw new Error('Missing web application root')
+
+const initialPresentation = selectApp(store.getState())
+document.documentElement.dataset.theme = initialPresentation.theme
+document.documentElement.dataset.density = initialPresentation.density
 
 createRoot(root).render(
   <StrictMode>
