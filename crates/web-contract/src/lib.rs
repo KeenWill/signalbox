@@ -126,6 +126,103 @@ fn canonical_u64(value: &str) -> Option<u64> {
     canonical.then(|| value.parse::<u64>().ok()).flatten()
 }
 
+fn canonical_session_id(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+        })
+}
+
+/// Checked canonical UUID used for browser-visible session identities.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebSessionId(
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    String,
+);
+
+impl WebSessionId {
+    /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
+    #[must_use]
+    pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
+        Self(format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+            bytes[4],
+            bytes[5],
+            bytes[6],
+            bytes[7],
+            bytes[8],
+            bytes[9],
+            bytes[10],
+            bytes[11],
+            bytes[12],
+            bytes[13],
+            bytes[14],
+            bytes[15],
+        ))
+    }
+
+    /// Constructs a session identity from its canonical lowercase UUID spelling.
+    #[must_use]
+    pub fn from_canonical(value: String) -> Option<Self> {
+        canonical_session_id(&value).then_some(Self(value))
+    }
+
+    /// Returns the canonical lowercase UUID spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebSessionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_canonical(value)
+            .ok_or_else(|| de::Error::custom("session ID must be a canonical lowercase UUID"))
+    }
+}
+
+/// Checked canonical UUID used for browser-visible turn identities.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebTurnId(
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    String,
+);
+
+impl WebTurnId {
+    /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
+    #[must_use]
+    pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
+        Self(WebSessionId::from_uuid_bytes(bytes).0)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebTurnId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        canonical_session_id(&value)
+            .then_some(Self(value))
+            .ok_or_else(|| de::Error::custom("turn ID must be a canonical lowercase UUID"))
+    }
+}
+
 impl WebTimelineEventSequence {
     /// Encodes one already-validated positive durable-event sequence.
     #[must_use]
@@ -221,7 +318,7 @@ pub struct WebSessionWorkFacts {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineDescriptor {
-    pub session_id: String,
+    pub session_id: WebSessionId,
     pub sizes: WebSessionTimelineSizeFacts,
     pub first_address: WebTimelineAddress,
     pub latest_address: WebTimelineAddress,
@@ -266,11 +363,23 @@ pub struct WebSessionTimelineItem {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineWindow {
-    pub session_id: String,
+    pub session_id: WebSessionId,
     pub items: Vec<WebSessionTimelineItem>,
     pub projected_structured_bytes: u32,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub continuation_before: Option<WebTimelineAddress>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub continuation_after: Option<WebTimelineAddress>,
+}
+
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 /// Current durable state of one active turn.
@@ -472,38 +581,40 @@ pub enum WebAttentionActivityKind {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionGoalBlock {
-    pub generation: String,
+    pub generation: WebU64,
     pub reason: WebAttentionBlockedReason,
     /// At most 128 Unicode scalar values; exact text is in session detail.
+    #[schemars(length(max = 128))]
     pub need_summary: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionJudgeFacts {
-    pub actionable: String,
-    pub completed: String,
-    pub escalated: String,
-    pub failed: String,
+    pub actionable: WebU64,
+    pub completed: WebU64,
+    pub escalated: WebU64,
+    pub failed: WebU64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionActivity {
-    pub unix_milliseconds: String,
+    pub unix_microseconds: WebU64,
     pub kind: WebAttentionActivityKind,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionSummary {
-    pub session_id: String,
+    pub session_id: WebSessionId,
+    #[schemars(length(max = 128))]
     pub title_summary: Option<String>,
     pub title_truncated: bool,
     pub archived: bool,
-    pub current_turn_id: Option<String>,
-    pub active_turn_count: String,
-    pub queued_turn_count: String,
+    pub current_turn_id: Option<WebTurnId>,
+    pub active_turn_count: WebU64,
+    pub queued_turn_count: WebU64,
     pub state: WebAttentionState,
     pub action: Option<WebAttentionAction>,
     pub goal_block: Option<WebAttentionGoalBlock>,
@@ -519,39 +630,41 @@ pub enum WebAttentionSort {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebAttentionContinuation {
     LastActivity {
-        unix_microseconds: String,
-        session_id: String,
+        unix_microseconds: WebU64,
+        session_id: WebSessionId,
     },
     SessionIdentity {
-        session_id: String,
+        session_id: WebSessionId,
     },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionSnapshot {
-    pub cursor: String,
-    pub total: String,
+    pub cursor: WebU64,
+    pub total: WebU64,
     pub sort: WebAttentionSort,
+    #[schemars(length(max = 32))]
     pub summaries: Vec<WebAttentionSummary>,
     pub continuation: Option<WebAttentionContinuation>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebAttentionStreamEvent {
     Snapshot {
         snapshot: WebAttentionSnapshot,
     },
     Update {
-        cursor: String,
+        cursor: WebU64,
+        #[schemars(length(max = 128))]
         summaries: Vec<WebAttentionSummary>,
     },
     ResyncRequired {
-        cursor: String,
+        cursor: WebU64,
     },
 }
 
@@ -604,7 +717,7 @@ struct GeneratedSchemas {
 /// Returns a closed build-time error when serde cannot encode a generated value
 /// or a DTO schema grows beyond the generator's focused supported shapes.
 pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContractError> {
-    let schemas = GeneratedSchemas {
+    let mut schemas = GeneratedSchemas {
         bootstrap: canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value()),
         example: canonical_schema(schemars::schema_for!(WebContractExample).to_value()),
         error: canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value()),
@@ -620,6 +733,8 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
         ),
         live_event: canonical_schema(schemars::schema_for!(WebSessionLiveStreamEvent).to_value()),
     };
+    make_property_nullable(&mut schemas.window, "continuation_before")?;
+    make_property_nullable(&mut schemas.window, "continuation_after")?;
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -650,6 +765,18 @@ fn canonical_schema(mut schema: Value) -> Value {
     // must not change checked-in artifacts.
     schema.sort_all_objects();
     schema
+}
+
+fn make_property_nullable(
+    schema: &mut Value,
+    property_name: &str,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(&format!("/properties/{property_name}"))
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    let concrete = property.take();
+    *property = json!({ "anyOf": [concrete, { "type": "null" }] });
+    Ok(())
 }
 
 fn runtime_module(schemas: &GeneratedSchemas) -> Result<String, GenerateWebContractError> {
@@ -738,17 +865,11 @@ function assertSchema(root, schema, value, path) {{
       return;
     }}
     const concrete = schema.type.filter((candidate) => candidate !== "null");
-    const accepted = concrete.some((candidate) => {{
-      try {{
-        assertSchema(root, {{ ...schema, type: candidate }}, value, path);
-        return true;
-      }} catch {{
-        return false;
-      }}
-    }});
-    if (!accepted) {{
+    const actual = Array.isArray(value) ? "array" : typeof value;
+    if (!concrete.includes(actual)) {{
       fail(path, concrete.join(" or "));
     }}
+    assertSchema(root, {{ ...schema, type: actual }}, value, path);
     return;
   }}
   if (schema.type === "object") {{
@@ -809,6 +930,20 @@ function assertSchema(root, schema, value, path) {{
   if (typeof value !== schema.type) {{
     fail(path, schema.type);
   }}
+  if (
+    schema.type === "string" &&
+    schema.maxLength !== undefined &&
+    Array.from(value).length > schema.maxLength
+  ) {{
+    fail(path, `at most ${{schema.maxLength}} Unicode scalar values`);
+  }}
+  if (
+    schema.type === "string" &&
+    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+    value.length > 20
+  ) {{
+    fail(path, "an unsigned 64-bit integer");
+  }}
   if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {{
     fail(path, `a string matching ${{schema.pattern}}`);
   }}
@@ -851,11 +986,14 @@ export function decodeWebSessionTimelineWindow(value) {{
 
 export function decodeWebAttentionSnapshot(value) {{
   assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
+  value.summaries.forEach((summary, index) => assertAttentionSummary(summary, `attention_snapshot.summaries[${{index}}]`));
   return value;
 }}
 
 export function decodeWebAttentionStreamEvent(value) {{
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
+  const summaries = value.kind === "snapshot" ? value.snapshot.summaries : value.summaries;
+  summaries?.forEach((summary, index) => assertAttentionSummary(summary, `attention_event.summaries[${{index}}]`));
   return value;
 }}
 
@@ -868,6 +1006,25 @@ export function decodeWebSessionLiveSnapshot(value) {{
 export function decodeWebSessionLiveStreamEvent(value) {{
   assertSchema(schemas.WebSessionLiveStreamEvent, schemas.WebSessionLiveStreamEvent, value, "session_live_event");
   return value;
+}}
+
+function assertAttentionSummary(summary, path) {{
+  const expectedAction = {{
+    active: null,
+    queued: null,
+    blocked: "provide_goal_need",
+    awaiting_approval: "decide_approval",
+    ambiguous: "reconcile_turn",
+    awaiting_reconciliation: "reconcile_turn",
+    runner_lost: "restore_runner",
+    idle: null,
+  }}[summary.state];
+  if (summary.action !== expectedAction) {{
+    fail(`${{path}}.action`, `the action required by state ${{summary.state}}`);
+  }}
+  if ((summary.state === "blocked") !== (summary.goal_block !== null)) {{
+    fail(`${{path}}.goal_block`, "present exactly for blocked state");
+  }}
 }}
 "##,
         contract_name = WEB_CONTRACT_NAME,
@@ -1048,7 +1205,7 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        WebContractBootstrap, WebContractExample, WebTimelineEventSequence, WebU64,
+        WebContractBootstrap, WebContractExample, WebSessionId, WebTimelineEventSequence, WebU64,
         generated_artifacts,
     };
 
@@ -1121,5 +1278,14 @@ mod tests {
         assert!(serde_json::from_str::<WebU64>(r#""18446744073709551616""#).is_err());
         assert!(serde_json::from_str::<WebU64>(r#""0""#).is_ok());
         assert!(serde_json::from_str::<WebU64>(r#""18446744073709551615""#).is_ok());
+    }
+
+    #[test]
+    fn session_id_rejects_noncanonical_uuid_spellings() {
+        assert!(serde_json::from_str::<WebSessionId>(r#""not-a-uuid""#).is_err());
+        assert!(
+            serde_json::from_str::<WebSessionId>(r#""00000000-0000-0000-0000-000000000991""#)
+                .is_ok()
+        );
     }
 }

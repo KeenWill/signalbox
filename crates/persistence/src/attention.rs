@@ -209,7 +209,13 @@ macro_rules! summary_sql {
            lifecycle.session_id, lifecycle.turn_id, lifecycle.state_kind,
            lifecycle.active_phase_kind, lifecycle.terminal_disposition_kind
       FROM turn_lifecycle AS lifecycle JOIN selected USING (session_id)
-     ORDER BY lifecycle.session_id, lifecycle.acceptance_position DESC
+     ORDER BY lifecycle.session_id,
+              CASE lifecycle.state_kind
+                  WHEN 'active' THEN 0
+                  WHEN 'queued' THEN 1
+                  ELSE 2
+              END,
+              lifecycle.acceptance_position DESC
 ), latest_goal AS (
     SELECT DISTINCT ON (goal.session_id)
            goal.session_id, goal.generation::text AS generation, goal.event_kind,

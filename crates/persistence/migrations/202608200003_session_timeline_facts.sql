@@ -121,6 +121,9 @@ CREATE FUNCTION append_session_timeline_transcript_bytes()
 RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$
 BEGIN
+    IF NEW.assistant_text_value IS NULL AND NEW.context_summary_value IS NULL THEN
+        RETURN NULL;
+    END IF;
     -- Transcript persistence can share a transaction with later outbox work.
     -- Preserve the global allocator-then-session-fact lock order here too.
     PERFORM 1 FROM outbox_sequence_state WHERE singleton FOR UPDATE;
