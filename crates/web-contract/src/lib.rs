@@ -370,6 +370,9 @@ pub struct WebTimelineBodyContinuation {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineTextExcerpt {
+    /// UTF-16 length never exceeds UTF-8 length, so every valid excerpt within
+    /// the 65,536-byte detail budget passes this pre-encoding string bound.
+    #[schemars(length(max = 65_536))]
     pub text: String,
     pub offset_bytes: WebU64,
     pub total_bytes: WebU64,
@@ -935,6 +938,9 @@ function assertTimelineDetailPage(value) {{
   let previousAddress = null;
   value.items.forEach((item, index) => {{
     const path = `timeline_detail_page.items[${{index}}]`;
+    if (expectedBodyContinuation !== null) {{
+      fail(path, "absent after a continued body");
+    }}
     const address = BigInt(item.address.event_sequence);
     if (previousAddress !== null && address <= previousAddress) {{
       fail(`${{path}}.address`, "strictly increasing after the previous item");
@@ -993,6 +999,16 @@ function assertTimelineDetailPage(value) {{
               "present only for a known_failed terminal model call",
             );
           }}
+          if (
+            item.body.response !== undefined &&
+            item.body.response !== null &&
+            item.body.state.disposition !== "completed"
+          ) {{
+            fail(
+              `${{path}}.body.response`,
+              "present only for a completed terminal model call",
+            );
+          }}
         }}
         break;
       case "turn_lifecycle":
@@ -1029,9 +1045,6 @@ function assertTimelineDetailPage(value) {{
       fail("timeline_detail_page.projected_body_bytes", `at most ${{maxProjectedBodyBytes}} bytes`);
     }}
     if (continuation !== null) {{
-      if (expectedBodyContinuation !== null) {{
-        fail(path, "at most one continued body per page");
-      }}
       expectedBodyContinuation = continuation;
     }}
   }});
@@ -1059,10 +1072,10 @@ function assertTimelineDetailPage(value) {{
     if (expectedBodyContinuation !== null) {{
       fail("timeline_detail_page.continuation", "more_body for a continued excerpt");
     }}
-    if (
-      previousAddress !== null &&
-      BigInt(value.continuation.address.event_sequence) <= previousAddress
-    ) {{
+    if (previousAddress === null) {{
+      fail("timeline_detail_page.continuation", "absent on an empty page");
+    }}
+    if (BigInt(value.continuation.address.event_sequence) <= previousAddress) {{
       fail("timeline_detail_page.continuation.address", "after the final returned item");
     }}
   }}

@@ -936,7 +936,16 @@ async fn project_detail_event(
                 DispatchedOutboxEventKind::TurnReconciliationRequired { turn, .. } => {
                     terminal_turn_body(*turn, "reconciliation_required", cursor)?
                 }
-                _ => {
+                DispatchedOutboxEventKind::SessionCreated
+                | DispatchedOutboxEventKind::SessionModelSettingsChanged(_)
+                | DispatchedOutboxEventKind::TurnModelSettingsResolved(_)
+                | DispatchedOutboxEventKind::GoalTurnRetired { .. }
+                | DispatchedOutboxEventKind::ToolBatchTransition { .. }
+                | DispatchedOutboxEventKind::ToolApprovalDecided { .. }
+                | DispatchedOutboxEventKind::ContextCompacted { .. }
+                | DispatchedOutboxEventKind::RunnerStateTransition { .. }
+                | DispatchedOutboxEventKind::DelegationUpdate(_)
+                | DispatchedOutboxEventKind::DelegationWake(_) => {
                     require_no_body_cursor(cursor)?;
                     (SessionTimelineDetailBody::EventFact { kind }, None)
                 }

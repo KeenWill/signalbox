@@ -956,6 +956,9 @@ fn provider_failure_cause_dto(
     cause: ProviderModelCallFailureCause,
 ) -> WebProviderModelCallFailureCause {
     match cause {
+        ProviderModelCallFailureCause::CredentialRejected => {
+            WebProviderModelCallFailureCause::CredentialRejected
+        }
         ProviderModelCallFailureCause::PermissionDenied => {
             WebProviderModelCallFailureCause::PermissionDenied
         }
@@ -979,7 +982,6 @@ fn provider_failure_cause_dto(
         ProviderModelCallFailureCause::Unrecognized => {
             WebProviderModelCallFailureCause::Unrecognized
         }
-        _ => WebProviderModelCallFailureCause::CredentialRejected,
     }
 }
 
