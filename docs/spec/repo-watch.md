@@ -1108,8 +1108,8 @@ deliveries pending, invalidates partial provider freshness, emits the closed
 projection backoff as another retryable drain failure; the serialized task is
 therefore returned to its scheduler after bounded child cleanup even when an
 inner operation never returns. Unfinished child fetches remain in the poller's
-shared set, which a later attempt must drain before it can spawn new work.
-A terminal commit whose result is lost in transit is resolved by reading whether
+shared set, which a later attempt must drain before it can spawn new work. A
+terminal commit whose result is lost in transit is resolved by reading whether
 the row is already terminal, which cannot itself be ambiguous: if it is, the
 delivery counts as recorded and the shadow advances; if it is not, the record is
 re-attempted a bounded number of times before the delivery is left pending for
