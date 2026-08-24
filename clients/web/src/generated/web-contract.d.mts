@@ -69,15 +69,15 @@ export type WebContractLimits = {
 export type WebImportContinuationReference = {
   readonly imported_conversation_id: string;
   readonly imported_entry_id: string;
-  readonly position: number;
+  readonly position: string;
 };
 
 export type WebImportFormat = "claude_code_session_jsonl_v1" | "claude_code_session_jsonl_v2" | "codex_rollout_jsonl_v1";
 
 export type WebImportSizeFacts = {
-  readonly normalized_entry_bytes: number;
-  readonly normalized_source_record_bytes: number;
-  readonly raw_source_bytes: number;
+  readonly normalized_entry_bytes: string;
+  readonly normalized_source_record_bytes: string;
+  readonly raw_source_bytes: string;
 };
 
 export type WebImportSourceEvidence = {
@@ -93,7 +93,7 @@ export type WebImportSourceSessionEvidence = {
 
 export type WebImportSummary = {
   readonly display_title?: string | null;
-  readonly entry_count: number;
+  readonly entry_count: string;
   readonly format: WebImportFormat;
   readonly imported_conversation_id: string;
   readonly source_session_id?: WebImportSourceSessionEvidence | null;
@@ -123,8 +123,8 @@ export type WebImportedContentKind = "source_event" | "source_message_block" | "
 export type WebImportedEntry = {
   readonly content_kind: WebImportedContentKind;
   readonly frontier: WebImportContinuationReference;
-  readonly raw_record_position: number;
-  readonly record_entry_position: number;
+  readonly raw_record_position: string;
+  readonly record_entry_position: string;
   readonly source_speaker: WebImportedSpeakerEvidence;
   readonly text?: WebImportTextEvidence | null;
 };
@@ -220,9 +220,9 @@ export type WebImportListPage = {
 
 export type WebImportDescriptor = {
   readonly display_title?: string | null;
-  readonly entry_count: number;
+  readonly entry_count: string;
   readonly imported_conversation_id: string;
-  readonly raw_record_count: number;
+  readonly raw_record_count: string;
   readonly sizes: WebImportSizeFacts;
   readonly source: WebImportSourceEvidence;
   readonly timeline: WebImportTimelineBounds;
@@ -232,16 +232,16 @@ export type WebImportEntryWindowRequest = {
   readonly after?: number | null;
   readonly anchor?: WebImportWindowAnchor | null;
   readonly before?: number | null;
-  readonly position?: number | null;
+  readonly position?: string | null;
 };
 
 export type WebImportEntryWindow = {
-  readonly anchor_position: number;
-  readonly first_position: number;
+  readonly anchor_position: string;
+  readonly first_position: string;
   readonly has_after: boolean;
   readonly has_before: boolean;
   readonly items: ReadonlyArray<WebImportedEntry>;
-  readonly last_position: number;
+  readonly last_position: string;
 };
 
 export type WebImportContinuationRequest = {

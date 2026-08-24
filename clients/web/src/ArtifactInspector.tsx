@@ -5,6 +5,7 @@ import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
 import type { ArtifactItem } from './features/artifacts/artifactTypes'
 import type { WebBlobDescriptor } from './generated/web-contract.mjs'
 import { type BlobDescriptorInput, ProductRequestError, productTransport } from './product'
+import { store } from './state'
 
 type ArtifactPresentation = 'audio' | 'blocked' | 'document' | 'image' | 'video'
 
@@ -189,6 +190,14 @@ export function ArtifactInspector({
           <ArtifactRenderer
             key={`${descriptor.data.digest}-${request.presentation}`}
             artifact={artifactFromDescriptor(descriptor.data, request.presentation)}
+            commandContext={{
+              dispatch: store.dispatch,
+              getState: store.getState,
+              timelineIds: [],
+              artifactPreviewIds: [],
+              artifactOriginalIds: [descriptor.data.digest],
+              focusTimeline: () => undefined,
+            }}
           />
         </div>
       )}

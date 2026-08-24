@@ -47,7 +47,7 @@ const summaryAt = (index: number): WebImportSummary => ({
   source_session_id: sourceSessionAt(index)
     ? { leading_text: sourceSessionAt(index) ?? '', completeness: 'complete' }
     : undefined,
-  entry_count: index === 0 ? SCENARIO_ENTRY_TOTAL : 120 + (index % 8_000),
+  entry_count: String(index === 0 ? SCENARIO_ENTRY_TOTAL : 120 + (index % 8_000)),
 })
 
 const cursorIndex = (cursor: string | null | undefined): number => {
@@ -83,10 +83,10 @@ const entryAt = (conversation: string, position: number): WebImportedEntry => {
     frontier: {
       imported_conversation_id: conversation,
       imported_entry_id: fixtureUuid(2_000_000 + position),
-      position,
+      position: String(position),
     },
-    raw_record_position: Math.ceil(position / 3),
-    record_entry_position: ((position - 1) % 3) + 1,
+    raw_record_position: String(Math.ceil(position / 3)),
+    record_entry_position: String(((position - 1) % 3) + 1),
     source_speaker: speakerAt(position),
     content_kind: contentKind,
     text:
@@ -141,21 +141,21 @@ export class ScenarioImportApi implements ImportApi {
   async descriptor(importedConversationId: string): Promise<WebImportDescriptor> {
     const index = Math.max(cursorIndex(importedConversationId) - 1, 0)
     const summary = summaryAt(index)
-    const latestPosition = summary.entry_count
+    const latestPosition = Number(summary.entry_count)
     return {
       imported_conversation_id: summary.imported_conversation_id,
       display_title: summary.display_title,
-      raw_record_count: Math.ceil(latestPosition / 3),
-      entry_count: latestPosition,
+      raw_record_count: String(Math.ceil(latestPosition / 3)),
+      entry_count: String(latestPosition),
       source: {
         format: summary.format,
         source_digest_sha256: String(index + 1).padStart(64, '0'),
         source_session_id: summary.source_session_id,
       },
       sizes: {
-        raw_source_bytes: latestPosition * 384,
-        normalized_source_record_bytes: latestPosition * 128,
-        normalized_entry_bytes: latestPosition * 192,
+        raw_source_bytes: String(latestPosition * 384),
+        normalized_source_record_bytes: String(latestPosition * 128),
+        normalized_entry_bytes: String(latestPosition * 192),
       },
       timeline: {
         first: entryAt(summary.imported_conversation_id, 1).frontier,
@@ -172,24 +172,25 @@ export class ScenarioImportApi implements ImportApi {
     const anchor = request.anchor ?? 'first'
     const anchorPosition =
       anchor === 'latest'
-        ? descriptor.entry_count
+        ? Number(descriptor.entry_count)
         : anchor === 'position'
-          ? (request.position ?? 1)
+          ? Number(request.position ?? '1')
           : 1
     const before = request.before ?? 25
     const after = request.after ?? 25
     const firstPosition = Math.max(anchorPosition - before, 1)
-    const lastPosition = Math.min(anchorPosition + after, descriptor.entry_count)
+    const entryCount = Number(descriptor.entry_count)
+    const lastPosition = Math.min(anchorPosition + after, entryCount)
     const count = Math.min(lastPosition - firstPosition + 1, SCENARIO_IMPORT_WINDOW_ITEMS)
     const items = Array.from({ length: count }, (_, offset) =>
       entryAt(importedConversationId, firstPosition + offset),
     )
     return {
-      anchor_position: anchorPosition,
-      first_position: firstPosition,
-      last_position: firstPosition + items.length - 1,
+      anchor_position: String(anchorPosition),
+      first_position: String(firstPosition),
+      last_position: String(firstPosition + items.length - 1),
       has_before: firstPosition > 1,
-      has_after: firstPosition + items.length - 1 < descriptor.entry_count,
+      has_after: firstPosition + items.length - 1 < entryCount,
       items,
     }
   }
@@ -200,7 +201,7 @@ export class ScenarioImportApi implements ImportApi {
   ): Promise<WebImportContinuationResponse> {
     return {
       command_id: request.command_id,
-      session_id: fixtureUuid(9_000_000 + request.frontier.position),
+      session_id: fixtureUuid(9_000_000 + Number(request.frontier.position)),
       frontier: request.frontier,
       relationship: request.relationship,
     }

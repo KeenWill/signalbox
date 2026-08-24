@@ -1640,8 +1640,8 @@ mod tests {
     use super::{
         DEFAULT_WEB_BIND_ADDRESS, MAX_CONCURRENT_WEB_BLOB_READS, WebHttpConfiguration,
         WebHttpConfigurationError, WebHttpRuntime, bootstrap_only_router, content_disposition,
-        deterministic_test_router, exceeds_web_blob_range_limit, if_none_match, ndjson_response,
-        parse_byte_range, production_router, reader_body_until, single_range_header,
+        deterministic_test_router, if_none_match, ndjson_response, parse_byte_range,
+        production_router, reader_body_until, single_range_header,
         try_acquire_web_blob_read_permit,
     };
 

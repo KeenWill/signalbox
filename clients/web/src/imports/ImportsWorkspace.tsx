@@ -46,10 +46,18 @@ const isRetryableContinuationError = (error: unknown): boolean =>
   (!(error instanceof ImportApiError) ||
     ['continuation_commit_ambiguous', 'continuation_unavailable'].includes(error.detail.error.code))
 
-const byteLabel = (bytes: number): string => {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
+const isAmbiguousContinuationError = (error: unknown): boolean =>
+  error instanceof ImportApiError && error.detail.error.code === 'continuation_commit_ambiguous'
+
+const decimalLabel = (value: string): string => BigInt(value).toLocaleString()
+
+const byteLabel = (value: string): string => {
+  const bytes = BigInt(value)
+  if (bytes < 1024n) return `${bytes.toLocaleString()} B`
+  const unit = bytes < 1024n * 1024n ? 1024n : 1024n * 1024n
+  const label = unit === 1024n ? 'KiB' : 'MiB'
+  const tenths = (bytes * 10n) / unit
+  return `${tenths / 10n}.${tenths % 10n} ${label}`
 }
 
 export function ImportsWorkspace({
@@ -165,13 +173,16 @@ export function ImportsWorkspace({
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds:
+        selectedEntry?.content_kind === 'text' ? [selectedEntry.frontier.imported_entry_id] : [],
+      artifactOriginalIds: [],
       focusTimeline: () =>
         document.querySelector<HTMLElement>('[aria-label="Imported source entries"]')?.focus(),
       importEntryIds,
       selectedImportEntry: selectedFrontier?.imported_entry_id ?? null,
       selectImportEntry,
     }),
-    [importEntryIds, selectImportEntry, selectedFrontier?.imported_entry_id],
+    [importEntryIds, selectImportEntry, selectedEntry, selectedFrontier?.imported_entry_id],
   )
   useEffect(() => {
     onCommandContext?.(commandContext)
@@ -240,12 +251,14 @@ export function ImportsWorkspace({
   ])
 
   const resetCatalog = () => {
+    if (hasRetainedCommand) return
     resetContinuation()
     setAfter(undefined)
     setSelectedImport(null)
   }
 
   const showCatalogPage = (cursor: string | undefined) => {
+    if (hasRetainedCommand) return
     resetContinuation()
     setAfter(cursor)
   }
@@ -258,16 +271,13 @@ export function ImportsWorkspace({
   }
 
   const showPosition = () => {
-    const position = Number(positionInput)
-    if (
-      !Number.isSafeInteger(position) ||
-      position <= 0 ||
-      position > (descriptorQuery.data?.entry_count ?? 0)
-    )
-      return
+    if (!/^[1-9]\d{0,19}$/.test(positionInput)) return
+    const position = BigInt(positionInput)
+    const entryCount = descriptorQuery.data?.entry_count
+    if (entryCount === undefined || position > BigInt(entryCount)) return
     showWindow({
       anchor: 'position',
-      position,
+      position: positionInput,
       before: Math.floor(IMPORT_WINDOW_RADIUS / 2),
       after: Math.floor(IMPORT_WINDOW_RADIUS / 2),
     })
@@ -284,6 +294,8 @@ export function ImportsWorkspace({
 
   const retryableContinuationFailure =
     continuation.isError && isRetryableContinuationError(continuation.error)
+  const ambiguousContinuationFailure =
+    continuation.isError && isAmbiguousContinuationError(continuation.error)
 
   const continueAt = (relationship: WebImportedSessionRelationship) => {
     if (!selectedFrontier || modelSelectionId.trim().length === 0) return
@@ -341,6 +353,7 @@ export function ImportsWorkspace({
                   <select
                     aria-label="Filter imports by format"
                     value={format}
+                    disabled={hasRetainedCommand}
                     onChange={(event) => {
                       setFormat(event.target.value as FormatFilter)
                       resetCatalog()
@@ -358,6 +371,7 @@ export function ImportsWorkspace({
                   <input
                     aria-label="Filter imports by exact source session evidence"
                     value={sourceSession}
+                    disabled={hasRetainedCommand}
                     placeholder="Exact attested identifier"
                     onChange={(event) => {
                       setSourceSession(event.target.value)
@@ -371,18 +385,23 @@ export function ImportsWorkspace({
                     aria-label="Use exact source session filter"
                     type="checkbox"
                     checked={sourceSessionFilterEnabled}
+                    disabled={hasRetainedCommand}
                     onChange={(event) => {
                       setSourceSessionFilterEnabled(event.target.checked)
                       resetCatalog()
                     }}
                   />
                 </label>
-                <button type="button" disabled={!after} onClick={() => showCatalogPage(undefined)}>
+                <button
+                  type="button"
+                  disabled={!after || hasRetainedCommand}
+                  onClick={() => showCatalogPage(undefined)}
+                >
                   First page
                 </button>
                 <button
                   type="button"
-                  disabled={!imports?.next_cursor}
+                  disabled={!imports?.next_cursor || hasRetainedCommand}
                   onClick={() => showCatalogPage(imports?.next_cursor ?? undefined)}
                 >
                   Next page
@@ -473,11 +492,11 @@ export function ImportsWorkspace({
                     </div>
                     <div>
                       <dt>Raw records</dt>
-                      <dd>{descriptorQuery.data.raw_record_count.toLocaleString()}</dd>
+                      <dd>{decimalLabel(descriptorQuery.data.raw_record_count)}</dd>
                     </div>
                     <div>
                       <dt>Entries</dt>
-                      <dd>{descriptorQuery.data.entry_count.toLocaleString()}</dd>
+                      <dd>{decimalLabel(descriptorQuery.data.entry_count)}</dd>
                     </div>
                     <div>
                       <dt>Raw source size</dt>
@@ -495,7 +514,7 @@ export function ImportsWorkspace({
                     </div>
                     <div>
                       <dt>Timeline</dt>
-                      <dd>1–{descriptorQuery.data.timeline.latest.position.toLocaleString()}</dd>
+                      <dd>1–{decimalLabel(descriptorQuery.data.timeline.latest.position)}</dd>
                     </div>
                   </dl>
                 )}
@@ -518,8 +537,8 @@ export function ImportsWorkspace({
                     />
                   </div>
                   <p>
-                    Frontier {selectedFrontier?.position.toLocaleString() ?? '—'} · provider
-                    defaults
+                    Frontier {selectedFrontier ? decimalLabel(selectedFrontier.position) : '—'} ·
+                    provider defaults
                   </p>
                   <div className="continuation-actions">
                     <button
@@ -541,15 +560,17 @@ export function ImportsWorkspace({
                         <button type="button" onClick={() => continuation.mutate(pendingCommand)}>
                           Retry exact command
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setPendingCommand(null)
-                            continuation.reset()
-                          }}
-                        >
-                          Abandon exact retry
-                        </button>
+                        {!ambiguousContinuationFailure && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPendingCommand(null)
+                              continuation.reset()
+                            }}
+                          >
+                            Abandon exact retry
+                          </button>
+                        )}
                       </>
                     )}
                   </div>
@@ -557,8 +578,10 @@ export function ImportsWorkspace({
                     <p role="alert">
                       The exact command for import{' '}
                       {pendingCommand.frontier.imported_conversation_id}, position{' '}
-                      {pendingCommand.frontier.position.toLocaleString()}, is retained for retry.
-                      Abandon it before selecting another import or frontier.
+                      {decimalLabel(pendingCommand.frontier.position)}, is retained for retry.
+                      {ambiguousContinuationFailure
+                        ? ' Retry this exact command until its durable outcome is known.'
+                        : ' Abandon it before selecting another import or frontier.'}
                     </p>
                   )}
                   {continuation.isError && !retryableContinuationFailure && (
@@ -580,7 +603,7 @@ export function ImportsWorkspace({
                     {windowQuery.isError
                       ? 'Entry window unavailable'
                       : entryWindow
-                        ? `${entryWindow.first_position.toLocaleString()}–${entryWindow.last_position.toLocaleString()} · ${entryWindow.items.length} loaded`
+                        ? `${decimalLabel(entryWindow.first_position)}–${decimalLabel(entryWindow.last_position)} · ${entryWindow.items.length} loaded`
                         : selectedImport === null
                           ? 'No import selected'
                           : 'Loading window…'}
@@ -604,7 +627,7 @@ export function ImportsWorkspace({
                     commandContext={commandContext}
                   />
                 )}
-                <ImportedArtifactView entry={selectedEntry} />
+                <ImportedArtifactView entry={selectedEntry} commandContext={commandContext} />
               </div>
             </div>
           </section>

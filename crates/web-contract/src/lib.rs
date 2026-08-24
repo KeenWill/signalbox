@@ -332,8 +332,8 @@ pub struct WebImportSummary {
     pub format: WebImportFormat,
     /// Bounded converter-attested source-session evidence, when consistent.
     pub source_session_id: Option<WebImportSourceSessionEvidence>,
-    /// Number of normalized imported entries.
-    pub entry_count: u64,
+    /// Number of normalized imported entries encoded losslessly for JavaScript.
+    pub entry_count: String,
 }
 
 /// Bounded projection of exact converter-attested source-session evidence.
@@ -351,6 +351,7 @@ pub struct WebImportSourceSessionEvidence {
 #[serde(deny_unknown_fields)]
 pub struct WebImportListPage {
     /// Rows in stable UUID order.
+    #[schemars(length(max = 100))]
     pub items: Vec<WebImportSummary>,
     /// Exclusive cursor for the next page, absent at the end.
     pub next_cursor: Option<String>,
@@ -372,12 +373,12 @@ pub struct WebImportSourceEvidence {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebImportSizeFacts {
-    /// Sum of exact raw source-record occurrence bytes.
-    pub raw_source_bytes: u64,
-    /// Sum of normalized source-record encoding bytes.
-    pub normalized_source_record_bytes: u64,
-    /// Sum of normalized entry and source-metadata encoding bytes.
-    pub normalized_entry_bytes: u64,
+    /// Sum of exact raw source-record occurrence bytes, encoded losslessly for JavaScript.
+    pub raw_source_bytes: String,
+    /// Sum of normalized source-record encoding bytes, encoded losslessly for JavaScript.
+    pub normalized_source_record_bytes: String,
+    /// Sum of normalized entry and source-metadata encoding bytes, encoded losslessly for JavaScript.
+    pub normalized_entry_bytes: String,
 }
 
 /// One immutable imported frontier suitable for precise continuation.
@@ -388,8 +389,8 @@ pub struct WebImportContinuationReference {
     pub imported_conversation_id: String,
     /// Exact imported-entry UUID at the inclusive frontier.
     pub imported_entry_id: String,
-    /// One-based immutable imported position.
-    pub position: u64,
+    /// One-based immutable imported position encoded losslessly for JavaScript.
+    pub position: String,
 }
 
 /// First and latest immutable positions in an imported timeline.
@@ -410,10 +411,10 @@ pub struct WebImportDescriptor {
     pub imported_conversation_id: String,
     /// Evidence-derived display title, when available.
     pub display_title: Option<String>,
-    /// Number of exact raw source records.
-    pub raw_record_count: u64,
-    /// Number of normalized imported entries.
-    pub entry_count: u64,
+    /// Number of exact raw source records encoded losslessly for JavaScript.
+    pub raw_record_count: String,
+    /// Number of normalized imported entries encoded losslessly for JavaScript.
+    pub entry_count: String,
     /// Source and converter evidence, distinct from native execution evidence.
     pub source: WebImportSourceEvidence,
     /// Projected byte facts; no raw blob bytes are included.
@@ -440,8 +441,8 @@ pub enum WebImportWindowAnchor {
 pub struct WebImportEntryWindowRequest {
     /// Logical anchor; defaults to `first` when omitted.
     pub anchor: Option<WebImportWindowAnchor>,
-    /// Required only for the `position` anchor.
-    pub position: Option<u64>,
+    /// Required only for the `position` anchor; encoded losslessly for JavaScript.
+    pub position: Option<String>,
     /// Number of entries requested before the anchor.
     pub before: Option<u32>,
     /// Number of entries requested after the anchor.
@@ -519,10 +520,10 @@ pub enum WebImportTextEvidence {
 pub struct WebImportedEntry {
     /// Exact immutable continuation frontier.
     pub frontier: WebImportContinuationReference,
-    /// One-based physical source-record occurrence.
-    pub raw_record_position: u64,
-    /// One-based normalized entry position within that source record.
-    pub record_entry_position: u64,
+    /// One-based physical source-record occurrence encoded losslessly for JavaScript.
+    pub raw_record_position: String,
+    /// One-based normalized entry position within that source record, encoded losslessly for JavaScript.
+    pub record_entry_position: String,
     /// Source speaker attestation, never native author evidence.
     pub source_speaker: WebImportedSpeakerEvidence,
     /// Source-neutral normalized content kind.
@@ -535,17 +536,18 @@ pub struct WebImportedEntry {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebImportEntryWindow {
-    /// Resolved immutable anchor position.
-    pub anchor_position: u64,
-    /// First position returned.
-    pub first_position: u64,
-    /// Last position returned.
-    pub last_position: u64,
+    /// Resolved immutable anchor position encoded losslessly for JavaScript.
+    pub anchor_position: String,
+    /// First position returned, encoded losslessly for JavaScript.
+    pub first_position: String,
+    /// Last position returned, encoded losslessly for JavaScript.
+    pub last_position: String,
     /// Whether earlier entries exist.
     pub has_before: bool,
     /// Whether later entries exist.
     pub has_after: bool,
     /// Entries in ascending immutable position order.
+    #[schemars(length(max = 101))]
     pub items: Vec<WebImportedEntry>,
 }
 
@@ -959,6 +961,53 @@ function assertCanonicalU64(value, path) {{
   }}
 }}
 
+function assertCanonicalNonnegativeU64(value, path) {{
+  if (!/^(?:0|[1-9][0-9]{{0,19}})$/.test(value) || BigInt(value) > 18446744073709551615n) {{
+    fail(path, "a nonnegative canonical decimal u64 string");
+  }}
+}}
+
+function validateWebImportFrontier(value, path) {{
+  assertCanonicalU64(value.position, `${{path}}.position`);
+}}
+
+function validateWebImportListPage(value) {{
+  value.items.forEach((item, index) =>
+    assertCanonicalNonnegativeU64(item.entry_count, `import_list_page.items[${{index}}].entry_count`));
+}}
+
+function validateWebImportDescriptor(value) {{
+  assertCanonicalNonnegativeU64(value.raw_record_count, "import_descriptor.raw_record_count");
+  assertCanonicalNonnegativeU64(value.entry_count, "import_descriptor.entry_count");
+  assertCanonicalNonnegativeU64(value.sizes.raw_source_bytes, "import_descriptor.sizes.raw_source_bytes");
+  assertCanonicalNonnegativeU64(value.sizes.normalized_source_record_bytes, "import_descriptor.sizes.normalized_source_record_bytes");
+  assertCanonicalNonnegativeU64(value.sizes.normalized_entry_bytes, "import_descriptor.sizes.normalized_entry_bytes");
+  validateWebImportFrontier(value.timeline.first, "import_descriptor.timeline.first");
+  validateWebImportFrontier(value.timeline.latest, "import_descriptor.timeline.latest");
+}}
+
+function validateWebImportEntryWindowRequest(value) {{
+  if (value.position !== undefined && value.position !== null) {{
+    assertCanonicalU64(value.position, "import_entry_window_request.position");
+  }}
+}}
+
+function validateWebImportEntryWindow(value) {{
+  assertCanonicalU64(value.anchor_position, "import_entry_window.anchor_position");
+  assertCanonicalU64(value.first_position, "import_entry_window.first_position");
+  assertCanonicalU64(value.last_position, "import_entry_window.last_position");
+  value.items.forEach((item, index) => {{
+    const path = `import_entry_window.items[${{index}}]`;
+    validateWebImportFrontier(item.frontier, `${{path}}.frontier`);
+    assertCanonicalU64(item.raw_record_position, `${{path}}.raw_record_position`);
+    assertCanonicalU64(item.record_entry_position, `${{path}}.record_entry_position`);
+  }});
+}}
+
+function validateWebImportContinuation(value, path) {{
+  validateWebImportFrontier(value.frontier, `${{path}}.frontier`);
+}}
+
 const utf8 = new TextEncoder();
 
 function compareUtf8(left, right) {{
@@ -1339,6 +1388,23 @@ function validateWebBlobDescriptor(value) {{
         }
         if schema.name == "WebBlobDescriptor" {
             output.push_str("  validateWebBlobDescriptor(value);\n");
+        }
+        match schema.name {
+            "WebImportListPage" => output.push_str("  validateWebImportListPage(value);\n"),
+            "WebImportDescriptor" => output.push_str("  validateWebImportDescriptor(value);\n"),
+            "WebImportEntryWindowRequest" => {
+                output.push_str("  validateWebImportEntryWindowRequest(value);\n");
+            }
+            "WebImportEntryWindow" => {
+                output.push_str("  validateWebImportEntryWindow(value);\n");
+            }
+            "WebImportContinuationRequest" => output.push_str(
+                "  validateWebImportContinuation(value, \"import_continuation_request\");\n",
+            ),
+            "WebImportContinuationResponse" => output.push_str(
+                "  validateWebImportContinuation(value, \"import_continuation_response\");\n",
+            ),
+            _ => {}
         }
         output.push_str("  return value;\n}\n\n");
     }

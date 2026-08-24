@@ -27,6 +27,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
       importEntryIds,
       selectedImportEntry,

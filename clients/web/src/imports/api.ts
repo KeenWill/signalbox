@@ -13,6 +13,9 @@ import {
   type WebImportListPage,
   type WebImportListRequest,
 } from '../generated/web-contract.mjs'
+import { readBoundedJson } from '../session-timeline/model'
+
+const MAX_IMPORT_RESPONSE_BYTES = 1024 * 1024
 
 export interface ImportApi {
   list(request: WebImportListRequest, signal?: AbortSignal): Promise<WebImportListPage>
@@ -52,29 +55,53 @@ export class ImportWindowCorrelationError extends Error {
   }
 }
 
+export class ImportDescriptorCorrelationError extends Error {
+  constructor() {
+    super('import descriptor does not correlate with its request')
+    this.name = 'ImportDescriptorCorrelationError'
+  }
+}
+
+const decimalPosition = (value: string): bigint => {
+  if (!/^[1-9]\d{0,19}$/.test(value)) throw new ImportWindowCorrelationError()
+  const parsed = BigInt(value)
+  if (parsed > 18_446_744_073_709_551_615n) throw new ImportWindowCorrelationError()
+  return parsed
+}
+
 const correlateEntryWindow = (
   importedConversationId: string,
   request: WebImportEntryWindowRequest,
   window: WebImportEntryWindow,
 ): WebImportEntryWindow => {
+  const firstPosition = decimalPosition(window.first_position)
+  const lastPosition = decimalPosition(window.last_position)
+  const anchorPosition = decimalPosition(window.anchor_position)
   const expectedAnchor =
-    request.anchor === 'first'
-      ? 1
+    request.anchor === undefined || request.anchor === null || request.anchor === 'first'
+      ? 1n
       : request.anchor === 'latest'
-        ? window.last_position
-        : request.position
-  const positionsCorrelate = window.items.every(
-    (entry, index) =>
+        ? lastPosition
+        : request.position === undefined || request.position === null
+          ? undefined
+          : decimalPosition(request.position)
+  const entryIds = new Set<string>()
+  const positionsCorrelate = window.items.every((entry, index) => {
+    const entryId = entry.frontier.imported_entry_id
+    if (entryIds.has(entryId)) return false
+    entryIds.add(entryId)
+    return (
       entry.frontier.imported_conversation_id === importedConversationId &&
-      entry.frontier.position === window.first_position + index,
-  )
+      decimalPosition(entry.frontier.position) === firstPosition + BigInt(index)
+    )
+  })
   if (
     expectedAnchor === undefined ||
     window.items.length === 0 ||
-    window.anchor_position !== expectedAnchor ||
-    window.first_position > window.anchor_position ||
-    window.last_position < window.anchor_position ||
-    window.last_position - window.first_position + 1 !== window.items.length ||
+    anchorPosition !== expectedAnchor ||
+    firstPosition > anchorPosition ||
+    lastPosition < anchorPosition ||
+    lastPosition - firstPosition + 1n !== BigInt(window.items.length) ||
     !positionsCorrelate ||
     !window.items.some((entry) => entry.frontier.position === window.anchor_position)
   ) {
@@ -89,7 +116,7 @@ const decodeResponse = async <Value>(
   response: Response,
   decoder: Decoder<Value>,
 ): Promise<Value> => {
-  const value: unknown = await response.json()
+  const value = await readBoundedJson(response, MAX_IMPORT_RESPONSE_BYTES)
   if (!response.ok) throw new ImportApiError(decodeWebApiErrorResponse(value))
   return decoder(value)
 }
@@ -116,7 +143,11 @@ export class HttpImportApi implements ImportApi {
     const response = await fetch(`/api/imports/${encodeURIComponent(importedConversationId)}`, {
       signal,
     })
-    return decodeResponse(response, decodeWebImportDescriptor)
+    const descriptor = await decodeResponse(response, decodeWebImportDescriptor)
+    if (descriptor.imported_conversation_id !== importedConversationId) {
+      throw new ImportDescriptorCorrelationError()
+    }
+    return descriptor
   }
 
   async entries(

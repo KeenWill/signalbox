@@ -101,6 +101,21 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('rejects a schema-valid blob descriptor that does not correlate with its request', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(imageArtifact))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readBlobDescriptor({
+        digest: imageArtifact.digest,
+        mediaType: 'image/jpeg',
+        displayFilename: imageArtifact.display_filename[0],
+      }),
+    ).rejects.toThrow('does not correlate with its request')
+  })
+
   it('rejects an oversized bootstrap before JSON materialization', async () => {
     vi.stubGlobal(
       'fetch',

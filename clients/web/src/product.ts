@@ -98,6 +98,13 @@ export class ProductRequestError extends Error {
   }
 }
 
+export class BlobDescriptorCorrelationError extends Error {
+  constructor() {
+    super('blob descriptor does not correlate with its request')
+    this.name = 'BlobDescriptorCorrelationError'
+  }
+}
+
 export class SameOriginProductTransport implements ProductTransport {
   async readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap> {
     const response = await fetch('/api/bootstrap', {
@@ -127,7 +134,17 @@ export class SameOriginProductTransport implements ProductTransport {
     if (!response.ok) {
       throw new ProductRequestError(response.status, decodeWebApiErrorResponse(payload))
     }
-    return decodeWebBlobDescriptor(payload)
+    const descriptor = decodeWebBlobDescriptor(payload)
+    const expectedFilename = input.displayFilename ? [input.displayFilename] : []
+    if (
+      descriptor.digest !== input.digest ||
+      descriptor.declared_media_type !== input.mediaType ||
+      descriptor.display_filename.length !== expectedFilename.length ||
+      descriptor.display_filename[0] !== expectedFilename[0]
+    ) {
+      throw new BlobDescriptorCorrelationError()
+    }
+    return descriptor
   }
 }
 

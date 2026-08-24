@@ -8,16 +8,20 @@ const contentKindLabel = (kind: WebImportedEntry['content_kind']): string =>
 export const projectImportedEntryArtifact = (entry: WebImportedEntry): ArtifactItem => {
   const identity = {
     id: entry.frontier.imported_entry_id,
-    displayName: `Imported entry ${entry.frontier.position.toLocaleString()}`,
+    displayName: `Imported entry ${BigInt(entry.frontier.position).toLocaleString()}`,
   }
   if (entry.content_kind !== 'text') {
     return {
       ...identity,
-      kind: 'committed_unimplemented',
+      kind: 'blocked',
       attemptedKind: `imported ${contentKindLabel(entry.content_kind)}`,
+      reason: 'No typed renderer is available for this imported content kind.',
     }
   }
-  if (!entry.text || entry.text.kind === 'not_attested') {
+  if (!entry.text) {
+    throw new TypeError('imported text entry is missing typed text evidence')
+  }
+  if (entry.text.kind === 'not_attested') {
     return {
       ...identity,
       kind: 'blocked',
@@ -33,7 +37,12 @@ export const projectImportedEntryArtifact = (entry: WebImportedEntry): ArtifactI
       reason: 'The source explicitly attests that text is absent. No content was inferred.',
     }
   }
-  return { ...identity, kind: 'text', content: entry.text.leading_text }
+  return {
+    ...identity,
+    kind: 'text',
+    content: entry.text.leading_text,
+    characterCount: [...entry.text.leading_text].length,
+  }
 }
 
 const sourceBoundLabel = (entry: WebImportedEntry): string => {
@@ -43,7 +52,13 @@ const sourceBoundLabel = (entry: WebImportedEntry): string => {
     : 'Complete attested source text'
 }
 
-export function ImportedArtifactView({ entry }: { entry: WebImportedEntry | null }) {
+export function ImportedArtifactView({
+  entry,
+  commandContext,
+}: {
+  entry: WebImportedEntry | null
+  commandContext: import('../commands').CommandContext
+}) {
   return (
     <section className="import-artifact-view" aria-labelledby="import-artifact-heading">
       <header>
@@ -54,7 +69,10 @@ export function ImportedArtifactView({ entry }: { entry: WebImportedEntry | null
         {entry && <small>{sourceBoundLabel(entry)}</small>}
       </header>
       {entry ? (
-        <ArtifactRenderer artifact={projectImportedEntryArtifact(entry)} />
+        <ArtifactRenderer
+          artifact={projectImportedEntryArtifact(entry)}
+          commandContext={commandContext}
+        />
       ) : (
         <p className="imports-state">Select an imported source entry to inspect its typed view.</p>
       )}

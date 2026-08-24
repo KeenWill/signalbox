@@ -38,13 +38,13 @@ describe('ScenarioImportApi', () => {
     const api = new ScenarioImportApi()
     const window = await api.entries(firstImportId, {
       anchor: 'position',
-      position: 125_000,
+      position: '125000',
       before: 50,
       after: 50,
     })
 
     expect(window.items).toHaveLength(SCENARIO_IMPORT_WINDOW_ITEMS)
-    expect(window.anchor_position).toBe(125_000)
+    expect(window.anchor_position).toBe('125000')
     expect(window.has_before).toBe(true)
     expect(window.has_after).toBe(true)
   })
@@ -53,8 +53,8 @@ describe('ScenarioImportApi', () => {
     const api = new ScenarioImportApi()
     const descriptor = await api.descriptor(firstImportId)
 
-    expect(descriptor.entry_count).toBe(SCENARIO_ENTRY_TOTAL)
-    expect(descriptor.timeline.first.position).toBe(1)
+    expect(descriptor.entry_count).toBe(String(SCENARIO_ENTRY_TOTAL))
+    expect(descriptor.timeline.first.position).toBe('1')
     expect(descriptor.timeline.latest.position).toBe(descriptor.entry_count)
     expect(descriptor.source.source_session_id?.leading_text).toBe('source-session-0')
   })

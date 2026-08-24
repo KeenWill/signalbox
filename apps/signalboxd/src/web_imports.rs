@@ -242,7 +242,8 @@ fn canonical_continuation_request(
     if frontier_conversation != path_conversation {
         return Err("continuation frontier belongs to another import");
     }
-    let position = ImportedTranscriptPosition::try_from_u64(request.frontier.position)
+    let position = canonical_positive_u64(&request.frontier.position)
+        .and_then(ImportedTranscriptPosition::try_from_u64)
         .ok_or("continuation position must be positive")?;
     let entry = required_uuid(&request.frontier.imported_entry_id)
         .map(ImportedTranscriptEntryId::from_uuid)
@@ -348,7 +349,7 @@ fn web_summary(summary: ImportedConversationSummary) -> WebImportSummary {
         display_title: summary.display_title.map(|title| title.into_string()),
         format: web_format(summary.format),
         source_session_id: summary.source_session_id.map(web_source_session),
-        entry_count: summary.entry_count,
+        entry_count: summary.entry_count.to_string(),
     }
 }
 
@@ -356,17 +357,20 @@ fn web_descriptor(descriptor: ImportedConversationDescriptor) -> WebImportDescri
     WebImportDescriptor {
         imported_conversation_id: descriptor.conversation.into_uuid().to_string(),
         display_title: descriptor.display_title.map(|title| title.into_string()),
-        raw_record_count: descriptor.raw_record_count,
-        entry_count: descriptor.entry_count,
+        raw_record_count: descriptor.raw_record_count.to_string(),
+        entry_count: descriptor.entry_count.to_string(),
         source: WebImportSourceEvidence {
             format: web_format(descriptor.format),
             source_digest_sha256: lowercase_hex(&descriptor.source_digest),
             source_session_id: descriptor.source_session_id.map(web_source_session),
         },
         sizes: WebImportSizeFacts {
-            raw_source_bytes: descriptor.sizes.raw_source_bytes,
-            normalized_source_record_bytes: descriptor.sizes.normalized_source_record_bytes,
-            normalized_entry_bytes: descriptor.sizes.normalized_entry_bytes,
+            raw_source_bytes: descriptor.sizes.raw_source_bytes.to_string(),
+            normalized_source_record_bytes: descriptor
+                .sizes
+                .normalized_source_record_bytes
+                .to_string(),
+            normalized_entry_bytes: descriptor.sizes.normalized_entry_bytes.to_string(),
         },
         timeline: WebImportTimelineBounds {
             first: web_frontier(descriptor.first),
@@ -377,9 +381,9 @@ fn web_descriptor(descriptor: ImportedConversationDescriptor) -> WebImportDescri
 
 fn web_entry_window(window: ImportedEntryWindow) -> WebImportEntryWindow {
     WebImportEntryWindow {
-        anchor_position: window.anchor_position,
-        first_position: window.first_position,
-        last_position: window.last_position,
+        anchor_position: window.anchor_position.to_string(),
+        first_position: window.first_position.to_string(),
+        last_position: window.last_position.to_string(),
         has_before: window.has_before,
         has_after: window.has_after,
         items: window.items.into_iter().map(web_entry).collect(),
@@ -390,8 +394,8 @@ fn web_entry(entry: ImportedEntryProjection) -> WebImportedEntry {
     let (content_kind, text) = web_content(&entry.content);
     WebImportedEntry {
         frontier: web_frontier(entry.frontier),
-        raw_record_position: entry.raw_record_position,
-        record_entry_position: entry.record_entry_position,
+        raw_record_position: entry.raw_record_position.to_string(),
+        record_entry_position: entry.record_entry_position.to_string(),
         source_speaker: match entry.source_speaker {
             ImportedSourceAttestation::NotAttested => WebImportedSpeakerEvidence::NotAttested,
             ImportedSourceAttestation::AttestedAbsent => WebImportedSpeakerEvidence::AttestedAbsent,
@@ -458,7 +462,7 @@ fn web_frontier(frontier: ImportedContinuationReference) -> WebImportContinuatio
     WebImportContinuationReference {
         imported_conversation_id: frontier.conversation.into_uuid().to_string(),
         imported_entry_id: frontier.entry.into_uuid().to_string(),
-        position: frontier.position,
+        position: frontier.position.to_string(),
     }
 }
 
@@ -474,16 +478,23 @@ fn continuation_response(request: CanonicalContinuationRequest, session: Uuid) -
 
 fn web_window_anchor(
     anchor: Option<WebImportWindowAnchor>,
-    position: Option<u64>,
+    position: Option<String>,
 ) -> Result<ImportedEntryWindowAnchor, &'static str> {
     match (anchor.unwrap_or(WebImportWindowAnchor::First), position) {
         (WebImportWindowAnchor::First, None) => Ok(ImportedEntryWindowAnchor::First),
         (WebImportWindowAnchor::Latest, None) => Ok(ImportedEntryWindowAnchor::Latest),
-        (WebImportWindowAnchor::Position, Some(position)) => {
-            Ok(ImportedEntryWindowAnchor::Position(position))
-        }
+        (WebImportWindowAnchor::Position, Some(position)) => canonical_positive_u64(&position)
+            .map(ImportedEntryWindowAnchor::Position)
+            .ok_or("entry-window position must be a positive canonical decimal u64"),
         _ => Err("entry-window position is present exactly for the position anchor"),
     }
+}
+
+fn canonical_positive_u64(value: &str) -> Option<u64> {
+    if value.starts_with('0') || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok().filter(|value| *value > 0)
 }
 
 fn domain_format(format: WebImportFormat) -> ImportedConversationFormat {
@@ -687,7 +698,7 @@ mod tests {
     #[test]
     fn position_anchor_preserves_its_exact_position() {
         assert_eq!(
-            web_window_anchor(Some(WebImportWindowAnchor::Position), Some(7)),
+            web_window_anchor(Some(WebImportWindowAnchor::Position), Some("7".to_owned())),
             Ok(ImportedEntryWindowAnchor::Position(7))
         );
     }
@@ -703,7 +714,7 @@ mod tests {
     #[test]
     fn non_position_anchor_rejects_a_supplied_position() {
         assert_eq!(
-            web_window_anchor(Some(WebImportWindowAnchor::Latest), Some(7)),
+            web_window_anchor(Some(WebImportWindowAnchor::Latest), Some("7".to_owned())),
             Err("entry-window position is present exactly for the position anchor")
         );
     }

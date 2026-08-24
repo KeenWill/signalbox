@@ -275,6 +275,8 @@ describe('BoundedSessionHistory', () => {
             immutable_blob_content: false,
             blob_derivations: false,
             image_derivatives: false,
+            import_discovery: true,
+            imported_continuations: true,
             bounded_session_timeline: false,
           },
           limits: {
@@ -336,6 +338,8 @@ describe('BoundedSessionHistory', () => {
             immutable_blob_content: false,
             blob_derivations: false,
             image_derivatives: false,
+            import_discovery: true,
+            imported_continuations: true,
             bounded_session_timeline: true,
           },
           limits: {
@@ -363,6 +367,8 @@ describe('BoundedSessionHistory', () => {
         immutable_blob_content: false,
         blob_derivations: false,
         image_derivatives: false,
+        import_discovery: true,
+        imported_continuations: true,
         bounded_session_timeline: true,
       },
       limits: {

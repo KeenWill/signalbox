@@ -8,10 +8,10 @@ const importedText: WebImportedEntry = {
   frontier: {
     imported_conversation_id: '00000000-0000-7000-8000-000000000001',
     imported_entry_id: '00000000-0000-7000-8000-000000000002',
-    position: 8,
+    position: '8',
   },
-  raw_record_position: 3,
-  record_entry_position: 2,
+  raw_record_position: '3',
+  record_entry_position: '2',
   source_speaker: 'assistant',
   content_kind: 'text',
   text: { kind: 'attested', leading_text: attestedText, completeness: 'complete' },
@@ -26,6 +26,7 @@ describe('imported artifact projection', () => {
       displayName: 'Imported entry 8',
       kind: 'text',
       content: attestedText,
+      characterCount: [...attestedText].length,
     })
   })
 
@@ -41,8 +42,9 @@ describe('imported artifact projection', () => {
     expect(artifact).toEqual({
       id: documentEntry.frontier.imported_entry_id,
       displayName: 'Imported entry 8',
-      kind: 'committed_unimplemented',
+      kind: 'blocked',
       attemptedKind: 'imported document',
+      reason: 'No typed renderer is available for this imported content kind.',
     })
   })
 
@@ -61,5 +63,11 @@ describe('imported artifact projection', () => {
       attemptedKind: 'imported text',
       reason: 'The source did not attest text for this entry. No content was inferred.',
     })
+  })
+
+  it('rejects text entries that omit typed text evidence', () => {
+    expect(() => projectImportedEntryArtifact({ ...importedText, text: null })).toThrow(
+      'missing typed text evidence',
+    )
   })
 })

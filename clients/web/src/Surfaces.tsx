@@ -231,7 +231,7 @@ export interface DiagnosticSnapshot {
   logicalImports?: number
   loadedImportEntries?: number
   selectedImport?: string | null
-  selectedImportPosition?: number | null
+  selectedImportPosition?: string | null
 }
 
 // Tunable effective ceiling: the inspector shows a concise recent action tail.

@@ -53,7 +53,7 @@ export function ImportsTable({
       {
         accessorKey: 'entry_count',
         header: 'Entries',
-        cell: ({ row }) => row.original.entry_count.toLocaleString(),
+        cell: ({ row }) => BigInt(row.original.entry_count).toLocaleString(),
       },
       {
         accessorKey: 'source_session_id',

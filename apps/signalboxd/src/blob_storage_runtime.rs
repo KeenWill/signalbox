@@ -52,12 +52,18 @@ impl BlobStoreRegistry {
 
     /// Initializes a composed conformance fixture without relying on the test
     /// host's backing-device classification.
-    #[cfg(feature = "test-support")]
     pub async fn initialize_for_conformance(
         configuration: Option<&BlobStorageConfiguration>,
         pool: PgPool,
     ) -> Result<Option<Self>, BlobStoreRegistryError> {
-        Self::initialize_with_locality_policy(configuration, pool, false).await
+        #[cfg(feature = "test-support")]
+        {
+            Self::initialize_with_locality_policy(configuration, pool, false).await
+        }
+        #[cfg(not(feature = "test-support"))]
+        {
+            Self::initialize_with_locality_policy(configuration, pool, true).await
+        }
     }
 
     async fn initialize_with_locality_policy(

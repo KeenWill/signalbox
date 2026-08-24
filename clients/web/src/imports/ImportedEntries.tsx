@@ -9,6 +9,11 @@ import type {
 // Tunable effective ceiling: imported evidence rows keep a small viewport-adjacent overscan.
 const IMPORT_ENTRY_OVERSCAN_ROWS = 6
 
+const safeAriaInteger = (value: string): number | undefined => {
+  const parsed = BigInt(value)
+  return parsed <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(parsed) : undefined
+}
+
 const sourceLabel = (entry: WebImportedEntry): string => {
   switch (entry.source_speaker) {
     case 'not_attested':
@@ -41,7 +46,7 @@ export function ImportedEntries({
   commandContext,
 }: {
   entries: readonly WebImportedEntry[]
-  logicalEntryCount: number
+  logicalEntryCount: string
   selected: WebImportContinuationReference | null
   commandContext: CommandContext
 }) {
@@ -99,8 +104,8 @@ export function ImportedEntries({
               id={`import-entry-${entry.frontier.imported_entry_id}`}
               role="option"
               aria-selected={isSelected}
-              aria-posinset={entry.frontier.position}
-              aria-setsize={logicalEntryCount}
+              aria-posinset={safeAriaInteger(entry.frontier.position)}
+              aria-setsize={safeAriaInteger(logicalEntryCount)}
               className="import-entry-row"
               data-testid={`import-entry-${entry.frontier.position}`}
               key={entry.frontier.imported_entry_id}
@@ -115,7 +120,9 @@ export function ImportedEntries({
                 })
               }
             >
-              <span className="import-position">{entry.frontier.position.toLocaleString()}</span>
+              <span className="import-position">
+                {BigInt(entry.frontier.position).toLocaleString()}
+              </span>
               <div>
                 <strong>{sourceLabel(entry)}</strong>
                 <p>{entryText(entry)}</p>

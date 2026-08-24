@@ -435,10 +435,8 @@ const schemas = {
             "type": "string"
           },
           "position": {
-            "description": "One-based immutable imported position.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
+            "description": "One-based immutable imported position encoded losslessly for JavaScript.",
+            "type": "string"
           }
         },
         "required": [
@@ -552,10 +550,8 @@ const schemas = {
             "type": "string"
           },
           "position": {
-            "description": "One-based immutable imported position.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
+            "description": "One-based immutable imported position encoded losslessly for JavaScript.",
+            "type": "string"
           }
         },
         "required": [
@@ -626,10 +622,8 @@ const schemas = {
             "type": "string"
           },
           "position": {
-            "description": "One-based immutable imported position.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
+            "description": "One-based immutable imported position encoded losslessly for JavaScript.",
+            "type": "string"
           }
         },
         "required": [
@@ -664,22 +658,16 @@ const schemas = {
         "description": "Byte facts projected from immutable stored import members.",
         "properties": {
           "normalized_entry_bytes": {
-            "description": "Sum of normalized entry and source-metadata encoding bytes.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
+            "description": "Sum of normalized entry and source-metadata encoding bytes, encoded losslessly for JavaScript.",
+            "type": "string"
           },
           "normalized_source_record_bytes": {
-            "description": "Sum of normalized source-record encoding bytes.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
+            "description": "Sum of normalized source-record encoding bytes, encoded losslessly for JavaScript.",
+            "type": "string"
           },
           "raw_source_bytes": {
-            "description": "Sum of exact raw source-record occurrence bytes.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
+            "description": "Sum of exact raw source-record occurrence bytes, encoded losslessly for JavaScript.",
+            "type": "string"
           }
         },
         "required": [
@@ -785,20 +773,16 @@ const schemas = {
         ]
       },
       "entry_count": {
-        "description": "Number of normalized imported entries.",
-        "format": "uint64",
-        "minimum": 0,
-        "type": "integer"
+        "description": "Number of normalized imported entries encoded losslessly for JavaScript.",
+        "type": "string"
       },
       "imported_conversation_id": {
         "description": "Immutable imported-conversation UUID.",
         "type": "string"
       },
       "raw_record_count": {
-        "description": "Number of exact raw source records.",
-        "format": "uint64",
-        "minimum": 0,
-        "type": "integer"
+        "description": "Number of exact raw source records encoded losslessly for JavaScript.",
+        "type": "string"
       },
       "sizes": {
         "$ref": "#/$defs/WebImportSizeFacts",
@@ -839,10 +823,8 @@ const schemas = {
             "type": "string"
           },
           "position": {
-            "description": "One-based immutable imported position.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
+            "description": "One-based immutable imported position encoded losslessly for JavaScript.",
+            "type": "string"
           }
         },
         "required": [
@@ -987,16 +969,12 @@ const schemas = {
             "description": "Exact immutable continuation frontier."
           },
           "raw_record_position": {
-            "description": "One-based physical source-record occurrence.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
+            "description": "One-based physical source-record occurrence encoded losslessly for JavaScript.",
+            "type": "string"
           },
           "record_entry_position": {
-            "description": "One-based normalized entry position within that source record.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
+            "description": "One-based normalized entry position within that source record, encoded losslessly for JavaScript.",
+            "type": "string"
           },
           "source_speaker": {
             "$ref": "#/$defs/WebImportedSpeakerEvidence",
@@ -1054,16 +1032,12 @@ const schemas = {
     "description": "One bounded imported-entry window.",
     "properties": {
       "anchor_position": {
-        "description": "Resolved immutable anchor position.",
-        "format": "uint64",
-        "minimum": 0,
-        "type": "integer"
+        "description": "Resolved immutable anchor position encoded losslessly for JavaScript.",
+        "type": "string"
       },
       "first_position": {
-        "description": "First position returned.",
-        "format": "uint64",
-        "minimum": 0,
-        "type": "integer"
+        "description": "First position returned, encoded losslessly for JavaScript.",
+        "type": "string"
       },
       "has_after": {
         "description": "Whether later entries exist.",
@@ -1078,13 +1052,12 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebImportedEntry"
         },
+        "maxItems": 101,
         "type": "array"
       },
       "last_position": {
-        "description": "Last position returned.",
-        "format": "uint64",
-        "minimum": 0,
-        "type": "integer"
+        "description": "Last position returned, encoded losslessly for JavaScript.",
+        "type": "string"
       }
     },
     "required": [
@@ -1155,11 +1128,9 @@ const schemas = {
         ]
       },
       "position": {
-        "description": "Required only for the `position` anchor.",
-        "format": "uint64",
-        "minimum": 0,
+        "description": "Required only for the `position` anchor; encoded losslessly for JavaScript.",
         "type": [
-          "integer",
+          "string",
           "null"
         ]
       }
@@ -1220,10 +1191,8 @@ const schemas = {
             ]
           },
           "entry_count": {
-            "description": "Number of normalized imported entries.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
+            "description": "Number of normalized imported entries encoded losslessly for JavaScript.",
+            "type": "string"
           },
           "format": {
             "$ref": "#/$defs/WebImportFormat",
@@ -1277,6 +1246,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebImportSummary"
         },
+        "maxItems": 100,
         "type": "array"
       },
       "next_cursor": {
@@ -1718,6 +1688,53 @@ function assertCanonicalU64(value, path) {
   }
 }
 
+function assertCanonicalNonnegativeU64(value, path) {
+  if (!/^(?:0|[1-9][0-9]{0,19})$/.test(value) || BigInt(value) > 18446744073709551615n) {
+    fail(path, "a nonnegative canonical decimal u64 string");
+  }
+}
+
+function validateWebImportFrontier(value, path) {
+  assertCanonicalU64(value.position, `${path}.position`);
+}
+
+function validateWebImportListPage(value) {
+  value.items.forEach((item, index) =>
+    assertCanonicalNonnegativeU64(item.entry_count, `import_list_page.items[${index}].entry_count`));
+}
+
+function validateWebImportDescriptor(value) {
+  assertCanonicalNonnegativeU64(value.raw_record_count, "import_descriptor.raw_record_count");
+  assertCanonicalNonnegativeU64(value.entry_count, "import_descriptor.entry_count");
+  assertCanonicalNonnegativeU64(value.sizes.raw_source_bytes, "import_descriptor.sizes.raw_source_bytes");
+  assertCanonicalNonnegativeU64(value.sizes.normalized_source_record_bytes, "import_descriptor.sizes.normalized_source_record_bytes");
+  assertCanonicalNonnegativeU64(value.sizes.normalized_entry_bytes, "import_descriptor.sizes.normalized_entry_bytes");
+  validateWebImportFrontier(value.timeline.first, "import_descriptor.timeline.first");
+  validateWebImportFrontier(value.timeline.latest, "import_descriptor.timeline.latest");
+}
+
+function validateWebImportEntryWindowRequest(value) {
+  if (value.position !== undefined && value.position !== null) {
+    assertCanonicalU64(value.position, "import_entry_window_request.position");
+  }
+}
+
+function validateWebImportEntryWindow(value) {
+  assertCanonicalU64(value.anchor_position, "import_entry_window.anchor_position");
+  assertCanonicalU64(value.first_position, "import_entry_window.first_position");
+  assertCanonicalU64(value.last_position, "import_entry_window.last_position");
+  value.items.forEach((item, index) => {
+    const path = `import_entry_window.items[${index}]`;
+    validateWebImportFrontier(item.frontier, `${path}.frontier`);
+    assertCanonicalU64(item.raw_record_position, `${path}.raw_record_position`);
+    assertCanonicalU64(item.record_entry_position, `${path}.record_entry_position`);
+  });
+}
+
+function validateWebImportContinuation(value, path) {
+  validateWebImportFrontier(value.frontier, `${path}.frontier`);
+}
+
 const utf8 = new TextEncoder();
 
 function compareUtf8(left, right) {
@@ -2121,30 +2138,36 @@ export function decodeWebImportListRequest(value) {
 
 export function decodeWebImportListPage(value) {
   assertSchema(schemas.WebImportListPage, schemas.WebImportListPage, value, "webimportlistpage");
+  validateWebImportListPage(value);
   return value;
 }
 
 export function decodeWebImportDescriptor(value) {
   assertSchema(schemas.WebImportDescriptor, schemas.WebImportDescriptor, value, "webimportdescriptor");
+  validateWebImportDescriptor(value);
   return value;
 }
 
 export function decodeWebImportEntryWindowRequest(value) {
   assertSchema(schemas.WebImportEntryWindowRequest, schemas.WebImportEntryWindowRequest, value, "webimportentrywindowrequest");
+  validateWebImportEntryWindowRequest(value);
   return value;
 }
 
 export function decodeWebImportEntryWindow(value) {
   assertSchema(schemas.WebImportEntryWindow, schemas.WebImportEntryWindow, value, "webimportentrywindow");
+  validateWebImportEntryWindow(value);
   return value;
 }
 
 export function decodeWebImportContinuationRequest(value) {
   assertSchema(schemas.WebImportContinuationRequest, schemas.WebImportContinuationRequest, value, "webimportcontinuationrequest");
+  validateWebImportContinuation(value, "import_continuation_request");
   return value;
 }
 
 export function decodeWebImportContinuationResponse(value) {
   assertSchema(schemas.WebImportContinuationResponse, schemas.WebImportContinuationResponse, value, "webimportcontinuationresponse");
+  validateWebImportContinuation(value, "import_continuation_response");
   return value;
 }

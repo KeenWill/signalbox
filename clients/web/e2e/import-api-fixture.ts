@@ -33,7 +33,7 @@ export const useDeterministicImportApi = async (page: Page) => {
         anchor:
           (url.searchParams.get('anchor') as WebImportEntryWindowRequest['anchor'] | null) ??
           undefined,
-        position: optionalNumber(url.searchParams.get('position')),
+        position: url.searchParams.get('position') ?? undefined,
         before: optionalNumber(url.searchParams.get('before')),
         after: optionalNumber(url.searchParams.get('after')),
       }

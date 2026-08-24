@@ -457,7 +457,8 @@ impl ImportedConversationDiscoveryRepository {
             "SELECT imported_entry_position, imported_transcript_entry_id,
                     raw_record_position, record_entry_position, source_speaker_kind,
                     substring(content_encoding FROM 1 FOR 12) AS content_header,
-                    CASE WHEN get_byte(content_encoding, 2) = 1
+                    CASE WHEN octet_length(content_encoding) >= 4
+                              AND get_byte(content_encoding, 2) = 1
                               AND get_byte(content_encoding, 3) = 2
                          THEN substring(content_encoding FROM 13 FOR $4) END
                          AS content_text_prefix,

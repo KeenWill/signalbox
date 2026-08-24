@@ -37,6 +37,7 @@ use signalbox_persistence::{
         ImportedConversationRepository, ImportedConversationRepositoryError,
     },
     conversation_import_discovery::{
+        ImportedConversationDiscoveryCorruption, ImportedConversationDiscoveryError,
         ImportedConversationDiscoveryRepository, ImportedConversationPageRequest,
         ImportedEntryWindowAnchor,
     },
@@ -2488,6 +2489,59 @@ async fn imported_discovery_describes_and_windows_without_complete_reconstitutio
     assert_eq!(window.items[2].frontier, descriptor.latest);
     assert!(!window.has_before);
     assert!(!window.has_after);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Short normalized entry encodings are durable corruption, not a PostgreSQL
+/// expression error or an unavailable optional text projection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn imported_discovery_classifies_short_content_encodings_as_corruption()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x901));
+    let mut importer = ImportConversationService::new(
+        FixedIds::for_conversations([conversation]),
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    importer
+        .execute(br#"{\"type\":\"user\",\"message\":{\"content\":\"evidence\"}}"#)
+        .await?;
+    let discovery = ImportedConversationDiscoveryRepository::new(pool.clone());
+
+    for short_length in 1_usize..=3 {
+        sqlx::query(
+            "UPDATE imported_transcript_entry
+                SET content_encoding = $2
+              WHERE imported_conversation_id = $1",
+        )
+        .bind(conversation.into_uuid())
+        .bind(vec![1_u8; short_length])
+        .execute(&pool)
+        .await?;
+
+        let error = discovery
+            .entry_window(
+                conversation,
+                ImportedEntryWindowAnchor::First,
+                0,
+                0,
+                NonZeroU32::new(1).ok_or("window fixture bound must be nonzero")?,
+                NonZeroU32::new(512).ok_or("entry-text fixture bound must be nonzero")?,
+            )
+            .await
+            .expect_err("a one-to-three-byte content encoding must be permanent corruption");
+        assert!(matches!(
+            error,
+            ImportedConversationDiscoveryError::Corruption(
+                ImportedConversationDiscoveryCorruption::InvalidEntryEncoding
+            )
+        ));
+    }
 
     pool.close().await;
     drop(container);

@@ -7,6 +7,10 @@ import {
   decodeWebBlobDescriptor,
   decodeWebContractBootstrap,
   decodeWebContractExample,
+  decodeWebImportContinuationRequest,
+  decodeWebImportDescriptor,
+  decodeWebImportEntryWindow,
+  decodeWebImportEntryWindowRequest,
   decodeWebImportListPage,
 } from "../../../clients/web/src/generated/web-contract.mjs";
 
@@ -1129,11 +1133,102 @@ test("generated imports decoder accepts explicit null evidence and cursor", () =
         display_title: null,
         format: "codex_rollout_jsonl_v1",
         source_session_id: null,
-        entry_count: 1,
+        entry_count: "1",
       },
     ],
     next_cursor: null,
   };
 
   assert.deepEqual(decodeWebImportListPage(page), page);
+});
+
+test("generated imports decoders enforce canonical decimal u64 strings", () => {
+  const conversation = "00000000-0000-7000-8000-000000000001";
+  const entry = "00000000-0000-7000-8000-000000000002";
+  const frontier = {
+    imported_conversation_id: conversation,
+    imported_entry_id: entry,
+    position: "1",
+  };
+  const descriptor = {
+    imported_conversation_id: conversation,
+    display_title: null,
+    raw_record_count: "0",
+    entry_count: "1",
+    source: {
+      format: "codex_rollout_jsonl_v1",
+      source_digest_sha256: "00".repeat(32),
+      source_session_id: null,
+    },
+    sizes: {
+      raw_source_bytes: "0",
+      normalized_source_record_bytes: "0",
+      normalized_entry_bytes: "0",
+    },
+    timeline: { first: frontier, latest: frontier },
+  };
+
+  assert.deepEqual(decodeWebImportDescriptor(descriptor), descriptor);
+  assert.throws(
+    () => decodeWebImportDescriptor({ ...descriptor, entry_count: "01" }),
+    /entry_count must be a nonnegative canonical decimal u64 string/,
+  );
+  assert.throws(
+    () =>
+      decodeWebImportDescriptor({
+        ...descriptor,
+        raw_record_count: "18446744073709551616",
+      }),
+    /raw_record_count must be a nonnegative canonical decimal u64 string/,
+  );
+  assert.throws(
+    () => decodeWebImportEntryWindowRequest({ anchor: "position", position: "0" }),
+    /position must be a positive canonical decimal u64 string/,
+  );
+
+  const window = {
+    anchor_position: "1",
+    first_position: "1",
+    last_position: "1",
+    has_before: false,
+    has_after: false,
+    items: [
+      {
+        frontier,
+        raw_record_position: "1",
+        record_entry_position: "1",
+        source_speaker: "user",
+        content_kind: "text",
+        text: { kind: "attested_absent" },
+      },
+    ],
+  };
+  assert.deepEqual(decodeWebImportEntryWindow(window), window);
+  assert.throws(
+    () =>
+      decodeWebImportEntryWindow({
+        ...window,
+        items: [{ ...window.items[0], raw_record_position: "01" }],
+      }),
+    /raw_record_position must be a positive canonical decimal u64 string/,
+  );
+
+  const continuation = {
+    command_id: "00000000-0000-7000-8000-000000000003",
+    frontier,
+    relationship: "resume",
+    initial_model_selection: {
+      kind: "direct",
+      selection_id: "00000000-0000-7000-8000-000000000004",
+    },
+  };
+  assert.deepEqual(decodeWebImportContinuationRequest(continuation), continuation);
+  assert.throws(
+    () =>
+      decodeWebImportContinuationRequest({
+        ...continuation,
+        frontier: { ...frontier, position: "0" },
+      }),
+    /position must be a positive canonical decimal u64 string/,
+  );
 });

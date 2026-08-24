@@ -23,11 +23,7 @@ import {
   useState,
 } from 'react'
 import { ArtifactInspector } from './ArtifactInspector'
-import {
-  type CommandContext,
-  globalHotkeyBindings,
-  globalHotkeySequenceBindings,
-} from './commands'
+import { type CommandContext, globalHotkeyBindings, globalHotkeySequenceBindings } from './commands'
 import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
 import type { ArtifactItem } from './features/artifacts/artifactTypes'
 import { HttpImportApi } from './imports/api'
@@ -294,11 +290,12 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
 const reviewEvidenceUnavailable: ArtifactItem = {
   id: 'review-evidence-unavailable',
   displayName: 'Review evidence',
-  kind: 'committed_unimplemented',
+  kind: 'blocked',
   attemptedKind: 'review evidence artifact',
+  reason: 'Review evidence is not exposed by the current daemon contract.',
 }
 
-function ReviewsArtifactSurface() {
+function ReviewsArtifactSurface({ commandContext }: { commandContext: CommandContext }) {
   return (
     <div className="surface-body reviews-artifact-surface">
       <SurfaceUnavailable surface="reviews" />
@@ -311,7 +308,7 @@ function ReviewsArtifactSurface() {
             client preserves that missing typed boundary instead of fabricating a preview.
           </p>
         </header>
-        <ArtifactRenderer artifact={reviewEvidenceUnavailable} />
+        <ArtifactRenderer artifact={reviewEvidenceUnavailable} commandContext={commandContext} />
       </section>
     </div>
   )
@@ -552,7 +549,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         onCommandContext={updateImportsCommandContext}
       />
     ) : surface === 'reviews' ? (
-      <ReviewsArtifactSurface />
+      <ReviewsArtifactSurface commandContext={context} />
     ) : (
       <DeferredSurface surface={surface} />
     )
