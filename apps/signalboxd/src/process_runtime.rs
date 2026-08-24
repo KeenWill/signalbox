@@ -12275,20 +12275,16 @@ where
                 writer,
                 version,
                 request_id,
-                ServerMessage::TranscriptTextEntry {
+                ServerMessage::TranscriptUserEntry {
                     entry_index: CanonicalU64::new(*entry_index),
                     source_session_id: wire_uuid(source_session.into_uuid()),
                     entry_id: wire_uuid(entry.into_uuid()),
-                    entry: TranscriptTextEntry::User {
-                        accepted_input_id: wire_uuid(accepted_input.into_uuid()),
-                        turn_id: wire_uuid(turn.into_uuid()),
-                    },
+                    accepted_input_id: wire_uuid(accepted_input.into_uuid()),
+                    turn_id: wire_uuid(turn.into_uuid()),
+                    content: wire_user_content(content),
                 },
             )
-            .await?;
-            let content = serde_json::to_string(&wire_user_content(content))
-                .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
-            write_content(writer, version, request_id, *entry_index, &content).await
+            .await
         }
         ProcessTranscriptEntry::Assistant {
             entry_index,
@@ -12613,7 +12609,8 @@ fn map_rejection(
         }
         SubmitInputRejectedResult::AttachmentByteBudgetExceeded { maximum_bytes } => {
             RejectionDetail::AttachmentByteBudgetExceeded {
-                maximum_bytes: CanonicalU64::new(maximum_bytes),
+                maximum_bytes: PositiveCanonicalU64::try_new(maximum_bytes)
+                    .map_err(|_| ProcessConnectionError::EncodeInvariant)?,
             }
         }
         SubmitInputRejectedResult::SessionNotFound { session } => {

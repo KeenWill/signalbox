@@ -514,6 +514,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::TranscriptModelCallUsage { .. }
         | ServerMessage::TranscriptModelCallsEnd { .. }
         | ServerMessage::TranscriptEntry { .. }
+        | ServerMessage::TranscriptUserEntry { .. }
         | ServerMessage::TranscriptTextEntry { .. }
         | ServerMessage::TranscriptContent { .. }
         | ServerMessage::TranscriptSnapshotEnd { .. }
@@ -616,6 +617,7 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::TranscriptModelCallUsage { .. }
         | ServerMessage::TranscriptModelCallsEnd { .. }
         | ServerMessage::TranscriptEntry { .. }
+        | ServerMessage::TranscriptUserEntry { .. }
         | ServerMessage::TranscriptTextEntry { .. }
         | ServerMessage::TranscriptContent { .. }
         | ServerMessage::TranscriptSnapshotEnd { .. }
@@ -730,6 +732,7 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::TranscriptModelCallUsage { .. }
         | ServerMessage::TranscriptModelCallsEnd { .. }
         | ServerMessage::TranscriptEntry { .. }
+        | ServerMessage::TranscriptUserEntry { .. }
         | ServerMessage::TranscriptTextEntry { .. }
         | ServerMessage::TranscriptContent { .. }
         | ServerMessage::TranscriptSnapshotEnd { .. }

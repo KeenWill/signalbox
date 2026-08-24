@@ -3548,6 +3548,9 @@ impl AcceptedInputSchedulingProjection {
     ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
     pub fn earliest_queued_turn(&self)
         -> Option<&AcceptedInputTurnSchedulingProjection>;
+    pub fn earliest_queued_rendered_base_origins(
+        &self,
+    ) -> Option<Vec<AcceptedInputId>>;
     pub fn resolved_snapshot(
         &self,
         snapshot: ContextFrontierId,

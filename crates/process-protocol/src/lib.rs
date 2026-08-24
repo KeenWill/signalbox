@@ -4449,7 +4449,7 @@ pub enum RejectionDetail {
     /// Distinct attachment bytes exceeded the deployment admission ceiling.
     AttachmentByteBudgetExceeded {
         /// Configured maximum aggregate byte count.
-        maximum_bytes: CanonicalU64,
+        maximum_bytes: PositiveCanonicalU64,
     },
     /// The placement head advanced beyond the caller-observed version.
     SessionPlacementCurrentVersionMismatch {
@@ -5761,13 +5761,6 @@ pub enum TranscriptEntry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptTextEntry {
-    /// User input text.
-    User {
-        /// Exact accepted input.
-        accepted_input_id: CanonicalUuid,
-        /// Origin turn.
-        turn_id: CanonicalUuid,
-    },
     /// Committed assistant text.
     Assistant {
         /// Owning turn.
@@ -7624,6 +7617,21 @@ pub enum ServerMessage {
         /// Exact marker payload.
         entry: TranscriptEntry,
     },
+    /// One atomic native user entry with exact ordered multipart content.
+    TranscriptUserEntry {
+        /// Zero-based frontier member index.
+        entry_index: CanonicalU64,
+        /// Entry source session.
+        source_session_id: CanonicalUuid,
+        /// Semantic entry identity.
+        entry_id: CanonicalUuid,
+        /// Exact accepted input.
+        accepted_input_id: CanonicalUuid,
+        /// Origin turn.
+        turn_id: CanonicalUuid,
+        /// Canonical ordered user content.
+        content: UserInputContent,
+    },
     /// Begins one text-bearing frontier member.
     TranscriptTextEntry {
         /// Zero-based frontier member index.
@@ -7888,6 +7896,7 @@ impl ServerMessage {
                 &approval.decider,
                 &approval.rationale,
             )?,
+            Self::TranscriptUserEntry { content, .. } => content.validate()?,
             Self::GoalTransitionApplied {
                 event_ordinal,
                 generation,
@@ -9703,6 +9712,53 @@ mod tests {
         );
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png"}]}}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_transcript_user_entry_round_trips_ordered_multipart_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            .parse::<CanonicalBlobDigest>()?;
+        assert_server_message_round_trip(
+            request(31)?,
+            ServerMessage::TranscriptUserEntry {
+                entry_index: CanonicalU64::new(0),
+                source_session_id: uuid(1),
+                entry_id: uuid(2),
+                accepted_input_id: uuid(3),
+                turn_id: uuid(4),
+                content: UserInputContent::from_parts(vec![
+                    UserInputPart::Text {
+                        text: String::from("inspect "),
+                    },
+                    UserInputPart::Attachment {
+                        digest,
+                        kind: UserAttachmentKind::Image,
+                        media_type: String::from("image/png"),
+                        display_filename: Some(String::from("chart.png")),
+                    },
+                    UserInputPart::Text {
+                        text: String::from(" carefully"),
+                    },
+                ]),
+            },
+            r#"{"type":"transcript_user_entry","entry_index":"0","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000002","accepted_input_id":"00000000-0000-0000-0000-000000000003","turn_id":"00000000-0000-0000-0000-000000000004","content":[{"type":"text","text":"inspect "},{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png","display_filename":"chart.png"},{"type":"text","text":" carefully"}]}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_transcript_user_entry_rejects_malformed_multipart_content() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_user_entry","entry_index":"0","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000002","accepted_input_id":"00000000-0000-0000-0000-000000000003","turn_id":"00000000-0000-0000-0000-000000000004","content":[{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png"}]}}"#,
+        );
+    }
+
+    #[test]
+    fn attachment_byte_budget_rejection_requires_a_positive_maximum() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"error","code":"rejected","message":"attachment budget exceeded","detail":{"type":"rejected","rejection":{"type":"attachment_byte_budget_exceeded","maximum_bytes":"0"}}}}"#,
         );
     }
 

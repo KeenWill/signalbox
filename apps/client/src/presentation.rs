@@ -2307,11 +2307,20 @@ impl<'a> Output<'a> {
 
     fn snapshot_entry(&mut self, entry: &SnapshotEntry) -> io::Result<()> {
         match &entry.kind {
+            SnapshotEntryKind::User {
+                accepted_input_id,
+                turn_id,
+                content,
+            } => {
+                writeln!(
+                    self.stdout,
+                    "user turn={turn_id} accepted_input={accepted_input_id} source={} entry={}",
+                    entry.source_session_id, entry.entry_id
+                )?;
+                self.user_content(content)
+            }
             SnapshotEntryKind::Text(metadata) => {
                 let label = match metadata {
-                    TranscriptTextEntry::User { turn_id, .. } => {
-                        format!("user turn={turn_id}")
-                    }
                     TranscriptTextEntry::Assistant { turn_id, .. } => {
                         format!("assistant turn={turn_id}")
                     }
@@ -2760,7 +2769,7 @@ impl SnapshotSelection {
                 | Self::ToolBatchProposed { .. }
                 | Self::ToolBatchResults { .. }
                 | Self::ToolReconciliation { .. },
-                SnapshotEntryKind::Text(_),
+                SnapshotEntryKind::User { .. } | SnapshotEntryKind::Text(_),
             ) => false,
             (
                 Self::ToolBatchProposed { .. }
@@ -2822,7 +2831,8 @@ impl SnapshotSelection {
                 | Self::ToolBatchProposed { .. }
                 | Self::ToolBatchResults { .. }
                 | Self::ToolReconciliation { .. },
-                SnapshotEntryKind::Text(_)
+                SnapshotEntryKind::User { .. }
+                | SnapshotEntryKind::Text(_)
                 | SnapshotEntryKind::Marker(
                     TranscriptEntry::ModelIdentityChanged { .. }
                     | TranscriptEntry::DelegatedTask { .. }
