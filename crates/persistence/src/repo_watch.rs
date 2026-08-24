@@ -488,7 +488,48 @@ pub struct RepoWatchPlannedStaleReviewClearance {
     dismissal_message: Box<str>,
 }
 
+/// Field-labeled construction input for one planned-clearance test fixture.
+///
+/// Production code reaches a planned clearance only through
+/// [`PostgresRepoWatchStore::plan_stale_review_clearances`], which is what
+/// makes the intent durable before any forge mutation. A caller that only
+/// needs the value — the poller's pre-dismissal revalidation, which reads the
+/// planned clearance and never creates one — would otherwise need a database
+/// to test against.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug)]
+pub struct RepoWatchPlannedStaleReviewClearanceFixture {
+    pub clearance_id: RepoWatchStaleReviewClearanceId,
+    pub claim_token: RepoWatchStaleReviewClearanceClaimToken,
+    pub number: PullRequestNumber,
+    pub current_head_sha: CommitSha,
+    pub base_branch: BranchName,
+    pub base_revision: CommitSha,
+    pub review_node_id: String,
+    pub reviewer: RepoWatchAuthorLogin,
+    pub reviewed_head_sha: CommitSha,
+    pub dismissal_message: String,
+}
+
 impl RepoWatchPlannedStaleReviewClearance {
+    /// Builds one planned clearance without a store, for tests that exercise
+    /// what happens to an already-planned intent.
+    #[cfg(feature = "test-support")]
+    pub fn from_fixture(fixture: RepoWatchPlannedStaleReviewClearanceFixture) -> Self {
+        Self {
+            clearance_id: fixture.clearance_id,
+            claim_token: fixture.claim_token,
+            number: fixture.number,
+            current_head_sha: fixture.current_head_sha,
+            base_branch: fixture.base_branch,
+            base_revision: fixture.base_revision,
+            review_node_id: fixture.review_node_id.into_boxed_str(),
+            reviewer: fixture.reviewer,
+            reviewed_head_sha: fixture.reviewed_head_sha,
+            dismissal_message: fixture.dismissal_message.into_boxed_str(),
+        }
+    }
+
     pub const fn clearance_id(&self) -> RepoWatchStaleReviewClearanceId {
         self.clearance_id
     }
@@ -939,11 +980,17 @@ impl PostgresRepoWatchStore {
                 return Err(RepoWatchStoreError::StaleReviewClearanceMismatch);
             }
             let assessment = sqlx::query_as::<_, ClearanceAssessmentRow>(
+                // An empty non-green list is evidence of a green head only when
+                // the head has a gating check to be green about, so this query
+                // requires a positive gating-check count exactly as the
+                // in-memory candidate rule does. Without it the durable gate
+                // would admit a head whose sole blocker is the review because
+                // it has no other gate at all.
                 "SELECT assessment_id, base_branch, base_revision
                    FROM (
                          SELECT assessment_id, head_sha, base_branch, base_revision, review_decision,
                                 unresolved_threads, non_green_gating_checks,
-                                mergeable_state, verdict_kind
+                                mergeable_state, verdict_kind, gating_check_count
                            FROM repo_watch_pull_request_convergence_assessment
                           WHERE repository = $1
                             AND pull_request_number = $2
@@ -954,6 +1001,7 @@ impl PostgresRepoWatchStore {
                     AND current.review_decision = 'changes_requested'
                     AND cardinality(current.unresolved_threads) = 0
                     AND cardinality(current.non_green_gating_checks) = 0
+                    AND current.gating_check_count > 0
                     AND current.mergeable_state <> 'conflicting'
                     AND current.verdict_kind = 'not_converged'",
             )

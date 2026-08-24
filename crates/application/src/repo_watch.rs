@@ -617,6 +617,13 @@ impl RepoWatchStaleReviewClearanceCandidate {
             // evidence rather than evidence of a green head. Dismissing a
             // blocking review then races the checks that have yet to report.
             || !assessment.settled()
+            // A head carrying no gating check at all presents the same empty
+            // non-green list as a fully green one, which is why the reference
+            // convergence rule counts it as blocked. Clearance must read that
+            // evidence the same way: without this gate, the "only remaining
+            // blocker" the dismissal claims to clear would be the sole gate the
+            // head ever had, and the review would be dismissed off zero checks.
+            || assessment.gating_check_count() == 0
             || assessment.mergeable_state() == MergeableState::Conflicting
             || &reviewed_head_sha == assessment.head_sha()
             || !Self::review_node_id_is_valid(&review_node_id)
@@ -3073,6 +3080,34 @@ mod tests {
             review_decision: RepoWatchReviewDecision::ChangesRequested,
             unresolved_threads: Vec::new(),
             gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            REVIEW_NODE_ID.to_owned(),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
+
+    /// A head with no gating check presents the same empty non-green list as a
+    /// fully green one. The convergence rule already calls that head blocked,
+    /// and clearance must agree: a settled head whose only stated blocker is
+    /// the review, but which never ran a check, has no green evidence to
+    /// dismiss the review against.
+    #[test]
+    fn zero_gating_checks_prevent_stale_review_clearance() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 0,
             non_green_gating_checks: Vec::new(),
         })?;
 

@@ -2493,6 +2493,16 @@ impl RepositoryWatchTask {
             RepoWatchCommitOutcome::Committed(cursor)
             | RepoWatchCommitOutcome::Replayed(cursor)
             | RepoWatchCommitOutcome::Unchanged(cursor) => {
+                // Published before the clearance sweep rather than after it.
+                // The cursor is durable at this point, so the freshness this
+                // poll recorded is legitimately tied to a committed generation,
+                // and clearance revalidation reads exactly that entry to decide
+                // whether the gating-check inventory has stood still since the
+                // observation that raised the candidate. A publication the
+                // sweep never reached would leave every candidate unsettled and
+                // no review would ever be dismissed. A failed attempt still
+                // invalidates every entry on its way out.
+                self.poller.publish_freshness(cursor.generation());
                 self.reconcile_pending_stale_review_clearances().await?;
                 let planned_clearances = self
                     .store
@@ -2506,7 +2516,7 @@ impl RepositoryWatchTask {
                 for clearance in &planned_clearances {
                     if !self
                         .poller
-                        .revalidate_stale_review_clearance(clearance)
+                        .revalidate_stale_review_clearance(clearance, cursor.generation())
                         .await?
                     {
                         self.store
@@ -2546,7 +2556,6 @@ impl RepositoryWatchTask {
                         .await
                         .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
                 }
-                self.poller.publish_freshness(cursor.generation());
                 // A full poll is the complete reconciliation sweep, so the
                 // cursor it commits supersedes everything the webhook stream
                 // had accumulated in memory. It is not handed over here: this
@@ -4435,6 +4444,13 @@ impl GitHubRepositoryPoller {
         Ok(FetchedConvergenceEvidence {
             base_revision,
             gating_checks_settled,
+            // Quiescence is not a property of one check-rollup read: it takes a
+            // second observation to say the inventory stopped growing. This
+            // read cannot know that, so it reports the conservative default and
+            // every caller replaces it with the verdict
+            // `GitHubRepositoryPoller::gating_check_inventory_quiesced` reads
+            // from the freshness the last committed cursor published. A caller
+            // that leaves the default in place reports every head unsettled.
             gating_check_inventory_quiesced: false,
             gating_check_inventory,
             review_decision: retained_review_decision
@@ -4454,6 +4470,7 @@ impl GitHubRepositoryPoller {
             || !assessment.unresolved_threads().is_empty()
             || !assessment.non_green_gating_checks().is_empty()
             || !assessment.settled()
+            || assessment.gating_check_count() == 0
             || assessment.mergeable_state() == MergeableState::Conflicting
         {
             return Ok(Vec::new());
@@ -4545,9 +4562,18 @@ impl GitHubRepositoryPoller {
         }
     }
 
+    /// Re-reads the provider immediately before a dismissal and reports
+    /// whether the planned clearance still holds against live evidence.
+    ///
+    /// `cursor_generation` is the generation the poll that raised this
+    /// candidate committed, and the freshness it published is what proves the
+    /// gating-check inventory has stood still: a candidate is only admissible
+    /// when the inventory this re-read observes is the one that committed
+    /// generation recorded for the same head and update stamp.
     async fn revalidate_stale_review_clearance(
         &self,
         clearance: &RepoWatchPlannedStaleReviewClearance,
+        cursor_generation: RepoWatchCursorGeneration,
     ) -> Result<bool, RepositoryWatchAttemptError> {
         let number_text = clearance.number().get().to_string();
         let detail: PullResponse = self
@@ -4579,7 +4605,23 @@ impl GitHubRepositoryPoller {
             None => MergeableState::Unknown,
         };
         let context = normalize_pull_request_context(&detail, head_sha.clone(), None)?;
-        let evidence = self.fetch_convergence_evidence(&context).await?;
+        let mut evidence = self.fetch_convergence_evidence(&context).await?;
+        // The same quiescence rule the polling path applies, against the same
+        // published freshness. Here the two observations being compared are the
+        // committed poll that raised this candidate and this pre-dismissal
+        // re-read, so a gating check that appeared in between leaves the head
+        // unsettled and the review undismissed until a later poll sees the
+        // inventory hold still.
+        let listed = ListedPullRequest {
+            updated_at: detail.updated_at.clone(),
+            head_sha: head_sha.clone(),
+        };
+        evidence.gating_check_inventory_quiesced = self.gating_check_inventory_quiesced(
+            clearance.number().get(),
+            &listed,
+            Some(cursor_generation),
+            &evidence.gating_check_inventory,
+        );
         if &evidence.base_revision != clearance.base_revision()
             || evidence.review_decision != RepoWatchReviewDecision::ChangesRequested
             || !evidence.non_green_gating_checks.is_empty()
@@ -4604,10 +4646,11 @@ impl GitHubRepositoryPoller {
                 base_branch: clearance.base_branch().clone(),
                 base_revision: evidence.base_revision,
                 mergeable_state,
-                // The revalidation path has no listing entry to quiesce the
-                // gating-check inventory against, so the evidence keeps its
-                // conservative default and this assessment reports unsettled.
-                // Clearance candidacy does not consult it.
+                // Clearance candidacy does consult this, and refuses every
+                // unsettled head, so it is computed from the same evidence the
+                // polling path uses: finished exact-head checks, an inventory
+                // quiesced against the published freshness above, and a decided
+                // mergeable state.
                 settled: evidence.gating_checks_settled
                     && evidence.gating_check_inventory_quiesced
                     && mergeable_state != MergeableState::Unknown,
@@ -5798,6 +5841,10 @@ struct ListedPullHeadResponse {
 struct PullResponse {
     number: u64,
     state: String,
+    // The same stamp the pulls listing carries, so a detail read can be
+    // compared against the freshness a committed poll recorded from the
+    // listing.
+    updated_at: String,
     merged_at: Option<String>,
     mergeable: Option<bool>,
     head: PullReferenceResponse,
@@ -6348,7 +6395,11 @@ mod tests {
     use signalbox_persistence::{
         disposable_postgres_server_args, disposable_postgres_state_tmpfs,
         disposable_test_container_labels, local_test_connection_options, migrate,
-        repo_watch::{PostgresRepoWatchStore, RepoWatchCommitRequest, RepoWatchCursorCandidate},
+        repo_watch::{
+            PostgresRepoWatchStore, RepoWatchCommitRequest, RepoWatchCursorCandidate,
+            RepoWatchPlannedStaleReviewClearanceFixture, RepoWatchStaleReviewClearanceClaimToken,
+            RepoWatchStaleReviewClearanceId,
+        },
         repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
         repo_watch_webhook::{
             PostgresRepoWatchWebhookStore, RepoWatchWebhookAdmission, RepoWatchWebhookDeliveryKey,
@@ -6749,6 +6800,7 @@ mod tests {
         serde_json::json!({
             "number": PULL_NUMBER,
             "state": "open",
+            "updated_at": PULL_UPDATED_AT,
             "merged_at": null,
             "mergeable": false,
             "head": {
@@ -6774,6 +6826,16 @@ mod tests {
         let mut detail = serde_json::from_str::<serde_json::Value>(&pull_detail())
             .expect("fixture pull detail is JSON");
         detail["mergeable"] = serde_json::Value::Null;
+        detail.to_string()
+    }
+
+    /// The fixture pull request with mergeability decided in its favor, which
+    /// a clearance revalidation needs: the shared fixture reports
+    /// `CONFLICTING`, and that alone refuses every dismissal.
+    fn mergeable_pull_detail() -> String {
+        let mut detail = serde_json::from_str::<serde_json::Value>(&pull_detail())
+            .expect("fixture pull detail is JSON");
+        detail["mergeable"] = serde_json::Value::Bool(true);
         detail.to_string()
     }
 
@@ -7019,6 +7081,48 @@ mod tests {
 
     fn convergence() -> String {
         convergence_with_mergeability("CONFLICTING")
+    }
+
+    /// Convergence evidence for a head whose only remaining blocker is the
+    /// aggregate review decision: one complete, green, gating check and no
+    /// other. This is the evidence a stale-review clearance is allowed to act
+    /// on, so it is what a revalidation must be able to read back.
+    fn review_only_blocked_convergence() -> String {
+        serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "headRefOid": HEAD_SHA,
+                        "baseRefName": BASE_BRANCH,
+                        "baseRefOid": BASE_SHA,
+                        "mergeable": "MERGEABLE",
+                        "reviewDecision": "CHANGES_REQUESTED",
+                        "commits": {
+                            "nodes": [{
+                                "commit": {
+                                    "oid": HEAD_SHA,
+                                    "statusCheckRollup": {
+                                        "contexts": {
+                                            "nodes": [{
+                                                "__typename": "CheckRun",
+                                                "name": CHECK_RUN_NAME,
+                                                "status": "COMPLETED",
+                                                "conclusion": "SUCCESS"
+                                            }],
+                                            "pageInfo": {
+                                                "hasNextPage": false,
+                                                "endCursor": null
+                                            }
+                                        }
+                                    }
+                                }
+                            }]
+                        }
+                    }
+                }
+            }
+        })
+        .to_string()
     }
 
     fn convergence_with_mergeability(mergeable: &str) -> String {
@@ -7858,6 +7962,7 @@ mod tests {
         serde_json::json!({
             "number": number,
             "state": "open",
+            "updated_at": PULL_UPDATED_AT,
             "merged_at": null,
             "mergeable": true,
             "head": {
@@ -9247,6 +9352,132 @@ mod tests {
         server.finish().await;
 
         assert_eq!(error, RepositoryWatchAttemptError::InvalidResponse);
+    }
+
+    fn planned_stale_review_clearance() -> super::RepoWatchPlannedStaleReviewClearance {
+        super::RepoWatchPlannedStaleReviewClearance::from_fixture(
+            RepoWatchPlannedStaleReviewClearanceFixture {
+                clearance_id: RepoWatchStaleReviewClearanceId::new(Uuid::from_u128(0x_c1ea_0001)),
+                claim_token: RepoWatchStaleReviewClearanceClaimToken::new(Uuid::from_u128(
+                    0x_c1a1_0001,
+                )),
+                number: PullRequestNumber::new(
+                    NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
+                ),
+                current_head_sha: CommitSha::try_new(String::from(HEAD_SHA))
+                    .expect("fixture head is canonical"),
+                base_branch: BranchName::try_new(String::from(BASE_BRANCH))
+                    .expect("fixture base branch is canonical"),
+                base_revision: CommitSha::try_new(String::from(BASE_SHA))
+                    .expect("fixture base revision is canonical"),
+                review_node_id: String::from(STALE_REVIEW_NODE_ID),
+                reviewer: RepoWatchAuthorLogin::try_new(String::from(REVIEWER))
+                    .expect("fixture reviewer is valid"),
+                reviewed_head_sha: CommitSha::try_new(String::from(STALE_REVIEW_HEAD_SHA))
+                    .expect("fixture reviewed head is canonical"),
+                dismissal_message: String::from(DISMISSAL_MESSAGE),
+            },
+        )
+    }
+
+    /// The dismissal mutation is reachable only through a revalidation that
+    /// reports the clearance still holds, and that report requires a settled
+    /// head. Settlement in turn requires a quiesced gating-check inventory, so
+    /// evidence that never carries quiescence makes the whole feature a no-op:
+    /// the candidate lookup short-circuits, the revalidation refuses, and no
+    /// review is ever dismissed. This proves the live path reaches the
+    /// dismissal when the committed poll's freshness backs the re-read.
+    #[tokio::test]
+    async fn a_quiesced_inventory_lets_a_planned_clearance_reach_dismissal() {
+        let server = ScriptedServer::start(vec![
+            ScriptedResponse::ok(
+                RequestTarget(String::from(PULL_DETAIL_TARGET)),
+                ResponseBody(mergeable_pull_detail()),
+            ),
+            ScriptedResponse::post(
+                RequestTarget(String::from(THREADS_TARGET)),
+                ResponseBody(review_only_blocked_convergence()),
+            )
+            .matching_request_body(String::from("RepositoryWatchConvergence")),
+            ScriptedResponse::post(
+                RequestTarget(String::from(THREADS_TARGET)),
+                ResponseBody(empty_threads()),
+            )
+            .matching_request_body(String::from("RepositoryWatchReviewThreads")),
+            ScriptedResponse::post(
+                RequestTarget(String::from(THREADS_TARGET)),
+                ResponseBody(blocking_reviews(STALE_REVIEW_HEAD_SHA)),
+            )
+            .matching_request_body(String::from("RepositoryWatchBlockingReviews")),
+        ])
+        .await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let generation = RepoWatchCursorGeneration::INITIAL;
+        fixture.poller.record_fetched_pull_request(
+            PULL_NUMBER,
+            &listed_pull_request(HEAD_SHA),
+            PullRequestSettlement::Settled,
+            vec![String::from(CHECK_RUN_NAME)],
+        );
+        fixture.poller.publish_freshness(generation);
+
+        let holds = fixture
+            .poller
+            .revalidate_stale_review_clearance(&planned_stale_review_clearance(), generation)
+            .await
+            .expect("clearance revalidation reads valid evidence");
+        server.finish().await;
+
+        assert!(
+            holds,
+            "a settled head whose only blocker is a superseded review must reach its dismissal"
+        );
+    }
+
+    /// The mirror of the reachability test: a gating check that appeared since
+    /// the committed poll leaves the inventory unquiesced, the head unsettled,
+    /// and the review undismissed. The candidate lookup short-circuits before
+    /// its provider request, so only three calls are scripted.
+    #[tokio::test]
+    async fn a_gating_check_added_since_the_committed_poll_refuses_the_clearance() {
+        let server = ScriptedServer::start(vec![
+            ScriptedResponse::ok(
+                RequestTarget(String::from(PULL_DETAIL_TARGET)),
+                ResponseBody(mergeable_pull_detail()),
+            ),
+            ScriptedResponse::post(
+                RequestTarget(String::from(THREADS_TARGET)),
+                ResponseBody(review_only_blocked_convergence()),
+            )
+            .matching_request_body(String::from("RepositoryWatchConvergence")),
+            ScriptedResponse::post(
+                RequestTarget(String::from(THREADS_TARGET)),
+                ResponseBody(empty_threads()),
+            )
+            .matching_request_body(String::from("RepositoryWatchReviewThreads")),
+        ])
+        .await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let generation = RepoWatchCursorGeneration::INITIAL;
+        fixture.poller.record_fetched_pull_request(
+            PULL_NUMBER,
+            &listed_pull_request(HEAD_SHA),
+            PullRequestSettlement::Settled,
+            vec![String::from(CHECK_RUN_NAME), String::from("later gate")],
+        );
+        fixture.poller.publish_freshness(generation);
+
+        let holds = fixture
+            .poller
+            .revalidate_stale_review_clearance(&planned_stale_review_clearance(), generation)
+            .await
+            .expect("clearance revalidation reads valid evidence");
+        server.finish().await;
+
+        assert!(
+            !holds,
+            "an inventory that has not stood still since the committed poll must refuse dismissal"
+        );
     }
 
     #[test]

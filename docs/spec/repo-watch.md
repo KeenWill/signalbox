@@ -967,40 +967,50 @@ repository watch continues delivering matching findings while that aggregate
 decision remains. It may dismiss a blocking review only when GitHub reports it
 among the pull request's latest opinionated `CHANGES_REQUESTED` reviews and its
 associated commit differs from the exact current head. The current convergence
-evidence must otherwise pass: zero unresolved threads, zero non-green gating
-checks, a settled head, and nonconflicting mergeability. An unsettled head has
-not finished registering and completing its exact-head checks, so its empty
-non-green list is the absence of evidence rather than evidence of a green head;
-requiring settlement keeps a dismissal from racing checks that have yet to
-report. Every effective blocking review must target a superseded head; one
-current-head blocker prevents every dismissal for that assessment. A
-current-head review is never dismissed automatically. Why: a new review is live
-judgment, while a stale aggregate decision whose complete thread inventory is
-resolved is forge state that alone prevents an otherwise finished head from
-converging. The following ordinary poll observes the dismissal and may then seal
-convergence; dismissal itself does not stop dispatch.
+evidence must otherwise pass: zero unresolved threads, at least one gating check
+and zero non-green ones, a settled head, and nonconflicting mergeability. An
+unsettled head has not finished registering and completing its exact-head
+checks, so its empty non-green list is the absence of evidence rather than
+evidence of a green head; requiring settlement keeps a dismissal from racing
+checks that have yet to report. A head carrying no gating check at all presents
+that same empty non-green list, which is why the reference convergence rule
+counts it blocked and why clearance refuses it: the dismissed review would be
+the only gate that head ever had. Both the in-memory candidate rule and the
+durable eligibility query enforce the positive count, so neither admits an
+intent the other would refuse. Every effective blocking review must target a
+superseded head; one current-head blocker prevents every dismissal for that
+assessment. A current-head review is never dismissed automatically. Why: a new
+review is live judgment, while a stale aggregate decision whose complete thread
+inventory is resolved is forge state that alone prevents an otherwise finished
+head from converging. The following ordinary poll observes the dismissal and may
+then seal convergence; dismissal itself does not stop dispatch.
 
 **Implemented behavior.** Before sending GitHub's review-dismissal mutation, the
 daemon appends a unique intent naming the assessment, repository, pull request,
 exact current and reviewed heads, review node, reviewer, fixed reason kind, and
 the exact human-readable dismissal message. That message identifies the review
 node, reviewer, superseded head, exact current head, and the resolved threads
-and green other gates that justify clearance. It appends the provider's terminal
-result separately. Replaying equal evidence reuses the intent rather than
-creating or sending concurrent duplicate work. After an ambiguous process
-failure, a later poll observes the named review directly: an already dismissed
-review completes the audit, a newer pull-request head supersedes the intent, and
-a review decision cleared by another actor is recorded as cleared elsewhere. A
-still-blocking intent is retried only when a current poll again proves the full
-dismissal predicate. Recovery renews its ownership token immediately before
-observing each intent, because a deeply paginated batch can outlive the claim
-lease; an intent whose lease another watcher has since taken is left to that
-watcher, and a lease lost between the renewal and the terminal write likewise
-leaves that one intent to its new claimant rather than abandoning the rest of
-the batch. The pending-intent projection makes every unsettled external action
-directly observable. The next poll observes the dismissal through the ordinary
-review and convergence projections; no synthetic approval is created and no
-fresh review is requested.
+and green other gates that justify clearance. It then re-reads the pull request
+and proves the whole predicate again against live evidence, including
+settlement: the gating-check inventory this re-read observes must be the one the
+committed poll that raised the candidate recorded for the same head and update
+stamp. A check that appeared in between leaves the head unsettled and the review
+undismissed until a later poll sees the inventory hold still. It appends the
+provider's terminal result separately. Replaying equal evidence reuses the
+intent rather than creating or sending concurrent duplicate work. After an
+ambiguous process failure, a later poll observes the named review directly: an
+already dismissed review completes the audit, a newer pull-request head
+supersedes the intent, and a review decision cleared by another actor is
+recorded as cleared elsewhere. A still-blocking intent is retried only when a
+current poll again proves the full dismissal predicate. Recovery renews its
+ownership token immediately before observing each intent, because a deeply
+paginated batch can outlive the claim lease; an intent whose lease another
+watcher has since taken is left to that watcher, and a lease lost between the
+renewal and the terminal write likewise leaves that one intent to its new
+claimant rather than abandoning the rest of the batch. The pending-intent
+projection makes every unsettled external action directly observable. The next
+poll observes the dismissal through the ordinary review and convergence
+projections; no synthetic approval is created and no fresh review is requested.
 
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,
