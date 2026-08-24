@@ -2522,12 +2522,15 @@ async fn restart_after_fatal_shutdown(
             .expect("the fatal-driven fleet scheduler was installed"),
     )
     .await;
-    let outcome = classify_fleet_scheduler_wait(match stopped {
-        Ok(stopped) => FleetSchedulerWait::Stopped(stopped),
+    let wait = match stopped {
+        Ok(stopped) => {
+            scheduler.take();
+            FleetSchedulerWait::Stopped(stopped)
+        }
         Err(_) => FleetSchedulerWait::Elapsed,
-    })?;
+    };
+    let outcome = classify_fleet_scheduler_wait(wait)?;
     if outcome == FleetFatalShutdownOutcome::Restarted {
-        scheduler.take();
         runtime.kill_and_restart().await?;
     }
     Ok(outcome)
