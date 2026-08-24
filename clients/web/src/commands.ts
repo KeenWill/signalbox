@@ -399,7 +399,12 @@ export const commandRegistry = [
     category: 'View',
     bindings: [],
     available: presentationPreferences,
-    run: (context) => context.dispatch(actions.layoutSet('focus')),
+    run: (context) => {
+      if (context.getState().app.layout === 'workbench') {
+        context.focusPrimaryWhenNavigationHides?.()
+      }
+      context.dispatch(actions.layoutSet('focus'))
+    },
   },
   {
     id: 'density.toggle',

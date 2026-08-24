@@ -123,6 +123,24 @@ describe('command registry', () => {
     expect(selectApp(store.getState()).paneSizes).toEqual(requestedPaneSizes)
   })
 
+  it('moves focus before the explicit focus layout hides navigation', () => {
+    const focused: string[] = []
+    store.dispatch(actions.layoutSet('workbench'))
+
+    invokeCommand('layout.focus', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      focusPrimaryWhenNavigationHides: () => focused.push('primary'),
+      presentationPreferences: true,
+    })
+
+    expect(focused).toEqual(['primary'])
+    expect(selectApp(store.getState()).layout).toBe('focus')
+    store.dispatch(actions.layoutSet('workbench'))
+  })
+
   it('runs available continuation actions through stable command identities', () => {
     const relationships: Array<'resume' | 'fork'> = []
     const context = {

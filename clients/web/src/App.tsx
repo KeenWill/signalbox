@@ -1,7 +1,7 @@
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { useCallback, useEffect, useMemo, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 import {
   type CommandContext,
   globalHotkeyBindings,
@@ -51,7 +51,9 @@ function useCommandHotkeys(context: CommandContext) {
 
 export function Workspace({ scenarioId }: { scenarioId: string }) {
   const navigate = useNavigate()
+  const workspaceRef = useRef<HTMLElement | null>(null)
   const focusWorkspace = useCallback((node: HTMLElement | null) => {
+    workspaceRef.current = node
     node?.focus()
   }, [])
   const knownId = scenarios.some((scenario) => scenario.id === scenarioId)
@@ -106,6 +108,15 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
   useEffect(() => {
     dispatch(actions.timelineSelected(initialSelection.item))
   }, [dispatch, initialSelection])
+
+  useEffect(() => {
+    if (!timelineQuery.isSuccess || !fleetQuery.isSuccess) return
+    const frame = requestAnimationFrame(() => {
+      const workspace = workspaceRef.current
+      if (workspace?.dataset.scenarioId === knownId) workspace.focus()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [fleetQuery.isSuccess, knownId, timelineQuery.isSuccess])
 
   useEffect(() => {
     document.documentElement.dataset.theme = app.theme
@@ -173,7 +184,7 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
       <aside className="navigation-pane">
         <ScenarioNavigation activeId={knownId} />
       </aside>
-      <main className="workspace" tabIndex={-1} ref={focusWorkspace}>
+      <main className="workspace" data-scenario-id={knownId} tabIndex={-1} ref={focusWorkspace}>
         <header className="workspace-header">
           <div className="scenario-title">
             <span className={`connection connection-${transport.scenario.connection}`}>
