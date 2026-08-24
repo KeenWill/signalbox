@@ -622,6 +622,24 @@ async fn calculated_dimensions_are_valid_without_numeric_metadata() -> Result<()
 }
 
 #[tokio::test]
+async fn invalid_calculation_dimension_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(banana)"/>"#,),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn empty_calculation_arguments_are_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="min(,)"/>"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn dimensions_admit_surrounding_xml_whitespace() -> Result<(), Box<dyn Error>> {
     let source = SvgFixture::raw(
         b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\" 10px \" height=\"\n20\t\"/>",

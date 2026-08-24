@@ -879,35 +879,193 @@ fn parse_dimension(value: &str) -> Result<Option<f64>, ParseIssue> {
 }
 
 fn valid_css_calculation(value: &str) -> bool {
-    let Some(open) = value.find('(') else {
-        return false;
-    };
-    if !matches!(
-        &value[..open].to_ascii_lowercase()[..],
-        "calc" | "min" | "max" | "clamp"
-    ) || !value.ends_with(')')
-    {
-        return false;
-    }
-    let mut depth = 0usize;
-    let mut has_content = false;
-    for character in value[open..].chars() {
-        match character {
-            '(' => depth += 1,
-            ')' => {
-                let Some(next) = depth.checked_sub(1) else {
-                    return false;
-                };
-                depth = next;
-            }
-            character if depth > 0 && !character.is_whitespace() => has_content = true,
-            _ => {}
+    let mut parser = CalculationParser::new(value);
+    parser.parse_function() && parser.at_end()
+}
+
+struct CalculationParser<'a> {
+    input: &'a [u8],
+    position: usize,
+}
+
+impl<'a> CalculationParser<'a> {
+    const fn new(input: &'a str) -> Self {
+        Self {
+            input: input.as_bytes(),
+            position: 0,
         }
-        if depth == 0 && character != ')' {
+    }
+
+    fn at_end(&mut self) -> bool {
+        self.skip_whitespace();
+        self.position == self.input.len()
+    }
+
+    fn parse_function(&mut self) -> bool {
+        let Some(name) = self.parse_identifier() else {
+            return false;
+        };
+        if !matches!(name, b"calc" | b"min" | b"max" | b"clamp")
+            || !self.consume(b'(')
+            || !self.parse_sum()
+        {
             return false;
         }
+        let mut arguments = 1usize;
+        while self.consume(b',') {
+            if !self.parse_sum() {
+                return false;
+            }
+            arguments += 1;
+        }
+        let valid_arity = match name {
+            b"calc" => arguments == 1,
+            b"min" | b"max" => arguments >= 1,
+            b"clamp" => arguments == 3,
+            _ => false,
+        };
+        valid_arity && self.consume(b')')
     }
-    depth == 0 && has_content
+
+    fn parse_sum(&mut self) -> bool {
+        if !self.parse_product() {
+            return false;
+        }
+        loop {
+            self.skip_whitespace();
+            if !self.peek_is(b'+') && !self.peek_is(b'-') {
+                return true;
+            }
+            self.position += 1;
+            if !self.parse_product() {
+                return false;
+            }
+        }
+    }
+
+    fn parse_product(&mut self) -> bool {
+        self.parse_value()
+    }
+
+    fn parse_value(&mut self) -> bool {
+        self.skip_whitespace();
+        if self.consume(b'(') {
+            return self.parse_sum() && self.consume(b')');
+        }
+        let checkpoint = self.position;
+        if self
+            .input
+            .get(self.position)
+            .is_some_and(|byte| byte.is_ascii_alphabetic())
+        {
+            if self.parse_function() {
+                return true;
+            }
+            self.position = checkpoint;
+            return false;
+        }
+        self.parse_dimension_value()
+    }
+
+    fn parse_dimension_value(&mut self) -> bool {
+        self.skip_whitespace();
+        let start = self.position;
+        if self.peek_is(b'+') || self.peek_is(b'-') {
+            self.position += 1;
+        }
+        let integer_start = self.position;
+        while self
+            .input
+            .get(self.position)
+            .is_some_and(u8::is_ascii_digit)
+        {
+            self.position += 1;
+        }
+        let mut has_digits = self.position > integer_start;
+        if self.peek_is(b'.') {
+            self.position += 1;
+            let fraction_start = self.position;
+            while self
+                .input
+                .get(self.position)
+                .is_some_and(u8::is_ascii_digit)
+            {
+                self.position += 1;
+            }
+            has_digits |= self.position > fraction_start;
+        }
+        if !has_digits {
+            self.position = start;
+            return false;
+        }
+        if self.peek_is(b'e') || self.peek_is(b'E') {
+            self.position += 1;
+            if self.peek_is(b'+') || self.peek_is(b'-') {
+                self.position += 1;
+            }
+            let exponent_start = self.position;
+            while self
+                .input
+                .get(self.position)
+                .is_some_and(u8::is_ascii_digit)
+            {
+                self.position += 1;
+            }
+            if self.position == exponent_start {
+                self.position = start;
+                return false;
+            }
+        }
+        while self
+            .input
+            .get(self.position)
+            .is_some_and(u8::is_ascii_alphabetic)
+        {
+            self.position += 1;
+        }
+        if self.peek_is(b'%') {
+            self.position += 1;
+        }
+        std::str::from_utf8(&self.input[start..self.position])
+            .is_ok_and(|token| parse_dimension(token).is_ok())
+    }
+
+    fn parse_identifier(&mut self) -> Option<&'a [u8]> {
+        self.skip_whitespace();
+        let start = self.position;
+        while self
+            .input
+            .get(self.position)
+            .is_some_and(u8::is_ascii_alphabetic)
+        {
+            self.position += 1;
+        }
+        (self.position > start).then_some(&self.input[start..self.position])
+    }
+
+    fn consume(&mut self, expected: u8) -> bool {
+        self.skip_whitespace();
+        if self.peek_is(expected) {
+            self.position += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek_is(&self, expected: u8) -> bool {
+        self.input.get(self.position) == Some(&expected)
+    }
+
+    fn skip_whitespace(&mut self) {
+        while self
+            .input
+            .get(self.position)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            self.position += 1;
+        }
+    }
 }
 
 fn strip_ascii_case_suffix<'a>(value: &'a str, suffix: &str) -> Option<&'a str> {
