@@ -157,7 +157,7 @@ type WebSessionLiveRunnerConnectionHealth = "connected" | "suspect" | "shutdown"
 
 type WebSessionLiveSnapshot = {
   readonly active?: WebSessionLiveActiveTurn | null;
-  readonly observed_through: WebU64;
+  readonly observed_through: WebPositiveU64;
   readonly queued_turn_count: WebU64;
   readonly queued_turn_ids: ReadonlyArray<WebTurnId>;
   readonly reconciliation?: WebSessionLiveReconciliation | null;
@@ -260,7 +260,7 @@ export type WebAttentionStreamEvent = {
 
 export type WebSessionLiveSnapshot = {
   readonly active?: WebSessionLiveActiveTurn | null;
-  readonly observed_through: WebU64;
+  readonly observed_through: WebPositiveU64;
   readonly queued_turn_count: WebU64;
   readonly queued_turn_ids: ReadonlyArray<WebTurnId>;
   readonly reconciliation?: WebSessionLiveReconciliation | null;

@@ -680,17 +680,19 @@ model-call recovery, tool recovery, or runner recovery state, the exact queued
 turn count, the earliest 32 queued turn identities, any current terminal
 reconciliation operation, and current runner placement and connection health.
 The queue count and preview are distinct, so a large queue never makes snapshot
-memory proportional to retained work. The read uses existing lifecycle,
-timeline-fact, runner, and outbox records and adds no durable projection.
+memory proportional to retained work. An incrementally maintained current-queue
+relation keeps preview reads independent of retired goal history; the remaining
+state comes from lifecycle, timeline-fact, runner, and outbox records.
 
 `GET /api/sessions/{session_id}/follow` subscribes to the daemon's single
 64-record browser monitor fanout before reading that snapshot, then emits the
 snapshot as its first NDJSON item. Durable updates above the snapshot cursor are
 observed in global sequence order and an update for the selected session is
 emitted as its stable timeline address and closed event category. Updates for
-other sessions advance the observed cursor without opening another stream. Thus
-the catalog never follows every listed session; only the open workspace uses
-this route.
+other sessions advance the observed cursor without opening another stream. The
+committed browser policy is for only the open workspace to use this route, but
+that client behavior is not yet implemented: no present browser surface selects
+an open workspace or prevents following any listed session.
 
 Already-redacted provider text deltas are ephemeral presentation, carry no
 durable cursor, and are split at UTF-8 boundaries below the NDJSON item ceiling.

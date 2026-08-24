@@ -109,6 +109,22 @@ test("generated live decoder bounds retained queued turns", () => {
   );
 });
 
+test("generated live decoder requires a positive observation cursor", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "0",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: null,
+      }),
+    /matching/,
+  );
+});
+
 test("generated live decoder correlates queued preview with its count", () => {
   assert.throws(
     () =>

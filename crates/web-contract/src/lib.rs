@@ -524,7 +524,7 @@ pub enum WebSessionLiveRunner {
 #[serde(deny_unknown_fields)]
 pub struct WebSessionLiveSnapshot {
     pub session_id: WebSessionId,
-    pub observed_through: WebU64,
+    pub observed_through: WebPositiveU64,
     pub active: Option<WebSessionLiveActiveTurn>,
     pub queued_turn_count: WebU64,
     #[schemars(length(max = 32))]

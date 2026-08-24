@@ -119,19 +119,11 @@ impl SessionLiveRepository {
             ));
         }
         let active = active_rows.first().map(decode_active).transpose()?;
-        let queued_rows = sqlx::query(
-            "SELECT turn_id
-               FROM turn_lifecycle
-              WHERE session_id = $1
-                AND state_kind = 'queued'
-                AND goal_turn_is_runtime_relevant(session_id, turn_id)
-              ORDER BY acceptance_position
-              LIMIT $2",
-        )
-        .bind(session.into_uuid())
-        .bind(i64::from(max_session_live_queued_turns()))
-        .fetch_all(&mut *transaction)
-        .await?;
+        let queued_rows = sqlx::query(QUEUED_PREVIEW_SQL)
+            .bind(session.into_uuid())
+            .bind(i64::from(max_session_live_queued_turns()))
+            .fetch_all(&mut *transaction)
+            .await?;
         let queued_turns = queued_rows
             .iter()
             .map(|row| row.try_get::<Uuid, _>("turn_id").map(TurnId::from_uuid))
@@ -207,6 +199,14 @@ SELECT lifecycle.turn_id, lifecycle.active_phase_kind,
    AND goal_turn_is_runtime_relevant(lifecycle.session_id, lifecycle.turn_id)
  ORDER BY lifecycle.acceptance_position
  LIMIT 2
+"#;
+
+const QUEUED_PREVIEW_SQL: &str = r#"
+SELECT turn_id
+  FROM session_live_queued_turn
+ WHERE session_id = $1
+ ORDER BY acceptance_position
+ LIMIT $2
 "#;
 
 const RECONCILIATION_SQL: &str = r#"

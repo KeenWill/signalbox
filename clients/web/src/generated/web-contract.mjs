@@ -1169,7 +1169,7 @@ const schemas = {
             ]
           },
           "observed_through": {
-            "$ref": "#/$defs/WebU64"
+            "$ref": "#/$defs/WebPositiveU64"
           },
           "queued_turn_count": {
             "$ref": "#/$defs/WebU64"
