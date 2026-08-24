@@ -1006,6 +1006,7 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   case transcriptModelCallUsage(SignalboxTranscriptModelCallUsage)
   case transcriptModelCallsEnd(modelCallCount: SignalboxCanonicalUInt64)
   case transcriptEntry(SignalboxTranscriptEntryMessage)
+  case transcriptUserEntry(SignalboxTranscriptUserEntryMessage)
   case transcriptTextEntry(SignalboxTranscriptTextEntryMessage)
   case transcriptContent(SignalboxTranscriptContent)
   case transcriptSnapshotEnd(SignalboxTranscriptSnapshotEnd)
@@ -1167,6 +1168,15 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
           decoder: decoder
         )
         self = .transcriptEntry(try SignalboxTranscriptEntryMessage(from: decoder))
+      case "transcript_user_entry":
+        try tagged.rejectUnadmittedFields(
+          [
+            "type", "entry_index", "source_session_id", "entry_id",
+            "accepted_input_id", "turn_id", "content",
+          ],
+          decoder: decoder
+        )
+        self = .transcriptUserEntry(try SignalboxTranscriptUserEntryMessage(from: decoder))
       case "transcript_text_entry":
         try tagged.rejectUnadmittedFields(
           ["type", "entry_index", "source_session_id", "entry_id", "entry"],
@@ -3257,6 +3267,24 @@ public struct SignalboxTranscriptEntryMessage: Decodable, Equatable, Sendable {
     case sourceSessionID = "source_session_id"
     case entryID = "entry_id"
     case entry
+  }
+}
+
+public struct SignalboxTranscriptUserEntryMessage: Decodable, Equatable, Sendable {
+  public let entryIndex: SignalboxCanonicalUInt64
+  public let sourceSessionID: SignalboxCanonicalUUID
+  public let entryID: SignalboxCanonicalUUID
+  public let acceptedInputID: SignalboxCanonicalUUID
+  public let turnID: SignalboxCanonicalUUID
+  public let content: SignalboxUserInputContent
+
+  private enum CodingKeys: String, CodingKey {
+    case entryIndex = "entry_index"
+    case sourceSessionID = "source_session_id"
+    case entryID = "entry_id"
+    case acceptedInputID = "accepted_input_id"
+    case turnID = "turn_id"
+    case content
   }
 }
 

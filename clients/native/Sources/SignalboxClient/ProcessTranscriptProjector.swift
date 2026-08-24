@@ -332,6 +332,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
             unanchoredUsage.append(usageRecord)
           }
         }
+      case .userEntry(let message):
+        if let projected = try projectUser(message, selection: selection) {
+          store(projected, in: &projectedByID, order: &projectedOrder)
+          materializedAcceptedInputIDs.insert(message.acceptedInputID)
+        }
       case .textEntry(let message):
         textAssembly = TextAssembly(message: message)
       case .content(let content):
@@ -448,6 +453,8 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     }
     for (index, record) in records.enumerated() {
       switch record {
+      case .userEntry:
+        textModelCall = nil
       case .textEntry(let message):
         guard message.sourceSessionID == nativeSourceSessionID else {
           textModelCall = nil
@@ -535,6 +542,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     for record in records {
       let anchor: (turnID: SignalboxCanonicalUUID, entryIndex: SignalboxCanonicalUInt64)?
       switch record {
+      case .userEntry(let message):
+        guard message.sourceSessionID == nativeSourceSessionID else {
+          continue
+        }
+        anchor = (message.turnID, message.entryIndex)
       case .textEntry(let message):
         guard message.sourceSessionID == nativeSourceSessionID else {
           continue
@@ -661,6 +673,26 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       }
     }
     return modelCallIDs
+  }
+
+  private mutating func projectUser(
+    _ message: SignalboxTranscriptUserEntryMessage,
+    selection: Selection
+  ) throws -> SignalboxStoredEvent? {
+    guard case .all = selection else {
+      return nil
+    }
+    let identity = PresentationIdentity.semantic(
+      sourceSessionID: message.sourceSessionID.rawValue,
+      entryID: message.entryID.rawValue
+    )
+    return SignalboxStoredEvent(
+      eventID: try claimSemanticEventID(identity),
+      presentationOrder: try semanticPresentationOrder(message.entryIndex),
+      event: .processMessage(
+        SignalboxProcessMessageEvent(role: .user, text: message.content.displayText)
+      )
+    )
   }
 
   private mutating func projectText(
@@ -1603,6 +1635,11 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
       case .modelCallUsage(let usage):
         return .modelCallUsage(usage.modelCallID.rawValue)
       case .entry(let message):
+        return .semantic(
+          sourceSessionID: message.sourceSessionID.rawValue,
+          entryID: message.entryID.rawValue
+        )
+      case .userEntry(let message):
         return .semantic(
           sourceSessionID: message.sourceSessionID.rawValue,
           entryID: message.entryID.rawValue

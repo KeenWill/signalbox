@@ -155,6 +155,58 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(decoded, content)
   }
 
+  func testTranscriptUserEntryDecodesTypedMultipartContent() throws {
+    let entryID = "44444444-4444-4444-8444-444444444444"
+    let message = try SignalboxJSONCoding.decoder().decode(
+      SignalboxProcessServerMessage.self,
+      from: Data(
+        """
+        {
+          "type":"transcript_user_entry",
+          "entry_index":"0",
+          "source_session_id":"\(sessionID)",
+          "entry_id":"\(entryID)",
+          "accepted_input_id":"\(toolRequestID)",
+          "turn_id":"\(turnID)",
+          "content":[
+            {"type":"text","text":"before"},
+            {
+              "type":"attachment",
+              "digest":"\(blobDigest)",
+              "kind":"document",
+              "media_type":"application/pdf",
+              "display_filename":"brief.pdf"
+            },
+            {"type":"text","text":"after"}
+          ]
+        }
+        """.utf8
+      )
+    )
+
+    guard case .transcriptUserEntry(let entry) = message else {
+      return XCTFail("Expected a typed transcript user entry.")
+    }
+    XCTAssertEqual(entry.entryIndex, SignalboxCanonicalUInt64(rawValue: 0))
+    XCTAssertEqual(entry.sourceSessionID.rawValue, sessionID)
+    XCTAssertEqual(entry.entryID.rawValue, entryID)
+    XCTAssertEqual(entry.acceptedInputID.rawValue, toolRequestID)
+    XCTAssertEqual(entry.turnID.rawValue, turnID)
+    XCTAssertEqual(
+      entry.content,
+      try SignalboxUserInputContent(validating: [
+        .text("before"),
+        .attachment(
+          digest: SignalboxCanonicalBlobDigest(validating: blobDigest),
+          kind: .document,
+          mediaType: "application/pdf",
+          displayFilename: "brief.pdf"
+        ),
+        .text("after"),
+      ])
+    )
+  }
+
   func testUserInputContentRejectsAdjacentTextParts() {
     XCTAssertThrowsError(
       try SignalboxUserInputContent(validating: [.text("first"), .text("second")])
