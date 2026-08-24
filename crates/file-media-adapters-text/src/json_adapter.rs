@@ -44,6 +44,20 @@ pub(crate) enum ProbeExtent {
 }
 
 pub(crate) fn has_json_structure(prefix: &[u8], extent: ProbeExtent) -> bool {
+    if !has_raw_json_structure(prefix, extent) {
+        return false;
+    }
+    if matches!(extent, ProbeExtent::TruncatedPrefix) {
+        let prefix = trim_ascii_start(prefix);
+        let Some(text) = source::probe_utf8(prefix) else {
+            return false;
+        };
+        return !csv_adapter::has_record_structure(text, extent);
+    }
+    true
+}
+
+pub(crate) fn has_raw_json_structure(prefix: &[u8], extent: ProbeExtent) -> bool {
     let prefix = trim_ascii_start(prefix);
     if !matches!(prefix.first(), Some(b'{' | b'[')) {
         return false;
@@ -56,10 +70,7 @@ pub(crate) fn has_json_structure(prefix: &[u8], extent: ProbeExtent) -> bool {
             Ok(()) => true,
             Err(error) => error.is_eof(),
         },
-        ProbeExtent::TruncatedPrefix => {
-            incomplete_json_prefix(text)
-                && !csv_adapter::has_record_structure(text, ProbeExtent::TruncatedPrefix)
-        }
+        ProbeExtent::TruncatedPrefix => incomplete_json_prefix(text),
     }
 }
 

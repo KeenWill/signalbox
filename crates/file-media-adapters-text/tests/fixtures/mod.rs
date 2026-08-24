@@ -52,6 +52,15 @@ pub(crate) fn csv_with_json_consistent_truncated_prefix() -> Vec<u8> {
     bytes
 }
 
+pub(crate) fn json_with_csv_consistent_truncated_prefix() -> Vec<u8> {
+    let mut bytes = b"[[1,2],\n[3,4],\n".to_vec();
+    while bytes.len() <= 4_096 {
+        bytes.extend_from_slice(b"[5,6],\n");
+    }
+    bytes.extend_from_slice(b"[7,8]]");
+    bytes
+}
+
 pub(crate) fn bracket_prefixed_prose() -> Vec<u8> {
     b"[section]\nbody".to_vec()
 }

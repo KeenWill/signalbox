@@ -23,8 +23,7 @@ pub(crate) async fn probe(
     } else {
         ProbeExtent::TruncatedPrefix
     };
-    let json_suppresses_csv = matches!(extent, ProbeExtent::CompleteSource)
-        && json_adapter::has_json_structure(&prefix, extent);
+    let json_suppresses_csv = json_adapter::has_raw_json_structure(&prefix, extent);
     let candidate = !json_suppresses_csv
         && source::probe_utf8(&prefix).is_some_and(|text| has_record_structure(text, extent));
     if candidate {

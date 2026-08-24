@@ -180,6 +180,15 @@ async fn truncated_json_prefix_does_not_suppress_valid_csv() -> Result<(), Box<d
 }
 
 #[tokio::test]
+async fn csv_like_truncated_prefix_does_not_suppress_valid_json() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::json_with_csv_consistent_truncated_prefix());
+
+    let inspection = support::inspect(&source, "application/json").await?;
+    support::assert_validated_media(inspection, "application/json");
+    Ok(())
+}
+
+#[tokio::test]
 async fn bracket_prefixed_prose_uses_the_text_fallback() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::bracket_prefixed_prose());
 
