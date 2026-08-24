@@ -2512,6 +2512,9 @@ async fn imported_discovery_classifies_short_content_encodings_as_corruption()
         .execute(br#"{"type":"user","message":{"content":"evidence"}}"#)
         .await?;
     let discovery = ImportedConversationDiscoveryRepository::new(pool.clone());
+    sqlx::query("ALTER TABLE imported_transcript_entry DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
 
     async fn assert_short_encoding_is_corrupt(
         pool: &PgPool,
@@ -2552,6 +2555,9 @@ async fn imported_discovery_classifies_short_content_encodings_as_corruption()
     assert_short_encoding_is_corrupt(&pool, &discovery, conversation, 1).await?;
     assert_short_encoding_is_corrupt(&pool, &discovery, conversation, 2).await?;
     assert_short_encoding_is_corrupt(&pool, &discovery, conversation, 3).await?;
+    sqlx::query("ALTER TABLE imported_transcript_entry ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
 
     pool.close().await;
     drop(container);

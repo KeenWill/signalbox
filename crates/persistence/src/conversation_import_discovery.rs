@@ -319,7 +319,7 @@ impl ImportedConversationDiscoveryRepository {
             });
         let rows = sqlx::query(
             "SELECT imported_conversation_id, source_format, converter_version,
-                    substring(source_session_id FROM 1 FOR $6) AS source_session_prefix,
+                    substring(source_session_id FROM 1 FOR ($6)::integer) AS source_session_prefix,
                     octet_length(source_session_id)::bigint AS source_session_bytes,
                     $6::bigint AS source_session_maximum_bytes,
                     declared_entry_count, display_title, display_title_state
@@ -364,7 +364,7 @@ impl ImportedConversationDiscoveryRepository {
         let row = sqlx::query(
             "SELECT imported.imported_conversation_id, imported.source_format,
                     imported.converter_version, imported.source_digest,
-                    substring(imported.source_session_id FROM 1 FOR $2)
+                    substring(imported.source_session_id FROM 1 FOR ($2)::integer)
                         AS source_session_prefix,
                     octet_length(imported.source_session_id)::bigint AS source_session_bytes,
                     $2::bigint AS source_session_maximum_bytes,
