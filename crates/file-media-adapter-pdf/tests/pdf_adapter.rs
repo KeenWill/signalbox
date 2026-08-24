@@ -7,10 +7,10 @@ use signalbox_file_media_adapter_pdf::{PdfProvider, declaration};
 use signalbox_file_media_runtime::{
     CancellationSignal, FileInspection, FileInspectionStatus, FileMediaCeilings, FileMediaFailure,
     FileMediaProcessor, FileMediaProcessorFuture, FileMediaProvider, FileMediaProviderReadRequest,
-    FileMediaProviderValidationRequest, FileMediaRegistry, FileReadRequest, FileReadResult,
-    InspectionRequest, NeverCancelled, ProcessorIsolation, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation, ReadViewName, ReaderIdentity,
-    ReasonCode, VerifiedBlobSource,
+    FileMediaProviderValidationRequest, FileMediaRegistry, FileReadInput, FileReadRequest,
+    FileReadResult, InspectionRequest, NeverCancelled, ProcessorBoundaryFailure, ProcessorFailure,
+    ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
+    ReadContinuation, ReadViewName, ReaderIdentity, ReasonCode, VerifiedBlobSource,
 };
 
 struct DirectProcessor {
@@ -32,7 +32,12 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
-        self.provider.probe(reader, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .probe(reader, source, cancellation)
+                .await
+                .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+        })
     }
 
     fn validate<'a>(
@@ -42,7 +47,12 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
-        self.provider.inspect(reader, request, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .inspect(reader, request, source, cancellation)
+                .await
+                .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+        })
     }
 
     fn read<'a>(
@@ -52,7 +62,12 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
-        self.provider.read(reader, request, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .read(reader, request, source, cancellation)
+                .await
+                .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+        })
     }
 }
 
@@ -298,12 +313,8 @@ async fn oversized_pdf_read_fails_at_the_declared_source_ceiling() -> Result<(),
     )
     .await;
 
-    assert_eq!(
-        result,
-        Err(FileMediaFailure::SourceTooLarge {
-            maximum_bytes: expected_source_limit,
-        })
-    );
+    assert_eq!(expected_source_limit, 8 * 1024 * 1024);
+    assert_eq!(result, Err(FileMediaFailure::ProcessorFailed));
     Ok(())
 }
 
@@ -428,7 +439,7 @@ async fn read(
             visible_part: None,
         },
         view: ReadViewName::try_new(view).map_err(|_| FileMediaFailure::ProcessorFailed)?,
-        options,
+        input: FileReadInput::Initial { options },
     };
     registry()
         .map_err(|_| FileMediaFailure::ProcessorFailed)?

@@ -2,15 +2,15 @@
 
 use std::{collections::BTreeSet, error::Error, num::NonZeroU64, str::FromStr};
 
-use lopdf::{Document, Error as LopdfError};
+use lopdf::{Dictionary, Document, Error as LopdfError, Object, Stream};
 use signalbox_file_media_runtime::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider,
-    FileMediaProviderDeclaration, FileMediaProviderFuture, FileMediaProviderReadRequest,
-    FileMediaProviderValidationRequest, FileReaderName, FileReaderProviderName, FileReaderRevision,
-    ProbeDeclaration, ProbeStrength, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds, ReadViewDeclaration,
-    ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
-    StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
+    FileMediaProviderDeclaration, FileMediaProviderFailure, FileMediaProviderFuture,
+    FileMediaProviderReadRequest, FileMediaProviderValidationRequest, FileReadInput,
+    FileReaderName, FileReaderProviderName, FileReaderRevision, ProbeDeclaration, ProbeStrength,
+    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
+    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
+    ReaderIdentity, ReasonCode, StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
 };
 
 const MEDIA_TYPE: &str = "application/pdf";
@@ -31,7 +31,7 @@ const ROOT_VALIDATION_BYTES: u64 = 4_096;
 const READ_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
 const SOURCE_CHUNK_BYTES: u64 = 256 * 1024;
 // Hard safety ceilings bound worker output and decompression-amplified memory.
-const TEXT_OUTPUT_BYTES: usize = 768 * 1024;
+const TEXT_OUTPUT_BYTES: usize = signalbox_file_media_runtime::MAX_TEXT_BODY_BYTES;
 const METADATA_OUTPUT_BYTES: usize = 16 * 1024;
 const MAX_DECOMPRESSED_PAGE_BYTES: usize = 1024 * 1024;
 // Hard safety ceilings bound object traversal and page-index construction latency.
@@ -59,20 +59,35 @@ struct TrailerFacts {
     index: Option<Vec<(u64, u64)>>,
     length: Option<u64>,
     prev: Option<u64>,
-    has_filter: bool,
+    filters: Vec<Vec<u8>>,
     is_xref_stream: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
+struct ObjectStreamFacts {
+    count: Option<u64>,
+    filters: Vec<Vec<u8>>,
+    first: Option<u64>,
+    is_object_stream: bool,
+    length: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct IndirectReference {
     object_number: u64,
     generation: u64,
 }
 
 #[derive(Clone, Copy)]
+enum XrefLocation {
+    Uncompressed(u64),
+    Compressed { stream_object: u64, index: u64 },
+}
+
+#[derive(Clone, Copy)]
 struct LiveXrefEntry {
     reference: IndirectReference,
-    offset: Option<u64>,
+    location: XrefLocation,
 }
 
 struct ParsedXref {
@@ -149,7 +164,7 @@ impl FileMediaProvider for PdfProvider {
             require_reader(reader)?;
             require_active(cancellation)?;
             if request.media_type.as_str() != MEDIA_TYPE {
-                return Err(ProcessorFailure::Protocol);
+                return Err(FileMediaProviderFailure::Failed);
             }
             let source_length = source.byte_length().get();
             if source_length <= VALIDATION_SOURCE_BYTES {
@@ -172,9 +187,15 @@ impl FileMediaProvider for PdfProvider {
             require_reader(reader)?;
             require_active(cancellation)?;
             if request.detected_media_type.as_str() != MEDIA_TYPE {
-                return Err(ProcessorFailure::Protocol);
+                return Err(FileMediaProviderFailure::Failed);
             }
-            if !empty_options(&request.options) {
+            let options = match &request.input {
+                FileReadInput::Initial { options } => options,
+                FileReadInput::Continuation { .. } => {
+                    return Ok(ProcessorReadOutput::InvalidViewArguments);
+                }
+            };
+            if !empty_options(options) {
                 return Ok(ProcessorReadOutput::InvalidViewArguments);
             }
             let source_length = source.byte_length().get();
@@ -186,17 +207,18 @@ impl FileMediaProvider for PdfProvider {
             let bytes = read_all(source, cancellation).await?;
             match preflight_document(&bytes)? {
                 Preflight::Ready => {}
-                Preflight::Encrypted => return Err(ProcessorFailure::Failed),
+                Preflight::Encrypted => return Err(FileMediaProviderFailure::Failed),
                 Preflight::ObjectLimit => {
                     return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
                         limit_kind: String::from(OBJECT_COUNT_LIMIT),
                     });
                 }
             }
-            let document = Document::load_mem(&bytes).map_err(|_| ProcessorFailure::Failed)?;
+            let document =
+                Document::load_mem(&bytes).map_err(|_| FileMediaProviderFailure::Failed)?;
             require_active(cancellation)?;
             if document.is_encrypted() {
-                return Err(ProcessorFailure::Failed);
+                return Err(FileMediaProviderFailure::Failed);
             }
             let pages = match collect_pages(&document) {
                 Ok(pages) => pages,
@@ -205,7 +227,9 @@ impl FileMediaProvider for PdfProvider {
                         limit_kind: String::from(PAGE_COUNT_LIMIT),
                     });
                 }
-                Err(PageCollectionError::Malformed) => return Err(ProcessorFailure::Failed),
+                Err(PageCollectionError::Malformed) => {
+                    return Err(FileMediaProviderFailure::Failed);
+                }
             };
             match request.view.as_str() {
                 TEXT_VIEW => read_text(&document, &pages, cancellation),
@@ -223,7 +247,7 @@ pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
         ReadViewName::try_new(TEXT_VIEW)?,
         String::from("Extracts embedded PDF text without OCR."),
         CanonicalJsonObjectSchema::try_new(r#"{"additionalProperties":false,"type":"object"}"#)?,
-        ReadAccessPattern::Streaming,
+        ReadAccessPattern::Streaming { maximum_ranges: 32 },
         ReadViewBounds::Text {
             source_bytes: READ_SOURCE_BYTES,
             output_bytes: TEXT_OUTPUT_BYTES,
@@ -233,7 +257,7 @@ pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
         ReadViewName::try_new(METADATA_VIEW)?,
         String::from("Returns bounded PDF version, page, and object counts."),
         CanonicalJsonObjectSchema::try_new(r#"{"additionalProperties":false,"type":"object"}"#)?,
-        ReadAccessPattern::Streaming,
+        ReadAccessPattern::Streaming { maximum_ranges: 32 },
         ReadViewBounds::Structured {
             source_bytes: READ_SOURCE_BYTES,
             output_bytes: METADATA_OUTPUT_BYTES,
@@ -250,7 +274,7 @@ pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
         probe: ProbeDeclaration::new(
             PDF_HEADER_BYTES,
             PDF_TRAILER_BYTES,
-            1,
+            signalbox_file_media_runtime::MAX_PROBE_RANGES,
             VALIDATION_SOURCE_BYTES,
         ),
         views: vec![text_view, metadata_view],
@@ -272,7 +296,7 @@ async fn inspect_bounded(
     source: &dyn VerifiedBlobSource,
     evidence: ValidationEvidence,
     cancellation: &dyn CancellationSignal,
-) -> Result<ProcessorValidationOutput, ProcessorFailure> {
+) -> Result<ProcessorValidationOutput, FileMediaProviderFailure> {
     let prefix = read_range(source, 0, PDF_HEADER_BYTES).await?;
     let source_length = source.byte_length().get();
     let suffix_length = source_length.min(PDF_TRAILER_BYTES);
@@ -289,22 +313,22 @@ async fn inspect_bounded(
     }
     let suffix_offset = source_length - suffix_length;
     let xref_bytes = if xref_offset >= suffix_offset {
-        let relative_offset =
-            usize::try_from(xref_offset - suffix_offset).map_err(|_| ProcessorFailure::Failed)?;
+        let relative_offset = usize::try_from(xref_offset - suffix_offset)
+            .map_err(|_| FileMediaProviderFailure::Failed)?;
         suffix
             .get(relative_offset..)
-            .ok_or(ProcessorFailure::Failed)?
+            .ok_or(FileMediaProviderFailure::Failed)?
             .to_vec()
     } else {
         let remaining_budget = VALIDATION_SOURCE_BYTES
             .checked_sub(PDF_HEADER_BYTES)
             .and_then(|remaining| remaining.checked_sub(suffix_length))
-            .ok_or(ProcessorFailure::Failed)?;
+            .ok_or(FileMediaProviderFailure::Failed)?;
         let missing_length = suffix_offset - xref_offset;
         let additional_length = missing_length.min(
             remaining_budget
                 .checked_sub(ROOT_VALIDATION_BYTES)
-                .ok_or(ProcessorFailure::Failed)?,
+                .ok_or(FileMediaProviderFailure::Failed)?,
         );
         let mut bytes = read_range(source, xref_offset, additional_length).await?;
         if additional_length == missing_length {
@@ -318,7 +342,7 @@ async fn inspect_bounded(
     };
     let mut remaining_budget = VALIDATION_SOURCE_BYTES
         .checked_sub(PDF_HEADER_BYTES + suffix_length)
-        .ok_or(ProcessorFailure::Failed)?;
+        .ok_or(FileMediaProviderFailure::Failed)?;
     if xref_offset < suffix_offset {
         remaining_budget = remaining_budget
             .saturating_sub((xref_bytes.len() as u64).saturating_sub(suffix_length));
@@ -329,9 +353,7 @@ async fn inspect_bounded(
             return Ok(malformed_validation());
         }
         let length = remaining_budget
-            .checked_sub(ROOT_VALIDATION_BYTES)
-            .unwrap_or(0)
-            .min(PDF_TRAILER_BYTES)
+            .saturating_sub(ROOT_VALIDATION_BYTES)
             .min(source_length - prev);
         if length == 0 {
             return Ok(malformed_validation());
@@ -352,18 +374,48 @@ async fn inspect_bounded(
     if parsed_xref.object_limit_exceeded || !valid_xref_targets(&parsed_xref, source_length) {
         return Ok(malformed_validation());
     }
-    let Some((root, root_offset)) = root_offset(&parsed_xref) else {
+    let Some((root, root_location)) = root_location(&parsed_xref) else {
         return Ok(malformed_validation());
     };
-    let root_length = remaining_budget
-        .min(ROOT_VALIDATION_BYTES)
-        .min(source_length - root_offset);
-    if root_length == 0 {
-        return Ok(malformed_validation());
-    }
-    let root_bytes = read_range(source, root_offset, root_length).await?;
-    if !object_is_catalog(&root_bytes, root) {
-        return Ok(malformed_validation());
+    match root_location {
+        XrefLocation::Uncompressed(root_offset) => {
+            let root_length = remaining_budget
+                .min(ROOT_VALIDATION_BYTES)
+                .min(source_length - root_offset);
+            if root_length == 0 {
+                return Ok(malformed_validation());
+            }
+            let root_bytes = read_range(source, root_offset, root_length).await?;
+            if !object_is_catalog(&root_bytes, root) {
+                return Ok(malformed_validation());
+            }
+        }
+        XrefLocation::Compressed {
+            stream_object,
+            index,
+        } => {
+            let Some((stream_reference, stream_offset)) =
+                object_stream_offset(&parsed_xref, stream_object)
+            else {
+                return Ok(malformed_validation());
+            };
+            let stream_length = remaining_budget.min(source_length - stream_offset);
+            if stream_length == 0 {
+                return Ok(malformed_validation());
+            }
+            let stream_bytes = read_range(source, stream_offset, stream_length).await?;
+            let decoded_limit =
+                usize::try_from(remaining_budget).map_err(|_| FileMediaProviderFailure::Failed)?;
+            if !object_stream_contains_catalog(
+                &stream_bytes,
+                stream_reference,
+                root,
+                index,
+                decoded_limit,
+            ) {
+                return Ok(malformed_validation());
+            }
+        }
     }
     validated_output(
         evidence,
@@ -377,7 +429,7 @@ async fn inspect_bounded(
 fn inspect_complete(
     bytes: &[u8],
     evidence: ValidationEvidence,
-) -> Result<ProcessorValidationOutput, ProcessorFailure> {
+) -> Result<ProcessorValidationOutput, FileMediaProviderFailure> {
     if !valid_header(bytes) || !has_pdf_trailer(bytes) {
         return Ok(malformed_validation());
     }
@@ -429,14 +481,14 @@ fn validated_output(
     pages: Option<usize>,
     objects: Option<usize>,
     mode: ValidationMode,
-) -> Result<ProcessorValidationOutput, ProcessorFailure> {
+) -> Result<ProcessorValidationOutput, FileMediaProviderFailure> {
     let metadata_json = serde_json::to_string(&serde_json::json!({
         "bounded_validation": mode.is_bounded(),
         "objects": objects,
         "pages": pages,
         "version": version,
     }))
-    .map_err(|_| ProcessorFailure::Failed)?;
+    .map_err(|_| FileMediaProviderFailure::Failed)?;
     Ok(ProcessorValidationOutput::Validated {
         media_type: String::from(MEDIA_TYPE),
         evidence,
@@ -448,7 +500,7 @@ fn read_text(
     document: &Document,
     pages: &[(u32, lopdf::ObjectId)],
     cancellation: &dyn CancellationSignal,
-) -> Result<ProcessorReadOutput, ProcessorFailure> {
+) -> Result<ProcessorReadOutput, FileMediaProviderFailure> {
     let mut text = String::new();
     for (page_number, page_id) in pages {
         require_active(cancellation)?;
@@ -461,7 +513,7 @@ fn read_text(
                         limit_kind: String::from(DECODED_CONTENT_LIMIT),
                     });
                 }
-                Err(_) => return Err(ProcessorFailure::Failed),
+                Err(_) => return Err(FileMediaProviderFailure::Failed),
             };
         let Some(total) = text.len().checked_add(page_text.len()) else {
             return Ok(ProcessorReadOutput::OutputUnitTooLarge);
@@ -481,14 +533,14 @@ fn read_text(
 fn read_metadata(
     document: &Document,
     page_count: usize,
-) -> Result<ProcessorReadOutput, ProcessorFailure> {
+) -> Result<ProcessorReadOutput, FileMediaProviderFailure> {
     let body_json = serde_json::to_string(&serde_json::json!({
         "encrypted": false,
         "objects": document.objects.len(),
         "pages": page_count,
         "version": effective_version(document),
     }))
-    .map_err(|_| ProcessorFailure::Failed)?;
+    .map_err(|_| FileMediaProviderFailure::Failed)?;
     Ok(ProcessorReadOutput::Structured {
         body_json,
         truncated: false,
@@ -496,10 +548,10 @@ fn read_metadata(
     })
 }
 
-fn preflight_document(bytes: &[u8]) -> Result<Preflight, ProcessorFailure> {
-    let xref_offset = startxref_offset(bytes).ok_or(ProcessorFailure::Failed)?;
-    let xref_offset = usize::try_from(xref_offset).map_err(|_| ProcessorFailure::Failed)?;
-    let parsed = parse_xref_chain(bytes, xref_offset).ok_or(ProcessorFailure::Failed)?;
+fn preflight_document(bytes: &[u8]) -> Result<Preflight, FileMediaProviderFailure> {
+    let xref_offset = startxref_offset(bytes).ok_or(FileMediaProviderFailure::Failed)?;
+    let xref_offset = usize::try_from(xref_offset).map_err(|_| FileMediaProviderFailure::Failed)?;
+    let parsed = parse_xref_chain(bytes, xref_offset).ok_or(FileMediaProviderFailure::Failed)?;
     if parsed.facts.encrypted {
         Ok(Preflight::Encrypted)
     } else if parsed.object_limit_exceeded {
@@ -564,33 +616,33 @@ fn collect_pages(document: &Document) -> Result<Vec<(u32, lopdf::ObjectId)>, Pag
 fn validate_page_contents(
     document: &Document,
     page_id: lopdf::ObjectId,
-) -> Result<(), ProcessorFailure> {
+) -> Result<(), FileMediaProviderFailure> {
     let page = document
         .get_dictionary(page_id)
-        .map_err(|_| ProcessorFailure::Failed)?;
+        .map_err(|_| FileMediaProviderFailure::Failed)?;
     let contents = match page.get(b"Contents") {
         Ok(contents) => contents,
         Err(LopdfError::DictKey(_)) => return Ok(()),
-        Err(_) => return Err(ProcessorFailure::Failed),
+        Err(_) => return Err(FileMediaProviderFailure::Failed),
     };
     match contents {
         lopdf::Object::Reference(object_id) => {
             document
                 .get_object(*object_id)
-                .map_err(|_| ProcessorFailure::Failed)?;
+                .map_err(|_| FileMediaProviderFailure::Failed)?;
         }
         lopdf::Object::Array(objects) => {
             for object in objects {
                 let object_id = object
                     .as_reference()
-                    .map_err(|_| ProcessorFailure::Failed)?;
+                    .map_err(|_| FileMediaProviderFailure::Failed)?;
                 document
                     .get_object(object_id)
-                    .map_err(|_| ProcessorFailure::Failed)?;
+                    .map_err(|_| FileMediaProviderFailure::Failed)?;
             }
         }
         lopdf::Object::Null | lopdf::Object::Stream(_) => {}
-        _ => return Err(ProcessorFailure::Failed),
+        _ => return Err(FileMediaProviderFailure::Failed),
     }
     Ok(())
 }
@@ -598,16 +650,18 @@ fn validate_page_contents(
 async fn read_all(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
-) -> Result<Vec<u8>, ProcessorFailure> {
+) -> Result<Vec<u8>, FileMediaProviderFailure> {
     let source_length = source.byte_length().get();
-    let capacity = usize::try_from(source_length).map_err(|_| ProcessorFailure::Failed)?;
+    let capacity = usize::try_from(source_length).map_err(|_| FileMediaProviderFailure::Failed)?;
     let mut bytes = Vec::with_capacity(capacity);
     let mut offset = 0_u64;
     while offset < source_length {
         require_active(cancellation)?;
         let length = (source_length - offset).min(SOURCE_CHUNK_BYTES);
         bytes.extend(read_range(source, offset, length).await?);
-        offset = offset.checked_add(length).ok_or(ProcessorFailure::Failed)?;
+        offset = offset
+            .checked_add(length)
+            .ok_or(FileMediaProviderFailure::Failed)?;
     }
     Ok(bytes)
 }
@@ -616,28 +670,28 @@ async fn read_range(
     source: &dyn VerifiedBlobSource,
     offset: u64,
     length: u64,
-) -> Result<Vec<u8>, ProcessorFailure> {
-    let length = NonZeroU64::new(length).ok_or(ProcessorFailure::Failed)?;
+) -> Result<Vec<u8>, FileMediaProviderFailure> {
+    let length = NonZeroU64::new(length).ok_or(FileMediaProviderFailure::Failed)?;
     source
         .read_range(offset, length)
         .await
-        .map_err(|_| ProcessorFailure::Failed)
+        .map_err(|_| FileMediaProviderFailure::Failed)
 }
 
-fn require_reader(reader: &ReaderIdentity) -> Result<(), ProcessorFailure> {
+fn require_reader(reader: &ReaderIdentity) -> Result<(), FileMediaProviderFailure> {
     if reader.provider().as_str() == PROVIDER_NAME
         && reader.reader().as_str() == READER_NAME
         && reader.revision().as_str() == READER_REVISION
     {
         Ok(())
     } else {
-        Err(ProcessorFailure::Protocol)
+        Err(FileMediaProviderFailure::Failed)
     }
 }
 
-fn require_active(cancellation: &dyn CancellationSignal) -> Result<(), ProcessorFailure> {
+fn require_active(cancellation: &dyn CancellationSignal) -> Result<(), FileMediaProviderFailure> {
     if cancellation.is_cancelled() {
-        Err(ProcessorFailure::Cancelled)
+        Err(FileMediaProviderFailure::Failed)
     } else {
         Ok(())
     }
@@ -713,7 +767,7 @@ fn parse_classic_xref(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
                             object_number,
                             generation,
                         },
-                        offset: Some(offset),
+                        location: XrefLocation::Uncompressed(offset),
                     });
                 }
             }
@@ -744,13 +798,10 @@ fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
         return None;
     }
     let facts = valid_trailer_facts(facts, true)?;
-    if facts.has_filter {
-        return None;
-    }
     consume_stream_line_end(bytes, &mut cursor)?;
     let stream_length = usize::try_from(facts.length?).ok()?;
     let stream_end = cursor.checked_add(stream_length)?;
-    let stream = bytes.get(cursor..stream_end)?;
+    let encoded_stream = bytes.get(cursor..stream_end)?;
     cursor = stream_end;
     skip_pdf_whitespace(bytes, &mut cursor);
     if !consume_keyword(bytes, &mut cursor, b"endstream") {
@@ -765,8 +816,10 @@ fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
         .index
         .clone()
         .unwrap_or_else(|| vec![(0, facts.size.unwrap_or(0))]);
+    let decoded_length = xref_decoded_length(widths, &indexes)?;
+    let stream = decode_xref_stream(encoded_stream, &facts.filters, decoded_length)?;
     let (mut live_entries, mut declared_objects, object_limit_exceeded) =
-        parse_xref_stream_entries(stream, widths, &indexes)?;
+        parse_xref_stream_entries(&stream, widths, &indexes)?;
     declared_objects.insert(xref_object);
     let xref_reference = IndirectReference {
         object_number: xref_object,
@@ -779,7 +832,7 @@ fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
     {
         live_entries.push(LiveXrefEntry {
             reference: xref_reference,
-            offset: None,
+            location: XrefLocation::Uncompressed(0),
         });
     }
     Some(ParsedXref {
@@ -849,7 +902,10 @@ fn parse_trailer_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(TrailerF
                 let mut value_cursor = value_start;
                 facts.prev = Some(parse_unsigned(bytes, &mut value_cursor)?);
             }
-            b"Filter" => facts.has_filter = true,
+            b"Filter" => {
+                let mut value_cursor = value_start;
+                facts.filters = parse_filter_names(bytes, &mut value_cursor)?;
+            }
             b"Type" => {
                 let mut value_cursor = value_start;
                 facts.is_xref_stream =
@@ -999,12 +1055,58 @@ fn parse_widths(bytes: &[u8], cursor: &mut usize) -> Option<[u64; 3]> {
     Some([first, second, third])
 }
 
-fn valid_xref_targets(parsed: &ParsedXref, source_length: u64) -> bool {
-    if parsed
-        .live_entries
+fn parse_filter_names(bytes: &[u8], cursor: &mut usize) -> Option<Vec<Vec<u8>>> {
+    if bytes.get(*cursor) == Some(&b'/') {
+        return Some(vec![parse_name(bytes, cursor)?]);
+    }
+    if bytes.get(*cursor) != Some(&b'[') {
+        return None;
+    }
+    *cursor += 1;
+    let mut filters = Vec::new();
+    loop {
+        skip_pdf_space_and_comments(bytes, cursor);
+        if bytes.get(*cursor) == Some(&b']') {
+            *cursor += 1;
+            return (!filters.is_empty()).then_some(filters);
+        }
+        filters.push(parse_name(bytes, cursor)?);
+    }
+}
+
+fn xref_decoded_length(widths: [u64; 3], indexes: &[(u64, u64)]) -> Option<usize> {
+    let entry_width = widths
         .iter()
-        .any(|entry| entry.offset.is_some_and(|offset| offset >= source_length))
-    {
+        .try_fold(0_u64, |total, width| total.checked_add(*width))?;
+    let entries = indexes
+        .iter()
+        .try_fold(0_u64, |total, (_, count)| total.checked_add(*count))?;
+    usize::try_from(entry_width.checked_mul(entries)?).ok()
+}
+
+fn decode_xref_stream(encoded: &[u8], filters: &[Vec<u8>], limit: usize) -> Option<Vec<u8>> {
+    if filters.is_empty() {
+        return (encoded.len() == limit).then(|| encoded.to_vec());
+    }
+    let filter = if filters.len() == 1 {
+        Object::Name(filters[0].clone())
+    } else {
+        Object::Array(filters.iter().cloned().map(Object::Name).collect())
+    };
+    let mut dictionary = Dictionary::new();
+    dictionary.set("Filter", filter);
+    let stream = Stream::new(dictionary, encoded.to_vec());
+    let decoded = stream.decompressed_content_with_limit(limit).ok()?;
+    (decoded.len() == limit).then_some(decoded)
+}
+
+fn valid_xref_targets(parsed: &ParsedXref, source_length: u64) -> bool {
+    if parsed.live_entries.iter().any(|entry| {
+        matches!(
+            entry.location,
+            XrefLocation::Uncompressed(offset) if offset >= source_length
+        )
+    }) {
         return false;
     }
     let Some(root) = parsed.facts.root else {
@@ -1054,13 +1156,181 @@ fn merge_previous_xref(current: &mut ParsedXref, previous: ParsedXref) {
     current.declared_objects.extend(previous.declared_objects);
 }
 
-fn root_offset(parsed: &ParsedXref) -> Option<(IndirectReference, u64)> {
+fn root_location(parsed: &ParsedXref) -> Option<(IndirectReference, XrefLocation)> {
     let root = parsed.facts.root?;
     parsed
         .live_entries
         .iter()
         .find(|entry| entry.reference == root)
-        .and_then(|entry| entry.offset.map(|offset| (root, offset)))
+        .map(|entry| (root, entry.location))
+}
+
+#[cfg(test)]
+fn root_offset(parsed: &ParsedXref) -> Option<(IndirectReference, u64)> {
+    let (root, location) = root_location(parsed)?;
+    match location {
+        XrefLocation::Uncompressed(offset) => Some((root, offset)),
+        XrefLocation::Compressed { .. } => None,
+    }
+}
+
+fn object_stream_offset(
+    parsed: &ParsedXref,
+    object_number: u64,
+) -> Option<(IndirectReference, u64)> {
+    parsed.live_entries.iter().find_map(|entry| {
+        if entry.reference.object_number != object_number {
+            return None;
+        }
+        match entry.location {
+            XrefLocation::Uncompressed(offset) => Some((entry.reference, offset)),
+            XrefLocation::Compressed { .. } => None,
+        }
+    })
+}
+
+fn object_stream_contains_catalog(
+    bytes: &[u8],
+    stream_reference: IndirectReference,
+    catalog_reference: IndirectReference,
+    catalog_index: u64,
+    decoded_limit: usize,
+) -> bool {
+    let Some((facts, encoded)) = parse_object_stream(bytes, stream_reference) else {
+        return false;
+    };
+    let Some(count) = facts.count.and_then(|value| usize::try_from(value).ok()) else {
+        return false;
+    };
+    let Some(first) = facts.first.and_then(|value| usize::try_from(value).ok()) else {
+        return false;
+    };
+    let Some(index) = usize::try_from(catalog_index).ok() else {
+        return false;
+    };
+    if !facts.is_object_stream || index >= count {
+        return false;
+    }
+    let Some(decoded) = decode_pdf_stream(encoded, &facts.filters, decoded_limit) else {
+        return false;
+    };
+    let Some(header) = decoded.get(..first) else {
+        return false;
+    };
+    let mut cursor = 0_usize;
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        skip_pdf_space_and_comments(header, &mut cursor);
+        let Some(object_number) = parse_unsigned(header, &mut cursor) else {
+            return false;
+        };
+        skip_pdf_space_and_comments(header, &mut cursor);
+        let Some(offset) = parse_unsigned(header, &mut cursor) else {
+            return false;
+        };
+        entries.push((object_number, offset));
+    }
+    skip_pdf_space_and_comments(header, &mut cursor);
+    if cursor != header.len() || entries[index].0 != catalog_reference.object_number {
+        return false;
+    }
+    let Some(start) = usize::try_from(entries[index].1)
+        .ok()
+        .and_then(|offset| first.checked_add(offset))
+    else {
+        return false;
+    };
+    let end = if index + 1 < entries.len() {
+        let Some(end) = usize::try_from(entries[index + 1].1)
+            .ok()
+            .and_then(|offset| first.checked_add(offset))
+        else {
+            return false;
+        };
+        end
+    } else {
+        decoded.len()
+    };
+    let Some(object) = decoded.get(start..end) else {
+        return false;
+    };
+    let Some((catalog, mut cursor)) = parse_catalog_dictionary(object, 0) else {
+        return false;
+    };
+    skip_pdf_space_and_comments(object, &mut cursor);
+    catalog && cursor == object.len()
+}
+
+fn parse_object_stream(
+    bytes: &[u8],
+    expected: IndirectReference,
+) -> Option<(ObjectStreamFacts, &[u8])> {
+    let mut cursor = 0_usize;
+    skip_pdf_space_and_comments(bytes, &mut cursor);
+    if parse_unsigned(bytes, &mut cursor) != Some(expected.object_number) {
+        return None;
+    }
+    skip_pdf_space_and_comments(bytes, &mut cursor);
+    if parse_unsigned(bytes, &mut cursor) != Some(expected.generation) {
+        return None;
+    }
+    skip_pdf_space_and_comments(bytes, &mut cursor);
+    if !consume_keyword(bytes, &mut cursor, b"obj") {
+        return None;
+    }
+    skip_pdf_space_and_comments(bytes, &mut cursor);
+    if !bytes.get(cursor..)?.starts_with(b"<<") {
+        return None;
+    }
+    cursor += 2;
+    let mut facts = ObjectStreamFacts::default();
+    loop {
+        skip_pdf_space_and_comments(bytes, &mut cursor);
+        if bytes.get(cursor..)?.starts_with(b">>") {
+            cursor += 2;
+            break;
+        }
+        let key = parse_name(bytes, &mut cursor)?;
+        skip_pdf_space_and_comments(bytes, &mut cursor);
+        let value_start = cursor;
+        skip_pdf_object(bytes, &mut cursor, 0)?;
+        let mut value_cursor = value_start;
+        match key.as_slice() {
+            b"Type" => {
+                facts.is_object_stream =
+                    parse_name(bytes, &mut value_cursor).as_deref() == Some(b"ObjStm");
+            }
+            b"N" => facts.count = Some(parse_unsigned(bytes, &mut value_cursor)?),
+            b"First" => facts.first = Some(parse_unsigned(bytes, &mut value_cursor)?),
+            b"Length" => facts.length = Some(parse_unsigned(bytes, &mut value_cursor)?),
+            b"Filter" => facts.filters = parse_filter_names(bytes, &mut value_cursor)?,
+            _ => {}
+        }
+    }
+    skip_pdf_space_and_comments(bytes, &mut cursor);
+    if !consume_keyword(bytes, &mut cursor, b"stream") {
+        return None;
+    }
+    consume_stream_line_end(bytes, &mut cursor)?;
+    let length = usize::try_from(facts.length?).ok()?;
+    let end = cursor.checked_add(length)?;
+    Some((facts, bytes.get(cursor..end)?))
+}
+
+fn decode_pdf_stream(encoded: &[u8], filters: &[Vec<u8>], limit: usize) -> Option<Vec<u8>> {
+    if filters.is_empty() {
+        return (encoded.len() <= limit).then(|| encoded.to_vec());
+    }
+    let filter = if filters.len() == 1 {
+        Object::Name(filters[0].clone())
+    } else {
+        Object::Array(filters.iter().cloned().map(Object::Name).collect())
+    };
+    let mut dictionary = Dictionary::new();
+    dictionary.set("Filter", filter);
+    Stream::new(dictionary, encoded.to_vec())
+        .decompressed_content_with_limit(limit)
+        .ok()
 }
 
 fn object_is_catalog(bytes: &[u8], expected: IndirectReference) -> bool {
@@ -1078,7 +1348,11 @@ fn object_is_catalog(bytes: &[u8], expected: IndirectReference) -> bool {
         return false;
     }
     skip_pdf_space_and_comments(bytes, &mut cursor);
-    parse_catalog_dictionary(bytes, cursor).is_some_and(|(catalog, _)| catalog)
+    let Some((catalog, mut cursor)) = parse_catalog_dictionary(bytes, cursor) else {
+        return false;
+    };
+    skip_pdf_space_and_comments(bytes, &mut cursor);
+    catalog && consume_keyword(bytes, &mut cursor, b"endobj")
 }
 
 fn parse_catalog_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(bool, usize)> {
@@ -1087,10 +1361,11 @@ fn parse_catalog_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(bool, us
     }
     cursor += 2;
     let mut catalog = false;
+    let mut pages = false;
     loop {
         skip_pdf_space_and_comments(bytes, &mut cursor);
         if bytes.get(cursor..)?.starts_with(b">>") {
-            return Some((catalog, cursor + 2));
+            return Some((catalog && pages, cursor + 2));
         }
         let key = parse_name(bytes, &mut cursor)?;
         skip_pdf_space_and_comments(bytes, &mut cursor);
@@ -1099,6 +1374,9 @@ fn parse_catalog_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(bool, us
         if key == b"Type" {
             let mut value_cursor = value_start;
             catalog = parse_name(bytes, &mut value_cursor).as_deref() == Some(b"Catalog");
+        } else if key == b"Pages" {
+            let mut value_cursor = value_start;
+            pages = parse_indirect_reference(bytes, &mut value_cursor).is_some();
         }
     }
 }
@@ -1147,7 +1425,7 @@ fn parse_xref_stream_entries(
     if entry_width == 0 {
         return None;
     }
-    let mut cursor = 0;
+    let mut cursor = 0_usize;
     let mut live_entries = Vec::new();
     let mut declared_objects = BTreeSet::new();
     let mut object_limit_exceeded = false;
@@ -1172,12 +1450,20 @@ fn parse_xref_stream_entries(
                 }
                 let field_two = parse_big_endian(entry.get(type_end..field_two_end)?)?;
                 let generation = parse_big_endian(entry.get(field_two_end..)?)?;
+                let location = if entry_type == 1 {
+                    XrefLocation::Uncompressed(field_two)
+                } else {
+                    XrefLocation::Compressed {
+                        stream_object: field_two,
+                        index: generation,
+                    }
+                };
                 live_entries.push(LiveXrefEntry {
                     reference: IndirectReference {
                         object_number,
                         generation: if entry_type == 1 { generation } else { 0 },
                     },
-                    offset: (entry_type == 1).then_some(field_two),
+                    location,
                 });
             }
         }
@@ -1328,6 +1614,26 @@ fn malformed_validation() -> ProcessorValidationOutput {
 mod tests {
     use super::*;
     use lopdf::{Object, dictionary};
+    use signalbox_file_media_runtime::{FileMediaCeilings, ReadViewBounds};
+
+    #[test]
+    fn declaration_fits_probe_and_text_ceilings() {
+        let declaration = declaration().expect("valid declaration");
+        let reader = &declaration.readers()[0];
+        let text = reader
+            .views()
+            .iter()
+            .find(|view| view.name().as_str() == TEXT_VIEW)
+            .expect("text view");
+
+        assert!(reader.probe().range_count() >= 2);
+        assert!(reader.probe().range_count() <= FileMediaCeilings::version_one().probe_ranges);
+        assert!(matches!(
+            text.bounds(),
+            ReadViewBounds::Text { output_bytes, .. }
+                if output_bytes <= signalbox_file_media_runtime::MAX_TEXT_BODY_BYTES
+        ));
+    }
 
     #[test]
     fn xref_preflight_rejects_object_count_before_document_construction() {
@@ -1367,6 +1673,38 @@ mod tests {
         let bytes = b"2 0 obj\n<< /Type /XRef /Size 3 /Root 1 0 R /W [1 7 0] /Length 24 >>\nstream\nendstream\nendobj";
 
         assert!(parse_xref_structure(bytes).is_none());
+    }
+
+    #[test]
+    fn flate_xref_stream_is_decoded_within_expected_entry_size() {
+        let decoded = [0_u8; 128];
+        let mut compressed = Stream::new(Dictionary::new(), decoded.to_vec());
+        compressed.compress().expect("compress xref fixture");
+        assert!(compressed.dict.has(b"Filter"));
+        let mut bytes = format!(
+            "2 0 obj\n<< /Type /XRef /Size 16 /Root 1 0 R /W [1 7 0] /Length {} /Filter /FlateDecode >>\nstream\n",
+            compressed.content.len()
+        )
+        .into_bytes();
+        bytes.extend_from_slice(&compressed.content);
+        bytes.extend_from_slice(b"\nendstream\nendobj");
+
+        let parsed = parse_xref_structure(&bytes).expect("filtered xref stream");
+        assert_eq!(parsed.declared_objects.len(), 16);
+    }
+
+    #[test]
+    fn type_two_xref_entry_retains_object_stream_coordinates() {
+        let parsed =
+            parse_xref_stream_entries(&[2, 7, 3], [1, 1, 1], &[(11, 1)]).expect("type two entry");
+
+        assert!(matches!(
+            parsed.0[0].location,
+            XrefLocation::Compressed {
+                stream_object: 7,
+                index: 3
+            }
+        ));
     }
 
     #[test]
@@ -1429,6 +1767,40 @@ mod tests {
         assert!(!object_is_catalog(
             b"7 0 obj\n<< /Type /Pages /Count 0 >>\nendobj",
             root
+        ));
+        assert!(!object_is_catalog(
+            b"7 0 obj\n<< /Type /Catalog >>\nendobj",
+            root
+        ));
+        assert!(!object_is_catalog(
+            b"7 0 obj\n<< /Type /Catalog /Pages 8 0 R >>",
+            root
+        ));
+    }
+
+    #[test]
+    fn compressed_catalog_is_resolved_at_the_xref_index() {
+        let content = b"9 0 7 4 null<< /Type /Catalog /Pages 8 0 R >>";
+        let mut bytes = format!(
+            "5 0 obj\n<< /Type /ObjStm /N 2 /First 8 /Length {} >>\nstream\n",
+            content.len()
+        )
+        .into_bytes();
+        bytes.extend_from_slice(content);
+
+        let stream = IndirectReference {
+            object_number: 5,
+            generation: 0,
+        };
+        let catalog = IndirectReference {
+            object_number: 7,
+            generation: 0,
+        };
+        assert!(object_stream_contains_catalog(
+            &bytes, stream, catalog, 1, 4_096
+        ));
+        assert!(!object_stream_contains_catalog(
+            &bytes, stream, catalog, 0, 4_096
         ));
     }
 
