@@ -358,6 +358,7 @@ impl FileMediaRegistry {
             let validations = async {
                 let mut successful = Vec::new();
                 let mut malformed = Vec::new();
+                let mut encrypted = Vec::new();
                 for candidate in candidates {
                     match self
                         .validate_candidate(
@@ -373,31 +374,40 @@ impl FileMediaRegistry {
                         inspection @ (FileInspection::Validated(_)
                         | FileInspection::DeclaredMismatch { .. }) => successful.push(inspection),
                         inspection @ FileInspection::Malformed { .. } => malformed.push(inspection),
+                        inspection @ FileInspection::EncryptedOrLocked { .. } => {
+                            encrypted.push(inspection);
+                        }
                         FileInspection::Unknown { .. } => {}
-                        FileInspection::Ambiguous { .. }
-                        | FileInspection::EncryptedOrLocked { .. } => {
+                        FileInspection::Ambiguous { .. } => {
                             return Err(FileMediaFailure::ProcessorFailed);
                         }
                     }
                 }
-                Ok::<_, FileMediaFailure>((successful, malformed))
+                Ok::<_, FileMediaFailure>((successful, malformed, encrypted))
             };
             let validations = Box::pin(validations);
             let deadline = Box::pin(futures_timer::Delay::new(std::time::Duration::from_secs(
                 MAX_WORKER_WALL_SECONDS,
             )));
-            let (mut successful, mut malformed) =
+            let (mut successful, mut malformed, mut encrypted) =
                 match futures_util::future::select(validations, deadline).await {
                     futures_util::future::Either::Left((result, _)) => result?,
                     futures_util::future::Either::Right(((), _)) => {
                         return Err(FileMediaFailure::ProcessorTimedOut);
                     }
                 };
-            if successful.len() == 1 {
+            let recognized = successful
+                .len()
+                .saturating_add(malformed.len())
+                .saturating_add(encrypted.len());
+            if recognized == 1 && successful.len() == 1 {
                 return successful.pop().ok_or(FileMediaFailure::ProcessorFailed);
             }
-            if successful.is_empty() && malformed.len() == 1 {
+            if recognized == 1 && malformed.len() == 1 {
                 return malformed.pop().ok_or(FileMediaFailure::ProcessorFailed);
+            }
+            if recognized == 1 && encrypted.len() == 1 {
+                return encrypted.pop().ok_or(FileMediaFailure::ProcessorFailed);
             }
             return Ok(FileInspection::Ambiguous {
                 source: request.source,
