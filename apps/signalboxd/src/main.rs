@@ -1437,7 +1437,7 @@ async fn run_hub(
                 tracing::warn!(
                     phase = ?RuntimePhase::StartupScan,
                     session = %session.into_uuid(),
-                    "session holds its slot awaiting a user reconciliation decision"
+                    "session holds its slot awaiting a durable recovery decision"
                 );
             }
             Ok(())
@@ -1827,7 +1827,8 @@ async fn run_hub(
             StartEligibleTurnRepository::new(scheduler_pool.clone()),
         ),
         execution,
-    );
+    )
+    .with_occupancy_recovery(scheduler_pool.clone(), eligibility_nudge.clone());
     let turn_liveness_runtime = TurnLivenessRuntime::new(
         scheduler_pool.clone(),
         StaleActiveTurnBound::hard_ceiling(),
@@ -1849,6 +1850,9 @@ async fn run_hub(
         },
         None => SchedulerLoop::new(work_source, pass),
     };
+    if let Some((metrics, _server)) = prometheus_runtime.as_ref() {
+        scheduler = scheduler.with_occupancy_observer(Arc::new(metrics.clone()));
+    }
     if let Some(limit) = scheduler_max_in_flight_passes {
         tracing::info!(
             max_in_flight_passes = limit,

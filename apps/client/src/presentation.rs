@@ -2152,12 +2152,23 @@ impl<'a> Output<'a> {
             TurnState::ActiveAwaitingModelCallRecovery {
                 ended_attempt_id,
                 recovery_model_call_id,
-            } => writeln!(
-                self.stdout,
-                "turn={turn_id} position={position} \
-                 state=active_awaiting_model_call_recovery \
-                 attempt={ended_attempt_id} call={recovery_model_call_id}"
-            ),
+                automatic_reconciliation_attempts,
+                operator_action_required,
+            } => {
+                let recovery = if *operator_action_required {
+                    "operator_required"
+                } else {
+                    "automatic"
+                };
+                writeln!(
+                    self.stdout,
+                    "turn={turn_id} position={position} \
+                     state=active_awaiting_model_call_recovery \
+                     attempt={ended_attempt_id} call={recovery_model_call_id} \
+                     recovery={recovery} recovery_attempts={}",
+                    automatic_reconciliation_attempts.value()
+                )
+            }
             TurnState::ActiveAwaitingToolApproval { tool_request_id } => writeln!(
                 self.stdout,
                 "turn={turn_id} position={position} state=active_awaiting_tool_approval \

@@ -1,5 +1,9 @@
 # Persistence protocol
 
+The durable automatic model-call reconciliation state, attempt history, and
+final-state authority were verified against this PR
+(`agent/turn-lifecycle-hardening`).
+
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
 
@@ -158,8 +162,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — one hundred files, `202607180001` through
-`202608210404` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — one hundred one files, `202607180001` through
+`202608210500` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -403,6 +407,18 @@ Representation rules, all enforced in the schema:
   `without_stop` and `after_cancellation`, and model-call state
   `prepared`/`in_flight`/`cancellation_requested`/`terminal` with terminal
   dispositions `completed`/`known_failed`/`refused`/`cancelled`/`ambiguous`.
+- Migration `202608210500` adds one current
+  `automatic_model_call_reconciliation` row per discovered model-call recovery
+  wait and typed attempt-history rows keyed by one-based ordinal. Current state
+  is `scheduled`, `attempting`, `reconciled`, `superseded`, or `exhausted`;
+  attempt outcome is `attempting`, `reconciled`, `superseded`,
+  `infrastructure_failure`, or `integrity_failure`. Checks close the
+  five-attempt budget, require a completion timestamp exactly for terminal
+  attempt outcomes, and require an exhaustion timestamp exactly for exhausted
+  current state. The same migration widens the reconciliation-required
+  final-state assertion only for an exact `reconciled` row binding that terminal
+  turn, session, and ambiguous model call; every frontier, attempt, call, and
+  outbox proof remains required.
 - Migration `202608080100` closes runner placement history over
   `runner_lost_before_pin`, `pre_pin_replaced`, sourced `runner_lost`, and
   `abandoned` records. Each event retains the complete facts required by its
@@ -921,6 +937,48 @@ Locks per transaction, in acquisition order:
   capacity-row or cursor-row lock; or take a capacity-row lock while holding a
   cursor-row lock.
 
+- **Automatic model-call reconciliation**: `claim_due` first locks the singleton
+  discovery-cursor row `FOR UPDATE` and retains it through discovery,
+  normalization, supersession maintenance, and claiming. Discovery may insert
+  recovery rows after that cursor lock. Each discovery lap fixes its highest
+  eligible turn identity before paging, then wraps after reaching that bound, so
+  a turn that becomes eligible behind the cursor is reached on the next lap.
+  Runtime-terminal delegated turns are excluded and superseded.
+  Abandoned-attempt settlement examines and updates at most 64 due
+  recovery/attempt pairs from one materialized page. Supersession maintenance
+  later locks its own singleton cursor row `FOR UPDATE`, then examines and
+  updates at most 64 recovery rows from one materialized keyset page. Each
+  supersession lap likewise fixes its highest pending recovery identity before
+  paging and wraps after reaching that bound. The bound carries weight here that
+  it does not for discovery: a recovery becomes superseded by a `turn_lifecycle`
+  change rather than by anything this statement writes, so a row the cursor has
+  already passed can acquire that disposition afterwards and must be reinspected
+  — and a lap whose pages a steady arrival rate keeps full would never wrap to
+  reach it. A recovery below the lap's bound is paged on the state it holds when
+  that page is read, so a disposition acquired mid-lap is still seen. Exhaustion
+  parks at most 64 `scheduled` recoveries that spent the whole attempt budget
+  and whose turn still holds the exact matching `awaiting_model_call_recovery`
+  wait; a recovery whose turn no longer holds that wait is left for supersession
+  rather than parked, because an exhaustion park raises an operator alert that
+  cannot be retracted. Rows over the window are reached by the next scan, since
+  every row this statement selects is also written. `attempting` recoveries are
+  never exhausted directly: settlement returns them to `scheduled` first, which
+  is what closes their attempt-history row. Claiming finally locks at most 64
+  due recovery rows `FOR UPDATE SKIP LOCKED`, increments their durable attempt
+  ordinal, sets the exact backoff deadline, and inserts the attempt rows in the
+  same transaction. The attempt budget and the retry ladder claiming applies are
+  bound from the domain attempt type, not written into the statement. No
+  reconciliation path may acquire either cursor row while holding a recovery-row
+  lock in the reverse of this order. Applying a claim first performs the
+  immutable delegated-parent lookup. When the claimed session is a delegated
+  child, it locks the parent/child endpoint session rows `FOR NO KEY UPDATE` in
+  ascending session-identity order; it then takes the child's
+  `session_scheduler` row `FOR UPDATE`, reconstitutes the complete scheduling
+  projection, and uses the existing reconciliation-required write transaction. A
+  nondelegated claim takes only the scheduler lock. Operator reconciliation uses
+  the same endpoint-before-scheduler prefix, so automatic reconciliation never
+  introduces the reverse child-scheduler-to-parent-session order.
+
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
   projection plus continuation preparation, and their authoritative rereads):
@@ -1299,6 +1357,18 @@ the active lifecycle terminalizes `reconciliation_required` with an
 equal-content frontier and typed outbox record. The reconciliation marker and
 accepted successor carry the exact interrupt proof. The attempt trigger rejects
 every update to an ended attempt.
+
+The periodic daemon also discovers an unstopped model-call wait without an
+interrupt into the automatic reconciliation tables. A claimed attempt records
+its ordinal before the terminal transaction. Under the scheduler lock, the
+adapter reconstitutes the same exact ambiguous call and ended attempt, derives
+fresh frontier and pending-steering reclassification identities, and persists
+the existing `reconciliation_required` lifecycle and outbox shapes. The
+`reconciled` recovery row is the typed authority admitted by the deferred
+final-state assertion when no applied interrupt exists. It asserts nothing about
+the provider's outcome; the terminal call remains `ambiguous`. A lost daemon
+leaves `attempting` durable, which a later claim pass classifies as
+`infrastructure_failure` after its deadline before retrying.
 
 ## Corruption taxonomy
 
