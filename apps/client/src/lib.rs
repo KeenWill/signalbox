@@ -58,16 +58,22 @@ mod error;
 mod presentation;
 mod transcript;
 
+// numeric-bound: ceiling - protects request memory and durable input storage
 const MAX_INPUT_CONTENT_BYTES: usize = 1_048_576;
+// numeric-bound: ceiling - protects frame memory while decoding review input
 const MAX_REVIEW_JSON_INPUT_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
+// numeric-bound: ceiling - protects frame memory while reading import source
 const MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 /// Bounded memory used while hashing one client-local blob source.
 const BLOB_HASH_BUFFER_BYTES: usize = 64 * 1024;
 /// Smallest bounded metadata page the process protocol admits.
+// numeric-bound: tunable - controls the smallest requested metadata page
 const MIN_METADATA_PAGE_SIZE: u64 = 1;
 /// Largest bounded metadata page the process protocol admits.
+// numeric-bound: tunable - controls the largest requested metadata page
 const MAX_METADATA_PAGE_SIZE: u64 = 100;
 /// Largest finding inventory one review run can own.
+// numeric-bound: ceiling - protects memory and writes from runaway model findings
 const MAX_REVIEW_FINDINGS_PER_RUN: u64 = 32;
 
 #[derive(Deserialize)]
@@ -453,6 +459,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
             detail,
         },
         ServerMessage::SessionCreated { .. }
+        | ServerMessage::SessionCommissioned { .. }
         | ServerMessage::SessionPlacementUpdated { .. }
         | ServerMessage::InputSubmitted { .. }
         | ServerMessage::SteeringSubmitted { .. }
@@ -554,6 +561,7 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
             detail,
         },
         ServerMessage::SessionCreated { .. }
+        | ServerMessage::SessionCommissioned { .. }
         | ServerMessage::SessionSpawned { .. }
         | ServerMessage::SessionAwaitRegistered { .. }
         | ServerMessage::ChildResult { .. }
@@ -667,6 +675,7 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
             detail,
         },
         ServerMessage::SessionCreated { .. }
+        | ServerMessage::SessionCommissioned { .. }
         | ServerMessage::SessionSpawned { .. }
         | ServerMessage::SessionAwaitRegistered { .. }
         | ServerMessage::ChildResult { .. }

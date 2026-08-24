@@ -12,6 +12,7 @@ use crate::{
     TerminalEvidence, ToolCallId, ToolCallProposal, ToolName, TransportFacts, UnsentCause,
 };
 
+// numeric-bound: tunable - controls retained provider diagnostic detail
 const MAX_NATIVE_MESSAGE_BYTES: usize = 2_048;
 const NATIVE_MESSAGE_TRUNCATION_SUFFIX: &str = " … [truncated]";
 
@@ -1000,9 +1001,11 @@ mod tests {
             exchange: ExchangeFacts {
                 provider_request_id: Some(ProviderRequestId::new("request-key_loop")),
                 http_status: Some(400),
+                retry_after: None,
             },
             reported_model: Some(ProviderReportedModel::new("model-key_loop")),
             kind: ProviderErrorKind::InvalidRequest,
+            non_acceptance_proven: false,
             native: NativeErrorFacts {
                 error_token: Some("token-key_loop".to_string()),
                 error_code: Some("code-key_loop".to_string()),
@@ -1040,6 +1043,7 @@ mod tests {
             exchange: ExchangeFacts {
                 provider_request_id: Some(ProviderRequestId::new("request-key_loop")),
                 http_status: Some(200),
+                retry_after: None,
             },
             reported_model: Some(ProviderReportedModel::new("model-key_loop")),
             native: NativeErrorFacts {
@@ -1113,6 +1117,7 @@ mod tests {
             exchange: ExchangeFacts {
                 provider_request_id: Some(ProviderRequestId::new("request-key_loop")),
                 http_status: Some(200),
+                retry_after: None,
             },
             reported_model: Some(ProviderReportedModel::new("model-key_loop")),
             finish_reported: Some(FinishReason::StopSequence {
@@ -1157,6 +1162,7 @@ mod tests {
             exchange: ExchangeFacts {
                 provider_request_id: Some(ProviderRequestId::new("request-key_loop")),
                 http_status: Some(200),
+                retry_after: None,
             },
             message_id: Some(ProviderMessageId::new("message-key_loop")),
             reported_model: Some(ProviderReportedModel::new("model-key_loop")),
@@ -1228,6 +1234,7 @@ mod tests {
             exchange: ExchangeFacts {
                 provider_request_id: Some(ProviderRequestId::new("request-key_loop")),
                 http_status: Some(200),
+                retry_after: None,
             },
             message_id: Some(ProviderMessageId::new("message-key_loop")),
             reported_model: Some(ProviderReportedModel::new("model-key_loop")),
@@ -2186,6 +2193,7 @@ mod tests {
             emitted_text(&ObservationFact::ExchangeEstablished(ExchangeFacts {
                 provider_request_id: Some(ProviderRequestId::new("fixture-request")),
                 http_status: Some(200),
+                retry_after: None,
             })),
             EmittedText::Complete(vec![("fixture-request", TextEncoding::Plain)])
         );
@@ -2326,6 +2334,7 @@ mod tests {
             fact: ObservationFact::ExchangeEstablished(ExchangeFacts {
                 provider_request_id: Some(ProviderRequestId::new("req-fixture/secret")),
                 http_status: Some(200),
+                retry_after: None,
             }),
         });
         sink.observe(Observation {
@@ -2358,6 +2367,7 @@ mod tests {
                     fact: ObservationFact::ExchangeEstablished(ExchangeFacts {
                         provider_request_id: Some(ProviderRequestId::new("req-[redacted]")),
                         http_status: Some(200),
+                        retry_after: None,
                     }),
                 },
                 Observation {
@@ -2924,6 +2934,7 @@ mod tests {
             exchange: ExchangeFacts::default(),
             reported_model: None,
             kind: ProviderErrorKind::Unrecognized,
+            non_acceptance_proven: false,
             native: NativeErrorFacts {
                 error_token: None,
                 error_code: Some("echo-key_loop".to_string()),

@@ -1,8 +1,9 @@
 use std::{error::Error, fmt, future::Future, num::NonZeroU64, pin::Pin};
 
 use crate::{
-    BoundedMetadata, CanonicalMediaType, FileDigest, FileUse, ProbeStrength, ReadViewDeclaration,
-    ReadViewName, ReaderIdentity, ReasonCode, VisiblePartSelector,
+    BoundedMetadata, CanonicalMediaType, FileDigest, FileUse, ProbeStrength,
+    ReadContinuationCursor, ReadViewDeclaration, ReadViewName, ReaderIdentity, ReasonCode,
+    VisiblePartSelector,
 };
 
 /// Asynchronous exact-range read result from a verified blob source.
@@ -244,8 +245,23 @@ pub struct FileReadRequest {
     pub inspection: InspectionRequest,
     /// Exact provider-owned view name.
     pub view: ReadViewName,
-    /// Structured model-supplied options.
-    pub options: serde_json::Value,
+    /// Closed initial-options or continuation input.
+    pub input: FileReadInput,
+}
+
+/// Closed input mode for one typed read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FileReadInput {
+    /// Initial request carrying structured model-supplied options.
+    Initial {
+        /// Provider-owned view options.
+        options: serde_json::Value,
+    },
+    /// Continuation request carrying a checked prior-page cursor.
+    Continuation {
+        /// Opaque restart-ephemeral continuation.
+        cursor: ReadContinuationCursor,
+    },
 }
 
 /// Sanitized continuation state for one typed read.
@@ -256,7 +272,7 @@ pub enum ReadContinuation {
     /// More complete semantic units remain.
     More {
         /// Opaque restart-ephemeral continuation.
-        cursor: String,
+        cursor: ReadContinuationCursor,
     },
 }
 
@@ -356,9 +372,12 @@ pub enum ProcessorReadOutput {
     InvalidViewArguments,
     /// Provider declined a declared view.
     UnsupportedView,
-    /// Source cannot satisfy a whole-decode view under its declaration.
+    /// Source exceeds a declared intrinsic whole-decode size limit.
+    ///
+    /// Version one declares only cumulative source-work budgets, so the
+    /// registry rejects this processor outcome until such a limit exists.
     SourceTooLarge {
-        /// Untrusted claimed maximum, checked against the view declaration.
+        /// Untrusted claimed intrinsic maximum.
         maximum_bytes: u64,
     },
     /// Decode expansion crossed a registered named limit.
@@ -400,9 +419,41 @@ impl fmt::Display for ProcessorFailure {
 
 impl Error for ProcessorFailure {}
 
+/// Authenticated failure returned by the daemon-side processor broker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessorBoundaryFailure {
+    /// Process execution failed without a verified-source classification.
+    Processor(ProcessorFailure),
+    /// The verified source failed while serving processor reads.
+    Source(SourceReadError),
+}
+
+impl fmt::Display for ProcessorBoundaryFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Processor(failure) => failure.fmt(formatter),
+            Self::Source(failure) => failure.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ProcessorBoundaryFailure {}
+
+impl From<ProcessorFailure> for ProcessorBoundaryFailure {
+    fn from(value: ProcessorFailure) -> Self {
+        Self::Processor(value)
+    }
+}
+
+impl From<SourceReadError> for ProcessorBoundaryFailure {
+    fn from(value: SourceReadError) -> Self {
+        Self::Source(value)
+    }
+}
+
 /// Boxed future returned by a daemon-side isolated processor client.
 pub type FileMediaProcessorFuture<'a, Output> =
-    Pin<Box<dyn Future<Output = Result<Output, ProcessorFailure>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<Output, ProcessorBoundaryFailure>> + Send + 'a>>;
 
 /// Daemon-side process boundary used by detection and reads.
 pub trait FileMediaProcessor: Send + Sync {
@@ -527,6 +578,15 @@ impl From<ProcessorFailure> for FileMediaFailure {
             ProcessorFailure::Failed | ProcessorFailure::Protocol => Self::ProcessorFailed,
             ProcessorFailure::TimedOut => Self::ProcessorTimedOut,
             ProcessorFailure::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<ProcessorBoundaryFailure> for FileMediaFailure {
+    fn from(value: ProcessorBoundaryFailure) -> Self {
+        match value {
+            ProcessorBoundaryFailure::Processor(failure) => failure.into(),
+            ProcessorBoundaryFailure::Source(failure) => failure.into(),
         }
     }
 }

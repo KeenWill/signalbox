@@ -711,7 +711,7 @@ where
     ))
 }
 
-async fn insert_prepared_failure(
+pub(crate) async fn insert_prepared_failure(
     connection: &mut PgConnection,
     prepared: PreparedAcceptedInputTurnFailure,
 ) -> Result<signalbox_domain::FailedAcceptedInputTurn, StartupScanRepositoryError> {
@@ -915,7 +915,9 @@ async fn recover_context_compaction(
     ))
 }
 
-fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartupScanRepositoryError {
+pub(crate) fn map_scheduling_error(
+    error: SubmitInputRepositoryError,
+) -> StartupScanRepositoryError {
     match error {
         SubmitInputRepositoryError::Database(error) => error.into(),
         SubmitInputRepositoryError::CommitAmbiguous(error) => {

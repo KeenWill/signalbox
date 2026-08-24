@@ -1,9 +1,11 @@
 [workspace]
+exclude = ["crates/file-media-linux-sandbox"]
 members = [
     "apps/client",
     "apps/signalbox-runner",
     "apps/signalboxd",
     "crates/application",
+    "crates/approval-judge-eval",
     "crates/blob-store",
     "crates/blob-store-filesystem",
     "crates/egress-transport",
@@ -24,6 +26,7 @@ members = [
     "crates/model-provider-runtime",
     "crates/persistence",
     "crates/process-protocol",
+    "crates/program-runtime",
     "crates/runner-wire",
     "crates/test-bin",
     "crates/tool-contract",
@@ -39,6 +42,7 @@ members = [
     "crates/tools-sessions",
     "crates/tools-web",
     "crates/tools-workspace",
+    "crates/web-contract",
 ]
 resolver = "3"
 

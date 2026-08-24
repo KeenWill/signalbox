@@ -50,7 +50,11 @@ signalboxd = { path = "../signalboxd" }
 signalbox-model-provider-runtime = { path = "../../crates/model-provider-runtime" }
 signalbox-model-runtime = { path = "../../crates/model-runtime" }
 signalbox-model-runtime-anthropic = { path = "../../crates/model-runtime-anthropic" }
-signalbox-persistence = { path = "../../crates/persistence" }
+# `postgres-integration` supplies the shared RAM-backed provisioning helpers
+# the end-to-end tests start their throwaway PostgreSQL containers through.
+signalbox-persistence = { path = "../../crates/persistence", features = [
+    "postgres-integration",
+] }
 signalbox-test-bin = { path = "../../crates/test-bin" }
 sqlx = { version = "0.9.0", default-features = false, features = [
     "postgres",
