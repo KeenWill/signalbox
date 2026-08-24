@@ -234,6 +234,10 @@ CREATE INDEX web_usage_by_model_provenance_recorded_call
     ON web_usage_call_projection
        (resolved_provider_model_identity_id, usage_provenance_kind,
         recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_model_kind_recorded_call
+    ON web_usage_call_projection
+       (resolved_provider_model_identity_id, call_kind,
+        recorded_at DESC, model_call_id DESC);
 CREATE INDEX web_usage_by_provenance_recorded_call
     ON web_usage_call_projection
        (usage_provenance_kind, recorded_at DESC, model_call_id DESC);

@@ -417,6 +417,17 @@ async fn usage_projection_has_combined_selection_indexes() -> Result<(), Box<dyn
     assert!(model_provenance_index_definition.contains(
         "resolved_provider_model_identity_id, usage_provenance_kind, recorded_at DESC, model_call_id DESC"
     ));
+    let model_kind_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_model_kind_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(model_kind_index_definition.contains(
+        "resolved_provider_model_identity_id, call_kind, recorded_at DESC, model_call_id DESC"
+    ));
 
     pool.close().await;
     drop(container);
