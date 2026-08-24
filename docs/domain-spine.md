@@ -7354,6 +7354,7 @@ pub struct RepoWatchConvergenceAssessmentInput {
     pub base_branch: BranchName,
     pub base_revision: CommitSha,
     pub mergeable_state: MergeableState,
+    pub settled: bool,
     pub review_decision: RepoWatchReviewDecision,
     pub unresolved_threads: Vec<ReviewThreadId>,
     pub gating_check_count: u64,

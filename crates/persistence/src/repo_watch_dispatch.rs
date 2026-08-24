@@ -1976,7 +1976,7 @@ async fn event_target_is_converged(
                      WHERE identity.repository = $1
                        AND identity.pull_request_number = $2
                      ORDER BY identity.cursor_generation DESC, identity.recorded_at DESC,
-                              identity.assessment_id DESC
+                              identity.identity_id DESC
                      LIMIT 1
                    ) AS current
               JOIN repo_watch_pull_request_convergence AS convergence

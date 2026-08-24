@@ -458,6 +458,7 @@ pub struct RepoWatchConvergenceAssessmentInput {
     pub base_branch: BranchName,
     pub base_revision: CommitSha,
     pub mergeable_state: MergeableState,
+    pub settled: bool,
     pub review_decision: RepoWatchReviewDecision,
     pub unresolved_threads: Vec<ReviewThreadId>,
     pub gating_check_count: u64,
@@ -494,7 +495,12 @@ impl RepoWatchConvergenceAssessment {
         }
         let blocked = !input.unresolved_threads.is_empty()
             || !input.non_green_gating_checks.is_empty()
-            || input.mergeable_state == MergeableState::Conflicting
+            // Unknown is GitHub's pending state, not affirmative evidence that
+            // the exact head is mergeable. An unsettled head likewise has not
+            // finished registering and completing its exact-head checks.
+            || input.mergeable_state != MergeableState::Mergeable
+            || !input.settled
+            || input.gating_check_count == 0
             || input.review_decision == RepoWatchReviewDecision::ChangesRequested;
         let verdict = if blocked {
             RepoWatchConvergenceVerdict::NotConverged
@@ -2733,6 +2739,7 @@ mod tests {
     struct ConvergenceFacts {
         base_branch: &'static str,
         mergeable_state: MergeableState,
+        settled: bool,
         review_decision: RepoWatchReviewDecision,
         unresolved_threads: Vec<ReviewThreadId>,
         gating_check_count: u64,
@@ -2749,6 +2756,7 @@ mod tests {
                 base_branch: BranchName::try_new(String::from(facts.base_branch))?,
                 base_revision: CommitSha::try_new(String::from(CHANGED_HEAD))?,
                 mergeable_state: facts.mergeable_state,
+                settled: facts.settled,
                 review_decision: facts.review_decision,
                 unresolved_threads: facts.unresolved_threads,
                 gating_check_count: facts.gating_check_count,
@@ -2761,10 +2769,11 @@ mod tests {
     fn exact_green_main_head_is_merge_ready_without_an_approval() -> Result<(), Box<dyn Error>> {
         let assessment = convergence_assessment(ConvergenceFacts {
             base_branch: BASE_BRANCH,
-            mergeable_state: MergeableState::Unknown,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
             review_decision: RepoWatchReviewDecision::None,
             unresolved_threads: Vec::new(),
-            gating_check_count: 0,
+            gating_check_count: 1,
             non_green_gating_checks: Vec::new(),
         })?;
 
@@ -2780,9 +2789,10 @@ mod tests {
         let assessment = convergence_assessment(ConvergenceFacts {
             base_branch: FIRST_STACK_BRANCH,
             mergeable_state: MergeableState::Mergeable,
+            settled: true,
             review_decision: RepoWatchReviewDecision::Approved,
             unresolved_threads: Vec::new(),
-            gating_check_count: 0,
+            gating_check_count: 1,
             non_green_gating_checks: Vec::new(),
         })?;
 
@@ -2798,9 +2808,10 @@ mod tests {
         let assessment = convergence_assessment(ConvergenceFacts {
             base_branch: BASE_BRANCH,
             mergeable_state: MergeableState::Mergeable,
+            settled: true,
             review_decision: RepoWatchReviewDecision::Approved,
             unresolved_threads: vec![ReviewThreadId::try_new(String::from(THREAD_ID))?],
-            gating_check_count: 0,
+            gating_check_count: 1,
             non_green_gating_checks: Vec::new(),
         })?;
 
@@ -2816,7 +2827,46 @@ mod tests {
         let assessment = convergence_assessment(ConvergenceFacts {
             base_branch: BASE_BRANCH,
             mergeable_state: MergeableState::Mergeable,
+            settled: true,
             review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        assert_eq!(
+            assessment.verdict(),
+            RepoWatchConvergenceVerdict::NotConverged
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pending_mergeability_blocks_an_otherwise_green_head() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Unknown,
+            settled: false,
+            review_decision: RepoWatchReviewDecision::Approved,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        assert_eq!(
+            assessment.verdict(),
+            RepoWatchConvergenceVerdict::NotConverged
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_gating_checks_block_an_otherwise_green_head() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::Approved,
             unresolved_threads: Vec::new(),
             gating_check_count: 0,
             non_green_gating_checks: Vec::new(),

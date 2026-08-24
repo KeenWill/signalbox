@@ -269,9 +269,10 @@ fn merge_ready_assessment(
             base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
             base_revision: CommitSha::try_new(base_revision.to_owned())?,
             mergeable_state: MergeableState::Mergeable,
+            settled: true,
             review_decision: RepoWatchReviewDecision::None,
             unresolved_threads: Vec::new(),
-            gating_check_count: 0,
+            gating_check_count: 1,
             non_green_gating_checks: Vec::new(),
         },
     )?)
