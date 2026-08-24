@@ -15,12 +15,13 @@ projection is append-only.
 Canonical credential references remain exact and do not gain a terminalization
 bound from this read projection. The exposed profile label is nonempty and at
 most 256 UTF-8 bytes. References of at most 250 bytes use an `exact:` label,
-while longer references use a stable `digest-md5:` label. These discriminators
-make literal names and digest labels disjoint. Exact canonical references remain
-a private grouping dimension, so the bounded label cannot combine otherwise
-distinct evidence. Each physical token axis is either absent or an exact integer
-in the `u64` domain. Aggregate token sums use `u128`, so every sum admitted by
-the bounded source-call ceiling remains exact.
+while longer references receive a stable projection-owned `mapped:` identity.
+The exact-to-bounded mapping is unique, so distinct oversized references cannot
+collide, and the discriminators keep mapped identities disjoint from literal
+names. Exact canonical references remain a private grouping dimension. Each
+physical token axis is either absent or an exact integer in the `u64` domain.
+Aggregate token sums use `u128`, so every sum admitted by the bounded
+source-call ceiling remains exact.
 
 ## Compatibility grouping
 

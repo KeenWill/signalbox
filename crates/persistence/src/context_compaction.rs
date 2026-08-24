@@ -23,6 +23,24 @@ use crate::{
 
 const COMMAND_KIND: &str = durable_command_kind_to_str(DurableCommandKind::CompactSession);
 
+/// Meaning of the input-token axis retained for a context-compaction call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContextCompactionInputTokenSemantics {
+    /// Input tokens exclude separately reported cache axes.
+    CacheExclusive,
+    /// Input tokens include separately reported cache axes.
+    CacheInclusive,
+}
+
+impl ContextCompactionInputTokenSemantics {
+    const fn includes_cache_tokens(self) -> bool {
+        match self {
+            Self::CacheExclusive => false,
+            Self::CacheInclusive => true,
+        }
+    }
+}
+
 /// All caller and hub-minted facts for a fresh explicit command attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrepareContextCompactionRequest {
@@ -40,8 +58,8 @@ pub struct PrepareContextCompactionRequest {
     pub selection: DirectModelSelection,
     /// Exact resolved provider target.
     pub target: ResolvedProviderTarget,
-    /// Whether reported input tokens include separately reported cache axes.
-    pub input_includes_cache_tokens: bool,
+    /// Meaning of reported input tokens relative to separate cache axes.
+    pub input_token_semantics: ContextCompactionInputTokenSemantics,
     /// Non-secret credential reference pinned for the call.
     pub credential_reference: String,
     /// Fresh physical call candidate.
@@ -1060,7 +1078,7 @@ async fn prepare_in_transaction(
     .bind(request.target.identity().into_uuid())
     .bind(source_frontier.into_uuid())
     .bind(&request.credential_reference)
-    .bind(request.input_includes_cache_tokens)
+    .bind(request.input_token_semantics.includes_cache_tokens())
     .execute(&mut **transaction)
     .await;
     if let Err(error) = insert_call {

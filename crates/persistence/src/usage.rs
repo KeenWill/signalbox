@@ -43,7 +43,7 @@ WITH candidate_calls AS MATERIALIZED (
     SELECT count(*) > $9 AS calls_truncated FROM candidate_calls
 )
 SELECT call_kind, resolved_provider_model_identity_id,
-       bounded_web_usage_profile(credential_reference) AS credential_reference,
+       credential_profile_label AS credential_reference,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens IS NOT NULL AS has_input,
        output_tokens IS NOT NULL AS has_output,
@@ -66,7 +66,8 @@ SELECT call_kind, resolved_provider_model_identity_id,
   FROM bounded_calls
  CROSS JOIN bounded_state
  GROUP BY call_kind, resolved_provider_model_identity_id, credential_reference,
-          usage_provenance_kind, usage_input_includes_cache_tokens,
+          credential_profile_label, usage_provenance_kind,
+          usage_input_includes_cache_tokens,
           input_tokens IS NOT NULL, output_tokens IS NOT NULL,
           cache_creation_input_tokens IS NOT NULL,
           cache_read_input_tokens IS NOT NULL, bounded_state.calls_truncated
@@ -80,7 +81,7 @@ SELECT call_kind, resolved_provider_model_identity_id,
 const CALLS_NEWEST_SQL: &str = "
 SELECT model_call_id, call_kind, session_id, turn_id,
        resolved_provider_model_identity_id,
-       bounded_web_usage_profile(credential_reference) AS credential_reference,
+       credential_profile_label AS credential_reference,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens, output_tokens,
        cache_creation_input_tokens, cache_read_input_tokens, recorded_at

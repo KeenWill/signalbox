@@ -101,7 +101,8 @@ use signalbox_persistence::{
         PostgresCommissionedDispatchStore,
     },
     context_compaction::{
-        AppliedContextCompaction, ContextCompactionCommandLookup, ContextCompactionRepository,
+        AppliedContextCompaction, ContextCompactionCommandLookup,
+        ContextCompactionInputTokenSemantics, ContextCompactionRepository,
         ContextCompactionRepositoryError, FailedContextCompactionDisposition,
         PrepareContextCompactionOutcome, PrepareContextCompactionRequest,
         PreparedContextCompaction,
@@ -6853,9 +6854,14 @@ where
             defaults_version: defaults.version(),
             selection,
             target,
-            input_includes_cache_tokens: services
+            input_token_semantics: if services
                 .model_configuration
-                .input_includes_cache_tokens(target),
+                .input_includes_cache_tokens(target)
+            {
+                ContextCompactionInputTokenSemantics::CacheInclusive
+            } else {
+                ContextCompactionInputTokenSemantics::CacheExclusive
+            },
             credential_reference: credential_reference.clone(),
             call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
             compaction: ContextCompactionId::from_uuid(uuid::Uuid::now_v7()),
@@ -7164,7 +7170,11 @@ pub(crate) async fn compact_automatically(
             defaults_version: defaults.version(),
             selection,
             target,
-            input_includes_cache_tokens: model_configuration.input_includes_cache_tokens(target),
+            input_token_semantics: if model_configuration.input_includes_cache_tokens(target) {
+                ContextCompactionInputTokenSemantics::CacheInclusive
+            } else {
+                ContextCompactionInputTokenSemantics::CacheExclusive
+            },
             credential_reference: credential_reference.as_str().to_owned(),
             call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
             compaction: ContextCompactionId::from_uuid(uuid::Uuid::now_v7()),
