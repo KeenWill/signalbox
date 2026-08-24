@@ -809,10 +809,15 @@ impl PendingProviderTextDelta {
 async fn live_follow_next(
     mut state: LiveFollowState,
 ) -> Option<(WebSessionLiveStreamEvent, LiveFollowState)> {
+    // A closed channel is a shutdown request from an embedded caller that
+    // dropped its sender, and it must stop the pending-event and retained
+    // fragment fast paths below too: provider delta text has no size bound,
+    // so draining a retained fragment for a slow client would otherwise keep
+    // graceful shutdown waiting arbitrarily long.
     if state
         .shutdown
         .as_ref()
-        .is_some_and(|shutdown| *shutdown.borrow())
+        .is_some_and(|shutdown| *shutdown.borrow() || shutdown.has_changed().is_err())
     {
         return None;
     }
@@ -2223,6 +2228,33 @@ mod tests {
         let event = tokio::time::timeout(Duration::from_secs(1), live_follow_next(state))
             .await
             .expect("a closed shutdown channel ends the follow stream promptly");
+
+        assert!(event.is_none());
+    }
+
+    /// The retained-fragment fast path returns before the monitor is polled,
+    /// so it must observe channel closure itself: provider delta text has no
+    /// size bound, and draining it for a slow client would otherwise keep
+    /// graceful shutdown waiting arbitrarily long.
+    #[tokio::test]
+    async fn live_follow_stops_draining_a_retained_fragment_on_closed_shutdown() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        state.provider_fragment = Some(super::PendingProviderTextDelta {
+            turn_id: WebTurnId::from_uuid_bytes(live_turn().into_uuid().into_bytes()),
+            model_call_id: WebLiveResourceId::from_uuid_bytes(live_call().into_uuid().into_bytes()),
+            part_index: 0,
+            text: Arc::from("retained draft"),
+            offset: 0,
+            emitted_empty: false,
+        });
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        state.shutdown = Some(shutdown);
+        drop(shutdown_sender);
+
+        let event = tokio::time::timeout(Duration::from_secs(1), live_follow_next(state))
+            .await
+            .expect("a closed shutdown channel preempts retained fragments promptly");
 
         assert!(event.is_none());
     }
