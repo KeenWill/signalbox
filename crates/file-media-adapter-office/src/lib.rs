@@ -1742,6 +1742,79 @@ fn element_uses_scoped_namespace(
         .is_some_and(|actual| namespace_matches(actual, namespace))
 }
 
+#[derive(Clone, Default)]
+struct MarkupCompatibilityScope {
+    ignorable_namespaces: HashSet<Vec<u8>>,
+    process_content: HashSet<(Vec<u8>, Vec<u8>)>,
+}
+
+fn apply_markup_compatibility_attributes(
+    reader: &Reader<Cursor<&[u8]>>,
+    element: &quick_xml::events::BytesStart<'_>,
+    namespace_scope: &std::collections::HashMap<Vec<u8>, Vec<u8>>,
+    compatibility: &mut MarkupCompatibilityScope,
+) -> Result<(), XmlIssue> {
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
+        let name = attribute.key.as_ref();
+        let Some(separator) = name.iter().position(|byte| *byte == b':') else {
+            continue;
+        };
+        let prefix = &name[..separator];
+        if !namespace_scope
+            .get(prefix)
+            .is_some_and(|namespace| namespace == MARKUP_COMPATIBILITY_NAMESPACE)
+        {
+            continue;
+        }
+        let value = attribute
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+            .map_err(|_| XmlIssue::Malformed)?;
+        match &name[separator + 1..] {
+            b"Ignorable" => {
+                for declared_prefix in value.split_ascii_whitespace() {
+                    let namespace = namespace_scope
+                        .get(declared_prefix.as_bytes())
+                        .ok_or(XmlIssue::Malformed)?;
+                    compatibility.ignorable_namespaces.insert(namespace.clone());
+                }
+            }
+            b"ProcessContent" => {
+                for qualified_name in value.split_ascii_whitespace() {
+                    let (declared_prefix, local) =
+                        qualified_name.split_once(':').ok_or(XmlIssue::Malformed)?;
+                    let namespace = namespace_scope
+                        .get(declared_prefix.as_bytes())
+                        .ok_or(XmlIssue::Malformed)?;
+                    compatibility
+                        .process_content
+                        .insert((namespace.clone(), local.as_bytes().to_vec()));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn ignores_markup_compatibility_element(
+    name: &[u8],
+    namespace_scope: &std::collections::HashMap<Vec<u8>, Vec<u8>>,
+    compatibility: &MarkupCompatibilityScope,
+) -> bool {
+    let prefix = name
+        .iter()
+        .position(|byte| *byte == b':')
+        .map_or(b"".as_slice(), |separator| &name[..separator]);
+    let Some(namespace) = namespace_scope.get(prefix) else {
+        return false;
+    };
+    compatibility.ignorable_namespaces.contains(namespace)
+        && !compatibility
+            .process_content
+            .contains(&(namespace.clone(), local_name(name).to_vec()))
+}
+
 fn required_relationship_id(
     reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
@@ -1776,6 +1849,7 @@ fn workbook_relationship_targets(bytes: &[u8]) -> Result<Vec<(String, Option<Str
     reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
     let mut targets = Vec::new();
+    let mut relationship_ids = HashSet::new();
     let mut depth = 0_usize;
     let mut namespace_scopes = vec![std::collections::HashMap::new()];
     loop {
@@ -1797,7 +1871,12 @@ fn workbook_relationship_targets(bytes: &[u8]) -> Result<Vec<(String, Option<Str
                         PACKAGE_RELATIONSHIPS_NAMESPACE,
                     )
                 {
-                    collect_workbook_relationship(&reader, &element, &mut targets)?;
+                    collect_workbook_relationship(
+                        &reader,
+                        &element,
+                        &mut relationship_ids,
+                        &mut targets,
+                    )?;
                 }
                 namespace_scopes.push(scope);
                 depth = next_xml_depth(depth)?;
@@ -1816,14 +1895,27 @@ fn workbook_relationship_targets(bytes: &[u8]) -> Result<Vec<(String, Option<Str
                         PACKAGE_RELATIONSHIPS_NAMESPACE,
                     )
                 {
-                    collect_workbook_relationship(&reader, &element, &mut targets)?;
+                    collect_workbook_relationship(
+                        &reader,
+                        &element,
+                        &mut relationship_ids,
+                        &mut targets,
+                    )?;
                 }
             }
             Event::End(_) => {
                 depth = depth.checked_sub(1).ok_or(XmlIssue::Malformed)?;
                 namespace_scopes.pop().ok_or(XmlIssue::Malformed)?;
             }
-            Event::DocType(_) | Event::GeneralRef(_) => return Err(XmlIssue::Malformed),
+            Event::Text(text) => {
+                let decoded = text.xml10_content().map_err(|_| XmlIssue::Malformed)?;
+                if !decoded.trim().is_empty() {
+                    return Err(XmlIssue::Malformed);
+                }
+            }
+            Event::CData(_) | Event::DocType(_) | Event::GeneralRef(_) => {
+                return Err(XmlIssue::Malformed);
+            }
             Event::Eof if depth == 0 => break,
             Event::Eof => return Err(XmlIssue::Malformed),
             _ => {}
@@ -1836,6 +1928,7 @@ fn workbook_relationship_targets(bytes: &[u8]) -> Result<Vec<(String, Option<Str
 fn collect_workbook_relationship(
     reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
+    relationship_ids: &mut HashSet<String>,
     targets: &mut Vec<(String, Option<String>)>,
 ) -> Result<(), XmlIssue> {
     let mut id = None;
@@ -1856,9 +1949,7 @@ fn collect_workbook_relationship(
         }
     }
     let id = id.ok_or(XmlIssue::Malformed)?;
-    if targets.iter().any(|(candidate, _)| candidate == &id) {
-        return Err(XmlIssue::Malformed);
-    }
+    record_relationship_id(relationship_ids, &id)?;
     let worksheet = relationship_type
         .as_deref()
         .is_some_and(|value| relationship_type_matches(value, "/worksheet"));
@@ -1897,6 +1988,7 @@ fn relationship_targets(
     reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
     let mut targets = Vec::new();
+    let mut relationship_ids = HashSet::new();
     let mut depth = 0_usize;
     let mut namespace_scopes = vec![std::collections::HashMap::new()];
     loop {
@@ -1923,6 +2015,7 @@ fn relationship_targets(
                         &element,
                         relationship_suffix,
                         normalize,
+                        &mut relationship_ids,
                         &mut targets,
                     )?;
                 }
@@ -1948,6 +2041,7 @@ fn relationship_targets(
                         &element,
                         relationship_suffix,
                         normalize,
+                        &mut relationship_ids,
                         &mut targets,
                     )?;
                 }
@@ -1956,7 +2050,15 @@ fn relationship_targets(
                 depth = depth.checked_sub(1).ok_or(XmlIssue::Malformed)?;
                 namespace_scopes.pop().ok_or(XmlIssue::Malformed)?;
             }
-            Event::DocType(_) | Event::GeneralRef(_) => return Err(XmlIssue::Malformed),
+            Event::Text(text) => {
+                let decoded = text.xml10_content().map_err(|_| XmlIssue::Malformed)?;
+                if !decoded.trim().is_empty() {
+                    return Err(XmlIssue::Malformed);
+                }
+            }
+            Event::CData(_) | Event::DocType(_) | Event::GeneralRef(_) => {
+                return Err(XmlIssue::Malformed);
+            }
             Event::Eof if depth == 0 => break,
             Event::Eof => return Err(XmlIssue::Malformed),
             _ => {}
@@ -1971,6 +2073,7 @@ fn collect_relationship_target(
     element: &quick_xml::events::BytesStart<'_>,
     relationship_suffix: &str,
     normalize: fn(&str) -> Result<String, XmlIssue>,
+    relationship_ids: &mut HashSet<String>,
     targets: &mut Vec<(String, String)>,
 ) -> Result<(), XmlIssue> {
     let mut id = None;
@@ -1990,6 +2093,8 @@ fn collect_relationship_target(
             _ => {}
         }
     }
+    let id = id.ok_or(XmlIssue::Malformed)?;
+    record_relationship_id(relationship_ids, &id)?;
     if relationship_type
         .as_deref()
         .is_some_and(|value| relationship_type_matches(value, relationship_suffix))
@@ -1997,11 +2102,15 @@ fn collect_relationship_target(
         if external {
             return Err(XmlIssue::Malformed);
         }
-        let id = id.ok_or(XmlIssue::Malformed)?;
-        if targets.iter().any(|(candidate, _)| candidate == &id) {
-            return Err(XmlIssue::Malformed);
-        }
         targets.push((id, normalize(&target.ok_or(XmlIssue::Malformed)?)?));
+    }
+    Ok(())
+}
+
+fn record_relationship_id(ids: &mut HashSet<String>, id: &str) -> Result<(), XmlIssue> {
+    let limit = usize::try_from(MAX_OBSERVED_CONTAINER_ENTRIES).unwrap_or(usize::MAX);
+    if ids.len() >= limit || !ids.insert(String::from(id)) {
+        return Err(XmlIssue::Malformed);
     }
     Ok(())
 }
@@ -2343,7 +2452,9 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
     let mut saw_root = false;
     let mut alternate_depth = None;
     let mut fallback_depth = None;
+    let mut ignored_depth = None;
     let mut namespace_scopes = vec![std::collections::HashMap::new()];
+    let mut compatibility_scopes = vec![MarkupCompatibilityScope::default()];
     let mut text_elements = Vec::new();
     loop {
         match reader
@@ -2356,6 +2467,11 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                     .cloned()
                     .ok_or(XmlIssue::Malformed)?;
                 apply_namespace_declarations(&reader, &start, &mut scope)?;
+                let mut compatibility = compatibility_scopes
+                    .last()
+                    .cloned()
+                    .ok_or(XmlIssue::Malformed)?;
+                apply_markup_compatibility_attributes(&reader, &start, &scope, &mut compatibility)?;
                 if element_depth == 0 {
                     if saw_root {
                         return Err(XmlIssue::Malformed);
@@ -2365,7 +2481,18 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                 element_depth = next_xml_depth(element_depth)?;
                 let qualified_name = start.name();
                 let name = local_name(qualified_name.as_ref());
-                let selected = alternate_depth.is_none() || fallback_depth.is_some();
+                if ignored_depth.is_none()
+                    && ignores_markup_compatibility_element(
+                        qualified_name.as_ref(),
+                        &scope,
+                        &compatibility,
+                    )
+                {
+                    ignored_depth = Some(element_depth);
+                }
+                let not_ignored = ignored_depth.is_none();
+                let selected =
+                    not_ignored && (alternate_depth.is_none() || fallback_depth.is_some());
                 let text_namespace = match kind {
                     OfficeKind::Docx => WORDPROCESSINGML_NAMESPACE,
                     OfficeKind::Xlsx => SPREADSHEETML_NAMESPACE,
@@ -2398,11 +2525,13 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                 );
                 if (supported_word_control || supported_drawing_break) && selected {
                     append_xml_text(&mut output, if name == b"tab" { "\t" } else { "\n" })?;
-                } else if name == b"AlternateContent" && markup_compatibility_element {
+                } else if not_ignored && name == b"AlternateContent" && markup_compatibility_element
+                {
                     if alternate_depth.replace(element_depth).is_some() {
                         return Err(XmlIssue::Malformed);
                     }
-                } else if name == b"Fallback"
+                } else if not_ignored
+                    && name == b"Fallback"
                     && markup_compatibility_element
                     && alternate_depth.is_some_and(|depth| element_depth == depth + 1)
                 {
@@ -2414,6 +2543,7 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                 }
                 text_elements.push(supported_text && selected);
                 namespace_scopes.push(scope);
+                compatibility_scopes.push(compatibility);
             }
             Event::End(end) => {
                 element_depth = element_depth.checked_sub(1).ok_or(XmlIssue::Malformed)?;
@@ -2460,13 +2590,18 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                     }
                     alternate_depth = None;
                 } else if (supported_paragraph || supported_spreadsheet_boundary)
+                    && ignored_depth.is_none()
                     && (alternate_depth.is_none() || fallback_depth.is_some())
                     && !output.is_empty()
                     && !output.ends_with('\n')
                 {
                     append_xml_text(&mut output, "\n")?;
                 }
+                if ignored_depth.is_some_and(|depth| element_depth + 1 == depth) {
+                    ignored_depth = None;
+                }
                 namespace_scopes.pop().ok_or(XmlIssue::Malformed)?;
+                compatibility_scopes.pop().ok_or(XmlIssue::Malformed)?;
             }
             Event::Empty(empty) => {
                 let mut scope = namespace_scopes
@@ -2474,6 +2609,11 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                     .cloned()
                     .ok_or(XmlIssue::Malformed)?;
                 apply_namespace_declarations(&reader, &empty, &mut scope)?;
+                let mut compatibility = compatibility_scopes
+                    .last()
+                    .cloned()
+                    .ok_or(XmlIssue::Malformed)?;
+                apply_markup_compatibility_attributes(&reader, &empty, &scope, &mut compatibility)?;
                 if element_depth == 0 {
                     if saw_root {
                         return Err(XmlIssue::Malformed);
@@ -2482,7 +2622,13 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                 }
                 let qualified_name = empty.name();
                 let name = local_name(qualified_name.as_ref());
-                let selected = alternate_depth.is_none() || fallback_depth.is_some();
+                let selected = ignored_depth.is_none()
+                    && !ignores_markup_compatibility_element(
+                        qualified_name.as_ref(),
+                        &scope,
+                        &compatibility,
+                    )
+                    && (alternate_depth.is_none() || fallback_depth.is_some());
                 let supported_word_control = kind == OfficeKind::Docx
                     && element_uses_scoped_namespace(
                         qualified_name.as_ref(),
@@ -2531,7 +2677,8 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                     && element_depth == 0
                     && text_depth == 0
                     && alternate_depth.is_none()
-                    && fallback_depth.is_none() =>
+                    && fallback_depth.is_none()
+                    && ignored_depth.is_none() =>
             {
                 break;
             }
@@ -3235,6 +3382,33 @@ mod tests {
     }
 
     #[test]
+    fn workbook_relationships_reject_character_data() {
+        let xml = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">garbage<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+
+        let result = workbook_relationship_targets(xml);
+
+        assert!(matches!(result, Err(XmlIssue::Malformed)));
+    }
+
+    #[test]
+    fn presentation_relationships_reject_cdata() {
+        let xml = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><![CDATA[garbage]]><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#;
+
+        let result = presentation_relationship_targets(xml);
+
+        assert!(matches!(result, Err(XmlIssue::Malformed)));
+    }
+
+    #[test]
+    fn part_relationships_reject_duplicate_irrelevant_ids() {
+        let xml = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="duplicate" Type="urn:extension/first" Target="first.xml"/><Relationship Id="duplicate" Type="urn:extension/second" Target="second.xml"/></Relationships>"#;
+
+        let result = workbook_relationship_targets(xml);
+
+        assert!(matches!(result, Err(XmlIssue::Malformed)));
+    }
+
+    #[test]
     fn package_targets_reject_empty_path_segments() {
         let result = normalized_package_target("word//document.xml");
 
@@ -3366,6 +3540,30 @@ mod tests {
         assert_eq!(
             result.expect("extension branch names should not alter selection"),
             "extension textdocument text"
+        );
+    }
+
+    #[test]
+    fn text_extraction_skips_ignorable_extension_subtrees() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:ext="urn:extension" mc:Ignorable="ext"><ext:metadata><w:t>hidden</w:t></ext:metadata><w:t>visible</w:t></w:document>"#;
+
+        let result = extract_xml_text(xml, OfficeKind::Docx);
+
+        assert_eq!(
+            result.expect("ignorable extension content should be skipped"),
+            "visible"
+        );
+    }
+
+    #[test]
+    fn text_extraction_honors_markup_process_content() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:ext="urn:extension" mc:Ignorable="ext" mc:ProcessContent="ext:metadata"><ext:metadata><w:t>visible</w:t></ext:metadata></w:document>"#;
+
+        let result = extract_xml_text(xml, OfficeKind::Docx);
+
+        assert_eq!(
+            result.expect("authorized extension content should be processed"),
+            "visible"
         );
     }
 
