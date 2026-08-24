@@ -542,7 +542,7 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
-      'attention snapshot continuation does not match its last session identity',
+      'attention_snapshot.continuation_after_session_id must be the last returned session identity',
     )
   })
 
