@@ -4,7 +4,7 @@
 -- An evaluated source fact still has one rule evaluation, but its retained
 -- obligation is a distinct delivery identity and may create a later batch.
 ALTER TABLE repo_watch_dispatch_batch
-    DROP CONSTRAINT repo_watch_dispatch_batch_event_id_rule_id_rule_version_key;
+    DROP CONSTRAINT IF EXISTS repo_watch_dispatch_batch_event_id_rule_id_rule_version_key;
 
 CREATE FUNCTION repo_watch_retain_released_dispatch_obligation()
 RETURNS trigger

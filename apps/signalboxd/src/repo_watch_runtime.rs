@@ -2829,42 +2829,53 @@ impl RepositoryWatchTask {
     async fn reconcile_pending_stale_review_clearances(
         &self,
     ) -> Result<(), RepositoryWatchAttemptError> {
-        let pending = self
-            .store
-            .load_pending_stale_review_clearances(&self.repository)
-            .await
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-        for clearance in &pending {
-            let observation = match isolate_stale_review_clearance_provider_result(
-                self.poller.observe_stale_review_clearance(clearance).await,
-            )? {
-                StaleReviewClearanceProviderResult::Completed(observation) => observation,
-                StaleReviewClearanceProviderResult::Deferred(error) => {
-                    tracing::warn!(
-                        repository = %self.repository.as_str(),
-                        pull_request_number = clearance.number().get(),
-                        clearance_id = %clearance.clearance_id(),
-                        cause_code = error.cause_code(),
-                        "repository-watch stale-review reconciliation deferred after provider failure"
-                    );
-                    continue;
-                }
-            };
-            let StaleReviewClearanceObservation::Terminal {
-                outcome,
-                provider_state,
-            } = observation
-            else {
-                continue;
-            };
-            self.store
-                .record_stale_review_clearance_outcome(
-                    clearance.clearance_id(),
-                    outcome,
-                    provider_state,
-                )
+        // Drains every pending intent by keyset rather than reconciling only
+        // the oldest page: an intent whose review stays `CHANGES_REQUESTED`
+        // keeps no terminal result, so a fixed first page would reload it
+        // forever and starve the intents behind it.
+        let mut after = None;
+        loop {
+            let pending = self
+                .store
+                .load_pending_stale_review_clearances(&self.repository, after)
                 .await
                 .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+            let Some(last) = pending.last() else {
+                break;
+            };
+            after = Some(last.clearance_id());
+            for clearance in &pending {
+                let observation = match isolate_stale_review_clearance_provider_result(
+                    self.poller.observe_stale_review_clearance(clearance).await,
+                )? {
+                    StaleReviewClearanceProviderResult::Completed(observation) => observation,
+                    StaleReviewClearanceProviderResult::Deferred(error) => {
+                        tracing::warn!(
+                            repository = %self.repository.as_str(),
+                            pull_request_number = clearance.number().get(),
+                            clearance_id = %clearance.clearance_id(),
+                            cause_code = error.cause_code(),
+                            "repository-watch stale-review reconciliation deferred after provider failure"
+                        );
+                        continue;
+                    }
+                };
+                let StaleReviewClearanceObservation::Terminal {
+                    outcome,
+                    provider_state,
+                } = observation
+                else {
+                    continue;
+                };
+                self.store
+                    .record_stale_review_clearance_outcome(
+                        clearance.clearance_id(),
+                        outcome,
+                        provider_state,
+                    )
+                    .await
+                    .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+            }
         }
         Ok(())
     }

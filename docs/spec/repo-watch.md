@@ -1462,18 +1462,22 @@ measurement shadow mode exists to produce; that trade is not taken while poll
 frequency is unchanged and the complete sweep remains authoritative. Full
 polling continues unchanged as the slow complete reconciliation sweep and
 remains authoritative for missed deliveries, reactions, and every provider fact
-outside the mapped set. Poll frequency does not drop in shadow mode; any later
-write mode or slower cadence requires a separately reviewed ruling after parity
-over a real workday.
+outside the mapped set. Poll frequency does not drop in either mode. Primary
+mode is the implemented write mode; the parity gate below governs when a
+repository is configured into it, not whether it exists. A slower cadence
+remains outside what is implemented and requires a separately reviewed ruling
+after parity over a real workday.
 
 **Committed unimplemented functionality.** The rollout gate is no *unexplained*
 divergence, not no divergence: it is zero `repo_watch_webhook_parity` rows whose
 status is `webhook_only` or `poll_only` and whose cause is null, measured over a
 real workday. Divergence that names a closed cause is understood and does not
-hold the gate. Reaching zero uncaused rows is the remaining rollout work, since
-the runtime today records `cross_drain_shadow_gap` and derives
-`poll_only_family`, while `compressed_transition` and `context_drift` are
-available to record and not yet emitted.
+hold the gate. The gate is the operational precondition for configuring a
+repository into primary mode, which is itself implemented; what remains
+unimplemented is the cause coverage the gate is measured against, since the
+runtime today records `cross_drain_shadow_gap` and derives `poll_only_family`,
+while `compressed_transition` and `context_drift` are available to record and
+not yet emitted.
 
 ## Open edges
 

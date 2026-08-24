@@ -211,15 +211,6 @@ pub enum RepoWatchEventProducer {
     Webhook,
 }
 
-impl RepoWatchEventProducer {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Poll => "poll",
-            Self::Webhook => "webhook",
-        }
-    }
-}
-
 /// Outcome of one atomic cursor-and-event commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchCommitOutcome {
@@ -756,7 +747,14 @@ impl PostgresRepoWatchStore {
             .iter()
             .filter(|occurrence| is_new_occurrence(&already_durable, occurrence))
             .collect::<Vec<_>>();
-        insert_events(&mut transaction, repository, generation, &fresh).await?;
+        insert_events(
+            &mut transaction,
+            repository,
+            generation,
+            request.producer(),
+            &fresh,
+        )
+        .await?;
         let cursor = RepoWatchCursor {
             repository: repository.clone(),
             generation,
@@ -1088,10 +1086,19 @@ impl PostgresRepoWatchStore {
         Ok(planned)
     }
 
-    /// Loads a bounded oldest-first page of intents lacking a terminal result.
+    /// Loads a bounded oldest-first page of intents lacking a terminal result,
+    /// resuming after `after`.
+    ///
+    /// Intents are keyed by their UUIDv7 clearance identifier, which is
+    /// allocated when the intent is planned and so orders them oldest-first.
+    /// Paging on that key rather than a fixed first page lets a caller drain
+    /// every pending intent: an intent whose review stays `CHANGES_REQUESTED`
+    /// no longer pins the page it occupies, so intents behind it still reach
+    /// reconciliation and can leave the pending set.
     pub async fn load_pending_stale_review_clearances(
         &self,
         repository: &RepositorySlug,
+        after: Option<Uuid>,
     ) -> Result<Vec<RepoWatchPlannedStaleReviewClearance>, RepoWatchStoreError> {
         let rows = sqlx::query_as::<_, PendingClearanceRow>(
             "SELECT clearance.clearance_id,
@@ -1106,10 +1113,12 @@ impl PostgresRepoWatchStore {
                  ON result.clearance_id = clearance.clearance_id
               WHERE clearance.repository = $1
                 AND result.clearance_id IS NULL
-              ORDER BY clearance.planned_at, clearance.clearance_id
+                AND ($2::uuid IS NULL OR clearance.clearance_id > $2)
+              ORDER BY clearance.clearance_id
               LIMIT 128",
         )
         .bind(repository.as_str())
+        .bind(after)
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(decode_pending_clearance).collect()
@@ -2233,8 +2242,13 @@ async fn insert_events(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &RepositorySlug,
     generation: RepoWatchCursorGeneration,
+    producer: RepoWatchEventProducer,
     events: &[&RepoWatchEventOccurrenceV1],
 ) -> Result<(), RepoWatchStoreError> {
+    let producer = match producer {
+        RepoWatchEventProducer::Poll => RepoWatchEventProducerStorageKind::Poll,
+        RepoWatchEventProducer::Webhook => RepoWatchEventProducerStorageKind::Webhook,
+    };
     for (index, occurrence) in events.iter().enumerate() {
         let ordinal =
             i32::try_from(index + 1).map_err(|_| RepoWatchStoreError::EventBatchTooLarge)?;
@@ -2268,9 +2282,7 @@ async fn insert_events(
         .bind(encoded.event_version)
         .bind(EVENT_CONTENT_IDENTITY_VERSION_V1)
         .bind(occurrence.content_identity().as_bytes().as_slice())
-        .bind(repo_watch_event_producer_to_str(
-            RepoWatchEventProducerStorageKind::Poll,
-        ))
+        .bind(repo_watch_event_producer_to_str(producer))
         .bind(encoded.target_kind)
         .bind(encoded.event_kind)
         .bind(encoded.pull_request_number)
@@ -2511,7 +2523,9 @@ fn decode_positioned_event(
         return Err(RepoWatchPersistenceCorruption::InvalidEventContentIdentity.into());
     }
     match repo_watch_event_producer_from_str(&row.producer) {
-        Some(RepoWatchEventProducerStorageKind::Poll) => {}
+        Some(
+            RepoWatchEventProducerStorageKind::Poll | RepoWatchEventProducerStorageKind::Webhook,
+        ) => {}
         None => return Err(RepoWatchPersistenceCorruption::UnknownEventProducer.into()),
     }
     let target = repo_watch_event_target_from_str(&row.target_kind).ok_or(

@@ -4993,7 +4993,7 @@ async fn stale_review_clearance_records_intent_before_terminal_audit() -> Result
         )
         .await?;
     let pending = store
-        .load_pending_stale_review_clearances(&repository)
+        .load_pending_stale_review_clearances(&repository, None)
         .await?;
     store
         .record_stale_review_clearance_outcome(
@@ -5003,7 +5003,7 @@ async fn stale_review_clearance_records_intent_before_terminal_audit() -> Result
         )
         .await?;
     let settled = store
-        .load_pending_stale_review_clearances(&repository)
+        .load_pending_stale_review_clearances(&repository, None)
         .await?;
     let audit: (String, String, String) = sqlx::query_as(
         "SELECT clearance.reason_kind, result.outcome_kind,

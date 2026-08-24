@@ -605,18 +605,25 @@ impl PostgresRepoWatchDispatchStore {
                 .await
             {
                 Ok(stopped) => {
-                    if stopped {
-                        sqlx::query(
-                            "INSERT INTO repo_watch_convergence_cutoff_goal
-                                (assessment_id, session_id, goal_command_id)
-                             VALUES ($1, $2, $3)",
-                        )
-                        .bind(assessment_id)
-                        .bind(session_id)
-                        .bind(command.command_id().as_uuid())
-                        .execute(&mut *savepoint)
-                        .await?;
-                    }
+                    // Records the disposition of every session this cutoff
+                    // considered, including one that needed no stop. Recording
+                    // only the stopped sessions would leave a no-op session
+                    // eligible forever: the selection below excludes sessions
+                    // by the presence of this row, so the same assessment would
+                    // be reselected on every pass and wedge the repository
+                    // worker.
+                    let cutoff_command_id = command.command_id();
+                    let goal_command_id = stopped.then(|| *cutoff_command_id.as_uuid());
+                    sqlx::query(
+                        "INSERT INTO repo_watch_convergence_cutoff_goal
+                            (assessment_id, session_id, goal_command_id)
+                         VALUES ($1, $2, $3)",
+                    )
+                    .bind(assessment_id)
+                    .bind(session_id)
+                    .bind(goal_command_id)
+                    .execute(&mut *savepoint)
+                    .await?;
                     savepoint.commit().await?;
                 }
                 Err(crate::goal::GoalRepositoryError::Corruption(error)) => {
