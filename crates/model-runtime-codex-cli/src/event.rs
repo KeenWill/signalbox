@@ -746,8 +746,7 @@ impl<C: Clone> EventDecoder<C> {
             // object (see `wire::EnvelopeToolCall`). Parsing here restores
             // the trait contract: the contained JSON object reaches the
             // caller byte-verbatim when it is credential-shape clean.
-            validate_tool_arguments(&call.arguments, &call.name)
-                .map_err(|detail| ResponseEnvelopeFailure::new("tool_arguments", detail))?;
+            validate_tool_arguments(&call.arguments, &call.name)?;
             // The id consults the same held lookbehind the arguments do —
             // including the same-envelope final text — so an id extending a
             // credential marker gets a safe surrogate instead of leaking.
@@ -1052,19 +1051,32 @@ fn fold_dropped_units<'a, C: Clone>(
 /// The argument text arrives inside a JSON string, so the line-level nesting
 /// validation in `push` never saw its structure. Failure detail names only
 /// the redacted tool name, never the argument text itself.
-fn validate_tool_arguments(arguments: &str, tool_name: &str) -> Result<(), String> {
-    validate_provider_json_nesting(arguments.as_bytes())
-        .map_err(|error| format!("tool `{}` arguments: {error}", redact_text(tool_name)))?;
+fn validate_tool_arguments(
+    arguments: &str,
+    tool_name: &str,
+) -> Result<(), ResponseEnvelopeFailure> {
+    validate_provider_json_nesting(arguments.as_bytes()).map_err(|error| {
+        ResponseEnvelopeFailure::new(
+            "tool_arguments_nesting",
+            format!("tool `{}` arguments: {error}", redact_text(tool_name)),
+        )
+    })?;
     let parsed: Value = serde_json::from_str(arguments).map_err(|_| {
-        format!(
-            "tool `{}` arguments are not valid JSON",
-            redact_text(tool_name)
+        ResponseEnvelopeFailure::new(
+            "tool_arguments_json",
+            format!(
+                "tool `{}` arguments are not valid JSON",
+                redact_text(tool_name)
+            ),
         )
     })?;
     if !parsed.is_object() {
-        return Err(format!(
-            "tool `{}` arguments are not a JSON object",
-            redact_text(tool_name)
+        return Err(ResponseEnvelopeFailure::new(
+            "tool_arguments_non_object",
+            format!(
+                "tool `{}` arguments are not a JSON object",
+                redact_text(tool_name)
+            ),
         ));
     }
     Ok(())
