@@ -1525,6 +1525,7 @@ async fn contract_bootstrap() -> Json<WebContractBootstrap> {
 async fn deterministic_contract_bootstrap() -> Json<WebContractBootstrap> {
     let mut bootstrap = WebContractBootstrap::current();
     bootstrap.capabilities.bounded_session_timeline = false;
+    bootstrap.capabilities.bounded_session_live = false;
     Json(bootstrap)
 }
 
@@ -2156,6 +2157,24 @@ mod tests {
         );
         assert_eq!(decoded, WebContractBootstrap::current());
         assert_eq!(runtime_outcome, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn deterministic_bootstrap_disables_unmounted_session_capabilities() {
+        let request = Request::get("/api/bootstrap")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = deterministic_test_router()
+            .oneshot(request)
+            .await
+            .expect("the deterministic router responds");
+        let status = response.status();
+        let decoded: WebContractBootstrap = serde_json::from_slice(&response_body(response).await)
+            .expect("the response is the bootstrap DTO");
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(!decoded.capabilities.bounded_session_timeline);
+        assert!(!decoded.capabilities.bounded_session_live);
     }
 
     #[tokio::test]

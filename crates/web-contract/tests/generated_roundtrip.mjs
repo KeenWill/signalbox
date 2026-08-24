@@ -161,6 +161,18 @@ test("generated live decoder validates identities and active-state correlation",
   );
 });
 
+test("generated live decoder treats omitted optional state as absent", () => {
+  const snapshot = decodeWebSessionLiveSnapshot({
+    session_id: "00000000-0000-0000-0000-000000000991",
+    observed_through: "7",
+    queued_turn_count: "0",
+    queued_turn_ids: [],
+  });
+
+  assert.equal(snapshot.active, undefined);
+  assert.equal(snapshot.reconciliation, undefined);
+});
+
 test("generated live decoder rejects malformed runner correlations", () => {
   assert.throws(
     () =>

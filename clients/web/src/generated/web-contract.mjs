@@ -1846,7 +1846,7 @@ function assertLiveSnapshot(snapshot, path) {
       `exactly ${expectedPreviewLength} IDs for queued_turn_count`,
     );
   }
-  if (snapshot.active !== null && snapshot.reconciliation !== null) {
+  if (snapshot.active != null && snapshot.reconciliation != null) {
     fail(`${path}.reconciliation`, "absent while an active turn is present");
   }
 }
