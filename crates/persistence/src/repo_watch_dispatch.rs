@@ -1984,7 +1984,24 @@ async fn event_target_is_converged(
                AND convergence.pull_request_number = $2
                AND convergence.head_sha = current.head_sha
                AND convergence.base_revision = current.base_revision
+              JOIN LATERAL (
+                    SELECT cursor_payload
+                      FROM repo_watch_cursor
+                     WHERE repository = $1
+                     ORDER BY generation DESC
+                     LIMIT 1
+                   ) AS cursor ON true
+              JOIN LATERAL jsonb_array_elements(
+                    cursor.cursor_payload -> 'state' -> 'pull_requests'
+                   ) AS pull_request ON
+                    (pull_request ->> 'number')::numeric = $2
+              JOIN LATERAL jsonb_array_elements(
+                    cursor.cursor_payload -> 'state' -> 'branch_heads'
+                   ) AS base_head ON
+                    base_head ->> 'branch' = pull_request ->> 'base_branch'
              WHERE current.head_sha = $3
+               AND pull_request ->> 'head_sha' = $3
+               AND base_head ->> 'head' = current.base_revision
         )",
     )
     .bind(event.repository().as_str())

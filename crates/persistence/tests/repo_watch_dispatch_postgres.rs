@@ -5270,14 +5270,6 @@ async fn base_advance_requires_a_fresh_seal_for_cutoff_and_admission() -> Result
     let advanced_generation =
         commit_mergeable_head_at_base(&fixture, 0x54_701, SECOND_HEAD, ADVANCED_BASE_REVISION)
             .await?;
-    record_assessment_at_base(
-        &fixture,
-        advanced_generation,
-        SECOND_HEAD,
-        ADVANCED_BASE_REVISION,
-        RepoWatchReviewDecision::ChangesRequested,
-    )
-    .await?;
 
     let stale_cutoff = fixture
         .store
@@ -5295,6 +5287,14 @@ async fn base_advance_requires_a_fresh_seal_for_cutoff_and_admission() -> Result
                 dispatch_context(),
             )
             .await?;
+    record_assessment_at_base(
+        &fixture,
+        advanced_generation,
+        SECOND_HEAD,
+        ADVANCED_BASE_REVISION,
+        RepoWatchReviewDecision::ChangesRequested,
+    )
+    .await?;
     record_assessment_at_base(
         &fixture,
         advanced_generation,

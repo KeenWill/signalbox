@@ -3531,6 +3531,7 @@ impl GitHubRepositoryPoller {
                 listed,
                 previous,
                 cursor_generation,
+                branch_heads,
                 &mut fetches,
             )
             .await;
@@ -3579,6 +3580,7 @@ impl GitHubRepositoryPoller {
         listed: &BTreeMap<u64, ListedPullRequest>,
         previous: Option<&RepoWatchObservation>,
         cursor_generation: Option<RepoWatchCursorGeneration>,
+        branch_heads: &[RepoWatchBranchHead],
         fetches: &mut JoinSet<Result<FetchedPullRequest, RepositoryWatchAttemptError>>,
     ) -> Result<Vec<FetchedPullRequest>, RepositoryWatchAttemptError> {
         let mut pull_requests = Vec::with_capacity(pull_numbers.len());
@@ -3593,6 +3595,11 @@ impl GitHubRepositoryPoller {
                 let previous_pull_request = previous
                     .and_then(|observation| previous_pull_request(observation, number))
                     .cloned();
+                let base_revision_unchanged = previous_pull_request.as_ref().is_some_and(|pull| {
+                    previous.is_some_and(|observation| {
+                        pull_request_base_revision_matches(observation, pull, branch_heads)
+                    })
+                });
                 fetches.spawn(async move {
                     poller
                         .fetch_or_reuse_pull_request(
@@ -3600,6 +3607,7 @@ impl GitHubRepositoryPoller {
                             listed_pull_request.as_ref(),
                             previous_pull_request.as_ref(),
                             cursor_generation,
+                            base_revision_unchanged,
                         )
                         .await
                 });
@@ -3657,8 +3665,10 @@ impl GitHubRepositoryPoller {
         listed_pull_request: Option<&ListedPullRequest>,
         previous_pull_request: Option<&RepoWatchPullRequestState>,
         cursor_generation: Option<RepoWatchCursorGeneration>,
+        base_revision_unchanged: bool,
     ) -> Result<FetchedPullRequest, RepositoryWatchAttemptError> {
         if let (Some(listed), Some(previous)) = (listed_pull_request, previous_pull_request)
+            && base_revision_unchanged
             && self.pull_request_detail_is_reusable(number, listed, previous, cursor_generation)
         {
             let reviews = self.fetch_reviews(number, Some(previous.reviews())).await?;
@@ -4979,6 +4989,30 @@ impl PollCache {
             self.cached_wire_bytes = self.cached_wire_bytes.saturating_sub(resource.wire_bytes);
         }
     }
+}
+
+fn pull_request_base_revision<'a>(
+    observation: &'a RepoWatchObservation,
+    pull_request: &RepoWatchPullRequestState,
+) -> Option<&'a CommitSha> {
+    observation
+        .state()
+        .branch_heads()
+        .iter()
+        .find(|head| head.branch() == pull_request.context().base_branch())
+        .map(RepoWatchBranchHead::head)
+}
+
+fn pull_request_base_revision_matches(
+    observation: &RepoWatchObservation,
+    pull_request: &RepoWatchPullRequestState,
+    branch_heads: &[RepoWatchBranchHead],
+) -> bool {
+    pull_request_base_revision(observation, pull_request)
+        == branch_heads
+            .iter()
+            .find(|head| head.branch() == pull_request.context().base_branch())
+            .map(RepoWatchBranchHead::head)
 }
 
 fn reuse_pull_request(
@@ -9490,6 +9524,23 @@ mod tests {
             ),
             "a head change is never hidden by unchanged listing metadata"
         );
+    }
+
+    #[tokio::test]
+    async fn a_base_advance_forbids_pull_request_reuse() {
+        let observation = complete_typed_observation().await;
+        let pull_request = &observation.state().pull_requests()[0];
+        let advanced_base = RepoWatchBranchHead::new(
+            pull_request.context().base_branch().clone(),
+            CommitSha::try_new(CHANGED_LISTED_HEAD_SHA.to_owned())
+                .expect("changed fixture base revision is canonical"),
+        );
+
+        assert!(!super::pull_request_base_revision_matches(
+            &observation,
+            pull_request,
+            &[advanced_base],
+        ));
     }
 
     #[tokio::test]
