@@ -284,6 +284,8 @@ enum XmlEncoding {
     Utf8,
     Utf16Le,
     Utf16Be,
+    Utf16LeBom,
+    Utf16BeBom,
 }
 
 fn probe_root(bytes: &[u8]) -> ProbeRoot {
@@ -371,9 +373,6 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
             Event::Start(start) => {
                 validate_qname(start.name().as_ref())?;
                 let (namespace, _) = reader.resolver().resolve_element(start.name());
-                if !root_seen && invalid_document_text_before_root {
-                    return Err(ParseIssue::Malformed);
-                }
                 prolog_event_seen = true;
                 inspect_element(
                     &start,
@@ -384,6 +383,9 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     &mut parsed,
                     root_seen,
                 )?;
+                if depth == 0 && invalid_document_text_before_root {
+                    return Err(ParseIssue::Malformed);
+                }
                 if depth == 0
                     && let Some(issue) = pending_prolog_issue
                 {
@@ -403,9 +405,6 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
             Event::Empty(empty) => {
                 validate_qname(empty.name().as_ref())?;
                 let (namespace, _) = reader.resolver().resolve_element(empty.name());
-                if !root_seen && invalid_document_text_before_root {
-                    return Err(ParseIssue::Malformed);
-                }
                 prolog_event_seen = true;
                 inspect_element(
                     &empty,
@@ -416,6 +415,9 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     &mut parsed,
                     root_seen,
                 )?;
+                if depth == 0 && invalid_document_text_before_root {
+                    return Err(ParseIssue::Malformed);
+                }
                 if depth == 0
                     && let Some(issue) = pending_prolog_issue
                 {
@@ -637,7 +639,11 @@ fn inspect_element(
             Some(ResolveResult::Bound(namespace))
                 if namespace.as_ref() == XLINK_NAMESPACE && key == b"href"
         );
-        if is_svg_attribute && (event_handler_attribute(key) || key == b"style") {
+        if is_svg_attribute
+            && (event_handler_attribute(key)
+                || (depth == 0 && root_window_event_handler_attribute(key))
+                || key == b"style")
+        {
             return Err(ParseIssue::ActiveContent);
         }
         if (is_svg_attribute && key == b"href")
@@ -842,6 +848,30 @@ fn event_handler_attribute(name: &[u8]) -> bool {
     )
 }
 
+fn root_window_event_handler_attribute(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"onafterprint"
+            | b"onbeforeprint"
+            | b"onbeforeunload"
+            | b"onhashchange"
+            | b"onlanguagechange"
+            | b"onmessage"
+            | b"onmessageerror"
+            | b"onoffline"
+            | b"ononline"
+            | b"onpagehide"
+            | b"onpagereveal"
+            | b"onpageshow"
+            | b"onpageswap"
+            | b"onpopstate"
+            | b"onrejectionhandled"
+            | b"onstorage"
+            | b"onunhandledrejection"
+            | b"onunload"
+    )
+}
+
 fn validate_qname(name: &[u8]) -> Result<(), ParseIssue> {
     let name = std::str::from_utf8(name).map_err(|_| ParseIssue::Malformed)?;
     let mut parts = name.split(':');
@@ -916,7 +946,13 @@ fn parse_dimension(value: &str) -> Result<Option<f64>, ParseIssue> {
 
 fn valid_css_calculation(value: &str) -> bool {
     let mut parser = CalculationParser::new(value);
-    parser.parse_function() && parser.at_end()
+    parser.parse_function() == Some(CalculationKind::Dimension) && parser.at_end()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CalculationKind {
+    Number,
+    Dimension,
 }
 
 struct CalculationParser<'a> {
@@ -937,20 +973,16 @@ impl<'a> CalculationParser<'a> {
         self.position == self.input.len()
     }
 
-    fn parse_function(&mut self) -> bool {
-        let Some(name) = self.parse_identifier() else {
-            return false;
-        };
-        if !matches!(name, b"calc" | b"min" | b"max" | b"clamp")
-            || !self.consume(b'(')
-            || !self.parse_sum()
-        {
-            return false;
+    fn parse_function(&mut self) -> Option<CalculationKind> {
+        let name = self.parse_identifier()?;
+        if !matches!(name, b"calc" | b"min" | b"max" | b"clamp") || !self.consume(b'(') {
+            return None;
         }
+        let kind = self.parse_sum()?;
         let mut arguments = 1usize;
         while self.consume(b',') {
-            if !self.parse_sum() {
-                return false;
+            if self.parse_sum()? != kind {
+                return None;
             }
             arguments += 1;
         }
@@ -960,42 +992,57 @@ impl<'a> CalculationParser<'a> {
             b"clamp" => arguments == 3,
             _ => false,
         };
-        valid_arity && self.consume(b')')
+        (valid_arity && self.consume(b')')).then_some(kind)
     }
 
-    fn parse_sum(&mut self) -> bool {
-        if !self.parse_product() {
-            return false;
-        }
+    fn parse_sum(&mut self) -> Option<CalculationKind> {
+        let kind = self.parse_product()?;
         loop {
             let whitespace_start = self.position;
             self.skip_whitespace();
             if !self.peek_is(b'+') && !self.peek_is(b'-') {
-                return true;
+                return Some(kind);
             }
             if self.position == whitespace_start {
-                return false;
+                return None;
             }
             self.position += 1;
             let whitespace_start = self.position;
             self.skip_whitespace();
-            if self.position == whitespace_start {
-                return false;
-            }
-            if !self.parse_product() {
-                return false;
+            if self.position == whitespace_start || self.parse_product()? != kind {
+                return None;
             }
         }
     }
 
-    fn parse_product(&mut self) -> bool {
-        self.parse_value()
+    fn parse_product(&mut self) -> Option<CalculationKind> {
+        let mut kind = self.parse_value()?;
+        loop {
+            let whitespace_start = self.position;
+            self.skip_whitespace();
+            let Some(operator) = self.input.get(self.position).copied() else {
+                return Some(kind);
+            };
+            if operator != b'*' && operator != b'/' {
+                self.position = whitespace_start;
+                return Some(kind);
+            }
+            self.position += 1;
+            let right = self.parse_value()?;
+            kind = match (operator, kind, right) {
+                (b'*', CalculationKind::Number, right) => right,
+                (b'*', left, CalculationKind::Number) => left,
+                (b'/', left, CalculationKind::Number) => left,
+                _ => return None,
+            };
+        }
     }
 
-    fn parse_value(&mut self) -> bool {
+    fn parse_value(&mut self) -> Option<CalculationKind> {
         self.skip_whitespace();
         if self.consume(b'(') {
-            return self.parse_sum() && self.consume(b')');
+            let kind = self.parse_sum()?;
+            return self.consume(b')').then_some(kind);
         }
         let checkpoint = self.position;
         if self
@@ -1003,16 +1050,16 @@ impl<'a> CalculationParser<'a> {
             .get(self.position)
             .is_some_and(|byte| byte.is_ascii_alphabetic())
         {
-            if self.parse_function() {
-                return true;
+            if let Some(kind) = self.parse_function() {
+                return Some(kind);
             }
             self.position = checkpoint;
-            return false;
+            return None;
         }
         self.parse_dimension_value()
     }
 
-    fn parse_dimension_value(&mut self) -> bool {
+    fn parse_dimension_value(&mut self) -> Option<CalculationKind> {
         self.skip_whitespace();
         let start = self.position;
         if self.peek_is(b'+') || self.peek_is(b'-') {
@@ -1041,7 +1088,7 @@ impl<'a> CalculationParser<'a> {
         }
         if !has_digits {
             self.position = start;
-            return false;
+            return None;
         }
         if self.peek_is(b'e') || self.peek_is(b'E') {
             self.position += 1;
@@ -1058,9 +1105,10 @@ impl<'a> CalculationParser<'a> {
             }
             if self.position == exponent_start {
                 self.position = start;
-                return false;
+                return None;
             }
         }
+        let unit_start = self.position;
         while self
             .input
             .get(self.position)
@@ -1071,8 +1119,16 @@ impl<'a> CalculationParser<'a> {
         if self.peek_is(b'%') {
             self.position += 1;
         }
-        std::str::from_utf8(&self.input[start..self.position])
-            .is_ok_and(|token| parse_dimension(token).is_ok())
+        let token_bytes = self.input.get(start..self.position)?;
+        let Ok(token) = core::str::from_utf8(token_bytes) else {
+            return None;
+        };
+        parse_dimension(token).ok()?;
+        Some(if self.position == unit_start {
+            CalculationKind::Number
+        } else {
+            CalculationKind::Dimension
+        })
     }
 
     fn parse_identifier(&mut self) -> Option<&'a [u8]> {
@@ -1364,10 +1420,12 @@ fn encoding_matches_source(declared: &[u8], source: XmlEncoding) -> bool {
         XmlEncoding::Utf8 => {
             declared.eq_ignore_ascii_case(b"utf-8") || declared.eq_ignore_ascii_case(b"utf8")
         }
-        XmlEncoding::Utf16Le => {
+        XmlEncoding::Utf16Le => declared.eq_ignore_ascii_case(b"utf-16le"),
+        XmlEncoding::Utf16Be => declared.eq_ignore_ascii_case(b"utf-16be"),
+        XmlEncoding::Utf16LeBom => {
             declared.eq_ignore_ascii_case(b"utf-16") || declared.eq_ignore_ascii_case(b"utf-16le")
         }
-        XmlEncoding::Utf16Be => {
+        XmlEncoding::Utf16BeBom => {
             declared.eq_ignore_ascii_case(b"utf-16") || declared.eq_ignore_ascii_case(b"utf-16be")
         }
     }
@@ -1378,9 +1436,9 @@ fn decode_xml(
     allow_truncated_tail: bool,
 ) -> Result<(Cow<'_, str>, XmlEncoding), ParseIssue> {
     let (encoding, payload) = if let Some(payload) = bytes.strip_prefix(&[0xff, 0xfe]) {
-        (XmlEncoding::Utf16Le, payload)
+        (XmlEncoding::Utf16LeBom, payload)
     } else if let Some(payload) = bytes.strip_prefix(&[0xfe, 0xff]) {
-        (XmlEncoding::Utf16Be, payload)
+        (XmlEncoding::Utf16BeBom, payload)
     } else if bytes.starts_with(&[0x3c, 0x00, 0x3f, 0x00]) {
         (XmlEncoding::Utf16Le, bytes)
     } else if bytes.starts_with(&[0x00, 0x3c, 0x00, 0x3f]) {
@@ -1405,8 +1463,8 @@ fn decode_xml(
         payload
     };
     let little_endian = match encoding {
-        XmlEncoding::Utf16Le => true,
-        XmlEncoding::Utf16Be => false,
+        XmlEncoding::Utf16Le | XmlEncoding::Utf16LeBom => true,
+        XmlEncoding::Utf16Be | XmlEncoding::Utf16BeBom => false,
         XmlEncoding::Utf8 => return Err(ParseIssue::Malformed),
     };
     let units = payload.chunks_exact(2).map(|pair| {

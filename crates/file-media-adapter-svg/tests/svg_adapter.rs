@@ -240,6 +240,15 @@ async fn utf16_little_endian_svg_is_accepted() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn bomless_generic_utf16_is_rejected() -> Result<(), Box<dyn Error>> {
+    let xml =
+        "<?xml version=\"1.0\" encoding=\"UTF-16\"?><svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+    let bytes: Vec<u8> = xml.encode_utf16().flat_map(u16::to_le_bytes).collect();
+
+    assert_malformed!(SvgFixture::raw(&bytes), "malformed_svg").await
+}
+
+#[tokio::test]
 async fn utf16_svg_without_declared_encoding_is_accepted() -> Result<(), Box<dyn Error>> {
     let xml = "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"/>";
     let mut bytes = vec![0xff, 0xfe];
@@ -402,6 +411,15 @@ async fn unnamespaced_non_svg_root_is_unknown_with_svg_declaration() -> Result<(
 #[tokio::test]
 async fn processing_instruction_before_non_svg_root_is_unknown() -> Result<(), Box<dyn Error>> {
     let source = SvgFixture::raw(br#"<?audit?><foo/>"#).into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn leading_text_before_non_svg_root_is_unknown() -> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(br#"junk<foo/>"#).into_source()?;
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
 
     assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
@@ -665,6 +683,19 @@ async fn calculated_dimensions_are_valid_without_numeric_metadata() -> Result<()
 }
 
 #[tokio::test]
+async fn calculation_products_are_valid_without_numeric_metadata() -> Result<(), Box<dyn Error>> {
+    let source =
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(2 * 10px)"/>"#)
+            .into_source()?;
+
+    assert_eq!(
+        inspect(&DirectProcessor::new(), &source).await?.status(),
+        FileInspectionStatus::Validated
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn invalid_calculation_dimension_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed!(
         SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(banana)"/>"#,),
@@ -830,6 +861,15 @@ async fn harmless_on_prefixed_names_are_accepted() -> Result<(), Box<dyn Error>>
 async fn actual_event_handler_attribute_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed!(
         SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" onclick="run()"/>"#),
+        "active_content",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn root_window_event_handler_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" onbeforeunload="run()"/>"#,),
         "active_content",
     )
     .await
