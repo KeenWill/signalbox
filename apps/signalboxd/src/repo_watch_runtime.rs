@@ -5424,11 +5424,11 @@ mod tests {
         RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchChildExit,
         RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, RepositoryWatchTask,
         RepositoryWatchWake, ResourceKey, ReviewState, TargetedPollOutcome, TargetedPullRequest,
-        Url, UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_RETRY_DELAY,
-        WEBHOOK_DRAIN_RETRY_MAX_DELAY, WebhookDrain, WebhookDrainOutcome, WebhookDrainRetry,
-        WebhookPayloadPurgeSchedule, WebhookPollInterrupt, WorkflowName, WorkflowResponse,
-        await_poll_or_interrupt, derive_repo_watch_events, dispatch_context_json,
-        inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
+        Url, UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_ATTEMPT_TIMEOUT,
+        WEBHOOK_DRAIN_RETRY_DELAY, WEBHOOK_DRAIN_RETRY_MAX_DELAY, WebhookDrain,
+        WebhookDrainOutcome, WebhookDrainRetry, WebhookPayloadPurgeSchedule, WebhookPollInterrupt,
+        WorkflowName, WorkflowResponse, await_poll_or_interrupt, derive_repo_watch_events,
+        dispatch_context_json, inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
         normalize_checks_outcome, normalize_pull_request_context, object_id,
         observe_webhook_work_before_drain, owed_dispatch_context_json_parts, rule_activation_error,
         run_until_shutdown, supervise_repository_tasks, targeted_pull_requests,
@@ -7863,7 +7863,7 @@ mod tests {
     }
 
     /// INV-071: deadline cancellation preserves durable webhook work for retry.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn a_webhook_drain_deadline_cancels_and_retries_durable_work()
     -> Result<(), Box<dyn Error>> {
@@ -7881,7 +7881,15 @@ mod tests {
             .await?;
         let mut fixture = webhook_task(&pool).await?;
         {
-            let drain = fixture.task.process_webhook_deliveries();
+            // Keep virtual time runnable until the database operation reaches
+            // the injected wedge, so Tokio cannot auto-advance the production
+            // deadline during PostgreSQL setup.
+            let clock_guard = tokio::spawn(async {
+                loop {
+                    tokio::task::yield_now().await;
+                }
+            });
+            let drain = fixture.task.process_webhook_deliveries_with_timeout();
             tokio::pin!(drain);
             tokio::select! {
                 () = wait_for_webhook_projection_wedge(&webhook_store) => {}
@@ -7890,11 +7898,14 @@ mod tests {
                 }
             }
 
-            assert!(
-                tokio::time::timeout(Duration::from_millis(50), &mut drain)
-                    .await
-                    .is_err(),
-                "the drain remains blocked after reaching the injected wedge"
+            clock_guard.abort();
+            clock_guard.await.ok();
+            tokio::time::advance(WEBHOOK_DRAIN_ATTEMPT_TIMEOUT).await;
+            assert_eq!(
+                drain.await,
+                WebhookDrainOutcome::ProjectionFailed(
+                    RepositoryWatchAttemptError::WebhookDrainTimedOut
+                )
             );
         }
         assert!(!webhook_disposition_exists(&webhook_store, admission.key()).await?);
