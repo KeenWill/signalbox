@@ -72,6 +72,7 @@ struct TrailerFacts {
     filters: Vec<Vec<u8>>,
     decode_parameters: Option<Vec<u8>>,
     is_xref_stream: bool,
+    indirect_xref_lengths: Vec<(IndirectReference, u64)>,
 }
 
 #[derive(Default)]
@@ -436,6 +437,20 @@ async fn inspect_bounded(
         merge_previous_xref(&mut parsed_xref, previous);
         newer_xref_offset = prev;
         require_active(cancellation)?;
+    }
+    for (reference, expected) in parsed_xref.facts.indirect_xref_lengths.clone() {
+        let resolved = resolve_bounded_integer_object(
+            source,
+            budget,
+            &parsed_xref,
+            reference,
+            (2 * ROOT_VALIDATION_BYTES, 2),
+            &mut BTreeSet::new(),
+        )
+        .await?;
+        if resolved != Some(expected) {
+            return Ok(malformed_validation());
+        }
     }
     if parsed_xref.facts.encrypted {
         return Ok(ProcessorValidationOutput::EncryptedOrLocked {
@@ -1190,7 +1205,6 @@ fn last_keyword_outside_comments(bytes: &[u8], keyword: &[u8]) -> Option<usize> 
 
 fn parse_xref_structure(bytes: &[u8]) -> Option<ParsedXref> {
     let mut cursor = 0;
-    skip_pdf_space_and_comments(bytes, &mut cursor);
     if consume_keyword(bytes, &mut cursor, b"xref") {
         parse_classic_xref(bytes, cursor)
     } else {
@@ -1231,7 +1245,11 @@ fn parse_classic_xref(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
                 return None;
             }
             cursor += 1;
+            skip_required_pdf_space_and_comments(bytes, &mut cursor)?;
             if state == b'n' {
+                if object_number == 0 {
+                    return None;
+                }
                 live_entries.push(LiveXrefEntry {
                     reference: IndirectReference {
                         object_number,
@@ -1259,7 +1277,7 @@ fn parse_classic_xref(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
 
 fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
     let xref_object = parse_unsigned(bytes, &mut cursor)?;
-    if xref_object > MAX_OBJECT_NUMBER {
+    if xref_object == 0 || xref_object > MAX_OBJECT_NUMBER {
         return None;
     }
     skip_required_pdf_space_and_comments(bytes, &mut cursor)?;
@@ -1277,11 +1295,17 @@ fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
     if !consume_keyword(bytes, &mut cursor, b"stream") {
         return None;
     }
-    let facts = valid_trailer_facts(facts, true)?;
+    let mut facts = valid_trailer_facts(facts, true)?;
     consume_stream_line_end(bytes, &mut cursor)?;
     let stream_length = match facts.length? {
         StreamLength::Direct(length) => usize::try_from(length).ok()?,
-        StreamLength::Indirect(_) => inferred_xref_stream_length(bytes, cursor)?,
+        StreamLength::Indirect(reference) => {
+            let inferred = inferred_xref_stream_length(bytes, cursor)?;
+            facts
+                .indirect_xref_lengths
+                .push((reference, u64::try_from(inferred).ok()?));
+            inferred
+        }
     };
     let stream_end = cursor.checked_add(stream_length)?;
     let encoded_stream = bytes.get(cursor..stream_end)?;
@@ -1608,7 +1632,7 @@ fn parse_name(bytes: &[u8], cursor: &mut usize) -> Option<Vec<u8>> {
 
 fn parse_indirect_reference(bytes: &[u8], cursor: &mut usize) -> Option<IndirectReference> {
     let object_number = parse_nonnegative_integer(bytes, cursor)?;
-    if object_number > MAX_OBJECT_NUMBER {
+    if object_number == 0 || object_number > MAX_OBJECT_NUMBER {
         return None;
     }
     skip_required_pdf_space_and_comments(bytes, cursor)?;
@@ -1744,7 +1768,15 @@ fn parse_xref_chain(bytes: &[u8], start: usize) -> Option<ParsedXref> {
         merge_complete_supplemental_xref(bytes, &mut previous, offset, &mut visited)?;
         merge_previous_xref(&mut parsed, previous);
     }
-    effective_size_contains_declarations(&parsed).then_some(parsed)
+    let lengths_match = parsed
+        .facts
+        .indirect_xref_lengths
+        .iter()
+        .all(|(reference, expected)| {
+            resolve_integer_object(bytes, &parsed, *reference, &mut BTreeSet::new())
+                == Some(*expected)
+        });
+    (lengths_match && effective_size_contains_declarations(&parsed)).then_some(parsed)
 }
 
 fn effective_size_contains_declarations(parsed: &ParsedXref) -> bool {
@@ -1807,7 +1839,7 @@ async fn merge_bounded_supplemental_xref(
     source: &dyn VerifiedBlobSource,
     budget: &mut ValidationBudget,
     parsed: &mut ParsedXref,
-    section_offset: u64,
+    mut section_offset: u64,
     visited: &mut BTreeSet<u64>,
 ) -> Result<bool, FileMediaProviderFailure> {
     while let Some(offset) = parsed.facts.xref_stream.take() {
@@ -1824,34 +1856,46 @@ async fn merge_bounded_supplemental_xref(
             return Ok(false);
         };
         merge_supplemental_xref(parsed, supplemental);
+        section_offset = offset;
     }
     Ok(true)
 }
 
-fn merge_supplemental_xref(current: &mut ParsedXref, supplemental: ParsedXref) {
+fn merge_supplemental_xref(current: &mut ParsedXref, mut supplemental: ParsedXref) {
     current.facts.encrypted |= supplemental.facts.encrypted;
     if current.facts.root.is_none() {
         current.facts.root = supplemental.facts.root;
     }
     current.facts.xref_stream = supplemental.facts.xref_stream;
-    for entry in supplemental.live_entries {
-        current.live_entries.retain(|current_entry| {
-            current_entry.reference.object_number != entry.reference.object_number
-        });
-        current.live_entries.push(entry);
-    }
+    current
+        .facts
+        .indirect_xref_lengths
+        .append(&mut supplemental.facts.indirect_xref_lengths);
+    let objects = supplemental
+        .live_entries
+        .iter()
+        .map(|entry| entry.reference.object_number)
+        .collect::<BTreeSet<_>>();
+    current
+        .live_entries
+        .retain(|entry| !objects.contains(&entry.reference.object_number));
+    current.live_entries.extend(supplemental.live_entries);
     current
         .declared_objects
         .extend(supplemental.declared_objects);
     current.object_limit_exceeded = current.live_entries.len() > MAX_OBJECTS;
 }
 
-fn merge_previous_xref(current: &mut ParsedXref, previous: ParsedXref) {
+fn merge_previous_xref(current: &mut ParsedXref, mut previous: ParsedXref) {
     current.facts.encrypted |= previous.facts.encrypted;
     if current.facts.root.is_none() {
         current.facts.root = previous.facts.root;
     }
     current.facts.prev = previous.facts.prev;
+    current
+        .facts
+        .indirect_xref_lengths
+        .append(&mut previous.facts.indirect_xref_lengths);
     for entry in previous.live_entries {
         if !current
             .declared_objects
@@ -2551,6 +2595,9 @@ fn parse_xref_stream_entries(
                 parse_big_endian(entry.get(..type_end)?)?
             };
             if entry_type == 1 || entry_type == 2 {
+                if object_number == 0 {
+                    return None;
+                }
                 let field_two = parse_big_endian(entry.get(type_end..field_two_end)?)?;
                 let generation = parse_big_endian(entry.get(field_two_end..)?)?;
                 if entry_type == 1 && generation > MAX_GENERATION {
@@ -3200,7 +3247,7 @@ mod tests {
     #[test]
     fn hybrid_xref_stream_entries_are_merged_before_preflight() {
         let supplemental_offset = b"%PDF-1.5\n".len();
-        let entry_count = MAX_OBJECTS + 1;
+        let entry_count = MAX_OBJECTS + 2;
         let stream = hybrid_xref_stream_entries(entry_count);
         let mut bytes = b"%PDF-1.5\n".to_vec();
         bytes.extend_from_slice(
@@ -3226,9 +3273,11 @@ mod tests {
     }
 
     fn hybrid_xref_stream_entries(entry_count: usize) -> Vec<u8> {
-        (0..entry_count)
-            .flat_map(|index| [2, 1, u8::try_from(index % 2).unwrap_or(0)])
-            .collect()
+        let mut entries = vec![0, 0, 0];
+        entries.extend(
+            (1..entry_count).flat_map(|index| [2, 1, u8::try_from(index % 2).unwrap_or(0)]),
+        );
+        entries
     }
 
     #[test]
