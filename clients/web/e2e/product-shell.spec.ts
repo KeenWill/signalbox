@@ -135,7 +135,7 @@ test('restores the scenario title after leaving product routes', async ({ page }
   await page.getByRole('link', { name: /Scenario studio/ }).click()
 
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
-  await expect(page).toHaveTitle('Signalbox scenarios')
+  await expect(page).toHaveTitle('Streaming session · Signalbox scenarios')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
