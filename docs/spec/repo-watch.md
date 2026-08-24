@@ -1132,7 +1132,12 @@ head of the queue and starve every later one; the attempt still reports the
 first such failure. A signature-valid delivery whose event or action is outside
 the mapped set, including a broadly subscribed `workflow_job`, is still
 acknowledged successfully and is cheaply logged and recorded as ignored rather
-than treated as an intake failure. A webhook-enabled shadow wake may also
+than treated as an intake failure. A targeted projection records its terminal
+disposition and exact projections as the durable recovery handoff before its
+cursor write. If that cursor write conflicts with an intervening full poll, the
+delivery remains terminal and the in-memory shadow is handed over to the
+competing durable cursor before later pending receipts are projected. A
+webhook-enabled shadow wake may also
 preempt the read-only provider sweep of an in-flight complete poll, without
 resetting that poll's deadline, so the durable delivery drains before bounded
 reconciliation resumes.
@@ -1144,9 +1149,10 @@ carrying the first such cause, whichever attempt performed it — a startup drai
 a wake, a retry, or a full poll. A delivery that fails before its terminal
 disposition is recorded remains pending, and its successful page peers still
 reach terminal state: a targeted refresh the provider will not serve is one such
-failure, because that query runs before anything is recorded. A targeted commit
-runs before the disposition is recorded, so its failure leaves the delivery
-pending too. A delivery whose disposition is already durable when a later step
+failure, because that query runs before anything is recorded. Once a targeted
+refresh's exact projections and disposition are durable, a later cursor-write
+failure does not reopen the delivery; the durable cursor becomes the next shadow
+baseline. A delivery whose disposition is already durable when a later step
 fails — the dispatch work that follows it — is terminal and is not loaded again;
 that failure carries the same delivery identity and closed cause at warning
 level, recorded where it happens because the delivery never reaches the drain
