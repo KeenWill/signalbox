@@ -694,7 +694,10 @@ async fn session_live_snapshot(
         return live_projection_unavailable();
     };
     match repository.read_live_snapshot(session).await {
-        Ok(Some(snapshot)) => Json(live_snapshot_dto(snapshot)).into_response(),
+        Ok(Some(snapshot)) => match live_snapshot_dto(snapshot) {
+            Some(snapshot) => Json(snapshot).into_response(),
+            None => live_projection_corruption(),
+        },
         Ok(None) => application_error(
             StatusCode::NOT_FOUND,
             "session_not_found",
@@ -742,8 +745,11 @@ async fn session_live_follow(
     let (snapshot, queued_at_snapshot) = snapshot;
     let observed_through = snapshot.observed_through;
     let mut pending = VecDeque::new();
+    let Some(snapshot) = live_snapshot_dto(snapshot) else {
+        return live_projection_corruption();
+    };
     pending.push_back(WebSessionLiveStreamEvent::Snapshot {
-        snapshot: Box::new(live_snapshot_dto(snapshot)),
+        snapshot: Box::new(snapshot),
     });
     let source = stream::unfold(
         LiveFollowState {
@@ -945,16 +951,12 @@ fn next_web_text_fragment(
     Some(fragment)
 }
 
-fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
-    WebSessionLiveSnapshot {
-        session_id: WebSessionId::from_uuid_bytes(snapshot.session.into_uuid().into_bytes()),
-        observed_through: WebPositiveU64::from_nonzero(
-            std::num::NonZeroU64::new(snapshot.observed_through)
-                .expect("live snapshot observation cursors are positive"),
-        ),
-        active: snapshot.active.map(|active| WebSessionLiveActiveTurn {
-            turn_id: WebTurnId::from_uuid_bytes(active.turn.into_uuid().into_bytes()),
-            state: match active.state {
+fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> Option<WebSessionLiveSnapshot> {
+    let observed_through = std::num::NonZeroU64::new(snapshot.observed_through)?;
+    let active = snapshot
+        .active
+        .map(|active| {
+            let state = match active.state {
                 SessionLiveActiveState::Running { model_call } => {
                     WebSessionLiveActiveState::Running {
                         model_call_id: model_call.map(|call| {
@@ -999,43 +1001,28 @@ fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
                 } => WebSessionLiveActiveState::AwaitingRunnerRecovery {
                     runner_id: WebLiveResourceId::from_uuid_bytes(runner.into_uuid().into_bytes()),
                     placement_revision: WebPositiveU64::from_nonzero(
-                        std::num::NonZeroU64::new(placement_revision)
-                            .expect("runner placement revisions are positive"),
+                        std::num::NonZeroU64::new(placement_revision).ok_or(())?,
                     ),
                 },
-            },
-        }),
-        queued_turn_count: WebU64::from_u64(snapshot.queued_turn_count),
-        queued_turn_ids: snapshot
-            .queued_turns
-            .into_iter()
-            .map(|turn| WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()))
-            .collect(),
-        reconciliation: snapshot
-            .reconciliation
-            .map(|reconciliation| match reconciliation {
-                SessionLiveReconciliation::ModelCall { turn, call } => {
-                    WebSessionLiveReconciliation::ModelCall {
-                        turn_id: WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()),
-                        model_call_id: WebLiveResourceId::from_uuid_bytes(
-                            call.into_uuid().into_bytes(),
-                        ),
-                    }
-                }
-                SessionLiveReconciliation::ToolAttempt { turn, attempt } => {
-                    WebSessionLiveReconciliation::ToolAttempt {
-                        turn_id: WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()),
-                        tool_attempt_id: WebLiveResourceId::from_uuid_bytes(
-                            attempt.into_uuid().into_bytes(),
-                        ),
-                    }
-                }
-            }),
-        runner: snapshot.runner.and_then(|runner| {
+            };
+            Ok::<WebSessionLiveActiveTurn, ()>(WebSessionLiveActiveTurn {
+                turn_id: WebTurnId::from_uuid_bytes(active.turn.into_uuid().into_bytes()),
+                state,
+            })
+        })
+        .transpose()
+        .ok()?;
+    let runner = snapshot
+        .runner
+        .map(|runner| {
             let placement_revision = WebPositiveU64::from_nonzero(
-                std::num::NonZeroU64::new(runner.placement_revision)
-                    .expect("runner placement revisions are positive"),
+                std::num::NonZeroU64::new(runner.placement_revision).ok_or(())?,
             );
+            Ok::<_, ()>((runner, placement_revision))
+        })
+        .transpose()
+        .ok()?
+        .and_then(|(runner, placement_revision)| {
             match (runner.state, runner.runner, runner.connection_health) {
                 (SessionLiveRunnerState::Unpinned, None, None) => {
                     Some(WebSessionLiveRunner::Unpinned { placement_revision })
@@ -1088,8 +1075,47 @@ fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
                 }
                 _ => None,
             }
-        }),
-    }
+        });
+    Some(WebSessionLiveSnapshot {
+        session_id: WebSessionId::from_uuid_bytes(snapshot.session.into_uuid().into_bytes()),
+        observed_through: WebPositiveU64::from_nonzero(observed_through),
+        active,
+        queued_turn_count: WebU64::from_u64(snapshot.queued_turn_count),
+        queued_turn_ids: snapshot
+            .queued_turns
+            .into_iter()
+            .map(|turn| WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()))
+            .collect(),
+        reconciliation: snapshot
+            .reconciliation
+            .map(|reconciliation| match reconciliation {
+                SessionLiveReconciliation::ModelCall { turn, call } => {
+                    WebSessionLiveReconciliation::ModelCall {
+                        turn_id: WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()),
+                        model_call_id: WebLiveResourceId::from_uuid_bytes(
+                            call.into_uuid().into_bytes(),
+                        ),
+                    }
+                }
+                SessionLiveReconciliation::ToolAttempt { turn, attempt } => {
+                    WebSessionLiveReconciliation::ToolAttempt {
+                        turn_id: WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()),
+                        tool_attempt_id: WebLiveResourceId::from_uuid_bytes(
+                            attempt.into_uuid().into_bytes(),
+                        ),
+                    }
+                }
+            }),
+        runner,
+    })
+}
+
+fn live_projection_corruption() -> Response {
+    application_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "session_live_projection_corrupt",
+        "the durable live session projection contains invalid positive values",
+    )
 }
 
 fn live_projection_unavailable() -> Response {
