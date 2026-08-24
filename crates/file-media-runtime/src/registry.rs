@@ -346,6 +346,35 @@ impl FileMediaRegistry {
             .map(|candidate| candidate.reader.clone())
             .collect::<std::collections::BTreeSet<_>>();
         if media_types.len() != 1 || readers.len() != 1 {
+            let mut successful = Vec::new();
+            let mut malformed = Vec::new();
+            for candidate in candidates {
+                match self
+                    .validate_candidate(
+                        processor,
+                        request.clone(),
+                        source,
+                        cancellation,
+                        candidate,
+                        evidence,
+                    )
+                    .await?
+                {
+                    inspection @ (FileInspection::Validated(_)
+                    | FileInspection::DeclaredMismatch { .. }) => successful.push(inspection),
+                    inspection @ FileInspection::Malformed { .. } => malformed.push(inspection),
+                    FileInspection::Unknown { .. } => {}
+                    FileInspection::Ambiguous { .. } | FileInspection::EncryptedOrLocked { .. } => {
+                        return Err(FileMediaFailure::ProcessorFailed);
+                    }
+                }
+            }
+            if successful.len() == 1 {
+                return successful.pop().ok_or(FileMediaFailure::ProcessorFailed);
+            }
+            if successful.is_empty() && malformed.len() == 1 {
+                return malformed.pop().ok_or(FileMediaFailure::ProcessorFailed);
+            }
             return Ok(FileInspection::Ambiguous {
                 source: request.source,
                 media_types,

@@ -142,6 +142,28 @@ async fn json_rejects_oversized_input_with_registered_reason() -> Result<(), Box
 }
 
 #[tokio::test]
+async fn oversized_declared_json_scalar_preserves_the_size_reason() -> Result<(), Box<dyn Error>> {
+    let mut bytes = b"true".to_vec();
+    bytes.resize(128 * 1_024 + 1, b' ');
+    let source = MemorySource::new(bytes);
+
+    let inspection = support::inspect(&source, "application/json").await?;
+    support::assert_malformed_reason(inspection, "source_too_large");
+    Ok(())
+}
+
+#[tokio::test]
+async fn declared_json_follow_up_respects_the_validation_ceiling() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(b"true ".to_vec());
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 4;
+
+    let inspection = support::inspect_with_ceilings(&source, "application/json", ceilings).await?;
+    support::assert_malformed_reason(inspection, "source_too_large");
+    Ok(())
+}
+
+#[tokio::test]
 async fn json_honors_the_effective_validation_source_ceiling() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::json_document());
     let mut ceilings = FileMediaCeilings::version_one();
@@ -185,6 +207,36 @@ async fn csv_like_truncated_prefix_does_not_suppress_valid_json() -> Result<(), 
 
     let inspection = support::inspect(&source, "application/json").await?;
     support::assert_validated_media(inspection, "application/json");
+    Ok(())
+}
+
+#[tokio::test]
+async fn overlapping_truncated_prefix_still_detects_json() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::json_with_csv_consistent_truncated_prefix());
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_declared_mismatch(
+        inspection,
+        DeclaredMismatchExpectation {
+            declared: "text/plain",
+            detected: "application/json",
+        },
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn overlapping_truncated_prefix_still_detects_csv() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::csv_with_json_consistent_truncated_prefix());
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_declared_mismatch(
+        inspection,
+        DeclaredMismatchExpectation {
+            declared: "text/plain",
+            detected: "text/csv",
+        },
+    );
     Ok(())
 }
 

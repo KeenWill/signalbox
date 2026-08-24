@@ -12,8 +12,7 @@ use signalbox_file_media_runtime::{
 };
 
 use crate::{
-    JSON_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, STRUCTURED_VIEW_NAME, csv_adapter, read_input_is_empty,
-    source,
+    JSON_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, STRUCTURED_VIEW_NAME, read_input_is_empty, source,
 };
 
 pub(crate) async fn probe(
@@ -44,17 +43,7 @@ pub(crate) enum ProbeExtent {
 }
 
 pub(crate) fn has_json_structure(prefix: &[u8], extent: ProbeExtent) -> bool {
-    if !has_raw_json_structure(prefix, extent) {
-        return false;
-    }
-    if matches!(extent, ProbeExtent::TruncatedPrefix) {
-        let prefix = trim_ascii_start(prefix);
-        let Some(text) = source::probe_utf8(prefix) else {
-            return false;
-        };
-        return !csv_adapter::has_record_structure(text, extent);
-    }
-    true
+    has_raw_json_structure(prefix, extent)
 }
 
 pub(crate) fn has_raw_json_structure(prefix: &[u8], extent: ProbeExtent) -> bool {
@@ -107,8 +96,10 @@ pub(crate) async fn inspect(
             | ValidationEvidence::StreamingTextValidation => false,
         };
         if declared_candidate {
-            let prefix = source::read_probe_prefix(source, cancellation).await?;
-            if has_complete_json_value_prefix(&prefix) {
+            let prefix =
+                source::read_validation_prefix(source, cancellation, request.maximum_source_bytes)
+                    .await?;
+            if has_declared_json_prefix(&prefix) {
                 return Ok(malformed("source_too_large"));
             }
         }
@@ -255,9 +246,12 @@ impl<'de> Visitor<'de> for DuplicateCheckedVisitor {
     }
 }
 
-fn has_complete_json_value_prefix(prefix: &[u8]) -> bool {
+fn has_declared_json_prefix(prefix: &[u8]) -> bool {
     let prefix = trim_ascii_start(prefix);
-    if !matches!(prefix.first(), Some(b'{' | b'[')) {
+    if matches!(prefix.first(), Some(b'{' | b'[')) {
+        return true;
+    }
+    if prefix.is_empty() {
         return false;
     }
     let Some(text) = source::probe_utf8(prefix) else {

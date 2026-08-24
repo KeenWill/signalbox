@@ -27,12 +27,28 @@ pub(crate) async fn read_probe_prefix(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
 ) -> Result<Vec<u8>, ProcessorFailure> {
+    read_prefix(source, cancellation, PROBE_PREFIX_BYTES).await
+}
+
+pub(crate) async fn read_validation_prefix(
+    source: &dyn VerifiedBlobSource,
+    cancellation: &dyn CancellationSignal,
+    maximum_bytes: u64,
+) -> Result<Vec<u8>, ProcessorFailure> {
+    read_prefix(source, cancellation, PROBE_PREFIX_BYTES.min(maximum_bytes)).await
+}
+
+async fn read_prefix(
+    source: &dyn VerifiedBlobSource,
+    cancellation: &dyn CancellationSignal,
+    maximum_bytes: u64,
+) -> Result<Vec<u8>, ProcessorFailure> {
     if cancellation.is_cancelled() {
         return Err(ProcessorFailure::Cancelled);
     }
     let length = source
         .byte_length()
-        .min(std::num::NonZeroU64::new(PROBE_PREFIX_BYTES).ok_or(ProcessorFailure::Failed)?);
+        .min(std::num::NonZeroU64::new(maximum_bytes).ok_or(ProcessorFailure::Failed)?);
     source
         .read_range(0, length)
         .await

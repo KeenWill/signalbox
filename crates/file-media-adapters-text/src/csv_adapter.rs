@@ -23,7 +23,8 @@ pub(crate) async fn probe(
     } else {
         ProbeExtent::TruncatedPrefix
     };
-    let json_suppresses_csv = json_adapter::has_raw_json_structure(&prefix, extent);
+    let json_suppresses_csv = matches!(extent, ProbeExtent::CompleteSource)
+        && json_adapter::has_raw_json_structure(&prefix, extent);
     let candidate = !json_suppresses_csv
         && source::probe_utf8(&prefix).is_some_and(|text| has_record_structure(text, extent));
     if candidate {
@@ -51,7 +52,9 @@ pub(crate) async fn inspect(
             request.evidence,
             ValidationEvidence::DeclaredCandidateStructurallyValidated
         ) {
-            let prefix = source::read_probe_prefix(source, cancellation).await?;
+            let prefix =
+                source::read_validation_prefix(source, cancellation, request.maximum_source_bytes)
+                    .await?;
             if source::probe_utf8(&prefix).is_some_and(has_declared_record_structure) {
                 return Ok(malformed("source_too_large"));
             }
