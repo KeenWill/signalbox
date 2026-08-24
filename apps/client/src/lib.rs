@@ -7,6 +7,7 @@ use std::{
     os::unix::ffi::OsStrExt as _,
     path::{Path, PathBuf},
     process::ExitCode,
+    time::Duration,
 };
 
 use arguments::{
@@ -59,17 +60,31 @@ mod error;
 mod presentation;
 mod transcript;
 
+// numeric-bound: ceiling - protects request memory and durable input storage
 const MAX_INPUT_CONTENT_BYTES: usize = 1_048_576;
+// numeric-bound: ceiling - protects frame memory while decoding review input
 const MAX_REVIEW_JSON_INPUT_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
+// numeric-bound: ceiling - protects frame memory while reading import source
 const MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 /// Bounded memory used while hashing one client-local blob source.
 const BLOB_HASH_BUFFER_BYTES: usize = 64 * 1024;
 /// Smallest bounded metadata page the process protocol admits.
+// numeric-bound: tunable - controls the smallest requested metadata page
 const MIN_METADATA_PAGE_SIZE: u64 = 1;
 /// Largest bounded metadata page the process protocol admits.
+// numeric-bound: tunable - controls the largest requested metadata page
 const MAX_METADATA_PAGE_SIZE: u64 = 100;
 /// Largest finding inventory one review run can own.
+// numeric-bound: ceiling - protects memory and writes from runaway model findings
 const MAX_REVIEW_FINDINGS_PER_RUN: u64 = 32;
+/// Maximum time a terminal follower waits before rereading recovery state.
+// numeric-bound: interval - exposes reconciliation exhaustion without busy polling
+#[cfg(not(test))]
+const FOLLOW_RECOVERY_REFETCH_INTERVAL: Duration = Duration::from_secs(30);
+/// Short equivalent used by deterministic socket tests.
+// numeric-bound: interval - keeps follower refetch tests bounded
+#[cfg(test)]
+const FOLLOW_RECOVERY_REFETCH_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -363,6 +378,7 @@ fn delegation_rejection_matches(
         | RejectionDetail::SessionPlacementVersionExhausted { .. }
         | RejectionDetail::GoalCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
+        | RejectionDetail::CommissionTargetBusy { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
         | RejectionDetail::NoActiveTurn { .. }
         | RejectionDetail::TurnNotAwaitingReconciliation { .. }
@@ -370,6 +386,9 @@ fn delegation_rejection_matches(
         | RejectionDetail::InterruptUnavailableWhileAwaitingApproval { .. }
         | RejectionDetail::SafePointUnavailableWhileStopping { .. }
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
+        | RejectionDetail::ToolRequestNotDelegateDenied { .. }
+        | RejectionDetail::ToolRequestNotTerminallyDenied { .. }
+        | RejectionDetail::ToolDenialAlreadyOverridden { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
         | RejectionDetail::DefaultsVersionMismatch { .. }
         | RejectionDetail::UnknownModelAlias { .. }
@@ -454,6 +473,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
             detail,
         },
         ServerMessage::SessionCreated { .. }
+        | ServerMessage::SessionCommissioned { .. }
         | ServerMessage::SessionPlacementUpdated { .. }
         | ServerMessage::InputSubmitted { .. }
         | ServerMessage::SteeringSubmitted { .. }
@@ -486,6 +506,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::SessionDefaultsReplaced { .. }
         | ServerMessage::SessionDefaults { .. }
         | ServerMessage::ToolRequestDecided { .. }
+        | ServerMessage::ToolDenialOverridden { .. }
         | ServerMessage::SessionCompacted { .. }
         | ServerMessage::ConversationImportBegun { .. }
         | ServerMessage::ConversationImportAppended { .. }
@@ -556,6 +577,7 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
             detail,
         },
         ServerMessage::SessionCreated { .. }
+        | ServerMessage::SessionCommissioned { .. }
         | ServerMessage::SessionSpawned { .. }
         | ServerMessage::SessionAwaitRegistered { .. }
         | ServerMessage::ChildResult { .. }
@@ -592,6 +614,7 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::SessionDefaultsReplaced { .. }
         | ServerMessage::SessionDefaults { .. }
         | ServerMessage::ToolRequestDecided { .. }
+        | ServerMessage::ToolDenialOverridden { .. }
         | ServerMessage::SessionCompacted { .. }
         | ServerMessage::ConversationImportAborted {}
         | ServerMessage::BlobUploadBegun { .. }
@@ -670,6 +693,7 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
             detail,
         },
         ServerMessage::SessionCreated { .. }
+        | ServerMessage::SessionCommissioned { .. }
         | ServerMessage::SessionSpawned { .. }
         | ServerMessage::SessionAwaitRegistered { .. }
         | ServerMessage::ChildResult { .. }
@@ -706,6 +730,7 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::SessionDefaultsReplaced { .. }
         | ServerMessage::SessionDefaults { .. }
         | ServerMessage::ToolRequestDecided { .. }
+        | ServerMessage::ToolDenialOverridden { .. }
         | ServerMessage::SessionCompacted { .. }
         | ServerMessage::ConversationImportBegun { .. }
         | ServerMessage::ConversationImportAppended { .. }
@@ -4281,9 +4306,31 @@ async fn await_turn_terminal(
             return Ok(terminal);
         }
         queued_turn_recovery(&mut snapshot, turn_id)?;
+        let mut poll_automatic_recovery =
+            automatic_model_call_recovery_pending(&mut snapshot, turn_id)?;
         let mut observed_cursor = snapshot.cursor();
         loop {
-            match connection.message().await? {
+            let message = if poll_automatic_recovery {
+                match tokio::time::timeout(FOLLOW_RECOVERY_REFETCH_INTERVAL, connection.message())
+                    .await
+                {
+                    Ok(message) => message?,
+                    Err(_) => {
+                        let mut refreshed = transcript(client, session_id).await?;
+                        let refreshed_state = refreshed.turn_state(turn_id)?;
+                        if let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())? {
+                            return Ok(terminal);
+                        }
+                        queued_turn_recovery(&mut refreshed, turn_id)?;
+                        poll_automatic_recovery =
+                            automatic_model_call_recovery_pending(&mut refreshed, turn_id)?;
+                        continue;
+                    }
+                }
+            } else {
+                connection.message().await?
+            };
+            match message {
                 ServerMessage::SessionEvent {
                     cursor,
                     session_id: event_session,
@@ -4303,6 +4350,11 @@ async fn await_turn_terminal(
                             return Ok(terminal);
                         }
                         queued_turn_recovery(&mut refreshed, turn_id)?;
+                        poll_automatic_recovery =
+                            automatic_model_call_recovery_pending(&mut refreshed, turn_id)?;
+                        if poll_automatic_recovery {
+                            continue;
+                        }
                         if !runner_recovery_transition(&event) {
                             return Err(ClientError::Protocol(
                                 "a recovery event did not produce recovery or terminal state",
@@ -4315,6 +4367,8 @@ async fn await_turn_terminal(
                         if let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())? {
                             return Ok(terminal);
                         }
+                        poll_automatic_recovery =
+                            automatic_model_call_recovery_pending(&mut refreshed, turn_id)?;
                     }
                     if session_recovery_transition(&event) {
                         let mut refreshed = transcript(client, session_id).await?;
@@ -4323,6 +4377,8 @@ async fn await_turn_terminal(
                             return Ok(terminal);
                         }
                         queued_turn_recovery(&mut refreshed, turn_id)?;
+                        poll_automatic_recovery =
+                            automatic_model_call_recovery_pending(&mut refreshed, turn_id)?;
                     }
                 }
                 ServerMessage::ProviderTextDelta {
@@ -4346,6 +4402,39 @@ async fn await_turn_terminal(
             }
         }
     }
+}
+
+fn automatic_model_call_recovery_pending(
+    snapshot: &mut TranscriptSnapshot,
+    selected_turn: CanonicalUuid,
+) -> Result<bool, ClientError> {
+    let selected_state = snapshot
+        .turn_state(selected_turn)?
+        .ok_or(ClientError::Protocol(
+            "follow snapshot omitted the submitted turn",
+        ))?;
+    if matches!(
+        selected_state,
+        TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: false,
+            ..
+        }
+    ) {
+        return Ok(true);
+    }
+    if !matches!(selected_state, TurnState::Queued { .. }) {
+        return Ok(false);
+    }
+    let Some(active_turn) = snapshot.active_turn()? else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        snapshot.turn_state(active_turn)?,
+        Some(TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: false,
+            ..
+        })
+    ))
 }
 
 fn queued_turn_recovery(
@@ -4374,8 +4463,15 @@ fn queued_turn_recovery(
 
 fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), ClientError> {
     match state {
-        TurnState::ActiveAwaitingModelCallRecovery { .. }
+        TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: true,
+            ..
+        }
         | TurnState::ActiveAwaitingToolRecovery { .. } => Err(ClientError::TurnRecoveryRequired),
+        TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: false,
+            ..
+        } => Ok(()),
         TurnState::ActiveAwaitingRunnerRecovery { .. } => Err(ClientError::RunnerRecoveryRequired),
         TurnState::Queued { .. }
         | TurnState::QueuedDelegated { .. }
@@ -4504,10 +4600,17 @@ fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTermi
             | TurnState::ActiveAwaitingToolApproval { .. }
             | TurnState::ActiveAwaitingChild { .. },
         ) => Ok(None),
-        Some(
-            TurnState::ActiveAwaitingModelCallRecovery { .. }
-            | TurnState::ActiveAwaitingToolRecovery { .. },
-        ) => Err(ClientError::TurnRecoveryRequired),
+        Some(TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: true,
+            ..
+        })
+        | Some(TurnState::ActiveAwaitingToolRecovery { .. }) => {
+            Err(ClientError::TurnRecoveryRequired)
+        }
+        Some(TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: false,
+            ..
+        }) => Ok(None),
         Some(TurnState::ActiveAwaitingRunnerRecovery { .. }) => {
             Err(ClientError::RunnerRecoveryRequired)
         }
@@ -6885,10 +6988,24 @@ mod tests {
     }
 
     #[test]
-    fn send_fails_explicitly_when_model_call_recovery_is_required() {
+    fn send_waits_while_automatic_model_call_recovery_owns_the_decision() {
         let state = TurnState::ActiveAwaitingModelCallRecovery {
             ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
             recovery_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            automatic_reconciliation_attempts: CanonicalU64::new(0),
+            operator_action_required: false,
+        };
+
+        assert!(matches!(terminal_snapshot_state(Some(&state)), Ok(None)));
+    }
+
+    #[test]
+    fn send_fails_when_model_call_recovery_requires_operator_action() {
+        let state = TurnState::ActiveAwaitingModelCallRecovery {
+            ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            recovery_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            automatic_reconciliation_attempts: CanonicalU64::new(5),
+            operator_action_required: true,
         };
 
         assert!(matches!(
@@ -7091,9 +7208,36 @@ mod tests {
                 TurnState::ActiveAwaitingModelCallRecovery {
                     ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(8)),
                     recovery_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(9)),
+                    automatic_reconciliation_attempts: CanonicalU64::new(0),
+                    operator_action_required: false,
                 },
             )?;
             refresh_writer.write_all(&refreshed).await?;
+
+            let (exhausted_stream, mut exhausted_writer) = listener.accept().await?.0.into_split();
+            let mut exhausted_reader = BufReader::new(exhausted_stream);
+            let mut exhausted_line = Vec::new();
+            exhausted_reader
+                .read_until(b'\n', &mut exhausted_line)
+                .await?;
+            let exhausted_request =
+                decode_client_line(&exhausted_line).map_err(io::Error::other)?;
+            assert_eq!(
+                exhausted_request.request(),
+                &ClientRequest::ReadTranscript { session_id }
+            );
+            let exhausted = snapshot(
+                exhausted_request.version(),
+                exhausted_request.request_id(),
+                1,
+                TurnState::ActiveAwaitingModelCallRecovery {
+                    ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(8)),
+                    recovery_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(9)),
+                    automatic_reconciliation_attempts: CanonicalU64::new(5),
+                    operator_action_required: true,
+                },
+            )?;
+            exhausted_writer.write_all(&exhausted).await?;
             Ok::<(), io::Error>(())
         });
 
@@ -7101,6 +7245,140 @@ mod tests {
         let result = await_turn_terminal(&mut client, session_id, queued_turn_id).await;
 
         assert!(matches!(result, Err(ClientError::TurnRecoveryRequired)));
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn selected_send_polls_after_an_automatic_recovery_transition()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let attempt_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        let model_call_id = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let server = tokio::spawn(async move {
+            let snapshot = |version, request_id, cursor, state| -> io::Result<Vec<u8>> {
+                let frame = |message| {
+                    ServerFrame::try_new_for_version(version, request_id, message)
+                        .map_err(io::Error::other)
+                };
+                let mut response =
+                    encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                        session_id,
+                        cursor: CanonicalU64::new(cursor),
+                        runner: None,
+                    })?)
+                    .map_err(io::Error::other)?;
+                response.extend_from_slice(
+                    &encode_server_line(&frame(ServerMessage::TranscriptTurn {
+                        turn_id,
+                        acceptance_position: CanonicalU64::new(1),
+                        model_settings: None,
+                        state,
+                    })?)
+                    .map_err(io::Error::other)?,
+                );
+                response.extend_from_slice(
+                    &encode_server_line(&frame(ServerMessage::TranscriptModelCallsEnd {
+                        model_call_count: CanonicalU64::new(0),
+                    })?)
+                    .map_err(io::Error::other)?,
+                );
+                response.extend_from_slice(
+                    &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
+                        session_id,
+                        cursor: CanonicalU64::new(cursor),
+                        turn_count: CanonicalU64::new(1),
+                        entry_count: CanonicalU64::new(0),
+                    })?)
+                    .map_err(io::Error::other)?,
+                );
+                Ok(response)
+            };
+
+            let (stream, mut writer) = listener.accept().await?.0.into_split();
+            let mut reader = BufReader::new(stream);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let follow_request = decode_client_line(&line).map_err(io::Error::other)?;
+            let mut initial = snapshot(
+                follow_request.version(),
+                follow_request.request_id(),
+                0,
+                TurnState::ActiveRunning {
+                    current_attempt_id: attempt_id,
+                    current_model_call: None,
+                },
+            )?;
+            initial.extend_from_slice(
+                &encode_server_line(
+                    &ServerFrame::try_new_for_version(
+                        follow_request.version(),
+                        follow_request.request_id(),
+                        ServerMessage::SessionEvent {
+                            cursor: CanonicalU64::new(1),
+                            session_id,
+                            event: SessionEvent::ModelCallTransition {
+                                turn_id,
+                                model_call_id,
+                                state: ModelCallState::Terminal {
+                                    disposition: ModelCallDisposition::Ambiguous,
+                                },
+                            },
+                        },
+                    )
+                    .map_err(io::Error::other)?,
+                )
+                .map_err(io::Error::other)?,
+            );
+            writer.write_all(&initial).await?;
+
+            let (refresh_stream, mut refresh_writer) = listener.accept().await?.0.into_split();
+            let mut refresh_reader = BufReader::new(refresh_stream);
+            let mut refresh_line = Vec::new();
+            refresh_reader.read_until(b'\n', &mut refresh_line).await?;
+            let refresh_request = decode_client_line(&refresh_line).map_err(io::Error::other)?;
+            refresh_writer
+                .write_all(&snapshot(
+                    refresh_request.version(),
+                    refresh_request.request_id(),
+                    1,
+                    TurnState::ActiveAwaitingModelCallRecovery {
+                        ended_attempt_id: attempt_id,
+                        recovery_model_call_id: model_call_id,
+                        automatic_reconciliation_attempts: CanonicalU64::new(0),
+                        operator_action_required: false,
+                    },
+                )?)
+                .await?;
+
+            let (poll_stream, mut poll_writer) = listener.accept().await?.0.into_split();
+            let mut poll_reader = BufReader::new(poll_stream);
+            let mut poll_line = Vec::new();
+            poll_reader.read_until(b'\n', &mut poll_line).await?;
+            let poll_request = decode_client_line(&poll_line).map_err(io::Error::other)?;
+            poll_writer
+                .write_all(&snapshot(
+                    poll_request.version(),
+                    poll_request.request_id(),
+                    1,
+                    TurnState::ReconciliationRequired {
+                        terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+                        terminal_attempt_id: attempt_id,
+                        terminal_model_call_id: model_call_id,
+                    },
+                )?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let terminal = await_turn_terminal(&mut client, session_id, turn_id).await?;
+
+        assert_eq!(terminal, TurnTerminal::ReconciliationRequired);
         server.await??;
         Ok(())
     }
@@ -10103,6 +10381,54 @@ mod tests {
         .await;
         assert!(matches!(result, Err(ClientError::AmbiguousMutation)));
         server.await??;
+        Ok(())
+    }
+
+    /// INV-033: `decide` accepts only its own receipt. A `tool_denial_overridden`
+    /// receipt names a distinct command — it proves a one-shot override was
+    /// recorded for a future re-proposal, never that this pending request was
+    /// decided — so naming the same request cannot make it stand in for one.
+    #[tokio::test]
+    async fn inv033_decide_rejects_a_denial_override_receipt() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let tool_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let server = tokio::spawn(async move {
+            let (stream, mut writer) = listener.accept().await?.0.into_split();
+            let mut reader = BufReader::new(stream);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            let response = ServerFrame::try_new_for_version(
+                request.version(),
+                request.request_id(),
+                ServerMessage::ToolDenialOverridden { tool_request_id },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&response).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let mut client = ProcessClient::new(socket);
+        let result = decide(
+            &mut client,
+            &mut output,
+            session_id,
+            tool_request_id,
+            Some(CommandId::try_from_uuid(Uuid::from_u128(4))?),
+            ToolDecision::Approve {},
+        )
+        .await;
+        assert!(matches!(result, Err(ClientError::AmbiguousMutation)));
+        server.await??;
+        assert_eq!(String::from_utf8(stdout)?, "");
         Ok(())
     }
 

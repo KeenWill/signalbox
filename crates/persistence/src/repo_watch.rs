@@ -1,7 +1,7 @@
 //! Durable repository-watch cursor and event storage.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     error::Error,
     fmt,
     num::{NonZeroU16, NonZeroU32, NonZeroU64},
@@ -13,10 +13,12 @@ use serde_json::Value;
 use signalbox_application::{
     RepoWatchBranchHead, RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
     RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment, RepoWatchConvergenceVerdict,
-    RepoWatchObservation, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
-    RepoWatchReviewObservation, RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWorkflowRunObservation,
+    RepoWatchEventContentIdentityV1, RepoWatchEventIdentityFrontierEntryV1,
+    RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
+    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
+    RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchWorkflowRunObservation, repo_watch_events_have_equal_identified_content,
 };
 use signalbox_domain::{
     BranchName, CheckRunName, CommitSha, GitHubObjectId, LabelName, PullRequestBody,
@@ -33,25 +35,30 @@ use sqlx::{
 use crate::{
     commit_failure_is_ambiguous,
     mapping::{
-        RepoWatchEventTargetStorageKind, RepoWatchReactionSubjectStorageKind,
-        positive_u64_from_numeric, repo_watch_check_conclusion_from_str,
-        repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
-        repo_watch_checks_outcome_to_str, repo_watch_convergence_verdict_to_str,
-        repo_watch_event_kind_from_str, repo_watch_event_kind_to_str,
-        repo_watch_event_target_from_str, repo_watch_event_target_to_str,
-        repo_watch_mergeable_state_from_str, repo_watch_mergeable_state_to_str,
-        repo_watch_observed_review_state_to_str, repo_watch_pull_request_lifecycle_from_str,
-        repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
-        repo_watch_reaction_change_to_str, repo_watch_reaction_subject_kind_from_str,
-        repo_watch_reaction_subject_kind_to_str, repo_watch_reaction_subject_to_storage,
-        repo_watch_review_decision_to_str, repo_watch_review_state_from_str,
-        repo_watch_review_state_to_str, repo_watch_stale_review_clearance_outcome_to_str,
-        repo_watch_thread_state_from_str, repo_watch_thread_state_to_str,
+        RepoWatchEventProducerStorageKind, RepoWatchEventTargetStorageKind,
+        RepoWatchReactionSubjectStorageKind, positive_u64_from_numeric,
+        repo_watch_check_conclusion_from_str, repo_watch_check_conclusion_to_str,
+        repo_watch_checks_outcome_from_str, repo_watch_checks_outcome_to_str,
+        repo_watch_convergence_verdict_to_str, repo_watch_event_kind_from_str,
+        repo_watch_event_kind_to_str, repo_watch_event_producer_from_str,
+        repo_watch_event_producer_to_str, repo_watch_event_target_from_str,
+        repo_watch_event_target_to_str, repo_watch_mergeable_state_from_str,
+        repo_watch_mergeable_state_to_str, repo_watch_observed_review_state_to_str,
+        repo_watch_pull_request_lifecycle_from_str, repo_watch_pull_request_lifecycle_to_str,
+        repo_watch_reaction_change_from_str, repo_watch_reaction_change_to_str,
+        repo_watch_reaction_subject_kind_from_str, repo_watch_reaction_subject_kind_to_str,
+        repo_watch_reaction_subject_to_storage, repo_watch_review_decision_to_str,
+        repo_watch_review_state_from_str, repo_watch_review_state_to_str,
+        repo_watch_stale_review_clearance_outcome_to_str,
+        repo_watch_stale_review_clearance_reason_from_str,
+        repo_watch_stale_review_clearance_reason_to_str, repo_watch_thread_state_from_str,
+        repo_watch_thread_state_to_str,
     },
 };
 
-const CURSOR_STORAGE_VERSION: u64 = 1;
-const CURSOR_STORAGE_VERSION_DB: i16 = 1;
+const CURSOR_STORAGE_VERSION: u64 = 2;
+const CURSOR_STORAGE_VERSION_DB: i16 = 2;
+const EVENT_CONTENT_IDENTITY_VERSION_V1: i16 = 1;
 const EVENT_VERSION_V1: i16 = 1;
 const MAX_EVENT_PAGE_SIZE: u16 = 100;
 
@@ -88,15 +95,33 @@ impl RepoWatchCursorGeneration {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchCursorCandidate {
     observation: RepoWatchObservation,
+    event_identity_frontier: RepoWatchEventIdentityFrontierV1,
 }
 
 impl RepoWatchCursorCandidate {
-    pub const fn new(observation: RepoWatchObservation) -> Self {
-        Self { observation }
+    pub fn new(observation: RepoWatchObservation) -> Self {
+        Self {
+            observation,
+            event_identity_frontier: RepoWatchEventIdentityFrontierV1::default(),
+        }
+    }
+
+    pub const fn with_event_identity_frontier(
+        observation: RepoWatchObservation,
+        event_identity_frontier: RepoWatchEventIdentityFrontierV1,
+    ) -> Self {
+        Self {
+            observation,
+            event_identity_frontier,
+        }
     }
 
     pub const fn observation(&self) -> &RepoWatchObservation {
         &self.observation
+    }
+
+    pub const fn event_identity_frontier(&self) -> &RepoWatchEventIdentityFrontierV1 {
+        &self.event_identity_frontier
     }
 }
 
@@ -127,14 +152,14 @@ impl RepoWatchCursor {
 pub struct RepoWatchCommitRequest {
     expected_generation: Option<RepoWatchCursorGeneration>,
     candidate: RepoWatchCursorCandidate,
-    events: Box<[RepoWatchEvent]>,
+    events: Box<[RepoWatchEventOccurrenceV1]>,
 }
 
 impl RepoWatchCommitRequest {
     pub fn new(
         expected_generation: Option<RepoWatchCursorGeneration>,
         candidate: RepoWatchCursorCandidate,
-        events: Vec<RepoWatchEvent>,
+        events: Vec<RepoWatchEventOccurrenceV1>,
     ) -> Self {
         Self {
             expected_generation,
@@ -151,7 +176,7 @@ impl RepoWatchCommitRequest {
         &self.candidate
     }
 
-    pub fn events(&self) -> &[RepoWatchEvent] {
+    pub fn events(&self) -> &[RepoWatchEventOccurrenceV1] {
         &self.events
     }
 }
@@ -266,6 +291,9 @@ pub enum RepoWatchPersistenceCorruption {
     NonCanonicalCursor,
     InvalidEventPosition,
     UnsupportedEventVersion,
+    UnsupportedEventContentIdentityVersion,
+    InvalidEventContentIdentity,
+    UnknownEventProducer,
     InvalidEventField(&'static str),
     UnknownEventDiscriminator(&'static str),
     InvalidStoredDomainValue,
@@ -285,6 +313,13 @@ impl fmt::Display for RepoWatchPersistenceCorruption {
             Self::NonCanonicalCursor => formatter.write_str("noncanonical cursor payload"),
             Self::InvalidEventPosition => formatter.write_str("invalid event position"),
             Self::UnsupportedEventVersion => formatter.write_str("unsupported event version"),
+            Self::UnsupportedEventContentIdentityVersion => {
+                formatter.write_str("unsupported event content identity version")
+            }
+            Self::InvalidEventContentIdentity => {
+                formatter.write_str("invalid event content identity")
+            }
+            Self::UnknownEventProducer => formatter.write_str("unknown event producer"),
             Self::InvalidEventField(field) => write!(formatter, "invalid event field {field}"),
             Self::UnknownEventDiscriminator(field) => {
                 write!(formatter, "unknown event discriminator {field}")
@@ -306,6 +341,7 @@ pub enum RepoWatchStoreError {
     Corruption(RepoWatchPersistenceCorruption),
     EventRepositoryMismatch,
     DuplicateEventIdentity(RepoWatchEventId),
+    DuplicateEventContentIdentity(RepoWatchEventContentIdentityV1),
     EventsWithoutStateChange,
     CursorGenerationExhausted,
     EventBatchTooLarge,
@@ -342,6 +378,11 @@ impl fmt::Display for RepoWatchStoreError {
                 formatter,
                 "repository-watch event batch repeats identity {id:?}"
             ),
+            Self::DuplicateEventContentIdentity(identity) => write!(
+                formatter,
+                "repository-watch event batch repeats content identity {:02x?}",
+                identity.as_bytes()
+            ),
             Self::EventsWithoutStateChange => {
                 formatter.write_str("repository-watch events accompany an unchanged cursor state")
             }
@@ -370,6 +411,7 @@ impl Error for RepoWatchStoreError {
             Self::Corruption(error) => Some(error),
             Self::EventRepositoryMismatch
             | Self::DuplicateEventIdentity(_)
+            | Self::DuplicateEventContentIdentity(_)
             | Self::EventsWithoutStateChange
             | Self::CursorGenerationExhausted
             | Self::EventBatchTooLarge
@@ -386,10 +428,56 @@ impl From<sqlx::Error> for RepoWatchStoreError {
     }
 }
 
+/// One stale-review clearance intent's durable identity.
+///
+/// Distinct from its claim token so the two cannot be transposed at a call
+/// site: they are both UUIDs, and swapping them turns a valid renewal, record,
+/// or release into a silent no-op against a row that does not exist.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RepoWatchStaleReviewClearanceId(Uuid);
+
+impl RepoWatchStaleReviewClearanceId {
+    pub const fn new(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> Uuid {
+        self.0
+    }
+}
+
+/// One clearance claim's ownership token.
+///
+/// Every write that acts on a claimed intent carries this token, so a watcher
+/// whose lease expired and was taken over cannot act on the newer claimant's
+/// intent.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RepoWatchStaleReviewClearanceClaimToken(Uuid);
+
+impl RepoWatchStaleReviewClearanceClaimToken {
+    pub const fn new(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> Uuid {
+        self.0
+    }
+}
+
+/// Whether a claim renewal still owns its intent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchStaleReviewClearanceRenewal {
+    /// The lease was extended; this watcher still owns the intent.
+    Retained,
+    /// Another watcher has claimed the intent since this lease was taken.
+    Lost,
+}
+
 /// Durable intent created before one stale review dismissal request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchPlannedStaleReviewClearance {
-    clearance_id: Uuid,
+    clearance_id: RepoWatchStaleReviewClearanceId,
+    claim_token: RepoWatchStaleReviewClearanceClaimToken,
     number: PullRequestNumber,
     current_head_sha: CommitSha,
     base_branch: BranchName,
@@ -400,9 +488,54 @@ pub struct RepoWatchPlannedStaleReviewClearance {
     dismissal_message: Box<str>,
 }
 
+/// Field-labeled construction input for one planned-clearance test fixture.
+///
+/// Production code reaches a planned clearance only through
+/// [`PostgresRepoWatchStore::plan_stale_review_clearances`], which is what
+/// makes the intent durable before any forge mutation. A caller that only
+/// needs the value — the poller's pre-dismissal revalidation, which reads the
+/// planned clearance and never creates one — would otherwise need a database
+/// to test against.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug)]
+pub struct RepoWatchPlannedStaleReviewClearanceFixture {
+    pub clearance_id: RepoWatchStaleReviewClearanceId,
+    pub claim_token: RepoWatchStaleReviewClearanceClaimToken,
+    pub number: PullRequestNumber,
+    pub current_head_sha: CommitSha,
+    pub base_branch: BranchName,
+    pub base_revision: CommitSha,
+    pub review_node_id: String,
+    pub reviewer: RepoWatchAuthorLogin,
+    pub reviewed_head_sha: CommitSha,
+    pub dismissal_message: String,
+}
+
 impl RepoWatchPlannedStaleReviewClearance {
-    pub const fn clearance_id(&self) -> Uuid {
+    /// Builds one planned clearance without a store, for tests that exercise
+    /// what happens to an already-planned intent.
+    #[cfg(feature = "test-support")]
+    pub fn from_fixture(fixture: RepoWatchPlannedStaleReviewClearanceFixture) -> Self {
+        Self {
+            clearance_id: fixture.clearance_id,
+            claim_token: fixture.claim_token,
+            number: fixture.number,
+            current_head_sha: fixture.current_head_sha,
+            base_branch: fixture.base_branch,
+            base_revision: fixture.base_revision,
+            review_node_id: fixture.review_node_id.into_boxed_str(),
+            reviewer: fixture.reviewer,
+            reviewed_head_sha: fixture.reviewed_head_sha,
+            dismissal_message: fixture.dismissal_message.into_boxed_str(),
+        }
+    }
+
+    pub const fn clearance_id(&self) -> RepoWatchStaleReviewClearanceId {
         self.clearance_id
+    }
+
+    pub const fn claim_token(&self) -> RepoWatchStaleReviewClearanceClaimToken {
+        self.claim_token
     }
 
     pub const fn number(&self) -> PullRequestNumber {
@@ -445,6 +578,12 @@ pub enum RepoWatchStaleReviewClearanceOutcome {
     AlreadyDismissed,
     ClearedElsewhere,
     Superseded,
+}
+
+/// Closed durable reason for planning one stale-review clearance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchStaleReviewClearanceReason {
+    OnlyStaleReviewBlocks,
 }
 
 /// Provider state observed while settling a clearance intent.
@@ -596,7 +735,14 @@ impl PostgresRepoWatchStore {
         .bind(Json(payload))
         .execute(&mut *transaction)
         .await?;
-        insert_events(&mut transaction, repository, generation, request.events()).await?;
+        let already_durable =
+            durable_occurrences(&mut transaction, repository, request.events(), None).await?;
+        let fresh = request
+            .events()
+            .iter()
+            .filter(|occurrence| is_new_occurrence(&already_durable, occurrence))
+            .collect::<Vec<_>>();
+        insert_events(&mut transaction, repository, generation, &fresh).await?;
         let cursor = RepoWatchCursor {
             repository: repository.clone(),
             generation,
@@ -698,8 +844,8 @@ impl PostgresRepoWatchStore {
             let unchanged_assessment_id: Option<Uuid> = sqlx::query_scalar(
                 "SELECT current.assessment_id
                       FROM (
-                            SELECT assessment_id, head_sha, base_branch, base_revision, mergeable_state,
-                                   review_decision, unresolved_threads,
+                            SELECT assessment_id, head_sha, base_branch, base_revision,
+                                   mergeable_state, settled, review_decision, unresolved_threads,
                                    gating_check_count, non_green_gating_checks,
                                    verdict_kind
                               FROM repo_watch_pull_request_convergence_assessment
@@ -712,11 +858,12 @@ impl PostgresRepoWatchStore {
                        AND current.base_revision = $4
                        AND current.base_branch = $5
                        AND current.mergeable_state = $6
-                       AND current.review_decision = $7
-                       AND current.unresolved_threads = $8
-                       AND current.gating_check_count = $9
-                       AND current.non_green_gating_checks = $10
-                       AND current.verdict_kind = $11",
+                       AND current.settled = $7
+                       AND current.review_decision = $8
+                       AND current.unresolved_threads = $9
+                       AND current.gating_check_count = $10
+                       AND current.non_green_gating_checks = $11
+                       AND current.verdict_kind = $12",
             )
             .bind(repository.as_str())
             .bind(Decimal::from(assessment.number().get()))
@@ -726,6 +873,7 @@ impl PostgresRepoWatchStore {
             .bind(repo_watch_mergeable_state_to_str(
                 assessment.mergeable_state(),
             ))
+            .bind(assessment.settled())
             .bind(repo_watch_review_decision_to_str(
                 assessment.review_decision(),
             ))
@@ -751,9 +899,9 @@ impl PostgresRepoWatchStore {
                 "INSERT INTO repo_watch_pull_request_convergence_assessment
                     (assessment_id, repository, cursor_generation,
                      pull_request_number, head_sha, base_branch, base_revision,
-                     mergeable_state, review_decision, unresolved_threads,
+                     mergeable_state, settled, review_decision, unresolved_threads,
                      gating_check_count, non_green_gating_checks, verdict_kind)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             )
             .bind(assessment_id)
             .bind(repository.as_str())
@@ -765,6 +913,7 @@ impl PostgresRepoWatchStore {
             .bind(repo_watch_mergeable_state_to_str(
                 assessment.mergeable_state(),
             ))
+            .bind(assessment.settled())
             .bind(repo_watch_review_decision_to_str(
                 assessment.review_decision(),
             ))
@@ -831,11 +980,31 @@ impl PostgresRepoWatchStore {
                 return Err(RepoWatchStoreError::StaleReviewClearanceMismatch);
             }
             let assessment = sqlx::query_as::<_, ClearanceAssessmentRow>(
+                // An empty non-green list is evidence of a green head only when
+                // the head has a gating check to be green about, so this query
+                // requires a positive gating-check count exactly as the
+                // in-memory candidate rule does. Without it the durable gate
+                // would admit a head whose sole blocker is the review because
+                // it has no other gate at all.
+                //
+                // Settlement and mergeability are required here for the same
+                // reason, and against the row rather than against the writer:
+                // the assessment this reads is whichever watcher recorded it
+                // last, so a newer assessment appended for the unchanged cursor
+                // while this watcher reconciled must be proven to carry the
+                // clearance predicate itself. An unsettled head's empty
+                // non-green list is the absence of evidence, and `unknown`
+                // mergeability is GitHub still computing rather than affirmative
+                // evidence; either would link a dismissal intent claiming
+                // `only_stale_review_blocks` to an assessment recording another
+                // blocker. The daemon records settlement only for a decided
+                // mergeability, so admitting `mergeable` alone refuses no intent
+                // the in-memory rule admits.
                 "SELECT assessment_id, base_branch, base_revision
                    FROM (
                          SELECT assessment_id, head_sha, base_branch, base_revision, review_decision,
                                 unresolved_threads, non_green_gating_checks,
-                                mergeable_state, verdict_kind
+                                mergeable_state, settled, verdict_kind, gating_check_count
                            FROM repo_watch_pull_request_convergence_assessment
                           WHERE repository = $1
                             AND pull_request_number = $2
@@ -846,7 +1015,9 @@ impl PostgresRepoWatchStore {
                     AND current.review_decision = 'changes_requested'
                     AND cardinality(current.unresolved_threads) = 0
                     AND cardinality(current.non_green_gating_checks) = 0
-                    AND current.mergeable_state <> 'conflicting'
+                    AND current.gating_check_count > 0
+                    AND current.settled
+                    AND current.mergeable_state = 'mergeable'
                     AND current.verdict_kind = 'not_converged'",
             )
             .bind(repository.as_str())
@@ -861,8 +1032,8 @@ impl PostgresRepoWatchStore {
                 "INSERT INTO repo_watch_stale_review_clearance
                     (clearance_id, assessment_id, repository,
                      pull_request_number, current_head_sha, base_revision, review_node_id,
-                     reviewer, reviewed_head_sha, dismissal_message)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                     reviewer, reviewed_head_sha, dismissal_message, reason_kind)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                  ON CONFLICT (assessment_id, review_node_id) DO NOTHING",
             )
             .bind(clearance_id)
@@ -875,6 +1046,9 @@ impl PostgresRepoWatchStore {
             .bind(candidate.reviewer().as_str())
             .bind(candidate.reviewed_head_sha().as_str())
             .bind(&dismissal_message)
+            .bind(repo_watch_stale_review_clearance_reason_to_str(
+                RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks,
+            ))
             .execute(&mut *transaction)
             .await?;
             let stored = sqlx::query_as::<_, PlannedClearanceRow>(
@@ -907,25 +1081,28 @@ impl PostgresRepoWatchStore {
             if stored.completion_state == ClearanceCompletionState::Completed {
                 continue;
             }
-            let claimed = sqlx::query_scalar::<_, bool>(
+            let claim_token = Uuid::now_v7();
+            let claimed = sqlx::query_scalar::<_, Uuid>(
                 "INSERT INTO repo_watch_stale_review_clearance_claim
-                    (clearance_id, claimed_until)
-                 VALUES ($1, clock_timestamp() + interval '2 minutes')
+                    (clearance_id, claim_token, claimed_until)
+                 VALUES ($1, $2, clock_timestamp() + interval '2 minutes')
                  ON CONFLICT (clearance_id) DO UPDATE
-                     SET claimed_until = EXCLUDED.claimed_until
+                     SET claim_token = EXCLUDED.claim_token,
+                         claimed_until = EXCLUDED.claimed_until
                    WHERE repo_watch_stale_review_clearance_claim.claimed_until
                          <= clock_timestamp()
-                 RETURNING TRUE",
+                 RETURNING claim_token",
             )
             .bind(stored.clearance_id)
+            .bind(claim_token)
             .fetch_optional(&mut *transaction)
-            .await?
-            .unwrap_or(false);
-            if !claimed {
+            .await?;
+            let Some(claim_token) = claimed else {
                 continue;
-            }
+            };
             planned.push(RepoWatchPlannedStaleReviewClearance {
-                clearance_id: stored.clearance_id,
+                clearance_id: RepoWatchStaleReviewClearanceId::new(stored.clearance_id),
+                claim_token: RepoWatchStaleReviewClearanceClaimToken::new(claim_token),
                 number: candidate.number(),
                 current_head_sha: candidate.current_head_sha().clone(),
                 base_branch: BranchName::try_new(assessment.base_branch.clone())
@@ -944,18 +1121,26 @@ impl PostgresRepoWatchStore {
         Ok(planned)
     }
 
-    /// Claims one bounded keyset page of intents lacking a terminal result.
+    /// Claims one bounded rotating page of intents lacking a terminal result.
     pub async fn claim_pending_stale_review_clearances(
         &self,
         repository: &RepositorySlug,
-        after: Option<Uuid>,
     ) -> Result<Vec<RepoWatchPlannedStaleReviewClearance>, RepoWatchStoreError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(repository.as_str())
             .execute(&mut *transaction)
             .await?;
-        let rows = sqlx::query_as::<_, PendingClearanceRow>(
+        let after = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT after_clearance_id
+               FROM repo_watch_stale_review_clearance_recovery_cursor
+              WHERE repository = $1",
+        )
+        .bind(repository.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .flatten();
+        let mut rows = sqlx::query_as::<_, PendingClearanceRow>(
             "SELECT clearance.clearance_id,
                     clearance.pull_request_number,
                     clearance.current_head_sha,
@@ -964,7 +1149,8 @@ impl PostgresRepoWatchStore {
                     clearance.review_node_id,
                     clearance.reviewer,
                     clearance.reviewed_head_sha,
-                    clearance.dismissal_message
+                    clearance.dismissal_message,
+                    clearance.reason_kind
                FROM repo_watch_stale_review_clearance AS clearance
                JOIN repo_watch_pull_request_convergence_assessment AS assessment
                  ON assessment.assessment_id = clearance.assessment_id
@@ -984,46 +1170,137 @@ impl PostgresRepoWatchStore {
         .bind(after)
         .fetch_all(&mut *transaction)
         .await?;
-        for row in &rows {
-            sqlx::query(
-                "INSERT INTO repo_watch_stale_review_clearance_claim
-                    (clearance_id, claimed_until)
-                 VALUES ($1, clock_timestamp() + interval '2 minutes')
-                 ON CONFLICT (clearance_id) DO UPDATE
-                     SET claimed_until = EXCLUDED.claimed_until",
+        if rows.is_empty() && after.is_some() {
+            rows = sqlx::query_as::<_, PendingClearanceRow>(
+                "SELECT clearance.clearance_id,
+                        clearance.pull_request_number,
+                        clearance.current_head_sha,
+                        assessment.base_branch,
+                        clearance.base_revision,
+                        clearance.review_node_id,
+                        clearance.reviewer,
+                        clearance.reviewed_head_sha,
+                        clearance.dismissal_message,
+                        clearance.reason_kind
+                   FROM repo_watch_stale_review_clearance AS clearance
+                   JOIN repo_watch_pull_request_convergence_assessment AS assessment
+                     ON assessment.assessment_id = clearance.assessment_id
+                   LEFT JOIN repo_watch_stale_review_clearance_result AS result
+                     ON result.clearance_id = clearance.clearance_id
+                   LEFT JOIN repo_watch_stale_review_clearance_claim AS claim
+                     ON claim.clearance_id = clearance.clearance_id
+                  WHERE clearance.repository = $1
+                    AND result.clearance_id IS NULL
+                    AND (claim.clearance_id IS NULL
+                         OR claim.claimed_until <= clock_timestamp())
+                  ORDER BY clearance.clearance_id
+                  LIMIT 128",
             )
-            .bind(row.clearance_id)
-            .execute(&mut *transaction)
+            .bind(repository.as_str())
+            .fetch_all(&mut *transaction)
             .await?;
         }
+        let mut claimed = Vec::with_capacity(rows.len());
+        for row in rows {
+            let claim_token = Uuid::now_v7();
+            let acquired = sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO repo_watch_stale_review_clearance_claim
+                    (clearance_id, claim_token, claimed_until)
+                 VALUES ($1, $2, clock_timestamp() + interval '2 minutes')
+                 ON CONFLICT (clearance_id) DO UPDATE
+                     SET claim_token = EXCLUDED.claim_token,
+                         claimed_until = EXCLUDED.claimed_until
+                   WHERE repo_watch_stale_review_clearance_claim.claimed_until
+                         <= clock_timestamp()
+                 RETURNING claim_token",
+            )
+            .bind(row.clearance_id)
+            .bind(claim_token)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if let Some(claim_token) = acquired {
+                claimed.push(decode_pending_clearance(
+                    row,
+                    RepoWatchStaleReviewClearanceClaimToken::new(claim_token),
+                )?);
+            }
+        }
+        let next_after = claimed
+            .last()
+            .map(RepoWatchPlannedStaleReviewClearance::clearance_id);
+        sqlx::query(
+            "INSERT INTO repo_watch_stale_review_clearance_recovery_cursor
+                (repository, after_clearance_id)
+             VALUES ($1, $2)
+             ON CONFLICT (repository) DO UPDATE
+                 SET after_clearance_id = EXCLUDED.after_clearance_id",
+        )
+        .bind(repository.as_str())
+        .bind(next_after.map(RepoWatchStaleReviewClearanceId::get))
+        .execute(&mut *transaction)
+        .await?;
         transaction.commit().await?;
-        rows.into_iter().map(decode_pending_clearance).collect()
+        Ok(claimed)
+    }
+
+    /// Renews the exact ownership token immediately before provider delivery.
+    pub async fn renew_stale_review_clearance_claim(
+        &self,
+        clearance_id: RepoWatchStaleReviewClearanceId,
+        claim_token: RepoWatchStaleReviewClearanceClaimToken,
+    ) -> Result<RepoWatchStaleReviewClearanceRenewal, RepoWatchStoreError> {
+        let renewed = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE repo_watch_stale_review_clearance_claim
+                SET claimed_until = clock_timestamp() + interval '2 minutes'
+              WHERE clearance_id = $1
+                AND claim_token = $2
+              RETURNING clearance_id",
+        )
+        .bind(clearance_id.get())
+        .bind(claim_token.get())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(match renewed {
+            Some(_) => RepoWatchStaleReviewClearanceRenewal::Retained,
+            None => RepoWatchStaleReviewClearanceRenewal::Lost,
+        })
     }
 
     /// Appends the first terminal provider observation for one clearance.
     pub async fn record_stale_review_clearance_outcome(
         &self,
-        clearance_id: Uuid,
+        clearance_id: RepoWatchStaleReviewClearanceId,
+        claim_token: RepoWatchStaleReviewClearanceClaimToken,
         outcome: RepoWatchStaleReviewClearanceOutcome,
         provider_state: RepoWatchObservedReviewState,
     ) -> Result<(), RepoWatchStoreError> {
         let mut transaction = self.pool.begin().await?;
-        sqlx::query(
+        let recorded = sqlx::query(
             "INSERT INTO repo_watch_stale_review_clearance_result
                 (clearance_id, outcome_kind, provider_review_state)
-             VALUES ($1,$2,$3)
+             SELECT $1,$3,$4
+               FROM repo_watch_stale_review_clearance_claim
+              WHERE clearance_id = $1
+                AND claim_token = $2
              ON CONFLICT (clearance_id) DO NOTHING",
         )
-        .bind(clearance_id)
+        .bind(clearance_id.get())
+        .bind(claim_token.get())
         .bind(repo_watch_stale_review_clearance_outcome_to_str(outcome))
         .bind(repo_watch_observed_review_state_to_str(provider_state))
         .execute(&mut *transaction)
         .await?;
+        if recorded.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Err(RepoWatchStoreError::StaleReviewClearanceMismatch);
+        }
         sqlx::query(
             "DELETE FROM repo_watch_stale_review_clearance_claim
-              WHERE clearance_id = $1",
+              WHERE clearance_id = $1
+                AND claim_token = $2",
         )
-        .bind(clearance_id)
+        .bind(clearance_id.get())
+        .bind(claim_token.get())
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -1035,13 +1312,16 @@ impl PostgresRepoWatchStore {
     /// same intent for retry.
     pub async fn release_stale_review_clearance_claim(
         &self,
-        clearance_id: Uuid,
+        clearance_id: RepoWatchStaleReviewClearanceId,
+        claim_token: RepoWatchStaleReviewClearanceClaimToken,
     ) -> Result<(), RepoWatchStoreError> {
         sqlx::query(
             "DELETE FROM repo_watch_stale_review_clearance_claim
-              WHERE clearance_id = $1",
+              WHERE clearance_id = $1
+                AND claim_token = $2",
         )
-        .bind(clearance_id)
+        .bind(clearance_id.get())
+        .bind(claim_token.get())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1131,11 +1411,15 @@ struct PendingClearanceRow {
     reviewer: String,
     reviewed_head_sha: String,
     dismissal_message: String,
+    reason_kind: String,
 }
 
 fn decode_pending_clearance(
     row: PendingClearanceRow,
+    claim_token: RepoWatchStaleReviewClearanceClaimToken,
 ) -> Result<RepoWatchPlannedStaleReviewClearance, RepoWatchStoreError> {
+    repo_watch_stale_review_clearance_reason_from_str(&row.reason_kind)
+        .ok_or(RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
     let number = positive_u64_from_numeric(row.pull_request_number)
         .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
     let number = pull_request_number(number, "stale review pull request")?;
@@ -1145,9 +1429,7 @@ fn decode_pending_clearance(
         .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
     let base_revision = CommitSha::try_new(row.base_revision)
         .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
-    if row.review_node_id.is_empty()
-        || row.review_node_id.len() > 256
-        || row.review_node_id.contains('\0')
+    if !RepoWatchStaleReviewClearanceCandidate::review_node_id_is_valid(&row.review_node_id)
         || row.dismissal_message.is_empty()
         || row.dismissal_message.len() > 1024
         || row.dismissal_message.contains('\0')
@@ -1162,7 +1444,8 @@ fn decode_pending_clearance(
         return Err(RepoWatchPersistenceCorruption::InvalidStoredDomainValue.into());
     }
     Ok(RepoWatchPlannedStaleReviewClearance {
-        clearance_id: row.clearance_id,
+        clearance_id: RepoWatchStaleReviewClearanceId::new(row.clearance_id),
+        claim_token,
         number,
         current_head_sha,
         base_branch,
@@ -1244,19 +1527,49 @@ async fn record_current_convergence_identity(
     assessment_id: Uuid,
 ) -> Result<(), RepoWatchStoreError> {
     sqlx::query(
-        "INSERT INTO repo_watch_pull_request_convergence_identity
+        "WITH current AS (
+            SELECT current.assessment_id, current.cursor_generation
+              FROM repo_watch_pull_request_convergence_identity AS current
+             WHERE current.repository = $2
+               AND current.pull_request_number = $4
+             ORDER BY current.cursor_generation DESC, current.recorded_at DESC,
+                      current.identity_id DESC
+             LIMIT 1
+         ), target AS (
+            SELECT head_sha, base_branch, base_revision
+              FROM repo_watch_pull_request_convergence_assessment
+             WHERE assessment_id = $5
+         )
+         INSERT INTO repo_watch_pull_request_convergence_identity
             (identity_id, repository, cursor_generation,
              pull_request_number, assessment_id)
          SELECT $1, $2, $3, $4, $5
-          WHERE (
-                SELECT current.assessment_id
-                  FROM repo_watch_pull_request_convergence_identity AS current
-                 WHERE current.repository = $2
-                   AND current.pull_request_number = $4
-                 ORDER BY current.cursor_generation DESC, current.recorded_at DESC,
-                          current.identity_id DESC
-                 LIMIT 1
-          ) IS DISTINCT FROM $5",
+          WHERE (SELECT assessment_id FROM current) IS DISTINCT FROM $5
+             OR EXISTS (
+                SELECT 1
+                  FROM repo_watch_cursor AS cursor
+                  CROSS JOIN target
+                 WHERE cursor.repository = $2
+                   AND cursor.generation > COALESCE(
+                        (SELECT cursor_generation FROM current), 0
+                   )
+                   AND cursor.generation < $3
+                   AND NOT EXISTS (
+                        SELECT 1
+                          FROM jsonb_array_elements(
+                                cursor.cursor_payload -> 'state' -> 'pull_requests'
+                               ) AS pull_request
+                          JOIN LATERAL jsonb_array_elements(
+                                cursor.cursor_payload -> 'state' -> 'branch_heads'
+                               ) AS base_head ON
+                                base_head ->> 'branch' =
+                                    pull_request ->> 'base_branch'
+                         WHERE (pull_request ->> 'number')::numeric = $4
+                           AND pull_request ->> 'head_sha' = target.head_sha
+                           AND pull_request ->> 'base_branch' = target.base_branch
+                           AND base_head ->> 'head' = target.base_revision
+                   )
+             )",
     )
     .bind(Uuid::now_v7())
     .bind(repository.as_str())
@@ -1304,27 +1617,137 @@ async fn exact_replay(
     let stored =
         load_generation_events_in_transaction(transaction, repository, expected_replay_generation)
             .await?;
-    if stored == request.events() {
+    // A commit coalesces occurrences already durable when it runs, so the replayed
+    // generation holds the requested batch minus those. Comparing against the raw
+    // request would read a coalesced replay as a conflict.
+    let coalesced = durable_occurrences(
+        transaction,
+        repository,
+        request.events(),
+        Some(expected_replay_generation),
+    )
+    .await?;
+    let expected = request
+        .events()
+        .iter()
+        .filter(|occurrence| is_new_occurrence(&coalesced, occurrence))
+        .collect::<Vec<_>>();
+    // Every requested occurrence is accounted for: one this generation stored is
+    // compared on its whole event value, candidate identity included, while one
+    // it coalesced was just proven durable in an earlier generation under the
+    // same identity and identified content. A coalesced occurrence's own
+    // candidate identity is not compared, because it was never written — the
+    // fact is durable under the identity of the occurrence that first recorded
+    // it, so a fresh candidate has nothing to be checked against.
+    let exact_events = stored.len() == expected.len()
+        && stored.iter().zip(expected).all(|(stored, requested)| {
+            stored.event == *requested.event()
+                && stored.content_identity == requested.content_identity()
+        });
+    if exact_events {
         Ok(Some(replayed))
     } else {
         Ok(None)
     }
 }
 
+/// Whether this occurrence still has to be written.
+///
+/// An occurrence already durable under the same identity *and* the same content
+/// is the one that was recorded before, so writing it again would mint a second
+/// row for a single occurrence. A provider entity that leaves the observation
+/// and returns re-derives exactly that, and before this check the duplicate
+/// aborted the whole cursor-and-event transaction and stalled the repository.
+///
+/// An occurrence whose identity is durable under different content is not that
+/// occurrence. It stays in the batch and the durable unique constraint rejects
+/// it, because a content identity that does not identify its content is the
+/// failure this design exists to prevent.
+fn is_new_occurrence(
+    durable: &HashMap<RepoWatchEventContentIdentityV1, RepoWatchEvent>,
+    occurrence: &RepoWatchEventOccurrenceV1,
+) -> bool {
+    match durable.get(&occurrence.content_identity()) {
+        Some(stored) => !is_same_occurrence(stored, occurrence.event()),
+        None => true,
+    }
+}
+
+/// Whether two events already known to share a content identity agree on the
+/// content that identity is derived from.
+///
+/// Only ever asked after a lookup by content identity, which is the precondition
+/// that makes the answer meaningful: identified content alone does not separate
+/// two occurrences of one recurring fact, because their sequences do.
+///
+/// Delegated to the application crate, which frames this content with the same
+/// function the identity is computed over. Comparing whole events here instead
+/// would let storage disagree with the identity it is coalescing on — a workflow
+/// renamed while its run was out of the observation restates its identity but
+/// not its display name, and the disagreement would abort the commit on the
+/// durable unique constraint.
+fn is_same_occurrence(stored: &RepoWatchEvent, derived: &RepoWatchEvent) -> bool {
+    repo_watch_events_have_equal_identified_content(stored, derived)
+}
+
+/// The already-durable occurrences among these, by content identity.
+///
+/// `before` bounds the search to generations earlier than the given one, which
+/// is how replay detection reconstructs the batch a past commit would have
+/// stored rather than reading a coalesced replay as a conflict.
+async fn durable_occurrences(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &RepositorySlug,
+    events: &[RepoWatchEventOccurrenceV1],
+    before: Option<RepoWatchCursorGeneration>,
+) -> Result<HashMap<RepoWatchEventContentIdentityV1, RepoWatchEvent>, RepoWatchStoreError> {
+    if events.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let requested = events
+        .iter()
+        .map(|occurrence| occurrence.content_identity().as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query_as::<_, EventRow>(EVENT_BY_CONTENT_IDENTITY_SQL)
+        .bind(repository.as_str())
+        .bind(EVENT_CONTENT_IDENTITY_VERSION_V1)
+        .bind(&requested)
+        .bind(before.map(generation_to_i64))
+        .fetch_all(&mut **transaction)
+        .await?;
+    let mut durable = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let bytes: [u8; 32] = row.content_identity.as_slice().try_into().map_err(|_| {
+            RepoWatchStoreError::from(RepoWatchPersistenceCorruption::InvalidEventContentIdentity)
+        })?;
+        let identity = RepoWatchEventContentIdentityV1::from_bytes(bytes);
+        let positioned = decode_positioned_event(repository, row)?;
+        durable.insert(identity, positioned.event);
+    }
+    Ok(durable)
+}
+
 fn validate_event_batch(
     repository: &RepositorySlug,
-    events: &[RepoWatchEvent],
+    events: &[RepoWatchEventOccurrenceV1],
 ) -> Result<(), RepoWatchStoreError> {
     if events.len() > i32::MAX as usize {
         return Err(RepoWatchStoreError::EventBatchTooLarge);
     }
     let mut identities = HashSet::with_capacity(events.len());
-    for event in events {
+    let mut content_identities = HashSet::with_capacity(events.len());
+    for occurrence in events {
+        let event = occurrence.event();
         if event.repository() != repository {
             return Err(RepoWatchStoreError::EventRepositoryMismatch);
         }
         if !identities.insert(event.id()) {
             return Err(RepoWatchStoreError::DuplicateEventIdentity(event.id()));
+        }
+        if !content_identities.insert(occurrence.content_identity()) {
+            return Err(RepoWatchStoreError::DuplicateEventContentIdentity(
+                occurrence.content_identity(),
+            ));
         }
     }
     Ok(())
@@ -1335,7 +1758,15 @@ fn validate_event_batch(
 struct CursorRecord {
     storage_version: u64,
     signal_reviewers: Vec<String>,
+    event_identity_frontier: Vec<EventIdentityFrontierRecord>,
     state: RepositoryStateRecord,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventIdentityFrontierRecord {
+    stream_identity: [u8; 32],
+    sequence: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1476,6 +1907,14 @@ fn cursor_record(candidate: &RepoWatchCursorCandidate) -> CursorRecord {
             .iter()
             .map(|reviewer| reviewer.as_str().to_owned())
             .collect(),
+        event_identity_frontier: candidate
+            .event_identity_frontier()
+            .entries()
+            .map(|entry| EventIdentityFrontierRecord {
+                stream_identity: *entry.stream_identity(),
+                sequence: entry.sequence().get(),
+            })
+            .collect(),
         state: repository_state_record(candidate.observation().state()),
     }
 }
@@ -1615,9 +2054,27 @@ fn decode_cursor_candidate(value: Value) -> Result<RepoWatchCursorCandidate, Rep
         .into_iter()
         .map(RepoWatchAuthorLogin::try_new)
         .collect::<Result<Vec<_>, _>>()?;
+    let event_identity_frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(
+        record
+            .event_identity_frontier
+            .into_iter()
+            .map(|entry| {
+                NonZeroU64::new(entry.sequence)
+                    .map(|sequence| {
+                        RepoWatchEventIdentityFrontierEntryV1::new(entry.stream_identity, sequence)
+                    })
+                    .ok_or(RepoWatchPersistenceCorruption::InvalidCursorField(
+                        "event_identity_frontier.sequence",
+                    ))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    )
+    .map_err(|_| RepoWatchPersistenceCorruption::InvalidCursorField("event_identity_frontier"))?;
     let state = decode_repository_state(record.state)?;
-    let candidate =
-        RepoWatchCursorCandidate::new(RepoWatchObservation::new(signal_reviewers, state));
+    let candidate = RepoWatchCursorCandidate::with_event_identity_frontier(
+        RepoWatchObservation::new(signal_reviewers, state),
+        event_identity_frontier,
+    );
     let canonical = if legacy_workflow_shape {
         encode_legacy_cursor_candidate(&candidate)?
     } else {
@@ -2037,15 +2494,17 @@ async fn insert_events(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &RepositorySlug,
     generation: RepoWatchCursorGeneration,
-    events: &[RepoWatchEvent],
+    events: &[&RepoWatchEventOccurrenceV1],
 ) -> Result<(), RepoWatchStoreError> {
-    for (index, event) in events.iter().enumerate() {
+    for (index, occurrence) in events.iter().enumerate() {
         let ordinal =
             i32::try_from(index + 1).map_err(|_| RepoWatchStoreError::EventBatchTooLarge)?;
+        let event = occurrence.event();
         let encoded = EncodedEvent::from_event(event);
         sqlx::query(
             "INSERT INTO repo_watch_event (
                 event_id, repository, cursor_generation, event_ordinal, event_version,
+                content_identity_version, content_identity, producer,
                 target_kind, event_kind,
                 pull_request_number, head_sha, head_repository, base_branch,
                 head_branch, title, body, labels, draft, author,
@@ -2059,7 +2518,8 @@ async fn insert_events(
                 $1, $2, $3, $4, $5, $6, $7,
                 $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
                 $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
-                $28, $29, $30, $31, $32, $33, $34, $35, $36
+                $28, $29, $30, $31, $32, $33, $34, $35, $36, $37,
+                $38, $39
              )",
         )
         .bind(encoded.event_id)
@@ -2067,6 +2527,11 @@ async fn insert_events(
         .bind(generation_to_i64(generation))
         .bind(ordinal)
         .bind(encoded.event_version)
+        .bind(EVENT_CONTENT_IDENTITY_VERSION_V1)
+        .bind(occurrence.content_identity().as_bytes().as_slice())
+        .bind(repo_watch_event_producer_to_str(
+            RepoWatchEventProducerStorageKind::Poll,
+        ))
         .bind(encoded.target_kind)
         .bind(encoded.event_kind)
         .bind(encoded.pull_request_number)
@@ -2111,6 +2576,9 @@ struct EventRow {
     cursor_generation: i64,
     event_ordinal: i32,
     event_version: i16,
+    content_identity_version: i16,
+    content_identity: Vec<u8>,
+    producer: String,
     target_kind: String,
     event_kind: String,
     pull_request_number: Option<Decimal>,
@@ -2145,7 +2613,7 @@ struct EventRow {
 }
 
 const EVENT_PAGE_SQL: &str = "SELECT event_id, repository, cursor_generation, event_ordinal,
-        event_version,
+        event_version, content_identity_version, content_identity, producer,
         target_kind, event_kind,
         pull_request_number, head_sha, head_repository, base_branch,
         head_branch, title, body, labels, draft, author,
@@ -2166,7 +2634,7 @@ const EVENT_PAGE_SQL: &str = "SELECT event_id, repository, cursor_generation, ev
   LIMIT $4";
 
 const EVENT_GENERATION_SQL: &str = "SELECT event_id, repository, cursor_generation, event_ordinal,
-        event_version,
+        event_version, content_identity_version, content_identity, producer,
         target_kind, event_kind,
         pull_request_number, head_sha, head_repository, base_branch,
         head_branch, title, body, labels, draft, author,
@@ -2180,8 +2648,25 @@ const EVENT_GENERATION_SQL: &str = "SELECT event_id, repository, cursor_generati
   WHERE repository = $1 AND cursor_generation = $2
   ORDER BY event_ordinal";
 
+const EVENT_BY_CONTENT_IDENTITY_SQL: &str = "SELECT event_id, repository, cursor_generation,
+        event_ordinal, event_version, content_identity_version, content_identity, producer,
+        target_kind, event_kind,
+        pull_request_number, head_sha, head_repository, base_branch,
+        head_branch, title, body, labels, draft, author,
+        previous_sha, current_sha, mergeable_state, checks_outcome,
+        check_run_name, conclusion, workflow_branch, workflow_name,
+        review_reviewer, review_state, review_commit, thread_id,
+        label_name, advanced_branch, reaction_subject_kind,
+        reaction_subject_id, reaction_reactor, reaction_content,
+        reaction_change
+   FROM repo_watch_event
+  WHERE repository = $1
+    AND content_identity_version = $2
+    AND content_identity = ANY($3)
+    AND ($4::bigint IS NULL OR cursor_generation < $4)";
+
 const EVENT_BY_ID_SQL: &str = "SELECT event_id, repository, cursor_generation, event_ordinal,
-        event_version,
+        event_version, content_identity_version, content_identity, producer,
         target_kind, event_kind,
         pull_request_number, head_sha, head_repository, base_branch,
         head_branch, title, body, labels, draft, author,
@@ -2214,15 +2699,37 @@ async fn load_generation_events_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &RepositorySlug,
     generation: RepoWatchCursorGeneration,
-) -> Result<Vec<RepoWatchEvent>, RepoWatchStoreError> {
+) -> Result<Vec<StoredEventOccurrence>, RepoWatchStoreError> {
     let rows = sqlx::query_as::<_, EventRow>(EVENT_GENERATION_SQL)
         .bind(repository.as_str())
         .bind(generation_to_i64(generation))
         .fetch_all(&mut **transaction)
         .await?;
     rows.into_iter()
-        .map(|row| decode_positioned_event(repository, row).map(|positioned| positioned.event))
+        .map(|row| {
+            if row.content_identity_version != EVENT_CONTENT_IDENTITY_VERSION_V1 {
+                return Err(
+                    RepoWatchPersistenceCorruption::UnsupportedEventContentIdentityVersion.into(),
+                );
+            }
+            let bytes: [u8; 32] = row.content_identity.as_slice().try_into().map_err(|_| {
+                RepoWatchStoreError::from(
+                    RepoWatchPersistenceCorruption::InvalidEventContentIdentity,
+                )
+            })?;
+            let content_identity = RepoWatchEventContentIdentityV1::from_bytes(bytes);
+            let positioned = decode_positioned_event(repository, row)?;
+            Ok(StoredEventOccurrence {
+                event: positioned.event,
+                content_identity,
+            })
+        })
         .collect()
+}
+
+struct StoredEventOccurrence {
+    event: RepoWatchEvent,
+    content_identity: RepoWatchEventContentIdentityV1,
 }
 
 fn decode_positioned_event(
@@ -2239,6 +2746,16 @@ fn decode_positioned_event(
         .ok_or(RepoWatchPersistenceCorruption::InvalidEventPosition)?;
     if row.event_version != EVENT_VERSION_V1 {
         return Err(RepoWatchPersistenceCorruption::UnsupportedEventVersion.into());
+    }
+    if row.content_identity_version != EVENT_CONTENT_IDENTITY_VERSION_V1 {
+        return Err(RepoWatchPersistenceCorruption::UnsupportedEventContentIdentityVersion.into());
+    }
+    if row.content_identity.len() != 32 {
+        return Err(RepoWatchPersistenceCorruption::InvalidEventContentIdentity.into());
+    }
+    match repo_watch_event_producer_from_str(&row.producer) {
+        Some(RepoWatchEventProducerStorageKind::Poll) => {}
+        None => return Err(RepoWatchPersistenceCorruption::UnknownEventProducer.into()),
     }
     let target = repo_watch_event_target_from_str(&row.target_kind).ok_or(
         RepoWatchPersistenceCorruption::UnknownEventDiscriminator("target_kind"),

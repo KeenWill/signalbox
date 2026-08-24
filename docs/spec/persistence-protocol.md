@@ -1,7 +1,15 @@
 # Persistence protocol
 
+The durable automatic model-call reconciliation state, attempt history, and
+final-state authority were verified against this PR
+(`agent/turn-lifecycle-hardening`).
+
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
+
+The restore-safety search-path pin on check-reachable functions, and the
+catalogue test holding it, were verified against this PR
+(`agent/restore-safe-check-functions`).
 
 The delegate denial-reason storage — the superseded decision-shape constraint
 and its byte-precise checks — was verified against this PR
@@ -12,7 +20,11 @@ fences were verified against the parent slice (`agent/runner-loss-epoch`).
 Placement-relative lease-offer fencing was verified against the parent slice
 (`agent/runner-loss-propagation`). The bounded runner-loss propagation cursor
 and ordered page read were verified against this PR
-(`agent/runner-loss-session-propagation`).
+(`agent/runner-loss-session-propagation`). The atomic per-session runner-loss
+propagation transaction and cursor completion were verified against this PR
+(`agent/runner-loss-session-transaction`). Daemon paging after terminal loss and
+startup resumption of every pending cursor were verified against this PR
+(`agent/runner-loss-daemon-propagation`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -21,7 +33,9 @@ source check was re-verified against this PR
 (`agent/daemon-runner-health-events`).
 
 The runner-recovery turn-phase representation and read boundary were verified
-against this PR (`agent/runner-awaiting-recovery-persistence`).
+against this PR (`agent/runner-awaiting-recovery-persistence`). The
+recorded-migration immutability rule was verified against this PR
+(`agent/mechanical-cleanup-batch`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -148,8 +162,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — seventy-nine files, `202607180001` through
-`202608140102` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — one hundred two files, `202607180001` through
+`202608210501` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -162,6 +176,35 @@ The fence migration's first installation is the sole case without a prior fenced
 pool, because no earlier schema can have admitted one. Why: checksummed
 forward-only files make every schema change a reviewed, immutable artifact, so a
 deployed database's history is never silently edited.
+
+A migration becomes immutable as soon as its version is recorded in the
+`_sqlx_migrations` table of any database whose history must remain continuous:
+every deployed database, and every recording once the migration's pull request
+merges. Correct an already-recorded migration with a new forward migration;
+never edit, replace, or renumber the recorded migration file. The sole exception
+is a pre-merge recording by a rehearsal installation when the recorded form
+cannot merge — a form that fails validation on fresh databases has no correct
+forward continuation, so the file is corrected before merge and the rehearsal
+installation's ledger row is corrected at its next deployment as a documented
+step, never silently. Why: the rule exists so no database's history is silently
+edited, and a documented rehearsal-ledger correction preserves that while a
+frozen unmergeable file would instead freeze a defect into every future
+installation.
+
+Every function reachable from a table constraint or index expression pins its
+search path in its catalogue definition, rendered through `current_schema` so
+installations whose migrations run outside the default schema keep the
+`202607310102` pattern. `pg_restore` replays a logical backup under an empty
+search path and evaluates check constraints while copying table data, so an
+unpinned body that names another user function unqualified resolves in normal
+operation and fails only during restore; `202608200001` retrofits the pin onto
+the check-reachable set the earlier migrations create, and the
+`search_path_postgres` catalogue test (INV-070) derives the reachable set from
+the dependency catalogue — including functions reached only through a
+user-defined operator — and fails on any unpinned member or on empty discovery,
+so a future migration cannot reintroduce the gap. Why: a backup that cannot
+restore is a silent failure that surfaces only during recovery, so restorability
+is part of the schema's contract rather than an operational afterthought.
 
 Prefix reservation across concurrent stacks: the bottom pull request of any
 stack that will add migrations declares a reserved prefix block — a date plus a
@@ -181,6 +224,32 @@ prefix and churn-renumber each time a sibling merges.
 Container-backed integration tests (`postgres-integration` feature, ignored by
 default, failing loudly when Docker is absent) exercise the real constraints,
 triggers, locks, and races described below against a pinned Postgres image.
+
+Migration `202608210400_convergence_sweep.sql` uses the reserved `2026082104xx`
+block to add the mutable `convergence_sweep_target` scheduler projection, the
+append-only `convergence_sweep_event` audit, and the
+`convergence_sweep_parked_target` operator view. Closed checks bind retry and
+park shapes to the five-attempt `convergence_sweep_retry_budget()` ceiling, bind
+each provider, commission, template, or state-access failure outcome to its
+typed cause and operator need, and prevent partial command-fence or
+commissioned-dispatch identities. Observation projections are decoded as
+complete pairs by the persistence adapter. The function pins the restore-safe
+schema search path. The cross-component behavior using these records is owned by
+[pull-request convergence reconciliation](convergence-reconciliation.md). The
+pull-request target and model-activity advisory fences described in the lock
+inventory below are verified against this PR (`agent/daemon-convergence-sweep`).
+Migration `202608210402_repo_watch_pull_request_target_indexes.sql` indexes the
+repository-watch event-to-action path used to census sessions by pull-request
+target. Migration `202608210403_convergence_sweep_parked_session.sql` projects
+the exact inactive census dispatch and session through the parked-target
+operator view, including repository-watch sessions not dispatched by the sweep.
+Migration `202608210404_convergence_sweep_immutable_parked_session.sql` persists
+that selected identity and timestamp in the guarded parking transition, so later
+censuses cannot change the operator-visible parked session. Its two check
+constraints are validated rather than declared `NOT VALID`: the whole
+`202608210400`–`202608210404` block lands together, so no database has held an
+inactivity park without those columns, and the schema asserts unconditionally
+that every such park carries an operator-visible dispatch identity.
 
 ## Relational representation
 
@@ -338,6 +407,18 @@ Representation rules, all enforced in the schema:
   `without_stop` and `after_cancellation`, and model-call state
   `prepared`/`in_flight`/`cancellation_requested`/`terminal` with terminal
   dispositions `completed`/`known_failed`/`refused`/`cancelled`/`ambiguous`.
+- Migration `202608210500` adds one current
+  `automatic_model_call_reconciliation` row per discovered model-call recovery
+  wait and typed attempt-history rows keyed by one-based ordinal. Current state
+  is `scheduled`, `attempting`, `reconciled`, `superseded`, or `exhausted`;
+  attempt outcome is `attempting`, `reconciled`, `superseded`,
+  `infrastructure_failure`, or `integrity_failure`. Checks close the
+  five-attempt budget, require a completion timestamp exactly for terminal
+  attempt outcomes, and require an exhaustion timestamp exactly for exhausted
+  current state. The same migration widens the reconciliation-required
+  final-state assertion only for an exact `reconciled` row binding that terminal
+  turn, session, and ambiguous model call; every frontier, attempt, call, and
+  outbox proof remains required.
 - Migration `202608080100` closes runner placement history over
   `runner_lost_before_pin`, `pre_pin_replaced`, sourced `runner_lost`, and
   `abandoned` records. Each event retains the complete facts required by its
@@ -348,10 +429,15 @@ Representation rules, all enforced in the schema:
   predecessor instead of inferring history from a revision. The generic
   placement snapshot writer refuses loss, either replacement, and abandonment
   because those transitions require connection/loss, durable-command, scheduler,
-  and outbox authority outside the placement aggregate. **Committed
-  unimplemented functionality.** No present adapter installs those transitions;
-  their dedicated orchestration transactions will install these same checked
-  records, and direct snapshot storage cannot stand in for those transactions.
+  and outbox authority outside the placement aggregate. The connection-loss
+  propagation adapter installs only loss transitions under those authorities;
+  replacement and abandonment remain **committed unimplemented functionality**
+  for their dedicated orchestration transactions. Direct snapshot storage cannot
+  stand in for any of those transactions. `RunnerReplacementTestProjection` and
+  `store_runner_replacement_projection_for_test` are compiled only with
+  `postgres-integration` for integration-test round trips; they are not
+  production authority-bearing adapters. The generic production placement writer
+  rejects `runner_replaced`.
 - Migration `202608110005` records the connection-loss epoch observed when each
   placement selects a known enrollment and carries that baseline through later
   loss or abandonment records. The value is derived while holding scheduler,
@@ -362,8 +448,8 @@ Representation rules, all enforced in the schema:
   reconnecting. Lease insertion compares its pinned placement with the
   enrollment's latest loss and remains fenced across successor physical
   connections until a checked replacement installs a fresh baseline. This is the
-  implemented not-yet-projected placement fence; bounded session propagation
-  remains the committed unimplemented transaction described below.
+  implemented placement fence consumed by the bounded session-propagation
+  transaction described below.
 - Migration `202608110006` gives every new durable connection-loss epoch a
   pending propagation cursor in the same transaction. Migration backfill marks a
   loss completed only when no affected current placement remains: losses already
@@ -376,14 +462,20 @@ Representation rules, all enforced in the schema:
   later loss for its selected runner despite having no enrollment baseline; the
   page and both cursor guards associate it through the runner identity. Cursor
   advancement is monotonic, cannot pass an affected current placement, and
-  cannot complete while one remains. Enrollment insertion, exact-identity
-  placement baseline derivation, and cursor completion share a transaction-level
-  runner-identity fence. An insertion that observes enrollment absence therefore
-  becomes visible before that enrollment can create and complete a loss cursor;
-  a completion that wins the fence becomes visible before a later insertion
-  derives its baseline. The cursor and ordered page are implemented; the
-  per-session transaction that changes placement, lease, turn, release, and
-  runner-event state remains the committed unimplemented propagation step below.
+  cannot complete while one remains. A per-session transaction locks the
+  scheduler, authenticates the exact loss and cursor, then atomically changes
+  placement, any current lease and physical attempt, an active runner-boundary
+  turn, the runner-state outbox, and the cursor. An offered lease records no
+  execution; a claimed pure or idempotent lease remains retryable in flight; a
+  claimed side-effecting lease becomes terminal ambiguous. A separate checked
+  operation completes an exhausted cursor. After an applied terminal connection
+  transition or an exact replay of its current lost state, the daemon pages
+  every pending loss, invokes the per-session transaction in page order, and
+  completes each exhausted cursor. Startup performs the same scan after marking
+  prior-process nonterminal connections lost, so a crash after the short loss
+  transaction cannot strand session projection. **Committed unimplemented
+  functionality.** No present daemon transaction retires an unacknowledged
+  workspace release.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -482,24 +574,23 @@ Representation rules, all enforced in the schema:
   reclassifies the ambiguity. Without this shape the loss transaction has
   nowhere to store the phase and restart cannot rebuild it. The same migration
   adds the optional interrupted-attempt fact to the exact placement-loss record,
-  and the runner persistence read boundary round-trips both nullable arms.
-  **Committed unimplemented functionality.** No present adapter produces the
-  phase: the dedicated runner-loss propagation transaction will install it under
-  the lock order below. Independently of that future writer, a present
-  interrupted-attempt fact on the placement-loss record is admitted only for one
-  of two exact lease-derived shapes: an in-flight retryable attempt whose loss
-  proves no execution or whose pure/idempotent effect permits successor
-  reissuance, or a terminal ambiguous side-effecting attempt whose execution may
-  have occurred. Both carry physical runner-lease lineage to the record's exact
-  lost runner and placement revision, and the same active runner-recovery
-  tool-round boundary names the attempt. Stopping the wait retires retryable
-  authority before releasing the active slot. The claimed-retry reservation
-  writer takes that same scheduler lock and rechecks that the exact
-  lease-derived source attempt remains in flight, so stale authority loaded
-  before the stop cannot be reserved afterward. No-execution and pure work
-  become known crash loss and cancel, while execution-possible idempotent work
-  becomes ambiguous and requires reconciliation. A same-session foreign or older
-  same-placement attempt therefore cannot survive placement readback.
+  and the runner persistence read boundary round-trips both nullable arms. The
+  runner-loss propagation transaction produces this phase under the lock order
+  below. Independently of that writer, a present interrupted-attempt fact on the
+  placement-loss record is admitted only for one of two exact lease-derived
+  shapes: an in-flight retryable attempt whose loss proves no execution or whose
+  pure/idempotent effect permits successor reissuance, or a terminal ambiguous
+  side-effecting attempt whose execution may have occurred. Both carry physical
+  runner-lease lineage to the record's exact lost runner and placement revision,
+  and the same active runner-recovery tool-round boundary names the attempt.
+  Stopping the wait retires retryable authority before releasing the active
+  slot. The claimed-retry reservation writer takes that same scheduler lock and
+  rechecks that the exact lease-derived source attempt remains in flight, so
+  stale authority loaded before the stop cannot be reserved afterward.
+  No-execution and pure work become known crash loss and cancel, while
+  execution-possible idempotent work becomes ambiguous and requires
+  reconciliation. A same-session foreign or older same-placement attempt
+  therefore cannot survive placement readback.
 - The same slice adds the closed `runner_placement_changed` semantic-entry
   payload: one positive placement revision, total only for that kind, with a
   foreign key to the same session's placement record at exactly that revision.
@@ -766,27 +857,33 @@ Locks per transaction, in acquisition order:
   `turn_lifecycle` row `FOR UPDATE` at commit time, inside the deferred
   source-turn trigger.
 
-- **Goal commands and transitions**: an unseen user command first claims the
-  user-global registry, then every user, model, scheduler, and continuation
-  transaction locks the session row `FOR NO KEY UPDATE` before reading the event
-  stream. An applied user transition next locks `session_scheduler` `FOR UPDATE`
-  before recording its receipt or event, so stop and queued-turn activation
-  share one serialization point. Deferred provenance correlation first
-  reacquires the session-row lock before checking the current goal turn and, for
-  scheduler failure, holds the named lifecycle row `FOR SHARE` while checking
-  its unsuccessful terminal disposition. The continuity trigger reacquires the
-  session-row lock before validating the predecessor. Pursuing user transitions
-  then read current defaults and insert their queued goal turn; rejected
-  commands commit without firing the trigger, and exact user-command replay
-  takes no row lock.
+- **Goal commands and transitions**: a pursuit-starting command for a
+  pull-request-commissioned session first takes the transaction-scoped
+  pull-request target advisory lock and checks for a competing live session. An
+  unseen command then claims the user-global registry, and every user, model,
+  scheduler, and continuation transaction locks the session row
+  `FOR NO KEY UPDATE` before reading the event stream. An applied user
+  transition next locks `session_scheduler` `FOR UPDATE` before recording its
+  receipt or event, so stop and queued-turn activation share one serialization
+  point. Deferred provenance correlation first reacquires the session-row lock
+  before checking the current goal turn and, for scheduler failure, holds the
+  named lifecycle row `FOR SHARE` while checking its unsuccessful terminal
+  disposition. The continuity trigger reacquires the session-row lock before
+  validating the predecessor. Pursuing user transitions then read current
+  defaults and insert their queued goal turn; rejected commands commit without
+  firing the trigger, and exact user-command replay takes no row lock.
 
 - **StartEligibleTurn** and nonterminal **model-call execution transactions**
-  (prepare and authorize): the `session_scheduler` row `FOR UPDATE` is the only
-  explicit lock (session existence is checked with a bare `EXISTS`). The session
-  row is locked only `KEY SHARE`, implicitly, by the inserts' foreign keys, and
-  the candidate `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
-  Terminal observation commit and reread, restart recovery, startup recovery,
-  and submit-input interruption first discover whether the target is a delegated
+  (prepare and authorize): first model-call insertion first takes the
+  transaction-scoped model-activity advisory lock keyed by session; inactivity
+  parking takes the pull-request target advisory lock and then that same
+  model-activity lock before rechecking activity. The `session_scheduler` row
+  `FOR UPDATE` remains the execution transaction's explicit row lock (session
+  existence is checked with a bare `EXISTS`). The session row is locked only
+  `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
+  `turn_lifecycle` row is locked by the guarded `UPDATE` itself. Terminal
+  observation commit and reread, restart recovery, startup recovery, and
+  submit-input interruption first discover whether the target is a delegated
   child. When it is, they lock the immutable parent/child session pair
   `FOR NO KEY UPDATE` in canonical session-ID order before taking the child
   scheduler lock. This is the shared prefix for any path that can record a child
@@ -839,6 +936,48 @@ Locks per transaction, in acquisition order:
   capacity-, or cursor-row lock; take an action-head lock while holding a
   capacity-row or cursor-row lock; or take a capacity-row lock while holding a
   cursor-row lock.
+
+- **Automatic model-call reconciliation**: `claim_due` first locks the singleton
+  discovery-cursor row `FOR UPDATE` and retains it through discovery,
+  normalization, supersession maintenance, and claiming. Discovery may insert
+  recovery rows after that cursor lock. Each discovery lap fixes its highest
+  eligible turn identity before paging, then wraps after reaching that bound, so
+  a turn that becomes eligible behind the cursor is reached on the next lap.
+  Runtime-terminal delegated turns are excluded and superseded.
+  Abandoned-attempt settlement examines and updates at most 64 due
+  recovery/attempt pairs from one materialized page. Supersession maintenance
+  later locks its own singleton cursor row `FOR UPDATE`, then examines and
+  updates at most 64 recovery rows from one materialized keyset page. Each
+  supersession lap likewise fixes its highest pending recovery identity before
+  paging and wraps after reaching that bound. The bound carries weight here that
+  it does not for discovery: a recovery becomes superseded by a `turn_lifecycle`
+  change rather than by anything this statement writes, so a row the cursor has
+  already passed can acquire that disposition afterwards and must be reinspected
+  — and a lap whose pages a steady arrival rate keeps full would never wrap to
+  reach it. A recovery below the lap's bound is paged on the state it holds when
+  that page is read, so a disposition acquired mid-lap is still seen. Exhaustion
+  parks at most 64 `scheduled` recoveries that spent the whole attempt budget
+  and whose turn still holds the exact matching `awaiting_model_call_recovery`
+  wait; a recovery whose turn no longer holds that wait is left for supersession
+  rather than parked, because an exhaustion park raises an operator alert that
+  cannot be retracted. Rows over the window are reached by the next scan, since
+  every row this statement selects is also written. `attempting` recoveries are
+  never exhausted directly: settlement returns them to `scheduled` first, which
+  is what closes their attempt-history row. Claiming finally locks at most 64
+  due recovery rows `FOR UPDATE SKIP LOCKED`, increments their durable attempt
+  ordinal, sets the exact backoff deadline, and inserts the attempt rows in the
+  same transaction. The attempt budget and the retry ladder claiming applies are
+  bound from the domain attempt type, not written into the statement. No
+  reconciliation path may acquire either cursor row while holding a recovery-row
+  lock in the reverse of this order. Applying a claim first performs the
+  immutable delegated-parent lookup. When the claimed session is a delegated
+  child, it locks the parent/child endpoint session rows `FOR NO KEY UPDATE` in
+  ascending session-identity order; it then takes the child's
+  `session_scheduler` row `FOR UPDATE`, reconstitutes the complete scheduling
+  projection, and uses the existing reconciliation-required write transaction. A
+  nondelegated claim takes only the scheduler lock. Operator reconciliation uses
+  the same endpoint-before-scheduler prefix, so automatic reconciliation never
+  introduces the reverse child-scheduler-to-parent-session order.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
@@ -1010,11 +1149,12 @@ Locks per transaction, in acquisition order:
   its own transaction by locking `session_scheduler` first, then the loss head,
   placement, current lease, and guarded turn rows. Offered leases with no
   durable claim acquire exact no-execution proof; claimed leases follow effect
-  loss law. That same session transaction retires any unacknowledged release the
-  lost connection still owed, since no successor inherits authority to complete
-  it. A crash resumes at the first uncommitted session, while every
-  not-yet-projected placement is already effectively lost through the epoch
-  fence.
+  loss law. Retirement of any unacknowledged release the lost connection still
+  owed remains a daemon-orchestration responsibility outside this persistence
+  transaction; this adapter commits the session projection and advances its
+  cursor without retiring that release. A crash resumes at the first uncommitted
+  session, while every not-yet-projected placement is already effectively lost
+  through the epoch fence.
 
 - **Runner replace, abandon, and release**: an unseen abandonment command owns
   its durable-command claim and terminalizes in one transaction. An unseen
@@ -1217,6 +1357,18 @@ the active lifecycle terminalizes `reconciliation_required` with an
 equal-content frontier and typed outbox record. The reconciliation marker and
 accepted successor carry the exact interrupt proof. The attempt trigger rejects
 every update to an ended attempt.
+
+The periodic daemon also discovers an unstopped model-call wait without an
+interrupt into the automatic reconciliation tables. A claimed attempt records
+its ordinal before the terminal transaction. Under the scheduler lock, the
+adapter reconstitutes the same exact ambiguous call and ended attempt, derives
+fresh frontier and pending-steering reclassification identities, and persists
+the existing `reconciliation_required` lifecycle and outbox shapes. The
+`reconciled` recovery row is the typed authority admitted by the deferred
+final-state assertion when no applied interrupt exists. It asserts nothing about
+the provider's outcome; the terminal call remains `ambiguous`. A lost daemon
+leaves `attempting` durable, which a later claim pass classifies as
+`infrastructure_failure` after its deadline before retrying.
 
 ## Corruption taxonomy
 
@@ -1972,6 +2124,11 @@ surface provides it.
 
 ## Open edges
 
+- [Graded approval judging](../open-questions.md#graded-approval-judging) owns
+  the unresolved graded fields in the durable audit shape for approval-judge
+  calls and decisions. The existing
+  [goal-mode compatibility constraint](goal-mode.md#compatibility-constraints)
+  owns retention of both the provider-offered and repository-committed outcomes.
 - Deferred outbox retention, pruning, and multiple-daemon fan-out are cataloged
   in [open questions](../open-questions.md#protocols-and-persistence).
 - Attempt continuation is presently admitted only for the tool-loop

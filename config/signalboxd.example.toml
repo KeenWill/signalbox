@@ -16,6 +16,13 @@
 # requires, up to but never above the model's cap.
 version = 1
 
+# Omit this table for the fixed baseline of 16 concurrent per-session scheduler
+# passes. A smaller deployment override keeps provider and tool work bounded
+# when many durable sessions become eligible together. Zero keeps ingestion
+# and process services live while pausing authoritative session execution.
+# [scheduler]
+# max_in_flight_passes = 4
+
 # Blob bytes live outside PostgreSQL. Each deployment generates and then keeps
 # one namespace UUID per physical store. Both directories must already exist,
 # be owned by the daemon user, and have exact mode 0700.
@@ -302,21 +309,43 @@ allowed_origins = [
   "https://github.com",
 ]
 
-# Optional repository-watch polling. Each repository has its own least-scope
-# credential file; it is reread for each request and is never shared with the
-# general GitHub tool credential. The first poll after startup is unconditional;
-# later polls use process-local ETags for unchanged resources.
+# Optional repository-watch polling and shadow-mode webhook intake. Each
+# repository has its own least-scope polling credential; it is reread for each
+# request and is never shared with the general GitHub tool credential. Omitting
+# the webhook table and per-repository hook fields disables webhook intake. The
+# reference deployment exposes public /github/webhooks with Tailscale Funnel
+# --set-path, which strips that prefix and forwards local path / to this listener.
 # [repository_watch]
 # version = 1
 # signal_reviewers = ["signal-reviewer", "review-bot[bot]"]
+#
+# The sweep remains disabled unless this policy and at least one repository's
+# explicit pull-request list are both present. Deployments may lower, never
+# raise, the five-minute census and thirty-minute cool-off ceilings.
+# [repository_watch.convergence_sweep]
+# template = "review-response"
+# interval_seconds = 300
+# cool_off_seconds = 1800
+#
+# [repository_watch.webhook]
+# bind_address = "127.0.0.1:3333"
+# path = "/"
 #
 # [[repository_watch.repositories]]
 # repository = "namespace/project"
 # poll_interval_seconds = 60
 # credential_file = "/run/credentials/repository-watch-namespace-project"
+# convergence_pull_requests = [892]
+# webhook_hook_id = 123456789
+# webhook_secret_file = "/etc/signalbox/github-webhook-secret"
 #
 # [[repository_watch.rules]]
 # id = "merge-forward-on-base-advance"
+# Increment this revision whenever matcher, actions, singleton_per, or cooldown
+# changes. Keeping the ID preserves history; startup retires the old revision
+# and activates the new one after the current event tail.
+# The schema upgrade that introduced rule fingerprints retires every existing
+# revision, so increment each configured rule's version once on the first boot.
 # version = 1
 # singleton_per = "pull_request"
 # cooldown_seconds = 0
@@ -409,7 +438,7 @@ target_id = "c74d2c41-8c70-4537-ab5d-7bbeac25562a"
 model_family = "anthropic"
 provider_model = "claude-fable-5"
 max_output_tokens = 8192
-context_window_tokens = 200000
+context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 service_tiers = ["auto", "standard_only"]
 # Rates are decimal USD strings per million tokens. Declare the complete
@@ -427,7 +456,7 @@ target_id = "cce0f90e-8420-4894-8850-eaf262e7c82a"
 model_family = "anthropic"
 provider_model = "claude-opus-5"
 max_output_tokens = 8192
-context_window_tokens = 200000
+context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 fast_mode = "request_control"
 service_tiers = ["auto", "standard_only"]
@@ -439,7 +468,7 @@ target_id = "ef1a6d7b-07dd-47ab-ac9b-321c8baa9b14"
 model_family = "anthropic"
 provider_model = "claude-opus-4-8"
 max_output_tokens = 8192
-context_window_tokens = 200000
+context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 fast_mode = "request_control"
 service_tiers = ["auto", "standard_only"]
@@ -451,7 +480,7 @@ target_id = "06e3f786-fb7d-4d03-842f-38091a01f094"
 model_family = "anthropic"
 provider_model = "claude-opus-4-7"
 max_output_tokens = 8192
-context_window_tokens = 200000
+context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 service_tiers = ["auto", "standard_only"]
 
@@ -462,7 +491,7 @@ target_id = "ff1c508a-f0a8-4a60-bc41-8cb956486bc6"
 model_family = "anthropic"
 provider_model = "claude-opus-4-6"
 max_output_tokens = 8192
-context_window_tokens = 200000
+context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "max"]
 service_tiers = ["auto", "standard_only"]
 
@@ -473,7 +502,7 @@ target_id = "86a42a25-e050-4d38-b45b-fb3a13ae72f9"
 model_family = "anthropic"
 provider_model = "claude-sonnet-5"
 max_output_tokens = 8192
-context_window_tokens = 200000
+context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 service_tiers = ["auto", "standard_only"]
 
@@ -484,7 +513,7 @@ target_id = "c1bd20ea-c5f4-407a-922f-206d6f3e02be"
 model_family = "anthropic"
 provider_model = "claude-sonnet-4-6"
 max_output_tokens = 8192
-context_window_tokens = 200000
+context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "max"]
 service_tiers = ["auto", "standard_only"]
 
@@ -645,6 +674,19 @@ service_tiers = ["auto", "standard_only"]
 # reasoning_levels = ["none", "low", "medium", "high"]
 # fast_mode = "request_control"
 # service_tiers = ["auto", "default", "flex", "fast"]
+
+# [[models]]
+# # Hard cap: 128000. The model page confirms reasoning support without
+# # enumerating levels, so this row declares the three baseline family levels.
+# # The pricing page does not list this model under the fast tier.
+# selection_id = "68c17f28-dba5-4d02-a3ed-d7336d160136"
+# target_id = "3fa4c948-3df3-4002-8429-73f2550807e9"
+# model_family = "openai"
+# provider_model = "gpt-5-nano"
+# max_output_tokens = 8192
+# context_window_tokens = 400000
+# reasoning_levels = ["low", "medium", "high"]
+# service_tiers = ["auto", "default", "flex"]
 
 # [[models]]
 # # A model with no reasoning control, so the row declares no levels. Hard

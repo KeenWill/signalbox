@@ -202,6 +202,7 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         ClientRequest::ImportConversation { .. } => true,
         ClientRequest::CreateSession { .. }
         | ClientRequest::CreateSessionFromTemplate { .. }
+        | ClientRequest::CommissionSession { .. }
         | ClientRequest::ListTemplates {}
         | ClientRequest::ListSessions {}
         | ClientRequest::ReadOperatorStatus {}
@@ -260,7 +261,8 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         | ClientRequest::RecordReviewPublicationOutcomes { .. }
         | ClientRequest::ReadReviewOrchestration { .. }
         | ClientRequest::StopTurn { .. }
-        | ClientRequest::DecideToolRequest { .. } => false,
+        | ClientRequest::DecideToolRequest { .. }
+        | ClientRequest::OverrideDeniedToolRequest { .. } => false,
     }
 }
 

@@ -44,6 +44,56 @@ specification diff. Accepted cross-component and wire contracts live in the
 
 ## Model-input projection
 
+### Graded approval judging
+
+Whether execution-approval judging should replace its direct recommendation with
+separate risk and brief-alignment grades remains undecided. Any such change must
+define the grade contract, trusted outcome derivation, remaining input evidence,
+durable audit shape, graded wire and projection data, evaluation method, and
+shadow-to-live promotion path in an owner-accepted specification and
+implementing stack. Safety ceilings remain owned by
+[Additional high-risk guardrails](#tool-safety), while parent-supplied task and
+authority evidence remains owned by
+[Turn-origin instructions in the approval-judge request](#tool-safety). The
+interactive prompting and later client-form choices remain owned by
+[Client approval presentation](#client-scope). The following related questions
+also require owner rulings:
+
+- **Corpus governance.** Approval corpora follow the identity, admitted storage
+  forms, digest, and cross-storage reproducibility contract owned by
+  [evaluation system](spec/eval-system.md#corpus-and-expectations). Which
+  admitted storage form this corpus uses remains undecided, together with
+  access, redaction, retention, and deletion rules.
+
+- **Promotion bounds.** The maximum false-allow rate, minimum acceptable
+  improvement, minimum labeled case count, required slices, and statistical
+  treatment for promotion from shadow to live graded authority remain open. A
+  promotion comparison must define each metric's denominator and its treatment
+  of parks, failed calls, and repeated trials.
+
+- **Label semantics.** Whether an ordinary user allow or deny is the final
+  quality label, or evaluation needs a separate “judge correct” ruling and an
+  approval rationale, remains open. Execution rulings are observations rather
+  than correctness labels until this is decided.
+
+- **Unparked sampling.** Whether and how operators may provide post-hoc labels
+  for automatically allowed or denied requests remains open. Without it, the
+  recorded corpus is selected toward parked requests and cannot support
+  whole-population promotion claims.
+
+- **Shadow budget.** The graded shadow sampling fraction for production shadow
+  traffic remains open. Provider-cost ceilings and concurrency remain owned by
+  [First-release resource limits](#identity-credentials-and-resource-governance).
+  Retention and deletion of observations admitted to the approval corpus remain
+  owned by Corpus governance above.
+
+- **Configuration actor audit.** If trusted outcome derivation introduces
+  mutable threshold configuration, whether source-control and deployment audit
+  are sufficient provenance for changes to it, or Signalbox needs an
+  authenticated configuration-change command, remains open.
+
+### Further projection and summarization
+
 - **Projection and summarization beyond the implemented role mappings.**
   [Model-call execution](spec/model-call-execution.md) owns the implemented
   model-input projections; [conversation-import](spec/conversation-import.md)
@@ -95,13 +145,59 @@ specification diff. Accepted cross-component and wire contracts live in the
   own proof and disposition rules. Later scope. (S07)
 - **Ambiguous provider-call recovery.** A restart-recovered unstopped in-flight
   call parks its turn in the awaiting-recovery wait
-  ([model-call-execution](spec/model-call-execution.md)). A user decision now
-  releases the slot by terminalizing the turn over that exact ambiguity
-  ([process-protocol](spec/process-protocol.md)), but nothing resolves what the
-  provider actually did. The retired design analysis identified adopting a
-  provider request-status API — with its polling posture and evidence classes —
-  as the resolution path; the full analysis is in git history. Later scope.
-  (S02)
+  ([model-call-execution](spec/model-call-execution.md)). The daemon now spends
+  a bounded durable reconciliation budget and automatically releases the slot by
+  terminalizing over that exact ambiguity; an operator decision may win the same
+  race and becomes required only when the budget exhausts
+  ([process-protocol](spec/process-protocol.md)). Neither treatment resolves
+  what the provider actually did. Whether a provider request-status API can
+  replace the conservative ambiguous outcome with trustworthy evidence,
+  including its polling posture and evidence classes, remains undecided. Later
+  scope. (S02)
+- **Operator control of scheduling and liveness cadence.** The scheduler's sweep
+  interval, per-session scan gating, fairness between contending sessions, and
+  the turn-liveness staleness bound and scan interval are all compiled constants
+  today
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)), and
+  almost none of them has anywhere to validate a supplied value. Only the
+  turn-liveness staleness bound has a lowering constructor that enforces its
+  compiled ceiling; the sweep interval's constructor refuses a zero or
+  unrepresentable duration and no more, so it fixes no maximum; and the scan
+  interval, per-session scan gating, and fairness expose no constructor at all.
+  The enforcement points for a configuration surface would therefore have to be
+  built rather than merely called. Undecided with them: whether signalboxd
+  should carry such settings at all; whether they arrive as one operational
+  surface or one constant at a time; and, for each, whether its compiled value
+  is a ceiling that may only be lowered or an ordinary default that may move
+  either way — settled so far only for the staleness bound. Leaning: one
+  surface, introduced when a deployment needs a value the compiled one cannot
+  serve, rather than pre-emptively. Later scope. (S01, S02)
+- **Terminalizing a turn that holds pending steering.** Every steering row bound
+  to a turn must be closed before that turn terminalizes, and the interrupt and
+  model-call terminal paths satisfy that by reclassifying the steering into a
+  queued successor origin
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)). The
+  failed-turn transition that startup recovery and the liveness watchdog share
+  performs no such reclassification and refuses outright, so a turn that wedges
+  and is then steered can be observed and reported but not ended — the one wedge
+  a user is actively trying to reach. Whether that transition should gain the
+  reclassification, and whether both its callers want it, is undecided: the
+  change is to a transition two components depend on, and startup recovery
+  reaching the same refusal has meant corrupt durable state rather than an
+  ordinary shape. Leaning: give the transition the reclassification the other
+  terminal paths already perform, since the constraint forcing it is a lifecycle
+  rule rather than a property of how the turn ended. Later scope. (S02, S07)
+- **Durable terminal cause for a failed turn.** The turn-liveness watchdog and
+  startup recovery commit the identical failed-turn transition
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)),
+  which is what keeps every terminal trigger firing for both, but the
+  `TurnFailed` shape carries no cause column — so the two are distinguishable
+  only in the operator log, and only while it is retained. Whether a terminal
+  turn should carry a stored cause, and whether that vocabulary is shared with
+  the operator cause codes or separate from them, is undecided; adding one is a
+  migration on a table several transitions write. Leaning: a cause belongs in
+  the rows, because an operator reconstructing why a session stopped should not
+  depend on log retention. Later scope. (S02, S07)
 - **Direct interrupt-only reconciliation from a running attempt.**
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) adds
   direct reconciliation only for fatal mismatch at a closed aggregate boundary;
@@ -378,6 +474,29 @@ The questions below remain open.
   workspace portability question above. Blocks automatic placement, not manual
   placement. (S16, S30–S32)
 
+## Goal mode
+
+Statement lineage, transition authority, scheduler continuation, and the bounded
+automatic resumption of an execution-failure block are specified in
+[goal mode](spec/goal-mode.md). The questions below remain open.
+
+- **Re-arming automatic resumption across a daemon restart.** A pending
+  automatic resumption lives only in the daemon process that armed it. The goal
+  event history records how many attempts a run has spent but not when any of
+  them was recorded, so a restart during a backoff loses the pending attempt and
+  the goal stays blocked until an operator resumes it; a goal blocked before
+  that behavior shipped is in the same position. Deciding this needs a durable
+  record of when a failure was appended, which no present goal table carries,
+  and a reader that re-arms from it at startup. Blocks unattended recovery of a
+  goal whose backoff spanned a restart.
+- **Separating consecutive execution failures from distant ones.** The run an
+  attempt budget is derived from ends only at a goal event, so consecutive
+  execution failures separated by successful turns count together: a pursuit
+  that fails transiently five times, however far apart and however much work
+  succeeded between them, exhausts its budget and parks for an operator. The
+  conservative direction is deliberate, because the alternative reads turn
+  dispositions the goal event stream does not carry. Blocks nothing committed.
+
 ## Tool safety
 
 ### Review-slog toolkit adoption
@@ -615,10 +734,11 @@ questions below remain open.
   by [process-protocol](spec/process-protocol.md). Remote access still requires
   decisions for client identity, authentication, authorization, revocation, and
   credential delivery. (S01, S24)
-- **Browser transport.** Technology remains open and blocks the web client;
-  snapshot and durable-update semantics are defined by
-  [process-protocol](spec/process-protocol.md), while transient model-update
-  streaming remains open below. (S02, S24)
+- **Browser transport.** Settled for the web client: the same-origin browser
+  transport merged in PR #1000 and is owned by
+  [configuration-and-credentials](spec/configuration-and-credentials.md). It no
+  longer blocks the web client; transient model-update streaming remains open
+  below. (S02, S24)
 - **Remote runner transport and reconnect.** The dedicated local socket,
   framing, heartbeat, reconnect inventory, and transaction orchestration are
   owned by [runner protocol and placement](spec/runner-protocol.md). Remote
@@ -671,8 +791,9 @@ questions below remain open.
   is a TUI, web app, or native app remains unselected. (S01, S02, S10, S24)
 - **Apple client code organization.** Defer until the protocol and the first
   native slice are known. (S01, S24)
-- **Web client technology (Rust/Wasm or TypeScript).** No leaning until the
-  browser protocol and product slice are measured. (S01, S02, S24)
+- **Web client technology.** Settled: the web campaign uses React and TypeScript
+  with TanStack, Redux Toolkit, and Radix. This owner-approved platform choice
+  is no longer open. (S01, S02, S24)
 - **Client approval presentation.** The terminal baseline now surfaces the
   pending request through the transcript's awaiting-turn and tool-use lines and
   collects decisions through `approve`/`deny`
@@ -706,6 +827,41 @@ the implemented session and external-link evidence.
   garbage collection remain undecided. The append-only catalog is their fixed
   constraint; mark/sweep rather than reference counting is nonbinding
   exploration guidance only.
+
+### File and media interpretation
+
+The proposed common architecture is described for owner review in
+[file and media layer](proposals/file-and-media-layer.md). The following choices
+remain unresolved and bind no implementation:
+
+- **Isolation substrate.** Choose a dedicated local worker, the existing runner
+  sandbox, or another mechanism that proves the proposed containment contract.
+  Leaning: a daemon-supervised local worker using accepted platform sandbox
+  primitives, because reads must work without a session runner. Blocks the
+  isolation and inspection slice.
+- **First file formats.** Select the initial adapter inventory. Leaning: UTF-8
+  text, JSON, CSV, PDF, PNG, JPEG, WebP, GIF, WAV, MP3, FLAC, and Ogg/Opus;
+  defer office containers, SVG, video, and archives. Blocks adapter slices, not
+  registry work.
+- **Parser dependency budget.** Decide whether isolated native decoders are
+  admissible. Leaning: pure Rust first, with native libraries approved per
+  adapter only when coverage requires them and executable isolation exists.
+- **OCR and transcription.** Choose explicit inference providers, local readers,
+  or absence. Leaning: exclude both because they add selection, credentials,
+  cost, privacy, and nondeterministic replay beyond file reading.
+- **Provider-native general files.** Decide which model adapters may receive
+  them. Leaning: require an exact per-adapter type inventory and never treat a
+  generic provider file surface as accepting unknown bytes.
+- **Encrypted-file credentials.** Decide whether a future credential reference
+  may supply a password. Leaning: keep `EncryptedOrLocked` terminal in version
+  one; secrets must not enter tool arguments or results.
+- **File-media turn budgets.** Set cumulative typed-read request and source-work
+  ceilings after first-adapter benchmarks while preserving every per-request and
+  per-call hard ceiling. Blocks production enablement, not interface work.
+- **File classification cache.** Decide whether validated classifications need a
+  cache beyond immutable tool results. Leaning: omit it until measurement proves
+  a need because it adds invalidation and reader-retirement law without
+  improving correctness.
 
 ## Program substrate and evaluations
 
