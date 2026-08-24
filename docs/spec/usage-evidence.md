@@ -1,22 +1,25 @@
 # Usage evidence
 
-The bounded aggregate and detail usage contract was verified against PR #1137
-(`agent/web-usage-cost`).
+This contract is verified against PR #1137 (`agent/web-usage-cost`).
 
 ## Canonical evidence
 
 Usage reads project terminal physical model calls without materializing the
 transcript. Ordinary and approval-judge calls belong to a turn;
-context-compaction calls belong directly to a session and therefore have no
-turn identity. Each projected row retains the resolved provider/model target,
+context-compaction calls belong directly to a session and therefore have no turn
+identity. Each projected row retains the resolved provider/model target,
 non-secret credential-profile reference, evidence provenance, input-token
 semantics, independently optional token axes, and projection time. The
 projection is append-only.
 
-Credential-profile references are nonempty and at most 256 UTF-8 bytes. Each
-physical token axis is either absent or an exact integer in the `u64` domain.
-Aggregate token sums use `u128`, so every sum admitted by the bounded source-call
-ceiling remains exact.
+Canonical credential references remain exact and do not gain a terminalization
+bound from this read projection. The exposed profile label is nonempty and at
+most 256 UTF-8 bytes: references within that bound retain their exact spelling,
+while oversized references use a stable digest label. Exact canonical references
+remain a private grouping dimension, so the bounded label cannot combine
+otherwise distinct evidence. Each physical token axis is either absent or an
+exact integer in the `u64` domain. Aggregate token sums use `u128`, so every sum
+admitted by the bounded source-call ceiling remains exact.
 
 ## Compatibility grouping
 
@@ -32,13 +35,13 @@ unscoped lifetime query from imposing work proportional to retained history.
 
 ## Selection and time
 
-Both read forms accept exact optional session, turn, target, provenance, and call
-kind filters. A turn filter excludes session-level context-compaction calls.
-Time ranges are half-open: the lower boundary is inclusive and the upper
+Both read forms accept exact optional session, turn, target, provenance, and
+call kind filters. A turn filter excludes session-level context-compaction
+calls. Time ranges are half-open: the lower boundary is inclusive and the upper
 boundary is exclusive. Missing boundaries mean unbounded in that direction.
-Empty and reversed ranges are rejected when constructed, and accepted
-timestamps are limited to the shared PostgreSQL/`time` representable range
-through `9999-12-31T23:59:59.999999Z`.
+Empty and reversed ranges are rejected when constructed, and accepted timestamps
+are limited to the shared PostgreSQL/`time` representable range through
+`9999-12-31T23:59:59.999999Z`.
 
 ## Detail pagination
 
@@ -46,8 +49,8 @@ Detail reads return at most 100 calls in newest-first order by
 `(recorded_at, model_call_id)`. A continuation cursor is an exclusive boundary
 at that same pair. The cursor provides deterministic keyset traversal of rows
 already visible ahead of it, not a cross-page snapshot. Oldest-first traversal
-is not exposed because transaction start timestamps can become visible behind
-an already emitted oldest-first cursor when concurrent transactions commit.
+is not exposed because transaction start timestamps can become visible behind an
+already emitted oldest-first cursor when concurrent transactions commit.
 
 Indexes led by session, turn, target, provenance, call kind, and the combined
 provenance/call-kind selection support selective chronological pages.

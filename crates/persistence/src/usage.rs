@@ -39,7 +39,8 @@ WITH candidate_calls AS MATERIALIZED (
 ), bounded_state AS (
     SELECT count(*) > $9 AS calls_truncated FROM candidate_calls
 )
-SELECT call_kind, resolved_provider_model_identity_id, credential_reference,
+SELECT call_kind, resolved_provider_model_identity_id,
+       bounded_web_usage_profile(credential_reference) AS credential_reference,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens IS NOT NULL AS has_input,
        output_tokens IS NOT NULL AS has_output,
@@ -75,7 +76,8 @@ SELECT call_kind, resolved_provider_model_identity_id, credential_reference,
 
 const CALLS_NEWEST_SQL: &str = "
 SELECT model_call_id, call_kind, session_id, turn_id,
-       resolved_provider_model_identity_id, credential_reference,
+       resolved_provider_model_identity_id,
+       bounded_web_usage_profile(credential_reference) AS credential_reference,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens, output_tokens,
        cache_creation_input_tokens, cache_read_input_tokens, recorded_at

@@ -336,6 +336,36 @@ async fn usage_projection_has_session_terminal_order_index() -> Result<(), Box<d
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn oversized_credential_references_receive_bounded_distinct_usage_labels()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let first = "a".repeat(257);
+    let second = format!("{}b", "a".repeat(256));
+    let labels: (String, String) =
+        sqlx::query_as("SELECT bounded_web_usage_profile($1), bounded_web_usage_profile($2)")
+            .bind(&first)
+            .bind(&second)
+            .fetch_one(&pool)
+            .await?;
+
+    assert!(labels.0.len() <= 256);
+    assert!(labels.1.len() <= 256);
+    assert_ne!(labels.0, labels.1);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT bounded_web_usage_profile($1)")
+            .bind("within-bound")
+            .fetch_one(&pool)
+            .await?,
+        "within-bound"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn terminal_approval_judge_usage_enters_dedicated_call_evidence() -> Result<(), Box<dyn Error>>
 {
     const JUDGE_INPUT_TOKENS: u64 = 31;
