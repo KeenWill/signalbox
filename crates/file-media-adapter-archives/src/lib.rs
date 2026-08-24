@@ -661,6 +661,20 @@ fn structurally_valid_zstd(bytes: &[u8]) -> bool {
     if !zstd_header(bytes) {
         return false;
     }
+    match zstd_frames_have_dictionary(bytes) {
+        Ok(true) => return true,
+        Ok(false) => {}
+        Err(ArchiveIssue::Malformed)
+        | Err(ArchiveIssue::Expansion)
+        | Err(ArchiveIssue::EntryCount)
+        | Err(ArchiveIssue::HostileName)
+        | Err(ArchiveIssue::Link)
+        | Err(ArchiveIssue::Special)
+        | Err(ArchiveIssue::Encrypted)
+        | Err(ArchiveIssue::Recursive)
+        | Err(ArchiveIssue::UnsupportedCompression)
+        | Err(ArchiveIssue::UnsupportedDictionary) => return false,
+    }
     let Ok(mut decoder) = zstd_decoder(bytes) else {
         return false;
     };

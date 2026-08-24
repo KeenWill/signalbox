@@ -522,6 +522,15 @@ async fn recursive_zstd_payload_is_rejected() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn dictionary_dependent_recursive_zstd_payload_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::disguised_dictionary_zstd()?).await?,
+        "recursive_container",
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn compressed_zip_bomb_is_a_typed_bounded_failure() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         malformed_inspection(ArchiveFixture::zip_bomb()?).await?,

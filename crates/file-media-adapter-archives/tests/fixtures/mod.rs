@@ -483,6 +483,16 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn disguised_dictionary_zstd() -> Result<Self, Box<dyn Error>> {
+        let nested = b"\x28\xb5\x2f\xfd\x21\x01\x00";
+        Ok(Self {
+            bytes: zip_bytes(&[("payload.bin", nested, ZipEntryKind::File)])?,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload.bin",
+        })
+    }
+
     pub fn mislabeled_zip() -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             bytes: b"not an archive".to_vec(),
