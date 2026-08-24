@@ -1385,7 +1385,7 @@ impl PostgresModelCallRepository {
                 )
                 .map_err(|_| {
                     ModelCallRepositoryError::InvalidTransition(
-                        "capability failure requires a Prepared call",
+                        "prepared failure requires a Prepared call",
                     )
                 })?;
             persist_failed_with_delegated_child_result(
@@ -1422,7 +1422,7 @@ impl PostgresModelCallRepository {
             .fetch_optional(&mut *transaction)
             .await?
             .ok_or(ModelCallCorruption::Missing(
-                "retained capability-failure model call",
+                "retained prepared-failure model call",
             ))?;
             let (turn, attempt, source_frontier, state, disposition) = stored;
             match (state.as_str(), disposition.as_deref()) {

@@ -2510,7 +2510,12 @@ impl ModelCallProvider for ScriptedModelCallProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, num::NonZeroU64, sync::Arc};
+    use std::{
+        collections::VecDeque,
+        io::{self, Write},
+        num::NonZeroU64,
+        sync::{Arc, Mutex as StdMutex},
+    };
 
     use expect_test::expect;
     use signalbox_domain::{
@@ -2536,9 +2541,49 @@ mod tests {
         ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestOrdinal,
         ToolRequestReconstitutionInput, ToolResultText, TranscriptAncestry,
     };
+    use tracing::instrument::WithSubscriber as _;
     use uuid::Uuid;
 
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct CapturedTelemetry(Arc<StdMutex<Vec<u8>>>);
+
+    struct CapturedTelemetryWriter(Arc<StdMutex<Vec<u8>>>);
+
+    impl Write for CapturedTelemetryWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("captured telemetry remains available")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedTelemetry {
+        type Writer = CapturedTelemetryWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedTelemetryWriter(Arc::clone(&self.0))
+        }
+    }
+
+    impl CapturedTelemetry {
+        fn text(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .expect("captured telemetry remains available")
+                    .clone(),
+            )
+            .expect("captured telemetry is UTF-8")
+        }
+    }
 
     fn identity<Identity>(value: u128, from_uuid: impl FnOnce(Uuid) -> Identity) -> Identity {
         from_uuid(Uuid::from_u128(value))
@@ -5390,13 +5435,26 @@ mod tests {
             ScriptedModelCallProvider::new([]),
             InProcessAttemptDispatchGate::default(),
         );
+        let captured = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(captured.clone())
+            .finish();
 
         assert_eq!(
             service
                 .execute(session)
+                .with_subscriber(subscriber)
                 .await
                 .expect("the saturated turn closes with its own terminal reason"),
             ModelCallExecutionOutcome::ToolRoundLimitReached(Box::new(failed))
+        );
+        assert!(
+            captured
+                .text()
+                .contains("terminal_outcome=\"tool_round_limit_reached\""),
+            "the service terminalization must expose the INV-071 label"
         );
         let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
         assert_eq!(prepare.calls, 1);

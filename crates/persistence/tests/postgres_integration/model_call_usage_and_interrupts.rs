@@ -2,6 +2,15 @@
 
 use crate::*;
 
+fn expect_ready_model_call(
+    outcome: PrepareInitialModelCallOutcome,
+) -> Box<PreparedModelCallRequest> {
+    match outcome {
+        PrepareInitialModelCallOutcome::Ready { request, .. } => request,
+        _ => panic!("the fixture call must resume from its Prepared checkpoint"),
+    }
+}
+
 /// INV-014: the credential-reference column is total; the migrated schema
 /// rejects a NULL stored reference.
 #[tokio::test(flavor = "multi_thread")]
@@ -522,28 +531,25 @@ async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
     .expect("one restart fixture target forms a catalog");
     let repository =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
-    let PrepareInitialModelCallOutcome::Ready {
-        request: prepared, ..
-    } = repository
-        .prepare_initial_call(
-            fixture.session,
-            ModelCallId::from_uuid(Uuid::from_u128(seed + 22)),
-            FailedModelCallTurnIdentities::new(
-                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 23)),
-                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 24)),
-            ),
-            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 25)),
-            |_| {
-                (
-                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 26)),
-                    TurnId::from_uuid(Uuid::from_u128(seed + 27)),
-                )
-            },
-        )
-        .await?
-    else {
-        panic!("the fixture call must resume from its Prepared checkpoint")
-    };
+    let prepared = expect_ready_model_call(
+        repository
+            .prepare_initial_call(
+                fixture.session,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 22)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 23)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 24)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 25)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 26)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 27)),
+                    )
+                },
+            )
+            .await?,
+    );
 
     SubmitInputRepository::new(pool.clone())
         .handle(

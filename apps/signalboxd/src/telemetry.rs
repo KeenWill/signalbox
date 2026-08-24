@@ -1555,6 +1555,8 @@ mod tests {
 
     #[test]
     fn admitted_span_and_event_export_only_the_documented_fields() {
+        let tool_round_limit = 32_usize;
+        let observed_tool_rounds = 32_usize;
         let spans = capture_spans(|| {
             let span = tracing::info_span!(
                 target: "signalboxd::context_guard",
@@ -1575,8 +1577,8 @@ mod tests {
                 session_id = %SESSION_ID,
                 turn_id = %TURN_ID,
                 model_call_id = %MODEL_CALL_ID,
-                tool_round_limit = 32_usize,
-                observed_tool_rounds = 32_usize,
+                tool_round_limit,
+                observed_tool_rounds,
                 "automatic tool-round limit reached"
             );
         });
@@ -1619,7 +1621,9 @@ mod tests {
                 .find(|attribute| attribute.key.as_str() == "tool_round_limit")
                 .expect("the saturation event carries its numeric limit")
                 .value,
-            opentelemetry::Value::I64(32)
+            opentelemetry::Value::I64(
+                i64::try_from(tool_round_limit).expect("the fixture limit fits OTLP I64")
+            )
         );
         assert_eq!(
             saturation_attributes
@@ -1627,7 +1631,10 @@ mod tests {
                 .find(|attribute| attribute.key.as_str() == "observed_tool_rounds")
                 .expect("the saturation event carries its numeric observed count")
                 .value,
-            opentelemetry::Value::I64(32)
+            opentelemetry::Value::I64(
+                i64::try_from(observed_tool_rounds)
+                    .expect("the fixture observed count fits OTLP I64")
+            )
         );
     }
 
