@@ -719,7 +719,7 @@ pub enum WebAttentionStreamEvent {
     },
     Update {
         cursor: WebU64,
-        #[schemars(length(max = 16))]
+        #[schemars(length(min = 1, max = 16))]
         summaries: Vec<WebAttentionSummary>,
     },
     ResyncRequired {
@@ -970,6 +970,9 @@ function assertSchema(root, schema, value, path) {{
   if (schema.type === "array") {{
     if (!Array.isArray(value)) {{
       fail(path, "an array");
+    }}
+    if (schema.minItems !== undefined && value.length < schema.minItems) {{
+      fail(path, `at least ${{schema.minItems}} items`);
     }}
     if (schema.maxItems !== undefined && value.length > schema.maxItems) {{
       fail(path, `at most ${{schema.maxItems}} items`);

@@ -538,6 +538,15 @@ test("generated attention decoder requires the continuation field", () => {
 test("generated attention decoder enforces collection and scalar bounds", () => {
   assert.throws(
     () =>
+      decodeWebAttentionStreamEvent({
+        kind: "update",
+        cursor: "1",
+        summaries: [],
+      }),
+    /one recognized variant/,
+  );
+  assert.throws(
+    () =>
       decodeWebAttentionSnapshot(
         attentionSnapshot({
           summaries: Array.from({ length: 33 }, () => attentionSummary()),

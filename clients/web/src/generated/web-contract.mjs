@@ -660,6 +660,7 @@ const schemas = {
               "$ref": "#/$defs/WebAttentionSummary"
             },
             "maxItems": 16,
+            "minItems": 1,
             "type": "array"
           }
         },
@@ -1722,6 +1723,9 @@ function assertSchema(root, schema, value, path) {
   if (schema.type === "array") {
     if (!Array.isArray(value)) {
       fail(path, "an array");
+    }
+    if (schema.minItems !== undefined && value.length < schema.minItems) {
+      fail(path, `at least ${schema.minItems} items`);
     }
     if (schema.maxItems !== undefined && value.length > schema.maxItems) {
       fail(path, `at most ${schema.maxItems} items`);

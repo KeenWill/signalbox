@@ -216,18 +216,7 @@ macro_rules! summary_sql {
         concat!(
             "WITH selected AS (",
             $selection,
-            r#"), latest_goal AS (
-    SELECT DISTINCT ON (goal.session_id)
-           goal.session_id, goal.generation::text AS generation, goal.event_kind,
-           goal.blocked_reason, LEFT(goal.need, $4) AS need_summary
-      FROM goal_event AS goal JOIN selected USING (session_id)
-     ORDER BY goal.session_id, goal.event_ordinal DESC
-), latest_runner AS (
-    SELECT DISTINCT ON (placement.session_id)
-           placement.session_id, placement.state_kind
-      FROM runner_session_placement_record AS placement JOIN selected USING (session_id)
-     ORDER BY placement.session_id, placement.event_ordinal DESC
-)
+            r#")
 SELECT selected.session_id, selected.attention_turn_id AS turn_id,
        selected.attention_turn_state_kind AS turn_state,
        selected.attention_turn_active_phase_kind AS active_phase_kind,
@@ -240,8 +229,21 @@ SELECT selected.session_id, selected.attention_turn_id AS turn_id,
        runner.state_kind AS runner_state,
        selected.fact_kind, selected.recorded_at
   FROM selected
-  LEFT JOIN latest_goal AS goal USING (session_id)
-  LEFT JOIN latest_runner AS runner USING (session_id) "#,
+  LEFT JOIN LATERAL (
+      SELECT event.generation::text AS generation, event.event_kind,
+             event.blocked_reason, LEFT(event.need, $4) AS need_summary
+        FROM goal_event AS event
+       WHERE event.session_id = selected.session_id
+       ORDER BY event.event_ordinal DESC
+       LIMIT 1
+  ) AS goal ON true
+  LEFT JOIN LATERAL (
+      SELECT placement.state_kind
+        FROM runner_session_placement_record AS placement
+       WHERE placement.session_id = selected.session_id
+       ORDER BY placement.event_ordinal DESC
+       LIMIT 1
+  ) AS runner ON true "#,
             $ordering
         )
     };
@@ -273,7 +275,9 @@ const SELECT_IDENTITY: &str = summary_sql!(
            WHERE change.session_id = session_row.session_id
            ORDER BY change.change_sequence DESC LIMIT 1
       ) AS activity ON true
-     WHERE ($2::uuid[] IS NOT NULL AND session_row.session_id = ANY($2))
+     WHERE ($2::uuid[] IS NOT NULL
+            AND session_row.session_id = ANY($2)
+            AND NOT COALESCE(metadata.archived, false))
         OR ($2::uuid[] IS NULL
             AND ($3::uuid IS NULL OR session_row.session_id > $3)
             AND ($6::text IS NULL
