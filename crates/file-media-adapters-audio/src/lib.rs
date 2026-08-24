@@ -58,14 +58,36 @@ impl AdapterFormat {
             }
             Self::Mp3 => mp3_signature(prefix),
             Self::Flac => prefix.starts_with(b"fLaC"),
-            Self::OggOpus => {
-                prefix.starts_with(b"OggS")
-                    && prefix
-                        .windows(b"OpusHead".len())
-                        .any(|window| window == b"OpusHead")
-            }
+            Self::OggOpus => ogg_opus_signature(prefix),
         }
     }
+}
+
+fn ogg_opus_signature(prefix: &[u8]) -> bool {
+    let Some(header) = prefix.get(..27) else {
+        return false;
+    };
+    if !header.starts_with(b"OggS")
+        || header[4] != 0
+        || header[5] & 0x02 == 0
+        || header[5] & 0x01 != 0
+        || header[6..14] != [0; 8]
+    {
+        return false;
+    }
+    let segment_count = usize::from(header[26]);
+    let Some(packet_offset) = 27_usize.checked_add(segment_count) else {
+        return false;
+    };
+    let Some(lacing) = prefix.get(27..packet_offset) else {
+        return false;
+    };
+    if !lacing.iter().any(|length| *length < 255) {
+        return false;
+    }
+    prefix
+        .get(packet_offset..packet_offset.saturating_add(19))
+        .is_some_and(|common| common.starts_with(b"OpusHead") && common[8] == 1 && common[9] != 0)
 }
 
 fn mp3_signature(prefix: &[u8]) -> bool {
@@ -123,6 +145,8 @@ fn valid_mp3_frame_header(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use ogg::{PacketWriteEndInfo, PacketWriter};
+
     use super::AdapterFormat;
 
     #[test]
@@ -138,6 +162,30 @@ mod tests {
         id3_prefixed_aac.extend_from_slice(&[0xff, 0xf1, 0x50, 0x80]);
 
         assert!(!AdapterFormat::Mp3.matches_signature(&id3_prefixed_aac));
+    }
+
+    #[test]
+    fn ogg_opus_probe_rejects_magic_in_a_later_packet() {
+        let mut writer = PacketWriter::new(Vec::new());
+        writer
+            .write_packet(
+                b"not-an-opus-identification-packet".to_vec(),
+                7,
+                PacketWriteEndInfo::EndPage,
+                0,
+            )
+            .expect("first Ogg packet should encode");
+        writer
+            .write_packet(
+                b"codec-version=OpusHead".to_vec(),
+                7,
+                PacketWriteEndInfo::EndStream,
+                0,
+            )
+            .expect("second Ogg packet should encode");
+        let bytes = writer.into_inner();
+
+        assert!(!AdapterFormat::OggOpus.matches_signature(&bytes));
     }
 }
 

@@ -42,6 +42,11 @@ struct OggOpusFixture {
     first_audio_page_granule: Option<u64>,
 }
 
+pub(crate) struct Id3HeaderFixture {
+    pub(crate) major: u8,
+    pub(crate) flags: u8,
+}
+
 enum HeadEnding {
     IsolatedPage,
     SharedPage,
@@ -189,6 +194,18 @@ pub(crate) fn ogg_opus_with_regressing_granule() -> Result<Vec<u8>, Box<dyn Erro
     })
 }
 
+pub(crate) fn ogg_opus_with_inaccurate_intermediate_granule() -> Result<Vec<u8>, Box<dyn Error>> {
+    ogg_opus(OggOpusFixture {
+        packet_count: 2,
+        frame_size: 960,
+        pre_skip: 0,
+        final_granule: 1_920,
+        ending: OggEnding::EndOfStream,
+        head_ending: HeadEnding::IsolatedPage,
+        first_audio_page_granule: Some(480),
+    })
+}
+
 pub(crate) fn mp3_with_long_id3_tag() -> Result<Vec<u8>, Box<dyn Error>> {
     let encoded = mp3(8_000, 800)?;
     let audio = encoded.get(10..).ok_or("missing MP3 audio")?;
@@ -199,10 +216,17 @@ pub(crate) fn mp3_with_long_id3_tag() -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(tagged)
 }
 
-pub(crate) fn mp3_with_id3_header(major: u8, flags: u8) -> Result<Vec<u8>, Box<dyn Error>> {
+pub(crate) fn mp3_with_id3_header(fixture: Id3HeaderFixture) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut bytes = mp3(8_000, 800)?;
-    bytes[3] = major;
-    bytes[5] = flags;
+    bytes[3] = fixture.major;
+    bytes[5] = fixture.flags;
+    Ok(bytes)
+}
+
+pub(crate) fn flac_with_mismatched_md5() -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut bytes = flac(8_000, 800)?;
+    let first_md5_byte = bytes.get_mut(26).ok_or("missing FLAC STREAMINFO MD5")?;
+    *first_md5_byte = 1;
     Ok(bytes)
 }
 

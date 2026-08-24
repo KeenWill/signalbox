@@ -170,8 +170,10 @@ fn decode_with_symphonia(
         .and_then(symphonia::core::codecs::CodecParameters::audio)
         .cloned()
         .ok_or("malformed_audio")?;
+    let mut decoder_options = AudioDecoderOptions::default();
+    decoder_options.verify = true;
     let mut decoder = symphonia::default::get_codecs()
-        .make_audio_decoder(&codec_parameters, &AudioDecoderOptions::default())
+        .make_audio_decoder(&codec_parameters, &decoder_options)
         .map_err(|_| "malformed_audio")?;
     let mut metadata = None;
     let mut decoded_frames = 0_u64;
@@ -205,7 +207,11 @@ fn decode_with_symphonia(
             .ok_or("duration_limit_exceeded")?;
         validate_duration(decoded_frames, observed.sample_rate_hz)?;
     }
-    metadata.ok_or("malformed_audio")
+    let metadata = metadata.ok_or("malformed_audio")?;
+    if decoder.finalize().verify_ok == Some(false) {
+        return Err("malformed_audio");
+    }
+    Ok(metadata)
 }
 
 fn decode_ogg_opus(bytes: &[u8]) -> Result<AudioMetadata, &'static str> {
@@ -255,7 +261,9 @@ fn decode_ogg_opus(bytes: &[u8]) -> Result<AudioMetadata, &'static str> {
         validate_ogg_decode_bound(decoded_frames, pre_skip)?;
         if packet.last_in_page() {
             let granule = packet.absgp_page();
-            if granule < completed_page_granule {
+            if granule < completed_page_granule
+                || (!packet.last_in_stream() && granule != decoded_frames)
+            {
                 return Err("malformed_audio");
             }
             completed_page_granule = granule;
@@ -370,7 +378,7 @@ fn valid_opus_tags(bytes: &[u8]) -> bool {
         }
         offset = next;
     }
-    offset == bytes.len()
+    true
 }
 
 fn valid_opus_comment(comment: &[u8]) -> bool {
@@ -486,6 +494,16 @@ mod tests {
         tags.extend_from_slice(b"not-a-field");
 
         assert!(!valid_opus_tags(&tags));
+    }
+
+    #[test]
+    fn opus_tags_accepts_trailing_padding() {
+        let mut tags = b"OpusTags".to_vec();
+        tags.extend_from_slice(&0_u32.to_le_bytes());
+        tags.extend_from_slice(&0_u32.to_le_bytes());
+        tags.extend_from_slice(&[0; 16]);
+
+        assert!(valid_opus_tags(&tags));
     }
 
     #[test]

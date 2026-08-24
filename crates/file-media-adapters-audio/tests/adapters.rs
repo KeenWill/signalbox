@@ -177,7 +177,10 @@ async fn mp3_probe_reads_the_frame_after_a_long_id3_tag() -> Result<(), Box<dyn 
 #[tokio::test]
 async fn mp3_probe_rejects_an_invalid_id3_version() -> Result<(), Box<dyn Error>> {
     let format = FixtureFormat::Mp3;
-    let source = MemorySource::new(fixtures::mp3_with_id3_header(5, 0)?);
+    let source = MemorySource::new(fixtures::mp3_with_id3_header(fixtures::Id3HeaderFixture {
+        major: 5,
+        flags: 0,
+    })?);
 
     let inspection = support::inspect(&source, format.media_type()).await?;
     assert!(matches!(
@@ -190,7 +193,10 @@ async fn mp3_probe_rejects_an_invalid_id3_version() -> Result<(), Box<dyn Error>
 #[tokio::test]
 async fn mp3_probe_rejects_invalid_id3_flags() -> Result<(), Box<dyn Error>> {
     let format = FixtureFormat::Mp3;
-    let source = MemorySource::new(fixtures::mp3_with_id3_header(4, 0x01)?);
+    let source = MemorySource::new(fixtures::mp3_with_id3_header(fixtures::Id3HeaderFixture {
+        major: 4,
+        flags: 0x01,
+    })?);
 
     let inspection = support::inspect(&source, format.media_type()).await?;
     assert!(matches!(
@@ -241,6 +247,16 @@ async fn flac_duration_over_limit_is_rejected() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn flac_mismatched_streaminfo_md5_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_reason(
+        FixtureFormat::Flac,
+        fixtures::flac_with_mismatched_md5()?,
+        "malformed_audio",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn ogg_opus_truncation_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_reason(
         FixtureFormat::OggOpus,
@@ -252,12 +268,15 @@ async fn ogg_opus_truncation_is_malformed() -> Result<(), Box<dyn Error>> {
 
 #[tokio::test]
 async fn ogg_opus_malformed_bytes_are_rejected() -> Result<(), Box<dyn Error>> {
-    assert_reason(
-        FixtureFormat::OggOpus,
-        fixtures::malformed(FixtureFormat::OggOpus),
-        "malformed_audio",
-    )
-    .await
+    let format = FixtureFormat::OggOpus;
+    let source = MemorySource::new(fixtures::malformed(format));
+
+    let inspection = support::inspect(&source, format.media_type()).await?;
+    assert!(matches!(
+        inspection,
+        signalbox_file_media_runtime::FileInspection::Unknown { .. }
+    ));
+    Ok(())
 }
 
 #[tokio::test]
@@ -306,7 +325,10 @@ async fn ogg_opus_requires_an_isolated_identification_header_page() -> Result<()
     let source = MemorySource::new(fixtures::ogg_opus_with_shared_identification_page()?);
 
     let inspection = support::inspect(&source, format.media_type()).await?;
-    support::assert_malformed_reason(inspection, "malformed_audio");
+    assert!(matches!(
+        inspection,
+        signalbox_file_media_runtime::FileInspection::Unknown { .. }
+    ));
     Ok(())
 }
 
@@ -314,6 +336,16 @@ async fn ogg_opus_requires_an_isolated_identification_header_page() -> Result<()
 async fn ogg_opus_rejects_regressing_page_granules() -> Result<(), Box<dyn Error>> {
     let format = FixtureFormat::OggOpus;
     let source = MemorySource::new(fixtures::ogg_opus_with_regressing_granule()?);
+
+    let inspection = support::inspect(&source, format.media_type()).await?;
+    support::assert_malformed_reason(inspection, "malformed_audio");
+    Ok(())
+}
+
+#[tokio::test]
+async fn ogg_opus_rejects_an_inaccurate_intermediate_granule() -> Result<(), Box<dyn Error>> {
+    let format = FixtureFormat::OggOpus;
+    let source = MemorySource::new(fixtures::ogg_opus_with_inaccurate_intermediate_granule()?);
 
     let inspection = support::inspect(&source, format.media_type()).await?;
     support::assert_malformed_reason(inspection, "malformed_audio");
