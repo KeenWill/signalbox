@@ -57,10 +57,12 @@ SELECT call_kind, resolved_provider_model_identity_id,
        usage_input_includes_cache_tokens IS NOT NULL
        AND bool_and(
            usage_input_includes_cache_tokens IS DISTINCT FROM true
-           OR input_tokens IS NULL
-           OR cache_creation_input_tokens IS NULL
-           OR cache_read_input_tokens IS NULL
-           OR input_tokens >= cache_creation_input_tokens + cache_read_input_tokens
+           OR (
+               input_tokens IS NOT NULL
+               AND cache_creation_input_tokens IS NOT NULL
+               AND cache_read_input_tokens IS NOT NULL
+               AND input_tokens >= cache_creation_input_tokens + cache_read_input_tokens
+           )
        ) AS cache_normalization_safe,
        bounded_state.calls_truncated
   FROM bounded_calls

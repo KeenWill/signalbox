@@ -316,6 +316,49 @@ async fn usage_half_open_time_range_excludes_earlier_evidence() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn incomplete_cache_inclusive_aggregates_are_not_normalization_safe()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = terminal_reported_usage_call(
+        &pool,
+        0x95_100,
+        ProviderReportedTokenUsage::unreported().with_input_tokens(Some(FIRST_INPUT_TOKENS)),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE web_usage_call_projection
+            SET usage_input_includes_cache_tokens = true,
+                cache_creation_input_tokens = NULL,
+                cache_read_input_tokens = NULL
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let report = UsageRepository::new(pool.clone())
+        .aggregate(UsageQuery {
+            time: UsageTimeRange::all(),
+            selection: UsageSelection {
+                session: Some(fixture.session),
+                turn: None,
+                model: None,
+                provenance: None,
+                call_kind: None,
+            },
+        })
+        .await?;
+
+    assert_eq!(report.groups.len(), 1);
+    assert!(!report.groups[0].cache_normalization_safe);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn usage_projection_has_combined_selection_indexes() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let index_definition: String = sqlx::query_scalar(
@@ -403,16 +446,70 @@ async fn context_compaction_input_semantics_preserve_history_and_pin_new_calls()
     .fetch_one(&pool)
     .await?;
     assert!(compaction_semantics_nullable);
-    let compaction_semantics_trigger: String = sqlx::query_scalar(
-        "SELECT pg_get_triggerdef(oid)
-           FROM pg_trigger
-          WHERE tgrelid = 'context_compaction_model_call'::regclass
-            AND tgname = 'context_compaction_usage_input_semantics_are_pinned'
-            AND NOT tgisinternal",
+    let seed = 0x98_000;
+    let fixture =
+        terminal_reported_usage_call(&pool, seed, ProviderReportedTokenUsage::unreported()).await?;
+    let source_frontier = Uuid::from_u128(seed + 0x80);
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
     )
-    .fetch_one(&pool)
+    .bind(fixture.session.into_uuid())
+    .bind(source_frontier)
+    .execute(&pool)
     .await?;
-    assert!(compaction_semantics_trigger.contains("BEFORE INSERT OR UPDATE"));
+
+    let call = Uuid::from_u128(seed + 0x81);
+    let missing_semantics_error = sqlx::query(
+        "INSERT INTO context_compaction_model_call
+            (model_call_id, session_id, direct_model_selection_id,
+             resolved_provider_model_identity_id, source_frontier_id,
+             credential_reference, state_kind)
+         VALUES ($1, $2, $3, $4, $5, 'semantic-pin-fixture', 'prepared')",
+    )
+    .bind(call)
+    .bind(fixture.session.into_uuid())
+    .bind(Uuid::from_u128(seed + 0x82))
+    .bind(Uuid::from_u128(seed + 0x83))
+    .bind(source_frontier)
+    .execute(&pool)
+    .await
+    .expect_err("new compaction calls must pin input semantics");
+    assert!(
+        missing_semantics_error
+            .to_string()
+            .contains("compaction input-token semantics must be pinned")
+    );
+
+    sqlx::query(
+        "INSERT INTO context_compaction_model_call
+            (model_call_id, session_id, direct_model_selection_id,
+             resolved_provider_model_identity_id, source_frontier_id,
+             credential_reference, usage_input_includes_cache_tokens, state_kind)
+         VALUES ($1, $2, $3, $4, $5, 'semantic-pin-fixture', true, 'prepared')",
+    )
+    .bind(call)
+    .bind(fixture.session.into_uuid())
+    .bind(Uuid::from_u128(seed + 0x82))
+    .bind(Uuid::from_u128(seed + 0x83))
+    .bind(source_frontier)
+    .execute(&pool)
+    .await?;
+    let changed_semantics_error = sqlx::query(
+        "UPDATE context_compaction_model_call
+            SET usage_input_includes_cache_tokens = false
+          WHERE model_call_id = $1",
+    )
+    .bind(call)
+    .execute(&pool)
+    .await
+    .expect_err("pinned compaction input semantics must be immutable");
+    assert!(
+        changed_semantics_error
+            .to_string()
+            .contains("compaction input-token semantics are immutable")
+    );
 
     pool.close().await;
     drop(container);
@@ -504,6 +601,16 @@ async fn oversized_credential_references_receive_bounded_distinct_usage_labels()
             .iter()
             .all(|index| !index.contains("exact_reference"))
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn usage_projection_retains_only_bounded_credential_identity() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
     let projection_retains_exact_reference: bool = sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1
