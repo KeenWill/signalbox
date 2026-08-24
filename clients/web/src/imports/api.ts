@@ -104,6 +104,8 @@ const correlateListPage = (
     const sourceSessionEvidence = item.source_session_id
     if (
       !isCanonicalUuid(item.imported_conversation_id) ||
+      !Number.isSafeInteger(item.entry_count) ||
+      item.entry_count <= 0 ||
       (previous !== undefined && item.imported_conversation_id <= previous) ||
       (request.format !== undefined && request.format !== null && item.format !== request.format) ||
       (sourceSessionEvidence !== undefined &&

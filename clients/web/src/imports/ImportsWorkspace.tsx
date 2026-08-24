@@ -45,12 +45,18 @@ const formatOptions: ReadonlyArray<{ value: FormatFilter; label: string }> = [
   { value: 'codex_rollout_jsonl_v1', label: 'Codex rollout · converter 1' },
 ]
 
+const DEFINITIVE_CONTINUATION_ERRORS = new Set([
+  'conflicting_command_reuse',
+  'import_frontier_not_found',
+  'import_not_found',
+  'invalid_import_request',
+  'model_not_configured',
+])
+
 const isRetryableContinuationError = (error: unknown): boolean =>
   error instanceof ImportReceiptCorrelationError ||
   !(error instanceof ImportApiError) ||
-  ['continuation_commit_ambiguous', 'continuation_unavailable', 'continuation_corrupt'].includes(
-    error.detail.error.code,
-  )
+  !DEFINITIVE_CONTINUATION_ERRORS.has(error.detail.error.code)
 
 const byteLabel = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`
@@ -346,6 +352,13 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
 
   const showWindow = (request: WebImportEntryWindowRequest) => {
     if (hasRetainedCommand) return
+    if (
+      request.anchor === windowRequest.anchor &&
+      request.position === windowRequest.position &&
+      request.before === windowRequest.before &&
+      request.after === windowRequest.after
+    )
+      return
     resetContinuation()
     setWindowRequest(request)
     setSelectedFrontier(null)
@@ -490,6 +503,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
               <ImportsTable
                 rows={imports.items}
                 selectedId={selectedImport}
+                selectionDisabled={hasRetainedCommand}
                 onSelect={selectImport}
               />
             )}
