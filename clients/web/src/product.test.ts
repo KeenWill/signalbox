@@ -53,6 +53,43 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('accepts deployment-disabled blob capabilities', async () => {
+    const bootstrap = {
+      ...webContractBootstrapFixture,
+      capabilities: {
+        ...webContractBootstrapFixture.capabilities,
+        immutable_blob_content: false,
+        blob_derivations: false,
+        image_derivatives: false,
+      },
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(bootstrap))),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).resolves.toEqual(bootstrap)
+  })
+
+  it('rejects contradictory blob capability dependencies', async () => {
+    const bootstrap = {
+      ...webContractBootstrapFixture,
+      capabilities: {
+        ...webContractBootstrapFixture.capabilities,
+        blob_derivations: false,
+        image_derivatives: true,
+      },
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(bootstrap))),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toBeInstanceOf(
+      ProductContractError,
+    )
+  })
+
   it('fails closed when the daemon returns an unknown contract shape', async () => {
     vi.stubGlobal(
       'fetch',

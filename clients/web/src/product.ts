@@ -174,9 +174,8 @@ const validateCurrentBootstrap = (bootstrap: WebContractBootstrap): WebContractB
     !bootstrap.capabilities.bounded_json ||
     !bootstrap.capabilities.same_origin_json_mutations ||
     !bootstrap.capabilities.ndjson_streaming ||
-    !bootstrap.capabilities.immutable_blob_content ||
-    !bootstrap.capabilities.blob_derivations ||
-    !bootstrap.capabilities.image_derivatives
+    (bootstrap.capabilities.blob_derivations && !bootstrap.capabilities.immutable_blob_content) ||
+    (bootstrap.capabilities.image_derivatives && !bootstrap.capabilities.blob_derivations)
   ) {
     throw new Error('bootstrap contradicted the fixed signalbox.web-http v2 contract')
   }

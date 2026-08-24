@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { commandById, invokeCommand } from './commands'
 import { actions, selectApp, store } from './state'
 
@@ -55,5 +55,21 @@ describe('command registry', () => {
         focusTimeline: () => undefined,
       }),
     ).toBe(false)
+  })
+
+  it('moves scenario focus before collapsing workbench panes', () => {
+    const focusTimeline = vi.fn()
+    store.dispatch(actions.layoutSet('workbench'))
+
+    invokeCommand('layout.toggle', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      scenarioSurface: true,
+      timelineIds: [],
+      focusTimeline,
+    })
+
+    expect(focusTimeline).toHaveBeenCalledOnce()
+    expect(selectApp(store.getState()).layout).toBe('focus')
   })
 })
