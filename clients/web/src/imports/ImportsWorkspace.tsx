@@ -21,7 +21,7 @@ import type {
 import { ProductNavigation } from '../ProductApp'
 import { ScenarioNavigation } from '../ScenarioNavigation'
 import { type DiagnosticSnapshot, IconCommand, OverlaySurfaces } from '../Surfaces'
-import { store, useAppSelector } from '../state'
+import { store } from '../state'
 import { type ImportApi, ImportApiError, ImportReceiptCorrelationError } from './api'
 import { ImportedEntries } from './ImportedEntries'
 import { ImportsTable } from './ImportsTable'
@@ -61,7 +61,6 @@ const byteLabel = (bytes: number): string => {
 export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: boolean }) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
-  const overlay = useAppSelector((state) => state.app.overlay)
   const queryScope = scenario ? 'scenario' : 'production'
   const [format, setFormat] = useState<FormatFilter>(EMPTY_FILTER)
   const [sourceSession, setSourceSession] = useState('')
@@ -245,7 +244,9 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
         document.querySelector<HTMLElement>('[aria-label="Imported source entries"]')?.focus(),
       importEntryIds,
       selectedImportEntry: selectedFrontier?.imported_entry_id ?? null,
-      canSelectImportEntry: !hasRetainedCommand && overlay === null,
+      // Keep navigation commands discoverable while the command palette is open.
+      // Execution still checks the live overlay state in selectImportEntry.
+      canSelectImportEntry: !hasRetainedCommand,
       selectImportEntry,
       canContinueImport,
       continueImport: continueAt,
@@ -265,7 +266,6 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       hasRetainedCommand,
       importEntryIds,
       navigate,
-      overlay,
       retryExactCommand,
       selectImportEntry,
       selectedFrontier?.imported_entry_id,

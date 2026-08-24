@@ -51,7 +51,7 @@ const importsFixture = {
   logicalEntries: 250_000,
   latestWindowSummary: '249,950–250,000 · 51 loaded',
   arbitraryWindowSummary: '124,975–125,025 · 51 loaded',
-  continuedSessionId: '00000000-0000-7000-8000-000009125000',
+  continuedSessionId: '00000000-0000-7000-8000-000009000000',
   firstEntryId: 'import-entry-00000000-0000-7000-8000-000002000001',
   secondEntryId: 'import-entry-00000000-0000-7000-8000-000002000002',
 } as const
