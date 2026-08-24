@@ -314,11 +314,11 @@ test("generated summary and call decoders reject derived cost without tokens", (
 
   assert.throws(
     () => decodeWebUsageSummary({ groups: [group], truncated: false }),
-    /unavailable without token evidence/,
+    /unavailable with reason no_token_evidence/,
   );
   assert.throws(
     () => decodeWebUsageCallPage({ calls: [call], continuation: null }, "newest"),
-    /unavailable without token evidence/,
+    /unavailable with reason no_token_evidence/,
   );
 });
 
@@ -360,6 +360,39 @@ test("generated usage decoder validates ordering and cursor correlation", () => 
         "newest",
       ),
     /cursor anchored to the final usage call/,
+  );
+});
+
+test("generated usage decoder accepts an omitted optional continuation", () => {
+  const page = { calls: [usageCall()] };
+
+  assert.equal(decodeWebUsageCallPage(page, "newest"), page);
+});
+
+test("generated usage decoders reject cost states inconsistent with evidence", () => {
+  const unknownSemantics = usageCall();
+  unknownSemantics.input_semantics = "unknown";
+  assert.throws(
+    () =>
+      decodeWebUsageCallPage(
+        { calls: [unknownSemantics], continuation: null },
+        "newest",
+      ),
+    /unavailable with reason unknown_input_semantics/,
+  );
+
+  const contradictoryUnavailable = usageGroup();
+  contradictoryUnavailable.cost = {
+    status: "unavailable",
+    reason: "no_token_evidence",
+  };
+  assert.throws(
+    () =>
+      decodeWebUsageSummary({
+        groups: [contradictoryUnavailable],
+        truncated: false,
+      }),
+    /consistent with token evidence and input semantics/,
   );
 });
 

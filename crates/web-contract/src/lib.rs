@@ -1170,7 +1170,12 @@ export function decodeWebSearchPage(value) {{
 export function decodeWebUsageSummary(value) {{
   assertSchema(schemas.WebUsageSummary, schemas.WebUsageSummary, value, "usage_summary");
   value.groups.forEach((group, index) => {{
-    assertUsageEvidence(group.tokens, group.cost, `usage_summary.groups[${{index}}]`);
+    assertUsageEvidence(
+      group.input_semantics,
+      group.tokens,
+      group.cost,
+      `usage_summary.groups[${{index}}]`,
+    );
     for (const axis of ["input", "output", "cache_creation_input", "cache_read_input"]) {{
       if (group.coverage[axis] !== (group.tokens[axis] !== null)) {{
         fail(`usage_summary.groups[${{index}}].coverage.${{axis}}`, "consistent with token evidence");
@@ -1187,7 +1192,12 @@ export function decodeWebUsageCallPage(value, order) {{
   }}
   let previousKey = null;
   value.calls.forEach((call, index) => {{
-    assertUsageEvidence(call.tokens, call.cost, `usage_call_page.calls[${{index}}]`);
+    assertUsageEvidence(
+      call.input_semantics,
+      call.tokens,
+      call.cost,
+      `usage_call_page.calls[${{index}}]`,
+    );
     const key = {{ recordedAt: BigInt(call.recorded_at_micros), callId: call.call_id }};
     if (previousKey !== null) {{
       const comparison = key.recordedAt === previousKey.recordedAt
@@ -1202,7 +1212,7 @@ export function decodeWebUsageCallPage(value, order) {{
     }}
     previousKey = key;
   }});
-  if (value.continuation !== null) {{
+  if (value.continuation != null) {{
     const lastCall = value.calls.at(-1);
     if (
       lastCall === undefined ||
@@ -1215,10 +1225,43 @@ export function decodeWebUsageCallPage(value, order) {{
   return value;
 }}
 
-function assertUsageEvidence(tokens, cost, path) {{
+function assertUsageEvidence(inputSemantics, tokens, cost, path) {{
   const hasTokenEvidence = Object.values(tokens).some((value) => value !== null);
-  if (cost.status === "derived" && !hasTokenEvidence) {{
-    fail(`${{path}}.cost`, "unavailable without token evidence");
+  const incompleteCacheAxes =
+    inputSemantics === "cache_inclusive" &&
+    tokens.input !== null &&
+    tokens.output === null &&
+    tokens.cache_creation_input === null &&
+    tokens.cache_read_input === null;
+  const invalidCacheBreakdown =
+    inputSemantics === "cache_inclusive" &&
+    tokens.input !== null &&
+    tokens.cache_creation_input !== null &&
+    tokens.cache_read_input !== null &&
+    BigInt(tokens.input) <
+      BigInt(tokens.cache_creation_input) + BigInt(tokens.cache_read_input);
+  const requiredReason = !hasTokenEvidence
+    ? "no_token_evidence"
+    : inputSemantics === "unknown"
+      ? "unknown_input_semantics"
+      : incompleteCacheAxes
+        ? "incomplete_cache_axes"
+        : invalidCacheBreakdown
+          ? "invalid_cache_breakdown"
+          : null;
+  if (requiredReason !== null) {{
+    if (cost.status !== "unavailable" || cost.reason !== requiredReason) {{
+      fail(`${{path}}.cost`, `unavailable with reason ${{requiredReason}}`);
+    }}
+    return;
+  }}
+  if (
+    cost.status === "unavailable" &&
+    (cost.reason === "no_token_evidence" ||
+      cost.reason === "unknown_input_semantics" ||
+      cost.reason === "incomplete_cache_axes")
+  ) {{
+    fail(`${{path}}.cost.reason`, "consistent with token evidence and input semantics");
   }}
 }}
 "##,
