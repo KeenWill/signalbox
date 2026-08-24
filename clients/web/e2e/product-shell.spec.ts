@@ -121,7 +121,7 @@ test('describes Settings as browser-local rather than daemon-backed', async ({ p
   await expect(
     page.getByText(/do not change daemon authority or manufacture operational facts/),
   ).toBeVisible()
-  await expect(page.getByRole('status')).toHaveText('Browser-local preferences')
+  await expect(page.locator('.contract-state')).toHaveText('Browser-local preferences')
   await expect(page.getByText('Transport unavailable', { exact: true })).toHaveCount(0)
   await expect(page.getByText('Incompatible daemon contract', { exact: true })).toHaveCount(0)
   await expect(
