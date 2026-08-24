@@ -983,6 +983,12 @@ fn collect_pages(document: &Document) -> Result<Vec<(u32, lopdf::ObjectId)>, Pag
             .get(b"Type")
             .and_then(lopdf::Object::as_name)
             .map_err(|_| PageCollectionError::Malformed)?;
+        if expected_parent.is_none() {
+            match dictionary.get(b"Parent") {
+                Ok(Object::Null) | Err(LopdfError::DictKey(_)) => {}
+                Ok(_) | Err(_) => return Err(PageCollectionError::Malformed),
+            }
+        }
         if let Some(expected_parent) = expected_parent {
             let parent = dictionary
                 .get(b"Parent")
@@ -1769,6 +1775,17 @@ fn valid_xref_targets(parsed: &ParsedXref, source_length: u64) -> bool {
     }) {
         return false;
     }
+    if parsed.live_entries.iter().any(|entry| {
+        let XrefLocation::Compressed { stream_object, .. } = entry.location else {
+            return false;
+        };
+        !parsed.live_entries.iter().any(|stream| {
+            stream.reference.object_number == stream_object
+                && matches!(stream.location, XrefLocation::Uncompressed(_))
+        })
+    }) {
+        return false;
+    }
     let Some(root) = parsed.facts.root else {
         return false;
     };
@@ -1906,14 +1923,11 @@ fn merge_supplemental_xref(current: &mut ParsedXref, mut supplemental: ParsedXre
         .saturating_add(supplemental.facts.decoded_xref_bytes);
     current.facts.xref_stream_limit_exceeded |= supplemental.facts.xref_stream_limit_exceeded
         || current.facts.decoded_xref_bytes > MAX_TOTAL_XREF_STREAM_BYTES;
-    let objects = supplemental
-        .live_entries
-        .iter()
-        .map(|entry| entry.reference.object_number)
-        .collect::<BTreeSet<_>>();
-    current
-        .live_entries
-        .retain(|entry| !objects.contains(&entry.reference.object_number));
+    current.live_entries.retain(|entry| {
+        !supplemental
+            .declared_objects
+            .contains(&entry.reference.object_number)
+    });
     current.live_entries.extend(supplemental.live_entries);
     current
         .declared_objects
@@ -2909,6 +2923,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compressed_xref_requires_a_live_object_stream() {
+        let parsed = ParsedXref {
+            facts: TrailerFacts {
+                root: Some(IndirectReference {
+                    object_number: 7,
+                    generation: 0,
+                }),
+                ..TrailerFacts::default()
+            },
+            live_entries: vec![LiveXrefEntry {
+                reference: IndirectReference {
+                    object_number: 7,
+                    generation: 0,
+                },
+                location: XrefLocation::Compressed {
+                    stream_object: 5,
+                    index: 0,
+                },
+            }],
+            declared_objects: BTreeSet::from([7]),
+            object_limit_exceeded: false,
+        };
+
+        assert!(!valid_xref_targets(&parsed, 128));
+    }
+
     fn parsed_xref_stream_fixture() -> (ParsedXref, u64) {
         let stream = [
             0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 17, 1, 0, 0, 0, 0, 0, 0, 42,
@@ -3082,16 +3123,40 @@ mod tests {
 
     #[test]
     fn type_two_xref_entry_retains_object_stream_coordinates() {
-        let parsed =
-            parse_xref_stream_entries(&[2, 7, 3], [1, 1, 1], &[(11, 1)]).expect("type two entry");
+        let fixture = type_two_xref_entry_fixture();
+        let parsed = parse_xref_stream_entries(&fixture.bytes, [1, 1, 1], &[(11, 1)])
+            .expect("type two entry");
 
-        assert!(matches!(
-            parsed.0[0].location,
+        assert_eq!(
+            compressed_coordinates(parsed.0[0].location),
+            Some((fixture.stream_object, fixture.index))
+        );
+    }
+
+    struct TypeTwoXrefEntryFixture {
+        bytes: [u8; 3],
+        stream_object: u64,
+        index: u64,
+    }
+
+    fn type_two_xref_entry_fixture() -> TypeTwoXrefEntryFixture {
+        let stream_object = 7_u8;
+        let index = 3_u8;
+        TypeTwoXrefEntryFixture {
+            bytes: [2, stream_object, index],
+            stream_object: u64::from(stream_object),
+            index: u64::from(index),
+        }
+    }
+
+    fn compressed_coordinates(location: XrefLocation) -> Option<(u64, u64)> {
+        match location {
             XrefLocation::Compressed {
-                stream_object: 7,
-                index: 3
-            }
-        ));
+                stream_object,
+                index,
+            } => Some((stream_object, index)),
+            XrefLocation::Uncompressed(_) => None,
+        }
     }
 
     #[test]
@@ -3271,6 +3336,32 @@ mod tests {
                 index: 0
             }
         ));
+    }
+
+    #[test]
+    fn supplemental_xref_free_entries_remove_classic_live_entries() {
+        let mut current = ParsedXref {
+            facts: TrailerFacts::default(),
+            live_entries: vec![LiveXrefEntry {
+                reference: IndirectReference {
+                    object_number: 7,
+                    generation: 0,
+                },
+                location: XrefLocation::Uncompressed(42),
+            }],
+            declared_objects: BTreeSet::from([7]),
+            object_limit_exceeded: false,
+        };
+        let supplemental = ParsedXref {
+            facts: TrailerFacts::default(),
+            live_entries: Vec::new(),
+            declared_objects: BTreeSet::from([7]),
+            object_limit_exceeded: false,
+        };
+
+        merge_supplemental_xref(&mut current, supplemental);
+
+        assert!(current.live_entries.is_empty());
     }
 
     #[test]
@@ -3827,6 +3918,28 @@ endobj",
     fn page_collection_requires_typed_page_tree_nodes() {
         let mut document = Document::with_version("1.5");
         let pages_id = document.add_object(Dictionary::new());
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+
+        assert!(matches!(
+            collect_pages(&document),
+            Err(PageCollectionError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn page_collection_rejects_a_parent_on_the_root() {
+        let mut document = Document::with_version("1.5");
+        let parent_id = document.new_object_id();
+        let pages_id = document.add_object(dictionary! {
+            "Type" => "Pages",
+            "Parent" => parent_id,
+            "Kids" => Vec::<Object>::new(),
+            "Count" => 0,
+        });
         let catalog_id = document.add_object(dictionary! {
             "Type" => "Catalog",
             "Pages" => pages_id,
