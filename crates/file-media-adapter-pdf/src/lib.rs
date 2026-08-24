@@ -28,6 +28,8 @@ const PDF_HEADER_BYTES: u64 = 8;
 const PDF_TRAILER_BYTES: u64 = 65_536;
 const VALIDATION_SOURCE_BYTES: u64 = 262_144;
 const ROOT_VALIDATION_BYTES: u64 = 4_096;
+// Hard safety ceiling bounds xref-stream decompression before entry parsing.
+const MAX_XREF_STREAM_BYTES: usize = VALIDATION_SOURCE_BYTES as usize;
 const READ_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
 const SOURCE_CHUNK_BYTES: u64 = 256 * 1024;
 // Hard safety ceilings bound worker output and decompression-amplified memory.
@@ -95,6 +97,32 @@ struct ParsedXref {
     live_entries: Vec<LiveXrefEntry>,
     declared_objects: BTreeSet<u64>,
     object_limit_exceeded: bool,
+}
+
+struct ValidationBudget {
+    remaining_bytes: u64,
+    remaining_ranges: u32,
+}
+
+impl ValidationBudget {
+    fn new(maximum_source_bytes: u64, maximum_ranges: u32) -> Self {
+        Self {
+            remaining_bytes: maximum_source_bytes.min(VALIDATION_SOURCE_BYTES),
+            remaining_ranges: maximum_ranges,
+        }
+    }
+
+    fn available_after_reserving(&self, bytes: u64, ranges: u32) -> u64 {
+        if self.remaining_ranges <= ranges {
+            0
+        } else {
+            self.remaining_bytes.saturating_sub(bytes)
+        }
+    }
+
+    fn can_read(&self, length: u64) -> bool {
+        length > 0 && self.remaining_ranges > 0 && length <= self.remaining_bytes
+    }
 }
 
 enum Preflight {
@@ -167,12 +195,14 @@ impl FileMediaProvider for PdfProvider {
                 return Err(FileMediaProviderFailure::Failed);
             }
             let source_length = source.byte_length().get();
-            if source_length <= VALIDATION_SOURCE_BYTES {
-                let bytes = read_range(source, 0, source_length).await?;
+            let mut budget =
+                ValidationBudget::new(request.maximum_source_bytes, request.maximum_ranges);
+            if source_length <= budget.remaining_bytes && budget.remaining_ranges > 0 {
+                let bytes = read_validation_range(source, &mut budget, 0, source_length).await?;
                 require_active(cancellation)?;
                 return inspect_complete(&bytes, request.evidence);
             }
-            inspect_bounded(source, request.evidence, cancellation).await
+            inspect_bounded(source, request.evidence, cancellation, &mut budget).await
         })
     }
 
@@ -296,11 +326,25 @@ async fn inspect_bounded(
     source: &dyn VerifiedBlobSource,
     evidence: ValidationEvidence,
     cancellation: &dyn CancellationSignal,
+    budget: &mut ValidationBudget,
 ) -> Result<ProcessorValidationOutput, FileMediaProviderFailure> {
-    let prefix = read_range(source, 0, PDF_HEADER_BYTES).await?;
     let source_length = source.byte_length().get();
-    let suffix_length = source_length.min(PDF_TRAILER_BYTES);
-    let suffix = read_range(source, source_length - suffix_length, suffix_length).await?;
+    if budget.remaining_ranges < 2
+        || budget.remaining_bytes <= PDF_HEADER_BYTES + 2 * ROOT_VALIDATION_BYTES
+    {
+        return Ok(malformed_validation());
+    }
+    let prefix = read_validation_range(source, budget, 0, PDF_HEADER_BYTES).await?;
+    let suffix_length = source_length.min(PDF_TRAILER_BYTES).min(
+        budget
+            .remaining_bytes
+            .saturating_sub(2 * ROOT_VALIDATION_BYTES),
+    );
+    if !budget.can_read(suffix_length) {
+        return Ok(malformed_validation());
+    }
+    let suffix =
+        read_validation_range(source, budget, source_length - suffix_length, suffix_length).await?;
     require_active(cancellation)?;
     if !valid_header(&prefix) || !has_pdf_trailer(&suffix) {
         return Ok(malformed_validation());
@@ -320,17 +364,14 @@ async fn inspect_bounded(
             .ok_or(FileMediaProviderFailure::Failed)?
             .to_vec()
     } else {
-        let remaining_budget = VALIDATION_SOURCE_BYTES
-            .checked_sub(PDF_HEADER_BYTES)
-            .and_then(|remaining| remaining.checked_sub(suffix_length))
-            .ok_or(FileMediaProviderFailure::Failed)?;
         let missing_length = suffix_offset - xref_offset;
-        let additional_length = missing_length.min(
-            remaining_budget
-                .checked_sub(ROOT_VALIDATION_BYTES)
-                .ok_or(FileMediaProviderFailure::Failed)?,
-        );
-        let mut bytes = read_range(source, xref_offset, additional_length).await?;
+        let additional_length =
+            missing_length.min(budget.available_after_reserving(2 * ROOT_VALIDATION_BYTES, 2));
+        if !budget.can_read(additional_length) {
+            return Ok(malformed_validation());
+        }
+        let mut bytes =
+            read_validation_range(source, budget, xref_offset, additional_length).await?;
         if additional_length == missing_length {
             bytes.extend_from_slice(&suffix);
         }
@@ -340,30 +381,23 @@ async fn inspect_bounded(
     let Some(mut parsed_xref) = parse_xref_structure(&xref_bytes) else {
         return Ok(malformed_validation());
     };
-    let mut remaining_budget = VALIDATION_SOURCE_BYTES
-        .checked_sub(PDF_HEADER_BYTES + suffix_length)
-        .ok_or(FileMediaProviderFailure::Failed)?;
-    if xref_offset < suffix_offset {
-        remaining_budget = remaining_budget
-            .saturating_sub((xref_bytes.len() as u64).saturating_sub(suffix_length));
-    }
     let mut visited = BTreeSet::from([xref_offset]);
+    let mut newer_xref_offset = xref_offset;
     while let Some(prev) = parsed_xref.facts.prev {
-        if !visited.insert(prev) || prev >= source_length || remaining_budget == 0 {
+        if !visited.insert(prev) || prev >= newer_xref_offset {
             return Ok(malformed_validation());
         }
-        let length = remaining_budget
-            .saturating_sub(ROOT_VALIDATION_BYTES)
-            .min(source_length - prev);
-        if length == 0 {
+        let length = (newer_xref_offset - prev)
+            .min(budget.available_after_reserving(2 * ROOT_VALIDATION_BYTES, 2));
+        if !budget.can_read(length) {
             return Ok(malformed_validation());
         }
-        let previous_bytes = read_range(source, prev, length).await?;
-        remaining_budget = remaining_budget.saturating_sub(length);
+        let previous_bytes = read_validation_range(source, budget, prev, length).await?;
         let Some(previous) = parse_xref_structure(&previous_bytes) else {
             return Ok(malformed_validation());
         };
         merge_previous_xref(&mut parsed_xref, previous);
+        newer_xref_offset = prev;
         require_active(cancellation)?;
     }
     if parsed_xref.facts.encrypted {
@@ -377,18 +411,22 @@ async fn inspect_bounded(
     let Some((root, root_location)) = root_location(&parsed_xref) else {
         return Ok(malformed_validation());
     };
-    match root_location {
+    let pages = match root_location {
         XrefLocation::Uncompressed(root_offset) => {
-            let root_length = remaining_budget
+            let root_length = budget
+                .remaining_bytes
+                .saturating_sub(ROOT_VALIDATION_BYTES)
                 .min(ROOT_VALIDATION_BYTES)
                 .min(source_length - root_offset);
-            if root_length == 0 {
+            if !budget.can_read(root_length) {
                 return Ok(malformed_validation());
             }
-            let root_bytes = read_range(source, root_offset, root_length).await?;
-            if !object_is_catalog(&root_bytes, root) {
+            let root_bytes =
+                read_validation_range(source, budget, root_offset, root_length).await?;
+            let Some(pages) = catalog_pages_reference(&root_bytes, root) else {
                 return Ok(malformed_validation());
-            }
+            };
+            pages
         }
         XrefLocation::Compressed {
             stream_object,
@@ -399,23 +437,49 @@ async fn inspect_bounded(
             else {
                 return Ok(malformed_validation());
             };
-            let stream_length = remaining_budget.min(source_length - stream_offset);
-            if stream_length == 0 {
+            let stream_length = budget
+                .remaining_bytes
+                .saturating_sub(ROOT_VALIDATION_BYTES)
+                .min(source_length - stream_offset);
+            if !budget.can_read(stream_length) {
                 return Ok(malformed_validation());
             }
-            let stream_bytes = read_range(source, stream_offset, stream_length).await?;
+            let stream_bytes =
+                read_validation_range(source, budget, stream_offset, stream_length).await?;
             let decoded_limit =
-                usize::try_from(remaining_budget).map_err(|_| FileMediaProviderFailure::Failed)?;
-            if !object_stream_contains_catalog(
+                usize::try_from(stream_length).map_err(|_| FileMediaProviderFailure::Failed)?;
+            let Some(pages) = object_stream_catalog_pages(
                 &stream_bytes,
                 stream_reference,
                 root,
                 index,
                 decoded_limit,
-            ) {
+            ) else {
                 return Ok(malformed_validation());
-            }
+            };
+            pages
         }
+    };
+    let Some(pages_entry) = parsed_xref
+        .live_entries
+        .iter()
+        .find(|entry| entry.reference == pages)
+    else {
+        return Ok(malformed_validation());
+    };
+    let XrefLocation::Uncompressed(pages_offset) = pages_entry.location else {
+        return Ok(malformed_validation());
+    };
+    let pages_length = budget
+        .remaining_bytes
+        .min(ROOT_VALIDATION_BYTES)
+        .min(source_length - pages_offset);
+    if !budget.can_read(pages_length) {
+        return Ok(malformed_validation());
+    }
+    let pages_bytes = read_validation_range(source, budget, pages_offset, pages_length).await?;
+    if !object_is_pages(&pages_bytes, pages) {
+        return Ok(malformed_validation());
     }
     validated_output(
         evidence,
@@ -678,6 +742,20 @@ async fn read_range(
         .map_err(|_| FileMediaProviderFailure::Failed)
 }
 
+async fn read_validation_range(
+    source: &dyn VerifiedBlobSource,
+    budget: &mut ValidationBudget,
+    offset: u64,
+    length: u64,
+) -> Result<Vec<u8>, FileMediaProviderFailure> {
+    if !budget.can_read(length) {
+        return Err(FileMediaProviderFailure::Failed);
+    }
+    budget.remaining_bytes -= length;
+    budget.remaining_ranges -= 1;
+    read_range(source, offset, length).await
+}
+
 fn require_reader(reader: &ReaderIdentity) -> Result<(), FileMediaProviderFailure> {
     if reader.provider().as_str() == PROVIDER_NAME
         && reader.reader().as_str() == READER_NAME
@@ -719,7 +797,7 @@ fn startxref_offset(bytes: &[u8]) -> Option<u64> {
         .windows(b"startxref".len())
         .rposition(|window| window == b"startxref")?;
     let mut cursor = marker.checked_add(b"startxref".len())?;
-    skip_pdf_whitespace(bytes, &mut cursor);
+    skip_pdf_space_and_comments(bytes, &mut cursor);
     parse_unsigned(bytes, &mut cursor)
 }
 
@@ -817,6 +895,9 @@ fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
         .clone()
         .unwrap_or_else(|| vec![(0, facts.size.unwrap_or(0))]);
     let decoded_length = xref_decoded_length(widths, &indexes)?;
+    if decoded_length > MAX_XREF_STREAM_BYTES {
+        return None;
+    }
     let stream = decode_xref_stream(encoded_stream, &facts.filters, decoded_length)?;
     let (mut live_entries, mut declared_objects, object_limit_exceeded) =
         parse_xref_stream_entries(&stream, widths, &indexes)?;
@@ -1189,76 +1270,49 @@ fn object_stream_offset(
     })
 }
 
-fn object_stream_contains_catalog(
+fn object_stream_catalog_pages(
     bytes: &[u8],
     stream_reference: IndirectReference,
     catalog_reference: IndirectReference,
     catalog_index: u64,
     decoded_limit: usize,
-) -> bool {
-    let Some((facts, encoded)) = parse_object_stream(bytes, stream_reference) else {
-        return false;
-    };
-    let Some(count) = facts.count.and_then(|value| usize::try_from(value).ok()) else {
-        return false;
-    };
-    let Some(first) = facts.first.and_then(|value| usize::try_from(value).ok()) else {
-        return false;
-    };
-    let Some(index) = usize::try_from(catalog_index).ok() else {
-        return false;
-    };
+) -> Option<IndirectReference> {
+    let (facts, encoded) = parse_object_stream(bytes, stream_reference)?;
+    let count = facts.count.and_then(|value| usize::try_from(value).ok())?;
+    let first = facts.first.and_then(|value| usize::try_from(value).ok())?;
+    let index = usize::try_from(catalog_index).ok()?;
     if !facts.is_object_stream || index >= count {
-        return false;
+        return None;
     }
-    let Some(decoded) = decode_pdf_stream(encoded, &facts.filters, decoded_limit) else {
-        return false;
-    };
-    let Some(header) = decoded.get(..first) else {
-        return false;
-    };
+    let decoded = decode_pdf_stream(encoded, &facts.filters, decoded_limit)?;
+    let header = decoded.get(..first)?;
     let mut cursor = 0_usize;
     let mut entries = Vec::with_capacity(count);
     for _ in 0..count {
         skip_pdf_space_and_comments(header, &mut cursor);
-        let Some(object_number) = parse_unsigned(header, &mut cursor) else {
-            return false;
-        };
+        let object_number = parse_unsigned(header, &mut cursor)?;
         skip_pdf_space_and_comments(header, &mut cursor);
-        let Some(offset) = parse_unsigned(header, &mut cursor) else {
-            return false;
-        };
+        let offset = parse_unsigned(header, &mut cursor)?;
         entries.push((object_number, offset));
     }
     skip_pdf_space_and_comments(header, &mut cursor);
     if cursor != header.len() || entries[index].0 != catalog_reference.object_number {
-        return false;
+        return None;
     }
-    let Some(start) = usize::try_from(entries[index].1)
+    let start = usize::try_from(entries[index].1)
         .ok()
-        .and_then(|offset| first.checked_add(offset))
-    else {
-        return false;
-    };
+        .and_then(|offset| first.checked_add(offset))?;
     let end = if index + 1 < entries.len() {
-        let Some(end) = usize::try_from(entries[index + 1].1)
+        usize::try_from(entries[index + 1].1)
             .ok()
-            .and_then(|offset| first.checked_add(offset))
-        else {
-            return false;
-        };
-        end
+            .and_then(|offset| first.checked_add(offset))?
     } else {
         decoded.len()
     };
-    let Some(object) = decoded.get(start..end) else {
-        return false;
-    };
-    let Some((catalog, mut cursor)) = parse_catalog_dictionary(object, 0) else {
-        return false;
-    };
+    let object = decoded.get(start..end)?;
+    let (pages, mut cursor) = parse_catalog_dictionary(object, 0)?;
     skip_pdf_space_and_comments(object, &mut cursor);
-    catalog && cursor == object.len()
+    (cursor == object.len()).then_some(pages)
 }
 
 fn parse_object_stream(
@@ -1314,7 +1368,17 @@ fn parse_object_stream(
     consume_stream_line_end(bytes, &mut cursor)?;
     let length = usize::try_from(facts.length?).ok()?;
     let end = cursor.checked_add(length)?;
-    Some((facts, bytes.get(cursor..end)?))
+    let encoded = bytes.get(cursor..end)?;
+    cursor = end;
+    skip_pdf_whitespace(bytes, &mut cursor);
+    if !consume_keyword(bytes, &mut cursor, b"endstream") {
+        return None;
+    }
+    skip_pdf_space_and_comments(bytes, &mut cursor);
+    if !consume_keyword(bytes, &mut cursor, b"endobj") {
+        return None;
+    }
+    Some((facts, encoded))
 }
 
 fn decode_pdf_stream(encoded: &[u8], filters: &[Vec<u8>], limit: usize) -> Option<Vec<u8>> {
@@ -1333,7 +1397,53 @@ fn decode_pdf_stream(encoded: &[u8], filters: &[Vec<u8>], limit: usize) -> Optio
         .ok()
 }
 
-fn object_is_catalog(bytes: &[u8], expected: IndirectReference) -> bool {
+fn catalog_pages_reference(bytes: &[u8], expected: IndirectReference) -> Option<IndirectReference> {
+    let mut cursor = 0;
+    skip_pdf_space_and_comments(bytes, &mut cursor);
+    if parse_unsigned(bytes, &mut cursor) != Some(expected.object_number) {
+        return None;
+    }
+    skip_pdf_space_and_comments(bytes, &mut cursor);
+    if parse_unsigned(bytes, &mut cursor) != Some(expected.generation) {
+        return None;
+    }
+    skip_pdf_space_and_comments(bytes, &mut cursor);
+    if !consume_keyword(bytes, &mut cursor, b"obj") {
+        return None;
+    }
+    skip_pdf_space_and_comments(bytes, &mut cursor);
+    let (pages, mut cursor) = parse_catalog_dictionary(bytes, cursor)?;
+    skip_pdf_space_and_comments(bytes, &mut cursor);
+    consume_keyword(bytes, &mut cursor, b"endobj").then_some(pages)
+}
+
+fn parse_catalog_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(IndirectReference, usize)> {
+    if !bytes.get(cursor..)?.starts_with(b"<<") {
+        return None;
+    }
+    cursor += 2;
+    let mut catalog = false;
+    let mut pages = None;
+    loop {
+        skip_pdf_space_and_comments(bytes, &mut cursor);
+        if bytes.get(cursor..)?.starts_with(b">>") {
+            return catalog.then_some((pages?, cursor + 2));
+        }
+        let key = parse_name(bytes, &mut cursor)?;
+        skip_pdf_space_and_comments(bytes, &mut cursor);
+        let value_start = cursor;
+        skip_pdf_object(bytes, &mut cursor, 0)?;
+        if key == b"Type" {
+            let mut value_cursor = value_start;
+            catalog = parse_name(bytes, &mut value_cursor).as_deref() == Some(b"Catalog");
+        } else if key == b"Pages" {
+            let mut value_cursor = value_start;
+            pages = Some(parse_indirect_reference(bytes, &mut value_cursor)?);
+        }
+    }
+}
+
+fn object_is_pages(bytes: &[u8], expected: IndirectReference) -> bool {
     let mut cursor = 0;
     skip_pdf_space_and_comments(bytes, &mut cursor);
     if parse_unsigned(bytes, &mut cursor) != Some(expected.object_number) {
@@ -1348,37 +1458,38 @@ fn object_is_catalog(bytes: &[u8], expected: IndirectReference) -> bool {
         return false;
     }
     skip_pdf_space_and_comments(bytes, &mut cursor);
-    let Some((catalog, mut cursor)) = parse_catalog_dictionary(bytes, cursor) else {
+    if !bytes
+        .get(cursor..)
+        .is_some_and(|bytes| bytes.starts_with(b"<<"))
+    {
         return false;
-    };
-    skip_pdf_space_and_comments(bytes, &mut cursor);
-    catalog && consume_keyword(bytes, &mut cursor, b"endobj")
-}
-
-fn parse_catalog_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(bool, usize)> {
-    if !bytes.get(cursor..)?.starts_with(b"<<") {
-        return None;
     }
     cursor += 2;
-    let mut catalog = false;
     let mut pages = false;
     loop {
         skip_pdf_space_and_comments(bytes, &mut cursor);
-        if bytes.get(cursor..)?.starts_with(b">>") {
-            return Some((catalog && pages, cursor + 2));
+        if bytes
+            .get(cursor..)
+            .is_some_and(|bytes| bytes.starts_with(b">>"))
+        {
+            cursor += 2;
+            break;
         }
-        let key = parse_name(bytes, &mut cursor)?;
+        let Some(key) = parse_name(bytes, &mut cursor) else {
+            return false;
+        };
         skip_pdf_space_and_comments(bytes, &mut cursor);
         let value_start = cursor;
-        skip_pdf_object(bytes, &mut cursor, 0)?;
+        if skip_pdf_object(bytes, &mut cursor, 0).is_none() {
+            return false;
+        }
         if key == b"Type" {
             let mut value_cursor = value_start;
-            catalog = parse_name(bytes, &mut value_cursor).as_deref() == Some(b"Catalog");
-        } else if key == b"Pages" {
-            let mut value_cursor = value_start;
-            pages = parse_indirect_reference(bytes, &mut value_cursor).is_some();
+            pages = parse_name(bytes, &mut value_cursor).as_deref() == Some(b"Pages");
         }
     }
+    skip_pdf_space_and_comments(bytes, &mut cursor);
+    pages && consume_keyword(bytes, &mut cursor, b"endobj")
 }
 
 fn consume_stream_line_end(bytes: &[u8], cursor: &mut usize) -> Option<()> {
@@ -1617,17 +1728,23 @@ mod tests {
     use signalbox_file_media_runtime::{FileMediaCeilings, ReadViewBounds};
 
     #[test]
-    fn declaration_fits_probe_and_text_ceilings() {
+    fn declaration_probe_fits_runtime_ceiling() {
         let declaration = declaration().expect("valid declaration");
         let reader = &declaration.readers()[0];
-        let text = reader
+
+        assert!(reader.probe().range_count() >= 2);
+        assert!(reader.probe().range_count() <= FileMediaCeilings::version_one().probe_ranges);
+    }
+
+    #[test]
+    fn declaration_text_view_fits_runtime_ceiling() {
+        let declaration = declaration().expect("valid declaration");
+        let text = declaration.readers()[0]
             .views()
             .iter()
             .find(|view| view.name().as_str() == TEXT_VIEW)
             .expect("text view");
 
-        assert!(reader.probe().range_count() >= 2);
-        assert!(reader.probe().range_count() <= FileMediaCeilings::version_one().probe_ranges);
         assert!(matches!(
             text.bounds(),
             ReadViewBounds::Text { output_bytes, .. }
@@ -1673,6 +1790,36 @@ mod tests {
         let bytes = b"2 0 obj\n<< /Type /XRef /Size 3 /Root 1 0 R /W [1 7 0] /Length 24 >>\nstream\nendstream\nendobj";
 
         assert!(parse_xref_structure(bytes).is_none());
+    }
+
+    #[test]
+    fn xref_stream_rejects_expansion_above_parser_ceiling() {
+        let count = MAX_XREF_STREAM_BYTES as u64 + 1;
+        let bytes = format!(
+            "2 0 obj\n<< /Type /XRef /Size {count} /Root 1 0 R /W [1 0 0] /Index [0 {count}] /Length 1 /Filter /FlateDecode >>\nstream\nx\nendstream\nendobj"
+        );
+
+        assert!(parse_xref_structure(bytes.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn startxref_accepts_a_comment_before_the_offset() {
+        assert_eq!(
+            startxref_offset(b"startxref % offset comment\n42\n%%EOF"),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn validation_budget_honors_effective_bytes_and_ranges() {
+        let mut budget = ValidationBudget::new(64, 2);
+
+        assert!(budget.can_read(32));
+        budget.remaining_bytes -= 32;
+        budget.remaining_ranges -= 1;
+        assert!(budget.can_read(32));
+        assert!(!budget.can_read(33));
+        assert_eq!(budget.available_after_reserving(1, 1), 0);
     }
 
     #[test]
@@ -1760,22 +1907,21 @@ mod tests {
             generation: 0,
         };
 
-        assert!(object_is_catalog(
-            b"7 0 obj\n<< /Type /Catalog /Pages 8 0 R >>\nendobj",
-            root
-        ));
-        assert!(!object_is_catalog(
-            b"7 0 obj\n<< /Type /Pages /Count 0 >>\nendobj",
-            root
-        ));
-        assert!(!object_is_catalog(
-            b"7 0 obj\n<< /Type /Catalog >>\nendobj",
-            root
-        ));
-        assert!(!object_is_catalog(
-            b"7 0 obj\n<< /Type /Catalog /Pages 8 0 R >>",
-            root
-        ));
+        assert_eq!(
+            catalog_pages_reference(b"7 0 obj\n<< /Type /Catalog /Pages 8 0 R >>\nendobj", root,),
+            Some(IndirectReference {
+                object_number: 8,
+                generation: 0,
+            })
+        );
+        assert!(
+            catalog_pages_reference(b"7 0 obj\n<< /Type /Pages /Count 0 >>\nendobj", root,)
+                .is_none()
+        );
+        assert!(catalog_pages_reference(b"7 0 obj\n<< /Type /Catalog >>\nendobj", root,).is_none());
+        assert!(
+            catalog_pages_reference(b"7 0 obj\n<< /Type /Catalog /Pages 8 0 R >>", root,).is_none()
+        );
     }
 
     #[test]
@@ -1787,6 +1933,7 @@ mod tests {
         )
         .into_bytes();
         bytes.extend_from_slice(content);
+        bytes.extend_from_slice(b"\nendstream\nendobj");
 
         let stream = IndirectReference {
             object_number: 5,
@@ -1796,11 +1943,62 @@ mod tests {
             object_number: 7,
             generation: 0,
         };
-        assert!(object_stream_contains_catalog(
-            &bytes, stream, catalog, 1, 4_096
+        assert_eq!(
+            object_stream_catalog_pages(&bytes, stream, catalog, 1, 4_096),
+            Some(IndirectReference {
+                object_number: 8,
+                generation: 0,
+            })
+        );
+        assert!(object_stream_catalog_pages(&bytes, stream, catalog, 0, 4_096).is_none());
+    }
+
+    #[test]
+    fn compressed_catalog_requires_object_stream_terminators() {
+        let content = b"7 0 << /Type /Catalog /Pages 8 0 R >>";
+        let mut bytes = format!(
+            "5 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length {} >>\nstream\n",
+            content.len()
+        )
+        .into_bytes();
+        bytes.extend_from_slice(content);
+
+        assert!(
+            object_stream_catalog_pages(
+                &bytes,
+                IndirectReference {
+                    object_number: 5,
+                    generation: 0,
+                },
+                IndirectReference {
+                    object_number: 7,
+                    generation: 0,
+                },
+                0,
+                4_096,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn page_tree_probe_requires_the_referenced_pages_object() {
+        let pages = IndirectReference {
+            object_number: 8,
+            generation: 0,
+        };
+
+        assert!(object_is_pages(
+            b"8 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj",
+            pages
         ));
-        assert!(!object_stream_contains_catalog(
-            &bytes, stream, catalog, 0, 4_096
+        assert!(!object_is_pages(
+            b"8 0 obj\n<< /Type /Page >>\nendobj",
+            pages
+        ));
+        assert!(!object_is_pages(
+            b"9 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj",
+            pages
         ));
     }
 
