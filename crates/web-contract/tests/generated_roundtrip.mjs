@@ -125,6 +125,42 @@ test("generated live decoder correlates queued preview with its count", () => {
   );
 });
 
+test("generated live decoder validates identities and active-state correlation", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "not-a-uuid",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: null,
+      }),
+    /matching/,
+  );
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: {
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          state: { kind: "running", model_call_id: null },
+        },
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: {
+          kind: "model_call",
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          model_call_id: "00000000-0000-0000-0000-000000000993",
+        },
+        runner: null,
+      }),
+    /absent while an active turn is present/,
+  );
+});
+
 test("generated live decoder rejects malformed runner correlations", () => {
   assert.throws(
     () =>
@@ -153,6 +189,19 @@ test("generated live stream decoder rejects variant-only extra fields", () => {
         cursor: "8",
       }),
     /one recognized variant/,
+  );
+});
+
+test("generated live stream decoder correlates durable cursor and address", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "durable",
+        cursor: "8",
+        address: { event_sequence: "9" },
+        event_kind: "turn_activated",
+      }),
+    /equal to cursor/,
   );
 });
 

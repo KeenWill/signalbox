@@ -50,12 +50,12 @@ use signalbox_web_contract::{
     WebAttentionAction, WebAttentionActivity, WebAttentionActivityKind, WebAttentionBlockedReason,
     WebAttentionContinuation, WebAttentionGoalBlock, WebAttentionJudgeFacts, WebAttentionSnapshot,
     WebAttentionSort, WebAttentionState, WebAttentionStreamEvent, WebAttentionSummary,
-    WebContractBootstrap, WebContractExample, WebSessionId, WebSessionLiveActiveState,
-    WebSessionLiveActiveTurn, WebSessionLiveReconciliation, WebSessionLiveRunner,
-    WebSessionLiveRunnerConnectionHealth, WebSessionLiveSnapshot, WebSessionLiveStreamEvent,
-    WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
-    WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
-    WebTimelineEventSequence, WebTurnId, WebU64,
+    WebContractBootstrap, WebContractExample, WebLiveResourceId, WebSessionId,
+    WebSessionLiveActiveState, WebSessionLiveActiveTurn, WebSessionLiveReconciliation,
+    WebSessionLiveRunner, WebSessionLiveRunnerConnectionHealth, WebSessionLiveSnapshot,
+    WebSessionLiveStreamEvent, WebSessionTimelineDescriptor, WebSessionTimelineEventKind,
+    WebSessionTimelineItem, WebSessionTimelineSizeFacts, WebSessionTimelineWindow,
+    WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence, WebTurnId, WebU64,
 };
 use sqlx::{PgPool, types::Uuid};
 use tokio::{net::TcpListener, sync::watch};
@@ -772,8 +772,8 @@ struct LiveFollowState {
 }
 
 struct PendingProviderTextDelta {
-    turn_id: String,
-    model_call_id: String,
+    turn_id: WebTurnId,
+    model_call_id: WebLiveResourceId,
     part_index: u32,
     text: std::sync::Arc<str>,
     offset: usize,
@@ -880,8 +880,10 @@ async fn live_follow_next(
                     continue;
                 }
                 let mut fragment = PendingProviderTextDelta {
-                    turn_id: turn.into_uuid().to_string(),
-                    model_call_id: call.into_uuid().to_string(),
+                    turn_id: WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()),
+                    model_call_id: WebLiveResourceId::from_uuid_bytes(
+                        call.into_uuid().into_bytes(),
+                    ),
                     part_index,
                     text,
                     offset: 0,
@@ -938,42 +940,54 @@ fn next_web_text_fragment(
 
 fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
     WebSessionLiveSnapshot {
-        session_id: snapshot.session.into_uuid().to_string(),
+        session_id: WebSessionId::from_uuid_bytes(snapshot.session.into_uuid().into_bytes()),
         observed_through: WebU64::from_u64(snapshot.observed_through),
         active: snapshot.active.map(|active| WebSessionLiveActiveTurn {
-            turn_id: active.turn.into_uuid().to_string(),
+            turn_id: WebTurnId::from_uuid_bytes(active.turn.into_uuid().into_bytes()),
             state: match active.state {
                 SessionLiveActiveState::Running { model_call } => {
                     WebSessionLiveActiveState::Running {
-                        model_call_id: model_call.map(|call| call.into_uuid().to_string()),
+                        model_call_id: model_call.map(|call| {
+                            WebLiveResourceId::from_uuid_bytes(call.into_uuid().into_bytes())
+                        }),
                     }
                 }
                 SessionLiveActiveState::AwaitingModelCallRecovery { call } => {
                     WebSessionLiveActiveState::AwaitingModelCallRecovery {
-                        model_call_id: call.into_uuid().to_string(),
+                        model_call_id: WebLiveResourceId::from_uuid_bytes(
+                            call.into_uuid().into_bytes(),
+                        ),
                     }
                 }
                 SessionLiveActiveState::AwaitingToolApproval { request } => {
                     WebSessionLiveActiveState::AwaitingToolApproval {
-                        tool_request_id: request.into_uuid().to_string(),
+                        tool_request_id: WebLiveResourceId::from_uuid_bytes(
+                            request.into_uuid().into_bytes(),
+                        ),
                     }
                 }
                 SessionLiveActiveState::AwaitingChild { request, child } => {
                     WebSessionLiveActiveState::AwaitingChild {
-                        tool_request_id: request.into_uuid().to_string(),
-                        child_session_id: child.into_uuid().to_string(),
+                        tool_request_id: WebLiveResourceId::from_uuid_bytes(
+                            request.into_uuid().into_bytes(),
+                        ),
+                        child_session_id: WebSessionId::from_uuid_bytes(
+                            child.into_uuid().into_bytes(),
+                        ),
                     }
                 }
                 SessionLiveActiveState::AwaitingToolRecovery { attempt } => {
                     WebSessionLiveActiveState::AwaitingToolRecovery {
-                        tool_attempt_id: attempt.into_uuid().to_string(),
+                        tool_attempt_id: WebLiveResourceId::from_uuid_bytes(
+                            attempt.into_uuid().into_bytes(),
+                        ),
                     }
                 }
                 SessionLiveActiveState::AwaitingRunnerRecovery {
                     runner,
                     placement_revision,
                 } => WebSessionLiveActiveState::AwaitingRunnerRecovery {
-                    runner_id: runner.into_uuid().to_string(),
+                    runner_id: WebLiveResourceId::from_uuid_bytes(runner.into_uuid().into_bytes()),
                     placement_revision: WebU64::from_u64(placement_revision),
                 },
             },
@@ -982,21 +996,25 @@ fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
         queued_turn_ids: snapshot
             .queued_turns
             .into_iter()
-            .map(|turn| turn.into_uuid().to_string())
+            .map(|turn| WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()))
             .collect(),
         reconciliation: snapshot
             .reconciliation
             .map(|reconciliation| match reconciliation {
                 SessionLiveReconciliation::ModelCall { turn, call } => {
                     WebSessionLiveReconciliation::ModelCall {
-                        turn_id: turn.into_uuid().to_string(),
-                        model_call_id: call.into_uuid().to_string(),
+                        turn_id: WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()),
+                        model_call_id: WebLiveResourceId::from_uuid_bytes(
+                            call.into_uuid().into_bytes(),
+                        ),
                     }
                 }
                 SessionLiveReconciliation::ToolAttempt { turn, attempt } => {
                     WebSessionLiveReconciliation::ToolAttempt {
-                        turn_id: turn.into_uuid().to_string(),
-                        tool_attempt_id: attempt.into_uuid().to_string(),
+                        turn_id: WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()),
+                        tool_attempt_id: WebLiveResourceId::from_uuid_bytes(
+                            attempt.into_uuid().into_bytes(),
+                        ),
                     }
                 }
             }),
@@ -1008,7 +1026,9 @@ fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
                 }
                 (SessionLiveRunnerState::Pinned, Some(runner), Some(connection_health)) => {
                     Some(WebSessionLiveRunner::Pinned {
-                        runner_id: runner.into_uuid().to_string(),
+                        runner_id: WebLiveResourceId::from_uuid_bytes(
+                            runner.into_uuid().into_bytes(),
+                        ),
                         placement_revision,
                         connection_health: match connection_health {
                             SessionLiveRunnerConnectionHealth::Connected => {
@@ -1028,19 +1048,25 @@ fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
                 }
                 (SessionLiveRunnerState::RunnerLostBeforePin, Some(runner), None) => {
                     Some(WebSessionLiveRunner::RunnerLostBeforePin {
-                        runner_id: runner.into_uuid().to_string(),
+                        runner_id: WebLiveResourceId::from_uuid_bytes(
+                            runner.into_uuid().into_bytes(),
+                        ),
                         placement_revision,
                     })
                 }
                 (SessionLiveRunnerState::RunnerLost, Some(runner), None) => {
                     Some(WebSessionLiveRunner::RunnerLost {
-                        runner_id: runner.into_uuid().to_string(),
+                        runner_id: WebLiveResourceId::from_uuid_bytes(
+                            runner.into_uuid().into_bytes(),
+                        ),
                         placement_revision,
                     })
                 }
                 (SessionLiveRunnerState::RunnerAbandoned, Some(runner), None) => {
                     Some(WebSessionLiveRunner::RunnerAbandoned {
-                        runner_id: runner.into_uuid().to_string(),
+                        runner_id: WebLiveResourceId::from_uuid_bytes(
+                            runner.into_uuid().into_bytes(),
+                        ),
                         placement_revision,
                     })
                 }
@@ -1788,8 +1814,9 @@ mod tests {
     use signalbox_domain::{ModelCallId, SessionId, TurnId};
     use signalbox_web_contract::{
         MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebAttentionStreamEvent, WebContractBootstrap,
-        WebContractExample, WebSessionLiveStreamEvent, WebSessionTimelineEventKind,
-        WebTimelineAddress, WebTimelineEventSequence, WebU64,
+        WebContractExample, WebLiveResourceId, WebSessionLiveStreamEvent,
+        WebSessionTimelineEventKind, WebTimelineAddress, WebTimelineEventSequence, WebTurnId,
+        WebU64,
     };
     use sqlx::types::Uuid;
     use tokio::sync::{mpsc, watch};
@@ -1871,8 +1898,10 @@ mod tests {
         assert_eq!(
             draft,
             WebSessionLiveStreamEvent::ProviderTextDelta {
-                turn_id: live_turn().into_uuid().to_string(),
-                model_call_id: live_call().into_uuid().to_string(),
+                turn_id: WebTurnId::from_uuid_bytes(live_turn().into_uuid().into_bytes()),
+                model_call_id: WebLiveResourceId::from_uuid_bytes(
+                    live_call().into_uuid().into_bytes()
+                ),
                 part_index: 2,
                 content: "draft".to_owned(),
             }
@@ -2003,8 +2032,8 @@ mod tests {
         let content = super::next_web_text_fragment(&source, &mut 0, &mut false)
             .expect("nonempty provider text has a first fragment");
         let encoded = super::encode_ndjson_item(WebSessionLiveStreamEvent::ProviderTextDelta {
-            turn_id: live_turn().into_uuid().to_string(),
-            model_call_id: live_call().into_uuid().to_string(),
+            turn_id: WebTurnId::from_uuid_bytes(live_turn().into_uuid().into_bytes()),
+            model_call_id: WebLiveResourceId::from_uuid_bytes(live_call().into_uuid().into_bytes()),
             part_index: u32::MAX,
             content,
         })
