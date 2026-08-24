@@ -448,11 +448,38 @@ the sweep (INV-007).
   daemon recovery handoff before dropping the pass future, then immediately
   releases the admission slot. The handoff marks the correlated cancellation so
   fatal supervision does not mistake the scheduler's bounded drop for an
-  unrelated failure, and invokes the existing startup-recovery transaction
-  immediately plus three retries at two-minute intervals. The outer watchdog
-  below remains responsible if those attempts all fail. Stateful pass data,
-  including identity generators, is never cloned per admitted pass; only the
-  detached expiry handler is cloned.
+  unrelated failure, then spends four bounded database attempts, the first
+  immediate and the rest at two-minute intervals, across correlating the turn
+  and recovering it.
+
+  Expiry bounds a pass's tenure, which is not the claim that its turn stopped
+  progressing: one admitted pass drives a whole model/tools loop, including
+  provider retry backoff, so a turn making continuous durable progress can reach
+  the ceiling, and recovery never re-admits the pass it replaced. The handoff
+  therefore imposes the same unchanged-evidence requirement both watchdogs below
+  do and the ceiling by itself lacks. It invokes the existing startup-recovery
+  transaction only for a turn whose evidence — the attempt holding its tenure
+  and the session's turn-progress frontier — stood still between two
+  observations. A turn seen once is not yet settled; a turn whose evidence
+  advanced is nudged instead of recovered, and a session whose slot has passed
+  to another turn ends the handoff.
+
+  A nudge ends the handoff only where a fresh pass can act on it. A running turn
+  still holding a live tool round is resumed by the admitted pass, which then
+  owns it, leaving the outer watchdog's far longer ceiling as its only later
+  judge. A turn that durable progress left running *without* a tool round clears
+  no re-admission predicate — not pass resumption, and not queued-turn
+  activation, which the session's own active turn excludes — so the nudge would
+  admit a pass that does nothing. Such a turn stays under the handoff's
+  remaining observations and is terminalized there once its evidence stands
+  still, rather than being stranded until the outer watchdog. A resumability
+  read that does not settle is treated as a resumption, since no failed read may
+  make a turn terminalizable on this shorter interval while a pass may already
+  be driving it.
+
+  The outer watchdog below remains responsible if those attempts all fail.
+  Stateful pass data, including identity generators, is never cloned per
+  admitted pass; only the detached expiry handler is cloned.
 
   With Prometheus export enabled, the loop publishes scheduler occupancy and
   oldest-pass telemetry through the registry owned by

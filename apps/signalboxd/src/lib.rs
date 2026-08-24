@@ -989,12 +989,95 @@ fn classify_expired_pass_observation(
     }
 }
 
+/// Whether a fresh scheduler pass would re-drive an expired pass's turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FreshPassAdmission {
+    /// A nudged pass resumes this exact turn, so the nudge is a real handoff.
+    Admissible,
+    /// No pass reaches this turn, so the nudge admits one that does nothing.
+    Stranded,
+    /// The read did not settle, so it is unknown whether a pass can reach it.
+    Undetermined,
+}
+
+/// Asks whether a nudged pass would resume `expected_turn`.
+///
+/// The question goes to the predicate the nudged pass actually applies rather
+/// than to a copy of it: `find_resumable_turn` is the one resume decision on the
+/// nudge path, and a restatement here could drift from it silently. Every arm of
+/// that predicate requires a live tool round, so a turn left running without one
+/// is resumed by nothing — and the activation the same pass falls through to
+/// cannot reach it either, since that admits a queued turn only while the
+/// session holds no active one.
+async fn fresh_pass_admission(
+    resumption: &PostgresToolLoopRepository,
+    session: SessionId,
+    expected_turn: TurnId,
+    attempt: u32,
+) -> FreshPassAdmission {
+    match timeout(
+        EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND,
+        resumption.find_resumable_turn(session),
+    )
+    .await
+    {
+        Ok(Ok(resumable)) if resumable == Some(expected_turn) => FreshPassAdmission::Admissible,
+        Ok(Ok(_)) => FreshPassAdmission::Stranded,
+        Ok(Err(error)) => {
+            tracing::error!(
+                failure_class = ?error.operator_failure_class(),
+                cause_code = "scheduler_pass_occupancy_resumability_failed",
+                session_id = %session.as_uuid(),
+                expected_turn_id = %expected_turn.as_uuid(),
+                attempt,
+                "scheduler pass expiry could not decide whether a fresh pass reaches its turn"
+            );
+            FreshPassAdmission::Undetermined
+        }
+        Err(_) => {
+            tracing::error!(
+                failure_class = ?signalbox_application::OperatorFailureClass::Infrastructure { commit_ambiguous: false },
+                cause_code = "scheduler_pass_occupancy_resumability_timed_out",
+                session_id = %session.as_uuid(),
+                expected_turn_id = %expected_turn.as_uuid(),
+                attempt,
+                attempt_bound_seconds = EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND.as_secs(),
+                "scheduler pass expiry resumability read exceeded its bound"
+            );
+            FreshPassAdmission::Undetermined
+        }
+    }
+}
+
+/// Whether a progressing turn leaves this path on the strength of its nudge.
+///
+/// Progress forbids terminalizing the turn here, but it does not settle who
+/// drives it next, and the two answers differ. A turn a fresh pass resumes is
+/// handed off: the pass owns it, and only the slot-held watchdog's much longer
+/// ceiling may judge it afterwards. A turn no pass reaches was not handed to
+/// anyone — the nudge admits a pass that finds nothing to resume and no queued
+/// turn to activate — so leaving it here would strand it until that thirty-minute
+/// watchdog, when this path is already watching it and holds a confirmation
+/// delay of its own.
+///
+/// An undetermined read is treated as a handoff. Keeping the turn would make it
+/// eligible for terminalization on the shorter delay while a pass may already be
+/// driving it, and no failed read is worth that; deferring costs only the wait
+/// this path already accepts whenever its own attempts fail.
+const fn progressing_turn_is_handed_off(admission: FreshPassAdmission) -> bool {
+    matches!(
+        admission,
+        FreshPassAdmission::Admissible | FreshPassAdmission::Undetermined
+    )
+}
+
 async fn recover_expired_scheduler_pass(
     recovery: SchedulerPassOccupancyRecovery,
     session: SessionId,
     expected_turn: TurnId,
 ) {
     let inventory = PostgresTurnLivenessRepository::new(recovery.pool.clone());
+    let resumption = PostgresToolLoopRepository::new(recovery.pool.clone());
     // The first attempt is immediate. A database outage spends three bounded
     // retries while the independent liveness scan remains the durable
     // backstop for the still-active turn.
@@ -1052,22 +1135,44 @@ async fn recover_expired_scheduler_pass(
                     unconfirmed = Some(observed);
                 }
                 Some(ExpiredPassObservation::Progressing { previous, observed }) => {
-                    // The pass expired while its turn was working. Nudge so a
-                    // fresh pass can be admitted for the still-active turn; the
-                    // slot-held watchdog, whose own ceiling is ledger-gated on
-                    // unchanged evidence, remains the durable backstop if the
-                    // turn stalls later.
+                    // The pass expired while its turn was working, so nothing
+                    // here may terminalize it on this observation. Whether this
+                    // path is finished with the turn is a separate question:
+                    // the nudge below re-drives only a turn a fresh pass can
+                    // resume, and durable progress can leave a turn in a shape
+                    // that clears no re-admission predicate at all.
                     let _ = recovery.eligibility_nudge.nudge(session);
-                    tracing::info!(
-                        cause_code = "scheduler_pass_occupancy_progress_observed",
+                    let admission =
+                        fresh_pass_admission(&resumption, session, expected_turn, attempt).await;
+                    if progressing_turn_is_handed_off(admission) {
+                        tracing::info!(
+                            cause_code = "scheduler_pass_occupancy_progress_observed",
+                            session_id = %session.as_uuid(),
+                            turn_id = %expected_turn.as_uuid(),
+                            attempt,
+                            ?admission,
+                            previous_evidence = ?previous.evidence(),
+                            observed_evidence = ?observed.evidence(),
+                            "expired scheduler pass was still making durable progress; turn left active"
+                        );
+                        return;
+                    }
+                    // No pass reaches the turn, so the progress this observed
+                    // was work landing rather than work continuing. Re-baseline
+                    // on the later evidence and keep watching: if the turn is
+                    // genuinely stranded its evidence now stands still, and the
+                    // next confirmation terminalizes it here instead of leaving
+                    // it for the thirty-minute slot-held watchdog.
+                    unconfirmed = Some(observed);
+                    tracing::warn!(
+                        cause_code = "scheduler_pass_occupancy_progress_unresumable",
                         session_id = %session.as_uuid(),
                         turn_id = %expected_turn.as_uuid(),
                         attempt,
                         previous_evidence = ?previous.evidence(),
                         observed_evidence = ?observed.evidence(),
-                        "expired scheduler pass was still making durable progress; turn left active"
+                        "expired scheduler pass advanced its turn into a shape no fresh pass resumes; recovery keeps watching"
                     );
-                    return;
                 }
                 Some(ExpiredPassObservation::Superseded(observed_turn)) => {
                     tracing::info!(
@@ -2297,11 +2402,12 @@ mod tests {
         APPROVAL_JUDGE_SYSTEM_PROMPT, ActivatedTurnExecution, ActivatedTurnPass,
         ActivatedTurnPassError, ApprovalJudgeModelError, ExpiredPassObservation,
         FailedApprovalJudgeDisposition, FatalExecutionGuardState, FatalExecutionOccupancyExpiry,
-        FatalExecutionSignal, FatalExecutionSupervisor, JudgeRequestFields,
+        FatalExecutionSignal, FatalExecutionSupervisor, FreshPassAdmission, JudgeRequestFields,
         MAX_QUOTED_CONTEXT_BYTES, SessionAuthorityContext, TokenUsage, TurnPassExecutionStage,
-        activation_session_matches, classify_expired_pass_observation, reconcile_retained_once,
-        render_dispatch_authority, render_judge_request_payload, render_session_authority_context,
-        supervise_execution, supervise_execution_for_session,
+        activation_session_matches, classify_expired_pass_observation,
+        progressing_turn_is_handed_off, reconcile_retained_once, render_dispatch_authority,
+        render_judge_request_payload, render_session_authority_context, supervise_execution,
+        supervise_execution_for_session,
     };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3632,5 +3738,35 @@ mod tests {
             classify_expired_pass_observation(turn, None, None),
             ExpiredPassObservation::Absent
         );
+    }
+
+    /// A turn a fresh pass resumes leaves this path: the pass owns it, and only
+    /// the slot-held watchdog's far longer ceiling may judge it afterwards.
+    #[test]
+    fn a_resumable_progressing_turn_is_handed_to_the_fresh_pass() {
+        assert!(progressing_turn_is_handed_off(
+            FreshPassAdmission::Admissible
+        ));
+    }
+
+    /// Progress alone does not settle who drives the turn next. A running turn
+    /// left without a tool round clears no re-admission predicate, so the nudge
+    /// admits a pass that does nothing; returning here would strand the turn
+    /// until the thirty-minute watchdog rather than confirming it on the delay
+    /// this path already holds.
+    #[test]
+    fn an_unresumable_progressing_turn_stays_in_the_expiry_recovery_path() {
+        assert!(!progressing_turn_is_handed_off(
+            FreshPassAdmission::Stranded
+        ));
+    }
+
+    /// A failed read must not make a turn terminalizable on the shorter delay
+    /// while a fresh pass may already be driving it.
+    #[test]
+    fn an_undetermined_resumability_read_defers_to_the_watchdog() {
+        assert!(progressing_turn_is_handed_off(
+            FreshPassAdmission::Undetermined
+        ));
     }
 }
