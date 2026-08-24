@@ -116,7 +116,7 @@ fn all_usage_query() -> UsageQuery {
 fn call_query(limit: u16, after: Option<signalbox_application::UsageCallCursor>) -> UsageCallQuery {
     UsageCallQuery {
         scope: all_usage_query(),
-        order: UsageCallOrder::OldestFirst,
+        order: UsageCallOrder::NewestFirst,
         limit: UsageCallPageLimit::new(limit).expect("fixture page limit fits"),
         after,
     }
@@ -133,7 +133,7 @@ fn evidence_signature(
 
 fn aggregate_signature(
     report: &UsageAggregateReport,
-) -> BTreeMap<(ProviderModelIdentity, UsageProvenance), (u64, Option<u64>)> {
+) -> BTreeMap<(ProviderModelIdentity, UsageProvenance), (u64, Option<u128>)> {
     report
         .groups
         .iter()
@@ -160,13 +160,13 @@ fn paged_evidence_signature(
 
 fn expected_aggregate_signature(
     calls: &[UsageCallEvidence],
-) -> BTreeMap<(ProviderModelIdentity, UsageProvenance), (u64, Option<u64>)> {
+) -> BTreeMap<(ProviderModelIdentity, UsageProvenance), (u64, Option<u128>)> {
     calls
         .iter()
         .map(|call| {
             (
                 (call.model.identity(), call.provenance),
-                (1, call.tokens.input),
+                (1, call.tokens.input.map(u128::from)),
             )
         })
         .collect()
@@ -405,6 +405,66 @@ async fn terminal_approval_judge_usage_enters_dedicated_call_evidence() -> Resul
     assert_eq!(page.calls[0].tokens.cache_creation_input, None);
     assert_eq!(page.calls[0].tokens.cache_read_input, None);
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_context_compaction_usage_enters_session_level_call_evidence()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x97_000;
+    let fixture =
+        terminal_reported_usage_call(&pool, seed, ProviderReportedTokenUsage::unreported()).await?;
+    let source_frontier = Uuid::from_u128(seed + 0x80);
+    let compaction_call = Uuid::from_u128(seed + 0x81);
+    let mut connection = pool.acquire().await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(source_frontier)
+    .execute(&mut *connection)
+    .await?;
+    insert_completed_context_compaction_call(
+        &mut connection,
+        compaction_call,
+        fixture.session.into_uuid(),
+        Uuid::from_u128(seed + 0x82),
+        Uuid::from_u128(seed + 0x83),
+        source_frontier,
+    )
+    .await?;
+
+    let page = UsageRepository::new(pool.clone())
+        .calls(UsageCallQuery {
+            scope: UsageQuery {
+                time: UsageTimeRange::all(),
+                selection: UsageSelection {
+                    session: Some(fixture.session),
+                    turn: None,
+                    model: None,
+                    provenance: Some(UsageProvenance::Reported),
+                    call_kind: Some(signalbox_application::UsageCallKind::ContextCompaction),
+                },
+            },
+            order: UsageCallOrder::NewestFirst,
+            limit: UsageCallPageLimit::new(1).expect("fixture page limit fits"),
+            after: None,
+        })
+        .await?;
+
+    assert_eq!(page.calls.len(), 1);
+    assert_eq!(page.calls[0].call.into_uuid(), compaction_call);
+    assert_eq!(page.calls[0].turn, None);
+    assert_eq!(page.calls[0].tokens.input, Some(17));
+    assert_eq!(page.calls[0].tokens.output, Some(5));
+
+    drop(connection);
     pool.close().await;
     drop(container);
     Ok(())

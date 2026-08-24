@@ -7,7 +7,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use signalbox_application::{
-    RepoWatchPullRequestLifecycle, RepoWatchThreadState, SearchContentClass,
+    RepoWatchPullRequestLifecycle, RepoWatchThreadState, SearchContentClass, UsageCallKind,
+    UsageProvenance,
 };
 use signalbox_domain::{
     AcceptedInputId, AnthropicServiceTier, BoundChildAction, CheckConclusion, ChecksOutcome,
@@ -156,6 +157,38 @@ pub(crate) fn search_projection_content_class_from_str(value: &str) -> Option<Se
         "derived_text_artifact" => SearchContentClass::DerivedTextArtifact,
         _ => return None,
     })
+}
+
+pub(crate) const fn usage_call_kind_to_str(value: UsageCallKind) -> &'static str {
+    match value {
+        UsageCallKind::ModelCall => "model_call",
+        UsageCallKind::ApprovalJudge => "approval_judge",
+        UsageCallKind::ContextCompaction => "context_compaction",
+    }
+}
+
+pub(crate) fn usage_call_kind_from_str(value: &str) -> Option<UsageCallKind> {
+    match value {
+        "model_call" => Some(UsageCallKind::ModelCall),
+        "approval_judge" => Some(UsageCallKind::ApprovalJudge),
+        "context_compaction" => Some(UsageCallKind::ContextCompaction),
+        _ => None,
+    }
+}
+
+pub(crate) const fn usage_provenance_to_str(value: UsageProvenance) -> &'static str {
+    match value {
+        UsageProvenance::Reported => "reported",
+        UsageProvenance::Estimated => "estimated",
+    }
+}
+
+pub(crate) fn usage_provenance_from_str(value: &str) -> Option<UsageProvenance> {
+    match value {
+        "reported" => Some(UsageProvenance::Reported),
+        "estimated" => Some(UsageProvenance::Estimated),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

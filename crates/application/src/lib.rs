@@ -207,10 +207,11 @@ pub use update_session_placement::{
     UpdateSessionPlacementTransaction,
 };
 pub use usage::{
-    UsageAggregateGroup, UsageAggregateKey, UsageAggregateReport, UsageCallCursor,
-    UsageCallEvidence, UsageCallKind, UsageCallOrder, UsageCallPage, UsageCallPageLimit,
-    UsageCallPageLimitError, UsageCallQuery, UsageInputTokenSemantics, UsageProvenance, UsageQuery,
-    UsageReader, UsageSelection, UsageService, UsageTimeRange, UsageTimeRangeError,
-    UsageTimestampError, UsageTimestampMicros, UsageTokenAxes, UsageTokenCoverage,
-    max_usage_aggregate_groups, max_usage_call_page_items,
+    UsageAggregateGroup, UsageAggregateKey, UsageAggregateReport, UsageAggregateTokenAxes,
+    UsageCallCursor, UsageCallEvidence, UsageCallKind, UsageCallOrder, UsageCallPage,
+    UsageCallPageLimit, UsageCallPageLimitError, UsageCallQuery, UsageInputTokenSemantics,
+    UsageProvenance, UsageQuery, UsageReader, UsageSelection, UsageService, UsageTimeRange,
+    UsageTimeRangeError, UsageTimestampError, UsageTimestampMicros, UsageTokenAxes,
+    UsageTokenCoverage, UsageTokenPresence, max_usage_aggregate_calls, max_usage_aggregate_groups,
+    max_usage_call_page_items, max_usage_credential_profile_utf8_bytes,
 };
