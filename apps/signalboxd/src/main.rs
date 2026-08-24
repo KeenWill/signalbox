@@ -1576,6 +1576,21 @@ async fn run_hub(
         phase = ?RuntimePhase::SocketBinding,
         "daemon startup phase completed"
     );
+    let web_http_listener = match WebHttpRuntime::bind_listener(web_configuration).await {
+        Ok(listener) => listener,
+        Err(_) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::SocketBinding,
+                SanitizedStartupCause::Static("web_http_listener_bind_failed"),
+            );
+            let _ = listener.cleanup();
+            let _ = runner_listener.cleanup();
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Err(failure);
+        }
+    };
     let repository_watch_reconciliation = async {
         repository_watch_store
             .process_pending_lifecycle_cutoffs(|| DurableCommandId::from_uuid(uuid::Uuid::now_v7()))
@@ -1690,26 +1705,7 @@ async fn run_hub(
         Some(ref registry) => process_runtime.with_blob_store_registry(Arc::clone(registry)),
         None => process_runtime,
     };
-    let web_http_runtime = match WebHttpRuntime::bind(
-        web_configuration,
-        pool.clone(),
-        process_runtime.monitor(),
-    )
-    .await
-    {
-        Ok(runtime) => runtime,
-        Err(_) => {
-            let failure = erase_startup_cause(
-                RuntimePhase::SocketBinding,
-                SanitizedStartupCause::Static("web_http_listener_bind_failed"),
-            );
-            let _ = runner_listener.cleanup();
-            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
-            drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
-        }
-    };
+    let web_http_runtime = web_http_listener.into_runtime(pool.clone(), process_runtime.monitor());
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
     let model_repository = PostgresModelCallRepository::new(

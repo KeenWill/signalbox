@@ -492,7 +492,7 @@ impl ProviderTextDeltaSink for ProcessProviderTextDeltaSink {
             turn: delta.turn(),
             call: delta.call(),
             part_index: delta.part_index(),
-            text: delta.text().to_owned(),
+            text: delta.shared_text(),
         };
         let _ = self.updates.send(ProcessUpdate::ProviderTextDelta(delta));
         let _ = self.monitor.send(monitor);
@@ -613,7 +613,7 @@ pub enum ProcessMonitorUpdate {
         turn: TurnId,
         call: ModelCallId,
         part_index: u32,
-        text: String,
+        text: Arc<str>,
     },
 }
 

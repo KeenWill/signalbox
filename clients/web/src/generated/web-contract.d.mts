@@ -128,15 +128,28 @@ type WebSessionLiveReconciliation = {
 };
 
 type WebSessionLiveRunner = {
-  readonly connection_health?: WebSessionLiveRunnerConnectionHealth | null;
   readonly placement_revision: WebU64;
-  readonly runner_id?: string | null;
-  readonly state: WebSessionLiveRunnerState;
+  readonly state: "unpinned";
+} | {
+  readonly connection_health: WebSessionLiveRunnerConnectionHealth;
+  readonly placement_revision: WebU64;
+  readonly runner_id: string;
+  readonly state: "pinned";
+} | {
+  readonly placement_revision: WebU64;
+  readonly runner_id: string;
+  readonly state: "runner_lost_before_pin";
+} | {
+  readonly placement_revision: WebU64;
+  readonly runner_id: string;
+  readonly state: "runner_lost";
+} | {
+  readonly placement_revision: WebU64;
+  readonly runner_id: string;
+  readonly state: "runner_abandoned";
 };
 
 type WebSessionLiveRunnerConnectionHealth = "connected" | "suspect" | "shutdown" | "lost";
-
-type WebSessionLiveRunnerState = "unpinned" | "pinned" | "runner_lost_before_pin" | "runner_lost" | "runner_abandoned";
 
 type WebSessionLiveSnapshot = {
   readonly active?: WebSessionLiveActiveTurn | null;

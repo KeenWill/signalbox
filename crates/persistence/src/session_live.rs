@@ -75,6 +75,18 @@ impl SessionLiveRepository {
         &self,
         session: SessionId,
     ) -> Result<Option<SessionLiveSnapshot>, SessionLiveRepositoryError> {
+        self.read_live_snapshot_at_completion(session, || ())
+            .await
+            .map(|result| result.map(|(snapshot, ())| snapshot))
+    }
+
+    /// Reads one snapshot and samples caller-owned state immediately after its
+    /// repeatable-read transaction completes.
+    pub async fn read_live_snapshot_at_completion<T>(
+        &self,
+        session: SessionId,
+        at_completion: impl FnOnce() -> T,
+    ) -> Result<Option<(SessionLiveSnapshot, T)>, SessionLiveRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             .execute(&mut *transaction)
@@ -147,8 +159,7 @@ impl SessionLiveRepository {
             .as_ref()
             .map(map_runner)
             .transpose()?;
-        transaction.commit().await?;
-        Ok(Some(SessionLiveSnapshot {
+        let snapshot = SessionLiveSnapshot {
             session,
             observed_through,
             active,
@@ -156,7 +167,10 @@ impl SessionLiveRepository {
             queued_turns,
             reconciliation,
             runner,
-        }))
+        };
+        let completion = at_completion();
+        transaction.commit().await?;
+        Ok(Some((snapshot, completion)))
     }
 }
 

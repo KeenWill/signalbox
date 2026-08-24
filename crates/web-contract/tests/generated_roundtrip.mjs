@@ -7,11 +7,16 @@ import {
   decodeWebContractBootstrap,
   decodeWebContractExample,
   decodeWebSessionLiveSnapshot,
+  decodeWebSessionLiveStreamEvent,
   decodeWebSessionTimelineDescriptor,
   decodeWebSessionTimelineWindow,
 } from "../../../clients/web/src/generated/web-contract.mjs";
 
 const fixtureUrl = new URL("./fixtures/example.json", import.meta.url);
+
+function thirtyThreeQueuedTurnIds() {
+  return Array.from({ length: 33 }, (_, index) => `${index}`);
+}
 
 test("generated example decoder round trips the Rust fixture", async () => {
   const source = JSON.parse(await readFile(fixtureUrl, "utf8"));
@@ -65,11 +70,42 @@ test("generated live decoder bounds retained queued turns", () => {
         observed_through: "7",
         active: null,
         queued_turn_count: "33",
-        queued_turn_ids: Array.from({ length: 33 }, (_, index) => `${index}`),
+        queued_turn_ids: thirtyThreeQueuedTurnIds(),
         reconciliation: null,
         runner: null,
       }),
     /at most 32 items/,
+  );
+});
+
+test("generated live decoder rejects malformed runner correlations", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: { state: "pinned", placement_revision: "1" },
+      }),
+    /one recognized variant/,
+  );
+});
+
+test("generated live stream decoder rejects variant-only extra fields", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "provider_text_delta",
+        turn_id: "00000000-0000-0000-0000-000000000992",
+        model_call_id: "00000000-0000-0000-0000-000000000993",
+        part_index: 0,
+        content: "draft",
+        cursor: "8",
+      }),
+    /one recognized variant/,
   );
 });
 

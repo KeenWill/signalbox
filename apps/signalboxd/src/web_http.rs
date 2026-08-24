@@ -51,10 +51,10 @@ use signalbox_web_contract::{
     WebAttentionSort, WebAttentionState, WebAttentionStreamEvent, WebAttentionSummary,
     WebContractBootstrap, WebContractExample, WebSessionLiveActiveState, WebSessionLiveActiveTurn,
     WebSessionLiveReconciliation, WebSessionLiveRunner, WebSessionLiveRunnerConnectionHealth,
-    WebSessionLiveRunnerState, WebSessionLiveSnapshot, WebSessionLiveStreamEvent,
-    WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
-    WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
-    WebTimelineEventSequence, WebU64,
+    WebSessionLiveSnapshot, WebSessionLiveStreamEvent, WebSessionTimelineDescriptor,
+    WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
+    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence,
+    WebU64,
 };
 use sqlx::{PgPool, types::Uuid};
 use tokio::{net::TcpListener, sync::watch};
@@ -215,6 +215,22 @@ pub struct WebHttpRuntime {
     router: Router,
 }
 
+/// Browser listener bound before startup performs durable rule admission.
+pub struct BoundWebHttpListener {
+    listener: TcpListener,
+    asset_root: Option<PathBuf>,
+}
+
+impl BoundWebHttpListener {
+    /// Attaches the production router after process-runtime construction.
+    pub fn into_runtime(self, pool: PgPool, monitor: ProcessMonitor) -> WebHttpRuntime {
+        WebHttpRuntime {
+            listener: self.listener,
+            router: production_router_with_monitor(self.asset_root, Some(pool), Some(monitor)),
+        }
+    }
+}
+
 impl WebHttpRuntime {
     /// Binds the production same-origin router.
     pub async fn bind(
@@ -222,9 +238,22 @@ impl WebHttpRuntime {
         pool: PgPool,
         monitor: ProcessMonitor,
     ) -> Result<Self, WebHttpRuntimeError> {
-        let router =
-            production_router_with_monitor(configuration.asset_root, Some(pool), Some(monitor));
-        Self::bind_router(configuration.bind_address, router).await
+        Ok(Self::bind_listener(configuration)
+            .await?
+            .into_runtime(pool, monitor))
+    }
+
+    /// Binds the fallible browser socket without requiring runtime-owned state.
+    pub async fn bind_listener(
+        configuration: WebHttpConfiguration,
+    ) -> Result<BoundWebHttpListener, WebHttpRuntimeError> {
+        let listener = TcpListener::bind(configuration.bind_address)
+            .await
+            .map_err(|_| WebHttpRuntimeError::Bind)?;
+        Ok(BoundWebHttpListener {
+            listener,
+            asset_root: configuration.asset_root,
+        })
     }
 
     /// Binds an explicit router, primarily for deterministic browser scenarios.
@@ -668,7 +697,10 @@ async fn session_live_follow(
     // Subscribe before the repeatable-read snapshot so every update after its
     // cursor is either observed or converted into an explicit resync.
     let subscription = monitor.subscribe();
-    let snapshot = match repository.read_live_snapshot(session).await {
+    let snapshot = match repository
+        .read_live_snapshot_at_completion(session, || subscription.queued_len())
+        .await
+    {
         Ok(Some(snapshot)) => snapshot,
         Ok(None) => {
             return application_error(
@@ -679,8 +711,8 @@ async fn session_live_follow(
         }
         Err(error) => return live_projection_error(error),
     };
+    let (snapshot, queued_at_snapshot) = snapshot;
     let observed_through = snapshot.observed_through;
-    let queued_at_snapshot = subscription.queued_len();
     let mut pending = VecDeque::new();
     pending.push_back(WebSessionLiveStreamEvent::Snapshot {
         snapshot: Box::new(live_snapshot_dto(snapshot)),
@@ -880,34 +912,52 @@ fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
                     }
                 }
             }),
-        runner: snapshot.runner.map(|runner| WebSessionLiveRunner {
-            runner_id: runner.runner.map(|runner| runner.into_uuid().to_string()),
-            placement_revision: WebU64::from_u64(runner.placement_revision),
-            state: match runner.state {
-                SessionLiveRunnerState::Unpinned => WebSessionLiveRunnerState::Unpinned,
-                SessionLiveRunnerState::Pinned => WebSessionLiveRunnerState::Pinned,
-                SessionLiveRunnerState::RunnerLostBeforePin => {
-                    WebSessionLiveRunnerState::RunnerLostBeforePin
+        runner: snapshot.runner.and_then(|runner| {
+            let placement_revision = WebU64::from_u64(runner.placement_revision);
+            match (runner.state, runner.runner, runner.connection_health) {
+                (SessionLiveRunnerState::Unpinned, None, None) => {
+                    Some(WebSessionLiveRunner::Unpinned { placement_revision })
                 }
-                SessionLiveRunnerState::RunnerLost => WebSessionLiveRunnerState::RunnerLost,
-                SessionLiveRunnerState::RunnerAbandoned => {
-                    WebSessionLiveRunnerState::RunnerAbandoned
+                (SessionLiveRunnerState::Pinned, Some(runner), Some(connection_health)) => {
+                    Some(WebSessionLiveRunner::Pinned {
+                        runner_id: runner.into_uuid().to_string(),
+                        placement_revision,
+                        connection_health: match connection_health {
+                            SessionLiveRunnerConnectionHealth::Connected => {
+                                WebSessionLiveRunnerConnectionHealth::Connected
+                            }
+                            SessionLiveRunnerConnectionHealth::Suspect => {
+                                WebSessionLiveRunnerConnectionHealth::Suspect
+                            }
+                            SessionLiveRunnerConnectionHealth::Shutdown => {
+                                WebSessionLiveRunnerConnectionHealth::Shutdown
+                            }
+                            SessionLiveRunnerConnectionHealth::Lost => {
+                                WebSessionLiveRunnerConnectionHealth::Lost
+                            }
+                        },
+                    })
                 }
-            },
-            connection_health: runner.connection_health.map(|health| match health {
-                SessionLiveRunnerConnectionHealth::Connected => {
-                    WebSessionLiveRunnerConnectionHealth::Connected
+                (SessionLiveRunnerState::RunnerLostBeforePin, Some(runner), None) => {
+                    Some(WebSessionLiveRunner::RunnerLostBeforePin {
+                        runner_id: runner.into_uuid().to_string(),
+                        placement_revision,
+                    })
                 }
-                SessionLiveRunnerConnectionHealth::Suspect => {
-                    WebSessionLiveRunnerConnectionHealth::Suspect
+                (SessionLiveRunnerState::RunnerLost, Some(runner), None) => {
+                    Some(WebSessionLiveRunner::RunnerLost {
+                        runner_id: runner.into_uuid().to_string(),
+                        placement_revision,
+                    })
                 }
-                SessionLiveRunnerConnectionHealth::Shutdown => {
-                    WebSessionLiveRunnerConnectionHealth::Shutdown
+                (SessionLiveRunnerState::RunnerAbandoned, Some(runner), None) => {
+                    Some(WebSessionLiveRunner::RunnerAbandoned {
+                        runner_id: runner.into_uuid().to_string(),
+                        placement_revision,
+                    })
                 }
-                SessionLiveRunnerConnectionHealth::Lost => {
-                    WebSessionLiveRunnerConnectionHealth::Lost
-                }
-            }),
+                _ => None,
+            }
         }),
     }
 }
@@ -1576,6 +1626,7 @@ mod tests {
         io::{self, Write as _},
         net::SocketAddr,
         path::PathBuf,
+        sync::Arc,
         time::{Duration, UNIX_EPOCH},
     };
 
@@ -1658,7 +1709,7 @@ mod tests {
             turn: live_turn(),
             call: live_call(),
             part_index: 2,
-            text: "draft".to_owned(),
+            text: Arc::from("draft"),
         });
         let (draft, state) = live_follow_next(state)
             .await
@@ -1704,7 +1755,7 @@ mod tests {
             turn: live_turn(),
             call: live_call(),
             part_index: 0,
-            text: "stale draft".to_owned(),
+            text: Arc::from("stale draft"),
         });
         state.queued_at_snapshot = state.subscription.queued_len();
         monitor.publish_for_test(ProcessMonitorUpdate::Durable {
