@@ -1252,12 +1252,12 @@ fn parse_classic_xref(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
 
 fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
     let xref_object = parse_unsigned(bytes, &mut cursor)?;
-    skip_pdf_space_and_comments(bytes, &mut cursor);
+    skip_required_pdf_space_and_comments(bytes, &mut cursor)?;
     let xref_generation = parse_unsigned(bytes, &mut cursor)?;
     if xref_generation > MAX_GENERATION {
         return None;
     }
-    skip_pdf_space_and_comments(bytes, &mut cursor);
+    skip_required_pdf_space_and_comments(bytes, &mut cursor)?;
     if !consume_keyword(bytes, &mut cursor, b"obj") {
         return None;
     }
@@ -1991,15 +1991,14 @@ fn parse_object_stream(
     resolved_length: Option<(IndirectReference, u64)>,
 ) -> Option<(ObjectStreamFacts, &[u8])> {
     let mut cursor = 0_usize;
-    skip_pdf_space_and_comments(bytes, &mut cursor);
     if parse_unsigned(bytes, &mut cursor) != Some(expected.object_number) {
         return None;
     }
-    skip_pdf_space_and_comments(bytes, &mut cursor);
+    skip_required_pdf_space_and_comments(bytes, &mut cursor)?;
     if parse_unsigned(bytes, &mut cursor) != Some(expected.generation) {
         return None;
     }
-    skip_pdf_space_and_comments(bytes, &mut cursor);
+    skip_required_pdf_space_and_comments(bytes, &mut cursor)?;
     if !consume_keyword(bytes, &mut cursor, b"obj") {
         return None;
     }
@@ -2082,15 +2081,14 @@ fn parse_stream_length(bytes: &[u8], start: usize, end: usize) -> Option<StreamL
 
 fn indirect_integer_object(bytes: &[u8], expected: IndirectReference) -> Option<u64> {
     let mut cursor = 0;
-    skip_pdf_space_and_comments(bytes, &mut cursor);
     if parse_unsigned(bytes, &mut cursor) != Some(expected.object_number) {
         return None;
     }
-    skip_pdf_space_and_comments(bytes, &mut cursor);
+    skip_required_pdf_space_and_comments(bytes, &mut cursor)?;
     if parse_unsigned(bytes, &mut cursor) != Some(expected.generation) {
         return None;
     }
-    skip_pdf_space_and_comments(bytes, &mut cursor);
+    skip_required_pdf_space_and_comments(bytes, &mut cursor)?;
     if !consume_keyword(bytes, &mut cursor, b"obj") {
         return None;
     }
@@ -2105,15 +2103,14 @@ fn object_stream_declared_length(
     expected: IndirectReference,
 ) -> Option<StreamLength> {
     let mut cursor = 0;
-    skip_pdf_space_and_comments(bytes, &mut cursor);
     if parse_unsigned(bytes, &mut cursor) != Some(expected.object_number) {
         return None;
     }
-    skip_pdf_space_and_comments(bytes, &mut cursor);
+    skip_required_pdf_space_and_comments(bytes, &mut cursor)?;
     if parse_unsigned(bytes, &mut cursor) != Some(expected.generation) {
         return None;
     }
-    skip_pdf_space_and_comments(bytes, &mut cursor);
+    skip_required_pdf_space_and_comments(bytes, &mut cursor)?;
     if !consume_keyword(bytes, &mut cursor, b"obj") {
         return None;
     }
@@ -2321,11 +2318,11 @@ fn catalog_facts(bytes: &[u8], expected: IndirectReference) -> Option<CatalogFac
     if parse_unsigned(bytes, &mut cursor) != Some(expected.object_number) {
         return None;
     }
-    skip_pdf_space_and_comments(bytes, &mut cursor);
+    skip_required_pdf_space_and_comments(bytes, &mut cursor)?;
     if parse_unsigned(bytes, &mut cursor) != Some(expected.generation) {
         return None;
     }
-    skip_pdf_space_and_comments(bytes, &mut cursor);
+    skip_required_pdf_space_and_comments(bytes, &mut cursor)?;
     if !consume_keyword(bytes, &mut cursor, b"obj") {
         return None;
     }
@@ -2384,15 +2381,18 @@ fn parse_catalog_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(CatalogF
 
 fn object_is_pages(bytes: &[u8], expected: IndirectReference) -> bool {
     let mut cursor = 0;
-    skip_pdf_space_and_comments(bytes, &mut cursor);
     if parse_unsigned(bytes, &mut cursor) != Some(expected.object_number) {
         return false;
     }
-    skip_pdf_space_and_comments(bytes, &mut cursor);
+    if skip_required_pdf_space_and_comments(bytes, &mut cursor).is_none() {
+        return false;
+    }
     if parse_unsigned(bytes, &mut cursor) != Some(expected.generation) {
         return false;
     }
-    skip_pdf_space_and_comments(bytes, &mut cursor);
+    if skip_required_pdf_space_and_comments(bytes, &mut cursor).is_none() {
+        return false;
+    }
     if !consume_keyword(bytes, &mut cursor, b"obj") {
         return false;
     }
@@ -2970,10 +2970,10 @@ mod tests {
 
     #[test]
     fn indirect_reference_requires_separators() {
-        for value in [b"1 0R".as_slice(), b"10 R"] {
-            let mut cursor = 0;
-            assert!(parse_indirect_reference(value, &mut cursor).is_none());
-        }
+        let mut cursor = 0;
+        assert!(parse_indirect_reference(b"1 0R", &mut cursor).is_none());
+        cursor = 0;
+        assert!(parse_indirect_reference(b"10 R", &mut cursor).is_none());
     }
 
     #[test]
@@ -3572,6 +3572,21 @@ mod tests {
         ));
         assert!(!object_is_pages(
             b"9 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj",
+            pages
+        ));
+    }
+
+    #[test]
+    fn page_tree_xref_offset_requires_object_header() {
+        let pages = IndirectReference {
+            object_number: 8,
+            generation: 0,
+        };
+        assert!(!object_is_pages(
+            b"% offset comment
+8 0 obj
+<< /Type /Pages /Count 0 /Kids [] >>
+endobj",
             pages
         ));
     }
