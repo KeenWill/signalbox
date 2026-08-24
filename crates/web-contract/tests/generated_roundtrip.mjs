@@ -117,7 +117,7 @@ test("generated error decoder preserves the transport application boundary", () 
   );
 });
 
-test("generated imports decoder accepts explicit null evidence and cursor", () => {
+test("generated imports decoder validates explicit null evidence and cursor", () => {
   const page = {
     items: [
       {
@@ -131,5 +131,16 @@ test("generated imports decoder accepts explicit null evidence and cursor", () =
     next_cursor: null,
   };
 
-  assert.deepEqual(decodeWebImportListPage(page), page);
+  const decoded = decodeWebImportListPage(page);
+
+  assert.equal(decoded.items[0].source_session_id, null);
+  assert.equal(decoded.next_cursor, null);
+  assert.throws(
+    () =>
+      decodeWebImportListPage({
+        ...page,
+        items: [{ ...page.items[0], entry_count: "1" }],
+      }),
+    /entry_count must be a safe integer/,
+  );
 });

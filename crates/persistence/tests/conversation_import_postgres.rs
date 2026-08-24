@@ -2468,6 +2468,29 @@ async fn imported_discovery_describes_and_windows_without_complete_reconstitutio
     assert_eq!(descriptor.first.position, 1);
     assert_eq!(descriptor.latest.position, descriptor.entry_count);
 
+    let exact_source_page = discovery
+        .list(ImportedConversationPageRequest {
+            after: None,
+            format: None,
+            source_session_id: Some(SOURCE_SESSION.as_bytes().to_vec()),
+            source_session_maximum_bytes: NonZeroU32::new(512)
+                .ok_or("source-session fixture bound must be nonzero")?,
+            limit: NonZeroU32::new(1).ok_or("exact-source fixture limit must be nonzero")?,
+        })
+        .await?;
+
+    assert_eq!(exact_source_page.items.len(), 1);
+    assert_eq!(exact_source_page.items[0].conversation, conversation);
+    assert_eq!(
+        exact_source_page.items[0]
+            .source_session_id
+            .as_ref()
+            .map(|evidence| evidence.leading_text.as_str()),
+        Some(SOURCE_SESSION)
+    );
+    assert!(exact_source_page.items[0].source_session_digest.is_some());
+    assert_eq!(exact_source_page.next_after, None);
+
     let maximum_items = NonZeroU32::new(3).ok_or("window fixture bound must be nonzero")?;
     let window = discovery
         .entry_window(

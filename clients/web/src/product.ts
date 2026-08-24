@@ -5,6 +5,7 @@ const EXPECTED_BOOTSTRAP_LIMITS = {
   max_ndjson_item_bytes: 65_536,
 } as const
 const BOOTSTRAP_RESPONSE_BYTES = 64 * 1024
+const BOOTSTRAP_STREAM_IDLE_TIMEOUT_MS = 10_000
 
 export class ProductContractAdmissionError extends Error {
   constructor(cause: unknown) {
@@ -103,7 +104,23 @@ const readBoundedBootstrapBytes = async (
   let receivedBytes = 0
   try {
     while (true) {
-      const { done, value } = await reader.read()
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      const idleDeadline = new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new TypeError('bootstrap response stream exceeded its idle deadline')),
+          BOOTSTRAP_STREAM_IDLE_TIMEOUT_MS,
+        )
+      })
+      let result: ReadableStreamReadResult<Uint8Array>
+      try {
+        result = await Promise.race([reader.read(), idleDeadline])
+      } catch (error) {
+        await reader.cancel(error).catch(() => undefined)
+        throw error
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout)
+      }
+      const { done, value } = result
       if (done) break
       receivedBytes += value.byteLength
       if (receivedBytes > maximumBytes) {

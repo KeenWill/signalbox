@@ -17,7 +17,10 @@ const bootstrapFixture = {
   limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 65_536 },
 } as const
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
+})
 
 describe('SameOriginProductTransport', () => {
   it('decodes the Rust-authored bootstrap contract', async () => {
@@ -133,6 +136,25 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toBe(interruption)
+  })
+
+  it('cancels a bootstrap stream that exceeds its idle deadline', async () => {
+    vi.useFakeTimers()
+    const cancel = vi.fn()
+    const body = new ReadableStream<Uint8Array>({ cancel })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body)),
+    )
+
+    const bootstrap = new SameOriginProductTransport().readBootstrap()
+    const rejection = expect(bootstrap).rejects.toThrow(
+      'bootstrap response stream exceeded its idle deadline',
+    )
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    await rejection
+    expect(cancel).toHaveBeenCalledOnce()
   })
 
   it('reports an unsuccessful HTTP response without decoding its body', async () => {

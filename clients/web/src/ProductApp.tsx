@@ -335,6 +335,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       !(error instanceof ProductContractAdmissionError) && failureCount < 2,
     retryDelay: (attemptIndex) => 250 * (attemptIndex + 1),
     staleTime: Number.POSITIVE_INFINITY,
+    refetchOnMount: 'always',
   })
   const productImportApi = useMemo(
     () =>

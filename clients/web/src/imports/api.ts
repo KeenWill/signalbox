@@ -102,15 +102,20 @@ const correlateListPage = (
   }
   let previous = request.after ?? undefined
   for (const item of page.items) {
+    const sourceSessionEvidence = item.source_session_id
     if (
       !isCanonicalUuid(item.imported_conversation_id) ||
       (previous !== undefined && item.imported_conversation_id <= previous) ||
-      (request.format !== undefined && request.format !== null && item.format !== request.format)
+      (request.format !== undefined && request.format !== null && item.format !== request.format) ||
+      (sourceSessionEvidence !== undefined &&
+        sourceSessionEvidence !== null &&
+        new TextEncoder().encode(sourceSessionEvidence.leading_text).byteLength >
+          MAX_IMPORT_TEXT_PREVIEW_BYTES)
     ) {
       throw new ImportListCorrelationError()
     }
     if (request.source_session_id !== undefined && request.source_session_id !== null) {
-      const evidence = item.source_session_id
+      const evidence = sourceSessionEvidence
       if (
         evidence === undefined ||
         evidence === null ||
@@ -177,22 +182,34 @@ const correlateEntryWindow = (
       : normalizedAnchor === 'latest'
         ? knownLatestPosition
         : request.position
+  const expectedFirstPosition =
+    expectedAnchor == null ? undefined : Math.max(1, expectedAnchor - requestedBefore)
+  const expectedLastPosition =
+    expectedAnchor == null || knownLatestPosition === undefined
+      ? undefined
+      : Math.min(knownLatestPosition, expectedAnchor + requestedAfter)
   const entryIdentities = new Set(window.items.map((entry) => entry.frontier.imported_entry_id))
   const positionsCorrelate = window.items.every(
     (entry, index) =>
       entry.frontier.imported_conversation_id === importedConversationId &&
       isCanonicalUuid(entry.frontier.imported_entry_id) &&
       entry.frontier.position > 0 &&
+      entry.raw_record_position > 0 &&
+      entry.record_entry_position > 0 &&
       entry.frontier.position === window.first_position + index &&
       (entry.content_kind === 'text') === (entry.text !== undefined && entry.text !== null) &&
       textPreviewIsBounded(entry),
   )
   if (
-    expectedAnchor === undefined ||
+    expectedAnchor == null ||
+    expectedFirstPosition === undefined ||
+    expectedLastPosition === undefined ||
     knownLatestPosition === undefined ||
     window.items.length === 0 ||
     window.first_position <= 0 ||
     window.anchor_position !== expectedAnchor ||
+    window.first_position !== expectedFirstPosition ||
+    window.last_position !== expectedLastPosition ||
     window.first_position > window.anchor_position ||
     window.last_position < window.anchor_position ||
     window.anchor_position - window.first_position > requestedBefore ||
@@ -353,9 +370,14 @@ export class HttpImportApi implements ImportApi {
       descriptor.imported_conversation_id !== importedConversationId ||
       descriptor.timeline.first.imported_conversation_id !== importedConversationId ||
       descriptor.timeline.latest.imported_conversation_id !== importedConversationId ||
+      descriptor.entry_count === 0 ||
       descriptor.timeline.first.position !== 1 ||
       descriptor.timeline.latest.position !== descriptor.entry_count ||
-      !SHA256_HEX.test(descriptor.source.source_digest_sha256)
+      !SHA256_HEX.test(descriptor.source.source_digest_sha256) ||
+      (descriptor.source.source_session_id !== undefined &&
+        descriptor.source.source_session_id !== null &&
+        new TextEncoder().encode(descriptor.source.source_session_id.leading_text).byteLength >
+          MAX_IMPORT_TEXT_PREVIEW_BYTES)
     ) {
       throw new ImportDescriptorCorrelationError()
     }

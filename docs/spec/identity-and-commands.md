@@ -200,31 +200,32 @@ All claimed command identifiers live in one user-global, append-only
 key `command_id`, a closed `command_kind` discriminator (`create_session`,
 `create_session_from_imported_frontier`, `replace_session_defaults`,
 `replace_session_metadata`, `submit_input`, `decide_tool_request`,
-`review_workflow`, `compact_session`, `update_session_placement`,
-`replace_lost_runner`, `abandon_lost_runner`, `promote_pending_runner`), a
-kind-scoped `storage_version`, and `claimed_at` (`transaction_timestamp()`),
-which is non-semantic operational metadata. No command kind, session, or client
-has a separate command-ID namespace.
+`override_denied_tool_request`, `review_workflow`, `compact_session`,
+`update_session_placement`, `replace_lost_runner`, `abandon_lost_runner`,
+`promote_pending_runner`), a kind-scoped `storage_version`, and `claimed_at`
+(`transaction_timestamp()`), which is non-semantic operational metadata. No
+command kind, session, or client has a separate command-ID namespace.
 
 Each admitted kind has one purpose-specific typed record family
 (`create_session_command`, `create_session_from_imported_frontier_command`,
 `replace_session_defaults_command`, `replace_session_metadata_command`,
 `submit_input_command`, `decide_tool_request_command`,
-`review_workflow_command`, `compact_session_command`,
-`update_session_placement_command`, `replace_lost_runner_command`,
-`abandon_lost_runner_command`, `promote_pending_runner_command`) keyed
-one-to-one by `command_id`, storing every caller-supplied semantic field under
-`CHECK` constraints and foreign keys. Every family except replacement also
-stores its terminal `applied`/`rejected` discriminator and typed result fields
-in that row. A compact-session record begins `pending` with its exact dedicated
-Prepared call, then changes exactly once to `applied` with its receipt or to
-`failed`; its request fields never change. Runner replacement instead has one
-immutable request row plus at most one append-only `replace_lost_runner_result`:
-the request row satisfies typed-claim completeness while provisioning crosses
-the runner boundary, and no success or rejection response exists until the
-result row commits. Kind and version agreement between the registry row and its
-typed record is enforced by a composite foreign key, and a deferred constraint
-trigger (`durable_command_requires_typed_record`, executing function
+`override_denied_tool_request_command`, `review_workflow_command`,
+`compact_session_command`, `update_session_placement_command`,
+`replace_lost_runner_command`, `abandon_lost_runner_command`,
+`promote_pending_runner_command`) keyed one-to-one by `command_id`, storing
+every caller-supplied semantic field under `CHECK` constraints and foreign keys.
+Every family except replacement also stores its terminal `applied`/`rejected`
+discriminator and typed result fields in that row. A compact-session record
+begins `pending` with its exact dedicated Prepared call, then changes exactly
+once to `applied` with its receipt or to `failed`; its request fields never
+change. Runner replacement instead has one immutable request row plus at most
+one append-only `replace_lost_runner_result`: the request row satisfies
+typed-claim completeness while provisioning crosses the runner boundary, and no
+success or rejection response exists until the result row commits. Kind and
+version agreement between the registry row and its typed record is enforced by a
+composite foreign key, and a deferred constraint trigger
+(`durable_command_requires_typed_record`, executing function
 `require_durable_command_typed_record`) requires exactly one typed record per
 claim at every transaction boundary. Why: typed relational records keep each
 command's comparison payload and result reviewable and constraint-checked
