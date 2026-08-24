@@ -129,7 +129,7 @@ fn parse_table(text: &str) -> Result<CsvTable, &'static str> {
         let record = record.map_err(|_| "malformed_csv")?;
         rows.push(record.iter().map(String::from).collect());
     }
-    if rows.is_empty() {
+    if rows.is_empty() && !text.bytes().any(|byte| matches!(byte, b'\r' | b'\n')) {
         return Err("malformed_csv");
     }
     Ok(CsvTable { headers, rows })

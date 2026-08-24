@@ -45,8 +45,8 @@ pub use registry::{
 pub use value::{
     AttachmentKind, BoundedMetadata, CanonicalJsonObjectSchema, CanonicalMediaType,
     DeclaredMediaType, DisplayFilename, FileDigest, FileReaderName, FileReaderProviderName,
-    FileReaderRevision, FileUse, MediaTypeParseError, ReadContinuationCursor, ReadViewName,
-    ReaderIdentity, ReasonCode, RegistryValueError, VisiblePartSelector,
+    FileReaderRevision, FileUse, JsonParseLimits, MediaTypeParseError, ReadContinuationCursor,
+    ReadViewName, ReaderIdentity, ReasonCode, RegistryValueError, VisiblePartSelector,
     parse_json_without_duplicate_members, parse_json_without_duplicate_members_bounded,
 };
 

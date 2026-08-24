@@ -223,11 +223,15 @@ pub(crate) fn assert_unknown(inspection: FileInspection) {
     assert!(matches!(inspection, FileInspection::Unknown { .. }));
 }
 
+pub(crate) struct DeclaredMismatchExpectation<'a> {
+    pub(crate) declared: &'a str,
+    pub(crate) detected: &'a str,
+}
+
 #[track_caller]
 pub(crate) fn assert_declared_mismatch(
     inspection: FileInspection,
-    expected_declared: &str,
-    expected_detected: &str,
+    expected: DeclaredMismatchExpectation<'_>,
 ) {
     assert!(matches!(
         inspection,
@@ -237,8 +241,8 @@ pub(crate) fn assert_declared_mismatch(
         declared, detected, ..
     } = inspection
     {
-        assert_eq!(declared.as_str(), expected_declared);
-        assert_eq!(detected.as_str(), expected_detected);
+        assert_eq!(declared.as_str(), expected.declared);
+        assert_eq!(detected.as_str(), expected.detected);
     }
 }
 

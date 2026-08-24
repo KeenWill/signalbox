@@ -4,7 +4,7 @@ mod support;
 use std::error::Error;
 
 use signalbox_file_media_runtime::{FileMediaFailure, ReasonCode};
-use support::{DirectProcessor, MemorySource, ReadInput};
+use support::{DeclaredMismatchExpectation, DirectProcessor, MemorySource, ReadInput};
 
 #[tokio::test]
 async fn utf8_text_detects_validates_and_reads_exact_bytes() -> Result<(), Box<dyn Error>> {
@@ -169,6 +169,25 @@ async fn invalid_utf8_streaming_text_candidate_is_unknown() -> Result<(), Box<dy
 }
 
 #[tokio::test]
+async fn json_at_the_declared_depth_limit_remains_readable() -> Result<(), Box<dyn Error>> {
+    let bytes = fixtures::json_at_structured_depth();
+    let expected = serde_json::from_slice(&bytes)?;
+    let source = MemorySource::new(bytes);
+
+    let result = support::read(
+        &source,
+        ReadInput {
+            media_type: "application/json",
+            view: "structured",
+        },
+        &DirectProcessor::provider(),
+    )
+    .await?;
+    support::assert_structured(result, &expected);
+    Ok(())
+}
+
+#[tokio::test]
 async fn json_read_reports_the_declared_depth_limit() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::json_beyond_structured_depth());
     let expected = ReasonCode::try_new("depth_limit_exceeded")?;
@@ -257,7 +276,13 @@ async fn json_probe_handles_a_utf8_scalar_split_at_its_boundary() -> Result<(), 
     let source = MemorySource::new(fixtures::json_with_scalar_split_at_probe_boundary());
 
     let inspection = support::inspect(&source, "text/plain").await?;
-    support::assert_declared_mismatch(inspection, "text/plain", "application/json");
+    support::assert_declared_mismatch(
+        inspection,
+        DeclaredMismatchExpectation {
+            declared: "text/plain",
+            detected: "application/json",
+        },
+    );
     Ok(())
 }
 
@@ -266,7 +291,13 @@ async fn deeply_nested_json_is_structurally_probed() -> Result<(), Box<dyn Error
     let source = MemorySource::new(fixtures::json_beyond_serde_recursion_limit());
 
     let inspection = support::inspect(&source, "text/plain").await?;
-    support::assert_declared_mismatch(inspection, "text/plain", "application/json");
+    support::assert_declared_mismatch(
+        inspection,
+        DeclaredMismatchExpectation {
+            declared: "text/plain",
+            detected: "application/json",
+        },
+    );
     Ok(())
 }
 
@@ -349,6 +380,15 @@ async fn declared_one_column_csv_validates() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn declared_header_only_csv_validates() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::header_only_csv());
+
+    let inspection = support::inspect(&source, "text/csv").await?;
+    support::assert_validated_media(inspection, "text/csv");
+    Ok(())
+}
+
+#[tokio::test]
 async fn malformed_quoted_csv_uses_the_text_fallback() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::csv_with_quotes_inside_unquoted_field());
 
@@ -419,7 +459,13 @@ async fn csv_probe_ignores_a_partial_trailing_record() -> Result<(), Box<dyn Err
     let source = MemorySource::new(fixtures::csv_with_partial_third_probe_record());
 
     let inspection = support::inspect(&source, "text/plain").await?;
-    support::assert_declared_mismatch(inspection, "text/plain", "text/csv");
+    support::assert_declared_mismatch(
+        inspection,
+        DeclaredMismatchExpectation {
+            declared: "text/plain",
+            detected: "text/csv",
+        },
+    );
     Ok(())
 }
 
@@ -428,7 +474,13 @@ async fn csv_probe_handles_a_utf8_scalar_split_at_its_boundary() -> Result<(), B
     let source = MemorySource::new(fixtures::csv_with_scalar_split_at_probe_boundary());
 
     let inspection = support::inspect(&source, "text/plain").await?;
-    support::assert_declared_mismatch(inspection, "text/plain", "text/csv");
+    support::assert_declared_mismatch(
+        inspection,
+        DeclaredMismatchExpectation {
+            declared: "text/plain",
+            detected: "text/csv",
+        },
+    );
     Ok(())
 }
 

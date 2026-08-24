@@ -1,9 +1,9 @@
 use serde::Deserialize;
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    MAX_OBSERVED_CONTAINER_ENTRIES, MAX_STRUCTURED_DEPTH, ProbeStrength, ProcessorFailure,
-    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ValidationEvidence,
-    VerifiedBlobSource, parse_json_without_duplicate_members_bounded,
+    JsonParseLimits, MAX_OBSERVED_CONTAINER_ENTRIES, MAX_STRUCTURED_DEPTH, ProbeStrength,
+    ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
+    ValidationEvidence, VerifiedBlobSource, parse_json_without_duplicate_members_bounded,
 };
 
 use crate::{
@@ -15,8 +15,12 @@ pub(crate) async fn probe(
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorProbeOutput, ProcessorFailure> {
     let prefix = source::read_probe_prefix(source, cancellation).await?;
-    let complete = source.byte_length().get() <= prefix.len() as u64;
-    let candidate = has_json_structure(&prefix, complete);
+    let extent = if source.byte_length().get() <= prefix.len() as u64 {
+        ProbeExtent::CompleteSource
+    } else {
+        ProbeExtent::TruncatedPrefix
+    };
+    let candidate = has_json_structure(&prefix, extent);
     if candidate {
         Ok(ProcessorProbeOutput::Candidate {
             media_type: String::from(JSON_MEDIA_TYPE),
@@ -27,7 +31,13 @@ pub(crate) async fn probe(
     }
 }
 
-fn has_json_structure(prefix: &[u8], complete: bool) -> bool {
+#[derive(Clone, Copy)]
+enum ProbeExtent {
+    CompleteSource,
+    TruncatedPrefix,
+}
+
+fn has_json_structure(prefix: &[u8], extent: ProbeExtent) -> bool {
     let prefix = trim_ascii_start(prefix);
     if !matches!(prefix.first(), Some(b'{' | b'[')) {
         return false;
@@ -35,13 +45,13 @@ fn has_json_structure(prefix: &[u8], complete: bool) -> bool {
     let Some(text) = source::probe_utf8(prefix) else {
         return false;
     };
-    if complete {
-        return match validate_json(text) {
+    match extent {
+        ProbeExtent::CompleteSource => match validate_json(text) {
             Ok(()) => true,
             Err(error) => error.is_eof(),
-        };
+        },
+        ProbeExtent::TruncatedPrefix => incomplete_json_prefix(text),
     }
-    incomplete_json_prefix(text)
 }
 
 fn incomplete_json_prefix(text: &str) -> bool {
@@ -88,7 +98,14 @@ pub(crate) async fn inspect(
     };
     if validate_json(&text).is_err()
         || (!json_depth_exceeds(text.as_bytes(), MAX_STRUCTURED_DEPTH)
-            && parse_json_without_duplicate_members_bounded(&text, u64::MAX, u64::MAX).is_err())
+            && parse_json_without_duplicate_members_bounded(
+                &text,
+                JsonParseLimits {
+                    maximum_nodes: u64::MAX,
+                    maximum_container_entries: u64::MAX,
+                },
+            )
+            .is_err())
     {
         return Ok(validation_failure(request.evidence, "malformed_json"));
     }
@@ -161,7 +178,13 @@ fn has_complete_json_value_prefix(prefix: &[u8]) -> bool {
 }
 
 fn parse_json(text: &str) -> Result<serde_json::Value, serde_json::Error> {
-    parse_json_without_duplicate_members_bounded(text, u64::MAX, u64::MAX)
+    parse_json_without_duplicate_members_bounded(
+        text,
+        JsonParseLimits {
+            maximum_nodes: u64::MAX,
+            maximum_container_entries: u64::MAX,
+        },
+    )
 }
 
 /// Detects excessive nesting before building a recursively dropped JSON tree.
@@ -194,18 +217,22 @@ fn json_depth_exceeds(bytes: &[u8], maximum_depth: u32) -> bool {
 
 /// Measures admitted trees iteratively so depth enforcement cannot overflow the stack.
 fn json_value_depth_exceeds(value: &serde_json::Value, maximum_depth: u32) -> bool {
-    let mut pending = vec![(value, 1_u32)];
-    while let Some((value, depth)) = pending.pop() {
-        if depth > maximum_depth {
-            return true;
-        }
-        let child_depth = depth.saturating_add(1);
+    let mut pending = vec![(value, 0_u32)];
+    while let Some((value, parent_depth)) = pending.pop() {
         match value {
             serde_json::Value::Array(values) => {
-                pending.extend(values.iter().map(|value| (value, child_depth)));
+                let depth = parent_depth.saturating_add(1);
+                if depth > maximum_depth {
+                    return true;
+                }
+                pending.extend(values.iter().map(|value| (value, depth)));
             }
             serde_json::Value::Object(values) => {
-                pending.extend(values.values().map(|value| (value, child_depth)));
+                let depth = parent_depth.saturating_add(1);
+                if depth > maximum_depth {
+                    return true;
+                }
+                pending.extend(values.values().map(|value| (value, depth)));
             }
             serde_json::Value::Null
             | serde_json::Value::Bool(_)

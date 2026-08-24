@@ -38,8 +38,12 @@ pub(crate) fn json_token_prefixed_prose() -> Vec<u8> {
     b"[todo]\nbody".to_vec()
 }
 
-pub(crate) fn json_beyond_structured_depth() -> Vec<u8> {
+pub(crate) fn json_at_structured_depth() -> Vec<u8> {
     format!("{}0{}", "[".repeat(64), "]".repeat(64)).into_bytes()
+}
+
+pub(crate) fn json_beyond_structured_depth() -> Vec<u8> {
+    format!("{}0{}", "[".repeat(65), "]".repeat(65)).into_bytes()
 }
 
 pub(crate) fn json_beyond_serde_recursion_limit() -> Vec<u8> {
@@ -96,6 +100,10 @@ pub(crate) fn csv_table_value() -> serde_json::Value {
 
 pub(crate) fn one_column_csv() -> Vec<u8> {
     b"header\nvalue\n".to_vec()
+}
+
+pub(crate) fn header_only_csv() -> Vec<u8> {
+    b"name,value\n".to_vec()
 }
 
 pub(crate) fn truncated_csv() -> Vec<u8> {

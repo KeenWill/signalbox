@@ -491,21 +491,31 @@ pub fn parse_json_without_duplicate_members(
 ) -> Result<serde_json::Value, serde_json::Error> {
     parse_json_without_duplicate_members_bounded(
         value,
-        crate::MAX_STRUCTURED_NODES,
-        crate::MAX_OBSERVED_CONTAINER_ENTRIES,
+        JsonParseLimits {
+            maximum_nodes: crate::MAX_STRUCTURED_NODES,
+            maximum_container_entries: crate::MAX_OBSERVED_CONTAINER_ENTRIES,
+        },
     )
+}
+
+/// Caller-labeled ceilings for structured JSON parsing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct JsonParseLimits {
+    /// Maximum total JSON values admitted.
+    pub maximum_nodes: u64,
+    /// Maximum members or elements admitted in any one container.
+    pub maximum_container_entries: u64,
 }
 
 /// Parses structured JSON with caller-labeled node and container-entry ceilings.
 pub fn parse_json_without_duplicate_members_bounded(
     value: &str,
-    maximum_nodes: u64,
-    maximum_container_entries: u64,
+    limits: JsonParseLimits,
 ) -> Result<serde_json::Value, serde_json::Error> {
     let raw = serde_json::from_str::<Box<RawValue>>(value)?;
     let mut budget = JsonParseBudget {
-        remaining_nodes: maximum_nodes,
-        maximum_container_entries,
+        remaining_nodes: limits.maximum_nodes,
+        maximum_container_entries: limits.maximum_container_entries,
     };
     parse_raw_json(raw.get(), 0, &mut budget)
 }
@@ -789,7 +799,13 @@ mod tests {
     fn bounded_parser_rejects_nodes_during_deserialization() {
         let input = flat_array(2);
 
-        let outcome = parse_json_without_duplicate_members_bounded(&input, 2, 2);
+        let outcome = parse_json_without_duplicate_members_bounded(
+            &input,
+            JsonParseLimits {
+                maximum_nodes: 2,
+                maximum_container_entries: 2,
+            },
+        );
 
         assert!(outcome.is_err());
     }
@@ -798,7 +814,13 @@ mod tests {
     fn bounded_parser_rejects_container_entries_during_deserialization() {
         let input = flat_array(2);
 
-        let outcome = parse_json_without_duplicate_members_bounded(&input, 3, 1);
+        let outcome = parse_json_without_duplicate_members_bounded(
+            &input,
+            JsonParseLimits {
+                maximum_nodes: 3,
+                maximum_container_entries: 1,
+            },
+        );
 
         assert!(outcome.is_err());
     }
