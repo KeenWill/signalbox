@@ -1359,7 +1359,7 @@ impl PostgresModelCallRepository {
         finish_commit(transaction, result).await
     }
 
-    /// Atomically closes a trustworthy capability failure before send.
+    /// Atomically closes a trustworthy prepared failure before send.
     pub async fn fail_prepared_call<NextTurn>(
         &self,
         session: SessionId,
@@ -1401,7 +1401,7 @@ impl PostgresModelCallRepository {
         finish_commit(transaction, result).await
     }
 
-    /// Rereads whether an unchanged pre-send capability failure committed.
+    /// Rereads whether an unchanged pre-send prepared failure committed.
     pub async fn reread_prepared_failure(
         &self,
         session: SessionId,
