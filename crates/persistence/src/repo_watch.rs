@@ -886,19 +886,49 @@ async fn record_current_convergence_identity(
     assessment_id: Uuid,
 ) -> Result<(), RepoWatchStoreError> {
     sqlx::query(
-        "INSERT INTO repo_watch_pull_request_convergence_identity
+        "WITH current AS (
+            SELECT current.assessment_id, current.cursor_generation
+              FROM repo_watch_pull_request_convergence_identity AS current
+             WHERE current.repository = $2
+               AND current.pull_request_number = $4
+             ORDER BY current.cursor_generation DESC, current.recorded_at DESC,
+                      current.identity_id DESC
+             LIMIT 1
+         ), target AS (
+            SELECT head_sha, base_branch, base_revision
+              FROM repo_watch_pull_request_convergence_assessment
+             WHERE assessment_id = $5
+         )
+         INSERT INTO repo_watch_pull_request_convergence_identity
             (identity_id, repository, cursor_generation,
              pull_request_number, assessment_id)
          SELECT $1, $2, $3, $4, $5
-          WHERE (
-                SELECT current.assessment_id
-                  FROM repo_watch_pull_request_convergence_identity AS current
-                 WHERE current.repository = $2
-                   AND current.pull_request_number = $4
-                 ORDER BY current.cursor_generation DESC, current.recorded_at DESC,
-                          current.identity_id DESC
-                 LIMIT 1
-          ) IS DISTINCT FROM $5",
+          WHERE (SELECT assessment_id FROM current) IS DISTINCT FROM $5
+             OR EXISTS (
+                SELECT 1
+                  FROM repo_watch_cursor AS cursor
+                  CROSS JOIN target
+                 WHERE cursor.repository = $2
+                   AND cursor.generation > COALESCE(
+                        (SELECT cursor_generation FROM current), 0
+                   )
+                   AND cursor.generation < $3
+                   AND NOT EXISTS (
+                        SELECT 1
+                          FROM jsonb_array_elements(
+                                cursor.cursor_payload -> 'state' -> 'pull_requests'
+                               ) AS pull_request
+                          JOIN LATERAL jsonb_array_elements(
+                                cursor.cursor_payload -> 'state' -> 'branch_heads'
+                               ) AS base_head ON
+                                base_head ->> 'branch' =
+                                    pull_request ->> 'base_branch'
+                         WHERE (pull_request ->> 'number')::numeric = $4
+                           AND pull_request ->> 'head_sha' = target.head_sha
+                           AND pull_request ->> 'base_branch' = target.base_branch
+                           AND base_head ->> 'head' = target.base_revision
+                   )
+             )",
     )
     .bind(Uuid::now_v7())
     .bind(repository.as_str())

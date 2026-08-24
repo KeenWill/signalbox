@@ -1726,28 +1726,6 @@ async fn record_assessment_at_base(
     Ok(())
 }
 
-async fn record_conflicting_assessment_at_base(
-    fixture: &DispatchFixture,
-    generation: RepoWatchCursorGeneration,
-    head: &str,
-    base_revision: &str,
-    review_decision: RepoWatchReviewDecision,
-) -> Result<(), Box<dyn Error>> {
-    PostgresRepoWatchStore::new(fixture.pool.clone())
-        .record_convergence_assessments(
-            &fixture.repository,
-            generation,
-            &[assessment_at_base_with_mergeability(
-                head,
-                base_revision,
-                MergeableState::Conflicting,
-                review_decision,
-            )?],
-        )
-        .await?;
-    Ok(())
-}
-
 async fn commit_merge(fixture: &DispatchFixture, event_id: u128) -> Result<(), Box<dyn Error>> {
     commit_lifecycle(
         fixture,
@@ -4865,8 +4843,8 @@ async fn converged_head_releases_singleton_after_ending_commission() -> Result<(
         .load_goal(session)
         .await?
         .expect("the dispatched goal remains readable");
-    let visible: (String, String, i32, i64) = sqlx::query_as(
-        "SELECT head_sha, verdict_kind, unresolved_thread_count,
+    let visible: (String, String, bool, i32, i64) = sqlx::query_as(
+        "SELECT head_sha, verdict_kind, settled, unresolved_thread_count,
                 gating_check_count
            FROM repo_watch_current_pull_request_convergence",
     )
@@ -4893,6 +4871,7 @@ async fn converged_head_releases_singleton_after_ending_commission() -> Result<(
                 .as_str()
                 .to_owned(),
             "merge_ready".to_owned(),
+            true,
             0,
             1,
         )
@@ -5084,7 +5063,8 @@ async fn stale_cutoff_waits_until_its_sealed_identity_is_current_again()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn sealed_identity_return_reapplies_its_convergence_cutoff() -> Result<(), Box<dyn Error>> {
+async fn unassessed_targeted_transition_still_reapplies_a_returned_seal()
+-> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
     record_merge_ready_head(&fixture, 0x54_650, FIRST_HEAD).await?;
     let first_cutoff = fixture
@@ -5139,19 +5119,6 @@ async fn sealed_identity_return_reapplies_its_convergence_cutoff() -> Result<(),
         evaluate_obligation(&fixture, obligation, current.candidate().observation()).await?;
     assert_eq!(settled, RepoWatchRuleEvaluationOutcome::TargetConverged);
     let (second_event, second_observation) = load_conflict(&fixture, 0x54_652, SECOND_HEAD).await?;
-    let second_generation = PostgresRepoWatchStore::new(fixture.pool.clone())
-        .load_cursor(&fixture.repository)
-        .await?
-        .expect("the intervening cursor exists")
-        .generation();
-    record_conflicting_assessment_at_base(
-        &fixture,
-        second_generation,
-        SECOND_HEAD,
-        BASE_REVISION,
-        RepoWatchReviewDecision::ChangesRequested,
-    )
-    .await?;
     let second_outcome =
         RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
             .evaluate(

@@ -241,6 +241,7 @@ SELECT DISTINCT ON (identity.repository, identity.pull_request_number)
        assessment.base_branch,
        assessment.base_revision,
        assessment.mergeable_state,
+       assessment.settled,
        assessment.review_decision,
        cardinality(assessment.unresolved_threads) AS unresolved_thread_count,
        assessment.gating_check_count,

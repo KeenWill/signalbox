@@ -390,7 +390,25 @@ impl PostgresRepoWatchDispatchStore {
                      LIMIT 1
                ) AS current ON current.head_sha = convergence.head_sha
                            AND current.base_revision = convergence.base_revision
+              JOIN LATERAL (
+                    SELECT cursor_payload
+                      FROM repo_watch_cursor
+                     WHERE repository = convergence.repository
+                     ORDER BY generation DESC
+                     LIMIT 1
+               ) AS cursor ON true
+              JOIN LATERAL jsonb_array_elements(
+                    cursor.cursor_payload -> 'state' -> 'pull_requests'
+               ) AS pull_request ON
+                    (pull_request ->> 'number')::numeric =
+                        convergence.pull_request_number
+              JOIN LATERAL jsonb_array_elements(
+                    cursor.cursor_payload -> 'state' -> 'branch_heads'
+               ) AS base_head ON
+                    base_head ->> 'branch' = pull_request ->> 'base_branch'
               WHERE convergence.repository = $1
+                AND pull_request ->> 'head_sha' = current.head_sha
+                AND base_head ->> 'head' = current.base_revision
                 AND NOT EXISTS (
                     SELECT 1
                       FROM repo_watch_convergence_cutoff AS cutoff
@@ -603,12 +621,30 @@ impl PostgresRepoWatchDispatchStore {
                          LIMIT 1
                    ) AS current ON current.head_sha = convergence.head_sha
                                AND current.base_revision = convergence.base_revision
+                  JOIN LATERAL (
+                        SELECT cursor_payload
+                          FROM repo_watch_cursor
+                         WHERE repository = convergence.repository
+                         ORDER BY generation DESC
+                         LIMIT 1
+                   ) AS cursor ON true
+                  JOIN LATERAL jsonb_array_elements(
+                        cursor.cursor_payload -> 'state' -> 'pull_requests'
+                   ) AS pull_request ON
+                        (pull_request ->> 'number')::numeric =
+                            convergence.pull_request_number
+                  JOIN LATERAL jsonb_array_elements(
+                        cursor.cursor_payload -> 'state' -> 'branch_heads'
+                   ) AS base_head ON
+                        base_head ->> 'branch' = pull_request ->> 'base_branch'
                   WHERE NOT EXISTS (
                         SELECT 1
                           FROM repo_watch_convergence_cutoff AS cutoff
                          WHERE cutoff.assessment_id = convergence.assessment_id
                            AND cutoff.identity_id = current.identity_id
                   )
+                    AND pull_request ->> 'head_sha' = current.head_sha
+                    AND base_head ->> 'head' = current.base_revision
                   ORDER BY convergence.repository, convergence.converged_at,
                            convergence.assessment_id
                   LIMIT 1",
