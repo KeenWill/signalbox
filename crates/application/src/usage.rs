@@ -335,7 +335,7 @@ pub struct UsageCallQuery {
 /// One canonical terminal model-call usage record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UsageCallEvidence {
-    /// Ordinary or approval-judge call.
+    /// Ordinary, approval-judge, or context-compaction call.
     pub call_kind: UsageCallKind,
     /// Exact physical call identity.
     pub call: ModelCallId,
@@ -369,7 +369,7 @@ pub struct UsageCallPage {
 /// Compatibility key that prevents unsafe aggregate summation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UsageAggregateKey {
-    /// Ordinary or approval-judge call.
+    /// Ordinary, approval-judge, or context-compaction call.
     pub call_kind: UsageCallKind,
     /// Resolved provider/model target.
     pub model: ResolvedProviderTarget,
