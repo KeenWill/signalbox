@@ -130,6 +130,10 @@ const WEBHOOK_DRAIN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 // shared child set before spawning, so timing out here cannot let unfinished
 // children interleave with later work.
 const WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+// Shutdown gives a retained targeted completion a short grace period, then
+// aborts and joins it so a wedged database operation cannot prevent the
+// repository supervisor from stopping.
+const WEBHOOK_TARGETED_COMPLETION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 // The monitor reads through the shared daemon pool, whose connections wedged
 // repositories can hold all of. An unbounded acquisition would leave the
 // observer silent during exactly the degradation it exists to expose, so the
@@ -918,6 +922,7 @@ struct RepositoryWatchTask {
     webhook_targeted_completion:
         Option<JoinHandle<Result<TargetedWebhookCompletion, TargetedWebhookCompletionError>>>,
     webhook_drain_first_failure: Option<RepositoryWatchAttemptError>,
+    webhook_drain_projection_failure: Option<RepositoryWatchAttemptError>,
     webhook_drain_timed_out: bool,
     payload_purge: WebhookPayloadPurgeSchedule,
     rules_activated: bool,
@@ -1003,6 +1008,7 @@ impl RepositoryWatchTask {
             webhook_dispatch_in_flight: false,
             webhook_targeted_completion: None,
             webhook_drain_first_failure: None,
+            webhook_drain_projection_failure: None,
             webhook_drain_timed_out: false,
             payload_purge,
             rules_activated: false,
@@ -1014,7 +1020,24 @@ impl RepositoryWatchTask {
         // A targeted cursor/terminal completion is deliberately detached from
         // drain cancellation, but repository shutdown must still join it before
         // the supervisor can report that this task stopped cleanly.
-        let _ = self.settle_webhook_targeted_completion().await;
+        if timeout(
+            WEBHOOK_TARGETED_COMPLETION_SHUTDOWN_TIMEOUT,
+            self.settle_webhook_targeted_completion(),
+        )
+        .await
+        .is_err()
+        {
+            if let Some(handle) = self.webhook_targeted_completion.take() {
+                handle.abort();
+                let _ = handle.await;
+            }
+            tracing::error!(
+                repository = %self.repository.as_str(),
+                timeout_seconds = WEBHOOK_TARGETED_COMPLETION_SHUTDOWN_TIMEOUT.as_secs(),
+                cause_code = "webhook_targeted_completion_shutdown_timed_out",
+                "repository-watch aborted a retained targeted completion during shutdown"
+            );
+        }
     }
 
     async fn run_until_stop(&mut self, mut shutdown: watch::Receiver<bool>) {
@@ -1616,6 +1639,7 @@ impl RepositoryWatchTask {
 
     async fn process_webhook_deliveries(&mut self) -> WebhookDrainOutcome {
         self.webhook_drain_first_failure = None;
+        self.webhook_drain_projection_failure = None;
         if let Some(Err(error)) = self.settle_webhook_targeted_completion().await {
             self.webhook_drain_first_failure = Some(error);
             return WebhookDrainOutcome::ProjectionFailed(error);
@@ -1701,6 +1725,7 @@ impl RepositoryWatchTask {
                         deferred.insert(delivery.key());
                         if first_failure.is_none() {
                             first_failure = Some(error);
+                            self.webhook_drain_projection_failure = Some(error);
                         }
                     }
                 }
@@ -1755,6 +1780,7 @@ impl RepositoryWatchTask {
         match timeout(deadline, self.process_webhook_deliveries()).await {
             Ok(outcome) => {
                 self.webhook_drain_first_failure = None;
+                self.webhook_drain_projection_failure = None;
                 outcome
             }
             Err(_) => {
@@ -1789,6 +1815,7 @@ impl RepositoryWatchTask {
                     self.webhook_projected_terminal_in_flight = false;
                 }
                 let first_failure = self.webhook_drain_first_failure.take();
+                let projection_failure = self.webhook_drain_projection_failure.take();
                 if let Some(first_failure) = first_failure {
                     tracing::error!(
                         repository = %self.repository.as_str(),
@@ -1803,12 +1830,12 @@ impl RepositoryWatchTask {
                     cause_code = error.cause_code(),
                     "repository-watch webhook drain exceeded its attempt deadline"
                 );
-                if let Some(first_failure) = first_failure {
+                if let Some(projection_failure) = projection_failure {
                     self.webhook_dispatch_in_flight = false;
-                    WebhookDrainOutcome::ProjectionFailed(first_failure)
+                    WebhookDrainOutcome::ProjectionFailed(projection_failure)
                 } else if self.webhook_dispatch_in_flight {
                     self.webhook_dispatch_in_flight = false;
-                    WebhookDrainOutcome::DispatchFailedAfterTerminal(error)
+                    WebhookDrainOutcome::DispatchFailedAfterTerminal(first_failure.unwrap_or(error))
                 } else {
                     WebhookDrainOutcome::ProjectionFailed(error)
                 }
@@ -5679,6 +5706,7 @@ mod tests {
                 webhook_dispatch_in_flight: false,
                 webhook_targeted_completion: None,
                 webhook_drain_first_failure: None,
+                webhook_drain_projection_failure: None,
                 webhook_drain_timed_out: false,
                 repository,
                 interval: POLL_INTERVAL,
