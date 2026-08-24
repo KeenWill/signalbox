@@ -11,7 +11,8 @@ use signalbox_persistence::{
     disposable_test_container_labels, local_test_connection_options,
 };
 use signalboxd::{
-    FencedHubDatabase, SingleHubGuard, SingleHubGuardError, reconcile_fenced_pool_floor,
+    FencedHubDatabase, FencedPoolFloorReconciliation, SingleHubGuard, SingleHubGuardError,
+    reconcile_fenced_pool_floor,
 };
 use sqlx::{Connection, PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -136,16 +137,39 @@ async fn fenced_pool_floor_reconciliation_reopens_retired_sessions() -> Result<(
     const FLOOR: u32 = 4;
     let (container, control_pool, database_url) = postgres().await?;
     let options = local_test_connection_options(&database_url)?;
-    let database = FencedHubDatabase::connect_with(options, Some(FLOOR)).await?;
+    let database = FencedHubDatabase::connect_with(options, None).await?;
     let pool = database.pool().clone();
+    let mut warm_a = pool.acquire().await?;
+    let mut warm_b = pool.acquire().await?;
+    let mut warm_c = pool.acquire().await?;
     let retired = pool.acquire().await?.detach();
     retired.close().await?;
+    warm_a.return_to_pool().await;
+    warm_b.return_to_pool().await;
+    warm_c.return_to_pool().await;
 
     assert_eq!(pool.size(), FLOOR - 1);
 
-    reconcile_fenced_pool_floor(&pool, FLOOR).await?;
+    assert_eq!(
+        reconcile_fenced_pool_floor(&pool, FLOOR).await?,
+        FencedPoolFloorReconciliation::DeferredForIdleCapacity
+    );
+    assert_eq!(pool.size(), FLOOR - 1);
+
+    let mut checkout_a = pool.acquire().await?;
+    let mut checkout_b = pool.acquire().await?;
+    let mut checkout_c = pool.acquire().await?;
+
+    assert_eq!(pool.num_idle(), 0);
+    assert_eq!(
+        reconcile_fenced_pool_floor(&pool, FLOOR).await?,
+        FencedPoolFloorReconciliation::Replenished
+    );
 
     assert_eq!(pool.size(), FLOOR);
+    checkout_a.return_to_pool().await;
+    checkout_b.return_to_pool().await;
+    checkout_c.return_to_pool().await;
     database.close().await?;
     control_pool.close().await;
     drop(container);

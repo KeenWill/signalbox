@@ -2,7 +2,6 @@
 
 use std::{error::Error, fmt, mem};
 
-use futures_util::future::try_join_all;
 use signalbox_persistence::{
     hub_fence::{
         HubFenceError, HubFenceGeneration, advance_hub_fence, initialize_hub_fence,
@@ -121,25 +120,44 @@ impl Drop for FencedHubDatabase {
     }
 }
 
-/// Reopens enough physical sessions to restore one deployment-owned pool
-/// floor.
+/// Result of one non-disruptive fenced-pool floor reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FencedPoolFloorReconciliation {
+    /// The physical-session floor was already present.
+    Satisfied,
+    /// Idle service capacity was preserved instead of being held by maintenance.
+    DeferredForIdleCapacity,
+    /// Demand had exhausted idle capacity, so one missing session was opened.
+    Replenished,
+}
+
+/// Reopens one missing physical session without consuming idle service
+/// capacity.
 ///
-/// Acquiring the current idle inventory together with the missing sessions
-/// forces SQLx to construct the deficit. All acquisitions remain held until
-/// the batch completes, then return to the pool together. Callers own the
-/// attempt deadline because concurrent checkouts can make the snapshot stale.
-pub async fn reconcile_fenced_pool_floor(pool: &PgPool, minimum: u32) -> Result<(), sqlx::Error> {
+/// SQLx opens a session only after its idle inventory is empty. Reconciliation
+/// therefore defers while any idle session remains; holding that inventory to
+/// force construction would steal capacity from ordinary work for the whole
+/// connection attempt. Once demand has consumed the idle inventory, one
+/// acquisition opens one missing session and immediately returns it. Callers
+/// own the attempt deadline and repeat bound.
+pub async fn reconcile_fenced_pool_floor(
+    pool: &PgPool,
+    minimum: u32,
+) -> Result<FencedPoolFloorReconciliation, sqlx::Error> {
     let current = pool.size();
     if current >= minimum {
-        return Ok(());
+        return Ok(FencedPoolFloorReconciliation::Satisfied);
     }
-    let missing = minimum - current;
-    let idle = u32::try_from(pool.num_idle()).unwrap_or(u32::MAX);
-    let acquisition_count = idle.saturating_add(missing).min(minimum);
-    let acquisitions = (0..acquisition_count).map(|_| pool.acquire());
-    let held = try_join_all(acquisitions).await?;
-    drop(held);
-    Ok(())
+    if pool.num_idle() > 0 {
+        return Ok(FencedPoolFloorReconciliation::DeferredForIdleCapacity);
+    }
+    let connection = pool.acquire().await?;
+    drop(connection);
+    Ok(if pool.size() > current {
+        FencedPoolFloorReconciliation::Replenished
+    } else {
+        FencedPoolFloorReconciliation::DeferredForIdleCapacity
+    })
 }
 
 /// Sanitized guarded-database startup failure.

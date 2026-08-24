@@ -103,7 +103,10 @@ pub use daemon_tools::{
     DaemonToolComposition, DaemonToolExecutor, DaemonToolExecutorError, DaemonTools,
     DaemonToolsConstructionError, MappedDaemonCredentialInputs, PinnedWorkspaceFileSystem,
 };
-pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError, reconcile_fenced_pool_floor};
+pub use fenced_database::{
+    FencedHubDatabase, FencedHubDatabaseError, FencedPoolFloorReconciliation,
+    reconcile_fenced_pool_floor,
+};
 pub use goal_mode::{
     GoalModeNumericBounds, PostgresGoalPassDisposition, PostgresGoalPassDispositionError,
 };

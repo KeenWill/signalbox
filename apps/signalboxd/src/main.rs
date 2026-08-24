@@ -61,15 +61,15 @@ use signalboxd::{
     CODE_HOST_CREDENTIAL_REFERENCE, CodeHostNumericBounds, ConfiguredApprovalPostureError,
     ConvergenceSweepNumericBounds, ConvergenceSweepRuntime, DaemonToolCatalog,
     DaemonToolComposition, DaemonTools, DaemonToolsConstructionError, ExpiredPassRecoveryPolicy,
-    FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess,
-    GitHubCodeHostTransport, GoalModeNumericBounds, HubModelConfiguration,
-    HubModelConfigurationError, LocalProcessListener, LocalSocketError,
-    MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
-    ReportedUsageCompaction, RepositoryWatchNumericBounds, RepositoryWatchRuntime,
-    RepositoryWatchRuntimeError, SessionTemplateConfiguration, SessionTemplateConfigurationError,
-    SingleHubGuardError, SystemCurrentTimeClock, TelemetryConfiguration,
-    TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError,
+    FencedPoolFloorReconciliation, FileCredentialAccess, GitHubCodeHostTransport,
+    GoalModeNumericBounds, HubModelConfiguration, HubModelConfigurationError, LocalProcessListener,
+    LocalSocketError, MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime,
+    PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
+    ProcessRuntimeError, PrometheusServer, ReportedUsageCompaction, RepositoryWatchNumericBounds,
+    RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
+    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
+    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
     TurnLivenessNumericBounds, TurnLivenessRuntime,
     model_adapter::ConfiguredModelRuntime,
     reconcile_fenced_pool_floor,
@@ -894,20 +894,16 @@ async fn run_fenced_pool_floor_reconciliation(
         };
         let current_size = pool.size();
         match outcome {
-            Ok(Ok(())) if current_size >= policy.minimum => tracing::info!(
+            Ok(Ok(FencedPoolFloorReconciliation::Replenished)) => tracing::info!(
                 prior_size,
                 current_size,
                 minimum = policy.minimum,
-                "fenced pool floor automatically reconciled"
+                "fenced pool floor reconciliation added one physical session"
             ),
-            Ok(Ok(())) => tracing::warn!(
-                failure_class = ?OperatorFailureClass::Infrastructure { commit_ambiguous: false },
-                cause_code = "fenced_pool_floor_reconciliation_incomplete",
-                prior_size,
-                current_size,
-                minimum = policy.minimum,
-                "fenced pool floor reconciliation will retry"
-            ),
+            Ok(Ok(
+                FencedPoolFloorReconciliation::Satisfied
+                | FencedPoolFloorReconciliation::DeferredForIdleCapacity,
+            )) => {}
             Ok(Err(_)) => tracing::warn!(
                 failure_class = ?OperatorFailureClass::Infrastructure { commit_ambiguous: false },
                 cause_code = "fenced_pool_floor_reconciliation_failed",
