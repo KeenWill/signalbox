@@ -433,7 +433,12 @@ fn selection_registry_with_ceilings(
         reader: FileReaderName::try_new("fixture").expect("fixture reader name is valid"),
         revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
         media_types: vec![media_type(owned_media_type)],
-        probe: ProbeDeclaration::new(4, 0, 0, 4),
+        probe: ProbeDeclaration::new(ProbeDeclarationInput {
+            prefix_bytes: 4,
+            suffix_bytes: 0,
+            range_count: 0,
+            cumulative_bytes: 4,
+        }),
         views: vec![text_view()],
         reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
         streaming_text_fallback,
