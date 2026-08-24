@@ -826,6 +826,11 @@ const schemas = {
         ],
         "description": "Independently nullable token axes; null is never interpreted as zero."
       },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
       "WebU64": {
         "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
         "pattern": "^(0|[1-9][0-9]*)$",
@@ -836,7 +841,7 @@ const schemas = {
         "description": "One terminal call with exact token, provenance, rate, and billing evidence.",
         "properties": {
           "call_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebUuid"
           },
           "call_kind": {
             "$ref": "#/$defs/WebUsageCallKind"
@@ -848,7 +853,7 @@ const schemas = {
             "$ref": "#/$defs/WebUsageInputSemantics"
           },
           "model_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebUuid"
           },
           "provenance": {
             "$ref": "#/$defs/WebUsageProvenance"
@@ -857,13 +862,13 @@ const schemas = {
             "$ref": "#/$defs/WebU64"
           },
           "session_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebSessionId"
           },
           "tokens": {
             "$ref": "#/$defs/WebUsageTokenAxes"
           },
           "turn_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebUuid"
           }
         },
         "required": [
@@ -885,7 +890,7 @@ const schemas = {
         "description": "Stable terminal-time/UUID keyset boundary for usage detail traversal.",
         "properties": {
           "call_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebUuid"
           },
           "recorded_at_micros": {
             "$ref": "#/$defs/WebU64"
@@ -1012,6 +1017,11 @@ const schemas = {
           "cache_read_input"
         ],
         "type": "object"
+      },
+      "WebUuid": {
+        "description": "Checked canonical UUID used for browser-visible non-session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1085,7 +1095,7 @@ const schemas = {
             "$ref": "#/$defs/WebUsageInputSemantics"
           },
           "model_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebUuid"
           },
           "provenance": {
             "$ref": "#/$defs/WebUsageProvenance"
@@ -1246,6 +1256,11 @@ const schemas = {
           "cache_read_input"
         ],
         "type": "object"
+      },
+      "WebUuid": {
+        "description": "Checked canonical UUID used for browser-visible non-session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1574,11 +1589,38 @@ export function decodeWebUsageSummary(value) {
   return value;
 }
 
-export function decodeWebUsageCallPage(value) {
+export function decodeWebUsageCallPage(value, order) {
   assertSchema(schemas.WebUsageCallPage, schemas.WebUsageCallPage, value, "usage_call_page");
-  value.calls.forEach((call, index) =>
-    assertUsageEvidence(call.tokens, call.cost, `usage_call_page.calls[${index}]`),
-  );
+  if (order !== "newest" && order !== "oldest") {
+    fail("usage_call_page.order", "newest or oldest");
+  }
+  let previousKey = null;
+  value.calls.forEach((call, index) => {
+    assertUsageEvidence(call.tokens, call.cost, `usage_call_page.calls[${index}]`);
+    const key = { recordedAt: BigInt(call.recorded_at_micros), callId: call.call_id };
+    if (previousKey !== null) {
+      const comparison = key.recordedAt === previousKey.recordedAt
+        ? key.callId < previousKey.callId ? -1 : key.callId > previousKey.callId ? 1 : 0
+        : key.recordedAt < previousKey.recordedAt ? -1 : 1;
+      if ((order === "newest" && comparison >= 0) || (order === "oldest" && comparison <= 0)) {
+        fail(
+          `usage_call_page.calls[${index}]`,
+          `strictly ${order === "newest" ? "descending" : "ascending"} by call key`,
+        );
+      }
+    }
+    previousKey = key;
+  });
+  if (value.continuation !== null) {
+    const lastCall = value.calls.at(-1);
+    if (
+      lastCall === undefined ||
+      value.continuation.recorded_at_micros !== lastCall.recorded_at_micros ||
+      value.continuation.call_id !== lastCall.call_id
+    ) {
+      fail("usage_call_page.continuation", "a cursor anchored to the final usage call");
+    }
+  }
   return value;
 }
 

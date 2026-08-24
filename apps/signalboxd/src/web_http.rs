@@ -672,7 +672,7 @@ async fn usage_calls(
                 .collect(),
             continuation: page.next.map(|cursor| WebUsageCallCursor {
                 recorded_at_micros: WebU64::from_u64(cursor.recorded_at.get()),
-                call_id: cursor.call.into_uuid().to_string(),
+                call_id: web_uuid(cursor.call.into_uuid()),
             }),
         })
         .into_response(),
@@ -789,7 +789,7 @@ fn usage_aggregate_dto(
 ) -> WebUsageAggregateGroup {
     WebUsageAggregateGroup {
         call_kind: usage_call_kind_dto(group.key.call_kind),
-        model_id: group.key.model.identity().into_uuid().to_string(),
+        model_id: web_uuid(group.key.model.identity().into_uuid()),
         provenance: usage_provenance_dto(group.key.provenance),
         input_semantics: usage_input_semantics_dto(group.key.input_semantics),
         coverage: WebUsageTokenCoverage {
@@ -814,10 +814,10 @@ fn usage_aggregate_dto(
 fn usage_call_dto(call: UsageCallEvidence, configuration: &HubModelConfiguration) -> WebUsageCall {
     WebUsageCall {
         call_kind: usage_call_kind_dto(call.call_kind),
-        call_id: call.call.into_uuid().to_string(),
-        session_id: call.session.into_uuid().to_string(),
-        turn_id: call.turn.into_uuid().to_string(),
-        model_id: call.model.identity().into_uuid().to_string(),
+        call_id: web_uuid(call.call.into_uuid()),
+        session_id: WebSessionId::from_uuid_bytes(*call.session.into_uuid().as_bytes()),
+        turn_id: web_uuid(call.turn.into_uuid()),
+        model_id: web_uuid(call.model.identity().into_uuid()),
         provenance: usage_provenance_dto(call.provenance),
         input_semantics: usage_input_semantics_dto(call.input_semantics),
         tokens: usage_tokens_dto(call.tokens),
@@ -860,6 +860,12 @@ fn usage_cost_dto(
             ProcessModelCallInputTokenSemantics::CacheExclusive
         }
         UsageInputTokenSemantics::CacheInclusive => {
+            if tokens.output.is_none()
+                && tokens.cache_creation_input.is_none()
+                && tokens.cache_read_input.is_none()
+            {
+                return unavailable(WebUsageCostUnavailableReason::IncompleteCacheAxes);
+            }
             let cache_total = tokens
                 .cache_creation_input
                 .and_then(|creation| tokens.cache_read_input?.checked_add(creation));
@@ -1505,6 +1511,7 @@ mod tests {
     use signalbox_domain::{ProviderModelIdentity, ResolvedProviderTarget};
     use signalbox_web_contract::{
         MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebContractBootstrap, WebContractExample,
+        WebUsageCost, WebUsageCostUnavailableReason,
     };
     use tokio::sync::{mpsc, watch};
     use tower::ServiceExt as _;
@@ -2078,6 +2085,31 @@ mod tests {
 
         assert_eq!(cost["status"], "derived");
         assert_ne!(cost["amount_usd"], "0");
+    }
+
+    #[test]
+    fn configured_usage_cost_reports_unpriceable_incomplete_cache_evidence() {
+        let configuration = example_model_configuration();
+        let cost = usage_cost_dto(
+            &configuration,
+            rated_example_target(),
+            "anthropic-primary",
+            UsageInputTokenSemantics::CacheInclusive,
+            UsageTokenAxes {
+                input: Some(10),
+                output: None,
+                cache_creation_input: None,
+                cache_read_input: None,
+            },
+            true,
+        );
+
+        assert_eq!(
+            cost,
+            WebUsageCost::Unavailable {
+                reason: WebUsageCostUnavailableReason::IncompleteCacheAxes,
+            }
+        );
     }
 
     #[tokio::test]

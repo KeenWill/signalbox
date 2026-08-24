@@ -674,7 +674,7 @@ pub enum WebUsageCost {
 #[serde(deny_unknown_fields)]
 pub struct WebUsageAggregateGroup {
     pub call_kind: WebUsageCallKind,
-    pub model_id: String,
+    pub model_id: WebUuid,
     pub provenance: WebUsageProvenance,
     pub input_semantics: WebUsageInputSemantics,
     pub coverage: WebUsageTokenCoverage,
@@ -697,10 +697,10 @@ pub struct WebUsageSummary {
 #[serde(deny_unknown_fields)]
 pub struct WebUsageCall {
     pub call_kind: WebUsageCallKind,
-    pub call_id: String,
-    pub session_id: String,
-    pub turn_id: String,
-    pub model_id: String,
+    pub call_id: WebUuid,
+    pub session_id: WebSessionId,
+    pub turn_id: WebUuid,
+    pub model_id: WebUuid,
     pub provenance: WebUsageProvenance,
     pub input_semantics: WebUsageInputSemantics,
     pub tokens: WebUsageTokenAxes,
@@ -713,7 +713,7 @@ pub struct WebUsageCall {
 #[serde(deny_unknown_fields)]
 pub struct WebUsageCallCursor {
     pub recorded_at_micros: WebU64,
-    pub call_id: String,
+    pub call_id: WebUuid,
 }
 
 /// One bounded page of exact call evidence.
@@ -1180,11 +1180,38 @@ export function decodeWebUsageSummary(value) {{
   return value;
 }}
 
-export function decodeWebUsageCallPage(value) {{
+export function decodeWebUsageCallPage(value, order) {{
   assertSchema(schemas.WebUsageCallPage, schemas.WebUsageCallPage, value, "usage_call_page");
-  value.calls.forEach((call, index) =>
-    assertUsageEvidence(call.tokens, call.cost, `usage_call_page.calls[${{index}}]`),
-  );
+  if (order !== "newest" && order !== "oldest") {{
+    fail("usage_call_page.order", "newest or oldest");
+  }}
+  let previousKey = null;
+  value.calls.forEach((call, index) => {{
+    assertUsageEvidence(call.tokens, call.cost, `usage_call_page.calls[${{index}}]`);
+    const key = {{ recordedAt: BigInt(call.recorded_at_micros), callId: call.call_id }};
+    if (previousKey !== null) {{
+      const comparison = key.recordedAt === previousKey.recordedAt
+        ? key.callId < previousKey.callId ? -1 : key.callId > previousKey.callId ? 1 : 0
+        : key.recordedAt < previousKey.recordedAt ? -1 : 1;
+      if ((order === "newest" && comparison >= 0) || (order === "oldest" && comparison <= 0)) {{
+        fail(
+          `usage_call_page.calls[${{index}}]`,
+          `strictly ${{order === "newest" ? "descending" : "ascending"}} by call key`,
+        );
+      }}
+    }}
+    previousKey = key;
+  }});
+  if (value.continuation !== null) {{
+    const lastCall = value.calls.at(-1);
+    if (
+      lastCall === undefined ||
+      value.continuation.recorded_at_micros !== lastCall.recorded_at_micros ||
+      value.continuation.call_id !== lastCall.call_id
+    ) {{
+      fail("usage_call_page.continuation", "a cursor anchored to the final usage call");
+    }}
+  }}
   return value;
 }}
 
@@ -1245,7 +1272,7 @@ fn declaration_module(schemas: &GeneratedSchemas) -> Result<String, GenerateWebC
         "export type WebUsageCallPage = {usage_call_page};\n\n"
     ));
     output.push_str(
-        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\nexport function decodeWebSearchPage(value: unknown): WebSearchPage;\nexport function decodeWebUsageSummary(value: unknown): WebUsageSummary;\nexport function decodeWebUsageCallPage(value: unknown): WebUsageCallPage;\n",
+        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\nexport function decodeWebSearchPage(value: unknown): WebSearchPage;\nexport function decodeWebUsageSummary(value: unknown): WebUsageSummary;\nexport function decodeWebUsageCallPage(value: unknown, order: \"newest\" | \"oldest\"): WebUsageCallPage;\n",
     );
     Ok(output)
 }

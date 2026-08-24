@@ -134,26 +134,26 @@ type WebUsageAggregateGroup = {
   readonly cost: WebUsageCost;
   readonly coverage: WebUsageTokenCoverage;
   readonly input_semantics: WebUsageInputSemantics;
-  readonly model_id: string;
+  readonly model_id: WebUuid;
   readonly provenance: WebUsageProvenance;
   readonly tokens: WebUsageTokenAxes;
 };
 
 type WebUsageCall = {
-  readonly call_id: string;
+  readonly call_id: WebUuid;
   readonly call_kind: WebUsageCallKind;
   readonly cost: WebUsageCost;
   readonly input_semantics: WebUsageInputSemantics;
-  readonly model_id: string;
+  readonly model_id: WebUuid;
   readonly provenance: WebUsageProvenance;
   readonly recorded_at_micros: WebU64;
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
   readonly tokens: WebUsageTokenAxes;
-  readonly turn_id: string;
+  readonly turn_id: WebUuid;
 };
 
 type WebUsageCallCursor = {
-  readonly call_id: string;
+  readonly call_id: WebUuid;
   readonly recorded_at_micros: WebU64;
 };
 
@@ -246,4 +246,4 @@ export function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTi
 export function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;
 export function decodeWebSearchPage(value: unknown): WebSearchPage;
 export function decodeWebUsageSummary(value: unknown): WebUsageSummary;
-export function decodeWebUsageCallPage(value: unknown): WebUsageCallPage;
+export function decodeWebUsageCallPage(value: unknown, order: "newest" | "oldest"): WebUsageCallPage;

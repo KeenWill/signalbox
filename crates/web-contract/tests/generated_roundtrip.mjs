@@ -274,7 +274,7 @@ test("generated usage decoder enforces collection ceilings", () => {
     () => decodeWebUsageCallPage({
       calls: Array.from({ length: 101 }, usageCall),
       continuation: null,
-    }),
+    }, "newest"),
     /at most 100 items/,
   );
 });
@@ -317,8 +317,49 @@ test("generated summary and call decoders reject derived cost without tokens", (
     /unavailable without token evidence/,
   );
   assert.throws(
-    () => decodeWebUsageCallPage({ calls: [call], continuation: null }),
+    () => decodeWebUsageCallPage({ calls: [call], continuation: null }, "newest"),
     /unavailable without token evidence/,
+  );
+});
+
+test("generated usage decoder rejects malformed identities", () => {
+  const call = usageCall();
+  call.call_id = "not-a-uuid";
+
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [call], continuation: null }, "newest"),
+    /matching/,
+  );
+});
+
+test("generated usage decoder validates ordering and cursor correlation", () => {
+  const first = usageCall();
+  const second = usageCall();
+  second.call_id = "00000000-0000-0000-0000-000000000050";
+  second.recorded_at_micros = "1777777777123455";
+  const page = {
+    calls: [first, second],
+    continuation: {
+      recorded_at_micros: second.recorded_at_micros,
+      call_id: second.call_id,
+    },
+  };
+
+  assert.equal(decodeWebUsageCallPage(page, "newest"), page);
+  assert.throws(
+    () => decodeWebUsageCallPage({ ...page, calls: [second, first] }, "newest"),
+    /strictly descending by call key/,
+  );
+  assert.throws(
+    () =>
+      decodeWebUsageCallPage(
+        {
+          ...page,
+          continuation: { ...page.continuation, call_id: first.call_id },
+        },
+        "newest",
+      ),
+    /cursor anchored to the final usage call/,
   );
 });
 
