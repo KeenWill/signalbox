@@ -21,6 +21,18 @@ use std::{
 // numeric-bound: ceiling - protects against multi-day latency and repeated provider spend
 const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 256;
 
+// The round ceiling alone does not bound memory: it multiplies against the
+// 32-request batch bound and the 1 MiB argument and result bounds, so 256
+// rounds would admit 16 GiB of retained argument and result text where 32
+// rounds admitted 2 GiB. Retained content is therefore bounded on its own
+// terms, independently of the round ceiling. One maximal round retains 32
+// requests times 1 MiB of arguments plus 1 MiB of results, so this admits four
+// maximal rounds while leaving the round ceiling operative for the
+// kilobyte-scale results real executors return. It also sits far above any
+// provider context window, so it cannot refuse a turn a provider would accept.
+// numeric-bound: ceiling - protects daemon memory against multiplicative retained tool content
+const MAX_RETAINED_TOOL_CONTENT_BYTES: usize = 256 * 1024 * 1024;
+
 use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
     AuthorizedModelCall, AvailabilitySuccessorModelCallTurn, CompletedModelCallIdentities,
@@ -480,6 +492,54 @@ fn render_frontier_messages<'a>(
     Ok(messages.into_boxed_slice())
 }
 
+/// Sums the model-visible tool content one render would clone into messages.
+///
+/// Only the content that scales with admitted batches counts, and each term
+/// mirrors exactly what `render_frontier_messages` clones for that evidence
+/// shape: a proposal clones its request arguments, a result clones its result
+/// text or error detail, and a denial clones its reason. A result entry
+/// contributes no arguments because its message carries only the request
+/// identity, so a request's arguments are counted once through its proposal.
+/// Reading the lengths of already-resident durable evidence allocates nothing,
+/// which is what lets the ceiling be enforced before the clone rather than
+/// after it.
+fn projected_tool_content_bytes<'a>(
+    tool_entries: impl IntoIterator<Item = &'a ResolvedToolConversationEntry>,
+) -> usize {
+    tool_entries
+        .into_iter()
+        .fold(0_usize, |total, entry| {
+            let bytes = match entry {
+                ResolvedToolConversationEntry::AssistantToolUse { request, .. } => {
+                    request.arguments().as_str().len()
+                }
+                ResolvedToolConversationEntry::ExecutionResult { attempt, .. } => {
+                    match attempt.end() {
+                        ToolAttemptEnd::Completed { result } => match result {
+                            ToolResultContent::Text(text) => text.as_str().len(),
+                        },
+                        ToolAttemptEnd::KnownFailed { error } => {
+                            error.detail().map_or(0, |detail| detail.as_str().len())
+                        }
+                        // Neither shape renders, so neither retains content.
+                        ToolAttemptEnd::AwaitingChild { .. } | ToolAttemptEnd::Ambiguous => 0,
+                    }
+                }
+                ResolvedToolConversationEntry::Denied { approval, .. } => {
+                    match approval.decision() {
+                        ToolApprovalDecision::Deny { reason } => {
+                            reason.as_ref().map_or(0, |reason| reason.as_str().len())
+                        }
+                        ToolApprovalDecision::Approve => 0,
+                    }
+                }
+                // A closed request renders a fixed marker carrying no content.
+                ResolvedToolConversationEntry::Closed { .. } => 0,
+            };
+            total.saturating_add(bytes)
+        })
+}
+
 /// A checked prepared call plus its provider-neutral ordered messages.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedModelOperation {
@@ -492,12 +552,39 @@ pub struct PreparedModelOperation {
 
 impl PreparedModelOperation {
     /// Renders one checked call request through the canonical frontier projection.
+    ///
+    /// Retained tool content is bounded by `MAX_RETAINED_TOOL_CONTENT_BYTES`.
     pub fn render(
         request: PreparedModelCallRequest,
         credential_reference: ModelCallCredentialReference,
         system_prompt: Option<SessionSystemPrompt>,
         tools: Box<[ToolDefinition]>,
         tool_entries: &[ResolvedToolConversationEntry],
+    ) -> Result<Self, ModelFrontierRenderingError> {
+        Self::render_within(
+            request,
+            credential_reference,
+            system_prompt,
+            tools,
+            tool_entries,
+            MAX_RETAINED_TOOL_CONTENT_BYTES,
+        )
+    }
+
+    /// Renders under an explicit retained-tool-content ceiling.
+    ///
+    /// The ceiling is checked once the projection names its entries and before
+    /// any of their content is cloned, so an over-bound frontier is refused
+    /// without first materializing the messages that would exhaust memory.
+    /// Taking the ceiling as an argument lets the bound be exercised without
+    /// materializing hundreds of megabytes of content.
+    fn render_within(
+        request: PreparedModelCallRequest,
+        credential_reference: ModelCallCredentialReference,
+        system_prompt: Option<SessionSystemPrompt>,
+        tools: Box<[ToolDefinition]>,
+        tool_entries: &[ResolvedToolConversationEntry],
+        retained_tool_content_limit: usize,
     ) -> Result<Self, ModelFrontierRenderingError> {
         let complete_entries = request.frontier_entries().cloned().collect::<Vec<_>>();
         let projection = ContextFrontierProjection::from_complete_entries(&complete_entries)
@@ -516,12 +603,25 @@ impl PreparedModelOperation {
             };
             projected_entries.push((reference, entry.payload()));
         }
+        let projected_tool_entries = tool_entries
+            .iter()
+            .filter(|entry| projected_references.contains(&entry.source()));
+        // Enforced here, between naming the projection and cloning it: the
+        // rendered messages are what would exhaust memory, so the refusal has
+        // to precede their construction rather than follow it.
+        let observed_bytes = projected_tool_content_bytes(projected_tool_entries.clone());
+        if observed_bytes > retained_tool_content_limit {
+            return Err(
+                ModelFrontierRenderingError::RetainedToolContentLimitExceeded {
+                    observed_bytes,
+                    limit_bytes: retained_tool_content_limit,
+                },
+            );
+        }
         let messages = render_frontier_messages(
             projected_entries,
             |accepted_input| request.origin_content(accepted_input).cloned(),
-            tool_entries
-                .iter()
-                .filter(|entry| projected_references.contains(&entry.source())),
+            projected_tool_entries,
         )?;
         Ok(Self {
             request,
@@ -599,6 +699,16 @@ pub enum ModelFrontierRenderingError {
         /// Source-qualified delegation-result entry.
         entry: SemanticTranscriptEntryRef,
     },
+    /// The projected tool content exceeded its retained-content ceiling.
+    ///
+    /// Raised before any projected content is cloned, so the refusal bounds the
+    /// memory the rendered messages would have held.
+    RetainedToolContentLimitExceeded {
+        /// Cumulative projected tool-content bytes the render would have cloned.
+        observed_bytes: usize,
+        /// The ceiling in force for this render.
+        limit_bytes: usize,
+    },
     /// The complete durable frontier carries malformed summary provenance.
     InvalidContextProjection(ContextFrontierProjectionFailure),
 }
@@ -626,6 +736,9 @@ impl fmt::Display for ModelFrontierRenderingError {
             }
             Self::InvalidDelegationDelivery { .. } => {
                 formatter.write_str("model frontier delegation delivery is inconsistent")
+            }
+            Self::RetainedToolContentLimitExceeded { .. } => {
+                formatter.write_str("model frontier retained tool content exceeds its ceiling")
             }
             Self::InvalidContextProjection(_) => {
                 formatter.write_str("invalid context-compaction projection")
@@ -1298,6 +1411,7 @@ pub struct ModelCallExecutionService<
     gate: Gate,
     catalog: Arc<dyn ToolCatalog>,
     retained_state: Option<RetainedModelCallExecutionState>,
+    retained_tool_content_limit: usize,
 }
 
 impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
@@ -1323,12 +1437,23 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             gate,
             catalog: Arc::new(NoToolCatalog),
             retained_state: None,
+            retained_tool_content_limit: MAX_RETAINED_TOOL_CONTENT_BYTES,
         }
     }
 
     /// Replaces the empty compatibility catalog with one tool-capable port.
     pub fn with_tool_catalog(mut self, catalog: impl ToolCatalog + 'static) -> Self {
         self.catalog = Arc::new(catalog);
+        self
+    }
+
+    /// Narrows the retained-tool-content ceiling for one service.
+    ///
+    /// Deployments run the module ceiling; this exists so the bound can be
+    /// exercised end to end without materializing hundreds of megabytes.
+    #[cfg(test)]
+    const fn with_retained_tool_content_limit(mut self, limit: usize) -> Self {
+        self.retained_tool_content_limit = limit;
         self
     }
 
@@ -1355,6 +1480,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             gate,
             catalog,
             retained_state,
+            retained_tool_content_limit: MAX_RETAINED_TOOL_CONTENT_BYTES,
         }
     }
 
@@ -1662,14 +1788,43 @@ where
         let turn = prepared.turn();
         let prepared_request = (*prepared).clone();
         let advertised_tools = self.catalog.definitions();
-        let operation = PreparedModelOperation::render(
+        let operation = match PreparedModelOperation::render_within(
             *prepared,
             credential_reference,
             system_prompt,
             advertised_tools.clone(),
             &tool_entries,
-        )
-        .map_err(ModelCallExecutionError::Render)?;
+            self.retained_tool_content_limit,
+        ) {
+            Ok(operation) => operation,
+            // The retained-content ceiling is a safety bound on the same
+            // automatic tool loop the round ceiling bounds, so it closes the
+            // checkpoint through the same terminal contract rather than
+            // surfacing as an operator failure. Refusing here, before the
+            // messages exist, is what keeps the closure reachable at all.
+            Err(ModelFrontierRenderingError::RetainedToolContentLimitExceeded {
+                observed_bytes,
+                limit_bytes,
+            }) => {
+                tracing::warn!(
+                    session_id = %session.as_uuid(),
+                    turn_id = %turn.as_uuid(),
+                    model_call_id = %call.into_uuid(),
+                    retained_tool_content_limit = limit_bytes,
+                    observed_retained_tool_content_bytes = observed_bytes,
+                    "retained tool content limit reached"
+                );
+                return self
+                    .commit_prepared_failure(
+                        session,
+                        turn,
+                        call,
+                        PreparedModelCallFailureCause::ToolRoundLimitReached,
+                    )
+                    .await;
+            }
+            Err(error) => return Err(ModelCallExecutionError::Render(error)),
+        };
         let observed_tool_rounds = automatic_tool_round_count(turn, operation.messages());
         if observed_tool_rounds >= MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN {
             tracing::warn!(
@@ -5482,6 +5637,188 @@ mod tests {
             provider.interaction_count(),
             0,
             "a saturated turn must not reach provider interaction"
+        );
+        assert!(retained.is_none());
+    }
+
+    /// The retained-content accounting counts exactly the tool evidence a
+    /// render clones. Byte accounting that drifts from the renderer would let
+    /// the ceiling admit more content than it names, so the sum is checked
+    /// against the messages the same evidence actually produces.
+    #[test]
+    fn projected_tool_content_bytes_matches_the_tool_evidence_render_clones() {
+        let (request, tool_entries, _) = tool_round_saturated_fixture(3);
+        let operation = PreparedModelOperation::render(
+            request,
+            credential_reference(),
+            None,
+            Box::new([]),
+            &tool_entries,
+        )
+        .expect("the fixture frontier renders");
+        let rendered = operation
+            .messages()
+            .iter()
+            .fold(0_usize, |total, message| {
+                let bytes = match message {
+                    ModelConversationMessage::AssistantToolUse { request, .. } => {
+                        request.arguments().as_str().len()
+                    }
+                    ModelConversationMessage::ToolResult { content, .. } => match content {
+                        ModelToolResultContent::Success(ToolResultContent::Text(text)) => {
+                            text.as_str().len()
+                        }
+                        ModelToolResultContent::ExecutionError(error) => {
+                            error.detail().map_or(0, |detail| detail.as_str().len())
+                        }
+                        ModelToolResultContent::Denied { reason } => {
+                            reason.as_ref().map_or(0, |reason| reason.as_str().len())
+                        }
+                        ModelToolResultContent::ClosedByTurnEnd => 0,
+                        // Delegation results render from their frontier payload
+                        // rather than from resolved tool evidence, so they are
+                        // outside this accounting on both sides.
+                        ModelToolResultContent::Delegation(_) => 0,
+                    },
+                    _ => 0,
+                };
+                total + bytes
+            });
+        assert!(
+            rendered > 0,
+            "the fixture must retain content for the comparison to mean anything"
+        );
+        assert_eq!(
+            projected_tool_content_bytes(tool_entries.iter()),
+            rendered,
+            "the ceiling must count exactly the bytes the renderer clones"
+        );
+    }
+
+    /// The ceiling is enforced ahead of message construction. A frontier that is
+    /// both over-bound and unrenderable is refused for its content, which places
+    /// the guard before `render_frontier_messages` and therefore before the
+    /// clones that would exhaust memory — the ordering a guard reached only
+    /// after rendering cannot provide.
+    #[test]
+    fn retained_tool_content_ceiling_precedes_message_rendering() {
+        let (request, tool_entries, _) = tool_round_saturated_fixture(2);
+        let mut unrenderable = tool_entries.into_vec();
+        unrenderable.push(
+            unrenderable
+                .first()
+                .expect("the fixture carries tool evidence")
+                .clone(),
+        );
+        // Control: with the ceiling out of the way this evidence fails inside
+        // the renderer, so the refusal below is genuinely the earlier one.
+        assert!(
+            matches!(
+                PreparedModelOperation::render_within(
+                    request.clone(),
+                    credential_reference(),
+                    None,
+                    Box::new([]),
+                    &unrenderable,
+                    MAX_RETAINED_TOOL_CONTENT_BYTES,
+                ),
+                Err(ModelFrontierRenderingError::DuplicateToolEvidence { .. })
+            ),
+            "the fixture must be unrenderable for this ordering claim to hold"
+        );
+        let error = PreparedModelOperation::render_within(
+            request,
+            credential_reference(),
+            None,
+            Box::new([]),
+            &unrenderable,
+            0,
+        )
+        .expect_err("an over-bound frontier is refused");
+        assert!(
+            matches!(
+                error,
+                ModelFrontierRenderingError::RetainedToolContentLimitExceeded {
+                    limit_bytes: 0,
+                    ..
+                }
+            ),
+            "the content ceiling must win over the rendering failure it precedes: {error:?}"
+        );
+    }
+
+    /// S15 / INV-071: a turn whose retained tool content exceeds its ceiling
+    /// closes through the same pre-send terminal contract as round saturation
+    /// and never enters the provider. The round ceiling alone bounds latency and
+    /// spend but not retained memory, which is what this bound supplies.
+    #[tokio::test]
+    async fn s15_inv071_retained_tool_content_limit_fires_before_provider_entry() {
+        // Two rounds: far below the round ceiling, so only the retained-content
+        // bound can explain the closure.
+        let (request, tool_entries, failed) = tool_round_saturated_fixture(2);
+        let session = request.session();
+        let over_bound_call = request.call().id();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready_with_tool_evidence(request, tool_entries))].into(),
+                calls: 0,
+            },
+            ScriptedFailure {
+                results: [Ok(failed.clone())].into(),
+                calls: 0,
+                recorded: Vec::new(),
+            },
+            UnusedAuthorization,
+            UnusedObservation,
+            ScriptedModelCallProvider::new([]),
+            InProcessAttemptDispatchGate::default(),
+        )
+        .with_retained_tool_content_limit(0);
+        let captured = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(captured.clone())
+            .finish();
+
+        assert_eq!(
+            service
+                .execute(session)
+                .with_subscriber(subscriber)
+                .await
+                .expect("the over-bound turn closes with its own terminal reason"),
+            ModelCallExecutionOutcome::ToolRoundLimitReached(Box::new(failed))
+        );
+        let telemetry = captured.text();
+        assert!(
+            telemetry.contains("retained tool content limit reached"),
+            "the refusal must name the bound that fired: {telemetry}"
+        );
+        assert!(
+            telemetry.contains("terminal_outcome=\"tool_round_limit_reached\""),
+            "the service terminalization must expose the INV-071 label"
+        );
+        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        assert_eq!(prepare.calls, 1);
+        assert_eq!(failure.calls, 1);
+        assert_eq!(failure.recorded.len(), 1);
+        let committed = &failure.recorded[0];
+        assert_eq!(committed.session, session);
+        assert_eq!(committed.call, over_bound_call);
+        assert_eq!(
+            committed.cause,
+            PreparedModelCallFailureCause::ToolRoundLimitReached
+        );
+        assert_eq!(
+            provider.capability_preparation_count(),
+            0,
+            "an over-bound turn must not reach provider capability preparation"
+        );
+        assert_eq!(
+            provider.interaction_count(),
+            0,
+            "an over-bound turn must not reach provider interaction"
         );
         assert!(retained.is_none());
     }

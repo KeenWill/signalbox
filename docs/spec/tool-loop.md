@@ -761,9 +761,24 @@ capability preparation or send. At that enforcement site it emits a warning
 carrying the limit and observed round count, and the guarded pre-send closure
 carries `ToolRoundLimitReached`. The terminal event consequently uses
 `tool_round_limit_reached`, distinct from `capability_known_failure` (INV-071).
+
+The round ceiling bounds latency and provider spend; it does not bound retained
+memory, because it multiplies against the 32-request batch bound and the 1 MiB
+argument and result bounds. Retained tool content is therefore bounded on its
+own terms: at most 256 MiB of projected tool content — request arguments,
+result text, error detail, and denial reasons — may be rendered into one call's
+provider messages. The bound is enforced once the frontier projection names its
+entries and before any of that content is cloned into messages, so an over-bound
+frontier is refused rather than materialized. Exceeding it closes the checkpoint
+through the same pre-send contract as round saturation, emitting a warning
+carrying the ceiling and the observed byte count and terminalizing as
+`tool_round_limit_reached` (INV-071). Because one maximal round retains at most
+64 MiB, the ceiling admits four maximal rounds and leaves the round ceiling
+operative for the kilobyte-scale results executors return in practice.
+
 These durable-content bounds avoid wall-clock policy and ensure one
 model-controlled response or chain cannot retain the progressing slot
-indefinitely.
+indefinitely or exhaust daemon memory before its guard is reached.
 
 If an applied stop terminalizes before continuation, the same materialization
 algorithm appends results for executed and denied requests, closes every request
