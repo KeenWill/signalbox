@@ -319,6 +319,40 @@ impl VideoFixture {
         )
     }
 
+    pub fn mp4_visual_sample_entry() -> Self {
+        let configuration = [0, 0, 0, 0, 0x03, 0x03, 0, 1, 0];
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(
+                MP4_TIMESCALE,
+                MP4_DURATION_UNITS,
+                visual_sample_entry(*b"mp4v", *b"esds", &configuration),
+            ),
+        )
+    }
+
+    pub fn av1_mp4_with_reserved_configuration_bits() -> Self {
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(
+                MP4_TIMESCALE,
+                MP4_DURATION_UNITS,
+                visual_sample_entry(*b"av01", *b"av1C", &[0x81, 0, 0, 0xe0]),
+            ),
+        )
+    }
+
+    pub fn avc_mp4_with_invalid_reserved_bits() -> Self {
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(
+                MP4_TIMESCALE,
+                MP4_DURATION_UNITS,
+                visual_sample_entry(*b"avc1", *b"avcC", &[1, 0x64, 0, 0x1f, 0x03, 0xe0, 0]),
+            ),
+        )
+    }
+
     pub fn hevc_mp4_with_truncated_configuration() -> Self {
         Self::new(
             FixtureKind::Mp4,
@@ -563,6 +597,15 @@ impl VideoFixture {
         Self::new(FixtureKind::Mp4, [ftyp(), movie].concat())
     }
 
+    pub fn large_audio_only_mp4() -> Self {
+        let mut movie_header = vec![0_u8; 100];
+        movie_header[12..16].copy_from_slice(&MP4_TIMESCALE.to_be_bytes());
+        movie_header[16..20].copy_from_slice(&MP4_DURATION_UNITS.to_be_bytes());
+        let movie = mp4_box(*b"moov", &mp4_box(*b"mvhd", &movie_header));
+        let padding = mp4_box(*b"free", &vec![0_u8; 1024]);
+        Self::new(FixtureKind::Mp4, [ftyp(), padding, movie].concat())
+    }
+
     pub fn webm_with_unsupported_ebml_read_version() -> Self {
         let read_version = ebml_element(&[0x42, 0xf7], &[0xff]);
         Self::new(
@@ -615,6 +658,24 @@ impl VideoFixture {
         let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
         let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
         Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn large_audio_only_webm() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let track_number = ebml_element(&[0xd7], &[1]);
+        let track_type = ebml_element(&[0x83], &[2]);
+        let codec_id = ebml_element(&[0x86], b"A_OPUS");
+        let track_entry = ebml_element(&[0xae], &[track_number, track_type, codec_id].concat());
+        let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
+        let padding = ebml_element(&[0xec], &vec![0_u8; 1024]);
+        let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[padding, info, tracks].concat());
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn webm_with_large_ebml_header() -> Self {
+        let padding = ebml_element(&[0xec], &vec![0_u8; 600]);
+        let header = ebml_header_with_extra(&padding);
+        Self::new(FixtureKind::Webm, webm_bytes_with_header(header))
     }
 
     pub fn webm_without_tracks() -> Self {
@@ -708,6 +769,41 @@ impl VideoFixture {
             &[mp4_box(*b"mvhd", &movie_header), track].concat(),
         );
         Self::new(FixtureKind::Mp4, [ftyp(), movie].concat())
+    }
+
+    pub fn mp4_with_incomplete_additional_track() -> Self {
+        let valid_track = mp4_track(1, avc1_sample_entry());
+        let incomplete_track = mp4_box(*b"trak", &tkhd(2));
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_tracks(&[valid_track, incomplete_track]),
+        )
+    }
+
+    pub fn webm_with_duplicate_content_encodings() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let track_number = ebml_element(&[0xd7], &[1]);
+        let track_type = ebml_element(&[0x83], &[1]);
+        let codec_id = ebml_element(&[0x86], b"V_VP9");
+        let pixel_width = ebml_element(&[0xb0], &1920_u16.to_be_bytes());
+        let pixel_height = ebml_element(&[0xba], &1080_u16.to_be_bytes());
+        let video = ebml_element(&[0xe0], &[pixel_width, pixel_height].concat());
+        let encodings = ebml_element(&[0x6d, 0x80], &[]);
+        let track_entry = ebml_element(
+            &[0xae],
+            &[
+                track_number,
+                track_type,
+                codec_id,
+                video,
+                encodings.clone(),
+                encodings,
+            ]
+            .concat(),
+        );
+        let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
+        let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
     }
 
     pub fn mp4_with_handler_sample_entry_mismatch() -> Self {

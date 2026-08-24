@@ -125,12 +125,14 @@ fn declaration_registers_mp4_and_webm_under_available_isolation() -> Result<(), 
     let registry = registry()?;
 
     assert_eq!(registry.providers(), &[declaration()?]);
-    for reader in registry.providers()[0].readers() {
-        let probe = reader.probe();
-        assert_eq!(probe.suffix_bytes(), 0);
-        assert_eq!(probe.range_count(), 1);
-        assert_eq!(probe.cumulative_bytes(), probe.prefix_bytes());
-    }
+    let mp4_probe = registry.providers()[0].readers()[0].probe();
+    assert_eq!(mp4_probe.suffix_bytes(), 0);
+    assert_eq!(mp4_probe.range_count(), 1);
+    assert_eq!(mp4_probe.cumulative_bytes(), mp4_probe.prefix_bytes());
+    let webm_probe = registry.providers()[0].readers()[1].probe();
+    assert_eq!(webm_probe.suffix_bytes(), 0);
+    assert_eq!(webm_probe.range_count(), 1);
+    assert_eq!(webm_probe.cumulative_bytes(), webm_probe.prefix_bytes());
     Ok(())
 }
 
@@ -390,6 +392,33 @@ async fn hevc_mp4_video_sample_entry_validates() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn mp4_visual_sample_entry_validates() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_visual_sample_entry().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn av1_reserved_configuration_bits_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::av1_mp4_with_reserved_configuration_bits(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn avc_reserved_configuration_bits_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::avc_mp4_with_invalid_reserved_bits(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn truncated_hevc_configuration_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::hevc_mp4_with_truncated_configuration(),
@@ -566,6 +595,33 @@ async fn audio_only_webm_is_not_claimed_as_video() -> Result<(), Box<dyn Error>>
 }
 
 #[tokio::test]
+async fn large_audio_only_mp4_is_not_claimed_as_video() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::large_audio_only_mp4().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn large_audio_only_webm_is_not_claimed_as_video() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::large_audio_only_webm().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn webm_with_large_header_is_probed_and_validated() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::webm_with_large_ebml_header().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
 async fn webm_without_tracks_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(VideoFixture::webm_without_tracks(), "malformed_video").await
 }
@@ -669,6 +725,24 @@ async fn mp4_video_track_without_mandatory_headers_is_malformed() -> Result<(), 
 async fn mp4_track_with_split_media_evidence_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::mp4_track_with_split_media_evidence(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn incomplete_additional_mp4_track_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_incomplete_additional_track(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn duplicate_webm_content_encodings_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_duplicate_content_encodings(),
         "malformed_video",
     )
     .await
