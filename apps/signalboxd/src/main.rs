@@ -1624,6 +1624,11 @@ async fn run_hub(
     let repository_watch_reconciliation = async {
         repository_watch_store
             .process_pending_lifecycle_cutoffs(|| DurableCommandId::from_uuid(uuid::Uuid::now_v7()))
+            .await?;
+        repository_watch_store
+            .process_pending_convergence_cutoffs(|| {
+                DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+            })
             .await
     };
     match await_while_guarded(&mut database, repository_watch_reconciliation).await {

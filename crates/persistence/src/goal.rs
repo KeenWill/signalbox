@@ -482,6 +482,7 @@ impl GoalRepository {
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::SubmitInput
                 | CommandKind::DecideToolRequest
+                | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
@@ -1264,6 +1265,7 @@ async fn existing_or_conflicting(
         | CommandKind::ReplaceSessionMetadata
         | CommandKind::SubmitInput
         | CommandKind::DecideToolRequest
+        | CommandKind::OverrideDeniedToolRequest
         | CommandKind::ReviewWorkflow
         | CommandKind::ReviewOrchestration
         | CommandKind::CompactSession

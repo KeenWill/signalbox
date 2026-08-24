@@ -506,6 +506,9 @@ pub(crate) async fn load_obligation_admission(
         Some(RepoWatchObligationSettlementStorageKind::TargetClosed) => Ok(
             ObligationAdmission::Settled(RepoWatchRuleEvaluationOutcome::TargetClosed),
         ),
+        Some(RepoWatchObligationSettlementStorageKind::TargetConverged) => Ok(
+            ObligationAdmission::Settled(RepoWatchRuleEvaluationOutcome::TargetConverged),
+        ),
         Some(RepoWatchObligationSettlementStorageKind::Dispatched) => {
             let dispatch_id: Uuid = row.try_get("settled_dispatch_id")?;
             let sessions = sqlx::query_scalar(
@@ -562,6 +565,35 @@ pub(crate) async fn settle_target_closed_obligation(
     if affected != 1 {
         return Err(RepoWatchDispatchRepositoryError::Corruption(
             "closed-target obligation settlement lost its active row",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn settle_target_converged_obligation(
+    transaction: &mut Transaction<'_, Postgres>,
+    obligation: Uuid,
+    event: RepoWatchEventId,
+) -> Result<(), RepoWatchDispatchRepositoryError> {
+    let affected = sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET settled_kind = $3,
+                settled_at = clock_timestamp()
+          WHERE obligation_id = $1
+            AND latest_event_id = $2
+            AND settled_kind IS NULL",
+    )
+    .bind(obligation)
+    .bind(event.as_uuid())
+    .bind(repo_watch_obligation_settlement_to_str(
+        RepoWatchObligationSettlementStorageKind::TargetConverged,
+    ))
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepoWatchDispatchRepositoryError::Corruption(
+            "converged-target obligation settlement lost its active row",
         ));
     }
     Ok(())

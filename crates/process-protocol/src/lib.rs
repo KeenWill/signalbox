@@ -2717,6 +2717,9 @@ fn validate_tool_approval_event_shape(
                 })
             }
         },
+        ToolApprovalEventDecider::UserOverride { .. } => {
+            matches!(decision, ToolApprovalEventDecision::Approve {}) && rationale.is_none()
+        }
     };
     if !shape_matches {
         return Err(FrameValidationError::ToolApprovalShape);
@@ -3672,6 +3675,15 @@ pub enum ClientRequest {
         /// Exact closed approval decision.
         decision: ToolDecision,
     },
+    /// Record one one-shot user override of a delegate-denied tool request.
+    OverrideDeniedToolRequest {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Session the override covers; part of the canonical payload.
+        session_id: CanonicalUuid,
+        /// Exact delegate-denied logical tool request.
+        tool_request_id: CanonicalUuid,
+    },
 }
 
 /// One closed wire approval decision for a pending tool request.
@@ -3760,7 +3772,8 @@ impl ClientRequest {
             | Self::RecordReviewPublicationOutcomes { .. }
             | Self::ReadReviewOrchestration { .. }
             | Self::StopTurn { .. }
-            | Self::DecideToolRequest { .. } => {}
+            | Self::DecideToolRequest { .. }
+            | Self::OverrideDeniedToolRequest { .. } => {}
         }
         match self {
             Self::CreateSession { placement, .. }
@@ -4345,6 +4358,22 @@ pub enum RejectionDetail {
         /// Tool request the caller named.
         tool_request_id: CanonicalUuid,
     },
+    /// The named tool request carries no delegate denial, so no override is
+    /// admitted for it.
+    ToolRequestNotDelegateDenied {
+        /// Tool request without a delegate denial.
+        tool_request_id: CanonicalUuid,
+    },
+    /// The named delegate denial has not reached its terminal denied result.
+    ToolRequestNotTerminallyDenied {
+        /// Tool request whose denial is still resolving.
+        tool_request_id: CanonicalUuid,
+    },
+    /// An override is already recorded for the named delegate denial.
+    ToolDenialAlreadyOverridden {
+        /// Already-overridden tool request.
+        tool_request_id: CanonicalUuid,
+    },
     /// The named delegation request belongs to another turn.
     DelegationRequestNotInTurn {
         /// Session the caller named.
@@ -4585,6 +4614,9 @@ impl RejectionDetail {
             | Self::ToolRequestAlreadyResolved { .. }
             | Self::ToolRequestNotEarliestUndecided { .. }
             | Self::ToolRequestNotInSession { .. }
+            | Self::ToolRequestNotDelegateDenied { .. }
+            | Self::ToolRequestNotTerminallyDenied { .. }
+            | Self::ToolDenialAlreadyOverridden { .. }
             | Self::DelegationRequestNotInTurn { .. }
             | Self::DelegationToolRequestNotExecutable { .. }
             | Self::DelegationSpawnConflict { .. }
@@ -6224,6 +6256,14 @@ pub enum ToolApprovalEventDecider {
         /// Exact recorded judge model call.
         model_call_id: CanonicalUuid,
     },
+    /// The user pre-approved the re-proposed command by overriding one exact
+    /// delegate denial through the named durable command.
+    UserOverride {
+        /// Exact durable override-command provenance.
+        command_id: CanonicalUuid,
+        /// The delegate-denied request whose recorded override was consumed.
+        overridden_tool_request_id: CanonicalUuid,
+    },
 }
 
 /// One explicit approval decision retained in an authoritative transcript.
@@ -7251,6 +7291,14 @@ pub enum ServerMessage {
         /// Exact recorded decision.
         decision: ToolDecision,
     },
+    /// One recorded recorded-override receipt.
+    ///
+    /// The receipt mirrors the recorded applied result exactly; an equal
+    /// command replay returns this same projection.
+    ToolDenialOverridden {
+        /// Overridden delegate-denied tool request.
+        tool_request_id: CanonicalUuid,
+    },
     /// One completed append-only context-compaction receipt.
     SessionCompacted {
         /// Compacted session.
@@ -8071,6 +8119,9 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
         | RejectionDetail::ToolRequestNotInSession { .. }
+        | RejectionDetail::ToolRequestNotDelegateDenied { .. }
+        | RejectionDetail::ToolRequestNotTerminallyDenied { .. }
+        | RejectionDetail::ToolDenialAlreadyOverridden { .. }
         | RejectionDetail::DelegationRequestNotInTurn { .. }
         | RejectionDetail::DelegationToolRequestNotExecutable { .. }
         | RejectionDetail::DelegationSpawnConflict { .. }
@@ -8175,6 +8226,9 @@ fn validate_conversation_import_detail(
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
         | RejectionDetail::ToolRequestNotInSession { .. }
+        | RejectionDetail::ToolRequestNotDelegateDenied { .. }
+        | RejectionDetail::ToolRequestNotTerminallyDenied { .. }
+        | RejectionDetail::ToolDenialAlreadyOverridden { .. }
         | RejectionDetail::DelegationRequestNotInTurn { .. }
         | RejectionDetail::DelegationToolRequestNotExecutable { .. }
         | RejectionDetail::DelegationSpawnConflict { .. }
@@ -13601,6 +13655,115 @@ mod tests {
     fn inv033_tool_approval_user_decider_rejects_delegate_rationale() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"5","message":{"type":"session_event","cursor":"8","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":"forged judge rationale"}}}"#,
+        );
+    }
+
+    /// INV-033: the override request carries its exact closed wire shape.
+    #[test]
+    fn inv033_override_denied_tool_request_has_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let override_request = ClientRequest::OverrideDeniedToolRequest {
+            command_id: command(4)?,
+            session_id: uuid(6),
+            tool_request_id: uuid(7),
+        };
+        let frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, override_request)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"override_denied_tool_request\",\
+             \"command_id\":\"00000000-0000-0000-0000-000000000004\",\
+             \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
+             \"tool_request_id\":\"00000000-0000-0000-0000-000000000007\"}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"2","request":{"type":"override_denied_tool_request","command_id":"00000000-0000-0000-0000-000000000004","session_id":"00000000-0000-0000-0000-000000000006","tool_request_id":"00000000-0000-0000-0000-000000000007","decision":{"type":"approve"}}}"#,
+        );
+        Ok(())
+    }
+
+    /// INV-033: the override receipt and every override rejection carry their
+    /// exact closed wire shapes.
+    #[test]
+    fn inv033_override_denial_responses_have_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::ToolDenialOverridden {
+                tool_request_id: uuid(7),
+            },
+            r#"{"type":"tool_denial_overridden","tool_request_id":"00000000-0000-0000-0000-000000000007"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the request carries no delegate denial"),
+                detail: ErrorDetail::rejected(RejectionDetail::ToolRequestNotDelegateDenied {
+                    tool_request_id: uuid(7),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"the request carries no delegate denial","detail":{"type":"tool_request_not_delegate_denied","tool_request_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the denial is still resolving"),
+                detail: ErrorDetail::rejected(RejectionDetail::ToolRequestNotTerminallyDenied {
+                    tool_request_id: uuid(7),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"the denial is still resolving","detail":{"type":"tool_request_not_terminally_denied","tool_request_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(4)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("an override is already recorded for the denial"),
+                detail: ErrorDetail::rejected(RejectionDetail::ToolDenialAlreadyOverridden {
+                    tool_request_id: uuid(7),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"an override is already recorded for the denial","detail":{"type":"tool_denial_already_overridden","tool_request_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )
+    }
+
+    #[test]
+    fn inv033_tool_approval_user_override_event_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(5)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(9),
+                session_id: uuid(6),
+                event: SessionEvent::ToolApprovalDecided {
+                    turn_id: uuid(7),
+                    tool_request_id: uuid(8),
+                    decision: ToolApprovalEventDecision::Approve {},
+                    decider: ToolApprovalEventDecider::UserOverride {
+                        command_id: uuid(9),
+                        overridden_tool_request_id: uuid(12),
+                    },
+                    rationale: None,
+                },
+            },
+            r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user_override","command_id":"00000000-0000-0000-0000-000000000009","overridden_tool_request_id":"00000000-0000-0000-0000-00000000000c"},"rationale":null}}"#,
+        )
+    }
+
+    /// A user-override decider is approve-only and carries no rationale: a
+    /// denial or a rationale under that decider is a malformed frame.
+    #[test]
+    fn inv033_tool_approval_user_override_decider_is_approve_only() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"6","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"user_override","command_id":"00000000-0000-0000-0000-000000000009","overridden_tool_request_id":"00000000-0000-0000-0000-00000000000c"},"rationale":null}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"7","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user_override","command_id":"00000000-0000-0000-0000-000000000009","overridden_tool_request_id":"00000000-0000-0000-0000-00000000000c"},"rationale":"forged rationale"}}}"#,
         );
     }
 
