@@ -398,6 +398,33 @@ impl VideoFixture {
         Self::new(FixtureKind::Mp4, [ftyp(), movie].concat())
     }
 
+    pub fn mp4_with_duplicate_track_ids() -> Self {
+        let first_track = mp4_track(1, avc1_sample_entry());
+        let second_track = mp4_track(1, avc1_sample_entry());
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_tracks(&[first_track, second_track]),
+        )
+    }
+
+    pub fn mp4_with_duplicate_sample_descriptions() -> Self {
+        let mut sample_description = vec![0_u8; 8];
+        sample_description[4..8].copy_from_slice(&1_u32.to_be_bytes());
+        sample_description.extend_from_slice(&avc1_sample_entry());
+        let stsd = mp4_box(*b"stsd", &sample_description);
+        let sample_table = mp4_box(*b"stbl", &[stsd.clone(), stsd].concat());
+        let media_information = mp4_box(*b"minf", &sample_table);
+        let media_header = mp4_box(*b"mdhd", &[0_u8; 24]);
+        let mut handler = vec![0_u8; 24];
+        handler[8..12].copy_from_slice(b"vide");
+        let media = mp4_box(
+            *b"mdia",
+            &[media_header, mp4_box(*b"hdlr", &handler), media_information].concat(),
+        );
+        let track = mp4_box(*b"trak", &[tkhd(1), media].concat());
+        Self::new(FixtureKind::Mp4, mp4_bytes_with_tracks(&[track]))
+    }
+
     pub fn webm_with_unsupported_ebml_read_version() -> Self {
         let read_version = ebml_element(&[0x42, 0xf7], &[0xff]);
         Self::new(
@@ -440,7 +467,7 @@ impl VideoFixture {
             *b"mdia",
             &[media_header, mp4_box(*b"hdlr", &handler), media_information].concat(),
         );
-        let track_header = mp4_box(*b"tkhd", &[0_u8; 84]);
+        let track_header = tkhd(1);
         let track = mp4_box(*b"trak", &[track_header, media].concat());
         let mut fragment_duration = vec![0_u8; 8];
         fragment_duration[4..8].copy_from_slice(&MP4_DURATION_UNITS.to_be_bytes());
@@ -482,7 +509,7 @@ impl VideoFixture {
             *b"mdia",
             &[media_header, mp4_box(*b"hdlr", &handler), media_information].concat(),
         );
-        let track_header = mp4_box(*b"tkhd", &[0_u8; 84]);
+        let track_header = tkhd(1);
         let track = mp4_box(*b"trak", &[track_header, media].concat());
         let movie_extends = mp4_box(*b"mvex", &[]);
         let movie = mp4_box(
@@ -579,6 +606,20 @@ impl VideoFixture {
         bytes.push(0x1f);
         Self::new(FixtureKind::Webm, bytes)
             .with_reported_byte_length(u64::try_from(METADATA_BYTES + 64).unwrap_or(u64::MAX))
+    }
+
+    pub fn webm_with_partial_vint_at_actual_eof() -> Self {
+        let mut fixture = Self::large_webm_with_partial_header_at_metadata_cutoff();
+        fixture.reported_byte_length = Some(u64::try_from(METADATA_BYTES + 1).unwrap_or(u64::MAX));
+        fixture
+    }
+
+    pub fn webm_with_declared_one_byte_id_limit() -> Self {
+        let maximum_id_length = ebml_element(&[0x42, 0xf2], &[1]);
+        Self::new(
+            FixtureKind::Webm,
+            webm_bytes_with_header(ebml_header_with_extra(&maximum_id_length)),
+        )
     }
 
     pub fn webm_with_unknown_sized_final_cluster() -> Self {
@@ -678,13 +719,50 @@ fn mp4_bytes_with_sample_entry(timescale: u32, duration: u32, sample_entry: Vec<
         *b"mdia",
         &[media_header, mp4_box(*b"hdlr", &handler), media_information].concat(),
     );
-    let track_header = mp4_box(*b"tkhd", &[0_u8; 84]);
+    let track_header = tkhd(1);
     let track = mp4_box(*b"trak", &[track_header, media].concat());
     let movie = mp4_box(
         *b"moov",
         &[mp4_box(*b"mvhd", &movie_header), track].concat(),
     );
     [ftyp(), movie].concat()
+}
+
+fn mp4_track(track_id: u32, sample_entry: Vec<u8>) -> Vec<u8> {
+    let mut handler = vec![0_u8; 24];
+    handler[8..12].copy_from_slice(b"vide");
+    let mut sample_description = vec![0_u8; 8];
+    sample_description[4..8].copy_from_slice(&1_u32.to_be_bytes());
+    sample_description.extend_from_slice(&sample_entry);
+    let sample_table = mp4_box(*b"stbl", &mp4_box(*b"stsd", &sample_description));
+    let media_information = mp4_box(*b"minf", &sample_table);
+    let media = mp4_box(
+        *b"mdia",
+        &[
+            mp4_box(*b"mdhd", &[0_u8; 24]),
+            mp4_box(*b"hdlr", &handler),
+            media_information,
+        ]
+        .concat(),
+    );
+    mp4_box(*b"trak", &[tkhd(track_id), media].concat())
+}
+
+fn mp4_bytes_with_tracks(tracks: &[Vec<u8>]) -> Vec<u8> {
+    let mut movie_header = vec![0_u8; 100];
+    movie_header[12..16].copy_from_slice(&MP4_TIMESCALE.to_be_bytes());
+    movie_header[16..20].copy_from_slice(&MP4_DURATION_UNITS.to_be_bytes());
+    let mut payload = mp4_box(*b"mvhd", &movie_header);
+    for track in tracks {
+        payload.extend_from_slice(track);
+    }
+    [ftyp(), mp4_box(*b"moov", &payload)].concat()
+}
+
+fn tkhd(track_id: u32) -> Vec<u8> {
+    let mut payload = vec![0_u8; 84];
+    payload[12..16].copy_from_slice(&track_id.to_be_bytes());
+    mp4_box(*b"tkhd", &payload)
 }
 
 fn ftyp() -> Vec<u8> {
@@ -803,6 +881,7 @@ pub struct MemorySource {
     bytes: Vec<u8>,
     byte_length: NonZeroU64,
     media_type: &'static str,
+    maximum_read_length: Option<u64>,
 }
 
 impl MemorySource {
@@ -822,11 +901,17 @@ impl MemorySource {
             bytes,
             byte_length,
             media_type,
+            maximum_read_length: None,
         })
     }
 
     pub fn unknown(bytes: Vec<u8>) -> Result<Self, Box<dyn Error>> {
         Self::new(bytes, "application/octet-stream")
+    }
+
+    pub fn with_maximum_read_length(mut self, maximum_read_length: u64) -> Self {
+        self.maximum_read_length = Some(maximum_read_length);
+        self
     }
 
     pub fn file_use(&self) -> Result<FileUse, Box<dyn Error>> {
@@ -854,8 +939,11 @@ impl VerifiedBlobSource for MemorySource {
     }
 
     fn read_range(&self, offset: u64, length: NonZeroU64) -> SourceReadFuture<'_> {
-        let outcome = usize::try_from(offset)
-            .ok()
+        let outcome = self
+            .maximum_read_length
+            .is_none_or(|maximum| length.get() <= maximum)
+            .then_some(())
+            .and_then(|()| usize::try_from(offset).ok())
             .and_then(|start| {
                 usize::try_from(length.get())
                     .ok()

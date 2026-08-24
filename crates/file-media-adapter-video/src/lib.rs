@@ -43,6 +43,8 @@ const MP4_MEHD: [u8; 4] = *b"mehd";
 
 const EBML_HEADER: u64 = 0x1a45dfa3;
 const EBML_HEADER_BYTES: [u8; 4] = [0x1a, 0x45, 0xdf, 0xa3];
+const EBML_MAX_ID_LENGTH: u64 = 0x42f2;
+const EBML_MAX_SIZE_LENGTH: u64 = 0x42f3;
 const EBML_READ_VERSION: u64 = 0x42f7;
 const EBML_DOCTYPE: u64 = 0x4282;
 const EBML_DOCTYPE_READ_VERSION: u64 = 0x4285;
@@ -118,7 +120,8 @@ impl FileMediaProvider for VideoProvider {
             if request.media_type.as_str() != kind.media_type() {
                 return Err(FileMediaProviderFailure::Failed);
             }
-            let (bytes, source_bytes) = read_metadata_prefix(source).await?;
+            let (bytes, source_bytes) =
+                read_metadata_prefix(source, request.maximum_source_bytes).await?;
             require_active(cancellation)?;
             if !kind.matches_probe(&bytes) {
                 return Ok(ProcessorValidationOutput::NoMatch);
@@ -155,7 +158,7 @@ impl FileMediaProvider for VideoProvider {
             if request.view.as_str() != METADATA_VIEW {
                 return Ok(ProcessorReadOutput::UnsupportedView);
             }
-            let (bytes, source_bytes) = read_metadata_prefix(source).await?;
+            let (bytes, source_bytes) = read_metadata_prefix(source, METADATA_BYTES).await?;
             require_active(cancellation)?;
             match parse(kind, &bytes, source_bytes) {
                 Ok(metadata) => metadata_output(kind, &metadata),
@@ -409,6 +412,7 @@ struct Mp4State {
     fragment_duration: Option<u64>,
     fragmented: bool,
     video_tracks: u64,
+    track_ids: Vec<u32>,
 }
 
 fn parse_mp4(bytes: &[u8], source_bytes: u64) -> Result<VideoMetadata, VideoIssue> {
@@ -468,6 +472,7 @@ fn parse_mp4_boxes(
     let mut handler_seen = false;
     let mut track_header_seen = false;
     let mut media_header_seen = false;
+    let mut sample_description_seen = false;
     while cursor < bytes.len() {
         let (box_type, payload, consumed) = match mp4_box_at(bytes, cursor, scope == Mp4Scope::Root)
         {
@@ -525,6 +530,12 @@ fn parse_mp4_boxes(
                 }
                 track_header_seen = true;
                 validate_mp4_full_box(payload, 84, 96)?;
+                let track_id_offset = if payload[0] == 0 { 12 } else { 20 };
+                let track_id = read_u32(payload, track_id_offset)?;
+                if track_id == 0 || state.track_ids.contains(&track_id) {
+                    return Err(VideoIssue::Malformed);
+                }
+                state.track_ids.push(track_id);
                 track_evidence.track_header = true;
             }
             MP4_MDIA if scope == Mp4Scope::Track => {
@@ -577,7 +588,11 @@ fn parse_mp4_boxes(
                 )?);
             }
             MP4_STSD if scope == Mp4Scope::SampleTable => {
-                track_evidence.sample_description |= parse_stsd(payload, state)?;
+                if sample_description_seen {
+                    return Err(VideoIssue::Malformed);
+                }
+                sample_description_seen = true;
+                track_evidence.sample_description = parse_stsd(payload, state)?;
             }
             MP4_MVEX if scope == Mp4Scope::Movie => {
                 if state.fragmented {
@@ -1086,6 +1101,10 @@ struct EbmlState {
     doc_type_seen: bool,
     ebml_read_version_seen: bool,
     doc_type_read_version_seen: bool,
+    max_id_length_seen: bool,
+    max_size_length_seen: bool,
+    max_id_length: usize,
+    max_size_length: usize,
     info_seen: bool,
     tracks_seen: bool,
     timecode_scale_seen: bool,
@@ -1104,6 +1123,10 @@ impl Default for EbmlState {
             doc_type_seen: false,
             ebml_read_version_seen: false,
             doc_type_read_version_seen: false,
+            max_id_length_seen: false,
+            max_size_length_seen: false,
+            max_id_length: 4,
+            max_size_length: 8,
             info_seen: false,
             tracks_seen: false,
             timecode_scale_seen: false,
@@ -1173,30 +1196,45 @@ fn parse_ebml_scope(
     let mut pixel_width_seen = false;
     let mut pixel_height_seen = false;
     while cursor < bytes.len() {
-        let (id, id_bytes, _) = match read_ebml_vint(bytes, cursor, EbmlVintKind::Identifier, 4) {
-            Ok(parsed) => parsed,
-            Err(VideoIssue::Malformed)
-                if allow_truncated_tail
-                    && scope == EbmlScope::Segment
-                    && ebml_vint_extends_beyond(bytes, cursor, 4) =>
-            {
-                break;
-            }
-            Err(issue) => return Err(issue),
-        };
-        let size_offset = cursor.checked_add(id_bytes).ok_or(VideoIssue::Structure)?;
-        let (size, size_bytes, unknown) =
-            match read_ebml_vint(bytes, size_offset, EbmlVintKind::Size, 8) {
+        let (id, id_bytes, _) =
+            match read_ebml_vint(bytes, cursor, EbmlVintKind::Identifier, state.max_id_length) {
                 Ok(parsed) => parsed,
                 Err(VideoIssue::Malformed)
                     if allow_truncated_tail
                         && scope == EbmlScope::Segment
-                        && ebml_vint_extends_beyond(bytes, size_offset, 8) =>
+                        && ebml_vint_is_complete_in_source(
+                            bytes,
+                            cursor,
+                            state.max_id_length,
+                            source_bytes,
+                        )? =>
                 {
                     break;
                 }
                 Err(issue) => return Err(issue),
             };
+        let size_offset = cursor.checked_add(id_bytes).ok_or(VideoIssue::Structure)?;
+        let (size, size_bytes, unknown) = match read_ebml_vint(
+            bytes,
+            size_offset,
+            EbmlVintKind::Size,
+            state.max_size_length,
+        ) {
+            Ok(parsed) => parsed,
+            Err(VideoIssue::Malformed)
+                if allow_truncated_tail
+                    && scope == EbmlScope::Segment
+                    && ebml_vint_is_complete_in_source(
+                        bytes,
+                        size_offset,
+                        state.max_size_length,
+                        source_bytes,
+                    )? =>
+            {
+                break;
+            }
+            Err(issue) => return Err(issue),
+        };
         let payload_offset = size_offset
             .checked_add(size_bytes)
             .ok_or(VideoIssue::Structure)?;
@@ -1334,6 +1372,24 @@ fn parse_ebml_scope(
                 return Err(VideoIssue::Encrypted);
             }
             (EBML_DOCTYPE, EbmlScope::Header) => parse_doc_type(payload, state)?,
+            (EBML_MAX_ID_LENGTH, EbmlScope::Header) => {
+                let maximum = parse_ebml_uint(payload)?;
+                if state.max_id_length_seen || maximum == 0 || maximum > 4 {
+                    return Err(VideoIssue::Malformed);
+                }
+                state.max_id_length_seen = true;
+                state.max_id_length =
+                    usize::try_from(maximum).map_err(|_| VideoIssue::Structure)?;
+            }
+            (EBML_MAX_SIZE_LENGTH, EbmlScope::Header) => {
+                let maximum = parse_ebml_uint(payload)?;
+                if state.max_size_length_seen || maximum == 0 || maximum > 8 {
+                    return Err(VideoIssue::Malformed);
+                }
+                state.max_size_length_seen = true;
+                state.max_size_length =
+                    usize::try_from(maximum).map_err(|_| VideoIssue::Structure)?;
+            }
             (EBML_READ_VERSION, EbmlScope::Header) => {
                 if state.ebml_read_version_seen || parse_ebml_uint(payload)? != 1 {
                     return Err(VideoIssue::Malformed);
@@ -1441,21 +1497,23 @@ fn parse_ebml_scope(
     Ok(VideoTrackPresence::Absent)
 }
 
-fn ebml_vint_extends_beyond(bytes: &[u8], offset: usize, maximum_bytes: usize) -> bool {
+fn ebml_vint_is_complete_in_source(
+    bytes: &[u8],
+    offset: usize,
+    maximum_bytes: usize,
+    source_bytes: u64,
+) -> Result<bool, VideoIssue> {
     let Some(first) = bytes.get(offset).copied() else {
-        return true;
+        return Ok(false);
     };
     if first == 0 {
-        return false;
+        return Ok(false);
     }
-    let Ok(length) = usize::try_from(first.leading_zeros()) else {
-        return false;
-    };
-    let length = length + 1;
-    length <= maximum_bytes
-        && offset
-            .checked_add(length)
-            .is_none_or(|end| end > bytes.len())
+    let length = usize::try_from(first.leading_zeros()).map_err(|_| VideoIssue::Structure)? + 1;
+    let end = offset.checked_add(length).ok_or(VideoIssue::Structure)?;
+    Ok(length <= maximum_bytes
+        && end > bytes.len()
+        && u64::try_from(end).map_err(|_| VideoIssue::Structure)? <= source_bytes)
 }
 
 fn read_ebml_vint(
@@ -1589,9 +1647,10 @@ fn metadata_json(
 
 async fn read_metadata_prefix(
     source: &dyn VerifiedBlobSource,
+    maximum_source_bytes: u64,
 ) -> Result<(Vec<u8>, u64), FileMediaProviderFailure> {
     let source_bytes = source.byte_length().get();
-    let length = source_bytes.min(METADATA_BYTES);
+    let length = source_bytes.min(METADATA_BYTES).min(maximum_source_bytes);
     Ok((read_range(source, 0, length).await?, source_bytes))
 }
 

@@ -411,6 +411,24 @@ async fn duplicate_mp4_handlers_are_malformed() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn duplicate_mp4_track_ids_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_duplicate_track_ids(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn duplicate_mp4_sample_descriptions_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_duplicate_sample_descriptions(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn unsupported_ebml_read_version_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::webm_with_unsupported_ebml_read_version(),
@@ -546,6 +564,48 @@ async fn partial_webm_header_at_metadata_cutoff_is_an_accepted_truncated_tail()
 -> Result<(), Box<dyn Error>> {
     let source = VideoFixture::large_webm_with_partial_header_at_metadata_cutoff().into_source()?;
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn partial_webm_vint_at_actual_eof_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_partial_vint_at_actual_eof(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn declared_ebml_identifier_limit_is_enforced() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_declared_one_byte_id_limit(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn validation_read_honors_the_effective_source_byte_ceiling() -> Result<(), Box<dyn Error>> {
+    let maximum_source_bytes = 4096_u64;
+    let source = VideoFixture::ordinary_large_mp4()
+        .into_source()?
+        .with_maximum_read_length(maximum_source_bytes);
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = maximum_source_bytes;
+    let request = InspectionRequest {
+        source: source.file_use()?,
+        visible_part: None,
+    };
+    let inspection = FileMediaRegistry::try_new(
+        vec![declaration()?],
+        ceilings,
+        ProcessorIsolation::Available,
+    )?
+    .inspect(&DirectProcessor::new(), request, &source, &NeverCancelled)
+    .await?;
 
     assert_eq!(inspection.status(), FileInspectionStatus::Validated);
     Ok(())
