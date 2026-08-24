@@ -311,7 +311,13 @@ async fn execute_continuation(
         .resolve_session_model(request.model_selection)
         .is_err()
     {
-        return invalid_request("initial model selection is not configured");
+        // The request passed transport decoding; rejecting an unconfigured model is a
+        // state-dependent application decision, not a trust-boundary failure.
+        return application_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "model_selection_not_configured",
+            "initial model selection is not configured",
+        );
     }
     let application_request = match CreateSessionFromImportedFrontierRequest::try_new(
         request.command_id,
