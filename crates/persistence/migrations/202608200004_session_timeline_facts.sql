@@ -201,15 +201,114 @@ SET search_path FROM CURRENT AS $$
            END;
 $$;
 
+-- A goal transition moves only the queued turns of the generation it retires
+-- and the generation it pursues, so the delta it is worth is two counts. No
+-- index can answer either one: `goal_turn` keys generation without lifecycle
+-- state, and `turn_lifecycle` keys queued-ness without generation, so counting
+-- the intersection through either access path walks a lifetime of rows to reach
+-- the few that move -- every turn the generation ever held, or every turn the
+-- session ever queued -- and does it under the global allocator lock, where an
+-- ordinary goal transition would stall outbox allocation for unrelated
+-- sessions.
+--
+-- This fact carries that intersection keyed by both, so the reconciliation
+-- below reads two primary-key rows instead. It is maintained by the same
+-- bounded per-row triggers that maintain `session_timeline_fact`: a lifecycle
+-- transition is worth at most one turn to the generation that turn belongs to,
+-- and the transitions that carry it already hold the allocator lock the
+-- reconciliation reads under. The row is created by the first turn a generation
+-- queues; a generation that has never queued one has no row and counts zero.
+CREATE TABLE session_goal_generation_work_fact (
+    session_id uuid NOT NULL REFERENCES session(session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    goal_generation numeric(20, 0) NOT NULL CHECK (
+        goal_generation BETWEEN 1 AND 18446744073709551615
+    ),
+    queued_turn_count numeric(20, 0) NOT NULL,
+    PRIMARY KEY (session_id, goal_generation),
+    CHECK (queued_turn_count >= 0 AND queued_turn_count <= 18446744073709551615)
+);
+
+INSERT INTO session_goal_generation_work_fact (
+    session_id, goal_generation, queued_turn_count
+)
+SELECT goal.session_id, goal.goal_generation, count(*)::numeric
+  FROM goal_turn AS goal
+  JOIN turn_lifecycle AS turn
+    ON turn.session_id = goal.session_id
+   AND turn.turn_id = goal.turn_id
+ WHERE turn.state_kind = 'queued'
+   AND NOT turn.delegation_runtime_terminal
+ GROUP BY goal.session_id, goal.goal_generation;
+
+-- One turn joining or leaving a generation's queue. The update comes first and
+-- the insert only covers the row's absence, which is what keeps the nonnegative
+-- check above a corruption gate rather than a failure mode: `ON CONFLICT DO
+-- UPDATE` would check the proposed row before arbitrating the conflict, so a
+-- subtraction from an existing count would fail on the bare delta. Reaching the
+-- insert with a negative delta means a turn left a generation's queue that
+-- never joined it, and failing there is the report this fact owes.
+--
+-- Two transactions cannot race to create the same row: every caller takes the
+-- allocator lock before reaching here, which is the same lock that serialises
+-- the reconciliation reading these counts.
+CREATE FUNCTION apply_goal_generation_queued_delta(
+    changed_session uuid,
+    changed_generation numeric,
+    queued_delta integer
+)
+RETURNS void
+LANGUAGE plpgsql
+SET search_path FROM CURRENT AS $$
+BEGIN
+    UPDATE session_goal_generation_work_fact
+       SET queued_turn_count = queued_turn_count + queued_delta
+     WHERE session_id = changed_session
+       AND goal_generation = changed_generation;
+    IF NOT FOUND THEN
+        INSERT INTO session_goal_generation_work_fact (
+            session_id, goal_generation, queued_turn_count
+        ) VALUES (changed_session, changed_generation, queued_delta);
+    END IF;
+END
+$$;
+
 CREATE FUNCTION update_session_timeline_work_fact()
 RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$
 DECLARE
     pursued boolean;
+    turn_generation numeric(20, 0);
+    generation_delta integer;
 BEGIN
     -- Outbox appends acquire the allocator before this session fact. Taking the
     -- same locks in the same order prevents lifecycle updates from inverting it.
     PERFORM 1 FROM outbox_sequence_state WHERE singleton FOR UPDATE;
+    -- The generation this turn belongs to is a primary-key read of `goal_turn`,
+    -- and a turn with no goal turn belongs to no generation: it is credited
+    -- unconditionally and no goal transition ever moves it, so it contributes
+    -- to no per-generation row. `goal_turn` is append-only, so the generation
+    -- this reads cannot change under a later transition of the same turn.
+    SELECT goal.goal_generation INTO turn_generation
+      FROM goal_turn AS goal
+     WHERE goal.session_id = NEW.session_id
+       AND goal.turn_id = NEW.turn_id;
+    IF turn_generation IS NOT NULL THEN
+        generation_delta :=
+            (NEW.state_kind = 'queued'
+             AND NOT NEW.delegation_runtime_terminal)::integer
+            - CASE
+                WHEN TG_OP = 'UPDATE'
+                    THEN (OLD.state_kind = 'queued'
+                          AND NOT OLD.delegation_runtime_terminal)::integer
+                ELSE 0
+              END;
+        IF generation_delta <> 0 THEN
+            PERFORM apply_goal_generation_queued_delta(
+                NEW.session_id, turn_generation, generation_delta
+            );
+        END IF;
+    END IF;
     -- A queued turn is credited only while its goal generation is still
     -- pursued, so the subtraction has to carry the same guard the credit did.
     -- Without it a turn already retired by a goal event -- whose credit the
@@ -257,6 +356,42 @@ CREATE TRIGGER turn_lifecycle_updates_timeline_fact
 AFTER INSERT OR UPDATE OF state_kind, delegation_runtime_terminal ON turn_lifecycle
 FOR EACH ROW EXECUTE FUNCTION update_session_timeline_work_fact();
 
+-- The lifecycle row and the `goal_turn` row that claims it for a generation are
+-- written in the same transaction in either order, because the foreign key
+-- between them is deferred. Whichever lands second is the only one that can see
+-- both, so each side credits the generation only when the other is already
+-- there and the turn is counted exactly once whichever order that was. Both
+-- reads are primary-key lookups.
+--
+-- A goal turn requires an `accepted_input`, whose own fact trigger takes the
+-- allocator lock in the same transaction, so taking it here adds no global
+-- serialisation the write did not already have -- and it keeps this write to a
+-- generation's count under the same lock the reconciliation reads it under.
+CREATE FUNCTION credit_goal_turn_generation_work_fact()
+RETURNS trigger LANGUAGE plpgsql
+SET search_path FROM CURRENT AS $$
+BEGIN
+    PERFORM 1 FROM outbox_sequence_state WHERE singleton FOR UPDATE;
+    IF EXISTS (
+        SELECT 1
+          FROM turn_lifecycle AS turn
+         WHERE turn.session_id = NEW.session_id
+           AND turn.turn_id = NEW.turn_id
+           AND turn.state_kind = 'queued'
+           AND NOT turn.delegation_runtime_terminal
+    ) THEN
+        PERFORM apply_goal_generation_queued_delta(
+            NEW.session_id, NEW.goal_generation, 1
+        );
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE TRIGGER goal_turn_credits_generation_work_fact
+AFTER INSERT ON goal_turn
+FOR EACH ROW EXECUTE FUNCTION credit_goal_turn_generation_work_fact();
+
 -- Goal events change which queued turns count as pursued work, so this applies
 -- the delta that change is worth. Rescanning the session instead would make an
 -- ordinary goal transition cost one `goal_turn_is_runtime_relevant` call per
@@ -287,8 +422,8 @@ DECLARE
     prior_generation numeric(20, 0);
     retired numeric(20, 0);
     pursued numeric(20, 0);
-    gained bigint;
-    lost bigint;
+    gained numeric(20, 0);
+    lost numeric(20, 0);
 BEGIN
     IF NEW.event_ordinal = 1 THEN
         -- The session's first goal event. No committed goal turn can precede it
@@ -324,28 +459,26 @@ BEGIN
     -- and a delta computed from an earlier read could subtract a turn the other
     -- transaction has already accounted for.
     PERFORM 1 FROM outbox_sequence_state WHERE singleton FOR UPDATE;
-    -- Each count is keyed by generation, so it reads the goal-turn index on
-    -- `(session_id, goal_generation, ...)` and touches only the turns this
-    -- transition actually moves. A NULL generation names no turn and matches
-    -- none, which is how the retiring kinds count zero on the pursued side.
-    SELECT count(*) INTO gained
-      FROM goal_turn AS goal
-      JOIN turn_lifecycle AS turn
-        ON turn.session_id = goal.session_id
-       AND turn.turn_id = goal.turn_id
-     WHERE goal.session_id = NEW.session_id
-       AND goal.goal_generation = pursued
-       AND turn.state_kind = 'queued'
-       AND NOT turn.delegation_runtime_terminal;
-    SELECT count(*) INTO lost
-      FROM goal_turn AS goal
-      JOIN turn_lifecycle AS turn
-        ON turn.session_id = goal.session_id
-       AND turn.turn_id = goal.turn_id
-     WHERE goal.session_id = NEW.session_id
-       AND goal.goal_generation = retired
-       AND turn.state_kind = 'queued'
-       AND NOT turn.delegation_runtime_terminal;
+    -- Each count is a primary-key read of the per-generation fact, so this
+    -- transition costs two row lookups whatever the retired generation's
+    -- history or the session's queue holds. Counting the same turns by joining
+    -- `goal_turn` to `turn_lifecycle` would instead scan one whole side of the
+    -- intersection -- the generation's turns or the session's queued turns --
+    -- because neither table indexes generation and queued-ness together. A NULL
+    -- generation names no generation and matches no row, which is how the
+    -- retiring kinds count zero on the pursued side.
+    SELECT coalesce((
+        SELECT fact.queued_turn_count
+          FROM session_goal_generation_work_fact AS fact
+         WHERE fact.session_id = NEW.session_id
+           AND fact.goal_generation = pursued
+    ), 0) INTO gained;
+    SELECT coalesce((
+        SELECT fact.queued_turn_count
+          FROM session_goal_generation_work_fact AS fact
+         WHERE fact.session_id = NEW.session_id
+           AND fact.goal_generation = retired
+    ), 0) INTO lost;
     IF gained = lost THEN
         RETURN NULL;
     END IF;

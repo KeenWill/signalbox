@@ -496,6 +496,10 @@ async fn goal_work_facts_agree_with_a_fresh_backfill_at_every_transition()
         .expect("created session has a descriptor");
     assert_eq!(created.work.queued_turn_count, 0);
     assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 0);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0
+    );
 
     commission_fixture_session_goal(&pool, identity, 0x0009_9900).await?;
     let pursuing = repository
@@ -504,6 +508,10 @@ async fn goal_work_facts_agree_with_a_fresh_backfill_at_every_transition()
         .expect("commissioned session has a descriptor");
     assert_eq!(pursuing.work.queued_turn_count, 1);
     assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 1);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0
+    );
 
     stop_fixture_session_goal(&pool, identity, 0x0009_9A00).await?;
     let stopped = repository
@@ -512,10 +520,56 @@ async fn goal_work_facts_agree_with_a_fresh_backfill_at_every_transition()
         .expect("stopped session has a descriptor");
     assert_eq!(stopped.work.queued_turn_count, 0);
     assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 0);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0
+    );
 
     pool.close().await;
     drop(container);
     Ok(())
+}
+
+/// Counts the generations whose incrementally maintained queued count differs
+/// from a fresh recomputation of the intersection it stands for.
+///
+/// That fact is what makes the goal-event reconciliation two keyed reads rather
+/// than a scan of the generation's history or of the session's queue, so it is
+/// only as good as its agreement with the join it replaced. Recomputing after
+/// each transition is what makes a drifting delta fail here instead of
+/// surfacing as a wrong `queued_turn_count` much later. A generation whose
+/// turns have all left the queue keeps a zero row the recomputation has no
+/// group for, so the stored side drops zeroes before the comparison.
+async fn generation_work_fact_disagreements(
+    pool: &PgPool,
+    identity: SessionId,
+) -> Result<i64, Box<dyn Error>> {
+    let disagreements: i64 = sqlx::query_scalar(
+        "WITH stored AS (
+             SELECT goal_generation, queued_turn_count
+               FROM session_goal_generation_work_fact
+              WHERE session_id = $1 AND queued_turn_count <> 0
+         ), recomputed AS (
+             SELECT goal.goal_generation, count(*)::numeric AS queued_turn_count
+               FROM goal_turn AS goal
+               JOIN turn_lifecycle AS turn
+                 ON turn.session_id = goal.session_id
+                AND turn.turn_id = goal.turn_id
+              WHERE goal.session_id = $1
+                AND turn.state_kind = 'queued'
+                AND NOT turn.delegation_runtime_terminal
+              GROUP BY goal.goal_generation
+         )
+         SELECT count(*)::bigint FROM (
+             (TABLE stored EXCEPT ALL TABLE recomputed)
+             UNION ALL
+             (TABLE recomputed EXCEPT ALL TABLE stored)
+         ) AS disagreements",
+    )
+    .bind(identity.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    Ok(disagreements)
 }
 
 /// Recomputes the goal half of the credit predicate the way the lifecycle
@@ -584,6 +638,10 @@ async fn a_retired_queued_goal_turn_is_never_subtracted_twice() -> Result<(), Bo
     assert_eq!(stopped.work.queued_turn_count, 0);
     assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 0);
     assert_eq!(relevance_predicates_disagree(&pool, identity).await?, 0);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0
+    );
 
     // The retired turn leaves the queue. Only the final-state assertion is
     // suspended -- it demands the attempts and boundary entries a turn that
@@ -646,6 +704,11 @@ async fn a_retired_queued_goal_turn_is_never_subtracted_twice() -> Result<(), Bo
     );
     assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 0);
     assert_eq!(relevance_predicates_disagree(&pool, identity).await?, 0);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0,
+        "the generation's count follows the turn out of the queue"
+    );
 
     pool.close().await;
     drop(container);
@@ -673,6 +736,10 @@ async fn goal_work_facts_track_a_second_generation_incrementally() -> Result<(),
         .expect("commissioned session has a descriptor");
     assert_eq!(first.work.queued_turn_count, 1);
     assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 1);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0
+    );
 
     stop_fixture_session_goal(&pool, identity, 0x0009_A300).await?;
     let retired = repository
@@ -681,6 +748,10 @@ async fn goal_work_facts_track_a_second_generation_incrementally() -> Result<(),
         .expect("stopped session has a descriptor");
     assert_eq!(retired.work.queued_turn_count, 0);
     assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 0);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0
+    );
 
     // The second generation credits only its own turn. The first generation's
     // turn is still queued and must stay uncredited, which a delta keyed on the
@@ -693,6 +764,11 @@ async fn goal_work_facts_track_a_second_generation_incrementally() -> Result<(),
     assert_eq!(second.work.queued_turn_count, 1);
     assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 1);
     assert_eq!(relevance_predicates_disagree(&pool, identity).await?, 0);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0,
+        "the retired generation keeps its own queued turn, uncredited"
+    );
 
     stop_fixture_session_goal(&pool, identity, 0x0009_A500).await?;
     let settled = repository
@@ -702,6 +778,10 @@ async fn goal_work_facts_track_a_second_generation_incrementally() -> Result<(),
     assert_eq!(settled.work.queued_turn_count, 0);
     assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 0);
     assert_eq!(relevance_predicates_disagree(&pool, identity).await?, 0);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0
+    );
 
     pool.close().await;
     drop(container);
