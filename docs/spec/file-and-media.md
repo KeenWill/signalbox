@@ -1,12 +1,11 @@
 # File and media interpretation
 
 The provider-neutral core is verified against PR #898 (`agent/file-media-core`).
-Its isolated processor implementation is
-verified against PR #900 (`agent/file-media-worker`). Together they include the
-type model, declaration and registry checks, detection and validation algorithm,
-untrusted processor-response boundary, stable agent tool contracts,
-visibility-authorizing application bridge, and fresh daemon-supervised worker
-runtime.
+Its isolated processor implementation is verified against PR #900
+(`agent/file-media-worker`). Together they include the type model, declaration
+and registry checks, detection and validation algorithm, untrusted
+processor-response boundary, stable agent tool contracts, visibility-authorizing
+application bridge, and fresh daemon-supervised worker runtime.
 
 The archive and compression adapter is verified against this PR
 (`agent/file-media-adapter-archives`).
