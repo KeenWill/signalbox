@@ -296,10 +296,12 @@ describe('SameOriginProductTransport', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
-      'attention summary state and action are incoherent',
+      'attention_snapshot.summaries[0].action must be consistent with attention state "idle"',
     )
     const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
-    await expect(events.next()).rejects.toThrow('attention summary state and action are incoherent')
+    await expect(events.next()).rejects.toThrow(
+      'attention_event.summaries[0].action must be consistent with attention state "idle"',
+    )
   })
 
   it('accepts an actionless approval wait', async () => {
