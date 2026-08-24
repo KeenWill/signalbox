@@ -36,9 +36,9 @@ against this PR (`agent/user-override-denials`).
 The change-request-scoped thread mutation contracts and their pre-dispatch
 ownership confirmation are verified through this PR (`agent/thread-ownership`).
 
-The automatic tool-round saturation and 256-round ceiling contracts are verified
-through this PR (`agent/tool-round-ceiling`) at implementation ref
-`bd80d3f63b325fb591641926061353e6d40a19c7`.
+The automatic tool-round saturation, 256-round ceiling, and retained-tool-content
+ceiling contracts are verified through this PR (`agent/tool-round-ceiling`) at
+implementation ref `859213c17c09666e36bddee63e63bc9616690685`.
 
 The daemon blob-read declarations below are the foundation proposal from PR #553
 (`agent/blob-storage-foundation`) and become verified with its implementing
