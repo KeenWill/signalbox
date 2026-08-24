@@ -124,7 +124,7 @@ CREATE TRIGGER runner_placement_records_operator_attention_change
 AFTER INSERT ON runner_session_placement_record
 FOR EACH ROW EXECUTE FUNCTION record_operator_attention_runner_change();
 
--- Existing owner-created sessions use their authoritative command-claim time.
+-- Existing user-created sessions use their authoritative command-claim time.
 -- Delegated children have no creation command; their mandatory version-one
 -- placement is written in the spawning transaction and supplies its durable
 -- creation timestamp. No historical time is inferred from UUID identity bits.
