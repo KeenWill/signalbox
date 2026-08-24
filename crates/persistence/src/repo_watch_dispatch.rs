@@ -40,8 +40,8 @@ const CONFIGURATION_LOCK: &str = "repo-watch\u{1f}configuration";
 const DISPATCH_START_LEASE_LIMIT: Duration = Duration::from_secs(5 * 60);
 // numeric-bound: tunable - preserves a positive lowered lease for tests and composition
 const MINIMUM_DISPATCH_START_LEASE: Duration = Duration::from_millis(1);
-// numeric-bound: tunable - bounds one repository reconciliation nudge batch
-const UNSTARTED_DISPATCH_NUDGE_BATCH_SIZE: i64 = 16;
+// numeric-bound: ceiling - one repository-watch rule can dispatch this many actions
+const UNSTARTED_DISPATCH_NUDGE_BATCH_SIZE: i64 = 32;
 
 struct ConfiguredRuleIdentity {
     content_digest: [u8; 32],

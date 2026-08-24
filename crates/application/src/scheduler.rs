@@ -936,6 +936,7 @@ where
         let mut pending_ordinary = VecDeque::new();
         let mut pending_hints = HashMap::new();
         let mut pending_reruns = HashMap::new();
+        let mut deferred_dispatch_start_retries = HashSet::new();
 
         'scheduler: loop {
             if let Some((session, priority)) = take_admissible_hint(
@@ -1011,6 +1012,11 @@ where
                                 if completed_priority == EligibilityHintPriority::Ordinary {
                                     ordinary_in_flight = ordinary_in_flight.saturating_sub(1);
                                 }
+                                if completed_priority == EligibilityHintPriority::DispatchStart
+                                    && !succeeded
+                                {
+                                    deferred_dispatch_start_retries.insert(session);
+                                }
                                 if let Some(continuation_priority) =
                                     pass_continuation_priority(completed_priority, succeeded)
                                 {
@@ -1024,7 +1030,10 @@ where
                                         &mut pending_ordinary,
                                     );
                                 }
-                                if let Some(priority) = pending_reruns.remove(&session) {
+                                if let Some(mut priority) = pending_reruns.remove(&session) {
+                                    if deferred_dispatch_start_retries.remove(&session) {
+                                        priority = priority.max(EligibilityHintPriority::DispatchStart);
+                                    }
                                     enqueue_pending_hint(
                                         session,
                                         priority,
@@ -1052,6 +1061,7 @@ where
                 }
             } else {
                 if let Some(session) = self.work_source.take_pending_dispatch_start() {
+                    deferred_dispatch_start_retries.remove(&session);
                     enqueue_pending_hint(
                         session,
                         EligibilityHintPriority::DispatchStart,
@@ -1071,6 +1081,7 @@ where
 
                         () = &mut shutdown => break 'scheduler,
                         session = &mut pending_dispatch_start => {
+                            deferred_dispatch_start_retries.remove(&session);
                             enqueue_pending_hint(
                                 session,
                                 EligibilityHintPriority::DispatchStart,
@@ -1096,6 +1107,11 @@ where
                                 if completed_priority == EligibilityHintPriority::Ordinary {
                                     ordinary_in_flight = ordinary_in_flight.saturating_sub(1);
                                 }
+                                if completed_priority == EligibilityHintPriority::DispatchStart
+                                    && !succeeded
+                                {
+                                    deferred_dispatch_start_retries.insert(session);
+                                }
                                 if let Some(continuation_priority) =
                                     pass_continuation_priority(completed_priority, succeeded)
                                 {
@@ -1109,7 +1125,10 @@ where
                                         &mut pending_ordinary,
                                     );
                                 }
-                                if let Some(priority) = pending_reruns.remove(&session) {
+                                if let Some(mut priority) = pending_reruns.remove(&session) {
+                                    if deferred_dispatch_start_retries.remove(&session) {
+                                        priority = priority.max(EligibilityHintPriority::DispatchStart);
+                                    }
                                     enqueue_pending_hint(
                                         session,
                                         priority,
@@ -1132,7 +1151,9 @@ where
 
             match hint {
                 Ok(session) => {
-                    let priority = if self.work_source.take_returned_dispatch_start(session) {
+                    let priority = if self.work_source.take_returned_dispatch_start(session)
+                        || deferred_dispatch_start_retries.remove(&session)
+                    {
                         EligibilityHintPriority::DispatchStart
                     } else {
                         EligibilityHintPriority::Ordinary
@@ -1175,9 +1196,7 @@ fn pass_continuation_priority(
 ) -> Option<EligibilityHintPriority> {
     match (completed_priority, succeeded) {
         (EligibilityHintPriority::DispatchStart, true) => Some(EligibilityHintPriority::Ordinary),
-        (EligibilityHintPriority::DispatchStart, false) => {
-            Some(EligibilityHintPriority::DispatchStart)
-        }
+        (EligibilityHintPriority::DispatchStart, false) => None,
         (EligibilityHintPriority::Ordinary, _) => None,
     }
 }
@@ -1876,10 +1895,10 @@ mod tests {
     }
 
     #[test]
-    fn inv069_failed_dispatch_start_pass_retains_reserved_priority() {
+    fn inv069_failed_dispatch_start_pass_waits_for_a_later_hint() {
         assert_eq!(
             pass_continuation_priority(EligibilityHintPriority::DispatchStart, false),
-            Some(EligibilityHintPriority::DispatchStart)
+            None
         );
         assert_eq!(
             pass_continuation_priority(EligibilityHintPriority::DispatchStart, true),

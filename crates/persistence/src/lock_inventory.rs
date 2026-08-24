@@ -101,16 +101,34 @@ pub(crate) const EXPIRED_DISPATCH_START_LEASE: &str = "SELECT EXISTS (
                   FROM model_call AS call
                  WHERE call.session_id = lease.session_id
            )
-           AND NOT EXISTS (
-                SELECT 1
-                  FROM repo_watch_dispatch_start_lease_expiration AS expired
-                 WHERE expired.dispatch_id = lease.dispatch_id
-                   AND expired.action_ordinal = lease.action_ordinal
-           )
-           AND NOT EXISTS (
-                SELECT 1
-                  FROM repo_watch_dispatch_release AS released
-                 WHERE released.dispatch_id = lease.dispatch_id
+           AND (
+                (
+                    NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_dispatch_start_lease_expiration AS expired
+                         WHERE expired.dispatch_id = lease.dispatch_id
+                           AND expired.action_ordinal = lease.action_ordinal
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_dispatch_release AS released
+                         WHERE released.dispatch_id = lease.dispatch_id
+                    )
+                )
+                OR EXISTS (
+                    SELECT 1
+                      FROM turn_lifecycle AS lifecycle
+                      JOIN goal_turn AS goal
+                        ON goal.session_id = lifecycle.session_id
+                       AND goal.turn_id = lifecycle.turn_id
+                      JOIN repo_watch_dispatch_start_lease_expiration AS expired
+                        ON expired.dispatch_id = lease.dispatch_id
+                       AND expired.action_ordinal = lease.action_ordinal
+                       AND expired.goal_command_id IS NOT NULL
+                     WHERE lifecycle.session_id = lease.session_id
+                       AND lifecycle.state_kind = 'active'
+                       AND goal.goal_generation = 1
+                )
            )
     )";
 

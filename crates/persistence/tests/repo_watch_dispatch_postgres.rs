@@ -4747,8 +4747,11 @@ async fn terminal_cutoff_preserves_an_obligation_for_its_own_event() -> Result<(
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv069_dispatch_admission_records_bounded_durable_start_leases()
 -> Result<(), Box<dyn Error>> {
-    let fixture =
-        dispatch_fixture_for_with_lease(rule()?, Some(Duration::from_secs(10 * 60))).await?;
+    let fixture = dispatch_fixture_for_with_lease(
+        rule_with_dispatch_action_count(32)?,
+        Some(Duration::from_secs(10 * 60)),
+    )
+    .await?;
     let loaded = fixture
         .store
         .load_unstarted_dispatch_sessions(&fixture.repository)
@@ -4770,6 +4773,61 @@ async fn inv069_dispatch_admission_records_bounded_durable_start_leases()
     assert_eq!(lease_count, i64::try_from(fixture.sessions.len())?);
     assert!(longest_lease_seconds > Decimal::ZERO);
     assert!(longest_lease_seconds <= Decimal::from(5 * 60));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv069_retired_generation_one_turn_cannot_prepare_after_expiry()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for_with_lease(
+        one_action_rule(Duration::ZERO)?,
+        Some(Duration::from_secs(1)),
+    )
+    .await?;
+    let session = fixture.session(0);
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(fixture.pool.clone()),
+    );
+    assert!(matches!(
+        activation.execute(session).await?,
+        StartEligibleTurnOutcome::Activated(_)
+    ));
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert!(
+        fixture
+            .store
+            .process_next_expired_start_lease(&fixture.repository, || {
+                DurableCommandId::from_uuid(Uuid::from_u128(0x5d_d00))
+            })
+            .await?
+    );
+
+    let repository = PostgresModelCallRepository::new(
+        fixture.pool.clone(),
+        model_targets(),
+        model_credential_reference(),
+    );
+    let outcome = repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(0x5d_d01)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x5d_d02)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x5d_d03)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x5d_d04)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x5d_d05)),
+                    TurnId::from_uuid(Uuid::from_u128(0x5d_d06)),
+                )
+            },
+        )
+        .await?;
+
+    assert!(matches!(outcome, PrepareInitialModelCallOutcome::NoWork));
     Ok(())
 }
 
