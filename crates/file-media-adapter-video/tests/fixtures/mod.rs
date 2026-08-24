@@ -307,8 +307,7 @@ impl VideoFixture {
     }
 
     pub fn hevc_mp4() -> Self {
-        let mut configuration = vec![0_u8; 23];
-        configuration[0] = 1;
+        let configuration = hevc_configuration();
         Self::new(
             FixtureKind::Mp4,
             mp4_bytes_with_sample_entry(
@@ -317,6 +316,26 @@ impl VideoFixture {
                 visual_sample_entry(*b"hvc1", *b"hvcC", &configuration),
             ),
         )
+    }
+
+    pub fn hevc_mp4_with_invalid_reserved_fields() -> Self {
+        let mut configuration = hevc_configuration();
+        configuration[13] = 0;
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(
+                MP4_TIMESCALE,
+                MP4_DURATION_UNITS,
+                visual_sample_entry(*b"hvc1", *b"hvcC", &configuration),
+            ),
+        )
+    }
+
+    pub fn mp4_with_metadata_after_probe_prefix() -> Self {
+        let ordinary = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
+        let movie = ordinary[ftyp().len()..].to_vec();
+        let padding = mp4_box(*b"free", &vec![0_u8; 8 * 1024]);
+        Self::new(FixtureKind::Mp4, [ftyp(), padding, movie].concat())
     }
 
     pub fn mp4_visual_sample_entry() -> Self {
@@ -446,9 +465,13 @@ impl VideoFixture {
         let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
         let video_track = webm_track_entry(ContentProtection::Clear);
         let track_number = ebml_element(&[0xd7], &[2]);
+        let track_uid = ebml_element(&[0x73, 0xc5], &[2]);
         let track_type = ebml_element(&[0x83], &[0x11]);
         let codec_id = ebml_element(&[0x86], b"D_WEBVTT/SUBTITLES");
-        let subtitle_track = ebml_element(&[0xae], &[track_number, track_type, codec_id].concat());
+        let subtitle_track = ebml_element(
+            &[0xae],
+            &[track_number, track_uid, track_type, codec_id].concat(),
+        );
         let tracks = ebml_element(
             &[0x16, 0x54, 0xae, 0x6b],
             &[video_track, subtitle_track].concat(),
@@ -652,9 +675,13 @@ impl VideoFixture {
     pub fn audio_only_webm() -> Self {
         let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
         let track_number = ebml_element(&[0xd7], &[1]);
+        let track_uid = ebml_element(&[0x73, 0xc5], &[1]);
         let track_type = ebml_element(&[0x83], &[2]);
         let codec_id = ebml_element(&[0x86], b"A_OPUS");
-        let track_entry = ebml_element(&[0xae], &[track_number, track_type, codec_id].concat());
+        let track_entry = ebml_element(
+            &[0xae],
+            &[track_number, track_uid, track_type, codec_id].concat(),
+        );
         let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
         let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
         Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
@@ -663,12 +690,74 @@ impl VideoFixture {
     pub fn large_audio_only_webm() -> Self {
         let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
         let track_number = ebml_element(&[0xd7], &[1]);
+        let track_uid = ebml_element(&[0x73, 0xc5], &[1]);
         let track_type = ebml_element(&[0x83], &[2]);
         let codec_id = ebml_element(&[0x86], b"A_OPUS");
-        let track_entry = ebml_element(&[0xae], &[track_number, track_type, codec_id].concat());
+        let track_entry = ebml_element(
+            &[0xae],
+            &[track_number, track_uid, track_type, codec_id].concat(),
+        );
         let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
         let padding = ebml_element(&[0xec], &vec![0_u8; 1024]);
         let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[padding, info, tracks].concat());
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn webm_with_metadata_after_probe_prefix() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let tracks = ebml_element(
+            &[0x16, 0x54, 0xae, 0x6b],
+            &webm_track_entry(ContentProtection::Clear),
+        );
+        let padding = ebml_element(&[0xec], &vec![0_u8; 8 * 1024]);
+        let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[padding, info, tracks].concat());
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn webm_with_missing_track_uid() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let track_number = ebml_element(&[0xd7], &[1]);
+        let track_type = ebml_element(&[0x83], &[1]);
+        let codec_id = ebml_element(&[0x86], b"V_VP9");
+        let pixel_width = ebml_element(&[0xb0], &1920_u16.to_be_bytes());
+        let pixel_height = ebml_element(&[0xba], &1080_u16.to_be_bytes());
+        let video = ebml_element(&[0xe0], &[pixel_width, pixel_height].concat());
+        let track_entry = ebml_element(
+            &[0xae],
+            &[track_number, track_type, codec_id, video].concat(),
+        );
+        let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
+        let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn webm_with_duplicate_track_uids() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let first = webm_track_entry_with_number(1, ContentProtection::Clear);
+        let second_number = ebml_element(&[0xd7], &[2]);
+        let duplicate_uid = ebml_element(&[0x73, 0xc5], &[1]);
+        let track_type = ebml_element(&[0x83], &[1]);
+        let codec_id = ebml_element(&[0x86], b"V_VP9");
+        let pixel_width = ebml_element(&[0xb0], &1920_u16.to_be_bytes());
+        let pixel_height = ebml_element(&[0xba], &1080_u16.to_be_bytes());
+        let video = ebml_element(&[0xe0], &[pixel_width, pixel_height].concat());
+        let second = ebml_element(
+            &[0xae],
+            &[second_number, duplicate_uid, track_type, codec_id, video].concat(),
+        );
+        let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &[first, second].concat());
+        let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn webm_with_misplaced_track_entry() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let track_entry = webm_track_entry(ContentProtection::Clear);
+        let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
+        let segment = ebml_element(
+            &[0x18, 0x53, 0x80, 0x67],
+            &[info, tracks, track_entry].concat(),
+        );
         Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
     }
 
@@ -897,6 +986,26 @@ impl VideoFixture {
         bytes.push(0x1f);
         Self::new(FixtureKind::Webm, bytes)
             .with_reported_byte_length(u64::try_from(METADATA_BYTES + 64).unwrap_or(u64::MAX))
+    }
+
+    pub fn partially_buffered_webm_with_nested_segment_tail() -> Self {
+        let header = ebml_header();
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let tracks = ebml_element(
+            &[0x16, 0x54, 0xae, 0x6b],
+            &webm_track_entry(ContentProtection::Clear),
+        );
+        let recursive_header = [vec![0x18, 0x53, 0x80, 0x67], ebml_size(1024)].concat();
+        let fixed = header.len() + 5 + info.len() + tracks.len() + recursive_header.len();
+        let filler = ebml_element(&[0xec], &vec![0_u8; METADATA_BYTES - fixed - 4]);
+        let mut bytes = header;
+        bytes.extend_from_slice(&[0x18, 0x53, 0x80, 0x67, 0xff]);
+        bytes.extend_from_slice(&info);
+        bytes.extend_from_slice(&tracks);
+        bytes.extend_from_slice(&filler);
+        bytes.extend_from_slice(&recursive_header);
+        Self::new(FixtureKind::Webm, bytes)
+            .with_reported_byte_length(u64::try_from(METADATA_BYTES + 1024).unwrap_or(u64::MAX))
     }
 
     pub fn webm_child_extending_past_known_segment() -> Self {
@@ -1146,6 +1255,7 @@ fn webm_track_entry(protection: ContentProtection) -> Vec<u8> {
 
 fn webm_track_entry_with_number(number: u8, protection: ContentProtection) -> Vec<u8> {
     let track_number = ebml_element(&[0xd7], &[number]);
+    let track_uid = ebml_element(&[0x73, 0xc5], &[number]);
     let track_type = ebml_element(&[0x83], &[1]);
     let codec_id = ebml_element(&[0x86], b"V_VP9");
     let pixel_width = ebml_element(&[0xb0], &1920_u16.to_be_bytes());
@@ -1161,8 +1271,27 @@ fn webm_track_entry_with_number(number: u8, protection: ContentProtection) -> Ve
     };
     ebml_element(
         &[0xae],
-        &[track_number, track_type, codec_id, video, encryption].concat(),
+        &[
+            track_number,
+            track_uid,
+            track_type,
+            codec_id,
+            video,
+            encryption,
+        ]
+        .concat(),
     )
+}
+
+fn hevc_configuration() -> Vec<u8> {
+    let mut configuration = vec![0_u8; 23];
+    configuration[0] = 1;
+    configuration[13] = 0xf0;
+    configuration[15] = 0xfc;
+    configuration[16] = 0xfc;
+    configuration[17] = 0xf8;
+    configuration[18] = 0xf8;
+    configuration
 }
 
 fn ebml_header() -> Vec<u8> {

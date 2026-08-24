@@ -126,13 +126,15 @@ fn declaration_registers_mp4_and_webm_under_available_isolation() -> Result<(), 
 
     assert_eq!(registry.providers(), &[declaration()?]);
     let mp4_probe = registry.providers()[0].readers()[0].probe();
+    assert_eq!(mp4_probe.prefix_bytes(), 4 * 1024);
     assert_eq!(mp4_probe.suffix_bytes(), 0);
-    assert_eq!(mp4_probe.range_count(), 1);
-    assert_eq!(mp4_probe.cumulative_bytes(), mp4_probe.prefix_bytes());
+    assert_eq!(mp4_probe.range_count(), 4);
+    assert_eq!(mp4_probe.cumulative_bytes(), 256 * 1024);
     let webm_probe = registry.providers()[0].readers()[1].probe();
+    assert_eq!(webm_probe.prefix_bytes(), 4 * 1024);
     assert_eq!(webm_probe.suffix_bytes(), 0);
-    assert_eq!(webm_probe.range_count(), 1);
-    assert_eq!(webm_probe.cumulative_bytes(), webm_probe.prefix_bytes());
+    assert_eq!(webm_probe.range_count(), 4);
+    assert_eq!(webm_probe.cumulative_bytes(), 256 * 1024);
     Ok(())
 }
 
@@ -198,6 +200,15 @@ async fn nested_mp4_movie_is_rejected_as_a_recursive_container() -> Result<(), B
 #[tokio::test]
 async fn nested_webm_segment_is_rejected_as_a_recursive_container() -> Result<(), Box<dyn Error>> {
     assert_malformed(VideoFixture::recursive_webm(), "recursive_container").await
+}
+
+#[tokio::test]
+async fn truncated_nested_webm_segment_tail_is_recursive() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::partially_buffered_webm_with_nested_segment_tail(),
+        "recursive_container",
+    )
+    .await
 }
 
 #[tokio::test]
@@ -389,6 +400,60 @@ async fn hevc_mp4_video_sample_entry_validates() -> Result<(), Box<dyn Error>> {
 
     assert_eq!(inspection.status(), FileInspectionStatus::Validated);
     Ok(())
+}
+
+#[tokio::test]
+async fn hevc_reserved_configuration_fields_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::hevc_mp4_with_invalid_reserved_fields(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn mp4_metadata_after_the_former_probe_prefix_is_nominated() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_metadata_after_probe_prefix().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn webm_metadata_after_the_former_probe_prefix_is_nominated() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::webm_with_metadata_after_probe_prefix().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_webm_track_uid_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_missing_track_uid(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn duplicate_webm_track_uids_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_duplicate_track_uids(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn recognized_webm_element_in_invalid_scope_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_misplaced_track_entry(),
+        "malformed_video",
+    )
+    .await
 }
 
 #[tokio::test]

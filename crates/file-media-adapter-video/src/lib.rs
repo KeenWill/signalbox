@@ -18,10 +18,14 @@ const METADATA_VIEW: &str = "metadata";
 const MALFORMED_REASON: &str = "malformed_video";
 const RECURSIVE_REASON: &str = "recursive_container";
 const STRUCTURE_REASON: &str = "structure_limit";
-// Bounded prefix used to establish video structure before validation.
-const PROBE_BYTES: u64 = 4 * 1024;
-// Effective metadata-work bound shared by validation and reads.
+// Effective metadata-work bound shared by probing, validation, and reads.
 const METADATA_BYTES: u64 = 256 * 1024;
+// The initial prefix handles ordinary metadata without extra probe I/O.
+const PROBE_PREFIX_BYTES: u64 = 4 * 1024;
+// Four bounded follow-up ranges cover the remainder of the metadata window.
+const PROBE_RANGE_BYTES: u64 = 64 * 1024;
+const PROBE_RANGE_COUNT: u32 = 4;
+const PROBE_BYTES: u64 = METADATA_BYTES;
 const OUTPUT_BYTES: usize = 16 * 1024;
 // Hard safety ceiling: bounds adversarial recursive container descent.
 const MAX_DEPTH: usize = 32;
@@ -56,6 +60,7 @@ const EBML_DURATION: u64 = 0x4489;
 const EBML_TRACKS: u64 = 0x1654ae6b;
 const EBML_TRACK_ENTRY: u64 = 0xae;
 const EBML_TRACK_NUMBER: u64 = 0xd7;
+const EBML_TRACK_UID: u64 = 0x73c5;
 const EBML_TRACK_TYPE: u64 = 0x83;
 const EBML_CODEC_ID: u64 = 0x86;
 const EBML_VIDEO: u64 = 0xe0;
@@ -95,11 +100,20 @@ impl FileMediaProvider for VideoProvider {
             let kind = require_reader(reader)?;
             require_active(cancellation)?;
             let source_bytes = source.byte_length().get();
-            let length = source_bytes.min(PROBE_BYTES);
-            let bytes = read_range(source, 0, length).await?;
+            let initial_length = source_bytes.min(PROBE_PREFIX_BYTES);
+            let mut bytes = read_range(source, 0, initial_length).await?;
             require_active(cancellation)?;
             if !kind.matches_probe(&bytes) {
                 return Ok(ProcessorProbeOutput::NoMatch);
+            }
+            if !matches!(
+                parse(kind, &bytes, source_bytes),
+                Ok(_) | Err(VideoIssue::Encrypted)
+            ) && u64::try_from(bytes.len()).map_err(|_| FileMediaProviderFailure::Failed)?
+                < source_bytes.min(PROBE_BYTES)
+            {
+                extend_probe_prefix(source, source_bytes, &mut bytes).await?;
+                require_active(cancellation)?;
             }
             match parse(kind, &bytes, source_bytes) {
                 Ok(_) | Err(VideoIssue::Encrypted) => Ok(ProcessorProbeOutput::Candidate {
@@ -213,7 +227,7 @@ fn reader_declaration(
         reader: FileReaderName::try_new(kind.reader())?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(kind.media_type())?],
-        probe: ProbeDeclaration::new(PROBE_BYTES, 0, 1, PROBE_BYTES),
+        probe: ProbeDeclaration::new(PROBE_PREFIX_BYTES, 0, PROBE_RANGE_COUNT, PROBE_BYTES),
         views: vec![metadata_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,
@@ -1214,7 +1228,14 @@ fn consume_avc_parameter_set(configuration: &[u8], cursor: usize) -> Result<usiz
 }
 
 fn validate_hevc_configuration(configuration: &[u8]) -> Result<(), VideoIssue> {
-    if configuration.len() < 23 || configuration[0] != 1 {
+    if configuration.len() < 23
+        || configuration[0] != 1
+        || configuration[13] & 0xf0 != 0xf0
+        || configuration[15] & 0xfc != 0xfc
+        || configuration[16] & 0xfc != 0xfc
+        || configuration[17] & 0xf8 != 0xf8
+        || configuration[18] & 0xf8 != 0xf8
+    {
         return Err(VideoIssue::Malformed);
     }
     let array_count = usize::from(configuration[22]);
@@ -1342,6 +1363,7 @@ struct EbmlState {
     duration: Option<f64>,
     video_tracks: u64,
     track_numbers: Vec<u64>,
+    track_uids: Vec<u64>,
 }
 
 impl Default for EbmlState {
@@ -1364,6 +1386,7 @@ impl Default for EbmlState {
             duration: None,
             video_tracks: 0,
             track_numbers: Vec::new(),
+            track_uids: Vec::new(),
         }
     }
 }
@@ -1423,6 +1446,7 @@ fn parse_ebml_scope(
     }
     let mut cursor = 0_usize;
     let mut track_number_seen = false;
+    let mut track_uid_seen = false;
     let mut track_type = None;
     let mut codec_kind = None;
     let mut video_settings_seen = false;
@@ -1490,6 +1514,9 @@ fn parse_ebml_scope(
                 return Err(VideoIssue::Malformed);
             }
             if allow_truncated_tail && scope == EbmlScope::Segment {
+                if id == EBML_HEADER || id == EBML_SEGMENT {
+                    return Err(VideoIssue::Recursive);
+                }
                 break;
             }
             if !(allow_truncated_tail && scope == EbmlScope::Root && id == EBML_SEGMENT) {
@@ -1674,6 +1701,14 @@ fn parse_ebml_scope(
                 track_number_seen = true;
                 state.track_numbers.push(track_number);
             }
+            (EBML_TRACK_UID, EbmlScope::TrackEntry) => {
+                let track_uid = parse_ebml_uint(payload)?;
+                if track_uid_seen || track_uid == 0 || state.track_uids.contains(&track_uid) {
+                    return Err(VideoIssue::Malformed);
+                }
+                track_uid_seen = true;
+                state.track_uids.push(track_uid);
+            }
             (EBML_CODEC_ID, EbmlScope::TrackEntry) => {
                 if codec_kind.is_some() {
                     return Err(VideoIssue::Malformed);
@@ -1708,6 +1743,8 @@ fn parse_ebml_scope(
                 }
                 pixel_height_seen = true;
             }
+            (EBML_CLUSTER, EbmlScope::Segment) => {}
+            _ if recognized_ebml_id(id) => return Err(VideoIssue::Malformed),
             _ => {}
         }
         cursor = payload_end;
@@ -1719,6 +1756,7 @@ fn parse_ebml_scope(
         let track_type = track_type.ok_or(VideoIssue::Malformed)?;
         let codec_kind = codec_kind.ok_or(VideoIssue::Malformed)?;
         if !track_number_seen
+            || !track_uid_seen
             || codec_kind != track_type
             || (track_type == EbmlTrackKind::Video && !video_settings_seen)
         {
@@ -1737,6 +1775,35 @@ fn parse_ebml_scope(
         return Ok(VideoTrackPresence::Present);
     }
     Ok(VideoTrackPresence::Absent)
+}
+
+fn recognized_ebml_id(id: u64) -> bool {
+    matches!(
+        id,
+        EBML_HEADER
+            | EBML_MAX_ID_LENGTH
+            | EBML_MAX_SIZE_LENGTH
+            | EBML_READ_VERSION
+            | EBML_DOCTYPE
+            | EBML_DOCTYPE_READ_VERSION
+            | EBML_SEGMENT
+            | EBML_INFO
+            | EBML_TIMECODE_SCALE
+            | EBML_DURATION
+            | EBML_TRACKS
+            | EBML_TRACK_ENTRY
+            | EBML_TRACK_NUMBER
+            | EBML_TRACK_UID
+            | EBML_TRACK_TYPE
+            | EBML_CODEC_ID
+            | EBML_VIDEO
+            | EBML_PIXEL_WIDTH
+            | EBML_PIXEL_HEIGHT
+            | EBML_CLUSTER
+            | EBML_CONTENT_ENCODINGS
+            | EBML_CONTENT_ENCODING
+            | EBML_CONTENT_ENCRYPTION
+    )
 }
 
 fn ebml_vint_is_complete_in_source(
@@ -1885,6 +1952,23 @@ fn metadata_json(
         "video_tracks": metadata.video_tracks,
     }))
     .map_err(|_| FileMediaProviderFailure::Failed)
+}
+
+async fn extend_probe_prefix(
+    source: &dyn VerifiedBlobSource,
+    source_bytes: u64,
+    bytes: &mut Vec<u8>,
+) -> Result<(), FileMediaProviderFailure> {
+    let total = source_bytes.min(PROBE_BYTES);
+    let mut offset = u64::try_from(bytes.len()).map_err(|_| FileMediaProviderFailure::Failed)?;
+    while offset < total {
+        let length = (total - offset).min(PROBE_RANGE_BYTES);
+        bytes.extend_from_slice(&read_range(source, offset, length).await?);
+        offset = offset
+            .checked_add(length)
+            .ok_or(FileMediaProviderFailure::Failed)?;
+    }
+    Ok(())
 }
 
 async fn read_metadata_prefix(
