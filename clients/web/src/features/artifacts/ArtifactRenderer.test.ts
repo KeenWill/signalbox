@@ -4,12 +4,15 @@ import { imageViewLabel, registeredArtifactKinds, selectImageView } from './Arti
 import {
   artifactOriginalIds,
   artifactPreviewIds,
+  fetchVerifiedSingleFrameJpeg,
   INLINE_ORIGINAL_MAX_BYTES,
   imageArtifact,
   imageDownloadView,
   imageOriginalView,
   imagePreviewView,
+  isSingleFrameJpegBytes,
   jpegDescriptor,
+  jpegOriginalView,
   selectBoundedOriginalView,
 } from './artifactScenario'
 import {
@@ -226,6 +229,56 @@ describe('artifact renderer compatibility', () => {
 
   it('labels thumbnail capabilities as thumbnails', () => {
     expect(imageViewLabel('thumbnail')).toBe('Thumbnail')
+  })
+
+  it('recognizes only the JPEG start-of-image signature as single-frame evidence', () => {
+    expect(isSingleFrameJpegBytes(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]))).toBe(true)
+    // GIF89a — animation-capable even when declared image/jpeg.
+    expect(isSingleFrameJpegBytes(new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]))).toBe(false)
+    // PNG signature — APNG shares it, so it proves nothing about frame count.
+    expect(isSingleFrameJpegBytes(new Uint8Array([0x89, 0x50, 0x4e, 0x47]))).toBe(false)
+    // RIFF....WEBP — animation-capable container.
+    expect(isSingleFrameJpegBytes(new Uint8Array([0x52, 0x49, 0x46, 0x46]))).toBe(false)
+    expect(isSingleFrameJpegBytes(new Uint8Array([0xff, 0xd8]))).toBe(false)
+    expect(isSingleFrameJpegBytes(new Uint8Array([]))).toBe(false)
+  })
+
+  it('admits fetched original bytes with the JPEG signature and advertised length', async () => {
+    const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10])
+    const view = { ...jpegOriginalView, byte_length: String(jpegBytes.byteLength) }
+    const fetchStub = (async () => new Response(jpegBytes, { status: 200 })) as typeof fetch
+
+    const blob = await fetchVerifiedSingleFrameJpeg(view, fetchStub)
+
+    expect(blob.size).toBe(jpegBytes.byteLength)
+  })
+
+  it('rejects fetched original bytes whose actual format is animation-capable', async () => {
+    const gifBytes = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])
+    const view = { ...jpegOriginalView, byte_length: String(gifBytes.byteLength) }
+    const fetchStub = (async () => new Response(gifBytes, { status: 200 })) as typeof fetch
+
+    await expect(fetchVerifiedSingleFrameJpeg(view, fetchStub)).rejects.toThrow(
+      'original bytes are not a single-frame JPEG stream',
+    )
+  })
+
+  it('rejects fetched original bytes that diverge from the advertised length', async () => {
+    const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0])
+    const view = { ...jpegOriginalView, byte_length: String(jpegBytes.byteLength + 1) }
+    const fetchStub = (async () => new Response(jpegBytes, { status: 200 })) as typeof fetch
+
+    await expect(fetchVerifiedSingleFrameJpeg(view, fetchStub)).rejects.toThrow(
+      'original bytes do not match the advertised byte length',
+    )
+  })
+
+  it('rejects failed original responses before reading any bytes', async () => {
+    const fetchStub = (async () => new Response('unavailable', { status: 500 })) as typeof fetch
+
+    await expect(fetchVerifiedSingleFrameJpeg(jpegOriginalView, fetchStub)).rejects.toThrow(
+      'original request failed with status 500',
+    )
   })
 
   it('admits only credential-free HTTPS remote media', () => {

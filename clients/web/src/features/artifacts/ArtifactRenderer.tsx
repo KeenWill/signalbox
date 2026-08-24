@@ -10,11 +10,15 @@ import {
   Minimize2,
   ShieldAlert,
 } from 'lucide-react'
-import { type ComponentType, type ReactNode, useState } from 'react'
+import { type ComponentType, type ReactNode, useEffect, useState } from 'react'
 import { type CommandContext, invokeCommand } from '../../commands'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import { actions, useAppDispatch, useAppSelector } from '../../state'
-import { artifactScenario, selectBoundedOriginalView } from './artifactScenario'
+import {
+  artifactScenario,
+  fetchVerifiedSingleFrameJpeg,
+  selectBoundedOriginalView,
+} from './artifactScenario'
 import {
   ARTIFACT_PREVIEW_CHARACTERS,
   type ArtifactItem,
@@ -188,21 +192,48 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
     () => new Set(),
   )
   const originalState = useAppSelector((state) => state.app.originalArtifacts[artifact.id])
+  const [verifiedOriginalUrl, setVerifiedOriginalUrl] = useState<string | null>(null)
   const { descriptor } = artifact.source
   const automatic = selectImageView(descriptor, failedAutomaticUrls)
   const advertisedOriginal = viewByKind(descriptor, 'browser_native')
   const original = selectBoundedOriginalView(descriptor)
   const download = viewByKind(descriptor, 'download')
   const originalRequested = originalState === 'loading' || originalState === 'loaded'
-  const rendered = originalRequested && original ? original : automatic
+  const rendered =
+    originalRequested && original && verifiedOriginalUrl !== null ? original : automatic
   const derivation = rendered?.derivations[0]
+
+  useEffect(() => {
+    if (originalState !== 'loading' || original === undefined || verifiedOriginalUrl !== null) {
+      return
+    }
+    const controller = new AbortController()
+    fetchVerifiedSingleFrameJpeg(original, (input, init) => fetch(input, init), controller.signal)
+      .then((blob) => setVerifiedOriginalUrl(URL.createObjectURL(blob)))
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          dispatch(actions.artifactOriginalSettled({ id: artifact.id, result: 'failed' }))
+        }
+      })
+    return () => controller.abort()
+  }, [artifact.id, dispatch, original, originalState, verifiedOriginalUrl])
+
+  useEffect(() => {
+    return () => {
+      if (verifiedOriginalUrl !== null) URL.revokeObjectURL(verifiedOriginalUrl)
+    }
+  }, [verifiedOriginalUrl])
 
   return (
     <div className="artifact-image-layout">
       <div className="artifact-visual">
         {rendered ? (
           <img
-            src={rendered.content_url}
+            src={
+              rendered.kind === 'browser_native' && verifiedOriginalUrl !== null
+                ? verifiedOriginalUrl
+                : rendered.content_url
+            }
             alt={`${imageViewLabel(rendered.kind)} of ${artifact.displayName}`}
             loading="lazy"
             onLoad={() => {
