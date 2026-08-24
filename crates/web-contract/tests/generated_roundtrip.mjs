@@ -527,6 +527,17 @@ test("generated detail decoder rejects a response on a non-completed disposition
   );
 });
 
+test("generated detail decoder rejects usage on a cancelled disposition", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.state = { type: "terminal", disposition: "cancelled" };
+  page.items[0].body.usage.input_tokens = "1";
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /unreported for a cancelled terminal model call/,
+  );
+});
+
 test("generated detail decoder requires more-at to advance", () => {
   const page = userInputDetailPage();
   page.continuation = {

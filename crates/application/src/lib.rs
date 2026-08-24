@@ -169,7 +169,7 @@ pub use session_timeline::{
     TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimitError,
     TimelineWindowLimits, max_timeline_detail_bytes, max_timeline_detail_items,
     max_timeline_window_bytes, max_timeline_window_items, min_timeline_detail_bytes,
-    min_timeline_window_bytes,
+    min_timeline_window_bytes, timeline_detail_envelope_bytes,
 };
 pub use start_eligible_turn::{
     StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,

@@ -11,7 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Value, json};
 use signalbox_application::{
     max_timeline_detail_bytes, max_timeline_detail_items, max_timeline_window_bytes,
-    max_timeline_window_items,
+    max_timeline_window_items, timeline_detail_envelope_bytes,
 };
 
 /// Exact browser HTTP contract version served by this daemon build.
@@ -370,9 +370,9 @@ pub struct WebTimelineBodyContinuation {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineTextExcerpt {
-    /// UTF-16 length never exceeds UTF-8 length, so every valid excerpt within
-    /// the 65,536-byte detail budget passes this pre-encoding string bound.
-    #[schemars(length(max = 65_536))]
+    /// The generator stamps `max_timeline_detail_bytes()` onto this field as
+    /// `maxLength`: UTF-16 length never exceeds UTF-8 length, so every valid
+    /// excerpt within the detail byte budget passes that pre-encoding bound.
     pub text: String,
     pub offset_bytes: WebU64,
     pub total_bytes: WebU64,
@@ -627,8 +627,13 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
         canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
     make_property_nullable(&mut window_schema, "continuation_before")?;
     make_property_nullable(&mut window_schema, "continuation_after")?;
-    let detail_schema =
+    let mut detail_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineDetailPage).to_value());
+    set_string_max_length(
+        &mut detail_schema,
+        "/$defs/WebTimelineTextExcerpt/properties/text",
+        max_timeline_detail_bytes(),
+    )?;
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -687,6 +692,20 @@ fn make_property_nullable(
     Ok(())
 }
 
+fn set_string_max_length(
+    schema: &mut Value,
+    property_pointer: &str,
+    max_length: u32,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(property_pointer)
+        .and_then(Value::as_object_mut)
+        .filter(|property| property.get("type").and_then(Value::as_str) == Some("string"))
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    property.insert("maxLength".to_owned(), json!(max_length));
+    Ok(())
+}
+
 fn runtime_module(
     bootstrap_schema: &Value,
     example_schema: &Value,
@@ -704,6 +723,8 @@ fn runtime_module(
         "WebSessionTimelineDetailPage": detail_schema,
     });
     schemas.sort_all_objects();
+    let max_detail_bytes = max_timeline_detail_bytes();
+    let detail_envelope_bytes = timeline_detail_envelope_bytes();
     let schemas = serde_json::to_string_pretty(&schemas)
         .map_err(|_| GenerateWebContractError::Serialization)?;
     Ok(format!(
@@ -918,8 +939,8 @@ function assertTimelineExcerpt(excerpt, address, field, path) {{
 }}
 
 function assertTimelineDetailPage(value) {{
-  const maxProjectedBodyBytes = 65536;
-  const detailEnvelopeBytes = 128;
+  const maxProjectedBodyBytes = {max_detail_bytes};
+  const detailEnvelopeBytes = {detail_envelope_bytes};
   const terminalKinds = new Set([
     "turn_failed",
     "turn_completed",
@@ -1007,6 +1028,15 @@ function assertTimelineDetailPage(value) {{
             fail(
               `${{path}}.body.response`,
               "present only for a completed terminal model call",
+            );
+          }}
+          const hasUsage = Object.values(item.body.usage).some(
+            (count) => count !== undefined && count !== null,
+          );
+          if (hasUsage && item.body.state.disposition === "cancelled") {{
+            fail(
+              `${{path}}.body.usage`,
+              "unreported for a cancelled terminal model call",
             );
           }}
         }}

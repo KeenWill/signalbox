@@ -6498,6 +6498,7 @@ pub const fn min_timeline_window_bytes() -> u32;
 pub const fn max_timeline_detail_items() -> u16;
 pub const fn max_timeline_detail_bytes() -> u32;
 pub const fn min_timeline_detail_bytes() -> u32;
+pub const fn timeline_detail_envelope_bytes() -> u32;
 
 pub struct TimelineAddress(/* private NonZeroU64 */);
 impl TimelineAddress {
@@ -11663,7 +11664,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)               |
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
-| application: session_timeline                      | 29 (+6 free fn) (incl. 1 trait)  |
+| application: session_timeline                      | 29 (+7 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 36 (incl. 8 traits)              |
 | application: tool_loop                             | 27 (incl. 5 traits)              |
 | application: operator_failure                      | 2 (incl. 1 trait)                |
@@ -11683,4 +11684,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 13                               |
-| **signalbox-application total**                    | **349 (+13 free fn)**            |
+| **signalbox-application total**                    | **349 (+14 free fn)**            |

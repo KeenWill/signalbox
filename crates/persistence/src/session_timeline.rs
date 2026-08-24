@@ -11,6 +11,7 @@ use signalbox_application::{
     TimelineContinuation, TimelineDetailContinuation, TimelineDetailCursor, TimelineDetailLimits,
     TimelineModelCallDisposition, TimelineModelCallState, TimelineModelUsage, TimelineTextExcerpt,
     TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
+    timeline_detail_envelope_bytes,
 };
 use signalbox_domain::{ProviderModelCallFailureCause, ProviderModelIdentity, SessionId, TurnId};
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
@@ -464,7 +465,7 @@ impl SessionTimelineReader for SessionTimelineRepository {
     }
 }
 
-const DETAIL_ENVELOPE_BYTES: u32 = 128;
+const DETAIL_ENVELOPE_BYTES: u32 = timeline_detail_envelope_bytes();
 
 const TURN_DETAIL_ADDRESSES_SQL: &str = r#"
 WITH turn_events AS (

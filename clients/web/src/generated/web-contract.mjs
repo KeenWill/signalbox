@@ -790,7 +790,7 @@ const schemas = {
             "$ref": "#/$defs/WebU64"
           },
           "text": {
-            "description": "UTF-16 length never exceeds UTF-8 length, so every valid excerpt within\nthe 65,536-byte detail budget passes this pre-encoding string bound.",
+            "description": "The generator stamps `max_timeline_detail_bytes()` onto this field as\n`maxLength`: UTF-16 length never exceeds UTF-8 length, so every valid\nexcerpt within the detail byte budget passes that pre-encoding bound.",
             "maxLength": 65536,
             "type": "string"
           },
@@ -1299,6 +1299,15 @@ function assertTimelineDetailPage(value) {
             fail(
               `${path}.body.response`,
               "present only for a completed terminal model call",
+            );
+          }
+          const hasUsage = Object.values(item.body.usage).some(
+            (count) => count !== undefined && count !== null,
+          );
+          if (hasUsage && item.body.state.disposition === "cancelled") {
+            fail(
+              `${path}.body.usage`,
+              "unreported for a cancelled terminal model call",
             );
           }
         }
