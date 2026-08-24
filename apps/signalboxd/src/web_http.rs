@@ -754,6 +754,7 @@ fn parse_usage_call_kind(value: &str) -> Option<UsageCallKind> {
     match value {
         "model_call" => Some(UsageCallKind::ModelCall),
         "approval_judge" => Some(UsageCallKind::ApprovalJudge),
+        "context_compaction" => Some(UsageCallKind::ContextCompaction),
         _ => None,
     }
 }
@@ -944,7 +945,9 @@ fn usage_aggregate_cost_dto(
             ProcessModelCallInputTokenSemantics::CacheInclusive
         }
     };
-    if !group.cache_normalization_safe {
+    if group.key.input_semantics == UsageInputTokenSemantics::CacheInclusive
+        && !group.cache_normalization_safe
+    {
         return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
     }
     let Some(cost) = configuration.derive_usage_aggregate_cost(
@@ -2054,7 +2057,7 @@ mod tests {
     #[tokio::test]
     async fn representable_usage_filters_are_parsed_before_projection_availability_is_reported() {
         let request = Request::get(
-            "/api/usage/calls?from_micros=0&to_micros=1777777777123456&provenance=estimated&call_kind=approval_judge&order=newest&max_items=100",
+            "/api/usage/calls?from_micros=0&to_micros=1777777777123456&provenance=estimated&call_kind=context_compaction&order=newest&max_items=100",
         )
         .header(header::HOST, "localhost")
         .body(Body::empty())

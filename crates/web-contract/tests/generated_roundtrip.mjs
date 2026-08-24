@@ -441,6 +441,7 @@ test("generated usage decoder rejects spurious invalid cache breakdowns", () => 
 
 test("generated usage summary preserves hidden constituent breakdown failures", () => {
   const group = usageGroup();
+  group.call_count = "2";
   group.input_semantics = "cache_inclusive";
   group.coverage.cache_creation_input = true;
   group.coverage.cache_read_input = true;
@@ -452,6 +453,42 @@ test("generated usage summary preserves hidden constituent breakdown failures", 
   assert.equal(
     decodeWebUsageSummary({ groups: [group], truncated: false }).groups[0],
     group,
+  );
+});
+
+test("generated usage summary rejects hidden breakdown failures for singletons", () => {
+  const group = usageGroup();
+  group.input_semantics = "cache_inclusive";
+  group.coverage.cache_creation_input = true;
+  group.coverage.cache_read_input = true;
+  group.tokens.cache_creation_input = "2";
+  group.tokens.cache_read_input = "0";
+  group.cost = { status: "unavailable", reason: "invalid_cache_breakdown" };
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [group], truncated: false }),
+    /consistent with token evidence and input semantics/,
+  );
+});
+
+test("generated usage summary bounds totals by represented calls", () => {
+  const group = usageGroup();
+  group.tokens.input = "18446744073709551616";
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [group], truncated: false }),
+    /bounded by call_count times u64::MAX/,
+  );
+});
+
+test("generated usage summary rejects duplicate compatibility keys", () => {
+  const first = usageGroup();
+  const duplicate = structuredClone(first);
+  duplicate.call_count = "2";
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [first, duplicate], truncated: false }),
+    /unique compatibility key/,
   );
 });
 

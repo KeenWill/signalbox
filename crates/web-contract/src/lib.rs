@@ -1366,14 +1366,31 @@ export function decodeWebSearchPage(value) {{
 export function decodeWebUsageSummary(value) {{
   assertSchema(schemas.WebUsageSummary, schemas.WebUsageSummary, value, "usage_summary");
   const encoder = new TextEncoder();
+  const compatibilityKeys = new Set();
   value.groups.forEach((group, index) => {{
+    const callCount = BigInt(group.call_count);
     assertUsageEvidence(
       group.input_semantics,
       group.tokens,
       group.cost,
       `usage_summary.groups[${{index}}]`,
-      group.input_semantics === "cache_inclusive",
+      group.input_semantics === "cache_inclusive" && callCount > 1n,
     );
+    const compatibilityKey = JSON.stringify([
+      group.call_kind,
+      group.model_id,
+      group.profile_id,
+      group.provenance,
+      group.input_semantics,
+      group.coverage.input,
+      group.coverage.output,
+      group.coverage.cache_creation_input,
+      group.coverage.cache_read_input,
+    ]);
+    if (compatibilityKeys.has(compatibilityKey)) {{
+      fail(`usage_summary.groups[${{index}}]`, "a unique compatibility key");
+    }}
+    compatibilityKeys.add(compatibilityKey);
     const profileBytes = encoder.encode(group.profile_id).length;
     if (profileBytes === 0 || profileBytes > 256) {{
       fail(`usage_summary.groups[${{index}}].profile_id`, "1 through 256 UTF-8 bytes");
@@ -1381,6 +1398,12 @@ export function decodeWebUsageSummary(value) {{
     for (const axis of ["input", "output", "cache_creation_input", "cache_read_input"]) {{
       if (group.coverage[axis] !== (group.tokens[axis] !== null)) {{
         fail(`usage_summary.groups[${{index}}].coverage.${{axis}}`, "consistent with token evidence");
+      }}
+      if (
+        group.tokens[axis] !== null &&
+        BigInt(group.tokens[axis]) > callCount * 18446744073709551615n
+      ) {{
+        fail(`usage_summary.groups[${{index}}].tokens.${{axis}}`, "bounded by call_count times u64::MAX");
       }}
     }}
   }});

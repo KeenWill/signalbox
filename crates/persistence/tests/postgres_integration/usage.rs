@@ -316,7 +316,7 @@ async fn usage_half_open_time_range_excludes_earlier_evidence() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn incomplete_cache_inclusive_aggregates_are_not_normalization_safe()
+async fn incomplete_cache_inclusive_aggregates_preserve_independent_axes()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x95_100;
@@ -362,7 +362,7 @@ async fn incomplete_cache_inclusive_aggregates_are_not_normalization_safe()
         .await?;
 
     assert_eq!(report.groups.len(), 1);
-    assert!(!report.groups[0].cache_normalization_safe);
+    assert!(report.groups[0].cache_normalization_safe);
 
     pool.close().await;
     drop(container);
@@ -647,6 +647,20 @@ async fn usage_projection_retains_only_bounded_credential_identity() -> Result<(
     .fetch_one(&pool)
     .await?;
     assert!(!projection_retains_exact_reference);
+
+    let fixture = terminal_reported_usage_call(
+        &pool,
+        0x95_900,
+        ProviderReportedTokenUsage::unreported().with_input_tokens(Some(FIRST_INPUT_TOKENS)),
+    )
+    .await?;
+    let repository = UsageRepository::new(pool.clone());
+    let page = repository.calls(call_query(1, None)).await?;
+    let report = repository.aggregate(all_usage_query()).await?;
+
+    assert_eq!(page.calls[0].call, fixture.call);
+    assert_eq!(page.calls[0].credential_profile, "anthropic-primary");
+    assert_eq!(report.groups[0].key.credential_profile, "anthropic-primary");
 
     pool.close().await;
     drop(container);
