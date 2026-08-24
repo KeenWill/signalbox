@@ -72,6 +72,7 @@ const WORDPROCESSINGML_NAMESPACE: &[u8] =
 const SPREADSHEETML_NAMESPACE: &[u8] = b"http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const PRESENTATIONML_NAMESPACE: &[u8] =
     b"http://schemas.openxmlformats.org/presentationml/2006/main";
+const DRAWINGML_NAMESPACE: &[u8] = b"http://schemas.openxmlformats.org/drawingml/2006/main";
 const DOCX_MAIN_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
 const XLSX_MAIN_CONTENT_TYPE: &str =
@@ -601,7 +602,9 @@ fn parse_central_directory(
             issue,
             kinds: recognized.clone(),
         })?;
-        if ((parsed.external_attributes >> 16) & 0o170_000) == 0o120_000 {
+        if parsed.creator_system == 3
+            && ((parsed.external_attributes >> 16) & 0o170_000) == 0o120_000
+        {
             return Err(CentralParseError {
                 issue: ValidationIssue::Malformed(SYMLINK_ENTRY),
                 kinds: recognized,
@@ -680,6 +683,7 @@ fn parse_central_directory(
 struct ParsedCentralEntry {
     entry: CentralEntry,
     flags: u16,
+    creator_system: u8,
     external_attributes: u32,
     next_offset: usize,
 }
@@ -732,6 +736,9 @@ fn parse_central_entry(bytes: &[u8], offset: usize) -> Result<ParsedCentralEntry
             local_offset,
         },
         flags: le_u16(fixed, 8)?,
+        creator_system: *fixed
+            .get(5)
+            .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?,
         external_attributes: le_u32(fixed, 38)?,
         next_offset,
     })
@@ -989,7 +996,7 @@ fn validate_package_relationships(
     let target = targets
         .pop()
         .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
-    let target = target.strip_prefix('/').unwrap_or(&target);
+    let target = normalized_package_target(&target)?;
     let kinds = content_type_kinds
         .iter()
         .copied()
@@ -999,6 +1006,36 @@ fn validate_package_relationships(
         return Err(ValidationIssue::Malformed(MALFORMED_REASON));
     }
     Ok(kinds)
+}
+
+fn normalized_package_target(target: &str) -> Result<String, ValidationIssue> {
+    if target.contains('\\')
+        || target.contains('?')
+        || target.contains('#')
+        || target.starts_with("//")
+        || target
+            .split('/')
+            .next()
+            .is_some_and(|first| first.contains(':'))
+    {
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+    }
+    let mut segments = Vec::new();
+    for segment in target.trim_start_matches('/').split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                if segments.pop().is_none() {
+                    return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+                }
+            }
+            value => segments.push(value),
+        }
+    }
+    if segments.is_empty() {
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+    }
+    Ok(segments.join("/"))
 }
 
 fn collect_package_relationship(
@@ -1270,7 +1307,7 @@ fn collect_content_type_kind(
     for kind in [OfficeKind::Docx, OfficeKind::Xlsx, OfficeKind::Pptx] {
         let expected_part = format!("/{}", kind.marker());
         if part_name == expected_part
-            && content_type == kind.main_content_type()
+            && content_type.eq_ignore_ascii_case(kind.main_content_type())
             && entries.iter().any(|entry| entry.name == kind.marker())
         {
             kinds.push(kind);
@@ -1519,14 +1556,23 @@ fn read_spreadsheet_text<R: Read + std::io::Seek>(
 }
 
 fn workbook_relationship_ids(bytes: &[u8]) -> Result<Vec<String>, XmlIssue> {
-    ordered_relationship_ids(bytes, b"sheets", b"sheet")
+    ordered_relationship_ids(
+        bytes,
+        b"workbook",
+        SPREADSHEETML_NAMESPACE,
+        b"sheets",
+        b"sheet",
+    )
 }
 
 fn ordered_relationship_ids(
     bytes: &[u8],
+    root_name: &[u8],
+    root_namespace: &[u8],
     list_name: &[u8],
     item_name: &[u8],
 ) -> Result<Vec<String>, XmlIssue> {
+    validate_xml_root(bytes, root_name, root_namespace)?;
     let transcoded = transcode_xml(bytes)?;
     let mut reader = Reader::from_reader(Cursor::new(transcoded.as_ref()));
     reader.config_mut().trim_text(true);
@@ -1610,6 +1656,18 @@ fn apply_namespace_declarations(
     Ok(())
 }
 
+fn element_uses_scoped_namespace(
+    name: &[u8],
+    namespace_scope: &std::collections::HashMap<Vec<u8>, Vec<u8>>,
+    namespace: &[u8],
+) -> bool {
+    let prefix = name
+        .iter()
+        .position(|byte| *byte == b':')
+        .map_or(b"".as_slice(), |separator| &name[..separator]);
+    namespace_scope.get(prefix).map(Vec::as_slice) == Some(namespace)
+}
+
 fn required_relationship_id(
     reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
@@ -1637,65 +1695,109 @@ fn required_relationship_id(
 }
 
 fn workbook_relationship_targets(bytes: &[u8]) -> Result<Vec<(String, Option<String>)>, XmlIssue> {
+    validate_xml_root(bytes, b"Relationships", PACKAGE_RELATIONSHIPS_NAMESPACE)?;
     let transcoded = transcode_xml(bytes)?;
     let mut reader = Reader::from_reader(Cursor::new(transcoded.as_ref()));
     reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
     let mut targets = Vec::new();
+    let mut depth = 0_usize;
+    let mut relationships_prefix = None;
     loop {
         match reader
             .read_event_into(&mut buffer)
             .map_err(|_| XmlIssue::Malformed)?
         {
-            Event::Start(element) | Event::Empty(element)
-                if local_name(element.name().as_ref()) == b"Relationship" =>
-            {
-                let mut id = None;
-                let mut target = None;
-                let mut relationship_type = None;
-                let mut external = false;
-                for attribute in element.attributes() {
-                    let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
-                    let value = attribute
-                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
-                        .map_err(|_| XmlIssue::Malformed)?;
-                    match attribute.key.as_ref() {
-                        b"Id" => id = Some(value.into_owned()),
-                        b"Target" => target = Some(value.into_owned()),
-                        b"Type" => relationship_type = Some(value.into_owned()),
-                        b"TargetMode" => external = value.eq_ignore_ascii_case("external"),
-                        _ => {}
-                    }
-                }
-                let id = id.ok_or(XmlIssue::Malformed)?;
-                if targets
-                    .iter()
-                    .any(|(candidate, _): &(String, Option<String>)| candidate == &id)
+            Event::Start(element) => {
+                if depth == 0 {
+                    let name = element.name();
+                    let name = name.as_ref();
+                    let prefix = name
+                        .iter()
+                        .position(|byte| *byte == b':')
+                        .map_or(b"".as_slice(), |separator| &name[..separator]);
+                    relationships_prefix = Some(prefix.to_vec());
+                } else if depth == 1
+                    && local_name(element.name().as_ref()) == b"Relationship"
+                    && relationships_prefix.as_deref().is_some_and(|prefix| {
+                        element_uses_namespace(
+                            &reader,
+                            &element,
+                            prefix,
+                            PACKAGE_RELATIONSHIPS_NAMESPACE,
+                        )
+                    })
                 {
-                    return Err(XmlIssue::Malformed);
+                    collect_workbook_relationship(&reader, &element, &mut targets)?;
                 }
-                let worksheet = relationship_type
-                    .as_deref()
-                    .is_some_and(|value| value.ends_with("/worksheet"));
-                if worksheet && external {
-                    return Err(XmlIssue::Malformed);
-                }
-                let target = if worksheet {
-                    Some(spreadsheet_target_name(
-                        &target.ok_or(XmlIssue::Malformed)?,
-                    )?)
-                } else {
-                    None
-                };
-                targets.push((id, target));
+                depth = depth.checked_add(1).ok_or(XmlIssue::Malformed)?;
             }
+            Event::Empty(element)
+                if depth == 1
+                    && local_name(element.name().as_ref()) == b"Relationship"
+                    && relationships_prefix.as_deref().is_some_and(|prefix| {
+                        element_uses_namespace(
+                            &reader,
+                            &element,
+                            prefix,
+                            PACKAGE_RELATIONSHIPS_NAMESPACE,
+                        )
+                    }) =>
+            {
+                collect_workbook_relationship(&reader, &element, &mut targets)?;
+            }
+            Event::End(_) => depth = depth.checked_sub(1).ok_or(XmlIssue::Malformed)?,
             Event::DocType(_) | Event::GeneralRef(_) => return Err(XmlIssue::Malformed),
-            Event::Eof => break,
+            Event::Eof if depth == 0 => break,
+            Event::Eof => return Err(XmlIssue::Malformed),
             _ => {}
         }
         buffer.clear();
     }
     Ok(targets)
+}
+
+fn collect_workbook_relationship(
+    reader: &Reader<Cursor<&[u8]>>,
+    element: &quick_xml::events::BytesStart<'_>,
+    targets: &mut Vec<(String, Option<String>)>,
+) -> Result<(), XmlIssue> {
+    let mut id = None;
+    let mut target = None;
+    let mut relationship_type = None;
+    let mut external = false;
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
+        let value = attribute
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+            .map_err(|_| XmlIssue::Malformed)?;
+        match attribute.key.as_ref() {
+            b"Id" => id = Some(value.into_owned()),
+            b"Target" => target = Some(value.into_owned()),
+            b"Type" => relationship_type = Some(value.into_owned()),
+            b"TargetMode" => external = value.eq_ignore_ascii_case("external"),
+            _ => {}
+        }
+    }
+    let id = id.ok_or(XmlIssue::Malformed)?;
+    if targets.iter().any(|(candidate, _)| candidate == &id) {
+        return Err(XmlIssue::Malformed);
+    }
+    let worksheet = relationship_type
+        .as_deref()
+        .is_some_and(|value| value.ends_with("/worksheet"));
+    if worksheet && external {
+        return Err(XmlIssue::Malformed);
+    }
+    let target = if worksheet {
+        Some(spreadsheet_target_name(
+            &target.ok_or(XmlIssue::Malformed)?,
+        )?)
+    } else {
+        None
+    };
+    targets.push((id, target));
+    Ok(())
 }
 
 fn workbook_shared_strings_target(bytes: &[u8]) -> Result<Option<String>, XmlIssue> {
@@ -1713,57 +1815,118 @@ fn relationship_targets(
     relationship_suffix: &str,
     normalize: fn(&str) -> Result<String, XmlIssue>,
 ) -> Result<Vec<(String, String)>, XmlIssue> {
+    validate_xml_root(bytes, b"Relationships", PACKAGE_RELATIONSHIPS_NAMESPACE)?;
     let transcoded = transcode_xml(bytes)?;
     let mut reader = Reader::from_reader(Cursor::new(transcoded.as_ref()));
     reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
     let mut targets = Vec::new();
+    let mut depth = 0_usize;
+    let mut relationships_prefix = None;
     loop {
         match reader
             .read_event_into(&mut buffer)
             .map_err(|_| XmlIssue::Malformed)?
         {
-            Event::Start(element) | Event::Empty(element)
-                if local_name(element.name().as_ref()) == b"Relationship" =>
-            {
-                let mut id = None;
-                let mut target = None;
-                let mut relationship_type = None;
-                let mut external = false;
-                for attribute in element.attributes() {
-                    let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
-                    let value = attribute
-                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
-                        .map_err(|_| XmlIssue::Malformed)?;
-                    match attribute.key.as_ref() {
-                        b"Id" => id = Some(value.into_owned()),
-                        b"Target" => target = Some(value.into_owned()),
-                        b"Type" => relationship_type = Some(value.into_owned()),
-                        b"TargetMode" => external = value.eq_ignore_ascii_case("external"),
-                        _ => {}
-                    }
-                }
-                if relationship_type
-                    .as_deref()
-                    .is_some_and(|value| value.ends_with(relationship_suffix))
+            Event::Start(element) => {
+                if depth == 0 {
+                    let name = element.name();
+                    let name = name.as_ref();
+                    let prefix = name
+                        .iter()
+                        .position(|byte| *byte == b':')
+                        .map_or(b"".as_slice(), |separator| &name[..separator]);
+                    relationships_prefix = Some(prefix.to_vec());
+                } else if depth == 1
+                    && local_name(element.name().as_ref()) == b"Relationship"
+                    && relationships_prefix.as_deref().is_some_and(|prefix| {
+                        element_uses_namespace(
+                            &reader,
+                            &element,
+                            prefix,
+                            PACKAGE_RELATIONSHIPS_NAMESPACE,
+                        )
+                    })
                 {
-                    if external {
-                        return Err(XmlIssue::Malformed);
-                    }
-                    let id = id.ok_or(XmlIssue::Malformed)?;
-                    if targets.iter().any(|(candidate, _)| candidate == &id) {
-                        return Err(XmlIssue::Malformed);
-                    }
-                    targets.push((id, normalize(&target.ok_or(XmlIssue::Malformed)?)?));
+                    collect_relationship_target(
+                        &reader,
+                        &element,
+                        relationship_suffix,
+                        normalize,
+                        &mut targets,
+                    )?;
                 }
+                depth = depth.checked_add(1).ok_or(XmlIssue::Malformed)?;
             }
+            Event::Empty(element)
+                if depth == 1
+                    && local_name(element.name().as_ref()) == b"Relationship"
+                    && relationships_prefix.as_deref().is_some_and(|prefix| {
+                        element_uses_namespace(
+                            &reader,
+                            &element,
+                            prefix,
+                            PACKAGE_RELATIONSHIPS_NAMESPACE,
+                        )
+                    }) =>
+            {
+                collect_relationship_target(
+                    &reader,
+                    &element,
+                    relationship_suffix,
+                    normalize,
+                    &mut targets,
+                )?;
+            }
+            Event::End(_) => depth = depth.checked_sub(1).ok_or(XmlIssue::Malformed)?,
             Event::DocType(_) | Event::GeneralRef(_) => return Err(XmlIssue::Malformed),
-            Event::Eof => break,
+            Event::Eof if depth == 0 => break,
+            Event::Eof => return Err(XmlIssue::Malformed),
             _ => {}
         }
         buffer.clear();
     }
     Ok(targets)
+}
+
+fn collect_relationship_target(
+    reader: &Reader<Cursor<&[u8]>>,
+    element: &quick_xml::events::BytesStart<'_>,
+    relationship_suffix: &str,
+    normalize: fn(&str) -> Result<String, XmlIssue>,
+    targets: &mut Vec<(String, String)>,
+) -> Result<(), XmlIssue> {
+    let mut id = None;
+    let mut target = None;
+    let mut relationship_type = None;
+    let mut external = false;
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
+        let value = attribute
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+            .map_err(|_| XmlIssue::Malformed)?;
+        match attribute.key.as_ref() {
+            b"Id" => id = Some(value.into_owned()),
+            b"Target" => target = Some(value.into_owned()),
+            b"Type" => relationship_type = Some(value.into_owned()),
+            b"TargetMode" => external = value.eq_ignore_ascii_case("external"),
+            _ => {}
+        }
+    }
+    if relationship_type
+        .as_deref()
+        .is_some_and(|value| value.ends_with(relationship_suffix))
+    {
+        if external {
+            return Err(XmlIssue::Malformed);
+        }
+        let id = id.ok_or(XmlIssue::Malformed)?;
+        if targets.iter().any(|(candidate, _)| candidate == &id) {
+            return Err(XmlIssue::Malformed);
+        }
+        targets.push((id, normalize(&target.ok_or(XmlIssue::Malformed)?)?));
+    }
+    Ok(())
 }
 
 fn spreadsheet_target_name(target: &str) -> Result<String, XmlIssue> {
@@ -2002,7 +2165,13 @@ fn presentation_slide_names<R: Read + std::io::Seek>(
 }
 
 fn presentation_relationship_ids(bytes: &[u8]) -> Result<Vec<String>, XmlIssue> {
-    ordered_relationship_ids(bytes, b"sldIdLst", b"sldId")
+    ordered_relationship_ids(
+        bytes,
+        b"presentation",
+        PRESENTATIONML_NAMESPACE,
+        b"sldIdLst",
+        b"sldId",
+    )
 }
 
 fn presentation_relationship_targets(bytes: &[u8]) -> Result<Vec<(String, String)>, XmlIssue> {
@@ -2043,12 +2212,19 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
     let mut saw_root = false;
     let mut alternate_depth = None;
     let mut fallback_depth = None;
+    let mut namespace_scopes = vec![std::collections::HashMap::new()];
+    let mut text_elements = Vec::new();
     loop {
         match reader
             .read_event_into(&mut buffer)
             .map_err(|_| XmlIssue::Malformed)?
         {
             Event::Start(start) => {
+                let mut scope = namespace_scopes
+                    .last()
+                    .cloned()
+                    .ok_or(XmlIssue::Malformed)?;
+                apply_namespace_declarations(&reader, &start, &mut scope)?;
                 if element_depth == 0 {
                     if saw_root {
                         return Err(XmlIssue::Malformed);
@@ -2059,7 +2235,25 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                 let qualified_name = start.name();
                 let name = local_name(qualified_name.as_ref());
                 let selected = alternate_depth.is_none() || fallback_depth.is_some();
-                if (name == b"tab" || name == b"br" || name == b"cr") && selected {
+                let text_namespace = match kind {
+                    OfficeKind::Docx => WORDPROCESSINGML_NAMESPACE,
+                    OfficeKind::Xlsx => SPREADSHEETML_NAMESPACE,
+                    OfficeKind::Pptx => DRAWINGML_NAMESPACE,
+                };
+                let supported_text = name == b"t"
+                    && element_uses_scoped_namespace(
+                        qualified_name.as_ref(),
+                        &scope,
+                        text_namespace,
+                    );
+                let supported_word_control = kind == OfficeKind::Docx
+                    && (name == b"tab" || name == b"br" || name == b"cr")
+                    && element_uses_scoped_namespace(
+                        qualified_name.as_ref(),
+                        &scope,
+                        WORDPROCESSINGML_NAMESPACE,
+                    );
+                if supported_word_control && selected {
                     append_xml_text(&mut output, if name == b"tab" { "\t" } else { "\n" })?;
                 } else if name == b"AlternateContent" {
                     if alternate_depth.replace(element_depth).is_some() {
@@ -2071,18 +2265,20 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                     if fallback_depth.replace(element_depth).is_some() {
                         return Err(XmlIssue::Malformed);
                     }
-                } else if name == b"t" && (alternate_depth.is_none() || fallback_depth.is_some()) {
+                } else if supported_text && selected {
                     text_depth = text_depth.checked_add(1).ok_or(XmlIssue::Malformed)?;
                 }
+                text_elements.push(supported_text && selected);
+                namespace_scopes.push(scope);
             }
             Event::End(end) => {
                 element_depth = element_depth.checked_sub(1).ok_or(XmlIssue::Malformed)?;
+                let was_text = text_elements.pop().ok_or(XmlIssue::Malformed)?;
+                namespace_scopes.pop().ok_or(XmlIssue::Malformed)?;
                 let qualified_name = end.name();
                 let name = local_name(qualified_name.as_ref());
-                if name == b"t" {
-                    if alternate_depth.is_none() || fallback_depth.is_some() {
-                        text_depth = text_depth.checked_sub(1).ok_or(XmlIssue::Malformed)?;
-                    }
+                if was_text {
+                    text_depth = text_depth.checked_sub(1).ok_or(XmlIssue::Malformed)?;
                 } else if name == b"Fallback"
                     && fallback_depth.is_some_and(|depth| element_depth + 1 == depth)
                 {
@@ -2104,6 +2300,11 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                 }
             }
             Event::Empty(empty) => {
+                let mut scope = namespace_scopes
+                    .last()
+                    .cloned()
+                    .ok_or(XmlIssue::Malformed)?;
+                apply_namespace_declarations(&reader, &empty, &mut scope)?;
                 if element_depth == 0 {
                     if saw_root {
                         return Err(XmlIssue::Malformed);
@@ -2113,9 +2314,15 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                 let qualified_name = empty.name();
                 let name = local_name(qualified_name.as_ref());
                 let selected = alternate_depth.is_none() || fallback_depth.is_some();
-                if name == b"tab" && selected {
+                let supported_word_control = kind == OfficeKind::Docx
+                    && element_uses_scoped_namespace(
+                        qualified_name.as_ref(),
+                        &scope,
+                        WORDPROCESSINGML_NAMESPACE,
+                    );
+                if name == b"tab" && selected && supported_word_control {
                     append_xml_text(&mut output, "\t")?;
-                } else if (name == b"br" || name == b"cr") && selected {
+                } else if (name == b"br" || name == b"cr") && selected && supported_word_control {
                     append_xml_text(&mut output, "\n")?;
                 }
             }
@@ -2853,7 +3060,7 @@ mod tests {
 
     #[test]
     fn presentation_relationship_ids_ignore_extension_slide_ids() {
-        let xml = br#"<p:presentation xmlns:p="urn:p" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p14="urn:p14"><p:sldIdLst><p:sldId r:id="rId1"/></p:sldIdLst><p:extLst><p14:sldId id="99"/></p:extLst></p:presentation>"#;
+        let xml = br#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p14="urn:p14"><p:sldIdLst><p:sldId r:id="rId1"/></p:sldIdLst><p:extLst><p14:sldId id="99"/></p:extLst></p:presentation>"#;
 
         let result = presentation_relationship_ids(xml);
 
@@ -2865,7 +3072,7 @@ mod tests {
 
     #[test]
     fn workbook_relationship_ids_preserve_sheet_order() {
-        let xml = br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet r:id="rId2"/><sheet r:id="rId1"/></sheets></workbook>"#;
+        let xml = br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet r:id="rId2"/><sheet r:id="rId1"/></sheets></workbook>"#;
 
         let result = workbook_relationship_ids(xml);
 
@@ -2877,7 +3084,7 @@ mod tests {
 
     #[test]
     fn relationship_ids_use_the_office_relationships_namespace() {
-        let xml = br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:ext="urn:extension"><sheets><sheet ext:id="metadata" r:id="rId1"/></sheets></workbook>"#;
+        let xml = br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:ext="urn:extension"><sheets><sheet ext:id="metadata" r:id="rId1"/></sheets></workbook>"#;
 
         let result = workbook_relationship_ids(xml);
 
@@ -2889,7 +3096,7 @@ mod tests {
 
     #[test]
     fn relationship_ids_use_the_current_namespace_scope() {
-        let xml = br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:o="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet xmlns:r="urn:extension" r:id="metadata" o:id="rId1"/></sheets></workbook>"#;
+        let xml = br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:o="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet xmlns:r="urn:extension" r:id="metadata" o:id="rId1"/></sheets></workbook>"#;
 
         let result = workbook_relationship_ids(xml);
 
@@ -2937,7 +3144,7 @@ mod tests {
 
     #[test]
     fn workbook_relationships_skip_non_worksheet_sheets() {
-        let xml = br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet" Target="chartsheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#;
+        let xml = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet" Target="chartsheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#;
 
         let result = workbook_relationship_targets(xml);
 
@@ -2954,7 +3161,7 @@ mod tests {
 
     #[test]
     fn workbook_relationships_resolve_the_shared_string_table() {
-        let xml = br#"<Relationships><Relationship Id="rIdShared" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="tables/strings.xml"/></Relationships>"#;
+        let xml = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdShared" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="tables/strings.xml"/></Relationships>"#;
 
         let result = workbook_shared_strings_target(xml);
 

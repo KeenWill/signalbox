@@ -52,12 +52,12 @@ impl OfficeFixture {
             &[
                 (
                     "xl/workbook.xml",
-                    b"<workbook xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet r:id=\"rId1\"/></sheets></workbook>".as_slice(),
+                    b"<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet r:id=\"rId1\"/></sheets></workbook>".as_slice(),
                     EntryKind::File,
                 ),
                 (
                     "xl/_rels/workbook.xml.rels",
-                    b"<Relationships><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"rIdShared\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings\" Target=\"sharedStrings.xml\"/></Relationships>".as_slice(),
+                    b"<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"rIdShared\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings\" Target=\"sharedStrings.xml\"/></Relationships>".as_slice(),
                     EntryKind::File,
                 ),
                 (
@@ -78,12 +78,12 @@ impl OfficeFixture {
             &[
                 (
                     "xl/workbook.xml",
-                    b"<workbook xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet r:id=\"rId1\"/></sheets></workbook>".as_slice(),
+                    b"<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet r:id=\"rId1\"/></sheets></workbook>".as_slice(),
                     EntryKind::File,
                 ),
                 (
                     "xl/_rels/workbook.xml.rels",
-                    b"<Relationships><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"rIdShared\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings\" Target=\"sharedStrings.xml\"/></Relationships>".as_slice(),
+                    b"<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"rIdShared\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings\" Target=\"sharedStrings.xml\"/></Relationships>".as_slice(),
                     EntryKind::File,
                 ),
                 (
@@ -99,10 +99,10 @@ impl OfficeFixture {
     pub fn pptx() -> Result<Self, Box<dyn Error>> {
         let expected_text = "generated pptx text";
         let slide = format!(
-            r#"<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="urn:a"><a:p><a:r><a:t>{expected_text}</a:t></a:r></a:p></p:sld>"#
+            r#"<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:p><a:r><a:t>{expected_text}</a:t></a:r></a:p></p:sld>"#
         );
         let presentation = br#"<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>"#;
-        let relationships = br#"<?xml version="1.0"?><Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#;
+        let relationships = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#;
         Self::package(
             PPTX_MEDIA_TYPE,
             expected_text,
@@ -124,9 +124,9 @@ impl OfficeFixture {
 
     pub fn reordered_pptx() -> Result<Self, Box<dyn Error>> {
         let presentation = br#"<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId r:id="rId2"/><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>"#;
-        let relationships = br#"<?xml version="1.0"?><Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/></Relationships>"#;
-        let first = br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><a:p><a:t>first</a:t></a:p></p:sld>"#;
-        let second = br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><a:p><a:t>second</a:t></a:p></p:sld>"#;
+        let relationships = br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/></Relationships>"#;
+        let first = br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:p><a:t>first</a:t></a:p></p:sld>"#;
+        let second = br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:p><a:t>second</a:t></a:p></p:sld>"#;
         Self::package(
             PPTX_MEDIA_TYPE,
             "second\nfirst\n",
