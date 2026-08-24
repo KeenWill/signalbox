@@ -882,15 +882,34 @@ export function decodeWebSessionTimelineWindow(value) {{
 
 export function decodeWebAttentionSnapshot(value) {{
   assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
-  value.summaries.forEach((summary, index) => assertAttentionSummary(summary, `attention_snapshot.summaries[${{index}}]`));
+  assertAttentionSnapshot(value, "attention_snapshot");
   return value;
 }}
 
 export function decodeWebAttentionStreamEvent(value) {{
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
-  const summaries = value.kind === "snapshot" ? value.snapshot.summaries : value.summaries;
-  summaries?.forEach((summary, index) => assertAttentionSummary(summary, `attention_event.summaries[${{index}}]`));
+  if (value.kind === "snapshot") {{
+    assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
+  }} else {{
+    value.summaries?.forEach((summary, index) =>
+      assertAttentionSummary(summary, `attention_event.summaries[${{index}}]`),
+    );
+  }}
   return value;
+}}
+
+function assertAttentionSnapshot(snapshot, path) {{
+  snapshot.summaries.forEach((summary, index) =>
+    assertAttentionSummary(summary, `${{path}}.summaries[${{index}}]`),
+  );
+  const continuationKind = snapshot.continuation?.kind ?? null;
+  const expectedContinuationKind = {{
+    last_activity_descending: "last_activity",
+    session_identity_ascending: "session_identity",
+  }}[snapshot.sort];
+  if (continuationKind !== null && continuationKind !== expectedContinuationKind) {{
+    fail(`${{path}}.continuation`, `the continuation required by sort ${{snapshot.sort}}`);
+  }}
 }}
 
 function assertAttentionSummary(summary, path) {{
@@ -907,7 +926,8 @@ function assertAttentionSummary(summary, path) {{
   if (summary.action !== expectedAction) {{
     fail(`${{path}}.action`, `the action required by state ${{summary.state}}`);
   }}
-  if ((summary.state === "blocked") !== (summary.goal_block !== null)) {{
+  const hasGoalBlock = Object.hasOwn(summary, "goal_block") && summary.goal_block !== null;
+  if ((summary.state === "blocked") !== hasGoalBlock) {{
     fail(`${{path}}.goal_block`, "present exactly for blocked state");
   }}
 }}

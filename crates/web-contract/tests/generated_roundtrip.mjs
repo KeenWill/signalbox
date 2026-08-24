@@ -323,4 +323,45 @@ test("generated attention decoder rejects inconsistent operator actions", () => 
       ),
     /present exactly for blocked state/,
   );
+  const blockedWithoutGoalBlock = attentionSummary({
+    state: "blocked",
+    action: "provide_goal_need",
+  });
+  delete blockedWithoutGoalBlock.goal_block;
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({ summaries: [blockedWithoutGoalBlock] }),
+      ),
+    /present exactly for blocked state/,
+  );
+});
+
+test("generated attention decoder rejects continuation and sort mismatches", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          sort: "session_identity_ascending",
+          continuation: {
+            kind: "last_activity",
+            unix_microseconds: "1",
+            session_id: "00000000-0000-0000-0000-000000000991",
+          },
+        }),
+      ),
+    /continuation required by sort session_identity_ascending/,
+  );
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          continuation: {
+            kind: "session_identity",
+            session_id: "00000000-0000-0000-0000-000000000991",
+          },
+        }),
+      ),
+    /continuation required by sort last_activity_descending/,
+  );
 });

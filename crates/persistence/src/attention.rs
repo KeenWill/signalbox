@@ -285,6 +285,7 @@ const SELECT_IDENTITY: &str = summary_sql!(
                     SELECT 1 FROM session_metadata_tag AS stored
                      WHERE stored.session_id = session_row.session_id
                        AND stored.tag = required.tag)))
+            AND $9::timestamptz IS NULL
      ORDER BY session_row.session_id LIMIT $1
     "#,
     "ORDER BY selected.session_id"
