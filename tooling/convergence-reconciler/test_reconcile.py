@@ -17,10 +17,12 @@ from reconcile import (
     comment_only_patch,
     evaluate_convergence,
     load_state,
+    meaningful_line_count,
     normalize_pull_request,
     normalize_review_threads,
     nonnegative_number,
     positive_number,
+    prior_threads_dispositioned_before,
     process_pull_request,
     save_state,
 )
@@ -483,6 +485,22 @@ class InputValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             nonnegative_number(math.nan, "cool_off_seconds")
 
+    def test_non_numeric_configuration_is_rejected_as_value_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "interval_seconds"):
+            positive_number(None, "interval_seconds")
+        with self.assertRaisesRegex(ValueError, "cool_off_seconds"):
+            nonnegative_number([], "cool_off_seconds")
+
+    def test_devenv_lock_is_excluded_from_meaningful_lines(self) -> None:
+        count = meaningful_line_count(
+            [
+                {"path": "devenv.lock", "additions": 100, "deletions": 50},
+                {"path": "src/main.py", "additions": 3, "deletions": 2},
+            ]
+        )
+
+        self.assertEqual(count, 5)
+
     def test_non_object_state_is_rejected_as_malformed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
@@ -492,6 +510,120 @@ class InputValidationTests(unittest.TestCase):
 
 
 class GitHubGraphQLTests(unittest.TestCase):
+    def test_resolution_observation_must_predate_next_review_request(self) -> None:
+        thread = {
+            "isResolved": True,
+            "isDispositioned": True,
+            "latestReviewerAt": "2026-08-16T10:00:00Z",
+            "dispositionAt": "2026-08-16T10:01:00Z",
+            "resolutionObservedAt": "2026-08-16T10:03:00Z",
+        }
+
+        eligible = prior_threads_dispositioned_before(
+            [thread], "2026-08-16T10:02:00Z"
+        )
+
+        self.assertFalse(eligible)
+
+    def test_persisted_review_requires_the_same_review_id(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "_persisted_record": {
+                "authenticated_review_head": "head",
+                "authenticated_review_id": "review-a",
+            },
+            "head_oid": "head",
+            "authenticated_quiet_review_oids": [],
+            "authenticated_review_ids": {},
+            "observed_codex_reviews": {"review-b": "head"},
+            "quiet_review_head_oids": [],
+        }
+
+        client._restore_persisted_review_evidence([pull_request])
+
+        self.assertEqual(pull_request["authenticated_quiet_review_oids"], [])
+        self.assertEqual(pull_request["quiet_review_head_oids"], [])
+
+    def test_material_base_forward_resets_escalation_wave_count(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        reviews = [
+            {
+                "id": "review-1",
+                "author": {"login": "chatgpt-codex-connector"},
+                "submittedAt": "2026-08-16T10:01:00Z",
+            },
+            {
+                "id": "review-2",
+                "author": {"login": "chatgpt-codex-connector"},
+                "submittedAt": "2026-08-16T10:02:00Z",
+            },
+            {
+                "id": "review-3",
+                "author": {"login": "chatgpt-codex-connector"},
+                "submittedAt": "2026-08-16T10:03:00Z",
+            },
+            {
+                "id": "review-4",
+                "author": {"login": "chatgpt-codex-connector"},
+                "submittedAt": "2026-08-16T10:04:00Z",
+            },
+            {
+                "id": "review-5",
+                "author": {"login": "chatgpt-codex-connector"},
+                "submittedAt": "2026-08-16T10:05:00Z",
+            },
+        ]
+        pull_request = {
+            "_persisted_record": {
+                "authenticated_review_head": "reviewed-head",
+                "known_codex_review_ids": [
+                    "review-1", "review-2", "review-3", "review-4"
+                ],
+                "review_wave_ids": [
+                    "review-1", "review-2", "review-3", "review-4"
+                ],
+                "review_wave_base_oid": "base-old",
+            },
+            "_codex_reviews": reviews,
+            "base_oid": "base-new",
+            "head_oid": "head-new",
+            "review_threads": [
+                {
+                    "dispositionKind": "escalated",
+                    "isDispositioned": True,
+                    "isEscalated": True,
+                    "reviewIds": ["review-5"],
+                }
+            ],
+        }
+        with mock.patch.object(
+            client, "_review_exempt_change", return_value=False
+        ):
+            client._validate_review_waves([pull_request])
+
+        thread = pull_request["review_threads"][0]
+        self.assertEqual(pull_request["review_wave_ids"], ["review-5"])
+        self.assertFalse(thread["isDispositioned"])
+        self.assertFalse(thread["isEscalated"])
+
+    def test_fixing_commit_verification_failure_aborts_snapshot(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "head_oid": "head",
+            "review_threads": [
+                {
+                    "dispositionKind": "fixed",
+                    "fixingCommit": "abcdef123",
+                    "isDispositioned": True,
+                }
+            ],
+        }
+        with mock.patch.object(
+            client, "execute_rest", side_effect=RuntimeError("unavailable")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unavailable"):
+                client._validate_fixing_commits([pull_request])
+
     def test_non_python_c_header_is_not_comment_only(self) -> None:
         changed_file = {
             "filename": "include/config.h",
@@ -751,7 +883,7 @@ class GitHubGraphQLTests(unittest.TestCase):
         client._finalize_review_evidence([pull_request])
 
         self.assertEqual(pull_request["quiet_review_head_oids"], [])
-        self.assertEqual(pull_request["observed_codex_review_oids"], [])
+        self.assertEqual(pull_request["observed_codex_reviews"], {})
 
     def test_review_requests_and_reviews_are_paginated(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)

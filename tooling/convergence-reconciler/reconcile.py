@@ -258,7 +258,7 @@ class GitHubGraphQL:
         self,
         tracked_node_ids: Sequence[str],
         head_pattern: str,
-        authenticated_review_heads: dict[int, str] | None = None,
+        persisted_records: dict[int, dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         open_pull_requests: list[dict[str, Any]] = []
         tracked: list[dict[str, Any]] = []
@@ -307,32 +307,28 @@ class GitHubGraphQL:
                 if node["state"] != "OPEN":
                     tracked.append(node)
                     continue
-                pull_requests.append(normalize_pull_request(node))
+                pull_request = normalize_pull_request(node)
+                pull_request["_persisted_record"] = (persisted_records or {}).get(
+                    pull_request["number"], {}
+                )
+                pull_requests.append(pull_request)
         self._finish_paginated_connections(pull_requests)
         self._finish_thread_comments(pull_requests)
+        for pull_request in pull_requests:
+            resolution_times = pull_request["_persisted_record"].get(
+                "resolved_thread_observed_at", {}
+            )
+            if isinstance(resolution_times, dict):
+                for thread in pull_request["review_threads"]:
+                    observed_at = resolution_times.get(thread.get("id"))
+                    if isinstance(observed_at, str):
+                        thread["resolutionObservedAt"] = observed_at
         self._validate_fixing_commits(pull_requests)
         self._finish_review_evidence_connections(pull_requests)
         self._finalize_review_evidence(pull_requests)
-        for pull_request in pull_requests:
-            persisted_head = (authenticated_review_heads or {}).get(
-                pull_request["number"]
-            )
-            if (
-                persisted_head in pull_request["observed_codex_review_oids"]
-                and persisted_head
-                not in pull_request["authenticated_quiet_review_oids"]
-            ):
-                pull_request["authenticated_quiet_review_oids"].append(
-                    persisted_head
-                )
-            if (
-                persisted_head == pull_request["head_oid"]
-                and persisted_head in pull_request["observed_codex_review_oids"]
-                and persisted_head not in pull_request["quiet_review_head_oids"]
-            ):
-                pull_request["quiet_review_head_oids"].append(persisted_head)
-            pull_request.pop("observed_codex_review_oids", None)
+        self._restore_persisted_review_evidence(pull_requests)
         self._load_review_exempt_status(pull_requests)
+        self._validate_review_waves(pull_requests)
         self._load_renamed_paths(pull_requests)
         self._load_planning_only_status(pull_requests)
         self._load_base_ancestry(pull_requests)
@@ -445,25 +441,21 @@ query($id: ID!, $after: String!) {
                     thread["dispositionKind"] = None
                     continue
                 if fixing_commit not in validity:
-                    try:
-                        comparison = self.execute_rest(
-                            f"repos/{self.owner}/{self.name}/compare/"
-                            f"{fixing_commit}...{pull_request['head_oid']}"
-                        )
-                    except RuntimeError:
-                        validity[fixing_commit] = False
-                    else:
-                        base_commit = comparison.get("base_commit")
-                        head_commit = comparison.get("head_commit")
-                        merge_base = comparison.get("merge_base_commit")
-                        validity[fixing_commit] = (
-                            comparison.get("status") in {"ahead", "identical"}
-                            and isinstance(base_commit, dict)
-                            and isinstance(head_commit, dict)
-                            and isinstance(merge_base, dict)
-                            and base_commit.get("sha") == merge_base.get("sha")
-                            and head_commit.get("sha") == pull_request["head_oid"]
-                        )
+                    comparison = self.execute_rest(
+                        f"repos/{self.owner}/{self.name}/compare/"
+                        f"{fixing_commit}...{pull_request['head_oid']}"
+                    )
+                    base_commit = comparison.get("base_commit")
+                    head_commit = comparison.get("head_commit")
+                    merge_base = comparison.get("merge_base_commit")
+                    validity[fixing_commit] = (
+                        comparison.get("status") in {"ahead", "identical"}
+                        and isinstance(base_commit, dict)
+                        and isinstance(head_commit, dict)
+                        and isinstance(merge_base, dict)
+                        and base_commit.get("sha") == merge_base.get("sha")
+                        and head_commit.get("sha") == pull_request["head_oid"]
+                    )
                 if not validity[fixing_commit]:
                     thread["isDispositioned"] = False
                     thread["dispositionKind"] = None
@@ -476,7 +468,8 @@ query($id: ID!, $after: String!) {
             comments = pull_request.pop("_review_comments")
             reviews = pull_request.pop("_reviews")
             quiet_oids: list[str] = []
-            observed_codex_review_oids: list[str] = []
+            observed_codex_reviews: dict[str, str] = {}
+            authenticated_review_ids: dict[str, str] = {}
             for review in reviews:
                 commit = review.get("commit")
                 reviewed_oid = commit.get("oid") if isinstance(commit, dict) else None
@@ -508,8 +501,9 @@ query($id: ID!, $after: String!) {
                     author_login(review) is not None
                     and author_login(review).casefold()
                     == CODEX_REVIEWER_LOGIN.casefold()
+                    and isinstance(review_id, str)
                 ):
-                    observed_codex_review_oids.append(reviewed_oid)
+                    observed_codex_reviews[review_id] = reviewed_oid
                 review_threads = [
                     thread
                     for thread in pull_request.get("review_threads", [])
@@ -538,12 +532,103 @@ query($id: ID!, $after: String!) {
                     )
                 ):
                     quiet_oids.append(reviewed_oid)
-            self._validate_escalation_dispositions(pull_request, reviews)
+                    if isinstance(review_id, str):
+                        authenticated_review_ids[reviewed_oid] = review_id
             pull_request["authenticated_quiet_review_oids"] = quiet_oids
-            pull_request["observed_codex_review_oids"] = observed_codex_review_oids
+            pull_request["authenticated_review_ids"] = authenticated_review_ids
+            pull_request["observed_codex_reviews"] = observed_codex_reviews
+            pull_request["_codex_reviews"] = [
+                review
+                for review in reviews
+                if isinstance(review.get("id"), str)
+                and review["id"] in observed_codex_reviews
+            ]
             pull_request["quiet_review_head_oids"] = [
                 oid for oid in quiet_oids if oid == pull_request["head_oid"]
             ]
+
+    def _restore_persisted_review_evidence(
+        self, pull_requests: list[dict[str, Any]]
+    ) -> None:
+        for pull_request in pull_requests:
+            record = pull_request["_persisted_record"]
+            persisted_head = record.get("authenticated_review_head")
+            persisted_review_id = record.get("authenticated_review_id")
+            review_still_valid = (
+                isinstance(persisted_review_id, str)
+                and pull_request["observed_codex_reviews"].get(
+                    persisted_review_id
+                )
+                == persisted_head
+            )
+            if (
+                review_still_valid
+                and persisted_head
+                not in pull_request["authenticated_quiet_review_oids"]
+            ):
+                pull_request["authenticated_quiet_review_oids"].append(
+                    persisted_head
+                )
+                pull_request["authenticated_review_ids"][persisted_head] = (
+                    persisted_review_id
+                )
+            if (
+                review_still_valid
+                and persisted_head == pull_request["head_oid"]
+                and persisted_head not in pull_request["quiet_review_head_oids"]
+            ):
+                pull_request["quiet_review_head_oids"].append(persisted_head)
+            pull_request.pop("observed_codex_reviews", None)
+
+    def _validate_review_waves(
+        self, pull_requests: list[dict[str, Any]]
+    ) -> None:
+        for pull_request in pull_requests:
+            record = pull_request.pop("_persisted_record")
+            reviews = pull_request.pop("_codex_reviews")
+            current_ids = [review["id"] for review in reviews]
+            known_ids = [
+                review_id
+                for review_id in record.get("known_codex_review_ids", [])
+                if isinstance(review_id, str)
+            ]
+            wave_ids = [
+                review_id
+                for review_id in record.get("review_wave_ids", [])
+                if isinstance(review_id, str)
+            ]
+            if not known_ids and not wave_ids:
+                wave_ids = list(current_ids)
+            new_ids = [
+                review_id for review_id in current_ids if review_id not in known_ids
+            ]
+            prior_base = record.get("review_wave_base_oid")
+            persisted_head = record.get("authenticated_review_head")
+            material_base_forward = False
+            if (
+                isinstance(prior_base, str)
+                and prior_base != pull_request["base_oid"]
+                and isinstance(persisted_head, str)
+            ):
+                material_base_forward = not self._review_exempt_change(
+                    persisted_head,
+                    pull_request["head_oid"],
+                    pull_request["base_oid"],
+                )
+            if material_base_forward:
+                wave_ids = list(new_ids)
+            else:
+                wave_ids.extend(
+                    review_id
+                    for review_id in new_ids
+                    if review_id not in wave_ids
+                )
+            pull_request["known_codex_review_ids"] = current_ids
+            pull_request["review_wave_ids"] = wave_ids
+            wave_reviews = [
+                review for review in reviews if review["id"] in wave_ids
+            ]
+            self._validate_escalation_dispositions(pull_request, wave_reviews)
 
     def _validate_escalation_dispositions(
         self, pull_request: dict[str, Any], reviews: Sequence[dict[str, Any]]
@@ -1029,11 +1114,14 @@ def prior_threads_dispositioned_before(
         if not isinstance(reviewer_at, str) or reviewer_at >= requested_at:
             continue
         disposition_at = thread.get("dispositionAt")
+        resolution_observed_at = thread.get("resolutionObservedAt")
         if (
             not thread["isResolved"]
             or not thread["isDispositioned"]
             or not isinstance(disposition_at, str)
             or disposition_at > requested_at
+            or not isinstance(resolution_observed_at, str)
+            or resolution_observed_at > requested_at
         ):
             return False
     return True
@@ -1163,6 +1251,7 @@ def is_lockfile(path: str) -> bool:
     return name in {
         "cargo.lock",
         "composer.lock",
+        "devenv.lock",
         "gemfile.lock",
         "package-lock.json",
         "packages.lock.json",
@@ -1269,25 +1358,27 @@ def normalize_review_threads(
                 ),
                 default=None,
             )
-        normalized.append(
-            {
-                "isResolved": thread["isResolved"],
-                "isDispositioned": dispositioned,
-                "isEscalated": "escalated" in dispositions,
-                "isInformational": informational,
-                "latestReviewerAt": latest_reviewer_at,
-                "dispositionAt": disposition_at,
-                "dispositionKind": next(
-                    (kind for kind in reversed(dispositions) if kind is not None),
-                    None,
-                ),
-                "fixingCommit": next(
-                    (commit for commit in reversed(fixing_commits) if commit is not None),
-                    None,
-                ),
-                "reviewIds": review_ids,
-            }
-        )
+        normalized_thread = {
+            "isResolved": thread["isResolved"],
+            "isDispositioned": dispositioned,
+            "isEscalated": "escalated" in dispositions,
+            "isInformational": informational,
+            "latestReviewerAt": latest_reviewer_at,
+            "dispositionAt": disposition_at,
+            "dispositionKind": next(
+                (kind for kind in reversed(dispositions) if kind is not None),
+                None,
+            ),
+            "fixingCommit": next(
+                (commit for commit in reversed(fixing_commits) if commit is not None),
+                None,
+            ),
+            "reviewIds": review_ids,
+        }
+        thread_id = thread.get("id")
+        if isinstance(thread_id, str):
+            normalized_thread["id"] = thread_id
+        normalized.append(normalized_thread)
     return normalized
 
 
@@ -1632,14 +1723,20 @@ def parse_command(value: Any, name: str) -> tuple[str, ...]:
 
 
 def positive_number(value: Any, name: str) -> float:
-    number = float(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a finite number greater than zero") from error
     if not math.isfinite(number) or number <= 0:
         raise ValueError(f"{name} must be a finite number greater than zero")
     return number
 
 
 def nonnegative_number(value: Any, name: str) -> float:
-    number = float(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a finite nonnegative number") from error
     if not math.isfinite(number) or number < 0:
         raise ValueError(f"{name} must be a finite nonnegative number")
     return number
@@ -1676,11 +1773,33 @@ def load_state(path: Path, repository: str) -> dict[str, Any]:
             "terminal_state",
             "terminal_at",
             "authenticated_review_head",
+            "authenticated_review_id",
             "last_dispatched_head",
         ):
             value = record.get(field)
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"unsupported or malformed state file: {path}")
+        resolution_times = record.get("resolved_thread_observed_at")
+        if resolution_times is not None and (
+            not isinstance(resolution_times, dict)
+            or not all(
+                isinstance(thread_id, str) and isinstance(observed_at, str)
+                for thread_id, observed_at in resolution_times.items()
+            )
+        ):
+            raise ValueError(f"unsupported or malformed state file: {path}")
+        for field in ("known_codex_review_ids", "review_wave_ids"):
+            value = record.get(field)
+            if value is not None and (
+                not isinstance(value, list)
+                or not all(isinstance(item, str) for item in value)
+            ):
+                raise ValueError(f"unsupported or malformed state file: {path}")
+        review_wave_base_oid = record.get("review_wave_base_oid")
+        if review_wave_base_oid is not None and not isinstance(
+            review_wave_base_oid, str
+        ):
+            raise ValueError(f"unsupported or malformed state file: {path}")
         for field in ("unconverged_since", "idle_since", "last_dispatched_at"):
             value = record.get(field)
             if (
@@ -1821,6 +1940,36 @@ def process_pull_request(
     )
     if pull_request["head_oid"] in pull_request["quiet_review_head_oids"]:
         record["authenticated_review_head"] = pull_request["head_oid"]
+        review_id = pull_request.get("authenticated_review_ids", {}).get(
+            pull_request["head_oid"]
+        )
+        if isinstance(review_id, str):
+            record["authenticated_review_id"] = review_id
+    resolution_times = record.setdefault("resolved_thread_observed_at", {})
+    observed_at = utc_timestamp(now)
+    current_thread_ids = {
+        thread["id"]
+        for thread in pull_request.get("review_threads", [])
+        if isinstance(thread.get("id"), str)
+    }
+    for thread_id in list(resolution_times):
+        if thread_id not in current_thread_ids:
+            del resolution_times[thread_id]
+    for thread in pull_request.get("review_threads", []):
+        thread_id = thread.get("id")
+        if not isinstance(thread_id, str):
+            continue
+        if thread.get("isResolved"):
+            resolution_times.setdefault(thread_id, observed_at)
+        else:
+            resolution_times.pop(thread_id, None)
+    record["known_codex_review_ids"] = pull_request.get(
+        "known_codex_review_ids", []
+    )
+    record["review_wave_ids"] = pull_request.get("review_wave_ids", [])
+    base_oid = pull_request.get("base_oid")
+    if isinstance(base_oid, str):
+        record["review_wave_base_oid"] = base_oid
     computed = evaluate_convergence(pull_request)
     if computed["converged"]:
         record["last_dispatched_at"] = None
@@ -2006,14 +2155,13 @@ def run_tick(config: Config, logger: JsonLogger) -> list[dict[str, Any]]:
         if record.get("node_id") and not record.get("terminal_state")
     ]
     tracked_node_ids = [record["node_id"] for record in active_records]
-    authenticated_review_heads = {
-        int(number): record["authenticated_review_head"]
+    persisted_records = {
+        int(number): record
         for number, record in state["pull_requests"].items()
-        if isinstance(record.get("authenticated_review_head"), str)
     }
     pull_requests, tracked = GitHubGraphQL(
         config.repository, config.command_timeout_seconds
-    ).snapshot(tracked_node_ids, config.head_pattern, authenticated_review_heads)
+    ).snapshot(tracked_node_ids, config.head_pattern, persisted_records)
     now = time.time()
     summaries = record_terminal_pull_requests(config, logger, state, tracked, now)
     for pull_request in pull_requests:
