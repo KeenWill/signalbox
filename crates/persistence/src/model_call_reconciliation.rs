@@ -1,6 +1,6 @@
 //! Durable daemon-owned reconciliation of ambiguous model calls.
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, time::Duration};
 
 use signalbox_application::{
     ClaimedModelCallReconciliation, ClassifyOperatorFailure, ExhaustedModelCallReconciliation,
@@ -11,7 +11,8 @@ use signalbox_domain::{
     AmbiguousModelCallTurnIdentities, ContextFrontierId, PendingSteeringReclassificationIdentity,
     TurnId,
 };
-use sqlx::{PgConnection, PgPool, Row};
+use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
+use tokio::time::timeout;
 
 use crate::{
     commit_failure_is_ambiguous,
@@ -28,38 +29,87 @@ use crate::{
 // numeric-bound: ceiling - bounds reconciliation transactions started per watchdog scan
 const CLAIM_WINDOW: i64 = 64;
 
-/// How long one claim scan waits for a row lock before giving the turn up.
+/// How long any one reconciliation statement waits for a contended row.
 ///
-/// The scan's caller also bounds this transaction with a client-side timeout,
-/// but dropping a future does not cancel the statement the server is running:
+/// All three transactions here — the claim scan, the claimed attempt, and the
+/// durable failure record — take inventoried row locks unqualified: none skips
+/// a locked row and none refuses to wait. Their caller also bounds them with a
+/// client-side timeout, but that bounds only the daemon's patience, because
+/// dropping a future queues a `ROLLBACK` rather than sending a `CancelRequest`:
 /// the backend keeps waiting for the lock and the pooled connection stays
-/// checked out for the full real wait, so the client bound bounds only the
-/// daemon's patience. `lock_timeout` bounds the database work itself and raises
-/// `55P03`, which this repository already treats as the clean, classifiable
-/// "row was busy" signal. It is set before anything is read or written, so the
-/// scan either holds its singleton rows or has touched nothing.
-// numeric-bound: ceiling - bounds one claim scan's wait for a contended row
-const CLAIM_LOCK_WAIT: &str = "1s";
-
-/// How long one claimed attempt waits for a row lock before giving the turn up.
-///
-/// The attempt transaction takes the delegated child endpoint locks and then
-/// the inventoried strongest-mode lock on the session scheduler row, and takes
-/// them unqualified — it neither skips a locked row nor refuses to wait. Its
-/// caller bounds the attempt with a client-side timeout too, but that bounds
-/// only the daemon, for the reason recorded on the claim scan's budget above:
-/// the dropped future queues a `ROLLBACK` instead of cancelling, so the backend
-/// keeps waiting and every retry strands another pooled connection. Under live
-/// traffic — new exposure, since this transaction used to contend with nothing
-/// — that turns contention into connection exhaustion.
+/// checked out for the full real wait while the caller has already given up and
+/// will retry. Under live traffic that turns contention into connection
+/// exhaustion.
 ///
 /// `lock_timeout` bounds the database work itself and raises `55P03`, which
 /// this repository records as an ordinary infrastructure failure and spends
-/// against the attempt budget. It is set before the first lock is taken, so it
-/// can only interrupt a lock wait, never a commit. It matches the claim scan's
-/// budget because it waits on the same rows for the same reason.
-// numeric-bound: ceiling - bounds one claimed attempt's wait for a contended row
-const ATTEMPT_LOCK_WAIT: &str = "1s";
+/// against the attempt budget. It is set before anything is read or written, so
+/// it can only interrupt a lock wait, never a commit — a transaction that trips
+/// it either holds its rows or has touched nothing.
+///
+/// One budget covers all three because they wait on the same rows for the same
+/// reason, and it is the write budget the quiescent terminalizer already uses:
+/// wide enough that the shared outbox sequence row, which every writer in the
+/// daemon holds from its first append until it commits, is ordinary traffic
+/// rather than a stall, and finite so that one indefinite holder cannot stall
+/// this loop.
+///
+/// It is published because the relationship that makes it work is with the
+/// caller's bound rather than with anything in this module. The caller must let
+/// this budget expire first; if the two are equal the client gives up before
+/// `55P03` can arrive and strands the connection anyway, which is the whole
+/// defect this bound exists to close. [`RECONCILIATION_ACQUIRE_WAIT`] takes
+/// reaching a connection out of that race, and the caller carries the margin
+/// for the rest.
+// numeric-bound: ceiling - bounds one reconciliation statement's wait for a contended row
+pub const RECONCILIATION_LOCK_WAIT: Duration = Duration::from_secs(1);
+
+/// How long one reconciliation transaction waits to reach a pooled connection.
+///
+/// The caller's client-side bound starts before the pool is asked for a
+/// connection, so an acquisition that spent most of that bound would leave
+/// [`RECONCILIATION_LOCK_WAIT`] no room to expire in: the client would give up
+/// first, on a transaction that had not yet begun to be one. The shared pool's
+/// own acquisition timeout is thirty seconds, which is that outcome with room
+/// to spare.
+///
+/// Cancelling an acquisition is safe in a way cancelling later work would not
+/// be: no transaction has begun, so there is nothing whose fate could be
+/// unknown. The value matches the budget the quiescent terminalizer uses for
+/// the same step and the same reason.
+// numeric-bound: tunable - bounds one reconciliation transaction's wait for a pooled connection
+const RECONCILIATION_ACQUIRE_WAIT: Duration = Duration::from_millis(250);
+
+/// Reaches a pooled connection under [`RECONCILIATION_ACQUIRE_WAIT`].
+///
+/// A pool that cannot answer inside the budget reports the driver's own
+/// `PoolTimedOut`, so the caller reads a plain infrastructure failure rather
+/// than learning that this module wraps its acquisitions.
+async fn begin_bounded(
+    pool: &PgPool,
+) -> Result<Transaction<'static, Postgres>, ModelCallReconciliationRepositoryError> {
+    timeout(RECONCILIATION_ACQUIRE_WAIT, pool.begin())
+        .await
+        .unwrap_or(Err(sqlx::Error::PoolTimedOut))
+        .map_err(ModelCallReconciliationRepositoryError::database)
+}
+
+/// Applies [`RECONCILIATION_LOCK_WAIT`] to the transaction on `connection`.
+///
+/// Called before the transaction reads or writes anything, so the only
+/// statement the budget can interrupt is one waiting for a row. A bound that
+/// could fire later — over the whole statement, or over the future — might
+/// interrupt the commit instead, and the caller would then not know whether the
+/// attempt had ended.
+async fn bound_reconciliation_lock_wait(
+    connection: &mut PgConnection,
+) -> Result<(), ModelCallReconciliationRepositoryError> {
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(format!("{}ms", RECONCILIATION_LOCK_WAIT.as_millis()))
+        .execute(connection)
+        .await?;
+    Ok(())
+}
 
 /// The claim statement carries one `CASE` arm per admitted attempt, so its
 /// arity is part of the contract with the domain budget: admitting another
@@ -224,11 +274,8 @@ impl PostgresModelCallReconciliationRepository {
     pub async fn claim_due(
         &self,
     ) -> Result<ModelCallReconciliationBatch, ModelCallReconciliationRepositoryError> {
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-            .bind(CLAIM_LOCK_WAIT)
-            .execute(&mut *transaction)
-            .await?;
+        let mut transaction = begin_bounded(&self.pool).await?;
+        bound_reconciliation_lock_wait(&mut transaction).await?;
         discover_recoveries(&mut transaction, CLAIM_WINDOW).await?;
         settle_abandoned_attempts(&mut transaction, CLAIM_WINDOW).await?;
         mark_superseded_recoveries(&mut transaction, CLAIM_WINDOW).await?;
@@ -278,11 +325,8 @@ impl PostgresModelCallReconciliationRepository {
         &self,
         claimed: ClaimedModelCallReconciliation,
     ) -> Result<ModelCallReconciliationOutcome, ModelCallReconciliationRepositoryError> {
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-            .bind(ATTEMPT_LOCK_WAIT)
-            .execute(&mut *transaction)
-            .await?;
+        let mut transaction = begin_bounded(&self.pool).await?;
+        bound_reconciliation_lock_wait(&mut transaction).await?;
         lock_delegated_child_endpoint_sessions(&mut transaction, claimed.session())
             .await
             .map_err(ModelCallReconciliationRepositoryError::Model)?;
@@ -419,12 +463,24 @@ impl PostgresModelCallReconciliationRepository {
     }
 
     /// Durably classifies an attempt whose authoritative transaction failed.
+    ///
+    /// Both updates take row locks that another daemon's settlement or
+    /// supersession transaction can already hold — the claim scan settles
+    /// abandoned attempts and marks superseded recoveries against exactly these
+    /// two tables — so this transaction is bounded inside the database like its
+    /// siblings. Unbounded, it is the same defect one step later: the caller's
+    /// dropped future queues a `ROLLBACK` instead of cancelling, the backend
+    /// keeps waiting, and a run of failing attempts strands a pooled connection
+    /// apiece until the pool is gone. Failing as `55P03` costs nothing here:
+    /// the attempt is already spent, and the claim scan's own abandonment
+    /// settlement reaches a record this transaction could not write.
     pub async fn record_failure(
         &self,
         claimed: ClaimedModelCallReconciliation,
         failure: ModelCallReconciliationFailureKind,
     ) -> Result<(), ModelCallReconciliationRepositoryError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = begin_bounded(&self.pool).await?;
+        bound_reconciliation_lock_wait(&mut transaction).await?;
         let rows = sqlx::query(
             "UPDATE automatic_model_call_reconciliation_attempt
                 SET outcome_kind = $3, finished_at = statement_timestamp()

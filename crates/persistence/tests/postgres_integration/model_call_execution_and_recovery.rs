@@ -1610,6 +1610,15 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
 /// caller retried. The wait is therefore bounded inside the transaction or not
 /// at all, and the retry after the contention clears is what shows the failure
 /// is ordinary back pressure rather than a spent attempt.
+///
+/// The wrapper is the production one. `signalboxd`'s watchdog wraps every one of
+/// these calls in a client-side bound set at a multiple of
+/// [`RECONCILIATION_LOCK_WAIT`], and its compile-time assertion keeps the two in
+/// step; a test that wrapped a wider bound of its own would pass on an ordering
+/// the daemon never runs, which is exactly how an equal-deadline pair hides.
+/// Both sides are asserted: the failure arrives before the caller's bound, and
+/// not before the database budget it is supposed to have spent — together, that
+/// `55P03` and not the client is what ended the wait.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s04_a_contended_automatic_attempt_gives_the_row_up_inside_the_database()
@@ -1619,6 +1628,7 @@ async fn s04_a_contended_automatic_attempt_gives_the_row_up_inside_the_database(
     let repository = PostgresModelCallReconciliationRepository::new(pool.clone());
     let batch = repository.claim_due().await?;
     let claimed = batch.claimed()[0];
+    let caller_bound = production_reconciliation_caller_bound();
 
     let mut holder = pool.begin().await?;
     sqlx::query(
@@ -1630,13 +1640,12 @@ async fn s04_a_contended_automatic_attempt_gives_the_row_up_inside_the_database(
     .bind(parked.session.into_uuid())
     .fetch_one(&mut *holder)
     .await?;
-    let contended = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        repository.reconcile(claimed),
-    )
-    .await
-    .expect("the attempt bounds its own wait for the held row")
-    .expect_err("a held scheduler row cannot be reconciled");
+    let started = std::time::Instant::now();
+    let contended = tokio::time::timeout(caller_bound, repository.reconcile(claimed))
+        .await
+        .expect("the database budget expires before the production caller bound")
+        .expect_err("a held scheduler row cannot be reconciled");
+    let waited = started.elapsed();
     let parked_still: (String, String) = sqlx::query_as(
         "SELECT lifecycle.state_kind, recovery.state_kind
            FROM turn_lifecycle AS lifecycle
@@ -1676,8 +1685,120 @@ async fn s04_a_contended_automatic_attempt_gives_the_row_up_inside_the_database(
             commit_ambiguous: false
         }
     ));
+    assert!(
+        waited >= RECONCILIATION_LOCK_WAIT,
+        "the attempt spent its database budget waiting, so {waited:?} is what \
+         the server's lock_timeout ended rather than an earlier client giving up"
+    );
+    assert!(
+        waited < caller_bound,
+        "the database budget has to expire inside the caller's bound, but the \
+         wait took {waited:?} of {caller_bound:?}"
+    );
     assert_eq!(parked_still, ("active".into(), "attempting".into()));
     assert_eq!(retried, ModelCallReconciliationOutcome::Reconciled);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The client-side bound `signalboxd` wraps each reconciliation call in.
+///
+/// Derived from the published database-side budget the same way production
+/// derives it, so raising either one cannot leave this test asserting against a
+/// pairing the daemon does not run.
+fn production_reconciliation_caller_bound() -> std::time::Duration {
+    RECONCILIATION_LOCK_WAIT * 5
+}
+
+/// S04 / S10: the durable failure record is bounded inside the database too, so
+/// a run of contended attempts cannot strand a pooled connection apiece.
+///
+/// This transaction updates the attempt row and its recovery row, and both are
+/// rows another daemon's claim scan already writes — it settles abandoned
+/// attempts and marks superseded recoveries against exactly these two tables.
+/// Unbounded it is the sibling defect one step later: the caller's dropped
+/// future queues a `ROLLBACK` rather than cancelling, so the backend keeps
+/// waiting while the watchdog moves on. Failing as `55P03` costs nothing, since
+/// the attempt is already spent and the claim scan's own abandonment settlement
+/// reaches a record this transaction could not write.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s04_a_contended_failure_record_gives_the_row_up_inside_the_database()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let parked = park_restart_ambiguity(&pool, 0xF200).await?;
+    let repository = PostgresModelCallReconciliationRepository::new(pool.clone());
+    let batch = repository.claim_due().await?;
+    let claimed = batch.claimed()[0];
+    let caller_bound = production_reconciliation_caller_bound();
+
+    let mut holder = pool.begin().await?;
+    sqlx::query(
+        "SELECT turn_id
+           FROM automatic_model_call_reconciliation_attempt
+          WHERE turn_id = $1 AND attempt_ordinal = $2
+          FOR UPDATE",
+    )
+    .bind(parked.turn.into_uuid())
+    .bind(i64::from(claimed.attempt().get()))
+    .fetch_one(&mut *holder)
+    .await?;
+    let started = std::time::Instant::now();
+    let contended = tokio::time::timeout(
+        caller_bound,
+        repository.record_failure(claimed, ModelCallReconciliationFailureKind::Infrastructure),
+    )
+    .await
+    .expect("the database budget expires before the production caller bound")
+    .expect_err("a held attempt row cannot be recorded against");
+    let waited = started.elapsed();
+    holder.rollback().await?;
+    let recorded = repository
+        .record_failure(claimed, ModelCallReconciliationFailureKind::Infrastructure)
+        .await;
+    let settled: (String, String) = sqlx::query_as(
+        "SELECT attempt.outcome_kind, recovery.state_kind
+           FROM automatic_model_call_reconciliation_attempt AS attempt
+           JOIN automatic_model_call_reconciliation AS recovery
+             ON recovery.turn_id = attempt.turn_id
+          WHERE attempt.turn_id = $1 AND attempt.attempt_ordinal = $2",
+    )
+    .bind(parked.turn.into_uuid())
+    .bind(i64::from(claimed.attempt().get()))
+    .fetch_one(&pool)
+    .await?;
+
+    let ModelCallReconciliationRepositoryError::Database {
+        commit_ambiguous,
+        source,
+    } = &contended
+    else {
+        panic!("a bounded lock wait fails as an ordinary database failure")
+    };
+    assert!(!commit_ambiguous);
+    assert_eq!(
+        source
+            .as_database_error()
+            .and_then(|failure| failure.code())
+            .as_deref(),
+        Some("55P03"),
+        "the wait ends as lock_not_available, not as an open-ended block"
+    );
+    assert!(
+        waited >= RECONCILIATION_LOCK_WAIT && waited < caller_bound,
+        "the server's budget is what ended the wait, but it took {waited:?}"
+    );
+    assert!(
+        recorded.is_ok(),
+        "the record is written once the contention clears"
+    );
+    assert_eq!(
+        settled,
+        ("infrastructure_failure".into(), "scheduled".into()),
+        "the retried record classifies the attempt and reschedules the recovery"
+    );
 
     pool.close().await;
     drop(container);

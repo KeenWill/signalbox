@@ -19,6 +19,7 @@ use signalbox_domain::{
 use signalbox_persistence::{
     model_call_reconciliation::{
         ModelCallReconciliationRepositoryError, PostgresModelCallReconciliationRepository,
+        RECONCILIATION_LOCK_WAIT,
     },
     startup::{PostgresStartupScanRepository, StartupScanRepositoryError},
     turn_liveness::{PostgresTurnLivenessRepository, TurnLivenessRepositoryError},
@@ -112,6 +113,41 @@ const QUIESCENT_ROTATION_PAGE_CEILING: usize = 4_096;
 /// Wall-clock bound for one detached durable recovery transaction.
 // numeric-bound: ceiling - prevents one database operation from wedging liveness supervision
 const RECOVERY_ATTEMPT_BOUND: Duration = Duration::from_secs(1);
+
+/// Wall-clock bound for one durable ambiguous-call reconciliation transaction.
+///
+/// Deliberately wider than [`RECOVERY_ATTEMPT_BOUND`], because these three
+/// transactions bound their row waits inside PostgreSQL and this bound must let
+/// that happen. The two timers do not measure the same thing: this one starts
+/// before the pool is asked for a connection and runs across `BEGIN`,
+/// `set_config`, and every statement, whereas `lock_timeout` starts only when a
+/// lock is actually awaited and applies per statement. Set equal, the client
+/// wins the race — and losing it is not a smaller failure but the original one,
+/// since dropping the future queues a `ROLLBACK` rather than cancelling, so the
+/// backend keeps waiting for the lock and the pooled connection stays checked
+/// out. The database-side budget only works if it expires first.
+///
+/// The margin is against the attempt's whole lock exposure, not one statement's:
+/// it takes the delegated child endpoint locks, the inventoried scheduler row,
+/// the parent endpoint session, and the shared outbox sequence row, so a
+/// pathological attempt can spend a budget at each. Five times a single budget
+/// clears that sum and leaves this bound doing what it is for — catching a
+/// backend that has stopped answering at all, which no `lock_timeout` covers.
+///
+/// A windowful of attempts that each ran to this bound would outlast the scan
+/// interval, and that is the acceptable direction: those attempts are contended
+/// ones that changed nothing and come due again, so the cost is laps rather than
+/// a scan that decided on part of its window.
+// numeric-bound: ceiling - bounds one reconciliation transaction with margin over its database-side budget
+const RECONCILIATION_ATTEMPT_BOUND: Duration = Duration::from_secs(5);
+
+/// The margin above must hold as an arithmetic fact, not as a comment: the two
+/// constants live in different crates, and a database-side budget raised to
+/// meet this bound would silently restore the strand it was set to prevent.
+const _: () = assert!(
+    RECONCILIATION_ATTEMPT_BOUND.as_millis() >= 4 * RECONCILIATION_LOCK_WAIT.as_millis(),
+    "the reconciliation caller bound must outlast its database-side lock budget"
+);
 
 /// What one scan's terminalization phase actually did.
 ///
@@ -564,7 +600,7 @@ fn report_slot_held_recovery_failure(
 
 /// Claims and applies one bounded window of durable ambiguous-call work.
 async fn reconcile_ambiguous_model_calls(repository: &PostgresModelCallReconciliationRepository) {
-    let batch = match timeout(RECOVERY_ATTEMPT_BOUND, repository.claim_due()).await {
+    let batch = match timeout(RECONCILIATION_ATTEMPT_BOUND, repository.claim_due()).await {
         Ok(Ok(batch)) => batch,
         Ok(Err(error)) => {
             report_model_call_reconciliation_failure("inventory", None, &error);
@@ -586,7 +622,7 @@ async fn reconcile_ambiguous_model_calls(repository: &PostgresModelCallReconcili
         );
     }
     for claimed in batch.claimed() {
-        match timeout(RECOVERY_ATTEMPT_BOUND, repository.reconcile(*claimed)).await {
+        match timeout(RECONCILIATION_ATTEMPT_BOUND, repository.reconcile(*claimed)).await {
             Ok(Ok(ModelCallReconciliationOutcome::Reconciled)) => tracing::warn!(
                 cause_code = "model_call_automatically_reconciled",
                 session_id = %claimed.session().as_uuid(),
@@ -612,7 +648,7 @@ async fn reconcile_ambiguous_model_calls(repository: &PostgresModelCallReconcili
                     }
                 ) {
                     match timeout(
-                        RECOVERY_ATTEMPT_BOUND,
+                        RECONCILIATION_ATTEMPT_BOUND,
                         repository.record_failure(*claimed, error.failure_kind()),
                     )
                     .await
@@ -648,14 +684,14 @@ fn report_model_call_reconciliation_timeout(
             turn_id = %claimed.turn().as_uuid(),
             model_call_id = %claimed.call().as_uuid(),
             attempt = claimed.attempt().get(),
-            attempt_bound_seconds = RECOVERY_ATTEMPT_BOUND.as_secs(),
+            attempt_bound_seconds = RECONCILIATION_ATTEMPT_BOUND.as_secs(),
             "automatic model-call reconciliation exceeded its bound; the durable attempt remains recoverable"
         ),
         None => tracing::error!(
             failure_class = ?signalbox_application::OperatorFailureClass::Infrastructure { commit_ambiguous: true },
             cause_code = "model_call_reconciliation_timed_out",
             stage,
-            attempt_bound_seconds = RECOVERY_ATTEMPT_BOUND.as_secs(),
+            attempt_bound_seconds = RECONCILIATION_ATTEMPT_BOUND.as_secs(),
             "automatic model-call reconciliation inventory exceeded its bound"
         ),
     }
@@ -961,13 +997,13 @@ fn report_slot_held_page_timeout(phase: &'static str) {
 mod tests {
     use super::{
         InventoryPage, PASS_FAILURE_CAUSE, QUIESCENT_ROTATION_PAGE_CEILING, QuiescentInventory,
-        RECOVERY_ATTEMPT_BOUND, ROTATION_CEILING_CAUSE, SLOT_HELD_PAGE_TIMEOUT_CAUSE,
-        STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_LOCK_UNAVAILABLE_CAUSE,
-        STALE_TURN_STEERING_BLOCKED_CAUSE, STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE,
-        SlotHeldInventory, StaleTurnTerminalizer, TERMINALIZATION_DEFERRED_CAUSE,
-        TERMINALIZATIONS_PER_SCAN, TerminalizationWindow, TurnLivenessWake,
-        drain_quiescent_rotation, drain_slot_held_rotation, next_turn_liveness_wake,
-        reconcile_turn_liveness,
+        RECONCILIATION_ATTEMPT_BOUND, RECONCILIATION_LOCK_WAIT, RECOVERY_ATTEMPT_BOUND,
+        ROTATION_CEILING_CAUSE, SLOT_HELD_PAGE_TIMEOUT_CAUSE, STALE_TURN_AMBIGUOUS_CAUSE,
+        STALE_TURN_LOCK_UNAVAILABLE_CAUSE, STALE_TURN_STEERING_BLOCKED_CAUSE,
+        STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE, SlotHeldInventory,
+        StaleTurnTerminalizer, TERMINALIZATION_DEFERRED_CAUSE, TERMINALIZATIONS_PER_SCAN,
+        TerminalizationWindow, TurnLivenessWake, drain_quiescent_rotation,
+        drain_slot_held_rotation, next_turn_liveness_wake, reconcile_turn_liveness,
     };
     use signalbox_application::{
         StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
@@ -1536,5 +1572,22 @@ mod tests {
         assert_eq!(lowered.get(), shortened);
         assert_eq!(StaleActiveTurnBound::hard_ceiling().as_secs(), 1_800);
         assert_eq!(RECOVERY_ATTEMPT_BOUND, Duration::from_secs(1));
+    }
+
+    /// The reconciliation stages are bounded above their database-side lock
+    /// budget, so a contended row ends as `55P03` under the caller's timer
+    /// rather than as a dropped future that leaves the backend still waiting.
+    ///
+    /// Stated here as well as in the compile-time assertion because the two
+    /// answer different questions: that one rejects a margin that has vanished,
+    /// this one records which side of the pair the margin belongs to.
+    #[test]
+    fn the_reconciliation_bound_outlasts_its_database_budget() {
+        assert_eq!(RECONCILIATION_ATTEMPT_BOUND, Duration::from_secs(5));
+        assert_eq!(RECONCILIATION_LOCK_WAIT, Duration::from_secs(1));
+        assert!(
+            RECONCILIATION_ATTEMPT_BOUND > RECONCILIATION_LOCK_WAIT,
+            "the database-side budget has to be the one that expires first"
+        );
     }
 }
