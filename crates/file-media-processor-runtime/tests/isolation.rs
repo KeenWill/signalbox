@@ -240,6 +240,7 @@ fn declaration() -> Result<(FileMediaProviderDeclaration, ReaderIdentity), Box<d
             "application/x-signalbox-synthetic",
         )?],
         probe: ProbeDeclaration::new(1, 0, 1, 1),
+        validation: signalbox_file_media_runtime::ValidationDeclaration::new(64, 1),
         views: vec![view],
         reason_codes: vec![ReasonCode::try_new("synthetic_failure")?],
         streaming_text_fallback: StreamingTextFallback::Disabled,

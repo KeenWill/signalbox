@@ -16,8 +16,8 @@ use signalbox_file_media_runtime::{
     ProbeDeclaration, ProbeStrength, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
     ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds,
     ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity,
-    ReasonCode, SourceReadError, SourceReadFuture, StreamingTextFallback, ValidationEvidence,
-    VerifiedBlobSource,
+    ReasonCode, SourceReadError, SourceReadFuture, StreamingTextFallback, ValidationDeclaration,
+    ValidationEvidence, VerifiedBlobSource,
 };
 
 const SYNTHETIC_MEDIA_TYPE: &str = "application/x-signalbox-synthetic";
@@ -71,6 +71,7 @@ impl VerifiedBlobSource for MemorySource {
 #[derive(Clone, Copy)]
 enum ValidationBehavior {
     Valid,
+    ValidWithEnvelope { source_bytes: u64, ranges: u32 },
     OversizedMetadata,
     MalformedMetadata,
 }
@@ -134,13 +135,24 @@ impl FileMediaProcessor for SyntheticProcessor {
         _cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
         Box::pin(async move {
-            if request.maximum_source_bytes != MAX_VALIDATION_SOURCE_BYTES
-                || request.maximum_ranges != MAX_VALIDATION_RANGES
-            {
+            let expected_envelope = match self.validation {
+                ValidationBehavior::ValidWithEnvelope {
+                    source_bytes,
+                    ranges,
+                } => (source_bytes, ranges),
+                ValidationBehavior::Valid
+                | ValidationBehavior::OversizedMetadata
+                | ValidationBehavior::MalformedMetadata => {
+                    (MAX_VALIDATION_SOURCE_BYTES, MAX_VALIDATION_RANGES)
+                }
+            };
+            if (request.maximum_source_bytes, request.maximum_ranges) != expected_envelope {
                 return Err(ProcessorFailure::Failed.into());
             }
             let metadata_json = match self.validation {
-                ValidationBehavior::Valid => String::from(r#"{"synthetic":true}"#),
+                ValidationBehavior::Valid | ValidationBehavior::ValidWithEnvelope { .. } => {
+                    String::from(r#"{"synthetic":true}"#)
+                }
                 ValidationBehavior::OversizedMetadata => {
                     format!(r#"{{"filler":"{}"}}"#, "x".repeat(16_385))
                 }
@@ -260,6 +272,18 @@ fn registry_with_view(view: ReadViewDeclaration) -> FileMediaRegistry {
 fn registry_with_view_result(
     view: ReadViewDeclaration,
 ) -> Result<FileMediaRegistry, signalbox_file_media_runtime::FileMediaRegistryConstructionError> {
+    registry_with_view_validation_and_ceilings(
+        view,
+        ValidationDeclaration::new(MAX_VALIDATION_SOURCE_BYTES, MAX_VALIDATION_RANGES),
+        FileMediaCeilings::version_one(),
+    )
+}
+
+fn registry_with_view_validation_and_ceilings(
+    view: ReadViewDeclaration,
+    validation: ValidationDeclaration,
+    ceilings: FileMediaCeilings,
+) -> Result<FileMediaRegistry, signalbox_file_media_runtime::FileMediaRegistryConstructionError> {
     let provider =
         FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
     let reader = ReaderDeclaration::try_new(ReaderDeclarationInput {
@@ -268,6 +292,7 @@ fn registry_with_view_result(
         revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
         media_types: vec![media_type(SYNTHETIC_MEDIA_TYPE)],
         probe: ProbeDeclaration::new(4, 0, 0, 4),
+        validation,
         views: vec![view],
         reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
         streaming_text_fallback: StreamingTextFallback::Disabled,
@@ -275,11 +300,7 @@ fn registry_with_view_result(
     .expect("fixture reader declaration is nonempty");
     let declaration = FileMediaProviderDeclaration::try_new(provider, vec![reader])
         .expect("fixture provider owns its reader");
-    FileMediaRegistry::try_new(
-        vec![declaration],
-        FileMediaCeilings::version_one(),
-        ProcessorIsolation::Available,
-    )
+    FileMediaRegistry::try_new(vec![declaration], ceilings, ProcessorIsolation::Available)
 }
 
 fn inspection_request(source: &MemorySource, declared: &str) -> InspectionRequest {
@@ -429,6 +450,10 @@ fn selection_registry_with_ceilings(
         revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
         media_types: vec![media_type(owned_media_type)],
         probe: ProbeDeclaration::new(4, 0, 0, 4),
+        validation: signalbox_file_media_runtime::ValidationDeclaration::new(
+            MAX_VALIDATION_SOURCE_BYTES,
+            MAX_VALIDATION_RANGES,
+        ),
         views: vec![text_view()],
         reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
         streaming_text_fallback,
@@ -1002,6 +1027,10 @@ fn provider_declaration(name: &str, owned_media_type: &str) -> FileMediaProvider
         revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
         media_types: vec![media_type(owned_media_type)],
         probe: ProbeDeclaration::new(4, 0, 0, 4),
+        validation: signalbox_file_media_runtime::ValidationDeclaration::new(
+            MAX_VALIDATION_SOURCE_BYTES,
+            MAX_VALIDATION_RANGES,
+        ),
         views: vec![text_view()],
         reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
         streaming_text_fallback: StreamingTextFallback::Disabled,
@@ -1184,6 +1213,10 @@ fn oversized_inspection_view_inventory_is_rejected() {
         revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
         media_types: vec![media_type(SYNTHETIC_MEDIA_TYPE)],
         probe: ProbeDeclaration::new(4, 0, 0, 4),
+        validation: signalbox_file_media_runtime::ValidationDeclaration::new(
+            MAX_VALIDATION_SOURCE_BYTES,
+            MAX_VALIDATION_RANGES,
+        ),
         views,
         reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
         streaming_text_fallback: StreamingTextFallback::Disabled,
@@ -1288,6 +1321,53 @@ fn validation_source_work_ceiling_can_only_be_lowered() {
     assert!(!compiled.admits(raised_ranges));
 }
 
+#[test]
+fn reader_validation_envelope_clamps_registry_request() {
+    let source = MemorySource::synthetic();
+    let registry = registry_with_view_validation_and_ceilings(
+        text_view(),
+        ValidationDeclaration::new(32, 2),
+        FileMediaCeilings::version_one(),
+    )
+    .expect("reader validation envelope is within compiled ceilings");
+    let processor = SyntheticProcessor {
+        validation: ValidationBehavior::ValidWithEnvelope {
+            source_bytes: 32,
+            ranges: 2,
+        },
+        read: ReadBehavior::Text,
+    };
+
+    let outcome = inspect(&registry, &processor, &source, SYNTHETIC_MEDIA_TYPE);
+
+    assert!(matches!(outcome, Ok(FileInspection::Validated { .. })));
+}
+
+#[test]
+fn lowered_global_validation_envelope_clamps_reader_request() {
+    let source = MemorySource::synthetic();
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 16;
+    ceilings.validation_ranges = 1;
+    let registry = registry_with_view_validation_and_ceilings(
+        text_view(),
+        ValidationDeclaration::new(32, 2),
+        ceilings,
+    )
+    .expect("lowered global ceilings admit the reader declaration");
+    let processor = SyntheticProcessor {
+        validation: ValidationBehavior::ValidWithEnvelope {
+            source_bytes: 16,
+            ranges: 1,
+        },
+        read: ReadBehavior::Text,
+    };
+
+    let outcome = inspect(&registry, &processor, &source, SYNTHETIC_MEDIA_TYPE);
+
+    assert!(matches!(outcome, Ok(FileInspection::Validated { .. })));
+}
+
 fn bounded_text_view(access: ReadAccessPattern, source_bytes: u64) -> ReadViewDeclaration {
     ReadViewDeclaration::try_new(
         ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
@@ -1325,6 +1405,10 @@ fn reader_declaration_with_view(
         revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
         media_types: vec![media_type(SYNTHETIC_MEDIA_TYPE)],
         probe: ProbeDeclaration::new(4, 0, 0, 4),
+        validation: signalbox_file_media_runtime::ValidationDeclaration::new(
+            MAX_VALIDATION_SOURCE_BYTES,
+            MAX_VALIDATION_RANGES,
+        ),
         views: vec![view],
         reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
         streaming_text_fallback: StreamingTextFallback::Disabled,
@@ -1357,6 +1441,10 @@ fn reader_declaration_with_probe(
         revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
         media_types: vec![media_type(owned_media_type)],
         probe,
+        validation: signalbox_file_media_runtime::ValidationDeclaration::new(
+            MAX_VALIDATION_SOURCE_BYTES,
+            MAX_VALIDATION_RANGES,
+        ),
         views: vec![text_view()],
         reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
         streaming_text_fallback: StreamingTextFallback::Disabled,

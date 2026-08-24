@@ -58,6 +58,9 @@ where
             fingerprint_u64(&mut fingerprint, probe.suffix_bytes());
             fingerprint_u64(&mut fingerprint, u64::from(probe.range_count()));
             fingerprint_u64(&mut fingerprint, probe.cumulative_bytes());
+            let validation = reader.validation();
+            fingerprint_u64(&mut fingerprint, validation.source_bytes());
+            fingerprint_u64(&mut fingerprint, u64::from(validation.range_count()));
             fingerprint_len(&mut fingerprint, reader.views().len());
             for view in reader.views() {
                 fingerprint_field(&mut fingerprint, view.name().as_str().as_bytes());
@@ -521,10 +524,64 @@ pub(crate) fn decode_bytes(encoded: &str) -> Result<Vec<u8>, ProtocolValueError>
 #[cfg(test)]
 mod tests {
     use signalbox_file_media_runtime::{
-        MAX_PROCESSOR_FRAME_BYTES, MAX_TEXT_OR_JSON_BYTES, ProcessorReadOutput,
+        CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProviderDeclaration,
+        FileReaderName, FileReaderProviderName, FileReaderRevision, MAX_PROCESSOR_FRAME_BYTES,
+        MAX_TEXT_OR_JSON_BYTES, ProbeDeclaration, ProcessorReadOutput, ReadAccessPattern,
+        ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
+        ReaderDeclarationInput, ReasonCode, StreamingTextFallback, ValidationDeclaration,
     };
 
-    use super::WorkerFrame;
+    use super::{WorkerFrame, declaration_fingerprint};
+
+    fn declaration_with_validation(
+        validation: ValidationDeclaration,
+    ) -> FileMediaProviderDeclaration {
+        let provider =
+            FileReaderProviderName::try_new("fixture").expect("fixture provider name is valid");
+        let view = ReadViewDeclaration::try_new(
+            ReadViewName::try_new("text").expect("fixture view name is valid"),
+            String::from("Reads fixture text."),
+            CanonicalJsonObjectSchema::try_new(r#"{"type":"object"}"#)
+                .expect("fixture schema is valid"),
+            ReadAccessPattern::Streaming { maximum_ranges: 1 },
+            ReadViewBounds::Text {
+                source_bytes: 64,
+                output_bytes: 64,
+            },
+        )
+        .expect("fixture view declaration is valid");
+        let reader = ReaderDeclaration::try_new(ReaderDeclarationInput {
+            provider: provider.clone(),
+            reader: FileReaderName::try_new("reader").expect("fixture reader name is valid"),
+            revision: FileReaderRevision::try_new("v1").expect("fixture revision is valid"),
+            media_types: vec![
+                "application/x-signalbox-fixture"
+                    .parse::<CanonicalMediaType>()
+                    .expect("fixture media type is valid"),
+            ],
+            probe: ProbeDeclaration::new(1, 0, 0, 1),
+            validation,
+            views: vec![view],
+            reason_codes: vec![
+                ReasonCode::try_new("fixture_failure").expect("fixture reason is valid"),
+            ],
+            streaming_text_fallback: StreamingTextFallback::Disabled,
+        })
+        .expect("fixture reader declaration is valid");
+        FileMediaProviderDeclaration::try_new(provider, vec![reader])
+            .expect("fixture provider owns its reader")
+    }
+
+    #[test]
+    fn validation_envelope_changes_declaration_fingerprint() {
+        let smaller = declaration_with_validation(ValidationDeclaration::new(64, 1));
+        let larger = declaration_with_validation(ValidationDeclaration::new(128, 2));
+
+        assert_ne!(
+            declaration_fingerprint(&[smaller]),
+            declaration_fingerprint(&[larger])
+        );
+    }
 
     #[test]
     fn maximum_escape_heavy_structured_output_fits_one_frame() {

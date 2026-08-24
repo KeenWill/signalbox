@@ -15,7 +15,7 @@ pub use declaration::{
     FileMediaProviderFuture, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
     ProbeDeclaration, ProbeStrength, ReadAccessPattern, ReadOutputKind, ReadViewBounds,
     ReadViewDeclaration, ReaderDeclaration, ReaderDeclarationInput, RegistryDeclarationError,
-    StreamingTextFallback,
+    StreamingTextFallback, ValidationDeclaration,
 };
 pub use detection::{
     CancellationSignal, FileInspection, FileInspectionStatus, FileMediaFailure, FileMediaProcessor,

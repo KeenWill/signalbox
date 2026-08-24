@@ -12,7 +12,8 @@ use signalbox_file_media_runtime::{
     FileMediaProviderValidationRequest, FileReaderName, FileReaderProviderName, FileReaderRevision,
     ProbeDeclaration, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
     ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
-    ReaderDeclarationInput, ReaderIdentity, ReasonCode, StreamingTextFallback, VerifiedBlobSource,
+    ReaderDeclarationInput, ReaderIdentity, ReasonCode, StreamingTextFallback,
+    ValidationDeclaration, VerifiedBlobSource,
 };
 pub use signalbox_file_media_runtime::{
     MAX_DECODED_IMAGE_PIXELS as MAX_IMAGE_DECODED_PIXELS, MAX_IMAGE_AXIS,
@@ -21,60 +22,69 @@ pub use signalbox_file_media_runtime::{
 const PROVIDER_NAME: &str = "signalbox_image";
 const READER_REVISION: &str = "v1";
 pub(crate) const METADATA_VIEW_NAME: &str = "metadata";
+pub(crate) const MALFORMED_IMAGE_REASON: &str = "malformed_image";
+pub(crate) const SOURCE_TOO_LARGE_REASON: &str = "source_too_large";
+pub(crate) const DIMENSION_LIMIT_EXCEEDED_REASON: &str = "dimension_limit_exceeded";
+pub(crate) const PIXEL_LIMIT_EXCEEDED_REASON: &str = "pixel_limit_exceeded";
 
 /// Maximum encoded bytes one image adapter accepts.
 // numeric-bound: ceiling - protects worker memory and decode latency from oversized inputs
 pub const MAX_IMAGE_SOURCE_BYTES: u64 = 262_144;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AdapterFormat {
-    Png,
-    Jpeg,
-    WebP,
-    Gif,
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AdapterFormat {
+    reader_name: &'static str,
+    media_type: &'static str,
+    image_format: ImageFormat,
+    matches_signature: fn(&[u8]) -> bool,
 }
 
 impl AdapterFormat {
-    const ALL: [Self; 4] = [Self::Png, Self::Jpeg, Self::WebP, Self::Gif];
-
     const fn reader_name(self) -> &'static str {
-        match self {
-            Self::Png => "png",
-            Self::Jpeg => "jpeg",
-            Self::WebP => "webp",
-            Self::Gif => "gif",
-        }
+        self.reader_name
     }
 
     const fn media_type(self) -> &'static str {
-        match self {
-            Self::Png => "image/png",
-            Self::Jpeg => "image/jpeg",
-            Self::WebP => "image/webp",
-            Self::Gif => "image/gif",
-        }
+        self.media_type
     }
 
     const fn image_format(self) -> ImageFormat {
-        match self {
-            Self::Png => ImageFormat::Png,
-            Self::Jpeg => ImageFormat::Jpeg,
-            Self::WebP => ImageFormat::WebP,
-            Self::Gif => ImageFormat::Gif,
-        }
+        self.image_format
     }
 
     fn matches_signature(self, prefix: &[u8]) -> bool {
-        match self {
-            Self::Png => prefix.starts_with(b"\x89PNG\r\n\x1a\n"),
-            Self::Jpeg => prefix.starts_with(&[0xff, 0xd8, 0xff]),
-            Self::WebP => {
-                prefix.starts_with(b"RIFF") && prefix.get(8..12) == Some(b"WEBP".as_slice())
-            }
-            Self::Gif => prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a"),
-        }
+        (self.matches_signature)(prefix)
     }
 }
+
+const ADAPTER_FORMATS: [AdapterFormat; 4] = [
+    AdapterFormat {
+        reader_name: "png",
+        media_type: "image/png",
+        image_format: ImageFormat::Png,
+        matches_signature: |prefix| prefix.starts_with(b"\x89PNG\r\n\x1a\n"),
+    },
+    AdapterFormat {
+        reader_name: "jpeg",
+        media_type: "image/jpeg",
+        image_format: ImageFormat::Jpeg,
+        matches_signature: |prefix| prefix.starts_with(&[0xff, 0xd8, 0xff]),
+    },
+    AdapterFormat {
+        reader_name: "webp",
+        media_type: "image/webp",
+        image_format: ImageFormat::WebP,
+        matches_signature: |prefix| {
+            prefix.starts_with(b"RIFF") && prefix.get(8..12) == Some(b"WEBP".as_slice())
+        },
+    },
+    AdapterFormat {
+        reader_name: "gif",
+        media_type: "image/gif",
+        image_format: ImageFormat::Gif,
+        matches_signature: |prefix| prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a"),
+    },
+];
 
 /// Compiled provider for the four version-one image readers.
 #[derive(Clone, Copy, Debug, Default)]
@@ -137,7 +147,7 @@ impl FileMediaProvider for ImageFamilyProvider {
 pub fn image_family_declaration()
 -> Result<FileMediaProviderDeclaration, Box<dyn Error + Send + Sync>> {
     let provider = FileReaderProviderName::try_new(PROVIDER_NAME)?;
-    let readers = AdapterFormat::ALL
+    let readers = ADAPTER_FORMATS
         .into_iter()
         .map(|format| reader(&provider, format))
         .collect::<Result<Vec<_>, _>>()?;
@@ -149,10 +159,10 @@ fn reader(
     format: AdapterFormat,
 ) -> Result<ReaderDeclaration, Box<dyn Error + Send + Sync>> {
     let reasons = [
-        "malformed_image",
-        "source_too_large",
-        "dimension_limit_exceeded",
-        "pixel_limit_exceeded",
+        MALFORMED_IMAGE_REASON,
+        SOURCE_TOO_LARGE_REASON,
+        DIMENSION_LIMIT_EXCEEDED_REASON,
+        PIXEL_LIMIT_EXCEEDED_REASON,
     ]
     .into_iter()
     .map(ReasonCode::try_new)
@@ -163,6 +173,7 @@ fn reader(
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(format.media_type())?],
         probe: ProbeDeclaration::new(16, 0, 0, 16),
+        validation: ValidationDeclaration::new(MAX_IMAGE_SOURCE_BYTES, 1),
         views: vec![metadata_view()?],
         reason_codes: reasons,
         streaming_text_fallback: StreamingTextFallback::Disabled,
@@ -186,7 +197,7 @@ fn metadata_view() -> Result<ReadViewDeclaration, Box<dyn Error + Send + Sync>> 
 }
 
 fn format_for_reader(reader: &ReaderIdentity) -> Result<AdapterFormat, FileMediaProviderFailure> {
-    AdapterFormat::ALL
+    ADAPTER_FORMATS
         .into_iter()
         .find(|format| format.reader_name() == reader.reader().as_str())
         .ok_or(FileMediaProviderFailure::Failed)

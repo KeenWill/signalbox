@@ -69,6 +69,33 @@ impl ProbeDeclaration {
     }
 }
 
+/// Finite source-read envelope for one validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ValidationDeclaration {
+    source_bytes: u64,
+    range_count: u32,
+}
+
+impl ValidationDeclaration {
+    /// Declares one finite validation envelope. Registry construction checks ceilings.
+    pub const fn new(source_bytes: u64, range_count: u32) -> Self {
+        Self {
+            source_bytes,
+            range_count,
+        }
+    }
+
+    /// Returns the cumulative source-byte budget.
+    pub const fn source_bytes(self) -> u64 {
+        self.source_bytes
+    }
+
+    /// Returns the exact-range request budget.
+    pub const fn range_count(self) -> u32 {
+        self.range_count
+    }
+}
+
 /// Whether one reader is eligible for the complete-stream UTF-8 fallback.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamingTextFallback {
@@ -262,6 +289,7 @@ pub struct ReaderDeclaration {
     identity: ReaderIdentity,
     media_types: Vec<CanonicalMediaType>,
     probe: ProbeDeclaration,
+    validation: ValidationDeclaration,
     views: Vec<ReadViewDeclaration>,
     reason_codes: Vec<ReasonCode>,
     streaming_text_fallback: StreamingTextFallback,
@@ -280,6 +308,8 @@ pub struct ReaderDeclarationInput {
     pub media_types: Vec<CanonicalMediaType>,
     /// Finite probe envelope.
     pub probe: ProbeDeclaration,
+    /// Finite validation envelope.
+    pub validation: ValidationDeclaration,
     /// Nonempty provider-owned view inventory.
     pub views: Vec<ReadViewDeclaration>,
     /// Nonempty sanitized reason-code inventory.
@@ -298,6 +328,7 @@ impl ReaderDeclaration {
             identity: ReaderIdentity::new(input.provider, input.reader, input.revision),
             media_types: input.media_types,
             probe: input.probe,
+            validation: input.validation,
             views: input.views,
             reason_codes: input.reason_codes,
             streaming_text_fallback: input.streaming_text_fallback,
@@ -317,6 +348,11 @@ impl ReaderDeclaration {
     /// Returns the probe envelope.
     pub const fn probe(&self) -> ProbeDeclaration {
         self.probe
+    }
+
+    /// Returns the validation envelope.
+    pub const fn validation(&self) -> ValidationDeclaration {
+        self.validation
     }
 
     /// Borrows provider-owned views.

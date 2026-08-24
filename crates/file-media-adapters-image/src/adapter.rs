@@ -8,8 +8,9 @@ use signalbox_file_media_runtime::{
 };
 
 use crate::{
-    AdapterFormat, MAX_IMAGE_AXIS, MAX_IMAGE_DECODED_PIXELS, MAX_IMAGE_SOURCE_BYTES,
-    METADATA_VIEW_NAME, options_are_empty, source,
+    AdapterFormat, DIMENSION_LIMIT_EXCEEDED_REASON, MALFORMED_IMAGE_REASON, MAX_IMAGE_AXIS,
+    MAX_IMAGE_DECODED_PIXELS, MAX_IMAGE_SOURCE_BYTES, METADATA_VIEW_NAME,
+    PIXEL_LIMIT_EXCEEDED_REASON, SOURCE_TOO_LARGE_REASON, options_are_empty, source,
 };
 
 // numeric-bound: ceiling - protects worker memory from runaway decoder allocation
@@ -50,7 +51,7 @@ pub(crate) async fn inspect(
     let Some(bytes) =
         source::read_complete(source, cancellation, request.maximum_source_bytes).await?
     else {
-        return Ok(malformed(format, "source_too_large"));
+        return Ok(malformed(format, SOURCE_TOO_LARGE_REASON));
     };
     let metadata = match decode(
         format,
@@ -108,17 +109,17 @@ fn decode(
 ) -> Result<ImageMetadata, &'static str> {
     let dimensions = ImageReader::with_format(Cursor::new(bytes), format.image_format())
         .into_dimensions()
-        .map_err(|_| "malformed_image")?;
+        .map_err(|_| MALFORMED_IMAGE_REASON)?;
     let maximum_axis = maximum_axis.min(MAX_IMAGE_AXIS);
     let maximum_pixels = maximum_pixels.min(MAX_IMAGE_DECODED_PIXELS);
     if dimensions.0 > maximum_axis || dimensions.1 > maximum_axis {
-        return Err("dimension_limit_exceeded");
+        return Err(DIMENSION_LIMIT_EXCEEDED_REASON);
     }
     let pixels = u64::from(dimensions.0)
         .checked_mul(u64::from(dimensions.1))
-        .ok_or("pixel_limit_exceeded")?;
+        .ok_or(PIXEL_LIMIT_EXCEEDED_REASON)?;
     if pixels > maximum_pixels {
-        return Err("pixel_limit_exceeded");
+        return Err(PIXEL_LIMIT_EXCEEDED_REASON);
     }
 
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format.image_format());
@@ -127,10 +128,10 @@ fn decode(
     limits.max_image_height = Some(maximum_axis);
     limits.max_alloc = Some(MAX_DECODER_ALLOCATION_BYTES);
     reader.limits(limits);
-    let image = reader.decode().map_err(|_| "malformed_image")?;
+    let image = reader.decode().map_err(|_| MALFORMED_IMAGE_REASON)?;
     let decoded_dimensions = image.dimensions();
     if decoded_dimensions != dimensions {
-        return Err("malformed_image");
+        return Err(MALFORMED_IMAGE_REASON);
     }
     Ok(ImageMetadata {
         width: dimensions.0,
