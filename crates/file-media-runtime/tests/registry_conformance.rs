@@ -326,6 +326,16 @@ struct SelectionProcessor {
     validation: SelectionValidation,
 }
 
+impl SelectionProcessor {
+    fn media_type(&self) -> CanonicalMediaType {
+        media_type(SYNTHETIC_MEDIA_TYPE)
+    }
+
+    fn malformed_reason(&self) -> ReasonCode {
+        ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")
+    }
+}
+
 impl FileMediaProcessor for SelectionProcessor {
     fn probe<'a>(
         &'a self,
@@ -431,6 +441,17 @@ fn selection_inspection(
     inspect(&registry, &processor, &source, declared_media_type)
 }
 
+fn selection_inspection_with_processor(
+    processor: &SelectionProcessor,
+    registry_media_type: &str,
+    declared_media_type: &str,
+    streaming_text_fallback: StreamingTextFallback,
+) -> Result<FileInspection, FileMediaFailure> {
+    let source = MemorySource::synthetic();
+    let registry = selection_registry(registry_media_type, streaming_text_fallback);
+    inspect(&registry, processor, &source, declared_media_type)
+}
+
 fn validated_evidence(inspection: FileInspection) -> ValidationEvidence {
     let FileInspection::Validated(validated) = inspection else {
         panic!("fixture must produce a validated inspection");
@@ -491,9 +512,14 @@ fn streaming_text_fallback_follows_probe_and_declaration_miss() {
 
 #[test]
 fn probe_recognized_malformed_is_terminal() {
-    let outcome = selection_inspection(
-        SelectionProbe::Malformed,
-        SelectionValidation::Validated,
+    let processor = SelectionProcessor {
+        probe: SelectionProbe::Malformed,
+        validation: SelectionValidation::Validated,
+    };
+    let expected_media_type = processor.media_type();
+    let expected_reason = processor.malformed_reason();
+    let outcome = selection_inspection_with_processor(
+        &processor,
         SYNTHETIC_MEDIA_TYPE,
         SYNTHETIC_MEDIA_TYPE,
         StreamingTextFallback::Disabled,
@@ -508,18 +534,20 @@ fn probe_recognized_malformed_is_terminal() {
     else {
         panic!("recognized malformed probe must produce malformed inspection");
     };
-    assert_eq!(detected_media_type, media_type(SYNTHETIC_MEDIA_TYPE));
-    assert_eq!(
-        reason_code,
-        ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")
-    );
+    assert_eq!(detected_media_type, expected_media_type);
+    assert_eq!(reason_code, expected_reason);
 }
 
 #[test]
 fn validation_malformed_is_terminal_for_strong_evidence() {
-    let outcome = selection_inspection(
-        SelectionProbe::Strong,
-        SelectionValidation::Malformed,
+    let processor = SelectionProcessor {
+        probe: SelectionProbe::Strong,
+        validation: SelectionValidation::Malformed,
+    };
+    let expected_media_type = processor.media_type();
+    let expected_reason = processor.malformed_reason();
+    let outcome = selection_inspection_with_processor(
+        &processor,
         SYNTHETIC_MEDIA_TYPE,
         SYNTHETIC_MEDIA_TYPE,
         StreamingTextFallback::Disabled,
@@ -534,18 +562,19 @@ fn validation_malformed_is_terminal_for_strong_evidence() {
     else {
         panic!("malformed strong validation must produce malformed inspection");
     };
-    assert_eq!(detected_media_type, media_type(SYNTHETIC_MEDIA_TYPE));
-    assert_eq!(
-        reason_code,
-        ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")
-    );
+    assert_eq!(detected_media_type, expected_media_type);
+    assert_eq!(reason_code, expected_reason);
 }
 
 #[test]
 fn validation_encrypted_is_terminal_for_strong_evidence() {
-    let outcome = selection_inspection(
-        SelectionProbe::Strong,
-        SelectionValidation::EncryptedOrLocked,
+    let processor = SelectionProcessor {
+        probe: SelectionProbe::Strong,
+        validation: SelectionValidation::EncryptedOrLocked,
+    };
+    let expected_media_type = processor.media_type();
+    let outcome = selection_inspection_with_processor(
+        &processor,
         SYNTHETIC_MEDIA_TYPE,
         SYNTHETIC_MEDIA_TYPE,
         StreamingTextFallback::Disabled,
@@ -559,7 +588,7 @@ fn validation_encrypted_is_terminal_for_strong_evidence() {
     else {
         panic!("encrypted strong validation must produce encrypted inspection");
     };
-    assert_eq!(detected_media_type, media_type(SYNTHETIC_MEDIA_TYPE));
+    assert_eq!(detected_media_type, expected_media_type);
 }
 
 #[test]
