@@ -5,7 +5,6 @@ import {
   type WebAttentionSnapshot,
   type WebContractBootstrap,
 } from './generated/web-contract.mjs'
-import generatedBootstrap from './generated/web-contract-bootstrap.json' with { type: 'json' }
 
 export const productRoutes = [
   { id: 'attention', label: 'Attention', description: 'Actionable work and fleet state' },
@@ -73,7 +72,7 @@ export interface ProductTransport {
   readSessions(request: ProductSessionRequest, signal?: AbortSignal): Promise<WebAttentionSnapshot>
 }
 
-export const MAX_SESSION_PAGE_ITEMS = 32
+export const MAX_SESSION_PAGE_ITEMS = 16
 export const MAX_PRODUCT_HTTP_RESPONSE_BYTES = 64 * 1024
 export const MAX_SESSION_SEARCH_BYTES = 1024
 const MAX_SESSION_SUMMARY_SCALARS = 128
@@ -206,11 +205,7 @@ const validateSessionPage = (
     if (summary.state === 'blocked' && summary.goal_block == null) {
       throw new Error('session catalog blocked row is missing blocked-goal evidence')
     }
-    if (
-      summary.goal_block != null &&
-      summary.state !== 'blocked' &&
-      summary.state !== 'runner_lost'
-    ) {
+    if (summary.goal_block != null && summary.state !== 'blocked') {
       throw new Error(
         'session catalog response contains goal-block evidence for an unrelated state',
       )
@@ -231,12 +226,14 @@ const validateSessionPage = (
     ) {
       throw new Error('session catalog response exceeds a summary scalar ceiling')
     }
-    const milliseconds = summary.last_activity.unix_milliseconds
-    const numericMilliseconds = Number(milliseconds)
+    const microseconds = summary.last_activity.unix_microseconds
+    if (!isCanonicalUnsigned64(microseconds)) {
+      throw new Error('session catalog activity timestamp is outside the JavaScript Date range')
+    }
+    const derivedMilliseconds = Number(BigInt(microseconds) / 1000n)
     if (
-      !isCanonicalUnsigned64(milliseconds) ||
-      !Number.isSafeInteger(numericMilliseconds) ||
-      !Number.isFinite(new Date(numericMilliseconds).getTime())
+      !Number.isSafeInteger(derivedMilliseconds) ||
+      !Number.isFinite(new Date(derivedMilliseconds).getTime())
     ) {
       throw new Error('session catalog activity timestamp is outside the JavaScript Date range')
     }
@@ -254,7 +251,7 @@ const validateSessionPage = (
     request.sort === 'activity' &&
     request.afterActivity !== undefined &&
     first !== undefined &&
-    BigInt(first.last_activity.unix_milliseconds) > BigInt(request.afterActivity) / 1000n
+    BigInt(first.last_activity.unix_microseconds) > BigInt(request.afterActivity)
   ) {
     throw new Error('session catalog response precedes its activity continuation')
   }
@@ -262,25 +259,11 @@ const validateSessionPage = (
     request.sort === 'activity' &&
     request.afterActivity !== undefined &&
     request.afterSession !== undefined &&
-    BigInt(request.afterActivity) % 1000n === 0n &&
     first !== undefined &&
-    BigInt(first.last_activity.unix_milliseconds) === BigInt(request.afterActivity) / 1000n &&
+    BigInt(first.last_activity.unix_microseconds) === BigInt(request.afterActivity) &&
     first.session_id <= request.afterSession
   ) {
     throw new Error('session catalog response repeats its exact activity continuation boundary')
-  }
-  for (let index = 1; index < page.summaries.length; index += 1) {
-    const previous = page.summaries[index - 1]
-    const current = page.summaries[index]
-    if (!previous || !current) continue
-    const violatesSort =
-      request.sort === 'identity'
-        ? previous.session_id >= current.session_id
-        : BigInt(previous.last_activity.unix_milliseconds) <
-          BigInt(current.last_activity.unix_milliseconds)
-    if (violatesSort) {
-      throw new Error(`session catalog rows contradict ${expectedSort}`)
-    }
   }
   if (
     request.afterSession === undefined &&
@@ -292,22 +275,6 @@ const validateSessionPage = (
   if (page.continuation) {
     if (BigInt(page.total) <= BigInt(page.summaries.length)) {
       throw new Error('session catalog continuation contradicts the declared total')
-    }
-    const boundary = page.summaries.at(-1)
-    if (!boundary || page.continuation.session_id !== boundary.session_id) {
-      throw new Error('session catalog continuation does not match its returned boundary')
-    }
-    if (page.continuation.kind === 'last_activity') {
-      const milliseconds = boundary.last_activity.unix_milliseconds
-      const microseconds = page.continuation.unix_microseconds
-      if (!/^(0|[1-9]\d*)$/.test(milliseconds) || !/^(0|[1-9]\d*)$/.test(microseconds)) {
-        throw new Error('session catalog boundary activity is not canonical')
-      }
-      const millisecondFloor = BigInt(milliseconds) * 1000n
-      const exactMicroseconds = BigInt(microseconds)
-      if (exactMicroseconds < millisecondFloor || exactMicroseconds >= millisecondFloor + 1000n) {
-        throw new Error('session catalog continuation does not match its returned boundary')
-      }
     }
     if (page.summaries.length !== MAX_SESSION_PAGE_ITEMS) {
       throw new Error('session catalog continuation accompanies a partial page')
@@ -373,17 +340,13 @@ export class SameOriginProductTransport implements ProductTransport {
         cause: error,
       })
     }
-    if (
-      bootstrap.contract.name !== generatedBootstrap.contract.name ||
-      bootstrap.contract.version !== generatedBootstrap.contract.version
-    ) {
-      throw new Error('bootstrap carries an incompatible web contract')
-    }
     if (!bootstrap.capabilities.bounded_json) {
-      throw new Error('bootstrap does not provide bounded JSON responses')
+      throw new BootstrapContractError('bootstrap does not provide bounded JSON responses')
     }
     if (bootstrap.limits.max_json_body_bytes !== MAX_PRODUCT_HTTP_RESPONSE_BYTES) {
-      throw new Error('bootstrap JSON response ceiling contradicts the browser contract')
+      throw new BootstrapContractError(
+        'bootstrap JSON response ceiling contradicts the browser contract',
+      )
     }
     return bootstrap
   }

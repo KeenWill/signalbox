@@ -31,7 +31,7 @@ const sessionPageFixture = {
       current_turn_id: currentTurnId,
       goal_block: null,
       judge: { actionable: '0', completed: '3', escalated: '0', failed: '0' },
-      last_activity: { kind: 'turn', unix_milliseconds: '1724200000000' },
+      last_activity: { kind: 'turn', unix_microseconds: '1724200000000000' },
       queued_turn_count: '2',
       session_id: sessionId,
       state: 'active',
@@ -50,7 +50,7 @@ const fullActivityPageFixture = () => {
       .padStart(12, '0')}`,
     last_activity: {
       kind: 'turn' as const,
-      unix_milliseconds: String(1_724_200_000_000 - index),
+      unix_microseconds: String(1_724_200_000_000_000 - index),
     },
     title_summary: `release session ${index + 1}`,
   }))
@@ -62,7 +62,7 @@ const fullActivityPageFixture = () => {
     continuation: {
       kind: 'last_activity' as const,
       session_id: boundary.session_id,
-      unix_microseconds: String(BigInt(boundary.last_activity.unix_milliseconds) * 1000n),
+      unix_microseconds: boundary.last_activity.unix_microseconds,
     },
   }
 }
@@ -144,7 +144,7 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      'incompatible web contract',
+      'violates the web contract',
     )
   })
 
@@ -297,14 +297,14 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('continuation session_identity contradicts last_activity')
+    ).rejects.toThrow('the continuation required by sort last_activity_descending')
   })
 
   it('rejects rows that violate the declared activity ordering', async () => {
     const laterSummary = {
       ...sessionPageFixture.summaries[0],
       session_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c7e',
-      last_activity: { kind: 'turn', unix_milliseconds: '1724200000001' },
+      last_activity: { kind: 'turn', unix_microseconds: '1724200000001000' },
     }
     vi.stubGlobal(
       'fetch',
@@ -325,7 +325,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('rows contradict last_activity_descending')
+    ).rejects.toThrow('strictly ordered by sort last_activity_descending')
   })
 
   it('rejects rows that violate the declared identity ordering', async () => {
@@ -353,7 +353,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'identity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('rows contradict session_identity_ascending')
+    ).rejects.toThrow('strictly ordered by sort session_identity_ascending')
   })
 
   it('rejects identity pages that precede the exclusive request cursor', async () => {
@@ -392,7 +392,7 @@ describe('SameOriginProductTransport', () => {
               summaries: [
                 {
                   ...sessionPageFixture.summaries[0],
-                  last_activity: { kind: 'turn', unix_milliseconds: '1724200000001' },
+                  last_activity: { kind: 'turn', unix_microseconds: '1724200000001000' },
                 },
               ],
             }),
@@ -410,7 +410,7 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('precedes its activity continuation')
   })
 
-  it('rejects exact-millisecond activity pages that repeat the request boundary identity', async () => {
+  it('rejects activity pages that repeat the exact request boundary identity', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(
@@ -492,7 +492,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('contradictory numeric page field')
+    ).rejects.toThrow('attention_snapshot.total must be')
   })
 
   it('rejects malformed catalog cursors', async () => {
@@ -515,7 +515,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('contradictory numeric page field')
+    ).rejects.toThrow('attention_snapshot.cursor must be')
   })
 
   it('rejects a zero cursor on a nonempty catalog page', async () => {
@@ -574,7 +574,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('contradictory state and action')
+    ).rejects.toThrow('the action required by state idle')
   })
 
   it('rejects blocked rows without blocked-goal evidence', async () => {
@@ -604,7 +604,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('missing blocked-goal evidence')
+    ).rejects.toThrow('present exactly for blocked state')
   })
 
   it('rejects goal-block evidence on unrelated states', async () => {
@@ -636,7 +636,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('goal-block evidence for an unrelated state')
+    ).rejects.toThrow('present exactly for blocked state')
   })
 
   it('rejects impossible title truncation flags', async () => {
@@ -659,7 +659,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('contradictory title truncation flag')
+    ).rejects.toThrow('exactly 128 Unicode scalar values when title_truncated is true')
   })
 
   it('rejects summaries beyond the daemon scalar ceilings', async () => {
@@ -681,7 +681,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('summary scalar ceiling')
+    ).rejects.toThrow('at most 128 Unicode scalar values')
   })
 
   it('rejects blocked-goal summaries beyond the daemon scalar ceiling', async () => {
@@ -715,7 +715,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('summary scalar ceiling')
+    ).rejects.toThrow('goal_block must be one recognized variant')
   })
 
   it('rejects displayed turn counts that are not canonical u64 values', async () => {
@@ -738,7 +738,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('non-canonical numeric field')
+    ).rejects.toThrow('active_turn_count must be')
   })
 
   it('rejects non-canonical approval-judge counts', async () => {
@@ -766,7 +766,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('non-canonical numeric field')
+    ).rejects.toThrow('judge.actionable must be')
   })
 
   it('rejects zero goal generations', async () => {
@@ -800,7 +800,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('non-canonical numeric field')
+    ).rejects.toThrow('goal_block must be one recognized variant')
   })
 
   it('rejects pre-epoch activity timestamps', async () => {
@@ -815,7 +815,7 @@ describe('SameOriginProductTransport', () => {
               summaries: [
                 {
                   ...sessionPageFixture.summaries[0],
-                  last_activity: { kind: 'turn', unix_milliseconds: '-1' },
+                  last_activity: { kind: 'turn', unix_microseconds: '-1' },
                 },
               ],
             }),
@@ -828,7 +828,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('outside the JavaScript Date range')
+    ).rejects.toThrow('last_activity.unix_microseconds must be')
   })
 
   it('rejects duplicate session identities on activity pages', async () => {
@@ -844,7 +844,7 @@ describe('SameOriginProductTransport', () => {
                 sessionPageFixture.summaries[0],
                 {
                   ...sessionPageFixture.summaries[0],
-                  last_activity: { kind: 'turn', unix_milliseconds: '1724199999999' },
+                  last_activity: { kind: 'turn', unix_microseconds: '1724199999999000' },
                 },
               ],
             }),
@@ -878,7 +878,7 @@ describe('SameOriginProductTransport', () => {
     const pageFixture = fullActivityPageFixture()
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(JSON.stringify({ ...pageFixture, total: '32' }))),
+      vi.fn(async () => new Response(JSON.stringify({ ...pageFixture, total: '16' }))),
     )
 
     await expect(
@@ -907,7 +907,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow(`exceeds ${MAX_SESSION_PAGE_ITEMS} summaries`)
+    ).rejects.toThrow('at most 16 items')
   })
 
   it('rejects activity timestamps outside the JavaScript Date range', async () => {
@@ -922,7 +922,7 @@ describe('SameOriginProductTransport', () => {
               summaries: [
                 {
                   ...sessionPageFixture.summaries[0],
-                  last_activity: { kind: 'turn', unix_milliseconds: '9007199254740991' },
+                  last_activity: { kind: 'turn', unix_microseconds: '9007199254740991000' },
                 },
               ],
             }),
@@ -958,7 +958,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('non-canonical session identity')
+    ).rejects.toThrow('continuation must be one recognized variant')
   })
 
   it('rejects non-canonical current-turn identities before exposing a page', async () => {
@@ -981,7 +981,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('non-canonical current-turn identity')
+    ).rejects.toThrow('current_turn_id must be one recognized variant')
   })
 
   it('rejects turn-derived states without a current-turn identity', async () => {
@@ -1004,7 +1004,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('turn-derived state is missing its current-turn identity')
+    ).rejects.toThrow('a turn identity for state active')
   })
 
   it('rejects a continuation that does not match the returned page boundary', async () => {
@@ -1029,22 +1029,22 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).rejects.toThrow('does not match its returned boundary')
+    ).rejects.toThrow('the session of the last returned summary')
   })
 
-  it('accepts exact continuation precision within the displayed millisecond', async () => {
+  it('rejects a continuation whose activity timestamp skews from its boundary', async () => {
     const pageFixture = fullActivityPageFixture()
     const boundary = activityPageBoundary(pageFixture)
-    const precisePage = {
+    const skewedPage = {
       ...pageFixture,
       continuation: {
         ...pageFixture.continuation,
-        unix_microseconds: String(BigInt(boundary.last_activity.unix_milliseconds) * 1000n + 999n),
+        unix_microseconds: String(BigInt(boundary.last_activity.unix_microseconds) + 1n),
       },
     }
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(JSON.stringify(precisePage))),
+      vi.fn(async () => new Response(JSON.stringify(skewedPage))),
     )
 
     await expect(
@@ -1052,7 +1052,7 @@ describe('SameOriginProductTransport', () => {
         sort: 'activity',
         includeArchived: false,
       }),
-    ).resolves.toEqual(precisePage)
+    ).rejects.toThrow('the activity timestamp of the last returned summary')
   })
 
   it('rejects an invalid search before fetching', async () => {

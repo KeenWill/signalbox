@@ -14,9 +14,9 @@ type SessionSummary = WebAttentionSnapshot['summaries'][number]
 
 const label = (value: string) => value.replaceAll('_', ' ')
 
-const activityTime = (unixMilliseconds: string) => {
-  const value = Number(unixMilliseconds)
-  if (!Number.isSafeInteger(value)) return unixMilliseconds
+const activityTime = (unixMicroseconds: string) => {
+  const value = Number(BigInt(unixMicroseconds) / 1000n)
+  if (!Number.isSafeInteger(value)) return unixMicroseconds
   return new Intl.DateTimeFormat('en-US', {
     dateStyle: 'medium',
     timeStyle: 'short',
@@ -254,7 +254,7 @@ export function SessionCatalogSurface({
                       <span>
                         {summary.active_turn_count} active · {summary.queued_turn_count} queued
                       </span>
-                      <time>{activityTime(summary.last_activity.unix_milliseconds)}</time>
+                      <time>{activityTime(summary.last_activity.unix_microseconds)}</time>
                       <ArrowRight aria-hidden="true" />
                     </button>
                   </li>
