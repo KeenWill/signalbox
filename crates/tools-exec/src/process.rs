@@ -1146,6 +1146,8 @@ impl WorkspaceDirectoryIdentity {
             rustix::fs::Mode::empty(),
         )
         .map_err(workspace_directory_failure)?;
+        let directory = inherited_descriptor_above_standard_streams(directory)
+            .map_err(|_| ProcessSpawnFailure::Other)?;
         let bind_source = PathBuf::from(format!(
             "/proc/self/fd/{}",
             rustix::fd::AsRawFd::as_raw_fd(&directory)
