@@ -6,6 +6,11 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::protocol::WireReadEnvelope;
 
+// The stable read-input contract permits 256 option containers. Reserve room
+// for the enclosing invocation and protocol frames while retaining a finite
+// parser bound independent of serde_json's lower default recursion limit.
+const MAX_FRAME_CONTAINER_DEPTH: usize = 272;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BrokerError {
     Eof,
@@ -181,13 +186,79 @@ where
         .read_exact(&mut encoded)
         .await
         .map_err(|_| BrokerError::Frame)?;
-    serde_json::from_slice(&encoded).map_err(|_| BrokerError::Frame)
+    if !json_container_depth_fits(&encoded) {
+        return Err(BrokerError::Frame);
+    }
+    let mut deserializer = serde_json::Deserializer::from_slice(&encoded);
+    deserializer.disable_recursion_limit();
+    let value =
+        serde::Deserialize::deserialize(&mut deserializer).map_err(|_| BrokerError::Frame)?;
+    deserializer.end().map_err(|_| BrokerError::Frame)?;
+    Ok(value)
+}
+
+fn json_container_depth_fits(encoded: &[u8]) -> bool {
+    let mut depth = 0_usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in encoded {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match *byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth = match depth.checked_add(1) {
+                    Some(depth) if depth <= MAX_FRAME_CONTAINER_DEPTH => depth,
+                    _ => return false,
+                };
+            }
+            b'}' | b']' => {
+                depth = match depth.checked_sub(1) {
+                    Some(depth) => depth,
+                    None => return false,
+                };
+            }
+            _ => {}
+        }
+    }
+    depth == 0 && !in_string && !escaped
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BrokerError, RangeBroker};
+    use super::{BrokerError, MAX_FRAME_CONTAINER_DEPTH, RangeBroker, read_frame_with_limit};
     use crate::protocol::WireReadEnvelope;
+
+    fn nested_array_frame(depth: usize) -> Vec<u8> {
+        let encoded = format!("{}null{}", "[".repeat(depth), "]".repeat(depth));
+        let mut frame = u32::try_from(encoded.len()).unwrap().to_be_bytes().to_vec();
+        frame.extend_from_slice(encoded.as_bytes());
+        frame
+    }
+
+    #[tokio::test]
+    async fn frame_parser_accepts_the_documented_container_depth() {
+        let frame = nested_array_frame(256);
+        let mut input = frame.as_slice();
+        let result = read_frame_with_limit::<_, serde_json::Value>(&mut input, frame.len()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn frame_parser_rejects_above_its_explicit_container_bound() {
+        let frame = nested_array_frame(MAX_FRAME_CONTAINER_DEPTH + 1);
+        let mut input = frame.as_slice();
+        let result = read_frame_with_limit::<_, serde_json::Value>(&mut input, frame.len()).await;
+        assert_eq!(result, Err(BrokerError::Frame));
+    }
 
     #[test]
     fn probe_envelope_rejects_an_extra_arbitrary_range() {
