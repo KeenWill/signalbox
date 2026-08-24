@@ -285,6 +285,7 @@ const SELECT_IDENTITY: &str = summary_sql!(
                     SELECT 1 FROM session_metadata_tag AS stored
                      WHERE stored.session_id = session_row.session_id
                        AND stored.tag = required.tag)))
+            AND $9::timestamptz IS NULL
      ORDER BY session_row.session_id LIMIT $1
     "#,
     "ORDER BY selected.session_id"
@@ -369,7 +370,7 @@ async fn load_summaries(
             ) => (
                 SELECT_LAST_ACTIVITY,
                 Some(session.into_uuid()),
-                Some(sqlx::types::time::OffsetDateTime::from(*recorded_at)),
+                Some(offset_date_time_from_system_time(*recorded_at)?),
             ),
             (AttentionSort::LastActivityDescending, None) => (SELECT_LAST_ACTIVITY, None, None),
             (
@@ -401,6 +402,19 @@ async fn load_summaries(
         .iter()
         .map(decode_summary)
         .collect()
+}
+
+fn offset_date_time_from_system_time(
+    recorded_at: SystemTime,
+) -> Result<sqlx::types::time::OffsetDateTime, AttentionRepositoryError> {
+    let nanoseconds = recorded_at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|_| AttentionCorruption::Invalid("catalog continuation timestamp"))?
+        .as_nanos();
+    let nanoseconds = i128::try_from(nanoseconds)
+        .map_err(|_| AttentionCorruption::Invalid("catalog continuation timestamp"))?;
+    sqlx::types::time::OffsetDateTime::from_unix_timestamp_nanos(nanoseconds)
+        .map_err(|_| AttentionCorruption::Invalid("catalog continuation timestamp").into())
 }
 
 async fn count_catalog_matches(
@@ -586,6 +600,16 @@ fn nonnegative(value: i64, field: &'static str) -> Result<u64, AttentionReposito
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn continuation_timestamp_conversion_rejects_values_outside_database_range() {
+        let beyond_offset_date_time = SystemTime::UNIX_EPOCH + Duration::from_secs(253_402_300_800);
+        let before_unix_epoch = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
+
+        assert!(offset_date_time_from_system_time(beyond_offset_date_time).is_err());
+        assert!(offset_date_time_from_system_time(before_unix_epoch).is_err());
+    }
 
     #[test]
     fn state_precedence_keeps_operator_actions_explicit() {

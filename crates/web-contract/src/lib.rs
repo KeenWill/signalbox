@@ -317,6 +317,33 @@ impl<'de> Deserialize<'de> for WebU64 {
     }
 }
 
+/// Checked positive 64-bit value encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebPositiveU64(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
+
+impl WebPositiveU64 {
+    /// Encodes one domain-validated positive value in canonical decimal form.
+    #[must_use]
+    pub fn from_u64(value: u64) -> Self {
+        debug_assert!(value > 0, "positive wire values cannot encode zero");
+        Self(value.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for WebPositiveU64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        canonical_u64(&value)
+            .filter(|value| *value > 0)
+            .map(|_| Self(value))
+            .ok_or_else(|| de::Error::custom("wire value must be a canonical positive u64"))
+    }
+}
+
 /// Stable browser-visible location of one durable session event.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -434,7 +461,7 @@ pub enum WebSessionLiveActiveState {
     },
     AwaitingRunnerRecovery {
         runner_id: WebLiveResourceId,
-        placement_revision: WebU64,
+        placement_revision: WebPositiveU64,
     },
 }
 
@@ -471,24 +498,24 @@ pub enum WebSessionLiveRunnerConnectionHealth {
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebSessionLiveRunner {
     Unpinned {
-        placement_revision: WebU64,
+        placement_revision: WebPositiveU64,
     },
     Pinned {
         runner_id: WebLiveResourceId,
-        placement_revision: WebU64,
+        placement_revision: WebPositiveU64,
         connection_health: WebSessionLiveRunnerConnectionHealth,
     },
     RunnerLostBeforePin {
         runner_id: WebLiveResourceId,
-        placement_revision: WebU64,
+        placement_revision: WebPositiveU64,
     },
     RunnerLost {
         runner_id: WebLiveResourceId,
-        placement_revision: WebU64,
+        placement_revision: WebPositiveU64,
     },
     RunnerAbandoned {
         runner_id: WebLiveResourceId,
-        placement_revision: WebU64,
+        placement_revision: WebPositiveU64,
     },
 }
 
@@ -677,8 +704,10 @@ pub struct WebAttentionSnapshot {
     pub cursor: WebU64,
     pub total: WebU64,
     pub sort: WebAttentionSort,
-    #[schemars(length(max = 32))]
+    #[schemars(length(max = 16))]
     pub summaries: Vec<WebAttentionSummary>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub continuation: Option<WebAttentionContinuation>,
 }
 
@@ -765,6 +794,11 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     };
     make_property_nullable(&mut schemas.window, "continuation_before")?;
     make_property_nullable(&mut schemas.window, "continuation_after")?;
+    make_property_nullable(&mut schemas.attention_snapshot, "continuation")?;
+    make_pointer_nullable(
+        &mut schemas.attention_event,
+        "/$defs/WebAttentionSnapshot/properties/continuation",
+    )?;
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -801,8 +835,15 @@ fn make_property_nullable(
     schema: &mut Value,
     property_name: &str,
 ) -> Result<(), GenerateWebContractError> {
+    make_pointer_nullable(schema, &format!("/properties/{property_name}"))
+}
+
+fn make_pointer_nullable(
+    schema: &mut Value,
+    pointer: &str,
+) -> Result<(), GenerateWebContractError> {
     let property = schema
-        .pointer_mut(&format!("/properties/{property_name}"))
+        .pointer_mut(pointer)
         .ok_or(GenerateWebContractError::UnsupportedSchema)?;
     let concrete = property.take();
     *property = json!({ "anyOf": [concrete, { "type": "null" }] });
@@ -1016,14 +1057,19 @@ export function decodeWebSessionTimelineWindow(value) {{
 
 export function decodeWebAttentionSnapshot(value) {{
   assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
-  value.summaries.forEach((summary, index) => assertAttentionSummary(summary, `attention_snapshot.summaries[${{index}}]`));
+  assertAttentionSnapshot(value, "attention_snapshot");
   return value;
 }}
 
 export function decodeWebAttentionStreamEvent(value) {{
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
-  const summaries = value.kind === "snapshot" ? value.snapshot.summaries : value.summaries;
-  summaries?.forEach((summary, index) => assertAttentionSummary(summary, `attention_event.summaries[${{index}}]`));
+  if (value.kind === "snapshot") {{
+    assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
+  }} else {{
+    value.summaries?.forEach((summary, index) =>
+      assertAttentionSummary(summary, `attention_event.summaries[${{index}}]`),
+    );
+  }}
   return value;
 }}
 
@@ -1054,8 +1100,25 @@ function assertLiveSnapshot(snapshot, path) {{
       `exactly ${{expectedPreviewLength}} IDs for queued_turn_count`,
     );
   }}
+  if (new Set(snapshot.queued_turn_ids).size !== snapshot.queued_turn_ids.length) {{
+    fail(`${{path}}.queued_turn_ids`, "unique turn IDs");
+  }}
   if (snapshot.active != null && snapshot.reconciliation != null) {{
     fail(`${{path}}.reconciliation`, "absent while an active turn is present");
+  }}
+}}
+
+function assertAttentionSnapshot(snapshot, path) {{
+  snapshot.summaries.forEach((summary, index) =>
+    assertAttentionSummary(summary, `${{path}}.summaries[${{index}}]`),
+  );
+  const continuationKind = snapshot.continuation?.kind ?? null;
+  const expectedContinuationKind = {{
+    last_activity_descending: "last_activity",
+    session_identity_ascending: "session_identity",
+  }}[snapshot.sort];
+  if (continuationKind !== null && continuationKind !== expectedContinuationKind) {{
+    fail(`${{path}}.continuation`, `the continuation required by sort ${{snapshot.sort}}`);
   }}
 }}
 
@@ -1073,7 +1136,8 @@ function assertAttentionSummary(summary, path) {{
   if (summary.action !== expectedAction) {{
     fail(`${{path}}.action`, `the action required by state ${{summary.state}}`);
   }}
-  if ((summary.state === "blocked") !== (summary.goal_block !== null)) {{
+  const hasGoalBlock = Object.hasOwn(summary, "goal_block") && summary.goal_block !== null;
+  if ((summary.state === "blocked") !== hasGoalBlock) {{
     fail(`${{path}}.goal_block`, "present exactly for blocked state");
   }}
 }}

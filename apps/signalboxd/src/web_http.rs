@@ -50,7 +50,7 @@ use signalbox_web_contract::{
     WebAttentionAction, WebAttentionActivity, WebAttentionActivityKind, WebAttentionBlockedReason,
     WebAttentionContinuation, WebAttentionGoalBlock, WebAttentionJudgeFacts, WebAttentionSnapshot,
     WebAttentionSort, WebAttentionState, WebAttentionStreamEvent, WebAttentionSummary,
-    WebContractBootstrap, WebContractExample, WebLiveResourceId, WebSessionId,
+    WebContractBootstrap, WebContractExample, WebLiveResourceId, WebPositiveU64, WebSessionId,
     WebSessionLiveActiveState, WebSessionLiveActiveTurn, WebSessionLiveReconciliation,
     WebSessionLiveRunner, WebSessionLiveRunnerConnectionHealth, WebSessionLiveSnapshot,
     WebSessionLiveStreamEvent, WebSessionTimelineDescriptor, WebSessionTimelineEventKind,
@@ -318,8 +318,12 @@ impl WebHttpRuntime {
 }
 
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
-pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> Router {
-    production_router_with_monitor(asset_root, pool, None, None)
+pub fn production_router(
+    asset_root: Option<PathBuf>,
+    pool: Option<PgPool>,
+    monitor: Option<ProcessMonitor>,
+) -> Router {
+    production_router_with_monitor(asset_root, pool, monitor, None)
 }
 
 fn production_router_with_monitor(
@@ -821,7 +825,13 @@ async fn live_follow_next(
             update = state.subscription.recv() => update,
         } {
             Ok(update) => update,
-            Err(ProcessMonitorReceiveError::Lagged) => {
+            Err(ProcessMonitorReceiveError::Lagged(skipped))
+                if skipped <= state.queued_at_snapshot =>
+            {
+                state.queued_at_snapshot -= skipped;
+                continue;
+            }
+            Err(ProcessMonitorReceiveError::Lagged(_)) => {
                 state.ended = true;
                 return Some((
                     WebSessionLiveStreamEvent::ResyncRequired {
@@ -988,7 +998,7 @@ fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
                     placement_revision,
                 } => WebSessionLiveActiveState::AwaitingRunnerRecovery {
                     runner_id: WebLiveResourceId::from_uuid_bytes(runner.into_uuid().into_bytes()),
-                    placement_revision: WebU64::from_u64(placement_revision),
+                    placement_revision: WebPositiveU64::from_u64(placement_revision),
                 },
             },
         }),
@@ -1019,7 +1029,7 @@ fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
                 }
             }),
         runner: snapshot.runner.and_then(|runner| {
-            let placement_revision = WebU64::from_u64(runner.placement_revision);
+            let placement_revision = WebPositiveU64::from_u64(runner.placement_revision);
             match (runner.state, runner.runner, runner.connection_health) {
                 (SessionLiveRunnerState::Unpinned, None, None) => {
                     Some(WebSessionLiveRunner::Unpinned { placement_revision })
@@ -1873,6 +1883,13 @@ mod tests {
         }
     }
 
+    fn provider_text_content_length(event: WebSessionLiveStreamEvent) -> usize {
+        let WebSessionLiveStreamEvent::ProviderTextDelta { content, .. } = event else {
+            panic!("expected provider text delta");
+        };
+        content.len()
+    }
+
     #[tokio::test]
     async fn live_follow_orders_provider_draft_before_later_durable_header() {
         let monitor = ProcessMonitor::test_channel();
@@ -1978,6 +1995,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_follow_consumes_lag_covered_by_snapshot_cutoff() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        monitor.fill_for_test(ProcessMonitorUpdate::ProviderTextDelta {
+            session: live_session(),
+            turn: live_turn(),
+            call: live_call(),
+            part_index: 0,
+            text: Arc::from("stale draft"),
+        });
+        state.queued_at_snapshot = state.subscription.queued_len();
+        monitor.publish_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::TurnCompleted,
+        });
+        let (event, _) = live_follow_next(state)
+            .await
+            .expect("the post-snapshot durable event is delivered");
+
+        assert_eq!(
+            event,
+            WebSessionLiveStreamEvent::Durable {
+                cursor: WebU64::from_u64(8),
+                address: WebTimelineAddress {
+                    event_sequence: WebTimelineEventSequence::from_nonzero(
+                        std::num::NonZeroU64::new(8).expect("the fixture cursor is positive"),
+                    ),
+                },
+                event_kind: WebSessionTimelineEventKind::TurnCompleted,
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn live_follow_fragments_provider_text_lazily() {
         let monitor = ProcessMonitor::test_channel();
         let state = live_follow_state(&monitor, 7, 0);
@@ -2002,10 +2054,7 @@ mod tests {
         assert!(Arc::ptr_eq(&text, &retained.text));
         assert_eq!(retained.offset, super::MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES);
         assert_eq!(
-            match first {
-                WebSessionLiveStreamEvent::ProviderTextDelta { content, .. } => content.len(),
-                event => panic!("expected provider text delta, got {event:?}"),
-            },
+            provider_text_content_length(first),
             super::MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES,
         );
     }
@@ -2118,7 +2167,7 @@ mod tests {
             .expect("the static index exists");
         let runtime = WebHttpRuntime::bind_router(
             loopback_ephemeral(),
-            production_router(Some(assets.path().to_path_buf()), None),
+            production_router(Some(assets.path().to_path_buf()), None, None),
         )
         .await
         .expect("the production test server binds");
@@ -2356,7 +2405,7 @@ mod tests {
         let request = Request::get("/api/not-a-route")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(Some(assets.path().to_path_buf()), None)
+        let response = production_router(Some(assets.path().to_path_buf()), None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2376,7 +2425,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2397,7 +2446,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2415,7 +2464,7 @@ mod tests {
             .header(header::HOST, "attacker.example")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2445,7 +2494,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2468,14 +2517,17 @@ mod tests {
 
     #[test]
     fn session_catalog_query_accepts_emitted_sort_tokens() {
-        for token in ["last_activity_descending", "session_identity_ascending"] {
-            let raw = format!("sort={token}");
-            let query = super::parse_attention_snapshot_query(Some(&raw))
-                .expect("the emitted sort token has a valid query shape");
+        let activity_query =
+            super::parse_attention_snapshot_query(Some("sort=last_activity_descending"))
+                .expect("the emitted activity sort token has a valid query shape");
+        super::parse_attention_query(activity_query)
+            .expect("the emitted activity sort token round trips through the request parser");
 
-            super::parse_attention_query(query)
-                .expect("the emitted sort token round trips through the request parser");
-        }
+        let identity_query =
+            super::parse_attention_snapshot_query(Some("sort=session_identity_ascending"))
+                .expect("the emitted identity sort token has a valid query shape");
+        super::parse_attention_query(identity_query)
+            .expect("the emitted identity sort token round trips through the request parser");
     }
 
     #[test]
@@ -2497,7 +2549,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2559,30 +2611,37 @@ mod tests {
             "1234567"
         );
 
-        let maximal_update_summary = super::attention_summary_dto(summary.clone())
+        let mut escaped_summary = summary.clone();
+        escaped_summary.title_summary =
+            Some(String::from('\u{1}').repeat(usize::from(max_attention_title_characters())));
+        escaped_summary
+            .goal_block
+            .as_mut()
+            .expect("the maximum summary carries a goal block")
+            .need_summary =
+            String::from('\u{1}').repeat(usize::from(max_attention_goal_summary_characters()));
+        let maximal_update_summary = super::attention_summary_dto(escaped_summary.clone())
             .expect("the maximal summary maps to the web contract");
         let updates = super::attention_update_events(
             AttentionCursor::new(7),
             AttentionCursor::new(9),
             vec![maximal_update_summary; usize::from(max_attention_change_items())],
         );
-        assert_eq!(updates.len(), 4);
-        for (index, (event, cursor)) in updates.iter().enumerate() {
-            let mut update_writer = super::NdjsonItemWriter::new();
-            serde_json::to_writer(&mut update_writer, event)
-                .expect("each split update serializes within one item");
-            update_writer
-                .write_all(b"\n")
-                .expect("the NDJSON terminator fits the split update");
-            assert!(update_writer.encoded.len() <= MAX_NDJSON_ITEM_BYTES);
-            assert_eq!(cursor.value(), if index == 3 { 9 } else { 7 });
-        }
+        assert_eq!(updates.len(), 8);
+        assert_attention_update_chunk(&updates[0], 7);
+        assert_attention_update_chunk(&updates[1], 7);
+        assert_attention_update_chunk(&updates[2], 7);
+        assert_attention_update_chunk(&updates[3], 7);
+        assert_attention_update_chunk(&updates[4], 7);
+        assert_attention_update_chunk(&updates[5], 7);
+        assert_attention_update_chunk(&updates[6], 7);
+        assert_attention_update_chunk(&updates[7], 9);
 
         let snapshot = attention_snapshot_dto(AttentionSnapshot {
             cursor: AttentionCursor::new(u64::MAX),
             total: u64::MAX,
             sort: AttentionSort::LastActivityDescending,
-            summaries: vec![summary; usize::from(max_attention_snapshot_items())],
+            summaries: vec![escaped_summary; usize::from(max_attention_snapshot_items())],
             continuation: Some(AttentionContinuation::LastActivity {
                 recorded_at: UNIX_EPOCH
                     + Duration::from_millis(LARGE_REPRESENTATIVE_UNIX_MILLISECONDS),
@@ -2599,6 +2658,21 @@ mod tests {
 
         assert!(super::attention_summary_dto(oversized_summary).is_err());
         assert!(writer.encoded.len() <= MAX_NDJSON_ITEM_BYTES);
+    }
+
+    fn assert_attention_update_chunk(
+        update: &(WebAttentionStreamEvent, AttentionCursor),
+        expected_cursor: u64,
+    ) {
+        let mut writer = super::NdjsonItemWriter::new();
+        serde_json::to_writer(&mut writer, &update.0)
+            .expect("the byte-safe update chunk serializes within one item");
+        writer
+            .write_all(b"\n")
+            .expect("the NDJSON terminator fits the update chunk");
+
+        assert!(writer.encoded.len() <= MAX_NDJSON_ITEM_BYTES);
+        assert_eq!(update.1.value(), expected_cursor);
     }
 
     #[tokio::test]

@@ -125,6 +125,24 @@ test("generated live decoder correlates queued preview with its count", () => {
   );
 });
 
+test("generated live decoder rejects duplicate queued turn identities", () => {
+  const duplicate = "00000000-0000-0000-0000-000000000992";
+
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "2",
+        queued_turn_ids: [duplicate, duplicate],
+        reconciliation: null,
+        runner: null,
+      }),
+    /unique turn IDs/,
+  );
+});
+
 test("generated live decoder validates identities and active-state correlation", () => {
   assert.throws(
     () =>
@@ -184,6 +202,22 @@ test("generated live decoder rejects malformed runner correlations", () => {
         queued_turn_ids: [],
         reconciliation: null,
         runner: { state: "pinned", placement_revision: "1" },
+      }),
+    /one recognized variant/,
+  );
+});
+
+test("generated live decoder requires positive placement revisions", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: { state: "unpinned", placement_revision: "0" },
       }),
     /one recognized variant/,
   );
@@ -399,6 +433,16 @@ test("generated attention decoder rejects unknown envelope fields", () => {
   );
 });
 
+test("generated attention decoder requires the continuation field", () => {
+  const { continuation: _continuation, ...withoutContinuation } = attentionSnapshot();
+
+  assert.throws(
+    () => decodeWebAttentionSnapshot(withoutContinuation),
+    /continuation must be present/,
+  );
+  assert.equal(decodeWebAttentionSnapshot(attentionSnapshot()).continuation, null);
+});
+
 test("generated attention decoder enforces collection and scalar bounds", () => {
   assert.throws(
     () =>
@@ -407,7 +451,7 @@ test("generated attention decoder enforces collection and scalar bounds", () => 
           summaries: Array.from({ length: 33 }, () => attentionSummary()),
         }),
       ),
-    /at most 32 items/,
+    /at most 16 items/,
   );
   assert.throws(
     () =>
@@ -444,5 +488,46 @@ test("generated attention decoder rejects inconsistent operator actions", () => 
         }),
       ),
     /present exactly for blocked state/,
+  );
+  const blockedWithoutGoalBlock = attentionSummary({
+    state: "blocked",
+    action: "provide_goal_need",
+  });
+  delete blockedWithoutGoalBlock.goal_block;
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({ summaries: [blockedWithoutGoalBlock] }),
+      ),
+    /present exactly for blocked state/,
+  );
+});
+
+test("generated attention decoder rejects continuation and sort mismatches", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          sort: "session_identity_ascending",
+          continuation: {
+            kind: "last_activity",
+            unix_microseconds: "1",
+            session_id: "00000000-0000-0000-0000-000000000991",
+          },
+        }),
+      ),
+    /continuation required by sort session_identity_ascending/,
+  );
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          continuation: {
+            kind: "session_identity",
+            session_id: "00000000-0000-0000-0000-000000000991",
+          },
+        }),
+      ),
+    /continuation required by sort last_activity_descending/,
   );
 });

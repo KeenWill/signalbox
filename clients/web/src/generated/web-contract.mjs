@@ -105,48 +105,6 @@ const schemas = {
         ],
         "type": "string"
       },
-      "WebAttentionContinuation": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "last_activity",
-                "type": "string"
-              },
-              "session_id": {
-                "$ref": "#/$defs/WebSessionId"
-              },
-              "unix_microseconds": {
-                "$ref": "#/$defs/WebU64"
-              }
-            },
-            "required": [
-              "kind",
-              "unix_microseconds",
-              "session_id"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "session_identity",
-                "type": "string"
-              },
-              "session_id": {
-                "$ref": "#/$defs/WebSessionId"
-              }
-            },
-            "required": [
-              "kind",
-              "session_id"
-            ],
-            "type": "object"
-          }
-        ]
-      },
       "WebAttentionGoalBlock": {
         "additionalProperties": false,
         "properties": {
@@ -312,7 +270,46 @@ const schemas = {
       "continuation": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WebAttentionContinuation"
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "last_activity",
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "$ref": "#/$defs/WebSessionId"
+                  },
+                  "unix_microseconds": {
+                    "$ref": "#/$defs/WebU64"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "unix_microseconds",
+                  "session_id"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "session_identity",
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "$ref": "#/$defs/WebSessionId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "session_id"
+                ],
+                "type": "object"
+              }
+            ]
           },
           {
             "type": "null"
@@ -329,7 +326,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebAttentionSummary"
         },
-        "maxItems": 32,
+        "maxItems": 16,
         "type": "array"
       },
       "total": {
@@ -340,7 +337,8 @@ const schemas = {
       "cursor",
       "total",
       "sort",
-      "summaries"
+      "summaries",
+      "continuation"
     ],
     "title": "WebAttentionSnapshot",
     "type": "object"
@@ -390,48 +388,6 @@ const schemas = {
           "execution_failure"
         ],
         "type": "string"
-      },
-      "WebAttentionContinuation": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "last_activity",
-                "type": "string"
-              },
-              "session_id": {
-                "$ref": "#/$defs/WebSessionId"
-              },
-              "unix_microseconds": {
-                "$ref": "#/$defs/WebU64"
-              }
-            },
-            "required": [
-              "kind",
-              "unix_microseconds",
-              "session_id"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "session_identity",
-                "type": "string"
-              },
-              "session_id": {
-                "$ref": "#/$defs/WebSessionId"
-              }
-            },
-            "required": [
-              "kind",
-              "session_id"
-            ],
-            "type": "object"
-          }
-        ]
       },
       "WebAttentionGoalBlock": {
         "additionalProperties": false,
@@ -485,7 +441,46 @@ const schemas = {
           "continuation": {
             "anyOf": [
               {
-                "$ref": "#/$defs/WebAttentionContinuation"
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "last_activity",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "$ref": "#/$defs/WebSessionId"
+                      },
+                      "unix_microseconds": {
+                        "$ref": "#/$defs/WebU64"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "unix_microseconds",
+                      "session_id"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "session_identity",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "$ref": "#/$defs/WebSessionId"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "session_id"
+                    ],
+                    "type": "object"
+                  }
+                ]
               },
               {
                 "type": "null"
@@ -502,7 +497,7 @@ const schemas = {
             "items": {
               "$ref": "#/$defs/WebAttentionSummary"
             },
-            "maxItems": 32,
+            "maxItems": 16,
             "type": "array"
           },
           "total": {
@@ -513,7 +508,8 @@ const schemas = {
           "cursor",
           "total",
           "sort",
-          "summaries"
+          "summaries",
+          "continuation"
         ],
         "type": "object"
       },
@@ -847,6 +843,11 @@ const schemas = {
         "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
         "type": "string"
       },
+      "WebPositiveU64": {
+        "description": "Checked positive 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
       "WebSessionId": {
         "description": "Checked canonical UUID used for browser-visible session identities.",
         "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -958,7 +959,7 @@ const schemas = {
                 "type": "string"
               },
               "placement_revision": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "runner_id": {
                 "$ref": "#/$defs/WebLiveResourceId"
@@ -1041,7 +1042,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "placement_revision": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "state": {
                 "const": "unpinned",
@@ -1061,7 +1062,7 @@ const schemas = {
                 "$ref": "#/$defs/WebSessionLiveRunnerConnectionHealth"
               },
               "placement_revision": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "runner_id": {
                 "$ref": "#/$defs/WebLiveResourceId"
@@ -1083,7 +1084,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "placement_revision": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "runner_id": {
                 "$ref": "#/$defs/WebLiveResourceId"
@@ -1104,7 +1105,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "placement_revision": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "runner_id": {
                 "$ref": "#/$defs/WebLiveResourceId"
@@ -1125,7 +1126,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "placement_revision": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "runner_id": {
                 "$ref": "#/$defs/WebLiveResourceId"
@@ -1808,14 +1809,19 @@ export function decodeWebSessionTimelineWindow(value) {
 
 export function decodeWebAttentionSnapshot(value) {
   assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
-  value.summaries.forEach((summary, index) => assertAttentionSummary(summary, `attention_snapshot.summaries[${index}]`));
+  assertAttentionSnapshot(value, "attention_snapshot");
   return value;
 }
 
 export function decodeWebAttentionStreamEvent(value) {
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
-  const summaries = value.kind === "snapshot" ? value.snapshot.summaries : value.summaries;
-  summaries?.forEach((summary, index) => assertAttentionSummary(summary, `attention_event.summaries[${index}]`));
+  if (value.kind === "snapshot") {
+    assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
+  } else {
+    value.summaries?.forEach((summary, index) =>
+      assertAttentionSummary(summary, `attention_event.summaries[${index}]`),
+    );
+  }
   return value;
 }
 
@@ -1846,8 +1852,25 @@ function assertLiveSnapshot(snapshot, path) {
       `exactly ${expectedPreviewLength} IDs for queued_turn_count`,
     );
   }
+  if (new Set(snapshot.queued_turn_ids).size !== snapshot.queued_turn_ids.length) {
+    fail(`${path}.queued_turn_ids`, "unique turn IDs");
+  }
   if (snapshot.active != null && snapshot.reconciliation != null) {
     fail(`${path}.reconciliation`, "absent while an active turn is present");
+  }
+}
+
+function assertAttentionSnapshot(snapshot, path) {
+  snapshot.summaries.forEach((summary, index) =>
+    assertAttentionSummary(summary, `${path}.summaries[${index}]`),
+  );
+  const continuationKind = snapshot.continuation?.kind ?? null;
+  const expectedContinuationKind = {
+    last_activity_descending: "last_activity",
+    session_identity_ascending: "session_identity",
+  }[snapshot.sort];
+  if (continuationKind !== null && continuationKind !== expectedContinuationKind) {
+    fail(`${path}.continuation`, `the continuation required by sort ${snapshot.sort}`);
   }
 }
 
@@ -1865,7 +1888,8 @@ function assertAttentionSummary(summary, path) {
   if (summary.action !== expectedAction) {
     fail(`${path}.action`, `the action required by state ${summary.state}`);
   }
-  if ((summary.state === "blocked") !== (summary.goal_block !== null)) {
+  const hasGoalBlock = Object.hasOwn(summary, "goal_block") && summary.goal_block !== null;
+  if ((summary.state === "blocked") !== hasGoalBlock) {
     fail(`${path}.goal_block`, "present exactly for blocked state");
   }
 }

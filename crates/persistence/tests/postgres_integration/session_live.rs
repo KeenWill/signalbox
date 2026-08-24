@@ -109,6 +109,7 @@ async fn snapshot_caps_queue_preview_and_tracks_activation() -> Result<(), Box<d
     let absent = repository
         .read_live_snapshot(SessionId::from_uuid(Uuid::from_u128(LIVE_SEED + 0xffff)))
         .await?;
+    let preview_limit = usize::from(max_session_live_queued_turns());
 
     assert_eq!(queued.queued_turn_count, 1);
     assert_eq!(queued.queued_turns, [first_turn]);
@@ -116,11 +117,8 @@ async fn snapshot_caps_queue_preview_and_tracks_activation() -> Result<(), Box<d
     assert_eq!(active.queued_turn_count, 0);
     assert_eq!(active.queued_turns, []);
     assert_eq!(bounded.queued_turn_count, 33);
-    assert_eq!(
-        bounded.queued_turns.len(),
-        usize::from(max_session_live_queued_turns())
-    );
-    assert_eq!(bounded.queued_turns, turns[..32]);
+    assert_eq!(bounded.queued_turns.len(), preview_limit);
+    assert_eq!(bounded.queued_turns, turns[..preview_limit]);
     assert_eq!(
         active.active,
         Some(SessionLiveActiveTurn {
