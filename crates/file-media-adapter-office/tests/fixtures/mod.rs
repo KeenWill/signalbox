@@ -233,7 +233,7 @@ impl OfficeFixture {
             "",
             &[(
                 "word/document.xml",
-                br#"<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"/>"#.as_slice(),
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#.as_slice(),
                 EntryKind::File,
             )],
         )

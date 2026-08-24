@@ -1192,17 +1192,17 @@ fn collect_package_relationship(
         }
     }
     let id = id.ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+    let relationship_type =
+        relationship_type.ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+    let target = target.ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
     if !relationship_ids.insert(id) {
         return Err(ValidationIssue::Malformed(MALFORMED_REASON));
     }
-    if relationship_type
-        .as_deref()
-        .is_some_and(|value| relationship_type_matches(value, "/officeDocument"))
-    {
+    if relationship_type_matches(&relationship_type, "/officeDocument") {
         if external {
             return Err(ValidationIssue::Malformed(MALFORMED_REASON));
         }
-        targets.push(target.ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?);
+        targets.push(target);
     }
     Ok(())
 }
@@ -1921,6 +1921,35 @@ fn supported_markup_namespace(namespace: &[u8]) -> bool {
     .any(|supported| namespace == supported)
 }
 
+fn markup_choice_is_supported(
+    reader: &Reader<Cursor<&[u8]>>,
+    element: &quick_xml::events::BytesStart<'_>,
+    namespace_scope: &std::collections::HashMap<Vec<u8>, Vec<u8>>,
+) -> Result<bool, XmlIssue> {
+    let mut requires = None;
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
+        if attribute.key.as_ref() == b"Requires" {
+            requires = Some(
+                attribute
+                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                    .map_err(|_| XmlIssue::Malformed)?
+                    .into_owned(),
+            );
+        }
+    }
+    let requires = requires.ok_or(XmlIssue::Malformed)?;
+    let mut prefixes = requires.split_ascii_whitespace().peekable();
+    if prefixes.peek().is_none() {
+        return Err(XmlIssue::Malformed);
+    }
+    Ok(prefixes.all(|prefix| {
+        namespace_scope
+            .get(prefix.as_bytes())
+            .is_some_and(|namespace| supported_markup_namespace(namespace))
+    }))
+}
+
 fn ignores_markup_compatibility_element(
     name: &[u8],
     namespace_scope: &std::collections::HashMap<Vec<u8>, Vec<u8>>,
@@ -2574,7 +2603,8 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
     let mut text_depth = 0_usize;
     let mut saw_root = false;
     let mut alternate_depth = None;
-    let mut fallback_depth = None;
+    let mut selected_branch_depth = None;
+    let mut supported_choice_found = false;
     let mut ignored_depth = None;
     let mut namespace_scopes = vec![std::collections::HashMap::new()];
     let mut compatibility_scopes = vec![MarkupCompatibilityScope::default()];
@@ -2615,7 +2645,7 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                 }
                 let not_ignored = ignored_depth.is_none();
                 let selected =
-                    not_ignored && (alternate_depth.is_none() || fallback_depth.is_some());
+                    not_ignored && (alternate_depth.is_none() || selected_branch_depth.is_some());
                 let text_namespace = match kind {
                     OfficeKind::Docx => WORDPROCESSINGML_NAMESPACE,
                     OfficeKind::Xlsx => SPREADSHEETML_NAMESPACE,
@@ -2653,12 +2683,23 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                     if alternate_depth.replace(element_depth).is_some() {
                         return Err(XmlIssue::Malformed);
                     }
+                    supported_choice_found = false;
+                } else if not_ignored
+                    && name == b"Choice"
+                    && markup_compatibility_element
+                    && alternate_depth.is_some_and(|depth| element_depth == depth + 1)
+                    && !supported_choice_found
+                    && markup_choice_is_supported(&reader, &start, &scope)?
+                {
+                    supported_choice_found = true;
+                    selected_branch_depth = Some(element_depth);
                 } else if not_ignored
                     && name == b"Fallback"
                     && markup_compatibility_element
                     && alternate_depth.is_some_and(|depth| element_depth == depth + 1)
+                    && !supported_choice_found
                 {
-                    if fallback_depth.replace(element_depth).is_some() {
+                    if selected_branch_depth.replace(element_depth).is_some() {
                         return Err(XmlIssue::Malformed);
                     }
                 } else if supported_text && selected {
@@ -2699,22 +2740,23 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                     );
                 if was_text {
                     text_depth = text_depth.checked_sub(1).ok_or(XmlIssue::Malformed)?;
-                } else if name == b"Fallback"
+                } else if (name == b"Choice" || name == b"Fallback")
                     && markup_compatibility_element
-                    && fallback_depth.is_some_and(|depth| element_depth + 1 == depth)
+                    && selected_branch_depth.is_some_and(|depth| element_depth + 1 == depth)
                 {
-                    fallback_depth = None;
+                    selected_branch_depth = None;
                 } else if name == b"AlternateContent"
                     && markup_compatibility_element
                     && alternate_depth.is_some_and(|depth| element_depth + 1 == depth)
                 {
-                    if fallback_depth.is_some() {
+                    if selected_branch_depth.is_some() {
                         return Err(XmlIssue::Malformed);
                     }
                     alternate_depth = None;
+                    supported_choice_found = false;
                 } else if (supported_paragraph || supported_spreadsheet_boundary)
                     && ignored_depth.is_none()
-                    && (alternate_depth.is_none() || fallback_depth.is_some())
+                    && (alternate_depth.is_none() || selected_branch_depth.is_some())
                     && !output.is_empty()
                     && !output.ends_with('\n')
                 {
@@ -2751,7 +2793,7 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                         &scope,
                         &compatibility,
                     )
-                    && (alternate_depth.is_none() || fallback_depth.is_some());
+                    && (alternate_depth.is_none() || selected_branch_depth.is_some());
                 let supported_word_control = kind == OfficeKind::Docx
                     && element_uses_scoped_namespace(
                         qualified_name.as_ref(),
@@ -2800,7 +2842,7 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                     && element_depth == 0
                     && text_depth == 0
                     && alternate_depth.is_none()
-                    && fallback_depth.is_none()
+                    && selected_branch_depth.is_none()
                     && ignored_depth.is_none() =>
             {
                 break;
@@ -3536,6 +3578,21 @@ mod tests {
     }
 
     #[test]
+    fn package_relationships_require_complete_attributes() {
+        let missing_type = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="custom.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+        let missing_target = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="urn:extension"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+
+        assert!(matches!(
+            validate_package_relationships(missing_type, &[OfficeKind::Docx]),
+            Err(ValidationIssue::Malformed(MALFORMED_REASON))
+        ));
+        assert!(matches!(
+            validate_package_relationships(missing_target, &[OfficeKind::Docx]),
+            Err(ValidationIssue::Malformed(MALFORMED_REASON))
+        ));
+    }
+
+    #[test]
     fn part_relationships_honor_inherited_prefixes() {
         let workbook_xml = br#"<pr:Relationships xmlns:pr="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:rel="http://schemas.openxmlformats.org/package/2006/relationships"><rel:Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></pr:Relationships>"#;
         let presentation_xml = br#"<pr:Relationships xmlns:pr="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:rel="http://schemas.openxmlformats.org/package/2006/relationships"><rel:Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></pr:Relationships>"#;
@@ -3774,13 +3831,25 @@ mod tests {
 
     #[test]
     fn text_extraction_selects_markup_compatibility_fallback() {
-        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:AlternateContent><mc:Choice Requires="w14"><w:p><w:t>choice</w:t></w:p></mc:Choice><mc:Fallback><w:p><w:t>fallback</w:t></w:p></mc:Fallback></mc:AlternateContent></w:document>"#;
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:ext="urn:unsupported"><mc:AlternateContent><mc:Choice Requires="ext"><w:p><w:t>choice</w:t></w:p></mc:Choice><mc:Fallback><w:p><w:t>fallback</w:t></w:p></mc:Fallback></mc:AlternateContent></w:document>"#;
 
         let result = extract_xml_text(xml, OfficeKind::Docx);
 
         assert_eq!(
             result.expect("the fallback branch should extract"),
             "fallback\n"
+        );
+    }
+
+    #[test]
+    fn text_extraction_selects_supported_markup_compatibility_choice() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:AlternateContent><mc:Choice Requires="w"><w:p><w:t>choice</w:t></w:p></mc:Choice><mc:Fallback><w:p><w:t>fallback</w:t></w:p></mc:Fallback></mc:AlternateContent></w:document>"#;
+
+        let result = extract_xml_text(xml, OfficeKind::Docx);
+
+        assert_eq!(
+            result.expect("the supported choice branch should extract"),
+            "choice\n"
         );
     }
 
