@@ -14,6 +14,7 @@ export interface CommandContext {
   requestedImportEntry?: string
   selectImportEntry?: (id: string) => void
   navigate?: (path: string) => void
+  navigateScenario?: () => void
   transcriptPreferences?: boolean
   presentationPreferences?: boolean
   requestedPaneSizes?: RootState['app']['paneSizes']
@@ -46,6 +47,7 @@ interface CommandDefinitionShape {
 
 const always = () => true
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
+const scenarioNavigation = (context: CommandContext) => context.navigateScenario !== undefined
 const scenarioTimeline = (context: CommandContext) => context.timelineIds.length > 0
 const keyboardHelp = (context: CommandContext) =>
   scenarioTimeline(context) || context.keyboardHelpAvailable === true
@@ -134,6 +136,15 @@ export const commandRegistry = [
     bindings: [{ label: 'g ,', registration: { kind: 'sequence', sequence: ['G', ','] } }],
     available: productNavigation,
     run: (context) => context.navigate?.('/settings'),
+  },
+  {
+    id: 'navigate.scenario',
+    title: 'Open Scenario studio',
+    description: 'Open the deterministic scenario workspace.',
+    category: 'Navigate',
+    bindings: [],
+    available: scenarioNavigation,
+    run: (context) => context.navigateScenario?.(),
   },
   {
     id: 'palette.open',

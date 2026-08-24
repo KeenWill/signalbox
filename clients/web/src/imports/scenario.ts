@@ -202,8 +202,7 @@ export class ScenarioImportApi implements ImportApi {
   ): Promise<WebImportContinuationResponse> {
     let sessionId = this.continuationSessions.get(request.command_id)
     if (sessionId === undefined) {
-      const sessionIdentity =
-        this.nextSessionIdentity ?? 9_000_000 + request.frontier.position
+      const sessionIdentity = this.nextSessionIdentity ?? 9_000_000 + request.frontier.position
       sessionId = fixtureUuid(sessionIdentity)
       this.nextSessionIdentity = sessionIdentity + 1
       this.continuationSessions.set(request.command_id, sessionId)

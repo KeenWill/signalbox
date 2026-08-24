@@ -16,6 +16,7 @@ import {
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   type CommandContext,
+  type CommandId,
   commandRegistry,
   globalHotkeyBindings,
   globalHotkeySequenceBindings,
@@ -81,12 +82,26 @@ const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; ques
   },
 }
 
+const productNavigationCommandIds: Record<ProductRouteId, CommandId> = {
+  attention: 'navigate.attention',
+  sessions: 'navigate.sessions',
+  search: 'navigate.search',
+  activity: 'navigate.activity',
+  runners: 'navigate.runners',
+  reviews: 'navigate.reviews',
+  imports: 'navigate.imports',
+  usage: 'navigate.usage',
+  settings: 'navigate.settings',
+}
+
 function ProductNavigation({
   active,
+  context,
   disabled = false,
   onNavigate,
 }: {
   active: ProductRouteId
+  context: CommandContext
   disabled?: boolean
   onNavigate?: (destination: 'product' | 'scenario') => void
 }) {
@@ -108,8 +123,21 @@ function ProductNavigation({
             aria-disabled={disabled || undefined}
             tabIndex={disabled ? -1 : undefined}
             onClick={(event) => {
-              if (disabled) event.preventDefault()
-              else onNavigate?.('product')
+              if (disabled) {
+                event.preventDefault()
+                return
+              }
+              if (
+                event.button === 0 &&
+                !event.altKey &&
+                !event.ctrlKey &&
+                !event.metaKey &&
+                !event.shiftKey
+              ) {
+                event.preventDefault()
+                onNavigate?.('product')
+                invokeCommand(productNavigationCommandIds[route.id], context)
+              }
             }}
           >
             <span>{route.label}</span>
@@ -124,8 +152,21 @@ function ProductNavigation({
         aria-disabled={disabled || undefined}
         tabIndex={disabled ? -1 : undefined}
         onClick={(event) => {
-          if (disabled) event.preventDefault()
-          else onNavigate?.('scenario')
+          if (disabled) {
+            event.preventDefault()
+            return
+          }
+          if (
+            event.button === 0 &&
+            !event.altKey &&
+            !event.ctrlKey &&
+            !event.metaKey &&
+            !event.shiftKey
+          ) {
+            event.preventDefault()
+            onNavigate?.('scenario')
+            invokeCommand('navigate.scenario', context)
+          }
         }}
       >
         Scenario studio <span aria-hidden="true">↗</span>
@@ -377,6 +418,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               focusDestination,
             )
           },
+      navigateScenario: navigationDisabled
+        ? undefined
+        : () =>
+            void navigate({
+              to: '/scenario/$scenarioId',
+              params: { scenarioId: 'streaming' },
+            }),
     }
   }, [dispatch, focusDestination, importsCommandContext, navigate, navigationDisabled, surface])
   useHotkeys(
@@ -408,7 +456,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <SessionsSurface />
     ) : surface === 'settings' ? (
       <SettingsSurface context={context} />
-    ) : surface === 'imports' && bootstrap.isSuccess && productImportApi !== null ? (
+    ) : surface === 'imports' &&
+      bootstrap.isSuccess &&
+      !bootstrap.isFetching &&
+      productImportApi !== null ? (
       <ImportsWorkspace
         api={productImportApi}
         scenario={false}
@@ -446,6 +497,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <aside className="product-navigation-pane" ref={navigationRef}>
         <ProductNavigation
           active={surface}
+          context={context}
           disabled={navigationDisabled}
           onNavigate={(destination) => {
             if (destination === 'product') focusDestination()
@@ -543,6 +595,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             </Dialog.Description>
             <ProductNavigation
               active={surface}
+              context={context}
               disabled={navigationDisabled}
               onNavigate={(destination) => {
                 restoreNavigationFocusRef.current = false

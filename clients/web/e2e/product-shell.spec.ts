@@ -270,7 +270,13 @@ test('applies saved presentation preferences on a direct Imports scenario load',
   await page.addInitScript(() => {
     localStorage.setItem(
       'signalbox.web.preferences.v1',
-      JSON.stringify({ theme: 'light', density: 'comfortable' }),
+      JSON.stringify({
+        layout: 'workbench',
+        density: 'comfortable',
+        detail: 'condensed',
+        theme: 'light',
+        paneSizes: { navigation: 218, inspector: 252 },
+      }),
     )
   })
   await page.goto('/scenario/imports')
@@ -300,7 +306,16 @@ test('restores default Settings preferences without a mouse', async ({ page }) =
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.addInitScript(() => {
-    localStorage.setItem('signalbox.web.preferences.v1', JSON.stringify({ theme: 'light' }))
+    localStorage.setItem(
+      'signalbox.web.preferences.v1',
+      JSON.stringify({
+        layout: 'workbench',
+        density: 'compact',
+        detail: 'condensed',
+        theme: 'light',
+        paneSizes: { navigation: 218, inspector: 252 },
+      }),
+    )
   })
   await page.goto(settingsPreferenceFixture.path)
 
@@ -510,7 +525,13 @@ test('stacks Imports from the available product pane width', async ({ page }) =>
   await page.addInitScript(() => {
     localStorage.setItem(
       'signalbox.web.preferences.v1',
-      JSON.stringify({ paneSizes: { navigation: 360, inspector: 480 } }),
+      JSON.stringify({
+        layout: 'workbench',
+        density: 'compact',
+        detail: 'condensed',
+        theme: 'dark',
+        paneSizes: { navigation: 360, inspector: 480 },
+      }),
     )
   })
   await page.setViewportSize({ width: 1280, height: 844 })

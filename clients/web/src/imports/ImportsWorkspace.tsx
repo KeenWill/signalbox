@@ -1,5 +1,6 @@
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
 import { Menu } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
@@ -30,6 +31,8 @@ const IMPORT_PAGE_ITEMS = 100
 const IMPORT_WINDOW_RADIUS = 50
 const EMPTY_FILTER = ''
 const SCENARIO_MODEL_SELECTION = '00000000-0000-7000-8000-000000000777'
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const NIL_UUID = '00000000-0000-0000-0000-000000000000'
 
 type FormatFilter = WebImportFormat | typeof EMPTY_FILTER
 type ModelKind = 'direct' | 'alias'
@@ -70,7 +73,7 @@ export function ImportsWorkspace({
   const queryClient = useQueryClient()
   const app = useAppSelector(selectApp)
   const density = app.density
-  const overlay = app.overlay
+  const navigate = useNavigate()
   const queryScope = scenario ? 'scenario' : 'production'
   const [format, setFormat] = useState<FormatFilter>(EMPTY_FILTER)
   const [sourceSession, setSourceSession] = useState('')
@@ -125,16 +128,17 @@ export function ImportsWorkspace({
 
   useEffect(() => {
     if (
+      imports !== undefined &&
       !hasRetainedCommand &&
       (!selectedImport ||
-        !imports?.items.some((item) => item.imported_conversation_id === selectedImport))
+        !imports.items.some((item) => item.imported_conversation_id === selectedImport))
     ) {
       setSelectedImport(firstImport)
       setWindowRequest({ anchor: 'first', before: 0, after: IMPORT_WINDOW_RADIUS })
       setSelectedFrontier(null)
       setPositionInput('')
     }
-  }, [firstImport, hasRetainedCommand, imports?.items, selectedImport])
+  }, [firstImport, hasRetainedCommand, imports, selectedImport])
 
   const descriptorQuery = useQuery({
     queryKey: ['imports', queryScope, selectedImport, 'descriptor'],
@@ -198,27 +202,28 @@ export function ImportsWorkspace({
     },
     [entryWindow?.items, hasRetainedCommand, resetContinuation],
   )
-  const modelSelectionMissing = modelSelectionId.trim().length === 0
+  const normalizedModelSelectionId = modelSelectionId.trim()
+  const modelSelectionInvalid =
+    !CANONICAL_UUID.test(normalizedModelSelectionId) || normalizedModelSelectionId === NIL_UUID
   const canContinueImport =
     selectedFrontier !== null &&
-    !modelSelectionMissing &&
+    !modelSelectionInvalid &&
     !importsQuery.isError &&
     !descriptorQuery.isError &&
     !windowQuery.isError &&
     !continuation.isPending &&
-    !hasRetainedCommand &&
-    overlay === null
+    !hasRetainedCommand
   const continueAt = useCallback(
     (relationship: WebImportedSessionRelationship) => {
-      if (!canContinueImport || !selectedFrontier) return
+      if (!canContinueImport || !selectedFrontier || store.getState().app.overlay !== null) return
       const request: WebImportContinuationRequest = {
         command_id: crypto.randomUUID(),
         frontier: selectedFrontier,
         relationship,
         initial_model_selection:
           modelKind === 'direct'
-            ? { kind: 'direct', selection_id: modelSelectionId.trim() }
-            : { kind: 'alias', alias_id: modelSelectionId.trim() },
+            ? { kind: 'direct', selection_id: normalizedModelSelectionId }
+            : { kind: 'alias', alias_id: normalizedModelSelectionId },
       }
       if (!storeRetainedCommand(queryScope, request)) {
         setRetainedStorageFailed(true)
@@ -228,7 +233,14 @@ export function ImportsWorkspace({
       setPendingCommand(request)
       continuation.mutate(request)
     },
-    [canContinueImport, continuation, modelKind, modelSelectionId, queryScope, selectedFrontier],
+    [
+      canContinueImport,
+      continuation,
+      modelKind,
+      normalizedModelSelectionId,
+      queryScope,
+      selectedFrontier,
+    ],
   )
   const retryExactCommand = useCallback(() => {
     if (!pendingCommand || continuation.isPending) return
@@ -259,6 +271,9 @@ export function ImportsWorkspace({
       retryImport: retryExactCommand,
       canAbandonImport: canRecoverRetainedCommand,
       abandonImport: abandonExactCommand,
+      navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      navigateScenario: () =>
+        void navigate({ to: '/scenario/$scenarioId', params: { scenarioId: 'streaming' } }),
     }),
     [
       abandonExactCommand,
@@ -267,6 +282,7 @@ export function ImportsWorkspace({
       continueAt,
       hasRetainedCommand,
       importEntryIds,
+      navigate,
       presentation,
       retryExactCommand,
       selectImportEntry,
@@ -649,7 +665,7 @@ export function ImportsWorkspace({
                       onClick={() => invokeCommand('imports.continue.resume', commandContext)}
                       disabled={
                         !selectedFrontier ||
-                        modelSelectionMissing ||
+                        modelSelectionInvalid ||
                         descriptorQuery.isError ||
                         continuation.isPending ||
                         hasRetainedCommand
@@ -662,7 +678,7 @@ export function ImportsWorkspace({
                       onClick={() => invokeCommand('imports.continue.fork', commandContext)}
                       disabled={
                         !selectedFrontier ||
-                        modelSelectionMissing ||
+                        modelSelectionInvalid ||
                         descriptorQuery.isError ||
                         continuation.isPending ||
                         hasRetainedCommand

@@ -142,37 +142,34 @@ describe('HttpImportApi correlation', () => {
 
   it('reapplies full product admission when an admitted bootstrap expires', async () => {
     let now = 1_000
-    let catalogRequests = 0
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: string | URL | Request) => {
-        const url = String(input)
-        if (url.includes('/api/bootstrap')) {
-          return new Response(
-            JSON.stringify({
-              contract: { name: 'signalbox.web-http', version: '2' },
-              capabilities: {
-                bounded_json: true,
-                import_discovery: false,
-                imported_continuations: true,
-                same_origin_json_mutations: true,
-                ndjson_streaming: true,
-              },
-              limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 65_536 },
-            }),
-          )
-        }
-        catalogRequests += 1
-        return new Response(
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
           JSON.stringify({
             items: [],
             next_cursor: null,
             search_correlation: null,
             exact_source_session_id_sha256: null,
           }),
-        )
-      }),
-    )
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            contract: { name: 'signalbox.web-http', version: '2' },
+            capabilities: {
+              bounded_json: true,
+              import_discovery: false,
+              imported_continuations: true,
+              same_origin_json_mutations: true,
+              ndjson_streaming: true,
+            },
+            limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 65_536 },
+          }),
+        ),
+      )
+    vi.stubGlobal('fetch', fetch)
     const api = HttpImportApi.withAdmittedBootstrap(
       {
         contract: { name: 'signalbox.web-http', version: '2' },
@@ -193,7 +190,8 @@ describe('HttpImportApi correlation', () => {
     now += 30_000
 
     await expect(api.list({ limit: 1 })).rejects.toBeInstanceOf(ProductContractAdmissionError)
-    expect(catalogRequests).toBe(1)
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(fetch.mock.calls[1]?.[0]).toBe('/api/bootstrap')
   })
 
   it('rejects a declared oversized catalog response before parsing it', async () => {
