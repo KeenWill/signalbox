@@ -146,6 +146,15 @@ async fn declared_zip_after_probe_prefix_validates_and_enumerates() -> Result<()
 }
 
 #[tokio::test]
+async fn declared_zip_after_signature_like_long_preamble_validates_and_enumerates()
+-> Result<(), Box<dyn Error>> {
+    assert_valid_inventory(
+        valid_inventory(ArchiveFixture::zip_after_signature_like_long_preamble()?).await?,
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn zip_with_signature_like_preamble_validates_and_enumerates() -> Result<(), Box<dyn Error>> {
     assert_valid_inventory(
         valid_inventory(ArchiveFixture::zip_with_gzip_signature_preamble()?).await?,
@@ -156,6 +165,15 @@ async fn zip_with_signature_like_preamble_validates_and_enumerates() -> Result<(
 #[tokio::test]
 async fn legacy_zip_filename_is_decoded_before_validation() -> Result<(), Box<dyn Error>> {
     assert_valid_inventory(valid_inventory(ArchiveFixture::legacy_named_zip()?).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn zero_sized_zip_directory_stream_is_decoded() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::zero_sized_data_bearing_zip_directory()?).await?,
+        "special_entry",
+    );
     Ok(())
 }
 

@@ -89,11 +89,13 @@ impl FileMediaProvider for ArchiveProvider {
             let length = source.byte_length().get().min(PROBE_BYTES);
             let prefix = ProbePrefix(read_range(source, SourceRange { offset: 0, length }).await?);
             require_active(cancellation)?;
-            if kind.matches_probe(prefix.as_bytes()) {
+            let prefix_matches = kind.matches_probe(prefix.as_bytes());
+            if prefix_matches
+                || kind == ArchiveKind::Zip && source.byte_length().get() <= SOURCE_BYTES
+            {
                 let strength = if source.byte_length().get() <= SOURCE_BYTES
                     && (kind == ArchiveKind::Zip
-                        || zip_header(prefix.as_bytes())
-                            && matches!(kind, ArchiveKind::Gzip | ArchiveKind::Zstd))
+                        || prefix_matches && matches!(kind, ArchiveKind::Gzip | ArchiveKind::Zstd))
                 {
                     let complete = read_complete_after_prefix(source, prefix).await?;
                     require_active(cancellation)?;
@@ -431,11 +433,10 @@ fn enumerate_zip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
         let mut file = archive
             .by_index(index)
             .map_err(|_| ArchiveIssue::Malformed)?;
-        let (expanded, recursive) = if file.is_dir() {
-            (0, false)
-        } else {
-            count_reader(&mut file, MAX_ENTRY_BYTES)?
-        };
+        let (expanded, recursive) = count_reader(&mut file, MAX_ENTRY_BYTES)?;
+        if file.is_dir() && expanded != 0 {
+            return Err(ArchiveIssue::Special);
+        }
         if recursive {
             return Err(ArchiveIssue::Recursive);
         }

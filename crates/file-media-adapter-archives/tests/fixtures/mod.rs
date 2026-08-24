@@ -74,6 +74,22 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn zip_after_signature_like_long_preamble() -> Result<Self, Box<dyn Error>> {
+        let mut bytes = b"\x1f\x8b\x08".to_vec();
+        bytes.resize(1_025, b'x');
+        bytes.extend_from_slice(&zip_bytes(&[(
+            "docs/readme.txt",
+            PAYLOAD,
+            ZipEntryKind::File,
+        )])?);
+        Ok(Self {
+            bytes,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "docs/readme.txt",
+        })
+    }
+
     pub fn legacy_named_zip() -> Result<Self, Box<dyn Error>> {
         let mut bytes = zip_bytes(&[("cafe.txt", PAYLOAD, ZipEntryKind::File)])?;
         set_legacy_filename(&mut bytes, b"caf\x82.txt")?;
@@ -314,6 +330,12 @@ impl ArchiveFixture {
             expected_format: "zip",
             expected_name: "payload/",
         })
+    }
+
+    pub fn zero_sized_data_bearing_zip_directory() -> Result<Self, Box<dyn Error>> {
+        let mut fixture = Self::data_bearing_zip_directory()?;
+        set_uncompressed_size(&mut fixture.bytes, 0)?;
+        Ok(fixture)
     }
 
     pub fn tar_symlink() -> Result<Self, Box<dyn Error>> {
@@ -607,6 +629,26 @@ fn set_compression_method(bytes: &mut [u8], method: u16) -> Result<(), Box<dyn E
         .get_mut(central + 10..central + 12)
         .ok_or("ZIP central compression method absent")?
         .copy_from_slice(&method.to_le_bytes());
+    Ok(())
+}
+
+fn set_uncompressed_size(bytes: &mut [u8], size: u32) -> Result<(), Box<dyn Error>> {
+    let local = bytes
+        .windows(4)
+        .position(|window| window == b"PK\x03\x04")
+        .ok_or("ZIP fixture omitted local header")?;
+    let central = bytes
+        .windows(4)
+        .position(|window| window == b"PK\x01\x02")
+        .ok_or("ZIP fixture omitted central header")?;
+    bytes
+        .get_mut(local + 22..local + 26)
+        .ok_or("ZIP local uncompressed size absent")?
+        .copy_from_slice(&size.to_le_bytes());
+    bytes
+        .get_mut(central + 24..central + 28)
+        .ok_or("ZIP central uncompressed size absent")?
+        .copy_from_slice(&size.to_le_bytes());
     Ok(())
 }
 
