@@ -503,6 +503,18 @@ impl fmt::Display for RejectionDisplay {
                 formatter,
                 "tool_request_not_in_session session={session_id} request={tool_request_id}"
             ),
+            RejectionDetail::ToolRequestNotDelegateDenied { tool_request_id } => write!(
+                formatter,
+                "tool_request_not_delegate_denied request={tool_request_id}"
+            ),
+            RejectionDetail::ToolRequestNotTerminallyDenied { tool_request_id } => write!(
+                formatter,
+                "tool_request_not_terminally_denied request={tool_request_id}"
+            ),
+            RejectionDetail::ToolDenialAlreadyOverridden { tool_request_id } => write!(
+                formatter,
+                "tool_denial_already_overridden request={tool_request_id}"
+            ),
             RejectionDetail::DelegationRequestNotInTurn {
                 session_id,
                 turn_id,

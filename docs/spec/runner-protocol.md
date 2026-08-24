@@ -26,7 +26,9 @@ remain owned by [tool loop](tool-loop.md). Invariant tags cite
 [the invariant test index](../invariants.md).
 
 The connection-loss persistence transaction was verified against this PR
-(`agent/runner-loss-session-transaction`).
+(`agent/runner-loss-session-transaction`). Daemon paging of its durable cursors
+and startup resumption were verified against this PR
+(`agent/runner-loss-daemon-propagation`).
 
 The registration-only executable slice is verified through PR #376
 (`agent/runner-daemon`). It adds the dedicated local listener, durable
@@ -519,9 +521,10 @@ advertises and serves no operation provider.
 An unannounced transport close or protocol failure durably records `lost`; an
 epoch-targeted shutdown from either side durably records `shutdown`. On hub
 startup, every prior-process connection left `connected` or `suspect` is marked
-`lost` before the runner listener binds. The append-only event stream retains
-the epoch, within-epoch ordinal, closed state, and typed cause, so a dead runner
-does not remain observable as healthy after disconnect or restart.
+`lost`, and every pending loss cursor is propagated to affected sessions, before
+the runner listener binds. The append-only event stream retains the epoch,
+within-epoch ordinal, closed state, and typed cause, so a dead runner does not
+remain observable as healthy after disconnect or restart.
 
 Before closing an established stream for a rejected advertisement, the daemon
 records peer, authority, and policy rejection as `protocol_failure`, or durable
@@ -1437,7 +1440,9 @@ of immutable grant audit evidence is rejected. Lease insertion joins the current
 unrevoked grant and exact tool/profile pair atomically with dispatch
 authorization. Durable admission requires provenance matching that stored
 placement-policy result: `Automatic` requires policy-derived automatic approval,
-and `SessionPolicy` requires an exact user confirmation. The daemon-local
+and `SessionPolicy` requires an exact user confirmation: either the applied user
+command that decided the request, or the one-shot user override the request
+consumed, which is that same confirmation exercised in advance. The daemon-local
 dangerous blanket is never accepted for runner insertion, including a direct
 lease-row insert (INV-035, INV-045).
 

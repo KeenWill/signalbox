@@ -18,7 +18,9 @@ Placement-relative lease-offer fencing was verified against the parent slice
 and ordered page read were verified against this PR
 (`agent/runner-loss-session-propagation`). The atomic per-session runner-loss
 propagation transaction and cursor completion were verified against this PR
-(`agent/runner-loss-session-transaction`).
+(`agent/runner-loss-session-transaction`). Daemon paging after terminal loss and
+startup resumption of every pending cursor were verified against this PR
+(`agent/runner-loss-daemon-propagation`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -156,8 +158,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — ninety files, `202607180001` through
-`202608200001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — ninety-two files, `202607180001` through
+`202608200002` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -424,10 +426,14 @@ Representation rules, all enforced in the schema:
   turn, the runner-state outbox, and the cursor. An offered lease records no
   execution; a claimed pure or idempotent lease remains retryable in flight; a
   claimed side-effecting lease becomes terminal ambiguous. A separate checked
-  operation completes an exhausted cursor. **Committed unimplemented
-  functionality.** No present daemon service pages the durable losses, invokes
-  these operations, or retires an unacknowledged workspace release; those
-  orchestration steps remain outside the persistence adapter.
+  operation completes an exhausted cursor. After an applied terminal connection
+  transition or an exact replay of its current lost state, the daemon pages
+  every pending loss, invokes the per-session transaction in page order, and
+  completes each exhausted cursor. Startup performs the same scan after marking
+  prior-process nonterminal connections lost, so a crash after the short loss
+  transaction cannot strand session projection. **Committed unimplemented
+  functionality.** No present daemon transaction retires an unacknowledged
+  workspace release.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -2016,6 +2022,11 @@ surface provides it.
 
 ## Open edges
 
+- [Graded approval judging](../open-questions.md#graded-approval-judging) owns
+  the unresolved graded fields in the durable audit shape for approval-judge
+  calls and decisions. The existing
+  [goal-mode compatibility constraint](goal-mode.md#compatibility-constraints)
+  owns retention of both the provider-offered and repository-committed outcomes.
 - Deferred outbox retention, pruning, and multiple-daemon fan-out are cataloged
   in [open questions](../open-questions.md#protocols-and-persistence).
 - Attempt continuation is presently admitted only for the tool-loop
