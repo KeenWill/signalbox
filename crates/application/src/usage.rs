@@ -408,7 +408,8 @@ pub struct UsageAggregateGroup {
 pub struct UsageAggregateReport {
     /// Compatibility-preserving groups.
     pub groups: Vec<UsageAggregateGroup>,
-    /// True when more groups matched than the hard response ceiling.
+    /// True when either the source-call or compatibility-group hard ceiling
+    /// truncated the aggregate result.
     pub truncated: bool,
 }
 
