@@ -85,15 +85,16 @@ impl WebContractBootstrap {
     /// Describes this daemon build's one exact browser contract.
     #[must_use]
     pub fn current() -> Self {
-        Self::for_runtime(false, false, false)
+        Self::for_runtime(false, false, false, false)
     }
 
-    /// Describes this contract with deployment-bound blob capabilities.
+    /// Describes this contract with deployment-bound capabilities.
     #[must_use]
     pub fn for_runtime(
         immutable_blob_content: bool,
         image_derivatives: bool,
         bounded_session_timeline: bool,
+        imports_available: bool,
     ) -> Self {
         Self {
             contract: WebContractIdentity {
@@ -108,8 +109,8 @@ impl WebContractBootstrap {
                 blob_derivations: image_derivatives,
                 image_derivatives,
                 bounded_session_timeline,
-                import_discovery: true,
-                imported_continuations: true,
+                import_discovery: imports_available,
+                imported_continuations: imports_available,
             },
             limits: WebContractLimits {
                 max_json_body_bytes: MAX_JSON_BODY_BYTES as u32,
@@ -1006,6 +1007,9 @@ function validateWebImportEntryWindow(value) {{
 
 function validateWebImportContinuation(value, path) {{
   validateWebImportFrontier(value.frontier, `${{path}}.frontier`);
+  if (path === "import_continuation_response") {{
+    assertUuid(value.session_id, `${{path}}.session_id`);
+  }}
 }}
 
 const utf8 = new TextEncoder();
@@ -1588,27 +1592,33 @@ mod tests {
 
     #[test]
     fn runtime_bootstrap_reports_only_configured_capabilities() {
-        let unavailable = WebContractBootstrap::for_runtime(false, false, false);
-        let available = WebContractBootstrap::for_runtime(true, true, true);
+        let unavailable = WebContractBootstrap::for_runtime(false, false, false, false);
+        let available = WebContractBootstrap::for_runtime(true, true, true, true);
 
         assert!(!unavailable.capabilities.immutable_blob_content);
         assert!(!unavailable.capabilities.blob_derivations);
         assert!(!unavailable.capabilities.image_derivatives);
         assert!(!unavailable.capabilities.bounded_session_timeline);
+        assert!(!unavailable.capabilities.import_discovery);
+        assert!(!unavailable.capabilities.imported_continuations);
         assert!(available.capabilities.immutable_blob_content);
         assert!(available.capabilities.blob_derivations);
         assert!(available.capabilities.image_derivatives);
         assert!(available.capabilities.bounded_session_timeline);
+        assert!(available.capabilities.import_discovery);
+        assert!(available.capabilities.imported_continuations);
     }
 
     #[test]
     fn blob_derivation_capability_requires_exposed_derivative_views() {
-        let bootstrap = WebContractBootstrap::for_runtime(true, false, true);
+        let bootstrap = WebContractBootstrap::for_runtime(true, false, true, false);
 
         assert!(bootstrap.capabilities.immutable_blob_content);
         assert!(!bootstrap.capabilities.blob_derivations);
         assert!(!bootstrap.capabilities.image_derivatives);
         assert!(bootstrap.capabilities.bounded_session_timeline);
+        assert!(!bootstrap.capabilities.import_discovery);
+        assert!(!bootstrap.capabilities.imported_continuations);
     }
 
     #[test]

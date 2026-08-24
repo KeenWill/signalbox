@@ -116,6 +116,22 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('does not correlate with its request')
   })
 
+  it('rejects an oversized blob descriptor before JSON materialization', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () => new Response('{}', { headers: { 'content-length': String(64 * 1024 + 1) } }),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readBlobDescriptor({
+        digest: imageArtifact.digest,
+        mediaType: imageArtifact.declared_media_type,
+      }),
+    ).rejects.toThrow('exceeds the browser byte ceiling')
+  })
+
   it('rejects an oversized bootstrap before JSON materialization', async () => {
     vi.stubGlobal(
       'fetch',

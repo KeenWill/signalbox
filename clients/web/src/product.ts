@@ -8,6 +8,8 @@ import {
 } from './generated/web-contract.mjs'
 import { MAX_BOOTSTRAP_RESPONSE_BYTES, readBoundedJson } from './session-timeline/model'
 
+const MAX_BLOB_DESCRIPTOR_RESPONSE_BYTES = 64 * 1024
+
 export const productRoutes = [
   { id: 'attention', label: 'Attention', description: 'Actionable work and fleet state' },
   { id: 'sessions', label: 'Sessions', description: 'Conversation activity and history' },
@@ -130,7 +132,7 @@ export class SameOriginProductTransport implements ProductTransport {
         signal,
       },
     )
-    const payload: unknown = await response.json()
+    const payload = await readBoundedJson(response, MAX_BLOB_DESCRIPTOR_RESPONSE_BYTES)
     if (!response.ok) {
       throw new ProductRequestError(response.status, decodeWebApiErrorResponse(payload))
     }

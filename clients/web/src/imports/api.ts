@@ -62,6 +62,70 @@ export class ImportDescriptorCorrelationError extends Error {
   }
 }
 
+export class ImportListCorrelationError extends Error {
+  constructor() {
+    super('imports catalog page does not correlate with its request')
+    this.name = 'ImportListCorrelationError'
+  }
+}
+
+const canonicalCatalogUuid = (value: string): string => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)) {
+    throw new ImportListCorrelationError()
+  }
+  return value
+}
+
+const correlateListPage = (
+  request: WebImportListRequest,
+  page: WebImportListPage,
+): WebImportListPage => {
+  const requestedLimit = request.limit
+  if (
+    requestedLimit !== undefined &&
+    requestedLimit !== null &&
+    page.items.length > requestedLimit
+  ) {
+    throw new ImportListCorrelationError()
+  }
+  const requestedAfter = request.after
+  let previousId =
+    requestedAfter === undefined || requestedAfter === null
+      ? undefined
+      : canonicalCatalogUuid(requestedAfter)
+  const requestedFormat = request.format
+  const requestedSourceSessionId = request.source_session_id
+  for (const item of page.items) {
+    const itemId = canonicalCatalogUuid(item.imported_conversation_id)
+    const sourceSessionCorrelates =
+      requestedSourceSessionId === undefined ||
+      requestedSourceSessionId === null ||
+      (item.source_session_id?.completeness === 'complete' &&
+        item.source_session_id.leading_text === requestedSourceSessionId)
+    if (
+      (previousId !== undefined && itemId <= previousId) ||
+      (requestedFormat !== undefined &&
+        requestedFormat !== null &&
+        item.format !== requestedFormat) ||
+      !sourceSessionCorrelates
+    ) {
+      throw new ImportListCorrelationError()
+    }
+    previousId = itemId
+  }
+  const nextCursor = page.next_cursor
+  if (
+    nextCursor !== null &&
+    nextCursor !== undefined &&
+    (page.items.length === 0 ||
+      canonicalCatalogUuid(nextCursor) !==
+        page.items[page.items.length - 1]?.imported_conversation_id)
+  ) {
+    throw new ImportListCorrelationError()
+  }
+  return page
+}
+
 const decimalPosition = (value: string): bigint => {
   if (!/^[1-9]\d{0,19}$/.test(value)) throw new ImportWindowCorrelationError()
   const parsed = BigInt(value)
@@ -133,7 +197,8 @@ const queryString = (request: WebImportListRequest | WebImportEntryWindowRequest
 export class HttpImportApi implements ImportApi {
   async list(request: WebImportListRequest, signal?: AbortSignal): Promise<WebImportListPage> {
     const response = await fetch(`/api/imports/${queryString(request)}`, { signal })
-    return decodeResponse(response, decodeWebImportListPage)
+    const page = await decodeResponse(response, decodeWebImportListPage)
+    return correlateListPage(request, page)
   }
 
   async descriptor(

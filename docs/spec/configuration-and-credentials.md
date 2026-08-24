@@ -211,7 +211,11 @@ an invalid, opaque, missing-authority, or cross-origin pair receives a
 structured transport error. Only crossing the buffering ceiling produces
 `413 Payload Too Large`; another failure while reading the request body produces
 a distinct `400 Bad Request` transport error. Application errors occupy a
-separate error kind and are not inferred from HTTP status alone.
+separate error kind and are not inferred from HTTP status alone. All browser
+requests, including static assets and reads, must carry a `Host` whose host
+component is a literal loopback IPv4 or IPv6 address; names such as `localhost`
+are rejected before routing because this unauthenticated listener does not
+delegate loopback authority to name resolution.
 
 Incremental responses are `application/x-ndjson`: each item is serialized only
 when the response body polls it, carries one trailing newline, and is at most

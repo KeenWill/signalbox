@@ -8,6 +8,7 @@ import {
   decodeWebContractBootstrap,
   decodeWebContractExample,
   decodeWebImportContinuationRequest,
+  decodeWebImportContinuationResponse,
   decodeWebImportDescriptor,
   decodeWebImportEntryWindow,
   decodeWebImportEntryWindowRequest,
@@ -1230,5 +1231,16 @@ test("generated imports decoders enforce canonical decimal u64 strings", () => {
         frontier: { ...frontier, position: "0" },
       }),
     /position must be a positive canonical decimal u64 string/,
+  );
+  const continuationResponse = {
+    command_id: continuation.command_id,
+    session_id: "00000000-0000-7000-8000-000000000005",
+    frontier,
+    relationship: continuation.relationship,
+  };
+  assert.deepEqual(decodeWebImportContinuationResponse(continuationResponse), continuationResponse);
+  assert.throws(
+    () => decodeWebImportContinuationResponse({ ...continuationResponse, session_id: "created" }),
+    /session_id must be a canonical lowercase UUID/,
   );
 });

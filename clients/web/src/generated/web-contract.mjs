@@ -1733,6 +1733,9 @@ function validateWebImportEntryWindow(value) {
 
 function validateWebImportContinuation(value, path) {
   validateWebImportFrontier(value.frontier, `${path}.frontier`);
+  if (path === "import_continuation_response") {
+    assertUuid(value.session_id, `${path}.session_id`);
+  }
 }
 
 const utf8 = new TextEncoder();

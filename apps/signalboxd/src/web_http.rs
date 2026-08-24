@@ -90,6 +90,7 @@ struct WebHttpState {
     blobs: Option<WebBlobRuntime>,
     blob_read_budget: Arc<Semaphore>,
     timeline: Option<SessionTimelineRepository>,
+    imports_available: bool,
 }
 
 /// Deployment-owned browser listener and production assets configuration.
@@ -292,6 +293,7 @@ pub fn production_router(
     pool: Option<PgPool>,
     model_configuration: Option<HubModelConfiguration>,
 ) -> Router {
+    let imports_available = pool.is_some() && model_configuration.is_some();
     let mut api = Router::new()
         .route("/bootstrap", get(contract_bootstrap))
         .route(
@@ -316,6 +318,7 @@ pub fn production_router(
             blobs,
             blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS)),
             timeline: pool.clone().map(SessionTimelineRepository::new),
+            imports_available,
         });
     if let (Some(pool), Some(model_configuration)) = (pool, model_configuration) {
         api = api.nest("/imports", web_imports::router(pool, model_configuration));
@@ -656,6 +659,7 @@ async fn contract_bootstrap(State(state): State<WebHttpState>) -> Json<WebContra
         state.blobs.is_some(),
         image_derivatives,
         state.timeline.is_some(),
+        state.imports_available,
     ))
 }
 
@@ -1928,7 +1932,7 @@ mod tests {
         );
         assert_eq!(
             decoded,
-            WebContractBootstrap::for_runtime(false, false, false)
+            WebContractBootstrap::for_runtime(false, false, false, false)
         );
         assert_eq!(runtime_outcome, Ok(()));
     }
