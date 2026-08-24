@@ -44,6 +44,8 @@ const MAX_DECOMPRESSED_PAGE_BYTES: usize = 1024 * 1024;
 const MAX_OBJECTS: usize = 10_000;
 const MAX_PAGES: usize = 10_000;
 const MAX_GENERATION: u64 = 65_535;
+const MAX_OBJECT_NUMBER: u64 = u32::MAX as u64;
+const MAX_INDIRECT_LENGTH_DEPTH: usize = 32;
 
 #[derive(Clone, Copy)]
 enum ValidationMode {
@@ -583,11 +585,7 @@ async fn inspect_bounded(
                                 bytes.get(usize::try_from(relative).ok()?..)
                             });
                     let stream_length = cached_stream.map_or_else(
-                        || {
-                            budget
-                                .available_after_reserving(ROOT_VALIDATION_BYTES, 1)
-                                .min(source_length - stream_offset)
-                        },
+                        || budget.remaining_bytes.min(source_length - stream_offset),
                         |bytes| bytes.len() as u64,
                     );
                     if cached_stream.is_none() && !budget.can_read(stream_length) {
@@ -842,7 +840,7 @@ fn resolve_integer_object(
     reference: IndirectReference,
     resolving: &mut BTreeSet<IndirectReference>,
 ) -> Option<u64> {
-    if !resolving.insert(reference) {
+    if resolving.len() >= MAX_INDIRECT_LENGTH_DEPTH || !resolving.insert(reference) {
         return None;
     }
     let resolved = (|| {
@@ -1028,18 +1026,24 @@ fn validate_page_contents(
     };
     match contents {
         lopdf::Object::Reference(object_id) => {
-            document
+            let object = document
                 .get_object(*object_id)
                 .map_err(|_| FileMediaProviderFailure::Failed)?;
+            if !matches!(object, Object::Stream(_)) {
+                return Err(FileMediaProviderFailure::Failed);
+            }
         }
         lopdf::Object::Array(objects) => {
             for object in objects {
                 let object_id = object
                     .as_reference()
                     .map_err(|_| FileMediaProviderFailure::Failed)?;
-                document
+                let object = document
                     .get_object(object_id)
                     .map_err(|_| FileMediaProviderFailure::Failed)?;
+                if !matches!(object, Object::Stream(_)) {
+                    return Err(FileMediaProviderFailure::Failed);
+                }
             }
         }
         lopdf::Object::Null | lopdf::Object::Stream(_) => {}
@@ -1208,6 +1212,9 @@ fn parse_classic_xref(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
         let count = parse_unsigned(bytes, &mut cursor)?;
         for index in 0..count {
             let object_number = first_object.checked_add(index)?;
+            if object_number > MAX_OBJECT_NUMBER {
+                return None;
+            }
             if !declared_objects.insert(object_number) {
                 return None;
             }
@@ -1252,6 +1259,9 @@ fn parse_classic_xref(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
 
 fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
     let xref_object = parse_unsigned(bytes, &mut cursor)?;
+    if xref_object > MAX_OBJECT_NUMBER {
+        return None;
+    }
     skip_required_pdf_space_and_comments(bytes, &mut cursor)?;
     let xref_generation = parse_unsigned(bytes, &mut cursor)?;
     if xref_generation > MAX_GENERATION {
@@ -1376,18 +1386,16 @@ fn parse_trailer_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(TrailerF
                 facts.widths = Some(parse_widths(bytes, &mut value_cursor)?);
             }
             b"Index" => {
-                let mut value_cursor = value_start;
-                facts.index = Some(parse_index(bytes, &mut value_cursor)?);
+                facts.index = parse_optional_index(bytes, value_start, cursor)?;
             }
             b"Length" => {
                 facts.length = Some(parse_stream_length(bytes, value_start, cursor)?);
             }
             b"Prev" => {
-                facts.prev = Some(parse_nonnegative_integer_value(bytes, value_start, cursor)?);
+                facts.prev = parse_optional_nonnegative_integer(bytes, value_start, cursor)?;
             }
             b"XRefStm" => {
-                facts.xref_stream =
-                    Some(parse_nonnegative_integer_value(bytes, value_start, cursor)?);
+                facts.xref_stream = parse_optional_nonnegative_integer(bytes, value_start, cursor)?;
             }
             b"Filter" => {
                 let mut value_cursor = value_start;
@@ -1404,6 +1412,27 @@ fn parse_trailer_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(TrailerF
             _ => {}
         }
     }
+}
+
+fn parse_optional_nonnegative_integer(
+    bytes: &[u8],
+    start: usize,
+    end: usize,
+) -> Option<Option<u64>> {
+    let mut cursor = start;
+    if consume_keyword(bytes, &mut cursor, b"null") {
+        return (cursor == end).then_some(None);
+    }
+    parse_nonnegative_integer_value(bytes, start, end).map(Some)
+}
+
+fn parse_optional_index(bytes: &[u8], start: usize, end: usize) -> Option<Option<Vec<(u64, u64)>>> {
+    let mut cursor = start;
+    if consume_keyword(bytes, &mut cursor, b"null") {
+        return (cursor == end).then_some(None);
+    }
+    let index = parse_index(bytes, &mut cursor)?;
+    (cursor == end).then_some(Some(index))
 }
 
 fn parse_encryption_value(bytes: &[u8], start: usize, end: usize) -> Option<bool> {
@@ -1579,6 +1608,9 @@ fn parse_name(bytes: &[u8], cursor: &mut usize) -> Option<Vec<u8>> {
 
 fn parse_indirect_reference(bytes: &[u8], cursor: &mut usize) -> Option<IndirectReference> {
     let object_number = parse_nonnegative_integer(bytes, cursor)?;
+    if object_number > MAX_OBJECT_NUMBER {
+        return None;
+    }
     skip_required_pdf_space_and_comments(bytes, cursor)?;
     let generation = parse_nonnegative_integer(bytes, cursor)?;
     if generation > MAX_GENERATION {
@@ -1924,7 +1956,7 @@ fn pages_dictionary_is_valid(bytes: &[u8]) -> bool {
     }
     cursor += 2;
     let mut pages = false;
-    let mut kids = false;
+    let mut kids = None;
     let mut count = None;
     loop {
         skip_pdf_space_and_comments(bytes, &mut cursor);
@@ -1935,8 +1967,10 @@ fn pages_dictionary_is_valid(bytes: &[u8]) -> bool {
             cursor += 2;
             skip_pdf_space_and_comments(bytes, &mut cursor);
             return pages
-                && kids
-                && count.is_some_and(|count| count <= MAX_PAGES as u64)
+                && kids.is_some()
+                && count.is_some_and(|count| {
+                    count <= MAX_PAGES as u64 && (count == 0) == (kids == Some(0))
+                })
                 && cursor == bytes.len();
         }
         let Some(key) = parse_name(bytes, &mut cursor) else {
@@ -1952,7 +1986,7 @@ fn pages_dictionary_is_valid(bytes: &[u8]) -> bool {
             b"Type" => {
                 pages = parse_name(bytes, &mut value_cursor).as_deref() == Some(b"Pages");
             }
-            b"Kids" => kids = kids_array_contains_only_references(bytes, value_start, cursor),
+            b"Kids" => kids = kids_array_reference_count(bytes, value_start, cursor),
             b"Count" => {
                 count = parse_nonnegative_integer(bytes, &mut value_cursor)
                     .filter(|_| value_cursor == cursor);
@@ -1962,10 +1996,10 @@ fn pages_dictionary_is_valid(bytes: &[u8]) -> bool {
     }
 }
 
-fn kids_array_contains_only_references(bytes: &[u8], start: usize, end: usize) -> bool {
+fn kids_array_reference_count(bytes: &[u8], start: usize, end: usize) -> Option<usize> {
     let mut cursor = start;
     if bytes.get(cursor) != Some(&b'[') {
-        return false;
+        return None;
     }
     cursor += 1;
     let mut references = 0_usize;
@@ -1973,14 +2007,12 @@ fn kids_array_contains_only_references(bytes: &[u8], start: usize, end: usize) -
         skip_pdf_space_and_comments(bytes, &mut cursor);
         if bytes.get(cursor) == Some(&b']') {
             cursor += 1;
-            return cursor == end;
+            return (cursor == end).then_some(references);
         }
-        if parse_indirect_reference(bytes, &mut cursor).is_none() {
-            return false;
-        }
+        parse_indirect_reference(bytes, &mut cursor)?;
         references += 1;
         if references > MAX_PAGES {
-            return false;
+            return None;
         }
     }
 }
@@ -2168,7 +2200,7 @@ fn resolve_bounded_integer_object<'a>(
     resolving: &'a mut BTreeSet<IndirectReference>,
 ) -> FileMediaProviderFuture<'a, Option<u64>> {
     Box::pin(async move {
-        if !resolving.insert(reference) {
+        if resolving.len() >= MAX_INDIRECT_LENGTH_DEPTH || !resolving.insert(reference) {
             return Ok(None);
         }
         let result = async {
@@ -2405,7 +2437,7 @@ fn object_is_pages(bytes: &[u8], expected: IndirectReference) -> bool {
     }
     cursor += 2;
     let mut pages = false;
-    let mut kids = false;
+    let mut kids = None;
     let mut count = None;
     loop {
         skip_pdf_space_and_comments(bytes, &mut cursor);
@@ -2428,7 +2460,7 @@ fn object_is_pages(bytes: &[u8], expected: IndirectReference) -> bool {
             let mut value_cursor = value_start;
             pages = parse_name(bytes, &mut value_cursor).as_deref() == Some(b"Pages");
         } else if key == b"Kids" {
-            kids = kids_array_contains_only_references(bytes, value_start, cursor);
+            kids = kids_array_reference_count(bytes, value_start, cursor);
         } else if key == b"Count" {
             let mut value_cursor = value_start;
             count = parse_nonnegative_integer(bytes, &mut value_cursor)
@@ -2437,8 +2469,8 @@ fn object_is_pages(bytes: &[u8], expected: IndirectReference) -> bool {
     }
     skip_pdf_space_and_comments(bytes, &mut cursor);
     pages
-        && kids
-        && count.is_some_and(|count| count <= MAX_PAGES as u64)
+        && kids.is_some()
+        && count.is_some_and(|count| count <= MAX_PAGES as u64 && (count == 0) == (kids == Some(0)))
         && consume_keyword(bytes, &mut cursor, b"endobj")
 }
 
@@ -2504,6 +2536,9 @@ fn parse_xref_stream_entries(
     for (first, count) in indexes {
         for index in 0..*count {
             let object_number = first.checked_add(index)?;
+            if object_number > MAX_OBJECT_NUMBER {
+                return None;
+            }
             declared_objects.insert(object_number);
             let end = cursor.checked_add(entry_width)?;
             let entry = bytes.get(cursor..end)?;
@@ -2990,6 +3025,21 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn indirect_reference_rejects_unrepresentable_object_number() {
+        let mut cursor = 0;
+        assert!(parse_indirect_reference(b"4294967296 0 R", &mut cursor).is_none());
+    }
+
+    #[test]
+    fn optional_xref_fields_accept_null() {
+        let (facts, _) = parse_trailer_dictionary(b"<< /Prev null /XRefStm null /Index null >>", 0)
+            .expect("trailer dictionary");
+        assert_eq!(facts.prev, None);
+        assert_eq!(facts.xref_stream, None);
+        assert_eq!(facts.index, None);
     }
 
     #[test]
@@ -3631,6 +3681,21 @@ endobj",
     }
 
     #[test]
+    fn bounded_page_tree_rejects_empty_kids_with_positive_count() {
+        let pages = IndirectReference {
+            object_number: 8,
+            generation: 0,
+        };
+        assert!(!pages_dictionary_is_valid(
+            b"<< /Type /Pages /Kids [] /Count 1 >>"
+        ));
+        assert!(!object_is_pages(
+            b"8 0 obj\n<< /Type /Pages /Kids [] /Count 1 >>\nendobj",
+            pages
+        ));
+    }
+
+    #[test]
     fn page_collection_rejects_inconsistent_declared_count() {
         let mut document = Document::with_version("1.5");
         let pages_id = document.add_object(dictionary! {
@@ -3664,6 +3729,15 @@ endobj",
             collect_pages(&document),
             Err(PageCollectionError::Malformed)
         ));
+    }
+
+    #[test]
+    fn referenced_page_contents_must_be_streams() {
+        let mut document = Document::with_version("1.5");
+        let contents_id = document.add_object(Object::Integer(42));
+        let page_id =
+            document.add_object(dictionary! { "Type" => "Page", "Contents" => contents_id });
+        assert!(validate_page_contents(&document, page_id).is_err());
     }
 
     #[test]
@@ -4025,6 +4099,24 @@ endobj",
     #[tokio::test]
     async fn bounded_resolves_compressed_stream_length() {
         let holder=b"9 0 obj\n<< /Type /ObjStm /N 1 /First 5 /Length 6 >>\nstream\n20 0 6\nendstream\nendobj\n";
+        let length_reference = IndirectReference {
+            object_number: 20,
+            generation: 0,
+        };
+        let holder_reference = IndirectReference {
+            object_number: 9,
+            generation: 0,
+        };
+        let expected_length = object_stream_object(
+            holder,
+            holder_reference,
+            length_reference,
+            0,
+            MAX_OBJECT_STREAM_BYTES,
+            None,
+        )
+        .and_then(|object| parse_integer_object_value(&object))
+        .expect("fixture length");
         let offset = u64::try_from(holder.len()).expect("offset");
         let target=b"5 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length 20 0 R >>\nstream\n7 0 x!\nendstream\nendobj";
         let mut bytes = holder.to_vec();
@@ -4071,15 +4163,6 @@ endobj",
             resolve_object_stream_length(&source, &mut budget, &parsed, target, stream, (0, 0))
                 .await
                 .expect("resolve");
-        assert_eq!(
-            got,
-            Some((
-                IndirectReference {
-                    object_number: 20,
-                    generation: 0
-                },
-                6
-            ))
-        );
+        assert_eq!(got, Some((length_reference, expected_length)));
     }
 }
