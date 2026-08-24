@@ -14,10 +14,11 @@ use signalbox_file_media_runtime::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider,
     FileMediaProviderDeclaration, FileMediaProviderFailure, FileMediaProviderFuture,
     FileMediaProviderReadRequest, FileMediaProviderValidationRequest, FileReadInput,
-    FileReaderName, FileReaderProviderName, FileReaderRevision, ProbeDeclaration, ProbeStrength,
-    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
-    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
-    ReaderIdentity, ReasonCode, StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
+    FileReaderName, FileReaderProviderName, FileReaderRevision, ProbeDeclaration,
+    ProbeDeclarationInput, ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds, ReadViewDeclaration,
+    ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
+    StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
 };
 use zip::{CompressionMethod, ZipArchive};
 
@@ -142,18 +143,21 @@ impl FileMediaProvider for ArchiveProvider {
             let mut complete = None;
             if request.evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated {
                 let length = source.byte_length().get().min(PROBE_BYTES);
-                let prefix = read_range(source, SourceRange { offset: 0, length }).await?;
+                let prefix =
+                    ProbePrefix(read_range(source, SourceRange { offset: 0, length }).await?);
                 require_active(cancellation)?;
-                if !kind.matches_probe(&prefix) {
+                if !kind.matches_probe(prefix.as_bytes()) {
                     if kind != ArchiveKind::Zip || source.byte_length().get() > SOURCE_BYTES {
                         return Ok(ProcessorValidationOutput::NoMatch);
                     }
-                    let bytes = read_all(source).await?;
+                    let bytes = read_complete_after_prefix(source, prefix).await?;
                     require_active(cancellation)?;
-                    if ZipArchive::new(Cursor::new(&bytes)).is_err() {
+                    if ZipArchive::new(Cursor::new(bytes.as_bytes())).is_err() {
                         return Ok(ProcessorValidationOutput::NoMatch);
                     }
-                    complete = Some(bytes);
+                    complete = Some(bytes.0);
+                } else if source.byte_length().get() <= SOURCE_BYTES {
+                    complete = Some(read_complete_after_prefix(source, prefix).await?.0);
                 }
             }
             if source.byte_length().get() > SOURCE_BYTES {
@@ -272,7 +276,12 @@ fn reader_declaration(
         reader: FileReaderName::try_new(kind.reader())?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(kind.media_type())?],
-        probe: ProbeDeclaration::new(PROBE_BYTES, 0, 1, SOURCE_BYTES),
+        probe: ProbeDeclaration::from_input(ProbeDeclarationInput {
+            prefix_bytes: PROBE_BYTES,
+            suffix_bytes: 0,
+            range_count: 1,
+            cumulative_bytes: SOURCE_BYTES,
+        }),
         views: vec![entries_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,
@@ -710,24 +719,33 @@ enum DecodeStatus {
 
 fn reader_decode_status(reader: &mut dyn Read) -> DecodeStatus {
     let mut total = 0_u64;
+    let mut limit_exceeded = false;
     let mut buffer = [0_u8; 8192];
     loop {
         let Ok(count) = reader.read(&mut buffer) else {
             return DecodeStatus::Malformed;
         };
         if count == 0 {
-            return DecodeStatus::Complete;
+            return if limit_exceeded {
+                DecodeStatus::LimitExceeded
+            } else {
+                DecodeStatus::Complete
+            };
         }
         let Ok(count) = u64::try_from(count) else {
             return DecodeStatus::Malformed;
         };
-        let Some(next) = total.checked_add(count) else {
-            return DecodeStatus::LimitExceeded;
-        };
-        if next > MAX_ENTRY_BYTES {
-            return DecodeStatus::LimitExceeded;
+        if !limit_exceeded {
+            let Some(next) = total.checked_add(count) else {
+                limit_exceeded = true;
+                continue;
+            };
+            if next > MAX_ENTRY_BYTES {
+                limit_exceeded = true;
+            } else {
+                total = next;
+            }
         }
-        total = next;
     }
 }
 

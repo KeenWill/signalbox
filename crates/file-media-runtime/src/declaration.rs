@@ -35,7 +35,30 @@ pub struct ProbeDeclaration {
     cumulative_bytes: u64,
 }
 
+/// Labeled finite source-read envelope for one probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProbeDeclarationInput {
+    /// Bytes available through privileged prefix access.
+    pub prefix_bytes: u64,
+    /// Bytes available through privileged suffix access.
+    pub suffix_bytes: u64,
+    /// Maximum arbitrary-range requests.
+    pub range_count: u32,
+    /// Maximum cumulative source bytes.
+    pub cumulative_bytes: u64,
+}
+
 impl ProbeDeclaration {
+    /// Declares one finite probe envelope from labeled source-access budgets.
+    pub const fn from_input(input: ProbeDeclarationInput) -> Self {
+        Self {
+            prefix_bytes: input.prefix_bytes,
+            suffix_bytes: input.suffix_bytes,
+            range_count: input.range_count,
+            cumulative_bytes: input.cumulative_bytes,
+        }
+    }
+
     /// Declares one finite probe envelope. Registry construction checks ceilings.
     pub const fn new(
         prefix_bytes: u64,

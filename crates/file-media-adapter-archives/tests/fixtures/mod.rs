@@ -421,6 +421,22 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn zip_with_corrupt_oversized_nested_gzip() -> Result<Self, Box<dyn Error>> {
+        let payload = vec![b'x'; 8 * 1024 * 1024 + 1];
+        let mut nested = gzip_bytes("payload.txt", &payload)?;
+        let trailer_byte = nested
+            .len()
+            .checked_sub(8)
+            .ok_or("GZIP fixture must contain a trailer")?;
+        nested[trailer_byte] ^= 0xff;
+        Ok(Self {
+            bytes: zip_bytes(&[("payload.bin", &nested, ZipEntryKind::File)])?,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload.bin",
+        })
+    }
+
     pub fn zip_with_oversized_nested_zstd() -> Result<Self, Box<dyn Error>> {
         let payload = vec![b'x'; 8 * 1024 * 1024 + 1];
         let nested = zstd::stream::encode_all(payload.as_slice(), 1)?;

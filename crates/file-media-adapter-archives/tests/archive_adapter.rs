@@ -460,6 +460,14 @@ async fn oversized_nested_gzip_is_rejected_as_recursive() -> Result<(), Box<dyn 
 }
 
 #[tokio::test]
+async fn corrupt_oversized_nested_gzip_is_not_recursive() -> Result<(), Box<dyn Error>> {
+    assert_valid_inventory(
+        valid_inventory(ArchiveFixture::zip_with_corrupt_oversized_nested_gzip()?).await?,
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn oversized_nested_zstd_is_rejected_as_recursive() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         malformed_inspection(ArchiveFixture::zip_with_oversized_nested_zstd()?).await?,
