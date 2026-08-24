@@ -123,14 +123,18 @@ export function SessionWorkspaceSurface({
   }, [selected])
   const showFirstWindow = useCallback(() => setManualAnchor({ kind: 'first' }), [])
   const showLatestWindow = useCallback(() => setManualAnchor({ kind: 'latest' }), [])
+  // Window commands act on an opened session; registering them earlier would advertise
+  // first/latest actions that cannot load or select anything.
   useEffect(() => {
+    if (sessionId === null) return
     onFirstWindowAction(showFirstWindow)
     return () => onFirstWindowAction(null)
-  }, [onFirstWindowAction, showFirstWindow])
+  }, [onFirstWindowAction, sessionId, showFirstWindow])
   useEffect(() => {
+    if (sessionId === null) return
     onLatestWindowAction(showLatestWindow)
     return () => onLatestWindowAction(null)
-  }, [onLatestWindowAction, showLatestWindow])
+  }, [onLatestWindowAction, sessionId, showLatestWindow])
 
   const openSession = (event: FormEvent) => {
     event.preventDefault()

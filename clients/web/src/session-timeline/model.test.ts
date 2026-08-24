@@ -263,6 +263,26 @@ describe('BoundedSessionHistory', () => {
     )
   })
 
+  it('rejects timeline items above the described latest address', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        latest_address: { event_sequence: '2' },
+        observed_through: '2',
+      }),
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(history.load({ kind: 'first' }, { maxItems: 4, maxBytes: 1024 })).rejects.toThrow(
+      'above the described latest address',
+    )
+  })
+
   it('rejects bootstrap connections without timeline capability', async () => {
     const request = async () =>
       new Response(

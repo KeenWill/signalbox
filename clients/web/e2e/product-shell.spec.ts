@@ -322,6 +322,15 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await useDeterministicSession(page)
   await page.goto('/sessions')
 
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(palette).toBeVisible()
+  await expect(palette.getByRole('button', { name: /Select first loaded item/ })).toHaveCount(0)
+  await expect(palette.getByRole('button', { name: /Select latest loaded item/ })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await expect(palette).toBeHidden()
+
   const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
   await sessionId.fill(sessionWorkspaceFixture.id)
   await sessionId.press('Enter')

@@ -259,12 +259,18 @@ export class BoundedSessionHistory {
     const knownFirstAddress = this.descriptorValue
       ? decimalAddress(this.descriptorValue.first_address.event_sequence)
       : null
+    const knownLatestAddress = this.descriptorValue
+      ? decimalAddress(this.descriptorValue.latest_address.event_sequence)
+      : null
     let previousAddress: bigint | undefined
     for (const item of window.items) {
       const address = item.address.event_sequence
       const parsedAddress = decimalAddress(address)
       if (knownFirstAddress !== null && parsedAddress < knownFirstAddress) {
         throw new TypeError('timeline window contains an item below the immutable first address')
+      }
+      if (knownLatestAddress !== null && parsedAddress > knownLatestAddress) {
+        throw new TypeError('timeline window contains an item above the described latest address')
       }
       if (previousAddress !== undefined && parsedAddress <= previousAddress) {
         throw new TypeError('timeline window items are not strictly ordered')
