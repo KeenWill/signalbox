@@ -728,6 +728,30 @@ const fn hex_digit_value(byte: u8) -> Option<u8> {
     }
 }
 
+/// Accepts only the canonical unsigned decimal spelling the contract emits:
+/// digits only, no sign, and no leading zero. `u64::from_str` alone would
+/// admit `+1` and `01` as extra wire spellings of one typed keyset.
+fn parse_canonical_u64(value: &str) -> Result<u64, ()> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(());
+    }
+    if value != "0" && value.starts_with('0') {
+        return Err(());
+    }
+    value.parse::<u64>().map_err(|_| ())
+}
+
+/// Accepts only the canonical lowercase hyphenated UUID spelling the contract
+/// emits; the permissive UUID parser would also admit uppercase, braced,
+/// simple, and URN spellings of the same keyset session.
+fn parse_canonical_session_id(value: &str) -> Result<SessionId, ()> {
+    let parsed = value.parse::<Uuid>().map_err(|_| ())?;
+    if value != parsed.hyphenated().to_string() {
+        return Err(());
+    }
+    Ok(SessionId::from_uuid(parsed))
+}
+
 fn parse_attention_query(query: AttentionSnapshotQuery) -> Result<AttentionQuery, ()> {
     let sort = match query.sort.as_deref() {
         None | Some("last_activity_descending") => AttentionSort::LastActivityDescending,
@@ -741,14 +765,12 @@ fn parse_attention_query(query: AttentionSnapshotQuery) -> Result<AttentionQuery
     };
     let after_session = query
         .after_session_id
-        .map(|value| value.parse::<Uuid>().map(SessionId::from_uuid))
-        .transpose()
-        .map_err(|_| ())?;
+        .map(|value| parse_canonical_session_id(&value))
+        .transpose()?;
     let after_activity_micros = query
         .after_activity_unix_microseconds
-        .map(|value| value.parse::<u64>())
-        .transpose()
-        .map_err(|_| ())?;
+        .map(|value| parse_canonical_u64(&value))
+        .transpose()?;
     if after_activity_micros.is_some_and(|value| {
         sqlx::types::time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(value) * 1_000)
             .is_err()
@@ -1917,6 +1939,31 @@ mod tests {
         );
 
         assert!(super::parse_attention_snapshot_query(Some(&raw)).is_err());
+    }
+
+    #[test]
+    fn session_catalog_query_rejects_noncanonical_activity_cursors() {
+        for cursor in ["01", "+1", " 1", "1_0"] {
+            let identity_query = super::parse_attention_snapshot_query(Some(&format!(
+                "sort=last_activity_descending\
+                 &after_session_id=00000000-0000-0000-0000-000000000001\
+                 &after_activity_unix_microseconds={cursor}"
+            )))
+            .expect("the query shape itself decodes");
+
+            assert!(super::parse_attention_query(identity_query).is_err());
+        }
+    }
+
+    #[test]
+    fn session_catalog_query_rejects_noncanonical_session_cursors() {
+        let identity_query = super::parse_attention_snapshot_query(Some(
+            "sort=session_identity_ascending\
+             &after_session_id=00000000-0000-0000-0000-0000000000AB",
+        ))
+        .expect("the query shape itself decodes");
+
+        assert!(super::parse_attention_query(identity_query).is_err());
     }
 
     #[test]

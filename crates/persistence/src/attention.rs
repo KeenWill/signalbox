@@ -96,6 +96,7 @@ impl AttentionRepository {
     ) -> Result<AttentionSnapshot, AttentionRepositoryError> {
         let mut transaction = self.read_transaction().await?;
         let cursor = current_cursor(&mut transaction).await?;
+        verify_fact_completeness(&mut transaction).await?;
         let total = count_catalog_matches(&mut transaction, &query).await?;
         let mut summaries = load_summaries(&mut transaction, None, Some(&query)).await?;
         let has_more = summaries.len() > usize::from(max_attention_snapshot_items());
@@ -297,11 +298,11 @@ const SELECT_IDENTITY: &str = summary_sql!(
     "ORDER BY selected.session_id"
 );
 
-// Completeness is driven from `session`, exactly like the count query: a
-// session whose `session_timeline_fact` row is missing sorts first (DESC puts
-// the NULL activity timestamp ahead) and stays inside every keyset page, so
-// decoding fails closed on the missing activity timestamp instead of the page
-// silently omitting the session while the exact total still counts it.
+// The page scan is driven by the indexed activity facts so the keyset order
+// stays a bounded ordered scan; completeness against `session` (which drives
+// the count query) is enforced separately by `verify_fact_completeness`, so a
+// session whose `session_timeline_fact` row is missing fails the snapshot
+// closed instead of being silently omitted while the exact total counts it.
 const SELECT_LAST_ACTIVITY: &str = summary_sql!(
     r#"
     SELECT session_row.session_id,
@@ -320,8 +321,8 @@ const SELECT_LAST_ACTIVITY: &str = summary_sql!(
            facts.attention_turn_terminal_disposition_kind,
            facts.attention_activity_kind AS fact_kind,
            facts.attention_activity_recorded_at AS recorded_at
-      FROM session AS session_row
-      LEFT JOIN session_timeline_fact AS facts USING (session_id)
+      FROM session_timeline_fact AS facts
+      JOIN session AS session_row USING (session_id)
       LEFT JOIN session_metadata AS metadata USING (session_id)
      WHERE ($6::text IS NULL
             OR strpos(COALESCE(metadata.title, ''), $6) > 0
@@ -334,7 +335,6 @@ const SELECT_LAST_ACTIVITY: &str = summary_sql!(
                 WHERE stored.session_id = session_row.session_id
                   AND stored.tag = required.tag))
        AND ($9::timestamptz IS NULL
-            OR facts.attention_activity_recorded_at IS NULL
             OR facts.attention_activity_recorded_at < $9
             OR (facts.attention_activity_recorded_at = $9
                 AND session_row.session_id > $3))
@@ -427,6 +427,31 @@ fn offset_date_time_from_system_time(
         .map_err(|_| AttentionCorruption::Invalid("catalog continuation timestamp"))?;
     sqlx::types::time::OffsetDateTime::from_unix_timestamp_nanos(nanoseconds)
         .map_err(|_| AttentionCorruption::Invalid("catalog continuation timestamp").into())
+}
+
+/// Fails the coherent read closed when any durable session is missing its
+/// `session_timeline_fact` row. The activity-ordered page scan is driven by
+/// the fact table for its index, while the exact total is counted from
+/// `session`; without this probe a missing projection row would silently
+/// shrink pages while the total still counted the session. The probe is a
+/// primary-key anti-join with an immediate limit, so it costs no more than
+/// the exact count that already runs in the same transaction.
+async fn verify_fact_completeness(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<(), AttentionRepositoryError> {
+    let missing = sqlx::query_scalar::<_, i32>(
+        "SELECT 1
+           FROM session
+           LEFT JOIN session_timeline_fact USING (session_id)
+          WHERE session_timeline_fact.session_id IS NULL
+          LIMIT 1",
+    )
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if missing.is_some() {
+        return Err(AttentionCorruption::Missing("session activity fact").into());
+    }
+    Ok(())
 }
 
 async fn count_catalog_matches(
@@ -556,13 +581,15 @@ fn classify_turn_shape(
     terminal: Option<&str>,
 ) -> Result<AttentionState, AttentionRepositoryError> {
     match (turn, phase, terminal) {
-        (Some("active"), Some("awaiting_tool_approval"), _) => Ok(AttentionState::AwaitingApproval),
-        (Some("active"), Some("awaiting_model_call_recovery" | "awaiting_tool_recovery"), _) => {
+        (Some("active"), Some("awaiting_tool_approval"), None) => {
+            Ok(AttentionState::AwaitingApproval)
+        }
+        (Some("active"), Some("awaiting_model_call_recovery" | "awaiting_tool_recovery"), None) => {
             Ok(AttentionState::Ambiguous)
         }
-        (Some("active"), Some("awaiting_runner_recovery"), _) => Ok(AttentionState::RunnerLost),
-        (Some("active"), Some("running" | "awaiting_child"), _) => Ok(AttentionState::Active),
-        (Some("queued"), None, _) => Ok(AttentionState::Queued),
+        (Some("active"), Some("awaiting_runner_recovery"), None) => Ok(AttentionState::RunnerLost),
+        (Some("active"), Some("running" | "awaiting_child"), None) => Ok(AttentionState::Active),
+        (Some("queued"), None, None) => Ok(AttentionState::Queued),
         (Some("terminal"), None, Some("reconciliation_required")) => {
             Ok(AttentionState::AwaitingReconciliation)
         }
@@ -573,6 +600,9 @@ fn classify_turn_shape(
             value: value.to_owned(),
         }
         .into()),
+        (Some("active" | "queued"), _, Some(_)) => {
+            Err(AttentionCorruption::Invalid("nonterminal turn disposition shape").into())
+        }
         (Some(value), _, _) => Err(AttentionCorruption::Unsupported {
             field: "turn state",
             value: value.to_owned(),
@@ -710,6 +740,32 @@ mod tests {
     #[test]
     fn goal_event_kind_decoding_rejects_unknown_storage_values() {
         assert!(decode_goal_event_kind("future_goal_state").is_err());
+    }
+
+    #[test]
+    fn state_classification_rejects_a_terminal_disposition_on_an_active_turn() {
+        assert_eq!(
+            classify_state(
+                None,
+                None,
+                Some("active"),
+                Some("running"),
+                Some("completed"),
+            )
+            .unwrap_err()
+            .to_string(),
+            "invalid operator attention nonterminal turn disposition shape"
+        );
+    }
+
+    #[test]
+    fn state_classification_rejects_a_terminal_disposition_on_a_queued_turn() {
+        assert_eq!(
+            classify_state(None, None, Some("queued"), None, Some("cancelled"))
+                .unwrap_err()
+                .to_string(),
+            "invalid operator attention nonterminal turn disposition shape"
+        );
     }
 
     #[test]

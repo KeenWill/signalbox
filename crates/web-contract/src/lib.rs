@@ -984,6 +984,13 @@ export function decodeWebAttentionStreamEvent(value) {{
     value.summaries?.forEach((summary, index) =>
       assertAttentionSummary(summary, `attention_event.summaries[${{index}}]`),
     );
+    const identities = new Set();
+    for (const summary of value.summaries ?? []) {{
+      if (identities.has(summary.session_id)) {{
+        fail("attention_event.summaries", "at most one replacement per session");
+      }}
+      identities.add(summary.session_id);
+    }}
   }}
   return value;
 }}
