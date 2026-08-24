@@ -42,6 +42,8 @@ const MAX_INSPECTION_PROBE_READS: u32 = 1_024;
 const MAX_READ_INPUT_CONTAINERS: u32 = 256;
 // numeric-bound: ceiling - every JSON node emits at least one serialized byte
 const MAX_READ_OPTIONS_NODES: usize = MAX_READ_OPTIONS_BYTES;
+// numeric-bound: ceiling - reserves processor-frame space for structured-body JSON escaping
+const MAX_STRUCTURED_BODY_BYTES: usize = 500 * 1_024;
 /// Immutable process-lifetime registry snapshot.
 #[derive(Clone, Debug)]
 pub struct FileMediaRegistry {
@@ -291,6 +293,11 @@ impl FileMediaRegistry {
         }
 
         if let Some(reader) = self.streaming_text_reader.as_ref() {
+            if request.source.byte_length().get() > self.ceilings.validation_source_bytes {
+                return Ok(FileInspection::Unknown {
+                    source: request.source,
+                });
+            }
             let declaration = self
                 .readers
                 .get(reader)
@@ -1124,6 +1131,7 @@ fn validate_view(
             ..
         } => {
             output_bytes > 0
+                && output_bytes <= MAX_STRUCTURED_BODY_BYTES
                 && output_bytes <= ceilings.text_or_json_bytes
                 && depth > 0
                 && depth <= ceilings.structured_depth
