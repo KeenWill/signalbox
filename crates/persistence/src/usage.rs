@@ -35,7 +35,10 @@ WITH candidate_calls AS MATERIALIZED (
      ORDER BY recorded_at DESC, model_call_id DESC
      LIMIT $8
 ), bounded_calls AS (
-    SELECT * FROM candidate_calls LIMIT $9
+    SELECT *
+      FROM candidate_calls
+     ORDER BY recorded_at DESC, model_call_id DESC
+     LIMIT $9
 ), bounded_state AS (
     SELECT count(*) > $9 AS calls_truncated FROM candidate_calls
 )
@@ -59,7 +62,7 @@ SELECT call_kind, resolved_provider_model_identity_id,
            OR cache_creation_input_tokens IS NULL
            OR cache_read_input_tokens IS NULL
            OR input_tokens >= cache_creation_input_tokens + cache_read_input_tokens
-       ) AS cost_derivation_safe,
+       ) AS cache_normalization_safe,
        bounded_state.calls_truncated
   FROM bounded_calls
  CROSS JOIN bounded_state
@@ -412,7 +415,7 @@ fn decode_aggregate(row: PgRow) -> Result<UsageAggregateGroup, UsageRepositoryEr
         },
         call_count,
         tokens: decode_aggregate_tokens(&row)?,
-        cost_derivation_safe: row.try_get("cost_derivation_safe")?,
+        cache_normalization_safe: row.try_get("cache_normalization_safe")?,
     })
 }
 

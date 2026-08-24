@@ -4,6 +4,63 @@
 -- remains a read-time derivation from versioned deployment rates and is
 -- deliberately not stored.
 
+-- Tighten canonical compaction evidence before projection backfill. This is a
+-- forward correction because recorded migrations are immutable. The replaced
+-- constraint was defined by 202607290401_context_compaction.sql.
+ALTER TABLE context_compaction_model_call
+    ADD COLUMN usage_input_includes_cache_tokens boolean;
+ALTER TABLE context_compaction_model_call
+    DROP CONSTRAINT context_compaction_model_call_usage_nonnegative;
+ALTER TABLE context_compaction_model_call
+    ADD CONSTRAINT context_compaction_model_call_usage_u64
+        CHECK (
+            (
+                input_tokens IS NULL
+                OR input_tokens BETWEEN 0 AND 18446744073709551615
+            )
+            AND (
+                output_tokens IS NULL
+                OR output_tokens BETWEEN 0 AND 18446744073709551615
+            )
+            AND (
+                cache_read_input_tokens IS NULL
+                OR cache_read_input_tokens BETWEEN 0 AND 18446744073709551615
+            )
+            AND (
+                cache_creation_input_tokens IS NULL
+                OR cache_creation_input_tokens
+                    BETWEEN 0 AND 18446744073709551615
+            )
+        );
+
+CREATE FUNCTION require_context_compaction_usage_input_semantics()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.usage_input_includes_cache_tokens IS NULL THEN
+            RAISE EXCEPTION 'compaction input-token semantics must be pinned'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    IF NEW.usage_input_includes_cache_tokens IS DISTINCT FROM
+       OLD.usage_input_includes_cache_tokens
+    THEN
+        RAISE EXCEPTION 'compaction input-token semantics are immutable'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER context_compaction_usage_input_semantics_are_pinned
+BEFORE INSERT OR UPDATE ON context_compaction_model_call
+FOR EACH ROW
+EXECUTE FUNCTION require_context_compaction_usage_input_semantics();
+
 CREATE FUNCTION bounded_web_usage_profile(value text)
 RETURNS text
 LANGUAGE sql
@@ -30,7 +87,7 @@ CREATE TABLE web_usage_call_projection (
     output_tokens numeric,
     cache_creation_input_tokens numeric,
     cache_read_input_tokens numeric,
-    recorded_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
+    recorded_at timestamptz NOT NULL DEFAULT statement_timestamp(),
 
     CONSTRAINT web_usage_call_kind_closed
         CHECK (call_kind IN ('model_call', 'approval_judge', 'context_compaction')),
@@ -95,6 +152,10 @@ CREATE INDEX web_usage_by_session_kind_recorded_call
 CREATE INDEX web_usage_by_session_provenance_recorded_call
     ON web_usage_call_projection
        (session_id, usage_provenance_kind, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_session_model_recorded_call
+    ON web_usage_call_projection
+       (session_id, resolved_provider_model_identity_id,
+        recorded_at DESC, model_call_id DESC);
 CREATE INDEX web_usage_by_turn_recorded_call
     ON web_usage_call_projection
        (turn_id, recorded_at DESC, model_call_id DESC);
@@ -178,9 +239,9 @@ BEGIN
 END;
 $$;
 
--- Existing terminal rows are projected at the migration transaction's exact
+-- Existing terminal rows are projected at each backfill statement's exact
 -- timestamp. Signalbox is pre-alpha, so no deployed historical time is
--- fabricated; all subsequent rows record their terminal transaction time.
+-- fabricated; all subsequent rows record their terminal statement time.
 INSERT INTO web_usage_call_projection (
     model_call_id, call_kind, session_id, turn_id,
     resolved_provider_model_identity_id, credential_reference,

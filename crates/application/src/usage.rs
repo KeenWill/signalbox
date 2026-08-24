@@ -398,8 +398,11 @@ pub struct UsageAggregateGroup {
     pub call_count: u64,
     /// Sums only for axes present on every call in the group.
     pub tokens: UsageAggregateTokenAxes,
-    /// Whether aggregate cost derivation matches per-call checked arithmetic.
-    pub cost_derivation_safe: bool,
+    /// Whether cache-inclusive input can be normalized without underflow.
+    ///
+    /// This does not assert that later rate arithmetic is representable or
+    /// equivalent to checked per-call cost derivation.
+    pub cache_normalization_safe: bool,
 }
 
 /// Bounded aggregate result with explicit truncation.
