@@ -616,6 +616,7 @@ fn checked_content_projection(
     }
     match header[2] {
         0 if content_kind.as_deref() == Some("source_event") => {
+            checked_single_attestation_envelope(&header, total_bytes)?;
             Ok(ImportedEntryContentProjection::SourceEvent)
         }
         1 => checked_text_projection(&header, row, total_bytes, projected_bytes)
@@ -630,6 +631,7 @@ fn checked_content_projection(
             Ok(ImportedEntryContentProjection::Thinking)
         }
         5 if content_kind.as_deref() == Some("redacted_thinking") => {
+            checked_single_attestation_envelope(&header, total_bytes)?;
             Ok(ImportedEntryContentProjection::RedactedThinking)
         }
         6 if content_kind.as_deref() == Some("document") => {
@@ -642,7 +644,36 @@ fn checked_content_projection(
             Ok(ImportedEntryContentProjection::MessageContentAbsent)
         }
         8 if content_kind.as_deref() == Some("source_message_block") => {
+            checked_single_attestation_envelope(&header, total_bytes)?;
             Ok(ImportedEntryContentProjection::SourceMessageBlock)
+        }
+        _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
+    }
+}
+
+// The bounded projection reads only the fixed header prefix, so a kind whose payload is a
+// single trailing text attestation is accepted only after its attestation tag and declared
+// payload length are checked against the stored byte count, instead of trusting the kind
+// byte alone.
+fn checked_single_attestation_envelope(
+    header: &[u8],
+    total_bytes: i64,
+) -> Result<(), ImportedConversationDiscoveryError> {
+    match header.get(3) {
+        Some(0 | 1) if total_bytes == 4 => Ok(()),
+        Some(2) if header.len() == 12 => {
+            let declared_bytes = u64::from_be_bytes(
+                header[4..12]
+                    .try_into()
+                    .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?,
+            );
+            let declared_bytes = i64::try_from(declared_bytes)
+                .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
+            if total_bytes.checked_sub(12) == Some(declared_bytes) {
+                Ok(())
+            } else {
+                Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into())
+            }
         }
         _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
     }
