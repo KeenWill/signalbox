@@ -1104,10 +1104,12 @@ so a sustained stream is accelerated without holding the worker past an overdue
 full poll. Every drain call also has a sixty-second outer deadline spanning its
 provider and database work. Expiry cancels that attempt, leaves unfinished
 deliveries pending, invalidates partial provider freshness, emits the closed
-`webhook_projection_drain_timed_out` cause, and enters the same bounded
-projection backoff as another retryable drain failure; the serialized task is
-therefore returned to its scheduler after bounded child cleanup even when an
-inner operation never returns. Unfinished child fetches remain in the poller's
+`webhook_projection_drain_timed_out` cause, and, unless only post-terminal
+dispatch work expired, enters the same bounded projection backoff as another
+retryable drain failure. Post-terminal dispatch expiry instead arms its fixed
+dispatch follow-up. The serialized task is therefore returned to its scheduler
+after bounded child cleanup even when an inner operation never returns.
+Unfinished child fetches remain in the poller's
 shared set, which a later attempt must drain before it can spawn new work. A
 deadline reached by the pre-poll drain stops that poll before its provider sweep
 can advance the durable cursor past the still-pending delivery. A targeted

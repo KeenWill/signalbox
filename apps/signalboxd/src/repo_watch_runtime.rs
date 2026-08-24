@@ -921,6 +921,7 @@ struct RepositoryWatchTask {
     webhook_dispatch_in_flight: bool,
     webhook_targeted_completion:
         Option<JoinHandle<Result<TargetedWebhookCompletion, TargetedWebhookCompletionError>>>,
+    webhook_targeted_terminal_ambiguous: bool,
     webhook_drain_first_failure: Option<RepositoryWatchAttemptError>,
     webhook_drain_projection_failure: Option<RepositoryWatchAttemptError>,
     webhook_drain_timed_out: bool,
@@ -1007,6 +1008,7 @@ impl RepositoryWatchTask {
             webhook_projected_terminal_in_flight: false,
             webhook_dispatch_in_flight: false,
             webhook_targeted_completion: None,
+            webhook_targeted_terminal_ambiguous: false,
             webhook_drain_first_failure: None,
             webhook_drain_projection_failure: None,
             webhook_drain_timed_out: false,
@@ -1459,6 +1461,16 @@ impl RepositoryWatchTask {
         drained: &mut Option<WebhookDrainOutcome>,
         trailing_failure: &mut Option<RepositoryWatchAttemptError>,
     ) -> Result<Result<(), RepositoryWatchAttemptError>, RepositoryWatchAttemptError> {
+        // A deferred drain may still own a targeted terminal/cursor completion,
+        // or a prior settlement may not know whether its terminal write
+        // committed. Do not let a complete poll advance the cursor until the
+        // owed drain settles that durable state.
+        if drain == WebhookDrain::Deferred
+            && (self.webhook_targeted_completion.is_some()
+                || self.webhook_targeted_terminal_ambiguous)
+        {
+            return Err(RepositoryWatchAttemptError::Persistence);
+        }
         if !self.rules_activated {
             self.activate_rules().await?;
             self.rules_activated = true;
@@ -1502,6 +1514,12 @@ impl RepositoryWatchTask {
                     // Return to the scheduler so retained drain state settles
                     // before another complete sweep can commit.
                     return Err(RepositoryWatchAttemptError::WebhookDrainTimedOut);
+                }
+                if self.webhook_targeted_terminal_ambiguous {
+                    // The targeted terminal write may have committed or rolled
+                    // back. Until a later drain settles that durable state, a
+                    // complete poll must not advance the cursor past it.
+                    return Err(RepositoryWatchAttemptError::Persistence);
                 }
                 outcome.failure().map_or(Ok(()), Err)
             }
@@ -1748,6 +1766,12 @@ impl RepositoryWatchTask {
         // later drain can still retry, and it is what the backoff spaces out.
         // The error-level record instead names the chronological first cause,
         // which the drain contract promises an error-only sink.
+        if first_failure.is_none() {
+            // A projection-clean drain has either observed the ambiguous
+            // targeted delivery as terminal or replayed it to a terminal
+            // disposition, so complete polling may resume.
+            self.webhook_targeted_terminal_ambiguous = false;
+        }
         match first_failure.or(dispatch_failure) {
             // Emitted here rather than by the caller because all three callers
             // — startup, wake, and retry — reach the drain through this one
@@ -2373,6 +2397,7 @@ impl RepositoryWatchTask {
             )) => {
                 self.webhook_shadow = None;
                 self.webhook_shadow_superseded = false;
+                self.webhook_targeted_terminal_ambiguous = true;
                 Some(Err(RepositoryWatchAttemptError::Persistence))
             }
             Err(TargetedWebhookCompletionError::Cursor) => {
@@ -5751,6 +5776,7 @@ mod tests {
                 webhook_projected_terminal_in_flight: false,
                 webhook_dispatch_in_flight: false,
                 webhook_targeted_completion: None,
+                webhook_targeted_terminal_ambiguous: false,
                 webhook_drain_first_failure: None,
                 webhook_drain_projection_failure: None,
                 webhook_drain_timed_out: false,
@@ -5788,6 +5814,14 @@ mod tests {
         tokio::time::timeout(SCRIPTED_SERVER_TIMEOUT, wait)
             .await
             .expect("the first webhook projection reaches its deliberate wedge");
+    }
+
+    fn keep_paused_clock_runnable() -> JoinHandle<()> {
+        tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        })
     }
 
     #[derive(Clone, Default)]
@@ -7884,11 +7918,7 @@ mod tests {
             // Keep virtual time runnable until the database operation reaches
             // the injected wedge, so Tokio cannot auto-advance the production
             // deadline during PostgreSQL setup.
-            let clock_guard = tokio::spawn(async {
-                loop {
-                    tokio::task::yield_now().await;
-                }
-            });
+            let clock_guard = keep_paused_clock_runnable();
             let drain = fixture.task.process_webhook_deliveries_with_timeout();
             tokio::pin!(drain);
             tokio::select! {
