@@ -52,7 +52,7 @@ const summary = (
 const catalogPage = (start: number, search: string | null) => {
   const summaries = search
     ? [summary(900, 'blocked')]
-    : Array.from({ length: 32 }, (_, offset) => summary(start + offset))
+    : Array.from({ length: 16 }, (_, offset) => summary(start + offset))
   const last = summaries.at(-1)
   return {
     continuation:
@@ -172,9 +172,9 @@ const deferred = (resolved = false): Deferred => {
 }
 
 const loadCatalogToRetainedCount = async (page: Page, target: number) => {
-  for (let retained = 32; retained < target; retained += 32) {
+  for (let retained = 16; retained < target; retained += 16) {
     await page.getByRole('button', { name: 'Load more' }).click()
-    await expect(page.getByText(`${retained + 32} retained`)).toBeVisible()
+    await expect(page.getByText(`${retained + 16} retained`)).toBeVisible()
   }
 }
 
@@ -204,7 +204,7 @@ test('pages and searches one thousand sessions while retaining a virtualized cli
   })
   await page.goto('/sessions')
 
-  await expect(page.getByText('32 retained')).toBeVisible()
+  await expect(page.getByText('16 retained')).toBeVisible()
   await loadCatalogToRetainedCount(page, 512)
   expect(await page.getByRole('option').count()).toBeLessThan(40)
   await page.keyboard.press('/')
