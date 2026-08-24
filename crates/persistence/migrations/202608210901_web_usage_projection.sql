@@ -63,10 +63,15 @@ EXECUTE FUNCTION require_context_compaction_usage_input_semantics();
 
 CREATE TABLE web_usage_oversized_profile_identity (
     profile_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    exact_reference text NOT NULL UNIQUE,
+    reference_digest text NOT NULL,
+    exact_reference text NOT NULL,
     CONSTRAINT web_usage_oversized_profile_reference
-        CHECK (octet_length(exact_reference) > 250)
+        CHECK (octet_length(exact_reference) > 250),
+    CONSTRAINT web_usage_oversized_profile_digest_shape
+        CHECK (reference_digest ~ '^[0-9a-f]{32}$')
 );
+CREATE INDEX web_usage_oversized_profile_by_digest
+    ON web_usage_oversized_profile_identity (reference_digest);
 
 CREATE FUNCTION bounded_web_usage_profile(value text)
 RETURNS text
@@ -74,19 +79,28 @@ LANGUAGE plpgsql
 STRICT
 AS $$
 DECLARE
+    lookup_digest text;
     mapped_id bigint;
 BEGIN
     IF octet_length(value) <= 250 THEN
         RETURN 'exact:' || value;
     END IF;
 
-    INSERT INTO web_usage_oversized_profile_identity (exact_reference)
-    VALUES (value)
-    ON CONFLICT (exact_reference) DO NOTHING;
+    lookup_digest := md5(value);
+    -- Serialize one bounded digest bucket while retaining exact collision
+    -- resolution without indexing the unbounded canonical reference.
+    PERFORM pg_advisory_xact_lock(hashtextextended(lookup_digest, 0));
     SELECT profile_id
       INTO mapped_id
       FROM web_usage_oversized_profile_identity
-     WHERE exact_reference = value;
+     WHERE reference_digest = lookup_digest
+       AND exact_reference = value;
+    IF mapped_id IS NULL THEN
+        INSERT INTO web_usage_oversized_profile_identity (
+            reference_digest, exact_reference
+        ) VALUES (lookup_digest, value)
+        RETURNING profile_id INTO mapped_id;
+    END IF;
     RETURN 'mapped:' || mapped_id::text;
 END;
 $$;
