@@ -39,6 +39,10 @@ pub(crate) fn pretty_json_document() -> Vec<u8> {
     b"{\n  \"name\": \"fixture\",\n  \"values\": [1, 2, 3]\n}\n".to_vec()
 }
 
+pub(crate) fn json_array_formatted_like_csv() -> Vec<u8> {
+    b"[[1,2],\n[3,4],\n[5,6]]".to_vec()
+}
+
 pub(crate) fn bracket_prefixed_prose() -> Vec<u8> {
     b"[section]\nbody".to_vec()
 }
@@ -166,6 +170,14 @@ pub(crate) fn row_bomb_csv() -> Vec<u8> {
     let mut bytes = b"name,value\n".to_vec();
     for _ in 0..10_001 {
         bytes.extend_from_slice(b"a,1\n");
+    }
+    bytes
+}
+
+pub(crate) fn one_column_row_bomb_csv() -> Vec<u8> {
+    let mut bytes = b"name\n".to_vec();
+    for _ in 0..10_001 {
+        bytes.extend_from_slice(b"value\n");
     }
     bytes
 }

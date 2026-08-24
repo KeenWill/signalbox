@@ -171,9 +171,9 @@ fn reader(input: ReaderInput<'_>) -> Result<ReaderDeclaration, Box<dyn Error + S
         media_types: vec![CanonicalMediaType::from_str(input.media_type)?],
         probe: ProbeDeclaration::new(ProbeDeclarationInput {
             prefix_bytes: PROBE_PREFIX_BYTES,
-            suffix_bytes: 1,
-            range_count: 2,
-            cumulative_bytes: MAX_TEXT_FAMILY_BYTES,
+            suffix_bytes: 0,
+            range_count: 0,
+            cumulative_bytes: PROBE_PREFIX_BYTES,
         }),
         views: vec![input.view],
         reason_codes,

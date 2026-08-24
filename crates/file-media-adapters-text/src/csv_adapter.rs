@@ -5,7 +5,9 @@ use signalbox_file_media_runtime::{
 };
 
 use crate::{
-    CSV_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, STRUCTURED_VIEW_NAME, read_input_is_empty, source,
+    CSV_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, STRUCTURED_VIEW_NAME,
+    json_adapter::{self, ProbeExtent},
+    read_input_is_empty, source,
 };
 
 // Hard safety ceiling preventing one record from causing runaway allocation.
@@ -21,8 +23,8 @@ pub(crate) async fn probe(
     } else {
         ProbeExtent::TruncatedPrefix
     };
-    let candidate =
-        source::probe_utf8(&prefix).is_some_and(|text| has_record_structure(text, extent));
+    let candidate = !json_adapter::has_json_structure(&prefix, extent)
+        && source::probe_utf8(&prefix).is_some_and(|text| has_record_structure(text, extent));
     if candidate {
         Ok(ProcessorProbeOutput::Candidate {
             media_type: String::from(CSV_MEDIA_TYPE),
@@ -65,8 +67,8 @@ pub(crate) async fn inspect(
             let declared_csv_shape = matches!(
                 request.evidence,
                 ValidationEvidence::DeclaredCandidateStructurallyValidated
-            ) && text.contains(',')
-                && text.bytes().any(|byte| matches!(byte, b'\r' | b'\n'));
+            ) && (has_declared_record_structure(&text)
+                || (text.contains(',') && text.bytes().any(|byte| matches!(byte, b'\r' | b'\n'))));
             if declared_csv_shape {
                 return Ok(malformed(reason));
             }
@@ -167,12 +169,6 @@ fn parse_table(text: &str, maximum_container_entries: u64) -> Result<CsvTable, &
         return Err("malformed_csv");
     }
     Ok(CsvTable { headers, rows })
-}
-
-#[derive(Clone, Copy)]
-enum ProbeExtent {
-    CompleteSource,
-    TruncatedPrefix,
 }
 
 fn has_record_structure(text: &str, extent: ProbeExtent) -> bool {

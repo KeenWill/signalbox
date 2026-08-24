@@ -162,6 +162,15 @@ async fn pretty_json_is_not_ambiguous_with_csv() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn csv_probe_does_not_claim_structurally_valid_json() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::json_array_formatted_like_csv());
+
+    let inspection = support::inspect(&source, "application/json").await?;
+    support::assert_validated_media(inspection, "application/json");
+    Ok(())
+}
+
+#[tokio::test]
 async fn bracket_prefixed_prose_uses_the_text_fallback() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::bracket_prefixed_prose());
 
@@ -545,6 +554,27 @@ async fn csv_rejects_row_bomb_shape_at_declared_ceiling() -> Result<(), Box<dyn 
 
     let inspection = support::inspect(&source, "text/csv").await?;
     support::assert_malformed_reason(inspection, "row_limit_exceeded");
+    Ok(())
+}
+
+#[tokio::test]
+async fn declared_one_column_csv_preserves_the_row_limit_reason() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::one_column_row_bomb_csv());
+
+    let inspection = support::inspect(&source, "text/csv").await?;
+    support::assert_malformed_reason(inspection, "row_limit_exceeded");
+    Ok(())
+}
+
+#[tokio::test]
+async fn text_family_registration_accepts_the_exact_probe_work_ceiling()
+-> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::json_document());
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.probe_cumulative_bytes = 4_096;
+
+    let inspection = support::inspect_with_ceilings(&source, "application/json", ceilings).await?;
+    support::assert_validated_media(inspection, "application/json");
     Ok(())
 }
 

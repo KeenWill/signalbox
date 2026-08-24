@@ -37,12 +37,12 @@ pub(crate) async fn probe(
 }
 
 #[derive(Clone, Copy)]
-enum ProbeExtent {
+pub(crate) enum ProbeExtent {
     CompleteSource,
     TruncatedPrefix,
 }
 
-fn has_json_structure(prefix: &[u8], extent: ProbeExtent) -> bool {
+pub(crate) fn has_json_structure(prefix: &[u8], extent: ProbeExtent) -> bool {
     let prefix = trim_ascii_start(prefix);
     if !matches!(prefix.first(), Some(b'{' | b'[')) {
         return false;
