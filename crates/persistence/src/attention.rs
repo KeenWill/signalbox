@@ -371,10 +371,7 @@ async fn load_summaries(
             ) => (
                 SELECT_LAST_ACTIVITY,
                 Some(session.into_uuid()),
-                Some(
-                    sqlx::types::time::OffsetDateTime::try_from(*recorded_at)
-                        .map_err(|_| AttentionCorruption::Invalid("catalog continuation"))?,
-                ),
+                Some(sqlx::types::time::OffsetDateTime::from(*recorded_at)),
             ),
             (AttentionSort::LastActivityDescending, None) => (SELECT_LAST_ACTIVITY, None, None),
             (
