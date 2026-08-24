@@ -249,6 +249,12 @@ impl PostgresRepoWatchDispatchStore {
                 )
                 AND NOT EXISTS (
                     SELECT 1
+                      FROM repo_watch_dispatch_start_lease_quarantine AS quarantined
+                     WHERE quarantined.dispatch_id = lease.dispatch_id
+                       AND quarantined.action_ordinal = lease.action_ordinal
+                )
+                AND NOT EXISTS (
+                    SELECT 1
                       FROM repo_watch_dispatch_release AS released
                      WHERE released.dispatch_id = lease.dispatch_id
                 )
@@ -313,6 +319,12 @@ impl PostgresRepoWatchDispatchStore {
                 )
                 AND NOT EXISTS (
                     SELECT 1
+                      FROM repo_watch_dispatch_start_lease_quarantine AS quarantined
+                     WHERE quarantined.dispatch_id = lease.dispatch_id
+                       AND quarantined.action_ordinal = lease.action_ordinal
+                )
+                AND NOT EXISTS (
+                    SELECT 1
                       FROM repo_watch_dispatch_release AS released
                      WHERE released.dispatch_id = lease.dispatch_id
                 )
@@ -344,14 +356,45 @@ impl PostgresRepoWatchDispatchStore {
         let session_id: Uuid = candidate.try_get("session_id")?;
         let session = SessionId::from_uuid(session_id);
         if !crate::goal::lock_session(&mut transaction, session).await? {
-            transaction.rollback().await?;
+            sqlx::query(
+                "INSERT INTO repo_watch_dispatch_start_lease_quarantine
+                    (dispatch_id, action_ordinal, session_id, reason)
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(dispatch_id)
+            .bind(action_ordinal)
+            .bind(session_id)
+            .bind("missing session")
+            .execute(&mut *transaction)
+            .await?;
+            commit(transaction).await?;
             return Err(RepoWatchDispatchRepositoryError::Corruption(
                 "expired dispatch start lease references a missing session",
             ));
         }
-        crate::goal::lock_scheduler(&mut transaction, session)
-            .await
-            .map_err(RepoWatchDispatchRepositoryError::GoalCutoff)?;
+        sqlx::query("SAVEPOINT expired_start_lease_goal")
+            .execute(&mut *transaction)
+            .await?;
+        if let Err(error) = crate::goal::lock_scheduler(&mut transaction, session).await {
+            if matches!(&error, crate::goal::GoalRepositoryError::Corruption(_)) {
+                sqlx::query("ROLLBACK TO SAVEPOINT expired_start_lease_goal")
+                    .execute(&mut *transaction)
+                    .await?;
+                sqlx::query(
+                    "INSERT INTO repo_watch_dispatch_start_lease_quarantine
+                        (dispatch_id, action_ordinal, session_id, reason)
+                     VALUES ($1, $2, $3, $4)",
+                )
+                .bind(dispatch_id)
+                .bind(action_ordinal)
+                .bind(session_id)
+                .bind("goal scheduler corruption")
+                .execute(&mut *transaction)
+                .await?;
+                commit(transaction).await?;
+            }
+            return Err(RepoWatchDispatchRepositoryError::GoalCutoff(error));
+        }
         let model_call_exists: bool = sqlx::query_scalar(
             "SELECT EXISTS (
                 SELECT 1 FROM model_call WHERE session_id = $1
@@ -394,9 +437,34 @@ impl PostgresRepoWatchDispatchStore {
             },
         );
         let stopped =
-            crate::goal::insert_repo_watch_composed_stop(&mut transaction, command.clone())
+            match crate::goal::insert_repo_watch_composed_stop(&mut transaction, command.clone())
                 .await
-                .map_err(RepoWatchDispatchRepositoryError::GoalCutoff)?;
+            {
+                Ok(stopped) => stopped,
+                Err(error) => {
+                    if matches!(&error, crate::goal::GoalRepositoryError::Corruption(_)) {
+                        sqlx::query("ROLLBACK TO SAVEPOINT expired_start_lease_goal")
+                            .execute(&mut *transaction)
+                            .await?;
+                        sqlx::query(
+                            "INSERT INTO repo_watch_dispatch_start_lease_quarantine
+                            (dispatch_id, action_ordinal, session_id, reason)
+                         VALUES ($1, $2, $3, $4)",
+                        )
+                        .bind(dispatch_id)
+                        .bind(action_ordinal)
+                        .bind(session_id)
+                        .bind("goal stop corruption")
+                        .execute(&mut *transaction)
+                        .await?;
+                        commit(transaction).await?;
+                    }
+                    return Err(RepoWatchDispatchRepositoryError::GoalCutoff(error));
+                }
+            };
+        sqlx::query("RELEASE SAVEPOINT expired_start_lease_goal")
+            .execute(&mut *transaction)
+            .await?;
         // A successor generation legitimately makes the repository-watch
         // generation-one stop inapplicable. The lease still needs a durable
         // retirement record so authoritative activation is no longer barred;

@@ -5,6 +5,10 @@
 -- record; an immutable expiry records the normal goal stop that retired work
 -- which did not start inside the production ceiling.
 
+ALTER TABLE repo_watch_dispatch_action
+    ADD CONSTRAINT repo_watch_dispatch_action_lease_correlation_key
+    UNIQUE (dispatch_id, action_ordinal, session_id);
+
 CREATE TABLE repo_watch_dispatch_start_lease (
     dispatch_id uuid NOT NULL,
     action_ordinal integer NOT NULL,
@@ -15,12 +19,12 @@ CREATE TABLE repo_watch_dispatch_start_lease (
     PRIMARY KEY (dispatch_id, action_ordinal),
     UNIQUE (dispatch_id, action_ordinal, session_id),
     UNIQUE (session_id),
-    FOREIGN KEY (dispatch_id, action_ordinal)
-        REFERENCES repo_watch_dispatch_action(dispatch_id, action_ordinal)
-        ON UPDATE RESTRICT
-        ON DELETE RESTRICT,
-    FOREIGN KEY (dispatch_id, session_id)
-        REFERENCES repo_watch_dispatch_action(dispatch_id, session_id)
+    FOREIGN KEY (dispatch_id, action_ordinal, session_id)
+        REFERENCES repo_watch_dispatch_action(
+            dispatch_id,
+            action_ordinal,
+            session_id
+        )
         ON UPDATE RESTRICT
         ON DELETE RESTRICT,
     CHECK (expires_at > leased_at),
@@ -46,10 +50,29 @@ CREATE TABLE repo_watch_dispatch_start_lease_expiration (
         )
         ON UPDATE RESTRICT
         ON DELETE RESTRICT,
-    FOREIGN KEY (goal_command_id)
-        REFERENCES durable_command(command_id)
+    FOREIGN KEY (goal_command_id, session_id)
+        REFERENCES goal_command(command_id, session_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
+);
+
+CREATE TABLE repo_watch_dispatch_start_lease_quarantine (
+    dispatch_id uuid NOT NULL,
+    action_ordinal integer NOT NULL,
+    session_id uuid NOT NULL,
+    reason text NOT NULL,
+    quarantined_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+
+    PRIMARY KEY (dispatch_id, action_ordinal),
+    FOREIGN KEY (dispatch_id, action_ordinal, session_id)
+        REFERENCES repo_watch_dispatch_start_lease(
+            dispatch_id,
+            action_ordinal,
+            session_id
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT,
+    CHECK (octet_length(reason) BETWEEN 1 AND 256)
 );
 
 CREATE TRIGGER repo_watch_dispatch_start_lease_is_append_only
@@ -62,6 +85,11 @@ BEFORE UPDATE OR DELETE ON repo_watch_dispatch_start_lease_expiration
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE TRIGGER repo_watch_dispatch_start_lease_quarantine_is_append_only
+BEFORE UPDATE OR DELETE ON repo_watch_dispatch_start_lease_quarantine
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
 CREATE TRIGGER repo_watch_dispatch_start_lease_reject_truncate
 BEFORE TRUNCATE ON repo_watch_dispatch_start_lease
 FOR EACH STATEMENT
@@ -69,5 +97,10 @@ EXECUTE FUNCTION reject_repo_watch_table_truncate();
 
 CREATE TRIGGER repo_watch_dispatch_start_lease_expiration_reject_truncate
 BEFORE TRUNCATE ON repo_watch_dispatch_start_lease_expiration
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_repo_watch_table_truncate();
+
+CREATE TRIGGER repo_watch_dispatch_start_lease_quarantine_reject_truncate
+BEFORE TRUNCATE ON repo_watch_dispatch_start_lease_quarantine
 FOR EACH STATEMENT
 EXECUTE FUNCTION reject_repo_watch_table_truncate();

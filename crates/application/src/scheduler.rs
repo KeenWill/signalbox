@@ -44,6 +44,8 @@ use crate::{
 const BASELINE_RECONCILIATION_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 // numeric-bound: tunable - controls baseline scheduler nudge backpressure
 const BASELINE_NUDGE_BUFFER_CAPACITY: usize = 1_024;
+// numeric-bound: ceiling - one repository-watch rule can dispatch this many actions
+const MINIMUM_DISPATCH_START_BACKLOG_CAPACITY: usize = 32;
 /// Shared product cap for concurrent authoritative scheduler passes.
 ///
 /// This controls simultaneous provider, tool, and database pressure. Deployment
@@ -467,6 +469,7 @@ pub struct InProcessEligibilityNudge {
     sender: mpsc::Sender<SessionId>,
     pending: Arc<Mutex<HashMap<SessionId, EligibilityHintPriority>>>,
     dispatch_start_available: Arc<Notify>,
+    dispatch_start_backlog_capacity: usize,
 }
 
 impl InProcessEligibilityNudge {
@@ -493,19 +496,20 @@ impl InProcessEligibilityNudge {
             }
             return EligibilityNudgeOutcome::Coalesced;
         }
-        let dispatch_start_already_pending = pending
+        let pending_dispatch_starts = pending
             .values()
-            .any(|pending_priority| *pending_priority == EligibilityHintPriority::DispatchStart);
+            .filter(|pending_priority| **pending_priority == EligibilityHintPriority::DispatchStart)
+            .count();
         pending.insert(session, priority);
         let outcome = match self.sender.try_send(session) {
             Ok(()) => EligibilityNudgeOutcome::Enqueued,
             Err(TrySendError::Full(_))
                 if priority == EligibilityHintPriority::DispatchStart
-                    && !dispatch_start_already_pending =>
+                    && pending_dispatch_starts < self.dispatch_start_backlog_capacity =>
             {
-                // Preserve one coalescing priority-only overflow outside the
-                // ordinary channel so a full ordinary buffer cannot consume
-                // the reserved lane's wakeup path.
+                // Preserve one complete multi-action dispatch outside the
+                // ordinary channel so backpressure cannot starve the reserved
+                // lane after its first priority pass.
                 EligibilityNudgeOutcome::Enqueued
             }
             Err(TrySendError::Full(_)) => EligibilityNudgeOutcome::DroppedAtCapacity,
@@ -630,6 +634,9 @@ where
             sender,
             pending: Arc::clone(&pending_nudges),
             dispatch_start_available: Arc::clone(&dispatch_start_available),
+            dispatch_start_backlog_capacity: nudge_buffer_capacity
+                .get()
+                .max(MINIMUM_DISPATCH_START_BACKLOG_CAPACITY),
         };
         let now = Instant::now();
         let first_sweep_deadline = now.checked_add(sweep_interval.get()).unwrap_or(now);
@@ -1397,9 +1404,9 @@ mod tests {
         EligibilityNudgeOutcome, EligibilityPass, EligibilitySweep, EligibilitySweepBatch,
         EligibilityWorkSource, GoalAwareEligibilityPass, GoalAwareEligibilityPassError,
         GoalPassDisposition, InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
-        PendingHintQueues, ReconciliationSweepInterval, SCHEDULER_PASS_ADMISSION_CAP,
-        SchedulerLoop, SchedulerLoopExit, enqueue_pending_hint, ordinary_pass_limit,
-        take_admissible_hint,
+        MINIMUM_DISPATCH_START_BACKLOG_CAPACITY, PendingHintQueues, ReconciliationSweepInterval,
+        SCHEDULER_PASS_ADMISSION_CAP, SchedulerLoop, SchedulerLoopExit, enqueue_pending_hint,
+        ordinary_pass_limit, take_admissible_hint,
     };
     use crate::{
         OperatorFailureClass, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
@@ -1816,6 +1823,42 @@ mod tests {
             nudge.nudge(second),
             EligibilityNudgeOutcome::DroppedAtCapacity
         );
+    }
+
+    #[tokio::test]
+    async fn inv069_full_ordinary_buffer_retains_one_complete_dispatch_batch() {
+        let ordinary = session(40);
+        let dispatch_starts = (0..MINIMUM_DISPATCH_START_BACKLOG_CAPACITY)
+            .map(|offset| session(100 + offset as u128))
+            .collect::<Vec<_>>();
+        let overflow = session(200);
+        let (nudge, mut source) = InProcessEligibilityWorkSource::with_options(
+            FakeSweep::returning([]),
+            ReconciliationSweepInterval::baseline(),
+            NonZeroUsize::new(1).expect("the test capacity is nonzero"),
+        );
+
+        assert_eq!(nudge.nudge(ordinary), EligibilityNudgeOutcome::Enqueued);
+        for dispatch_start in &dispatch_starts {
+            assert_eq!(
+                nudge.nudge_dispatch_start(*dispatch_start),
+                EligibilityNudgeOutcome::Enqueued
+            );
+        }
+        assert_eq!(
+            nudge.nudge_dispatch_start(overflow),
+            EligibilityNudgeOutcome::DroppedAtCapacity
+        );
+
+        let mut retained = HashSet::new();
+        while let Some(session) = source.take_pending_dispatch_start() {
+            retained.insert(session);
+        }
+        assert_eq!(
+            retained,
+            dispatch_starts.into_iter().collect::<HashSet<_>>()
+        );
+        assert!(!retained.contains(&overflow));
     }
 
     #[tokio::test]

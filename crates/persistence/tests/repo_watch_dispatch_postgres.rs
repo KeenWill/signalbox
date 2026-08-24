@@ -4836,6 +4836,46 @@ async fn inv069_expiry_retires_releases_and_rearms_the_dispatch() -> Result<(), 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn inv069_quarantined_expired_lease_does_not_block_the_next_candidate()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for_with_lease(
+        rule_with_dispatch_action_count(2)?,
+        Some(Duration::from_millis(1)),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let quarantined_session = fixture.session(0);
+
+    sqlx::query(
+        "INSERT INTO repo_watch_dispatch_start_lease_quarantine
+            (dispatch_id, action_ordinal, session_id, reason)
+         SELECT dispatch_id, action_ordinal, session_id, 'test corruption'
+           FROM repo_watch_dispatch_start_lease
+          WHERE session_id = $1",
+    )
+    .bind(quarantined_session.as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+
+    assert!(
+        fixture
+            .store
+            .process_next_expired_start_lease(&fixture.repository, || {
+                DurableCommandId::from_uuid(Uuid::from_u128(0x5d_e00))
+            })
+            .await?
+    );
+
+    let expired_sessions: Vec<Uuid> =
+        sqlx::query_scalar("SELECT session_id FROM repo_watch_dispatch_start_lease_expiration")
+            .fetch_all(&fixture.pool)
+            .await?;
+    assert_eq!(expired_sessions, vec![*fixture.session(1).as_uuid()]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn inv069_expiry_retires_a_lease_without_stopping_its_successor_goal()
 -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for_with_lease(
