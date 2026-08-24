@@ -374,6 +374,16 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
+/// Present-nullable bounded title text. `#[schemars(required)]` alone renders
+/// an `Option` field as its inner type, dropping the `null` arm, so this keeps
+/// `null` a legal value while absence stays rejected.
+fn nullable_title_summary_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["string", "null"],
+        "maxLength": 128,
+    })
+}
+
 /// Layer that owns one browser API failure.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -483,7 +493,8 @@ pub struct WebAttentionActivity {
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionSummary {
     pub session_id: WebSessionId,
-    #[schemars(length(max = 128))]
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_title_summary_schema")]
     pub title_summary: Option<String>,
     pub title_truncated: bool,
     pub archived: bool,

@@ -240,6 +240,7 @@ const schemas = {
         },
         "required": [
           "session_id",
+          "title_summary",
           "title_truncated",
           "archived",
           "current_turn_id",
@@ -600,6 +601,7 @@ const schemas = {
         },
         "required": [
           "session_id",
+          "title_summary",
           "title_truncated",
           "archived",
           "current_turn_id",

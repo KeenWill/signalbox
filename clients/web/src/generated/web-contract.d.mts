@@ -63,7 +63,7 @@ type WebAttentionSummary = {
   readonly queued_turn_count: WebU64;
   readonly session_id: WebSessionId;
   readonly state: WebAttentionState;
-  readonly title_summary?: string | null;
+  readonly title_summary: string | null;
   readonly title_truncated: boolean;
 };
 
