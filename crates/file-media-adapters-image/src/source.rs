@@ -5,11 +5,12 @@ use crate::MAX_IMAGE_SOURCE_BYTES;
 pub(crate) async fn read_complete(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
+    maximum_bytes: u64,
 ) -> Result<Option<Vec<u8>>, ProcessorFailure> {
     if cancellation.is_cancelled() {
         return Err(ProcessorFailure::Cancelled);
     }
-    if source.byte_length().get() > MAX_IMAGE_SOURCE_BYTES {
+    if source.byte_length().get() > maximum_bytes.min(MAX_IMAGE_SOURCE_BYTES) {
         return Ok(None);
     }
     let bytes = source

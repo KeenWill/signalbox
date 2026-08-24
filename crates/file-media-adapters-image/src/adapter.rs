@@ -9,9 +9,10 @@ use signalbox_file_media_runtime::{
 
 use crate::{
     AdapterFormat, MAX_IMAGE_AXIS, MAX_IMAGE_DECODED_PIXELS, MAX_IMAGE_SOURCE_BYTES,
-    options_are_empty, source,
+    METADATA_VIEW_NAME, options_are_empty, source,
 };
 
+// numeric-bound: ceiling - protects worker memory from runaway decoder allocation
 const MAX_DECODER_ALLOCATION_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,7 +47,9 @@ pub(crate) async fn inspect(
     if request.media_type.as_str() != format.media_type() {
         return Err(ProcessorFailure::Protocol);
     }
-    let Some(bytes) = source::read_complete(source, cancellation).await? else {
+    let Some(bytes) =
+        source::read_complete(source, cancellation, request.maximum_source_bytes).await?
+    else {
         return Ok(malformed(format, "source_too_large"));
     };
     let metadata = match decode(
@@ -74,10 +77,11 @@ pub(crate) async fn read(
     let signalbox_file_media_runtime::FileReadInput::Initial { options } = &request.input else {
         return Ok(ProcessorReadOutput::InvalidViewArguments);
     };
-    if request.view.as_str() != "metadata" || !options_are_empty(options) {
+    if request.view.as_str() != METADATA_VIEW_NAME || !options_are_empty(options) {
         return Ok(ProcessorReadOutput::InvalidViewArguments);
     }
-    let Some(bytes) = source::read_complete(source, cancellation).await? else {
+    let Some(bytes) = source::read_complete(source, cancellation, MAX_IMAGE_SOURCE_BYTES).await?
+    else {
         return Ok(ProcessorReadOutput::SourceTooLarge {
             maximum_bytes: MAX_IMAGE_SOURCE_BYTES,
         });

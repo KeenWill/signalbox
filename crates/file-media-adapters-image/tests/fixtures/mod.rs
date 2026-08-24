@@ -34,14 +34,6 @@ pub(crate) fn valid(format: FixtureFormat) -> Result<Vec<u8>, ImageError> {
     encode(format, 3, 2)
 }
 
-pub(crate) fn expected_metadata(format: FixtureFormat) -> serde_json::Value {
-    let channels = match format {
-        FixtureFormat::Jpeg => 3,
-        FixtureFormat::Png | FixtureFormat::WebP | FixtureFormat::Gif => 4,
-    };
-    serde_json::json!({"channels": channels, "height": 2, "width": 3})
-}
-
 pub(crate) fn truncated(format: FixtureFormat) -> Result<Vec<u8>, ImageError> {
     let mut bytes = valid(format)?;
     bytes.truncate(bytes.len() / 2);

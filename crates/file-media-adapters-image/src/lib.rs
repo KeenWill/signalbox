@@ -20,9 +20,10 @@ pub use signalbox_file_media_runtime::{
 
 const PROVIDER_NAME: &str = "signalbox_image";
 const READER_REVISION: &str = "v1";
-const METADATA_VIEW_NAME: &str = "metadata";
+pub(crate) const METADATA_VIEW_NAME: &str = "metadata";
 
 /// Maximum encoded bytes one image adapter accepts.
+// numeric-bound: ceiling - protects worker memory and decode latency from oversized inputs
 pub const MAX_IMAGE_SOURCE_BYTES: u64 = 262_144;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -161,7 +162,7 @@ fn reader(
         reader: FileReaderName::try_new(format.reader_name())?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(format.media_type())?],
-        probe: ProbeDeclaration::new(16, 0, 1, 16),
+        probe: ProbeDeclaration::new(16, 0, 0, 16),
         views: vec![metadata_view()?],
         reason_codes: reasons,
         streaming_text_fallback: StreamingTextFallback::Disabled,

@@ -9,22 +9,54 @@ use support::{DirectProcessor, MemorySource};
 
 #[tokio::test]
 async fn png_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>> {
-    assert_valid(FixtureFormat::Png).await
+    let format = FixtureFormat::Png;
+    let source = MemorySource::new(fixtures::valid(format)?);
+    let expected = serde_json::json!({"channels": 4, "height": 2, "width": 3});
+
+    let inspection = support::inspect(&source, "image/png").await?;
+    support::assert_validated_media(inspection, "image/png");
+    let result = support::read(&source, "image/png", &DirectProcessor::provider()).await?;
+    support::assert_structured(result, &expected);
+    Ok(())
 }
 
 #[tokio::test]
 async fn jpeg_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>> {
-    assert_valid(FixtureFormat::Jpeg).await
+    let format = FixtureFormat::Jpeg;
+    let source = MemorySource::new(fixtures::valid(format)?);
+    let expected = serde_json::json!({"channels": 3, "height": 2, "width": 3});
+
+    let inspection = support::inspect(&source, "image/jpeg").await?;
+    support::assert_validated_media(inspection, "image/jpeg");
+    let result = support::read(&source, "image/jpeg", &DirectProcessor::provider()).await?;
+    support::assert_structured(result, &expected);
+    Ok(())
 }
 
 #[tokio::test]
 async fn webp_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>> {
-    assert_valid(FixtureFormat::WebP).await
+    let format = FixtureFormat::WebP;
+    let source = MemorySource::new(fixtures::valid(format)?);
+    let expected = serde_json::json!({"channels": 4, "height": 2, "width": 3});
+
+    let inspection = support::inspect(&source, "image/webp").await?;
+    support::assert_validated_media(inspection, "image/webp");
+    let result = support::read(&source, "image/webp", &DirectProcessor::provider()).await?;
+    support::assert_structured(result, &expected);
+    Ok(())
 }
 
 #[tokio::test]
 async fn gif_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>> {
-    assert_valid(FixtureFormat::Gif).await
+    let format = FixtureFormat::Gif;
+    let source = MemorySource::new(fixtures::valid(format)?);
+    let expected = serde_json::json!({"channels": 4, "height": 2, "width": 3});
+
+    let inspection = support::inspect(&source, "image/gif").await?;
+    support::assert_validated_media(inspection, "image/gif");
+    let result = support::read(&source, "image/gif", &DirectProcessor::provider()).await?;
+    support::assert_structured(result, &expected);
+    Ok(())
 }
 
 #[tokio::test]
@@ -77,6 +109,20 @@ async fn lowered_decoded_pixels_are_enforced_during_metadata_validation()
 }
 
 #[tokio::test]
+async fn lowered_validation_source_bytes_return_source_too_large() -> Result<(), Box<dyn Error>> {
+    let format = FixtureFormat::Png;
+    let source = MemorySource::new(fixtures::valid(format)?);
+    let ceilings = FileMediaCeilings {
+        validation_source_bytes: 16,
+        ..FileMediaCeilings::version_one()
+    };
+
+    let inspection = support::inspect_with_ceilings(&source, format.media_type(), ceilings).await?;
+    support::assert_malformed_reason(inspection, "source_too_large");
+    Ok(())
+}
+
+#[tokio::test]
 async fn registry_sanitizer_keeps_injection_shaped_metadata_as_data() -> Result<(), Box<dyn Error>>
 {
     let format = FixtureFormat::Png;
@@ -110,17 +156,6 @@ async fn registry_sanitizer_rejects_nul_bearing_decoder_output() -> Result<(), B
     )
     .await;
     support::assert_processor_failed(result);
-    Ok(())
-}
-
-async fn assert_valid(format: FixtureFormat) -> Result<(), Box<dyn Error>> {
-    let source = MemorySource::new(fixtures::valid(format)?);
-    let expected = fixtures::expected_metadata(format);
-
-    let inspection = support::inspect(&source, format.media_type()).await?;
-    support::assert_validated_media(inspection, format.media_type());
-    let result = support::read(&source, format.media_type(), &DirectProcessor::provider()).await?;
-    support::assert_structured(result, &expected);
     Ok(())
 }
 
