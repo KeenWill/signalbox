@@ -1803,12 +1803,27 @@ export function decodeWebAttentionStreamEvent(value) {
 export function decodeWebSessionLiveSnapshot(value) {
   const root = schemas.WebSessionLiveStreamEvent;
   assertSchema(root, root.$defs.WebSessionLiveSnapshot, value, "session_live_snapshot");
+  assertLiveSnapshot(value, "session_live_snapshot");
   return value;
 }
 
 export function decodeWebSessionLiveStreamEvent(value) {
   assertSchema(schemas.WebSessionLiveStreamEvent, schemas.WebSessionLiveStreamEvent, value, "session_live_event");
+  if (value.kind === "snapshot") {
+    assertLiveSnapshot(value.snapshot, "session_live_event.snapshot");
+  }
   return value;
+}
+
+function assertLiveSnapshot(snapshot, path) {
+  const queuedTurnCount = BigInt(snapshot.queued_turn_count);
+  const expectedPreviewLength = queuedTurnCount > 32n ? 32n : queuedTurnCount;
+  if (BigInt(snapshot.queued_turn_ids.length) !== expectedPreviewLength) {
+    fail(
+      `${path}.queued_turn_ids`,
+      `exactly ${expectedPreviewLength} IDs for queued_turn_count`,
+    );
+  }
 }
 
 function assertAttentionSummary(summary, path) {

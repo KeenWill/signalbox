@@ -214,6 +214,7 @@ impl Error for WebHttpRuntimeError {}
 pub struct WebHttpRuntime {
     listener: TcpListener,
     router: Router,
+    stream_shutdown: Option<watch::Sender<bool>>,
 }
 
 /// Browser listener bound before startup performs durable rule admission.
@@ -225,9 +226,16 @@ pub struct BoundWebHttpListener {
 impl BoundWebHttpListener {
     /// Attaches the production router after process-runtime construction.
     pub fn into_runtime(self, pool: PgPool, monitor: ProcessMonitor) -> WebHttpRuntime {
+        let (stream_shutdown, shutdown) = watch::channel(false);
         WebHttpRuntime {
             listener: self.listener,
-            router: production_router_with_monitor(self.asset_root, Some(pool), Some(monitor)),
+            router: production_router_with_monitor(
+                self.asset_root,
+                Some(pool),
+                Some(monitor),
+                Some(shutdown),
+            ),
+            stream_shutdown: Some(stream_shutdown),
         }
     }
 }
@@ -265,7 +273,11 @@ impl WebHttpRuntime {
         let listener = TcpListener::bind(bind_address)
             .await
             .map_err(|_| WebHttpRuntimeError::Bind)?;
-        Ok(Self { listener, router })
+        Ok(Self {
+            listener,
+            router,
+            stream_shutdown: None,
+        })
     }
 
     /// Actual address, including an operating-system-selected test port.
@@ -277,17 +289,28 @@ impl WebHttpRuntime {
 
     /// Serves until shutdown, then cancels requests by dropping their futures.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<(), WebHttpRuntimeError> {
+        let Self {
+            listener,
+            router,
+            stream_shutdown,
+        } = self;
         let shutdown_requested = async move {
             if *shutdown.borrow() {
+                if let Some(stream_shutdown) = stream_shutdown.as_ref() {
+                    let _ = stream_shutdown.send(true);
+                }
                 return;
             }
             while shutdown.changed().await.is_ok() {
                 if *shutdown.borrow() {
+                    if let Some(stream_shutdown) = stream_shutdown.as_ref() {
+                        let _ = stream_shutdown.send(true);
+                    }
                     return;
                 }
             }
         };
-        axum::serve(self.listener, self.router)
+        axum::serve(listener, router)
             .with_graceful_shutdown(shutdown_requested)
             .await
             .map_err(|_| WebHttpRuntimeError::Serve)
@@ -296,19 +319,21 @@ impl WebHttpRuntime {
 
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
 pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> Router {
-    production_router_with_monitor(asset_root, pool, None)
+    production_router_with_monitor(asset_root, pool, None, None)
 }
 
 fn production_router_with_monitor(
     asset_root: Option<PathBuf>,
     pool: Option<PgPool>,
     monitor: Option<ProcessMonitor>,
+    shutdown: Option<watch::Receiver<bool>>,
 ) -> Router {
     let state = WebApiState {
         timeline: pool.clone().map(SessionTimelineRepository::new),
         live: pool.clone().map(SessionLiveRepository::new),
         attention: pool.map(AttentionRepository::new),
         monitor,
+        shutdown,
     };
     let session_reads = Router::new()
         .route("/sessions/{session_id}", get(session_descriptor))
@@ -343,6 +368,7 @@ struct WebApiState {
     live: Option<SessionLiveRepository>,
     attention: Option<AttentionRepository>,
     monitor: Option<ProcessMonitor>,
+    shutdown: Option<watch::Receiver<bool>>,
 }
 
 async fn validate_loopback_host(request: Request, next: Next) -> Response {
@@ -725,6 +751,8 @@ async fn session_live_follow(
             observed_through,
             queued_at_snapshot,
             pending,
+            provider_fragment: None,
+            shutdown: state.shutdown,
             ended: false,
         },
         live_follow_next,
@@ -738,20 +766,60 @@ struct LiveFollowState {
     observed_through: u64,
     queued_at_snapshot: usize,
     pending: VecDeque<WebSessionLiveStreamEvent>,
+    provider_fragment: Option<PendingProviderTextDelta>,
+    shutdown: Option<watch::Receiver<bool>>,
     ended: bool,
+}
+
+struct PendingProviderTextDelta {
+    turn_id: String,
+    model_call_id: String,
+    part_index: u32,
+    text: std::sync::Arc<str>,
+    offset: usize,
+    emitted_empty: bool,
+}
+
+impl PendingProviderTextDelta {
+    fn next_event(&mut self) -> Option<WebSessionLiveStreamEvent> {
+        let content =
+            next_web_text_fragment(&self.text, &mut self.offset, &mut self.emitted_empty)?;
+        Some(WebSessionLiveStreamEvent::ProviderTextDelta {
+            turn_id: self.turn_id.clone(),
+            model_call_id: self.model_call_id.clone(),
+            part_index: self.part_index,
+            content,
+        })
+    }
 }
 
 async fn live_follow_next(
     mut state: LiveFollowState,
 ) -> Option<(WebSessionLiveStreamEvent, LiveFollowState)> {
+    if state
+        .shutdown
+        .as_ref()
+        .is_some_and(|shutdown| *shutdown.borrow())
+    {
+        return None;
+    }
     if let Some(event) = state.pending.pop_front() {
+        return Some((event, state));
+    }
+    if let Some(mut fragment) = state.provider_fragment.take()
+        && let Some(event) = fragment.next_event()
+    {
+        state.provider_fragment = Some(fragment);
         return Some((event, state));
     }
     if state.ended {
         return None;
     }
     loop {
-        let update = match state.subscription.recv().await {
+        let update = match tokio::select! {
+            () = live_follow_shutdown(&mut state.shutdown) => return None,
+            update = state.subscription.recv() => update,
+        } {
             Ok(update) => update,
             Err(ProcessMonitorReceiveError::Lagged) => {
                 state.ended = true;
@@ -811,42 +879,61 @@ async fn live_follow_next(
                 if queued_at_snapshot || session != state.session {
                     continue;
                 }
-                state
-                    .pending
-                    .extend(web_text_fragments(&text).map(|content| {
-                        WebSessionLiveStreamEvent::ProviderTextDelta {
-                            turn_id: turn.into_uuid().to_string(),
-                            model_call_id: call.into_uuid().to_string(),
-                            part_index,
-                            content,
-                        }
-                    }));
-                let event = state.pending.pop_front()?;
+                let mut fragment = PendingProviderTextDelta {
+                    turn_id: turn.into_uuid().to_string(),
+                    model_call_id: call.into_uuid().to_string(),
+                    part_index,
+                    text,
+                    offset: 0,
+                    emitted_empty: false,
+                };
+                let event = fragment.next_event()?;
+                state.provider_fragment = Some(fragment);
                 return Some((event, state));
             }
         }
     }
 }
 
-fn web_text_fragments(value: &str) -> impl Iterator<Item = String> + '_ {
-    let mut remaining = value;
-    let mut emitted_empty = !value.is_empty();
-    std::iter::from_fn(move || {
-        if remaining.is_empty() {
-            if emitted_empty {
-                return None;
-            }
-            emitted_empty = true;
-            return Some(String::new());
+async fn live_follow_shutdown(shutdown: &mut Option<watch::Receiver<bool>>) {
+    let Some(shutdown) = shutdown else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    if *shutdown.borrow() {
+        return;
+    }
+    while shutdown.changed().await.is_ok() {
+        if *shutdown.borrow() {
+            return;
         }
-        let mut end = remaining.len().min(MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES);
-        while !remaining.is_char_boundary(end) {
-            end -= 1;
+    }
+    std::future::pending::<()>().await;
+}
+
+fn next_web_text_fragment(
+    value: &str,
+    offset: &mut usize,
+    emitted_empty: &mut bool,
+) -> Option<String> {
+    if value.is_empty() {
+        if *emitted_empty {
+            return None;
         }
-        let (fragment, rest) = remaining.split_at(end);
-        remaining = rest;
-        Some(fragment.to_owned())
-    })
+        *emitted_empty = true;
+        return Some(String::new());
+    }
+    if *offset == value.len() {
+        return None;
+    }
+    let remaining = &value[*offset..];
+    let mut length = remaining.len().min(MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES);
+    while !remaining.is_char_boundary(length) {
+        length -= 1;
+    }
+    let fragment = remaining[..length].to_owned();
+    *offset += length;
+    Some(fragment)
 }
 
 fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
@@ -1712,7 +1799,7 @@ mod tests {
     use super::{
         DEFAULT_WEB_BIND_ADDRESS, LiveFollowState, WebHttpConfiguration, WebHttpConfigurationError,
         WebHttpRuntime, attention_snapshot_dto, deterministic_test_router, live_follow_next,
-        ndjson_response, production_router, web_text_fragments,
+        ndjson_response, production_router,
     };
     use crate::{ProcessMonitor, ProcessMonitorUpdate};
 
@@ -1752,6 +1839,8 @@ mod tests {
             observed_through,
             queued_at_snapshot,
             pending: std::collections::VecDeque::new(),
+            provider_fragment: None,
+            shutdown: None,
             ended: false,
         }
     }
@@ -1858,11 +1947,60 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn live_follow_fragments_provider_text_lazily() {
+        let monitor = ProcessMonitor::test_channel();
+        let state = live_follow_state(&monitor, 7, 0);
+        let text: Arc<str> = Arc::from("x".repeat(super::MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES + 1));
+        monitor.publish_for_test(ProcessMonitorUpdate::ProviderTextDelta {
+            session: live_session(),
+            turn: live_turn(),
+            call: live_call(),
+            part_index: 0,
+            text: Arc::clone(&text),
+        });
+
+        let (first, state) = live_follow_next(state)
+            .await
+            .expect("the first fragment is delivered");
+        let retained = state
+            .provider_fragment
+            .as_ref()
+            .expect("the unencoded suffix remains pending");
+
+        assert!(state.pending.is_empty());
+        assert!(Arc::ptr_eq(&text, &retained.text));
+        assert_eq!(retained.offset, super::MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES);
+        assert_eq!(
+            match first {
+                WebSessionLiveStreamEvent::ProviderTextDelta { content, .. } => content.len(),
+                event => panic!("expected provider text delta, got {event:?}"),
+            },
+            super::MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES,
+        );
+    }
+
+    #[tokio::test]
+    async fn live_follow_ends_when_http_shutdown_is_requested() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        state.shutdown = Some(shutdown);
+        shutdown_sender
+            .send(true)
+            .expect("the follow stream observes shutdown");
+
+        let event = tokio::time::timeout(Duration::from_secs(1), live_follow_next(state))
+            .await
+            .expect("shutdown ends the follow stream promptly");
+
+        assert!(event.is_none());
+    }
+
     #[test]
     fn provider_text_fragment_fits_after_worst_case_json_escaping() {
         let source = "\u{0001}".repeat(super::MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES);
-        let content = web_text_fragments(&source)
-            .next()
+        let content = super::next_web_text_fragment(&source, &mut 0, &mut false)
             .expect("nonempty provider text has a first fragment");
         let encoded = super::encode_ndjson_item(WebSessionLiveStreamEvent::ProviderTextDelta {
             turn_id: live_turn().into_uuid().to_string(),

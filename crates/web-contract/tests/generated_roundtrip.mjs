@@ -109,6 +109,22 @@ test("generated live decoder bounds retained queued turns", () => {
   );
 });
 
+test("generated live decoder correlates queued preview with its count", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: ["00000000-0000-0000-0000-000000000992"],
+        reconciliation: null,
+        runner: null,
+      }),
+    /exactly 0 IDs for queued_turn_count/,
+  );
+});
+
 test("generated live decoder rejects malformed runner correlations", () => {
   assert.throws(
     () =>
