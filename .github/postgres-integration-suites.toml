@@ -47,11 +47,17 @@ name = "persistence"
 package = "signalbox-persistence"
 features = ["postgres-integration"]
 # The long pole by an order of magnitude: 695 of the 1,134 ignored tests these
-# suites hold. Three shards still took about 8m15s each at the measured
-# baseline, so six bring the test-execution long pole into the four-minute band.
-# Counts are a snapshot, taken with `cargo test --tests -- --ignored --list`;
-# they justify the shard count and nothing depends on them staying exact.
-shards = 6
+# suites hold. Counts are a snapshot, taken with `cargo test --tests --
+# --ignored --list`; they justify the shard count and nothing depends on them
+# staying exact.
+#
+# Six shards were sized when every test database wrote to the shared scratch
+# disks. With that state in memory and sixteen tests running per shard, a
+# shard ran about 3m45s of which roughly 1m15s was fixed cost — archive
+# download, runner setup, image pull — so three shards spend three fewer pool
+# slots and their repeated fixed costs for the same tests. Not fewer than two,
+# so a failing shard can be re-run without re-running the whole suite.
+shards = 3
 skip = []
 exclude_binaries = ["runner_protocol_postgres"]
 
@@ -59,9 +65,10 @@ exclude_binaries = ["runner_protocol_postgres"]
 name = "runner"
 package = "signalbox-persistence"
 features = ["postgres-integration"]
-# The 263 runner-protocol tests took about eight minutes as one partition at the
-# measured baseline, so they are split across two runners.
-shards = 2
+# The 263 runner-protocol tests ran as two partitions of under four minutes
+# each at sixteen test threads with database state in memory; one partition of
+# about six minutes pays the fixed shard costs once.
+shards = 1
 skip = []
 include_binaries = ["runner_protocol_postgres"]
 
@@ -76,9 +83,10 @@ skip = []
 name = "signalboxd"
 package = "signalboxd"
 features = ["test-support"]
-# One partition took about five minutes at the measured baseline; two keep it
-# from replacing persistence as the integration-test long pole.
-shards = 2
+# Two partitions ran under three and a half minutes each at sixteen test
+# threads with database state in memory; one partition of about five minutes
+# pays the fixed shard costs once and stays well short of the long pole.
+shards = 1
 # Subprocess entry points invoked only by their owning process tests.
 skip = ["bridge_build_direct_invocation_fixture", "bridge_wait_"]
 
