@@ -2517,14 +2517,17 @@ mod tests {
 
     #[test]
     fn session_catalog_query_accepts_emitted_sort_tokens() {
-        for token in ["last_activity_descending", "session_identity_ascending"] {
-            let raw = format!("sort={token}");
-            let query = super::parse_attention_snapshot_query(Some(&raw))
-                .expect("the emitted sort token has a valid query shape");
+        let activity_query =
+            super::parse_attention_snapshot_query(Some("sort=last_activity_descending"))
+                .expect("the emitted activity sort token has a valid query shape");
+        super::parse_attention_query(activity_query)
+            .expect("the emitted activity sort token round trips through the request parser");
 
-            super::parse_attention_query(query)
-                .expect("the emitted sort token round trips through the request parser");
-        }
+        let identity_query =
+            super::parse_attention_snapshot_query(Some("sort=session_identity_ascending"))
+                .expect("the emitted identity sort token has a valid query shape");
+        super::parse_attention_query(identity_query)
+            .expect("the emitted identity sort token round trips through the request parser");
     }
 
     #[test]
@@ -2608,30 +2611,37 @@ mod tests {
             "1234567"
         );
 
-        let maximal_update_summary = super::attention_summary_dto(summary.clone())
+        let mut escaped_summary = summary.clone();
+        escaped_summary.title_summary =
+            Some(String::from('\u{1}').repeat(usize::from(max_attention_title_characters())));
+        escaped_summary
+            .goal_block
+            .as_mut()
+            .expect("the maximum summary carries a goal block")
+            .need_summary =
+            String::from('\u{1}').repeat(usize::from(max_attention_goal_summary_characters()));
+        let maximal_update_summary = super::attention_summary_dto(escaped_summary.clone())
             .expect("the maximal summary maps to the web contract");
         let updates = super::attention_update_events(
             AttentionCursor::new(7),
             AttentionCursor::new(9),
             vec![maximal_update_summary; usize::from(max_attention_change_items())],
         );
-        assert_eq!(updates.len(), 4);
-        for (index, (event, cursor)) in updates.iter().enumerate() {
-            let mut update_writer = super::NdjsonItemWriter::new();
-            serde_json::to_writer(&mut update_writer, event)
-                .expect("each split update serializes within one item");
-            update_writer
-                .write_all(b"\n")
-                .expect("the NDJSON terminator fits the split update");
-            assert!(update_writer.encoded.len() <= MAX_NDJSON_ITEM_BYTES);
-            assert_eq!(cursor.value(), if index == 3 { 9 } else { 7 });
-        }
+        assert_eq!(updates.len(), 8);
+        assert_attention_update_chunk(&updates[0], 7);
+        assert_attention_update_chunk(&updates[1], 7);
+        assert_attention_update_chunk(&updates[2], 7);
+        assert_attention_update_chunk(&updates[3], 7);
+        assert_attention_update_chunk(&updates[4], 7);
+        assert_attention_update_chunk(&updates[5], 7);
+        assert_attention_update_chunk(&updates[6], 7);
+        assert_attention_update_chunk(&updates[7], 9);
 
         let snapshot = attention_snapshot_dto(AttentionSnapshot {
             cursor: AttentionCursor::new(u64::MAX),
             total: u64::MAX,
             sort: AttentionSort::LastActivityDescending,
-            summaries: vec![summary; usize::from(max_attention_snapshot_items())],
+            summaries: vec![escaped_summary; usize::from(max_attention_snapshot_items())],
             continuation: Some(AttentionContinuation::LastActivity {
                 recorded_at: UNIX_EPOCH
                     + Duration::from_millis(LARGE_REPRESENTATIVE_UNIX_MILLISECONDS),
@@ -2648,6 +2658,21 @@ mod tests {
 
         assert!(super::attention_summary_dto(oversized_summary).is_err());
         assert!(writer.encoded.len() <= MAX_NDJSON_ITEM_BYTES);
+    }
+
+    fn assert_attention_update_chunk(
+        update: &(WebAttentionStreamEvent, AttentionCursor),
+        expected_cursor: u64,
+    ) {
+        let mut writer = super::NdjsonItemWriter::new();
+        serde_json::to_writer(&mut writer, &update.0)
+            .expect("the byte-safe update chunk serializes within one item");
+        writer
+            .write_all(b"\n")
+            .expect("the NDJSON terminator fits the update chunk");
+
+        assert!(writer.encoded.len() <= MAX_NDJSON_ITEM_BYTES);
+        assert_eq!(update.1.value(), expected_cursor);
     }
 
     #[tokio::test]
