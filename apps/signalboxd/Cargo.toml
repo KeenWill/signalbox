@@ -14,6 +14,30 @@ test-support = [
 ]
 
 [dependencies]
+axum = { version = "0.8.9", default-features = false, features = [
+    "http1",
+    "json",
+    "tokio",
+] }
+futures-util = { version = "0.3.34", default-features = false }
+hmac = { version = "0.13.0", default-features = false }
+# Classifies the error `axum::body::to_bytes` returns: only its
+# `LengthLimitError` is an oversized body; anything else is transport failure.
+# Already present transitively under axum.
+http-body-util = { version = "0.1.4", default-features = false }
+# The webhook listener drives Hyper directly rather than through `axum::serve`,
+# because the raw-header ceilings below the router are only reachable on the
+# HTTP/1 builder. Both were already present transitively.
+hyper = { version = "1.10.1", default-features = false, features = [
+    "http1",
+    "server",
+] }
+hyper-util = { version = "0.1.20", default-features = false, features = [
+    "server",
+    "server-graceful",
+    "service",
+    "tokio",
+] }
 opentelemetry = { version = "0.32.0", default-features = false, features = [
     "trace",
 ] }
@@ -63,6 +87,7 @@ signalbox-tools-plan = { path = "../../crates/tools-plan" }
 signalbox-tools-sessions = { path = "../../crates/tools-sessions" }
 signalbox-tools-web = { path = "../../crates/tools-web" }
 signalbox-tools-workspace = { path = "../../crates/tools-workspace" }
+signalbox-web-contract = { path = "../../crates/web-contract" }
 rustix = { version = "1.1.4", default-features = false, features = [
     "fs",
     "net",
@@ -94,11 +119,21 @@ tracing-subscriber = { version = "0.3.20", default-features = false, features = 
     "fmt",
     "registry",
 ] }
+tower-http = { version = "0.7.0", default-features = false, features = ["fs"] }
 url = "2.5.8"
 uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
 
 [dev-dependencies]
 signalbox-blob-store-filesystem = { path = "../../crates/blob-store-filesystem", features = ["test-support"] }
+# The composed daemon tests read drain dispositions through persistence's
+# test-support surface; carrying the feature here keeps a plain
+# `cargo test -p signalboxd` compiling without an explicit feature flag.
+# `postgres-integration` likewise: the tests start their throwaway PostgreSQL
+# containers through persistence's shared RAM-backed provisioning helpers.
+signalbox-persistence = { path = "../../crates/persistence", features = [
+    "postgres-integration",
+    "test-support",
+] }
 expect-test = "1.5.1"
 git2 = { version = "0.21.0", default-features = false, features = ["unstable-sha256"] }
 # The shared executor-driving harness lives in the application crate so sibling
@@ -119,6 +154,7 @@ testcontainers-modules = { version = "0.15.0", default-features = false, feature
     "ring",
 ] }
 tokio = { version = "1.53.0", default-features = false, features = ["test-util"] }
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
 
 [lints]
 workspace = true
