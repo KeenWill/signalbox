@@ -500,15 +500,15 @@ fn inspect_element(
     if depth == 0 && root_seen {
         return Err(ParseIssue::Malformed);
     }
-    if matches!(
-        namespace,
-        ResolveResult::Unbound | ResolveResult::Unknown(_)
-    ) {
-        return Err(ParseIssue::Malformed);
-    }
     let binding = element.local_name();
     let name = binding.as_ref();
     if depth == 0 {
+        if matches!(namespace, ResolveResult::Unbound)
+            && !element.name().as_ref().contains(&b':')
+            && name != b"svg"
+        {
+            return Err(ParseIssue::NoMatch);
+        }
         if !is_svg_element(namespace, name, b"svg") {
             let declares_default_svg_namespace = element.attributes().any(|attribute| {
                 attribute.is_ok_and(|attribute| {
@@ -524,10 +524,16 @@ fn inspect_element(
     } else if is_svg_element(namespace, name, b"svg") {
         return Err(ParseIssue::NestedSvg);
     }
+    if matches!(
+        namespace,
+        ResolveResult::Unbound | ResolveResult::Unknown(_)
+    ) {
+        return Err(ParseIssue::Malformed);
+    }
     if active_element(name) {
         return Err(ParseIssue::ActiveContent);
     }
-    if is_svg_namespace(namespace) && resource_element(name) {
+    if resource_element(name) {
         return Err(ParseIssue::ExternalReference);
     }
     parsed.elements = parsed
@@ -642,7 +648,10 @@ fn active_element(name: &[u8]) -> bool {
 }
 
 fn resource_element(name: &[u8]) -> bool {
-    matches!(name, b"image" | b"audio" | b"video")
+    matches!(
+        name,
+        b"image" | b"img" | b"audio" | b"video" | b"source" | b"track"
+    )
 }
 
 fn resource_capable_attribute(name: &[u8]) -> bool {
@@ -832,6 +841,9 @@ fn parse_dimension(value: &str) -> Result<Option<f64>, ParseIssue> {
     if value.eq_ignore_ascii_case("auto") {
         return Ok(None);
     }
+    if valid_css_calculation(value) {
+        return Ok(None);
+    }
     if let Ok(parsed) = parse_nonnegative_finite(value) {
         return Ok(Some(parsed));
     }
@@ -850,6 +862,38 @@ fn parse_dimension(value: &str) -> Result<Option<f64>, ParseIssue> {
         return parse_nonnegative_finite(number).map(Some);
     }
     Err(ParseIssue::Malformed)
+}
+
+fn valid_css_calculation(value: &str) -> bool {
+    let Some(open) = value.find('(') else {
+        return false;
+    };
+    if !matches!(
+        &value[..open].to_ascii_lowercase()[..],
+        "calc" | "min" | "max" | "clamp"
+    ) || !value.ends_with(')')
+    {
+        return false;
+    }
+    let mut depth = 0usize;
+    let mut has_content = false;
+    for character in value[open..].chars() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                let Some(next) = depth.checked_sub(1) else {
+                    return false;
+                };
+                depth = next;
+            }
+            character if depth > 0 && !character.is_whitespace() => has_content = true,
+            _ => {}
+        }
+        if depth == 0 && character != ')' {
+            return false;
+        }
+    }
+    depth == 0 && has_content
 }
 
 fn strip_ascii_case_suffix<'a>(value: &'a str, suffix: &str) -> Option<&'a str> {
@@ -1120,8 +1164,14 @@ fn decode_reference(reference: &str) -> Result<Cow<'_, str>, ParseIssue> {
         return Ok(Cow::Borrowed(value));
     }
     let codepoint = if let Some(hexadecimal) = reference.strip_prefix("#x") {
+        if hexadecimal.is_empty() || !hexadecimal.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ParseIssue::Malformed);
+        }
         u32::from_str_radix(hexadecimal, 16).map_err(|_| ParseIssue::Malformed)?
     } else if let Some(decimal) = reference.strip_prefix('#') {
+        if decimal.is_empty() || !decimal.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(ParseIssue::Malformed);
+        }
         decimal.parse::<u32>().map_err(|_| ParseIssue::Malformed)?
     } else {
         return Err(ParseIssue::Malformed);

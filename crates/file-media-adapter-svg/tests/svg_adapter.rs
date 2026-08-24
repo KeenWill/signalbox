@@ -340,6 +340,15 @@ async fn plain_text_is_unknown_with_svg_declaration() -> Result<(), Box<dyn Erro
 }
 
 #[tokio::test]
+async fn unnamespaced_non_svg_root_is_unknown_with_svg_declaration() -> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(br#"<foo/>"#).into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
 async fn dtd_bearing_svg_is_malformed_without_svg_declaration() -> Result<(), Box<dyn Error>> {
     let source = SvgFixture::raw(br#"<!DOCTYPE svg><svg xmlns="http://www.w3.org/2000/svg"/>"#)
         .into_source()?;
@@ -369,6 +378,17 @@ async fn foreign_namespaced_script_is_rejected_as_active_content() -> Result<(),
             br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:h="http://www.w3.org/1999/xhtml"><h:script>run()</h:script></svg>"#,
         ),
         "active_content",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn foreign_resource_element_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:h="http://www.w3.org/1999/xhtml"><h:img src="https://example.test/a.png"/></svg>"#,
+        ),
+        "external_reference",
     )
     .await
 }
@@ -545,6 +565,26 @@ async fn auto_and_container_dimensions_are_valid_without_numeric_metadata()
 }
 
 #[tokio::test]
+async fn calculated_dimensions_are_valid_without_numeric_metadata() -> Result<(), Box<dyn Error>> {
+    let source =
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(100% - 1px)"/>"#)
+            .into_source()?;
+    let result = read(
+        &DirectProcessor::new(),
+        &source,
+        "metadata",
+        serde_json::json!({}),
+    )
+    .await?;
+
+    assert_eq!(
+        complete_structure(result)?["width"],
+        serde_json::Value::Null
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn dimensions_admit_surrounding_xml_whitespace() -> Result<(), Box<dyn Error>> {
     let source = SvgFixture::raw(
         b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\" 10px \" height=\"\n20\t\"/>",
@@ -654,6 +694,15 @@ async fn numeric_character_references_are_extracted() -> Result<(), Box<dyn Erro
 
     assert_eq!(complete_text(result)?, "AB\n");
     Ok(())
+}
+
+#[tokio::test]
+async fn signed_numeric_character_reference_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg"><text>&#+65;</text></svg>"#,),
+        "malformed_svg",
+    )
+    .await
 }
 
 #[tokio::test]

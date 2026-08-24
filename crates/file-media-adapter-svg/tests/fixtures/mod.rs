@@ -79,7 +79,7 @@ impl SvgFixture {
 
     pub fn malformed_dimension() -> Self {
         Self {
-            bytes: br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(1px)"></svg>"#.to_vec(),
+            bytes: br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc()"></svg>"#.to_vec(),
         }
     }
 
