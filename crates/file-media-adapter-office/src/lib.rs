@@ -783,8 +783,17 @@ fn parse_central_entry(bytes: &[u8], offset: usize) -> Result<ParsedCentralEntry
     let compressed_32 = le_u32(fixed, 20)?;
     let expanded_32 = le_u32(fixed, 24)?;
     let local_offset_32 = le_u32(fixed, 42)?;
-    let (expanded_bytes, compressed_bytes, local_offset) =
-        decode_zip64_entry_fields(extra, expanded_32, compressed_32, local_offset_32)?;
+    let disk_start_16 = le_u16(fixed, 34)?;
+    let (expanded_bytes, compressed_bytes, local_offset, disk_start) = decode_zip64_entry_fields(
+        extra,
+        expanded_32,
+        compressed_32,
+        local_offset_32,
+        disk_start_16,
+    )?;
+    if disk_start != 0 {
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+    }
     let next_offset = offset
         .checked_add(record_length)
         .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
@@ -812,14 +821,18 @@ fn decode_zip64_entry_fields(
     expanded_32: u32,
     compressed_32: u32,
     local_offset_32: u32,
-) -> Result<(u64, u64, u64), ValidationIssue> {
-    let needs_zip64 =
-        expanded_32 == u32::MAX || compressed_32 == u32::MAX || local_offset_32 == u32::MAX;
+    disk_start_16: u16,
+) -> Result<(u64, u64, u64, u32), ValidationIssue> {
+    let needs_zip64 = expanded_32 == u32::MAX
+        || compressed_32 == u32::MAX
+        || local_offset_32 == u32::MAX
+        || disk_start_16 == u16::MAX;
     if !needs_zip64 {
         return Ok((
             u64::from(expanded_32),
             u64::from(compressed_32),
             u64::from(local_offset_32),
+            u32::from(disk_start_16),
         ));
     }
 
@@ -844,7 +857,15 @@ fn decode_zip64_entry_fields(
             let expanded = zip64_or_32(body, &mut zip64_offset, expanded_32)?;
             let compressed = zip64_or_32(body, &mut zip64_offset, compressed_32)?;
             let local_offset = zip64_or_32(body, &mut zip64_offset, local_offset_32)?;
-            return Ok((expanded, compressed, local_offset));
+            let disk_start = if disk_start_16 == u16::MAX {
+                let value = body
+                    .get(zip64_offset..zip64_offset.saturating_add(4))
+                    .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+                u32::from_le_bytes([value[0], value[1], value[2], value[3]])
+            } else {
+                u32::from(disk_start_16)
+            };
+            return Ok((expanded, compressed, local_offset, disk_start));
         }
         offset = body_end;
     }
@@ -995,8 +1016,8 @@ fn validate_local_header_fields(
     }
     let expanded_32 = le_u32(local, 22)?;
     let compressed_32 = le_u32(local, 18)?;
-    let (expanded, compressed, _) =
-        decode_zip64_entry_fields(local_extra, expanded_32, compressed_32, 0)?;
+    let (expanded, compressed, _, _) =
+        decode_zip64_entry_fields(local_extra, expanded_32, compressed_32, 0, 0)?;
     if le_u32(local, 14)? != entry.crc32
         || compressed != entry.compressed_bytes
         || expanded != entry.expanded_bytes
@@ -1722,6 +1743,7 @@ fn ordered_relationship_ids(
                         &scope,
                         root_namespace,
                     )
+                    && depth == 1
                 {
                     if list_depth.is_some() {
                         return Err(XmlIssue::Malformed);
@@ -1767,7 +1789,8 @@ fn ordered_relationship_ids(
                         qualified_name.as_ref(),
                         scope,
                         root_namespace,
-                    );
+                    )
+                    && list_depth == depth.checked_sub(1);
                 depth = depth.checked_sub(1).ok_or(XmlIssue::Malformed)?;
                 namespace_scopes.pop().ok_or(XmlIssue::Malformed)?;
                 if closes_list {
@@ -2122,7 +2145,7 @@ fn collect_workbook_relationship(
 
 fn workbook_shared_strings_target(bytes: &[u8]) -> Result<Option<String>, XmlIssue> {
     let mut targets = relationship_targets(bytes, "/sharedStrings", |target| {
-        normalized_part_target(target, "xl/", "xl/")
+        normalized_part_target(target, "xl/")
     })?;
     if targets.len() > 1 {
         return Err(XmlIssue::Malformed);
@@ -2279,14 +2302,10 @@ fn relationship_type_matches(value: &str, suffix: &str) -> bool {
 }
 
 fn spreadsheet_target_name(target: &str) -> Result<String, XmlIssue> {
-    normalized_part_target(target, "xl/", "xl/worksheets/")
+    normalized_part_target(target, "xl/")
 }
 
-fn normalized_part_target(
-    target: &str,
-    base: &str,
-    required_prefix: &str,
-) -> Result<String, XmlIssue> {
+fn normalized_part_target(target: &str, base: &str) -> Result<String, XmlIssue> {
     if target.contains('\\') {
         return Err(XmlIssue::Malformed);
     }
@@ -2294,7 +2313,7 @@ fn normalized_part_target(
         .strip_prefix('/')
         .map_or_else(|| format!("{base}{target}"), String::from);
     let name = normalized_package_target(&unresolved).map_err(|_| XmlIssue::Malformed)?;
-    if !name.starts_with(required_prefix) || !name.ends_with(".xml") {
+    if !name.ends_with(".xml") {
         return Err(XmlIssue::Malformed);
     }
     Ok(name)
@@ -2571,7 +2590,7 @@ fn presentation_relationship_targets(bytes: &[u8]) -> Result<Vec<(String, String
 }
 
 fn presentation_target_name(target: &str) -> Result<String, XmlIssue> {
-    normalized_part_target(target, "ppt/", "ppt/slides/")
+    normalized_part_target(target, "ppt/")
 }
 
 fn read_entry<R: Read + std::io::Seek>(
@@ -3616,6 +3635,26 @@ mod tests {
     }
 
     #[test]
+    fn relationship_targets_follow_parts_outside_conventional_directories() {
+        let workbook_xml = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="custom/sheet.xml"/></Relationships>"#;
+        let presentation_xml = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="custom/slide.xml"/></Relationships>"#;
+
+        assert_eq!(
+            workbook_relationship_targets(workbook_xml)
+                .expect("the worksheet target should resolve"),
+            vec![(
+                String::from("rId1"),
+                Some(String::from("xl/custom/sheet.xml")),
+            )]
+        );
+        assert_eq!(
+            presentation_relationship_targets(presentation_xml)
+                .expect("the slide target should resolve"),
+            vec![(String::from("rId1"), String::from("ppt/custom/slide.xml"))]
+        );
+    }
+
+    #[test]
     fn workbook_relationships_reject_character_data() {
         let xml = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">garbage<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
 
@@ -3673,6 +3712,25 @@ mod tests {
                 issue: ValidationIssue::Malformed(MALFORMED_REASON),
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn central_entries_must_start_on_the_current_disk() {
+        let name = CONTENT_TYPES.as_bytes();
+        let mut central = vec![0_u8; 46 + name.len()];
+        central[0..4].copy_from_slice(b"PK\x01\x02");
+        central[28..30].copy_from_slice(
+            &u16::try_from(name.len())
+                .expect("fixture entry name fits in a ZIP length")
+                .to_le_bytes(),
+        );
+        central[34..36].copy_from_slice(&1_u16.to_le_bytes());
+        central[46..].copy_from_slice(name);
+
+        assert!(matches!(
+            parse_central_entry(&central, 0),
+            Err(ValidationIssue::Malformed(MALFORMED_REASON))
         ));
     }
 
@@ -3957,6 +4015,18 @@ mod tests {
         assert_eq!(
             result.expect("sheet relationship IDs should preserve order"),
             vec![String::from("rId2"), String::from("rId1")]
+        );
+    }
+
+    #[test]
+    fn ordered_relationship_ids_restrict_lists_to_the_document_root() {
+        let xml = br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><ext><sheets><sheet r:id="nested"/></sheets></ext><sheets><sheet r:id="root"/></sheets></workbook>"#;
+
+        let result = workbook_relationship_ids(xml);
+
+        assert_eq!(
+            result.expect("only the root-level sheet list should be used"),
+            vec![String::from("root")]
         );
     }
 
