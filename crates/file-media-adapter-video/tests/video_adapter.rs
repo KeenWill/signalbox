@@ -188,6 +188,15 @@ async fn encrypted_mp4_is_terminal_without_a_key_channel() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
+async fn invalid_encrypted_mp4_sample_entry_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_invalid_encrypted_sample_entry(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn encrypted_webm_is_terminal_without_a_key_channel() -> Result<(), Box<dyn Error>> {
     assert_locked(VideoFixture::encrypted_webm()).await
 }
@@ -823,6 +832,24 @@ async fn zero_trex_sample_description_index_is_malformed() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
+async fn out_of_range_trex_sample_description_index_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::fragmented_mp4_with_out_of_range_sample_description_index(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn nonzero_mvhd_full_box_flags_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_nonzero_movie_header_flags(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn zero_sample_entry_data_reference_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::mp4_with_zero_sample_entry_data_reference(),
@@ -943,6 +970,38 @@ async fn validation_read_honors_the_effective_source_byte_ceiling() -> Result<()
     .await?;
 
     assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn probe_evidence_does_not_exceed_the_effective_validation_ceiling()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_metadata_after_probe_prefix().into_source()?;
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 4096;
+    let request = InspectionRequest {
+        source: source.file_use()?,
+        visible_part: None,
+    };
+    let inspection = FileMediaRegistry::try_new(
+        vec![declaration()?],
+        ceilings,
+        ProcessorIsolation::Available,
+    )?
+    .inspect(&DirectProcessor::new(), request, &source, &NeverCancelled)
+    .await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn declared_mp4_metadata_beyond_the_supported_window_remains_unknown()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_metadata_beyond_supported_window().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
     Ok(())
 }
 

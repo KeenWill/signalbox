@@ -90,6 +90,17 @@ impl VideoFixture {
     pub fn encrypted_mp4() -> Self {
         Self::new(
             FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(
+                MP4_TIMESCALE,
+                MP4_DURATION_UNITS,
+                encrypted_visual_sample_entry(),
+            ),
+        )
+    }
+
+    pub fn mp4_with_invalid_encrypted_sample_entry() -> Self {
+        Self::new(
+            FixtureKind::Mp4,
             mp4_bytes_with_sample_entry(MP4_TIMESCALE, MP4_DURATION_UNITS, mp4_box(*b"encv", &[])),
         )
     }
@@ -363,6 +374,25 @@ impl VideoFixture {
         let movie = ordinary[ftyp().len()..].to_vec();
         let padding = mp4_box(*b"free", &vec![0_u8; 8 * 1024]);
         Self::new(FixtureKind::Mp4, [ftyp(), padding, movie].concat())
+    }
+
+    pub fn mp4_with_metadata_beyond_supported_window() -> Self {
+        let ordinary = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
+        let movie = ordinary[ftyp().len()..].to_vec();
+        let padding = mp4_box(*b"free", &vec![0_u8; METADATA_BYTES]);
+        Self::new(FixtureKind::Mp4, [ftyp(), padding, movie].concat())
+    }
+
+    pub fn mp4_with_nonzero_movie_header_flags() -> Self {
+        let mut fixture = Self::ordinary_mp4();
+        if let Some(movie_header) = fixture
+            .bytes
+            .windows(4)
+            .position(|window| window == b"mvhd")
+        {
+            fixture.bytes[movie_header + 5] = 1;
+        }
+        fixture
     }
 
     pub fn mp4_visual_sample_entry() -> Self {
@@ -917,6 +947,19 @@ impl VideoFixture {
         fixture
     }
 
+    pub fn fragmented_mp4_with_out_of_range_sample_description_index() -> Self {
+        let mut fixture = Self::fragmented_mp4_without_movie_extends_duration();
+        if let Some(track_extends) = fixture
+            .bytes
+            .windows(4)
+            .position(|window| window == b"trex")
+        {
+            fixture.bytes[track_extends + 12..track_extends + 16]
+                .copy_from_slice(&2_u32.to_be_bytes());
+        }
+        fixture
+    }
+
     pub fn mp4_with_zero_sample_entry_data_reference() -> Self {
         let mut sample_entry = avc1_sample_entry();
         sample_entry[14..16].fill(0);
@@ -1347,6 +1390,15 @@ fn trex(track_id: u32) -> Vec<u8> {
     payload[4..8].copy_from_slice(&track_id.to_be_bytes());
     payload[8..12].copy_from_slice(&1_u32.to_be_bytes());
     mp4_box(*b"trex", &payload)
+}
+
+fn encrypted_visual_sample_entry() -> Vec<u8> {
+    let mut payload = vec![0_u8; 78];
+    payload[6..8].copy_from_slice(&1_u16.to_be_bytes());
+    payload[24..26].copy_from_slice(&1920_u16.to_be_bytes());
+    payload[26..28].copy_from_slice(&1080_u16.to_be_bytes());
+    payload.extend_from_slice(&mp4_box(*b"sinf", &[]));
+    mp4_box(*b"encv", &payload)
 }
 
 fn esds_configuration() -> Vec<u8> {

@@ -188,7 +188,17 @@ impl FileMediaRegistry {
                     .await?;
                 match sanitize_probe(reader, raw)? {
                     SanitizedProbe::NoMatch => {}
-                    SanitizedProbe::Candidate(candidate) => candidates.push(candidate),
+                    SanitizedProbe::Candidate(candidate) => {
+                        let declaration = self
+                            .readers
+                            .get(&candidate.reader)
+                            .ok_or(FileMediaFailure::ProcessorFailed)?;
+                        if declaration.probe().cumulative_bytes()
+                            <= self.ceilings.validation_source_bytes
+                        {
+                            candidates.push(candidate);
+                        }
+                    }
                     SanitizedProbe::Malformed {
                         media_type,
                         reason_code,
