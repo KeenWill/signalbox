@@ -905,6 +905,27 @@ impl VideoFixture {
         fixture
     }
 
+    pub fn fragmented_mp4_with_zero_sample_description_index() -> Self {
+        let mut fixture = Self::fragmented_mp4_without_movie_extends_duration();
+        if let Some(trex) = fixture
+            .bytes
+            .windows(4)
+            .position(|window| window == b"trex")
+        {
+            fixture.bytes[trex + 12..trex + 16].fill(0);
+        }
+        fixture
+    }
+
+    pub fn mp4_with_zero_sample_entry_data_reference() -> Self {
+        let mut sample_entry = avc1_sample_entry();
+        sample_entry[14..16].fill(0);
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(MP4_TIMESCALE, MP4_DURATION_UNITS, sample_entry),
+        )
+    }
+
     pub fn webm_with_undefined_track_type() -> Self {
         let mut fixture = Self::ordinary_webm();
         if let Some(track_type) = fixture
@@ -927,6 +948,30 @@ impl VideoFixture {
             &[0x18, 0x53, 0x80, 0x67],
             &[info, tracks, vec![0xff, 0x80]].concat(),
         );
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn webm_with_all_zero_element_id() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let tracks = ebml_element(
+            &[0x16, 0x54, 0xae, 0x6b],
+            &webm_track_entry(ContentProtection::Clear),
+        );
+        let segment = ebml_element(
+            &[0x18, 0x53, 0x80, 0x67],
+            &[info, tracks, vec![0x80, 0x80]].concat(),
+        );
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn webm_with_invalid_crc32_length() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let tracks = ebml_element(
+            &[0x16, 0x54, 0xae, 0x6b],
+            &webm_track_entry(ContentProtection::Clear),
+        );
+        let crc32 = ebml_element(&[0xbf], &[0]);
+        let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks, crc32].concat());
         Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
     }
 
@@ -1300,6 +1345,7 @@ fn mdhd(timescale: u32) -> Vec<u8> {
 fn trex(track_id: u32) -> Vec<u8> {
     let mut payload = vec![0_u8; 24];
     payload[4..8].copy_from_slice(&track_id.to_be_bytes());
+    payload[8..12].copy_from_slice(&1_u32.to_be_bytes());
     mp4_box(*b"trex", &payload)
 }
 

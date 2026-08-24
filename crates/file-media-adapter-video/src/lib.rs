@@ -25,7 +25,6 @@ const PROBE_PREFIX_BYTES: u64 = 4 * 1024;
 // Four bounded follow-up ranges cover the remainder of the metadata window.
 const PROBE_RANGE_BYTES: u64 = 64 * 1024;
 const PROBE_RANGE_COUNT: u32 = 4;
-const PROBE_ADDITIONAL_BYTES: u64 = METADATA_BYTES - PROBE_PREFIX_BYTES;
 const OUTPUT_BYTES: usize = 16 * 1024;
 // Hard safety ceiling: bounds adversarial recursive container descent.
 const MAX_DEPTH: usize = 32;
@@ -71,6 +70,7 @@ const EBML_CLUSTER: u64 = 0x1f43b675;
 const EBML_CONTENT_ENCODINGS: u64 = 0x6d80;
 const EBML_CONTENT_ENCODING: u64 = 0x6240;
 const EBML_CONTENT_ENCRYPTION: u64 = 0x5035;
+const EBML_CRC32: u64 = 0xbf;
 
 /// MP4 and WebM metadata provider for the isolated worker.
 #[derive(Clone, Copy, Debug, Default)]
@@ -228,12 +228,7 @@ fn reader_declaration(
         reader: FileReaderName::try_new(kind.reader())?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(kind.media_type())?],
-        probe: ProbeDeclaration::new(
-            PROBE_PREFIX_BYTES,
-            0,
-            PROBE_RANGE_COUNT,
-            PROBE_ADDITIONAL_BYTES,
-        ),
+        probe: ProbeDeclaration::new(PROBE_PREFIX_BYTES, 0, PROBE_RANGE_COUNT, METADATA_BYTES),
         views: vec![metadata_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,
@@ -1060,7 +1055,9 @@ fn parse_trex(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
         return Err(VideoIssue::Malformed);
     }
     let track_id = read_u32(payload, 4)?;
-    if track_id == 0 || state.track_extends_ids.contains(&track_id) {
+    let sample_description_index = read_u32(payload, 8)?;
+    if track_id == 0 || sample_description_index == 0 || state.track_extends_ids.contains(&track_id)
+    {
         return Err(VideoIssue::Malformed);
     }
     state.track_extends_ids.push(track_id);
@@ -1154,7 +1151,7 @@ fn parse_visual_sample_entry(
 ) -> Result<(), VideoIssue> {
     const VISUAL_SAMPLE_ENTRY_BYTES: usize = 78;
 
-    if read_u16(payload, 24)? == 0 || read_u16(payload, 26)? == 0 {
+    if read_u16(payload, 6)? == 0 || read_u16(payload, 24)? == 0 || read_u16(payload, 26)? == 0 {
         return Err(VideoIssue::Malformed);
     }
     let children = payload
@@ -1846,6 +1843,11 @@ fn parse_ebml_scope(
                 }
                 pixel_height_seen = true;
             }
+            (EBML_CRC32, _) => {
+                if payload.len() != 4 {
+                    return Err(VideoIssue::Malformed);
+                }
+            }
             (EBML_CLUSTER, EbmlScope::Segment) => {}
             _ if recognized_ebml_id(id) => return Err(VideoIssue::Malformed),
             _ => {}
@@ -1906,6 +1908,7 @@ fn recognized_ebml_id(id: u64) -> bool {
             | EBML_CONTENT_ENCODINGS
             | EBML_CONTENT_ENCODING
             | EBML_CONTENT_ENCRYPTION
+            | EBML_CRC32
     )
 }
 
@@ -1954,12 +1957,13 @@ fn read_ebml_vint(
     for byte in &encoded[1..] {
         value = value.checked_shl(8).ok_or(VideoIssue::Structure)? | u64::from(*byte);
     }
-    let reserved =
+    let all_ones =
         encoded[0] & (marker - 1) == marker - 1 && encoded[1..].iter().all(|byte| *byte == 0xff);
-    if kind == EbmlVintKind::Identifier && reserved {
+    let all_zeroes = encoded[0] & (marker - 1) == 0 && encoded[1..].iter().all(|byte| *byte == 0);
+    if kind == EbmlVintKind::Identifier && (all_zeroes || all_ones) {
         return Err(VideoIssue::Malformed);
     }
-    let unknown = kind == EbmlVintKind::Size && reserved;
+    let unknown = kind == EbmlVintKind::Size && all_ones;
     Ok((value, length, unknown))
 }
 

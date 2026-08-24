@@ -129,12 +129,12 @@ fn declaration_registers_mp4_and_webm_under_available_isolation() -> Result<(), 
     assert_eq!(mp4_probe.prefix_bytes(), 4 * 1024);
     assert_eq!(mp4_probe.suffix_bytes(), 0);
     assert_eq!(mp4_probe.range_count(), 4);
-    assert_eq!(mp4_probe.cumulative_bytes(), 252 * 1024);
+    assert_eq!(mp4_probe.cumulative_bytes(), 256 * 1024);
     let webm_probe = registry.providers()[0].readers()[1].probe();
     assert_eq!(webm_probe.prefix_bytes(), 4 * 1024);
     assert_eq!(webm_probe.suffix_bytes(), 0);
     assert_eq!(webm_probe.range_count(), 4);
-    assert_eq!(webm_probe.cumulative_bytes(), 252 * 1024);
+    assert_eq!(webm_probe.cumulative_bytes(), 256 * 1024);
     Ok(())
 }
 
@@ -814,6 +814,24 @@ async fn fragmented_mp4_without_track_extends_is_malformed() -> Result<(), Box<d
 }
 
 #[tokio::test]
+async fn zero_trex_sample_description_index_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::fragmented_mp4_with_zero_sample_description_index(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn zero_sample_entry_data_reference_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_zero_sample_entry_data_reference(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn mp4_video_track_without_sample_description_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::mp4_video_track_without_sample_description(),
@@ -950,6 +968,24 @@ async fn undefined_webm_track_type_is_malformed() -> Result<(), Box<dyn Error>> 
 async fn reserved_ebml_element_identifier_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::webm_with_reserved_element_id(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn all_zero_ebml_element_identifier_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_all_zero_element_id(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn invalid_webm_crc32_length_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_invalid_crc32_length(),
         "malformed_video",
     )
     .await
