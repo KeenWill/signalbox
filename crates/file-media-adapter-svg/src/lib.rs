@@ -200,7 +200,7 @@ pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
         reader: FileReaderName::try_new(READER_NAME)?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(MEDIA_TYPE)?],
-        probe: ProbeDeclaration::new(PROBE_BYTES, 0, 0, PROBE_BYTES),
+        probe: ProbeDeclaration::prefix_only(PROBE_BYTES),
         views: vec![text_view, metadata_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,
@@ -370,6 +370,12 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     &mut parsed,
                     root_seen,
                 )?;
+                if mode.collects_text()
+                    && is_svg_element(&namespace, empty.local_name().as_ref(), b"text")
+                    && !parsed.text.ends_with('\n')
+                {
+                    append_text(&mut parsed.text, "\n")?;
+                }
                 if depth == 0 {
                     root_seen = true;
                     root_closed = true;
@@ -431,6 +437,10 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                 validate_declaration(&declaration)?;
             }
             Event::Comment(comment) => {
+                let decoded = comment.xml10_content().map_err(|_| ParseIssue::Malformed)?;
+                if !has_only_xml10_characters(&decoded) {
+                    return Err(ParseIssue::Malformed);
+                }
                 if comment.as_ref().windows(2).any(|window| window == b"--")
                     || comment.as_ref().ends_with(b"-")
                 {
@@ -778,14 +788,17 @@ fn is_name_character(character: char) -> bool {
 }
 
 fn parse_dimension(value: &str) -> Result<Option<f64>, ParseIssue> {
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
     if let Ok(parsed) = parse_nonnegative_finite(value) {
         return Ok(Some(parsed));
     }
     for unit in [
         "dvmax", "dvmin", "lvmax", "lvmin", "svmax", "svmin", "rcap", "dvb", "dvh", "dvi", "dvw",
         "lvb", "lvh", "lvi", "lvw", "rch", "rem", "rex", "ric", "rlh", "svb", "svh", "svi", "svw",
-        "vmax", "vmin", "cap", "ch", "cm", "em", "ex", "ic", "in", "lh", "mm", "pc", "pt", "vb",
-        "vh", "vi", "vw", "q", "%",
+        "cqmax", "cqmin", "vmax", "vmin", "cap", "cqb", "cqh", "cqi", "cqw", "ch", "cm", "em",
+        "ex", "ic", "in", "lh", "mm", "pc", "pt", "vb", "vh", "vi", "vw", "q", "%",
     ] {
         if let Some(number) = strip_ascii_case_suffix(value, unit) {
             parse_nonnegative_finite(number)?;
