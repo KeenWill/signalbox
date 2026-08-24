@@ -132,6 +132,7 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
 pub const SUPPORTED_CODEX_CLI_VERSION: &str = env!("SIGNALBOX_CODEX_CLI_VERSION");
 
 const MAX_VERSION_BANNER_BYTES: usize = 4096;
+const VERSION_PROBE_SPAWN_RETRY_DELAY: Duration = Duration::from_millis(20);
 
 /// Why the configured Codex executable could not prove the adapter's pin.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -177,6 +178,9 @@ pub async fn verify_pinned_codex_cli_version(
     if bound.is_zero() {
         return Err(CodexCliVersionProbeError::InvalidBound);
     }
+    let deadline = tokio::time::Instant::now()
+        .checked_add(bound)
+        .ok_or(CodexCliVersionProbeError::InvalidBound)?;
     let mut command = tokio::process::Command::new(executable);
     command
         .arg("--version")
@@ -190,11 +194,12 @@ pub async fn verify_pinned_codex_cli_version(
     if let Some(path) = std::env::var_os("PATH") {
         command.env("PATH", path);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|_| CodexCliVersionProbeError::SpawnFailed)?;
+    let mut child = spawn_version_probe(&mut command, deadline).await?;
     let process_group = child.id();
-    let output = match tokio::time::timeout(bound, collect_version_output(&mut child)).await {
+    let remaining = deadline
+        .checked_duration_since(tokio::time::Instant::now())
+        .ok_or(CodexCliVersionProbeError::TimedOut)?;
+    let output = match tokio::time::timeout(remaining, collect_version_output(&mut child)).await {
         Ok(Ok(output)) => output,
         Ok(Err(error)) => {
             kill_probe_process_group(process_group);
@@ -221,6 +226,24 @@ pub async fn verify_pinned_codex_cli_version(
         return Err(CodexCliVersionProbeError::VersionMismatch);
     }
     Ok(())
+}
+
+async fn spawn_version_probe(
+    command: &mut tokio::process::Command,
+    deadline: tokio::time::Instant,
+) -> Result<tokio::process::Child, CodexCliVersionProbeError> {
+    loop {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error) if error.raw_os_error() == Some(26) => {
+                let remaining = deadline
+                    .checked_duration_since(tokio::time::Instant::now())
+                    .ok_or(CodexCliVersionProbeError::TimedOut)?;
+                tokio::time::sleep(VERSION_PROBE_SPAWN_RETRY_DELAY.min(remaining)).await;
+            }
+            Err(_) => return Err(CodexCliVersionProbeError::SpawnFailed),
+        }
+    }
 }
 
 async fn collect_version_output(
