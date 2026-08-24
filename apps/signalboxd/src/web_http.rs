@@ -58,8 +58,8 @@ use signalbox_web_contract::{
     WebTimelineEventSequence, WebU64, WebUsageAggregateGroup, WebUsageAggregateTokenAxes,
     WebUsageCall, WebUsageCallCount, WebUsageCallCursor, WebUsageCallKind, WebUsageCallPage,
     WebUsageCost, WebUsageCostLabel, WebUsageCostUnavailableReason, WebUsageInputSemantics,
-    WebUsageProvenance, WebUsageRateVersion, WebUsageSummary, WebUsageTokenAxes,
-    WebUsageTokenCoverage, WebUuid,
+    WebUsageProvenance, WebUsageRateVersion, WebUsageSummary, WebUsageTimestampMicros,
+    WebUsageTokenAxes, WebUsageTokenCoverage, WebUuid,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -674,7 +674,9 @@ async fn usage_calls(
                 .map(|call| usage_call_dto(call, &configuration))
                 .collect(),
             continuation: page.next.map(|cursor| WebUsageCallCursor {
-                recorded_at_micros: WebU64::from_u64(cursor.recorded_at.get()),
+                recorded_at_micros: WebUsageTimestampMicros::from_application(
+                    cursor.recorded_at.get(),
+                ),
                 call_id: web_uuid(cursor.call.into_uuid()),
             }),
         })
@@ -821,7 +823,7 @@ fn usage_call_dto(call: UsageCallEvidence, configuration: &HubModelConfiguration
         provenance: usage_provenance_dto(call.provenance),
         input_semantics: usage_input_semantics_dto(call.input_semantics),
         tokens: usage_tokens_dto(call.tokens),
-        recorded_at_micros: WebU64::from_u64(call.recorded_at.get()),
+        recorded_at_micros: WebUsageTimestampMicros::from_application(call.recorded_at.get()),
         cost: usage_cost_dto(
             configuration,
             call.model,

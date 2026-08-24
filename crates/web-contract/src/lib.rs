@@ -11,8 +11,8 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Value, json};
 use signalbox_application::{
     max_search_page_items, max_search_query_bytes, max_search_snippet_bytes,
-    max_timeline_window_bytes, max_timeline_window_items, max_usage_aggregate_groups,
-    max_usage_call_page_items,
+    max_timeline_window_bytes, max_timeline_window_items, max_usage_aggregate_calls,
+    max_usage_aggregate_groups, max_usage_call_page_items,
 };
 
 /// Exact browser HTTP contract version served by this daemon build.
@@ -792,13 +792,13 @@ impl<'de> Deserialize<'de> for WebUsageProfileId {
 /// Checked positive summary call count encoded losslessly for JavaScript.
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(transparent)]
-pub struct WebUsageCallCount(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
+pub struct WebUsageCallCount(#[schemars(regex(pattern = r"^([1-9][0-9]{0,3}|10000)$"))] String);
 
 impl WebUsageCallCount {
     /// Encodes a positive aggregate count produced by persistence.
     #[must_use]
     pub fn from_positive(value: u64) -> Self {
-        debug_assert!(value > 0);
+        debug_assert!(value > 0 && value <= u64::from(max_usage_aggregate_calls()));
         Self(value.to_string())
     }
 }
@@ -809,9 +809,40 @@ impl<'de> Deserialize<'de> for WebUsageCallCount {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        if canonical_u64(&value).is_none_or(|parsed| parsed == 0) {
+        if canonical_u64(&value)
+            .is_none_or(|parsed| parsed == 0 || parsed > u64::from(max_usage_aggregate_calls()))
+        {
             return Err(de::Error::custom(
-                "usage summary call count must be a canonical positive u64",
+                "usage summary call count must be canonical and within the aggregation ceiling",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Checked application-range usage timestamp encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebUsageTimestampMicros(#[schemars(regex(pattern = r"^(0|[1-9][0-9]{0,17})$"))] String);
+
+impl WebUsageTimestampMicros {
+    /// Encodes one timestamp already admitted by the application boundary.
+    #[must_use]
+    pub fn from_application(value: u64) -> Self {
+        debug_assert!(value <= 253_402_300_799_999_999);
+        Self(value.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for WebUsageTimestampMicros {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if canonical_u64(&value).is_none_or(|parsed| parsed > 253_402_300_799_999_999) {
+            return Err(de::Error::custom(
+                "usage timestamp must be canonical and within the application range",
             ));
         }
         Ok(Self(value))
@@ -854,7 +885,7 @@ pub struct WebUsageCall {
     pub provenance: WebUsageProvenance,
     pub input_semantics: WebUsageInputSemantics,
     pub tokens: WebUsageTokenAxes,
-    pub recorded_at_micros: WebU64,
+    pub recorded_at_micros: WebUsageTimestampMicros,
     pub cost: WebUsageCost,
 }
 
@@ -862,7 +893,7 @@ pub struct WebUsageCall {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebUsageCallCursor {
-    pub recorded_at_micros: WebU64,
+    pub recorded_at_micros: WebUsageTimestampMicros,
     pub call_id: WebUuid,
 }
 
@@ -1188,6 +1219,13 @@ function assertSchema(root, schema, value, path) {{
     BigInt(value) > 9223372036854775807n
   ) {{
     fail(path, "a positive signed 64-bit integer");
+  }}
+  if (
+    schema.type === "string" &&
+    schema.pattern === "^(0|[1-9][0-9]{{0,17}})$" &&
+    BigInt(value) > 253402300799999999n
+  ) {{
+    fail(path, "an application-range usage timestamp");
   }}
   if (
     schema.type === "string" &&
@@ -1609,7 +1647,7 @@ mod tests {
     use super::{
         WebContractBootstrap, WebContractExample, WebDollarAmount, WebSessionId,
         WebTimelineEventSequence, WebU64, WebUsageCallCount, WebUsageRateVersion,
-        generated_artifacts,
+        WebUsageTimestampMicros, generated_artifacts,
     };
 
     #[track_caller]
@@ -1688,6 +1726,17 @@ mod tests {
         assert!(serde_json::from_str::<WebUsageCallCount>(r#""0""#).is_err());
         assert!(serde_json::from_str::<WebUsageCallCount>(r#""01""#).is_err());
         assert!(serde_json::from_str::<WebUsageCallCount>(r#""1""#).is_ok());
+        assert!(serde_json::from_str::<WebUsageCallCount>(r#""10000""#).is_ok());
+        assert!(serde_json::from_str::<WebUsageCallCount>(r#""10001""#).is_err());
+    }
+
+    #[test]
+    fn usage_timestamp_requires_the_application_range() {
+        assert!(serde_json::from_str::<WebUsageTimestampMicros>(r#""0""#).is_ok());
+        assert!(serde_json::from_str::<WebUsageTimestampMicros>(r#""253402300799999999""#).is_ok());
+        assert!(
+            serde_json::from_str::<WebUsageTimestampMicros>(r#""253402300800000000""#).is_err()
+        );
     }
 
     #[test]

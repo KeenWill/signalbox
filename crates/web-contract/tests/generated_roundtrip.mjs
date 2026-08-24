@@ -307,6 +307,35 @@ test("generated usage decoder requires positive summary call counts", () => {
   );
 });
 
+test("generated usage decoder caps summary call counts at the aggregation ceiling", () => {
+  const group = usageGroup();
+  group.call_count = "10001";
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [group], truncated: false }),
+    /matching/,
+  );
+});
+
+test("generated usage decoder constrains call and cursor timestamps", () => {
+  const call = usageCall();
+  call.recorded_at_micros = "253402300800000000";
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [call], continuation: null }, "newest"),
+    /application-range usage timestamp|matching|one recognized variant/,
+  );
+
+  const validCall = usageCall();
+  const continuation = {
+    recorded_at_micros: "253402300800000000",
+    call_id: validCall.call_id,
+  };
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [validCall], continuation }, "newest"),
+    /application-range usage timestamp|matching|one recognized variant/,
+  );
+});
+
 test("generated usage decoder bounds rate versions by UTF-8 bytes", () => {
   const empty = usageGroup();
   empty.cost.rate_version = "";

@@ -859,7 +859,7 @@ const schemas = {
             "$ref": "#/$defs/WebUsageProvenance"
           },
           "recorded_at_micros": {
-            "$ref": "#/$defs/WebU64"
+            "$ref": "#/$defs/WebUsageTimestampMicros"
           },
           "session_id": {
             "$ref": "#/$defs/WebSessionId"
@@ -899,7 +899,7 @@ const schemas = {
             "$ref": "#/$defs/WebUuid"
           },
           "recorded_at_micros": {
-            "$ref": "#/$defs/WebU64"
+            "$ref": "#/$defs/WebUsageTimestampMicros"
           }
         },
         "required": [
@@ -1004,6 +1004,11 @@ const schemas = {
         "description": "Checked nonempty configured rate version exposed to browser clients.",
         "maxLength": 128,
         "minLength": 1,
+        "type": "string"
+      },
+      "WebUsageTimestampMicros": {
+        "description": "Checked application-range usage timestamp encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]{0,17})$",
         "type": "string"
       },
       "WebUsageTokenAxes": {
@@ -1160,7 +1165,7 @@ const schemas = {
       },
       "WebUsageCallCount": {
         "description": "Checked positive summary call count encoded losslessly for JavaScript.",
-        "pattern": "^[1-9][0-9]*$",
+        "pattern": "^([1-9][0-9]{0,3}|10000)$",
         "type": "string"
       },
       "WebUsageCallKind": {
@@ -1482,6 +1487,13 @@ function assertSchema(root, schema, value, path) {
     BigInt(value) > 9223372036854775807n
   ) {
     fail(path, "a positive signed 64-bit integer");
+  }
+  if (
+    schema.type === "string" &&
+    schema.pattern === "^(0|[1-9][0-9]{0,17})$" &&
+    BigInt(value) > 253402300799999999n
+  ) {
+    fail(path, "an application-range usage timestamp");
   }
   if (
     schema.type === "string" &&

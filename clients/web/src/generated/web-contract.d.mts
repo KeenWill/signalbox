@@ -158,7 +158,7 @@ type WebUsageCall = {
   readonly input_semantics: WebUsageInputSemantics;
   readonly model_id: WebUuid;
   readonly provenance: WebUsageProvenance;
-  readonly recorded_at_micros: WebU64;
+  readonly recorded_at_micros: WebUsageTimestampMicros;
   readonly session_id: WebSessionId;
   readonly tokens: WebUsageTokenAxes;
   readonly turn_id?: WebUuid | null;
@@ -168,7 +168,7 @@ type WebUsageCallCount = string;
 
 type WebUsageCallCursor = {
   readonly call_id: WebUuid;
-  readonly recorded_at_micros: WebU64;
+  readonly recorded_at_micros: WebUsageTimestampMicros;
 };
 
 type WebUsageCallKind = "model_call" | "approval_judge" | "context_compaction";
@@ -194,6 +194,8 @@ type WebUsageProfileId = string;
 type WebUsageProvenance = "reported" | "estimated";
 
 type WebUsageRateVersion = string;
+
+type WebUsageTimestampMicros = string;
 
 type WebUsageTokenAxes = {
   readonly cache_creation_input: WebNullableU64;
