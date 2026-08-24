@@ -49,13 +49,14 @@ use signalbox_persistence::usage::{
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
     WebContractBootstrap, WebContractExample, WebDollarAmount, WebNullableU64,
-    WebSearchContentClass, WebSearchCursor, WebSearchHighlight, WebSearchPage, WebSearchResult,
-    WebSearchResultSource, WebSessionTimelineDescriptor, WebSessionTimelineEventKind,
-    WebSessionTimelineItem, WebSessionTimelineSizeFacts, WebSessionTimelineWindow,
-    WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence, WebU64,
-    WebUsageAggregateGroup, WebUsageCall, WebUsageCallCursor, WebUsageCallKind, WebUsageCallPage,
-    WebUsageCost, WebUsageCostLabel, WebUsageCostUnavailableReason, WebUsageInputSemantics,
-    WebUsageProvenance, WebUsageSummary, WebUsageTokenAxes, WebUsageTokenCoverage,
+    WebSearchContentClass, WebSearchCursor, WebSearchHighlight, WebSearchPage,
+    WebSearchProjectionId, WebSearchResult, WebSearchResultSource, WebSessionId,
+    WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
+    WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
+    WebTimelineEventSequence, WebU64, WebUsageAggregateGroup, WebUsageCall, WebUsageCallCursor,
+    WebUsageCallKind, WebUsageCallPage, WebUsageCost, WebUsageCostLabel,
+    WebUsageCostUnavailableReason, WebUsageInputSemantics, WebUsageProvenance, WebUsageSummary,
+    WebUsageTokenAxes, WebUsageTokenCoverage, WebUuid,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -462,15 +463,16 @@ fn search_page_dto(page: signalbox_application::SearchPage) -> WebSearchPage {
         results: page.results.into_iter().map(search_result_dto).collect(),
         continuation: page.next.map(|cursor| WebSearchCursor {
             address: address_dto(cursor.address()),
-            projection_id: cursor.projection().get().to_string(),
+            projection_id: WebSearchProjectionId::from_nonzero(cursor.projection()),
         }),
     }
 }
 
 fn search_result_dto(result: signalbox_application::SearchResult) -> WebSearchResult {
     WebSearchResult {
-        session_id: result.session.into_uuid().to_string(),
+        session_id: WebSessionId::from_validated_uuid(result.session.into_uuid().to_string()),
         address: address_dto(result.address),
+        projection_id: WebSearchProjectionId::from_nonzero(result.projection),
         source: search_source_dto(result.source),
         content_class: search_content_class_dto(result.content_class),
         snippet: result.snippet,
@@ -488,40 +490,50 @@ fn search_result_dto(result: signalbox_application::SearchResult) -> WebSearchRe
 fn search_source_dto(source: SearchResultSource) -> WebSearchResultSource {
     match source {
         SearchResultSource::Session(session) => WebSearchResultSource::Session {
-            session_id: session.into_uuid().to_string(),
+            session_id: WebSessionId::from_validated_uuid(session.into_uuid().to_string()),
         },
         SearchResultSource::AcceptedInput { input, turn } => WebSearchResultSource::AcceptedInput {
-            accepted_input_id: input.into_uuid().to_string(),
-            turn_id: turn.into_uuid().to_string(),
+            accepted_input_id: web_uuid(input.into_uuid()),
+            turn_id: web_uuid(turn.into_uuid()),
         },
+        SearchResultSource::SteeringInput { input, source_turn } => {
+            WebSearchResultSource::SteeringInput {
+                accepted_input_id: web_uuid(input.into_uuid()),
+                source_turn_id: web_uuid(source_turn.into_uuid()),
+            }
+        }
         SearchResultSource::TurnTranscriptEntry { entry, turn } => {
             WebSearchResultSource::TurnTranscriptEntry {
-                semantic_entry_id: entry.into_uuid().to_string(),
-                turn_id: turn.into_uuid().to_string(),
+                semantic_entry_id: web_uuid(entry.into_uuid()),
+                turn_id: web_uuid(turn.into_uuid()),
             }
         }
         SearchResultSource::SessionTranscriptEntry { entry } => {
             WebSearchResultSource::SessionTranscriptEntry {
-                semantic_entry_id: entry.into_uuid().to_string(),
+                semantic_entry_id: web_uuid(entry.into_uuid()),
             }
         }
         SearchResultSource::ToolRequest { request, turn } => WebSearchResultSource::ToolRequest {
-            tool_request_id: request.into_uuid().to_string(),
-            turn_id: turn.into_uuid().to_string(),
+            tool_request_id: web_uuid(request.into_uuid()),
+            turn_id: web_uuid(turn.into_uuid()),
         },
         SearchResultSource::ToolAttempt { attempt, turn } => WebSearchResultSource::ToolAttempt {
-            tool_attempt_id: attempt.into_uuid().to_string(),
-            turn_id: turn.into_uuid().to_string(),
+            tool_attempt_id: web_uuid(attempt.into_uuid()),
+            turn_id: web_uuid(turn.into_uuid()),
         },
         SearchResultSource::Attachment { attachment } => WebSearchResultSource::Attachment {
-            attachment_id: attachment.into_uuid().to_string(),
+            attachment_id: web_uuid(attachment.into_uuid()),
         },
         SearchResultSource::DerivedArtifact { artifact } => {
             WebSearchResultSource::DerivedArtifact {
-                artifact_id: artifact.into_uuid().to_string(),
+                artifact_id: web_uuid(artifact.into_uuid()),
             }
         }
     }
+}
+
+fn web_uuid(value: uuid::Uuid) -> WebUuid {
+    WebUuid::from_validated_uuid(value.to_string())
 }
 
 fn search_content_class_dto(content: SearchContentClass) -> WebSearchContentClass {
@@ -1103,7 +1115,7 @@ fn descriptor_dto(
         return Err(SessionTimelineRequestError::MissingBounds);
     };
     Ok(WebSessionTimelineDescriptor {
-        session_id: descriptor.session.into_uuid().to_string(),
+        session_id: WebSessionId::from_uuid_bytes(*descriptor.session.into_uuid().as_bytes()),
         sizes: WebSessionTimelineSizeFacts {
             item_count: WebU64::from_u64(descriptor.sizes.item_count),
             projected_text_bytes: WebU64::from_u64(descriptor.sizes.projected_text_bytes),
@@ -1133,7 +1145,7 @@ fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
         TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
     };
     WebSessionTimelineWindow {
-        session_id: window.session.into_uuid().to_string(),
+        session_id: WebSessionId::from_uuid_bytes(*window.session.into_uuid().as_bytes()),
         items: window
             .items
             .into_iter()
@@ -1876,7 +1888,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_rejects_non_product_strategy_and_partial_cursor() {
+    async fn search_rejects_a_non_product_strategy() {
         let unsupported = Request::get("/api/search?strategy=postgres&q=term&max_items=10")
             .header(header::HOST, "localhost")
             .body(Body::empty())
@@ -1889,6 +1901,13 @@ mod tests {
         let unsupported_body: serde_json::Value =
             serde_json::from_slice(&response_body(unsupported).await)
                 .expect("the rejection is structured JSON");
+
+        assert_eq!(unsupported_status, StatusCode::BAD_REQUEST);
+        assert_eq!(unsupported_body["error"]["code"], "invalid_search_query");
+    }
+
+    #[tokio::test]
+    async fn search_rejects_a_partial_cursor() {
         let partial =
             Request::get("/api/search?strategy=lexical&q=term&max_items=10&after_address=5")
                 .header(header::HOST, "localhost")
@@ -1901,6 +1920,13 @@ mod tests {
         let partial_status = partial.status();
         let partial_body: serde_json::Value = serde_json::from_slice(&response_body(partial).await)
             .expect("the rejection is structured JSON");
+
+        assert_eq!(partial_status, StatusCode::BAD_REQUEST);
+        assert_eq!(partial_body["error"]["code"], "invalid_search_query");
+    }
+
+    #[tokio::test]
+    async fn search_rejects_an_oversized_projection_cursor() {
         let oversized = Request::get(
             "/api/search?strategy=lexical&q=term&max_items=10&after_address=5&after_projection=9223372036854775808",
         )
@@ -1913,10 +1939,6 @@ mod tests {
             .expect("the production router responds");
         let oversized_status = oversized.status();
 
-        assert_eq!(unsupported_status, StatusCode::BAD_REQUEST);
-        assert_eq!(unsupported_body["error"]["code"], "invalid_search_query");
-        assert_eq!(partial_status, StatusCode::BAD_REQUEST);
-        assert_eq!(partial_body["error"]["code"], "invalid_search_query");
         assert_eq!(oversized_status, StatusCode::BAD_REQUEST);
     }
 

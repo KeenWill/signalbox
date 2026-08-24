@@ -6452,6 +6452,7 @@ pub struct SearchArtifactProjection {
 pub enum SearchResultSource {
     Session(SessionId),
     AcceptedInput { input: AcceptedInputId, turn: TurnId },
+    SteeringInput { input: AcceptedInputId, source_turn: TurnId },
     TurnTranscriptEntry { entry: SemanticTranscriptEntryId, turn: TurnId },
     SessionTranscriptEntry { entry: SemanticTranscriptEntryId },
     ToolRequest { request: ToolRequestId, turn: TurnId },
@@ -6464,6 +6465,7 @@ pub struct SearchHighlight { pub start_byte: u16, pub end_byte: u16 }
 pub struct SearchResult {
     pub session: SessionId,
     pub address: TimelineAddress,
+    pub projection: NonZeroU64,
     pub source: SearchResultSource,
     pub content_class: SearchContentClass,
     pub snippet: String,

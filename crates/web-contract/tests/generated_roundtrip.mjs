@@ -6,6 +6,7 @@ import {
   decodeWebApiErrorResponse,
   decodeWebContractBootstrap,
   decodeWebContractExample,
+  decodeWebSearchPage,
   decodeWebSessionTimelineDescriptor,
   decodeWebSessionTimelineWindow,
   decodeWebUsageCallPage,
@@ -13,6 +14,29 @@ import {
 } from "../../../clients/web/src/generated/web-contract.mjs";
 
 const fixtureUrl = new URL("./fixtures/example.json", import.meta.url);
+
+function searchPage() {
+  return {
+    results: [
+      {
+        session_id: "00000000-0000-0000-0000-000000000991",
+        address: { event_sequence: "1" },
+        projection_id: "1",
+        source: {
+          kind: "session",
+          session_id: "00000000-0000-0000-0000-000000000991",
+        },
+        content_class: "session_metadata",
+        snippet: "café",
+        highlights: [{ start_byte: 0, end_byte: 5 }],
+      },
+    ],
+    continuation: {
+      address: { event_sequence: "1" },
+      projection_id: "1",
+    },
+  };
+}
 
 test("generated example decoder round trips the Rust fixture", async () => {
   const source = JSON.parse(await readFile(fixtureUrl, "utf8"));
@@ -99,6 +123,26 @@ test("generated timeline decoder rejects an address beyond u64", () => {
           },
         ],
         projected_structured_bytes: 96,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    /unsigned 64-bit integer/,
+  );
+});
+
+test("generated timeline decoder rejects an overlong decimal before BigInt", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionTimelineWindow({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        items: [
+          {
+            address: { event_sequence: "1".repeat(1000) },
+            kind: "session_created",
+            projected_structured_bytes: 79,
+          },
+        ],
+        projected_structured_bytes: 79,
         continuation_before: null,
         continuation_after: null,
       }),
@@ -275,5 +319,190 @@ test("generated summary and call decoders reject derived cost without tokens", (
   assert.throws(
     () => decodeWebUsageCallPage({ calls: [call], continuation: null }),
     /unavailable without token evidence/,
+  );
+});
+
+test("generated search decoder rejects an invalid projection identity", () => {
+  const page = searchPage();
+  page.continuation.projection_id = "0";
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /continuation must be one recognized variant/,
+  );
+});
+
+test("generated search decoder rejects more than one bounded page", () => {
+  const page = searchPage();
+  page.results = Array.from({ length: 101 }, () => page.results[0]);
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /results must be at most 100 items/,
+  );
+});
+
+test("generated search decoder rejects an oversized UTF-8 snippet", () => {
+  const page = searchPage();
+  page.results[0].snippet = "é".repeat(257);
+  page.results[0].highlights = [];
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /snippet must be at most 512 UTF-8 bytes/,
+  );
+});
+
+test("generated search decoder rejects a highlight inside a UTF-8 character", () => {
+  const page = searchPage();
+  page.results[0].highlights = [{ start_byte: 4, end_byte: 5 }];
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /range on UTF-8 boundaries/,
+  );
+});
+
+test("generated search decoder rejects overlapping highlight ranges", () => {
+  const page = searchPage();
+  page.results[0].highlights = [
+    { start_byte: 0, end_byte: 3 },
+    { start_byte: 2, end_byte: 5 },
+  ];
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /ordered non-overlapping in-bounds UTF-8 byte range/,
+  );
+});
+
+test("generated search decoder rejects too many highlight ranges", () => {
+  const page = searchPage();
+  page.results[0].snippet = "x".repeat(512);
+  page.results[0].highlights = Array.from({ length: 513 }, () => ({
+    start_byte: 0,
+    end_byte: 1,
+  }));
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /highlights must be at most 512 items/,
+  );
+});
+
+test("generated search decoder rejects continuation on an empty page", () => {
+  const empty = searchPage();
+  empty.results = [];
+  assert.throws(
+    () => decodeWebSearchPage(empty),
+    /cursor anchored to the final search result/,
+  );
+});
+
+test("generated search decoder rejects a continuation address mismatch", () => {
+  const mismatched = searchPage();
+  mismatched.continuation.address.event_sequence = "2";
+  assert.throws(
+    () => decodeWebSearchPage(mismatched),
+    /cursor anchored to the final search result/,
+  );
+});
+
+test("generated search decoder rejects a continuation projection mismatch", () => {
+  const mismatchedProjection = searchPage();
+  mismatchedProjection.continuation.projection_id = "2";
+  assert.throws(
+    () => decodeWebSearchPage(mismatchedProjection),
+    /cursor anchored to the final search result/,
+  );
+});
+
+test("generated search decoder rejects out-of-order result addresses", () => {
+  const page = searchPage();
+  const newer = structuredClone(page.results[0]);
+  newer.address.event_sequence = "2";
+  newer.projection_id = "2";
+  page.results.push(newer);
+  page.continuation.address.event_sequence = "2";
+  page.continuation.projection_id = "2";
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /strictly descending search result key/,
+  );
+});
+
+test("generated search decoder rejects out-of-order same-address projections", () => {
+  const page = searchPage();
+  page.results[0].projection_id = "2";
+  const outOfOrder = structuredClone(page.results[0]);
+  outOfOrder.projection_id = "3";
+  page.results.push(outOfOrder);
+  page.continuation.projection_id = "3";
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /strictly descending search result key/,
+  );
+});
+
+test("generated search decoder rejects malformed result identities", () => {
+  const page = searchPage();
+  page.results[0].session_id = "not-a-uuid";
+
+  assert.throws(() => decodeWebSearchPage(page), /matching/);
+});
+
+test("generated search decoder rejects a contradictory source session", () => {
+  const mismatchedSession = searchPage();
+  mismatchedSession.results[0].source.session_id =
+    "00000000-0000-0000-0000-000000000992";
+  assert.throws(
+    () => decodeWebSearchPage(mismatchedSession),
+    /source consistent with the result session and content class/,
+  );
+});
+
+test("generated search decoder rejects a contradictory content class", () => {
+  const mismatchedContent = searchPage();
+  mismatchedContent.results[0].content_class = "tool_result";
+  assert.throws(
+    () => decodeWebSearchPage(mismatchedContent),
+    /source consistent with the result session and content class/,
+  );
+});
+
+test("generated descriptor decoder rejects an invalid session ID", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionTimelineDescriptor({
+        session_id: "not-a-uuid",
+        sizes: {
+          item_count: "1",
+          projected_text_bytes: "0",
+          projected_structured_bytes: "96",
+          referenced_blob_count: "0",
+          referenced_blob_bytes: "0",
+        },
+        first_address: { event_sequence: "1" },
+        latest_address: { event_sequence: "1" },
+        work: { active_turn_count: "0", queued_turn_count: "0" },
+        observed_through: "1",
+      }),
+    /matching/,
+  );
+});
+
+test("generated window decoder rejects an invalid session ID", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionTimelineWindow({
+        session_id: "not-a-uuid",
+        items: [],
+        projected_structured_bytes: 0,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    /matching/,
   );
 });
