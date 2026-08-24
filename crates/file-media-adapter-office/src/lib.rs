@@ -1,7 +1,7 @@
 //! Bounded Open XML interpretation inside the supervised file-media worker.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     error::Error,
     io::{Cursor, Read},
     num::NonZeroU64,
@@ -592,6 +592,9 @@ fn validate_selected_probe_entries(inventory: &CentralInventory) -> Result<(), C
             .iter()
             .find(|entry| entry.name == kind.marker())
             .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+        if entry.flags & 1 != 0 {
+            continue;
+        }
         if !matches!(entry.compression, 0 | 8) {
             return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
         }
@@ -957,6 +960,7 @@ fn validate_package_relationships(
     reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
     let mut targets = Vec::new();
+    let mut relationship_ids = HashSet::new();
     let mut depth = 0_usize;
     let mut saw_root = false;
     let mut relationships_scope = std::collections::HashMap::new();
@@ -989,7 +993,12 @@ fn validate_package_relationships(
                         &scope,
                         PACKAGE_RELATIONSHIPS_NAMESPACE,
                     ) {
-                        collect_package_relationship(&reader, &element, &mut targets)?;
+                        collect_package_relationship(
+                            &reader,
+                            &element,
+                            &mut relationship_ids,
+                            &mut targets,
+                        )?;
                     }
                 }
                 depth = depth
@@ -1008,7 +1017,12 @@ fn validate_package_relationships(
                     &scope,
                     PACKAGE_RELATIONSHIPS_NAMESPACE,
                 ) {
-                    collect_package_relationship(&reader, &element, &mut targets)?;
+                    collect_package_relationship(
+                        &reader,
+                        &element,
+                        &mut relationship_ids,
+                        &mut targets,
+                    )?;
                 }
             }
             Event::Empty(element) if depth == 0 => {
@@ -1101,8 +1115,10 @@ fn normalized_package_target(target: &str) -> Result<String, ValidationIssue> {
 fn collect_package_relationship(
     reader: &Reader<Cursor<&[u8]>>,
     element: &quick_xml::events::BytesStart<'_>,
+    relationship_ids: &mut HashSet<String>,
     targets: &mut Vec<String>,
 ) -> Result<(), ValidationIssue> {
+    let mut id = None;
     let mut relationship_type = None;
     let mut target = None;
     let mut external = false;
@@ -1112,11 +1128,16 @@ fn collect_package_relationship(
             .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
             .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
         match attribute.key.as_ref() {
+            b"Id" => id = Some(value.into_owned()),
             b"Type" => relationship_type = Some(value.into_owned()),
             b"Target" => target = Some(value.into_owned()),
             b"TargetMode" => external = value.eq_ignore_ascii_case("external"),
             _ => {}
         }
+    }
+    let id = id.ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+    if !relationship_ids.insert(id) {
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
     }
     if relationship_type
         .as_deref()
@@ -1545,8 +1566,10 @@ fn read_spreadsheet_text<R: Read + std::io::Seek>(
     };
     let relationship_ids =
         workbook_relationship_ids(&workbook).map_err(|_| ProcessorFailure::Failed)?;
-    let targets =
-        workbook_relationship_targets(&relationships).map_err(|_| ProcessorFailure::Failed)?;
+    let targets = workbook_relationship_targets(&relationships)
+        .map_err(|_| ProcessorFailure::Failed)?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
     let shared_target =
         workbook_shared_strings_target(&relationships).map_err(|_| ProcessorFailure::Failed)?;
     let shared_strings = if let Some(shared_target) = shared_target {
@@ -1568,8 +1591,7 @@ fn read_spreadsheet_text<R: Read + std::io::Seek>(
     for relationship_id in relationship_ids {
         require_active(cancellation)?;
         let target = targets
-            .iter()
-            .find_map(|(candidate, target)| (candidate == &relationship_id).then_some(target))
+            .get(&relationship_id)
             .ok_or(ProcessorFailure::Failed)?;
         let Some(target) = target else {
             continue;
@@ -1657,7 +1679,10 @@ fn ordered_relationship_ids(
                     )
                     && list_depth == depth.checked_sub(1)
                 {
-                    ids.push(required_relationship_id(&reader, &element, &scope)?);
+                    record_ordered_relationship_id(
+                        &mut ids,
+                        required_relationship_id(&reader, &element, &scope)?,
+                    )?;
                 }
                 namespace_scopes.push(scope);
                 depth = next_xml_depth(depth)?;
@@ -1672,7 +1697,10 @@ fn ordered_relationship_ids(
                     .ok_or(XmlIssue::Malformed)?;
                 apply_namespace_declarations(&reader, &element, &mut scope)?;
                 if element_uses_scoped_namespace(element.name().as_ref(), &scope, root_namespace) {
-                    ids.push(required_relationship_id(&reader, &element, &scope)?);
+                    record_ordered_relationship_id(
+                        &mut ids,
+                        required_relationship_id(&reader, &element, &scope)?,
+                    )?;
                 }
             }
             Event::End(element) => {
@@ -1698,6 +1726,15 @@ fn ordered_relationship_ids(
         buffer.clear();
     }
     Ok(ids)
+}
+
+fn record_ordered_relationship_id(ids: &mut Vec<String>, id: String) -> Result<(), XmlIssue> {
+    let limit = usize::try_from(MAX_OBSERVED_CONTAINER_ENTRIES).unwrap_or(usize::MAX);
+    if ids.len() >= limit {
+        return Err(XmlIssue::Malformed);
+    }
+    ids.push(id);
+    Ok(())
 }
 
 fn apply_namespace_declarations(
@@ -1774,6 +1811,16 @@ fn apply_markup_compatibility_attributes(
             .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
             .map_err(|_| XmlIssue::Malformed)?;
         match &name[separator + 1..] {
+            b"MustUnderstand" => {
+                for declared_prefix in value.split_ascii_whitespace() {
+                    let namespace = namespace_scope
+                        .get(declared_prefix.as_bytes())
+                        .ok_or(XmlIssue::Malformed)?;
+                    if !supported_markup_namespace(namespace) {
+                        return Err(XmlIssue::Malformed);
+                    }
+                }
+            }
             b"Ignorable" => {
                 for declared_prefix in value.split_ascii_whitespace() {
                     let namespace = namespace_scope
@@ -1798,6 +1845,24 @@ fn apply_markup_compatibility_attributes(
         }
     }
     Ok(())
+}
+
+fn supported_markup_namespace(namespace: &[u8]) -> bool {
+    [
+        OFFICE_RELATIONSHIPS_NAMESPACE,
+        WORDPROCESSINGML_NAMESPACE,
+        SPREADSHEETML_NAMESPACE,
+        PRESENTATIONML_NAMESPACE,
+        DRAWINGML_NAMESPACE,
+        MARKUP_COMPATIBILITY_NAMESPACE,
+        STRICT_OFFICE_RELATIONSHIPS_NAMESPACE,
+        STRICT_WORDPROCESSINGML_NAMESPACE,
+        STRICT_SPREADSHEETML_NAMESPACE,
+        STRICT_PRESENTATIONML_NAMESPACE,
+        STRICT_DRAWINGML_NAMESPACE,
+    ]
+    .into_iter()
+    .any(|supported| namespace == supported)
 }
 
 fn ignores_markup_compatibility_element(
@@ -2393,14 +2458,13 @@ fn presentation_slide_names<R: Read + std::io::Seek>(
     let relationships = read_entry(archive, "ppt/_rels/presentation.xml.rels", budget)?;
     let relationship_ids =
         presentation_relationship_ids(&presentation).map_err(|_| ReadIssue::Failed)?;
-    let targets =
-        presentation_relationship_targets(&relationships).map_err(|_| ReadIssue::Failed)?;
+    let targets = presentation_relationship_targets(&relationships)
+        .map_err(|_| ReadIssue::Failed)?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
     let mut names = Vec::with_capacity(relationship_ids.len());
     for relationship_id in relationship_ids {
-        let target = targets
-            .iter()
-            .find_map(|(candidate, target)| (candidate == &relationship_id).then_some(target))
-            .ok_or(ReadIssue::Failed)?;
+        let target = targets.get(&relationship_id).ok_or(ReadIssue::Failed)?;
         archive.by_name(target).map_err(|_| ReadIssue::Failed)?;
         names.push(target.clone());
     }
@@ -3321,7 +3385,7 @@ mod tests {
     fn package_relationships_require_the_opc_namespace() {
         let xml = concat!(
             "<Relationships>",
-            "<Relationship Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/>",
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/>",
             "</Relationships>"
         );
 
@@ -3337,7 +3401,7 @@ mod tests {
     fn package_relationships_transcode_utf16_metadata() {
         let xml = concat!(
             "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">",
-            "<Relationship Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/>",
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/>",
             "</Relationships>"
         );
         let mut bytes = vec![0xff, 0xfe];
@@ -3355,8 +3419,8 @@ mod tests {
     fn package_relationships_ignore_suffix_collisions() {
         let xml = concat!(
             "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">",
-            "<Relationship Type=\"urn:extension/officeDocument\" Target=\"custom.xml\"/>",
-            "<Relationship Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/>",
+            "<Relationship Id=\"extension\" Type=\"urn:extension/officeDocument\" Target=\"custom.xml\"/>",
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/>",
             "</Relationships>"
         );
 
@@ -3366,6 +3430,21 @@ mod tests {
             result.expect("only the exact Office relationship should match"),
             vec![OfficeKind::Docx]
         );
+    }
+
+    #[test]
+    fn package_relationships_require_unique_ids() {
+        let missing = br#"<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>"#;
+        let duplicate = br#"<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"duplicate\" Type=\"urn:extension\" Target=\"custom.xml\"/><Relationship Id=\"duplicate\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>"#;
+
+        assert!(matches!(
+            validate_package_relationships(missing, &[OfficeKind::Docx]),
+            Err(ValidationIssue::Malformed(MALFORMED_REASON))
+        ));
+        assert!(matches!(
+            validate_package_relationships(duplicate, &[OfficeKind::Docx]),
+            Err(ValidationIssue::Malformed(MALFORMED_REASON))
+        ));
     }
 
     #[test]
@@ -3512,6 +3591,27 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_selected_entry_skips_decoder_validation() {
+        let inventory = CentralInventory {
+            entries: 1,
+            expanded_bytes: MAX_ENTRY_BYTES + 1,
+            entries_by_name: vec![CentralEntry {
+                name: String::from(OfficeKind::Docx.marker()),
+                flags: 1,
+                compression: 99,
+                crc32: 0,
+                compressed_bytes: 1,
+                expanded_bytes: MAX_ENTRY_BYTES + 1,
+                local_offset: 0,
+            }],
+            kinds: vec![OfficeKind::Docx],
+            encrypted: true,
+        };
+
+        assert!(validate_selected_probe_entries(&inventory).is_ok());
+    }
+
+    #[test]
     fn text_extraction_decodes_numeric_references() {
         let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:t>&#65;&#x42;</w:t></w:document>"#;
 
@@ -3578,6 +3678,16 @@ mod tests {
     }
 
     #[test]
+    fn text_extraction_rejects_unsupported_mandatory_namespaces() {
+        let xml = br#"<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:ext=\"urn:unsupported\" mc:MustUnderstand=\"ext\"><w:t>text</w:t></w:document>"#;
+
+        assert!(matches!(
+            extract_xml_text(xml, OfficeKind::Docx),
+            Err(XmlIssue::Malformed)
+        ));
+    }
+
+    #[test]
     fn text_extraction_ignores_extension_paragraph_boundaries() {
         let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:ext="urn:extension"><w:p><w:t>first</w:t><ext:p></ext:p><w:t>second</w:t></w:p></w:document>"#;
 
@@ -3636,6 +3746,18 @@ mod tests {
             result.expect("sheet relationship IDs should preserve order"),
             vec![String::from("rId2"), String::from("rId1")]
         );
+    }
+
+    #[test]
+    fn ordered_relationship_ids_enforce_the_entry_ceiling() {
+        let limit = usize::try_from(MAX_OBSERVED_CONTAINER_ENTRIES)
+            .expect("the relationship ceiling should fit usize");
+        let mut ids = vec![String::new(); limit];
+
+        assert!(matches!(
+            record_ordered_relationship_id(&mut ids, String::from("overflow")),
+            Err(XmlIssue::Malformed)
+        ));
     }
 
     #[test]
