@@ -485,6 +485,18 @@ test('returns from the scenario studio through the command palette', async ({ pa
   await page.route('**/api/bootstrap', (route) =>
     route.fulfill({ json: webContractBootstrapFixture }),
   )
+  const attentionSnapshot = {
+    continuation_after_session_id: null,
+    cursor: '0',
+    summaries: [],
+  }
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      body: `${JSON.stringify({ kind: 'snapshot', snapshot: attentionSnapshot })}\n`,
+      contentType: 'application/x-ndjson',
+    }),
+  )
+  await page.route('**/api/attention', (route) => route.fulfill({ json: attentionSnapshot }))
   await page.goto('/scenario/streaming')
 
   await page.getByRole('button', { name: 'Open command palette' }).click()
