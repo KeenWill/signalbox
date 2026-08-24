@@ -31,7 +31,8 @@ interface CommandDefinitionShape {
 }
 
 const always = () => true
-const productNavigation = (context: CommandContext) => context.navigate !== undefined
+const productNavigation = (context: CommandContext) =>
+  !context.scenarioSurface && context.navigate !== undefined
 const scenarioNavigation = (context: CommandContext) => context.navigateScenario !== undefined
 const scenarioTimeline = (context: CommandContext) => context.timelineIds.length > 0
 const scenarioSurface = (context: CommandContext) => context.scenarioSurface
