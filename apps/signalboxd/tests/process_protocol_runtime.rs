@@ -718,7 +718,7 @@ struct RunningRuntime {
     pool: PgPool,
     socket_directory: SocketDirectory,
     shutdown: watch::Sender<bool>,
-    runtime_task: JoinHandle<Result<(), ProcessRuntimeError>>,
+    runtime_task: Option<JoinHandle<Result<(), ProcessRuntimeError>>>,
     work_source: Option<InProcessEligibilityWorkSource<RuntimeEligibilitySweep>>,
     reconciliation_witness: ReconciliationWitness,
     provider_text_deltas: ProcessProviderTextDeltaSink,
@@ -811,7 +811,7 @@ impl RunningRuntime {
             pool,
             socket_directory,
             shutdown,
-            runtime_task,
+            runtime_task: Some(runtime_task),
             work_source: Some(work_source),
             reconciliation_witness,
             provider_text_deltas,
@@ -852,7 +852,12 @@ impl RunningRuntime {
         template_configuration: SessionTemplateConfiguration,
     ) -> Result<usize, Box<dyn Error>> {
         self.shutdown.send(true)?;
-        timeout(Duration::from_secs(10), &mut self.runtime_task).await???;
+        let runtime_task = self
+            .runtime_task
+            .as_mut()
+            .expect("a running runtime has an installed task");
+        timeout(Duration::from_secs(10), runtime_task).await???;
+        self.runtime_task = None;
         self.restart_after_stop(configuration, template_configuration)
             .await
     }
@@ -890,7 +895,7 @@ impl RunningRuntime {
         let provider_text_deltas = runtime.provider_text_delta_sink();
         let (shutdown, shutdown_receiver) = watch::channel(false);
         self.shutdown = shutdown;
-        self.runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
+        self.runtime_task = Some(tokio::spawn(runtime.run(shutdown_receiver)));
         self.work_source = Some(work_source);
         self.reconciliation_witness = reconciliation_witness;
         self.provider_text_deltas = provider_text_deltas;
@@ -901,8 +906,12 @@ impl RunningRuntime {
     /// replacement opens the same socket and database only after the killed
     /// task has stopped, so no graceful runtime shutdown can repair its work.
     async fn kill_and_restart(&mut self) -> Result<usize, Box<dyn Error>> {
-        self.runtime_task.abort();
-        let killed = (&mut self.runtime_task).await;
+        let runtime_task = self
+            .runtime_task
+            .take()
+            .expect("a running runtime has an installed task");
+        runtime_task.abort();
+        let killed = runtime_task.await;
         assert!(
             matches!(&killed, Err(error) if error.is_cancelled()),
             "the runtime task must stop by cancellation, not by returning: {killed:?}"
@@ -936,9 +945,11 @@ impl RunningRuntime {
         )
     }
 
-    async fn stop(self) -> Result<(), Box<dyn Error>> {
-        self.shutdown.send(true)?;
-        timeout(Duration::from_secs(10), self.runtime_task).await???;
+    async fn stop(mut self) -> Result<(), Box<dyn Error>> {
+        if let Some(runtime_task) = self.runtime_task.take() {
+            self.shutdown.send(true)?;
+            timeout(Duration::from_secs(10), runtime_task).await???;
+        }
         self.pool.close().await;
         self.socket_directory.cleanup()?;
         drop(self.blob_storage_root);
