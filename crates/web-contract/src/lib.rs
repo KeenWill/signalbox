@@ -520,6 +520,31 @@ function assertSchema(root, schema, value, path) {{
   }}
 }}
 
+function assertAttentionSummary(summary, path) {{
+  const valid =
+    (summary.state === "blocked" && summary.action === "provide_goal_need") ||
+    (summary.state === "awaiting_approval" &&
+      (summary.action === null || summary.action === "decide_approval")) ||
+    (summary.state === "ambiguous" && summary.action === "reconcile_turn") ||
+    ([
+      "active",
+      "queued",
+      "awaiting_tool_recovery",
+      "awaiting_reconciliation",
+      "runner_lost",
+      "idle",
+    ].includes(summary.state) && summary.action === null);
+  if (!valid) {{
+    fail(`${{path}}.action`, `consistent with attention state ${{JSON.stringify(summary.state)}}`);
+  }}
+}}
+
+function assertAttentionSummaries(summaries, path) {{
+  summaries.forEach((summary, index) =>
+    assertAttentionSummary(summary, `${{path}}[${{index}}]`),
+  );
+}}
+
 export function decodeWebContractBootstrap(value) {{
   assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "bootstrap");
   if (value.contract.name !== {contract_name:?} || value.contract.version !== {contract_version:?}) {{
@@ -540,11 +565,20 @@ export function decodeWebApiErrorResponse(value) {{
 
 export function decodeWebAttentionSnapshot(value) {{
   assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
+  assertAttentionSummaries(value.summaries, "attention_snapshot.summaries");
   return value;
 }}
 
 export function decodeWebAttentionStreamEvent(value) {{
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
+  if (value.kind === "snapshot") {{
+    assertAttentionSummaries(
+      value.snapshot.summaries,
+      "attention_event.snapshot.summaries",
+    );
+  }} else if (value.kind === "update") {{
+    assertAttentionSummaries(value.summaries, "attention_event.summaries");
+  }}
   return value;
 }}
 "##,

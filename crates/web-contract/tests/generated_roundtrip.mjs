@@ -4,6 +4,8 @@ import test from "node:test";
 
 import {
   decodeWebApiErrorResponse,
+  decodeWebAttentionSnapshot,
+  decodeWebAttentionStreamEvent,
   decodeWebContractBootstrap,
   decodeWebContractExample,
 } from "../../../clients/web/src/generated/web-contract.mjs";
@@ -69,5 +71,39 @@ test("generated error decoder preserves the transport application boundary", () 
         },
       }),
     /one recognized variant/,
+  );
+});
+
+const idleSummary = {
+  session_id: "00000000-0000-0000-0000-000000000001",
+  current_turn_id: null,
+  state: "idle",
+  action: null,
+  goal_block: null,
+  judge: { actionable: "0", completed: "0", escalated: "0", failed: "0" },
+  last_activity: { unix_milliseconds: "0", kind: "session" },
+};
+
+test("generated snapshot decoder rejects an action inconsistent with state", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot({
+        cursor: "1",
+        summaries: [{ ...idleSummary, action: "decide_approval" }],
+        continuation_after_session_id: null,
+      }),
+    /attention_snapshot\.summaries\[0\]\.action must be consistent with attention state "idle"/,
+  );
+});
+
+test("generated stream decoder rejects a missing blocked action", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionStreamEvent({
+        kind: "update",
+        cursor: "2",
+        summaries: [{ ...idleSummary, state: "blocked" }],
+      }),
+    /attention_event\.summaries\[0\]\.action must be consistent with attention state "blocked"/,
   );
 });
