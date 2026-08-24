@@ -5,9 +5,8 @@ Its isolated processor implementation is verified against this PR
 (`agent/file-media-worker`). Together they include the type model, declaration
 and registry checks, detection and validation algorithm, untrusted
 processor-response boundary, stable agent tool contracts, visibility-authorizing
-application bridge, and fresh daemon-supervised worker runtime.
-The audio-family adapter coverage is verified against PR #908
-(`agent/file-media-audio-family`).
+application bridge, and fresh daemon-supervised worker runtime. The audio-family
+adapter coverage is verified against PR #908 (`agent/file-media-audio-family`).
 
 This page owns typed interpretation above immutable blob bytes. Blob identity,
 catalog placement, replica verification, raw reads, attachment visibility, and
