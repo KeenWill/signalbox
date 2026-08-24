@@ -52,9 +52,8 @@ const artifactFromDescriptor = (
   }
   return {
     ...identity,
-    kind: 'blocked',
-    attemptedKind: 'unknown artifact',
-    reason: 'No typed presentation was supplied with this blob identity. No bytes were read.',
+    kind: 'blob',
+    descriptor,
   }
 }
 

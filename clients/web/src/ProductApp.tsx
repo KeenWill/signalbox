@@ -287,23 +287,33 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   )
 }
 
-function ImportsCapabilityState({ bootstrapPending }: { bootstrapPending: boolean }) {
+function ImportsCapabilityState({ state }: { state: 'pending' | 'failed' | 'unavailable' }) {
+  const pending = state === 'pending'
+  const failed = state === 'failed'
   return (
     <section className="surface-empty" aria-labelledby="imports-capability-heading">
       <AlertTriangle aria-hidden="true" />
       <div>
         <span className="availability-tag">
-          {bootstrapPending ? 'Checking capability' : 'Capability unavailable'}
+          {pending
+            ? 'Checking capability'
+            : failed
+              ? 'Bootstrap unavailable'
+              : 'Capability unavailable'}
         </span>
         <h2 id="imports-capability-heading">
-          {bootstrapPending
+          {pending
             ? 'Checking whether import discovery is available'
-            : 'Import discovery is not exposed by this daemon'}
+            : failed
+              ? 'The daemon bootstrap contract could not be loaded'
+              : 'Import discovery is not exposed by this daemon'}
         </h2>
         <p>
-          {bootstrapPending
+          {pending
             ? 'The imports workspace will open only after the bootstrap contract advertises it.'
-            : 'The current bootstrap contract does not advertise imported-conversation discovery.'}
+            : failed
+              ? 'Capability availability is unknown because the bootstrap request failed.'
+              : 'The current bootstrap contract does not advertise imported-conversation discovery.'}
         </p>
       </div>
     </section>
@@ -552,7 +562,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   }, [app.overlay, inspectorInSheet])
 
   const copy = surfaceCopy[surface]
-  const content =
+  const importsAvailable = bootstrap.data?.capabilities.import_discovery === true
+  const nonImportContent =
     surface === 'attention' ? (
       <AttentionSurface />
     ) : surface === 'sessions' ? (
@@ -564,16 +575,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       />
     ) : surface === 'settings' ? (
       <SettingsSurface />
-    ) : surface === 'imports' && bootstrap.data?.capabilities.import_discovery === true ? (
-      <ImportsWorkspace
-        api={productImportApi}
-        scenario={false}
-        continuationAvailable={bootstrap.data?.capabilities.imported_continuations === true}
-        presentation="product"
-        onCommandContext={updateImportsCommandContext}
-      />
     ) : surface === 'imports' ? (
-      <ImportsCapabilityState bootstrapPending={bootstrap.isPending} />
+      importsAvailable ? null : (
+        <ImportsCapabilityState
+          state={bootstrap.isPending ? 'pending' : bootstrap.isError ? 'failed' : 'unavailable'}
+        />
+      )
     ) : surface === 'reviews' ? (
       <ReviewsArtifactSurface commandContext={context} />
     ) : (
@@ -614,7 +621,18 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
                 : 'Checking contract…'}
           </span>
         </div>
-        {content}
+        {importsAvailable && (
+          <div hidden={surface !== 'imports'}>
+            <ImportsWorkspace
+              api={productImportApi}
+              scenario={false}
+              continuationAvailable={bootstrap.data?.capabilities.imported_continuations === true}
+              presentation="product"
+              onCommandContext={updateImportsCommandContext}
+            />
+          </div>
+        )}
+        {nonImportContent}
       </main>
       {app.layout === 'workbench' && (
         <aside className="product-inspector" aria-label="Inspector">

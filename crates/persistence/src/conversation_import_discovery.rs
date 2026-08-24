@@ -373,21 +373,9 @@ impl ImportedConversationDiscoveryRepository {
                     imported.declared_raw_record_count,
                     imported.declared_entry_count, imported.display_title,
                     imported.display_title_state,
-                    (SELECT COALESCE(SUM(octet_length(blob.raw_bytes)), 0)::numeric
-                       FROM imported_conversation_raw_record AS occurrence
-                       JOIN imported_raw_source_record AS blob
-                         ON blob.content_hash = occurrence.content_hash
-                      WHERE occurrence.imported_conversation_id =
-                            imported.imported_conversation_id) AS raw_source_bytes,
-                    (SELECT COALESCE(SUM(octet_length(normalized_value_encoding)), 0)::numeric
-                       FROM imported_conversation_raw_record AS occurrence
-                      WHERE occurrence.imported_conversation_id =
-                            imported.imported_conversation_id) AS normalized_source_record_bytes,
-                    (SELECT COALESCE(SUM(octet_length(content_encoding)
-                                         + octet_length(source_metadata_encoding)), 0)::numeric
-                       FROM imported_transcript_entry AS entry
-                      WHERE entry.imported_conversation_id =
-                            imported.imported_conversation_id) AS normalized_entry_bytes,
+                    imported.raw_source_bytes,
+                    imported.normalized_source_record_bytes,
+                    imported.normalized_entry_bytes,
                     (SELECT imported_transcript_entry_id
                        FROM imported_transcript_entry AS first_entry
                       WHERE first_entry.imported_conversation_id =
@@ -626,10 +614,13 @@ fn checked_content_projection(
         return Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into());
     }
     match header[2] {
-        0 => {
-            checked_single_text_attestation(&header, total_bytes)?;
-            Ok(ImportedEntryContentProjection::SourceEvent)
-        }
+        0 => checked_non_text_content(row, |content| {
+            matches!(
+                content,
+                signalbox_domain::ImportedTranscriptContent::SourceEvent { .. }
+            )
+        })
+        .map(|()| ImportedEntryContentProjection::SourceEvent),
         1 => checked_text_projection(&header, row, total_bytes, projected_bytes)
             .map(ImportedEntryContentProjection::Text),
         2 => checked_non_text_content(row, |content| {
@@ -653,10 +644,13 @@ fn checked_content_projection(
             )
         })
         .map(|()| ImportedEntryContentProjection::Thinking),
-        5 => {
-            checked_single_text_attestation(&header, total_bytes)?;
-            Ok(ImportedEntryContentProjection::RedactedThinking)
-        }
+        5 => checked_non_text_content(row, |content| {
+            matches!(
+                content,
+                signalbox_domain::ImportedTranscriptContent::RedactedThinking { .. }
+            )
+        })
+        .map(|()| ImportedEntryContentProjection::RedactedThinking),
         6 => checked_non_text_content(row, |content| {
             matches!(
                 content,
@@ -667,10 +661,13 @@ fn checked_content_projection(
         7 if header.get(3).is_some_and(|tag| *tag <= 4) && total_bytes == 4 => {
             Ok(ImportedEntryContentProjection::MessageContentAbsent)
         }
-        8 => {
-            checked_single_text_attestation(&header, total_bytes)?;
-            Ok(ImportedEntryContentProjection::SourceMessageBlock)
-        }
+        8 => checked_non_text_content(row, |content| {
+            matches!(
+                content,
+                signalbox_domain::ImportedTranscriptContent::SourceMessageBlock { .. }
+            )
+        })
+        .map(|()| ImportedEntryContentProjection::SourceMessageBlock),
         _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
     }
 }
@@ -691,30 +688,6 @@ fn checked_non_text_content(
         Ok(())
     } else {
         Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into())
-    }
-}
-
-fn checked_single_text_attestation(
-    header: &[u8],
-    total_bytes: i64,
-) -> Result<(), ImportedConversationDiscoveryError> {
-    match header.get(3) {
-        Some(0 | 1) if total_bytes == 4 => Ok(()),
-        Some(2) if header.len() == 12 => {
-            let declared_bytes = u64::from_be_bytes(
-                header[4..12]
-                    .try_into()
-                    .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?,
-            );
-            let declared_bytes = i64::try_from(declared_bytes)
-                .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
-            if total_bytes.checked_sub(12) == Some(declared_bytes) {
-                Ok(())
-            } else {
-                Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into())
-            }
-        }
-        _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
     }
 }
 
@@ -817,7 +790,26 @@ fn bounded_utf8_projection(
     let candidate = &prefix[..prefix.len().min(maximum_bytes)];
     let end = match std::str::from_utf8(candidate) {
         Ok(_) => candidate.len(),
-        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        Err(error) if error.error_len().is_none() => {
+            let scalar_start = error.valid_up_to();
+            let width = match candidate.get(scalar_start).copied() {
+                Some(0xc2..=0xdf) => 2,
+                Some(0xe0..=0xef) => 3,
+                Some(0xf0..=0xf4) => 4,
+                _ => {
+                    return Err(ImportedConversationDiscoveryCorruption::InvalidUtf8(field).into());
+                }
+            };
+            let scalar_end = scalar_start
+                .checked_add(width)
+                .ok_or(ImportedConversationDiscoveryCorruption::InvalidUtf8(field))?;
+            let scalar = prefix
+                .get(scalar_start..scalar_end)
+                .ok_or(ImportedConversationDiscoveryCorruption::InvalidUtf8(field))?;
+            std::str::from_utf8(scalar)
+                .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidUtf8(field))?;
+            scalar_start
+        }
         Err(_) => return Err(ImportedConversationDiscoveryCorruption::InvalidUtf8(field).into()),
     };
     let leading_text = std::str::from_utf8(&candidate[..end])

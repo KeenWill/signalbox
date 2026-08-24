@@ -20,7 +20,12 @@ import type {
 import { ScenarioNavigation } from '../ScenarioNavigation'
 import { type DiagnosticSnapshot, IconCommand, OverlaySurfaces } from '../Surfaces'
 import { store } from '../state'
-import { type ImportApi, ImportApiError, ImportReceiptCorrelationError } from './api'
+import {
+  correlateEntryWindowWithDescriptor,
+  type ImportApi,
+  ImportApiError,
+  ImportReceiptCorrelationError,
+} from './api'
 import { ImportedArtifactView } from './ImportedArtifactView'
 import { ImportedEntries } from './ImportedEntries'
 import { ImportsTable } from './ImportsTable'
@@ -130,10 +135,18 @@ export function ImportsWorkspace({
     queryKey: ['imports', queryScope, selectedImport, 'descriptor'],
     queryFn: ({ signal }) => api.descriptor(selectedImport ?? '', signal),
     enabled: selectedImport !== null,
+    gcTime: 0,
   })
   const windowQuery = useQuery({
     queryKey: ['imports', queryScope, selectedImport, 'entries', windowRequest],
-    queryFn: ({ signal }) => api.entries(selectedImport ?? '', windowRequest, signal),
+    queryFn: async ({ signal }) => {
+      const importedConversationId = selectedImport ?? ''
+      const [descriptor, window] = await Promise.all([
+        api.descriptor(importedConversationId, signal),
+        api.entries(importedConversationId, windowRequest, signal),
+      ])
+      return correlateEntryWindowWithDescriptor(windowRequest, window, descriptor)
+    },
     enabled: selectedImport !== null,
     gcTime: 0,
   })

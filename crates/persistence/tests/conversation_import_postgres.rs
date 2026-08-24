@@ -286,11 +286,12 @@ async fn insert_imported_source_scaffolding(
          INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count)
+             declared_entry_count, raw_source_bytes,
+             normalized_source_record_bytes, normalized_entry_bytes)
          VALUES
             ('10000000-0000-4000-8000-000000000039', 1,
              'claude_code_session_jsonl', 1,
-             decode(repeat('22', 32), 'hex'), 1, 3);
+             decode(repeat('22', 32), 'hex'), 1, 3, 1, 1, 6);
          INSERT INTO imported_conversation_raw_record
             (imported_conversation_id, raw_record_position, content_hash,
              conversion_digest, normalized_value_encoding,
@@ -1815,8 +1816,9 @@ async fn inv001_late_entry_identity_constraint_is_typed_collision() -> Result<()
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count)
-         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1)",
+             declared_entry_count, raw_source_bytes,
+             normalized_source_record_bytes, normalized_entry_bytes)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1, 0, 0, 0)",
     )
     .bind(Uuid::from_u128(0xa10))
     .bind(vec![0x10_u8; 32])
@@ -1889,8 +1891,9 @@ async fn inv038_incomplete_import_header_cannot_commit() -> Result<(), Box<dyn E
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count)
-         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1)",
+             declared_entry_count, raw_source_bytes,
+             normalized_source_record_bytes, normalized_entry_bytes)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1, 0, 0, 0)",
     )
     .bind(Uuid::from_u128(0x400))
     .bind(vec![0_u8; 32])
@@ -1977,8 +1980,9 @@ async fn inv002_inv038_unsupported_format_version_pair_is_schema_rejected()
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count)
-         VALUES ($1, 1, 'claude_code_session_jsonl', 3, $2, 1, 1)",
+             declared_entry_count, raw_source_bytes,
+             normalized_source_record_bytes, normalized_entry_bytes)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 3, $2, 1, 1, 0, 0, 0)",
     )
     .bind(Uuid::from_u128(0x4ff))
     .bind(vec![0_u8; 32])
@@ -1995,8 +1999,9 @@ async fn inv002_inv038_unsupported_format_version_pair_is_schema_rejected()
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count)
-         VALUES ($1, 1, 'codex_rollout_jsonl', 2, $2, 1, 1)",
+             declared_entry_count, raw_source_bytes,
+             normalized_source_record_bytes, normalized_entry_bytes)
+         VALUES ($1, 1, 'codex_rollout_jsonl', 2, $2, 1, 1, 0, 0, 0)",
     )
     .bind(Uuid::from_u128(0x4fe))
     .bind(vec![1_u8; 32])

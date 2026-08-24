@@ -1141,6 +1141,30 @@ test("generated imports decoder accepts explicit null evidence and cursor", () =
   };
 
   assert.deepEqual(decodeWebImportListPage(page), page);
+  assert.throws(
+    () =>
+      decodeWebImportListPage({
+        ...page,
+        items: [{ ...page.items[0], entry_count: "0" }],
+      }),
+    /entry_count must be a positive canonical decimal u64 string/,
+  );
+  assert.throws(
+    () =>
+      decodeWebImportListPage({
+        ...page,
+        items: [
+          {
+            ...page.items[0],
+            source_session_id: {
+              leading_text: "é".repeat(257),
+              completeness: "truncated",
+            },
+          },
+        ],
+      }),
+    /leading_text must be at most 512 UTF-8 bytes/,
+  );
 });
 
 test("generated imports decoders enforce canonical decimal u64 strings", () => {
@@ -1194,6 +1218,17 @@ test("generated imports decoders enforce canonical decimal u64 strings", () => {
     () =>
       decodeWebImportDescriptor({
         ...descriptor,
+        source: {
+          ...descriptor.source,
+          source_session_id: { leading_text: "é".repeat(257), completeness: "truncated" },
+        },
+      }),
+    /leading_text must be at most 512 UTF-8 bytes/,
+  );
+  assert.throws(
+    () =>
+      decodeWebImportDescriptor({
+        ...descriptor,
         raw_record_count: "18446744073709551616",
       }),
     /raw_record_count must be a nonnegative canonical decimal u64 string/,
@@ -1221,6 +1256,19 @@ test("generated imports decoders enforce canonical decimal u64 strings", () => {
     ],
   };
   assert.deepEqual(decodeWebImportEntryWindow(window), window);
+  assert.throws(
+    () =>
+      decodeWebImportEntryWindow({
+        ...window,
+        items: [
+          {
+            ...window.items[0],
+            text: { kind: "attested", leading_text: "x".repeat(513), completeness: "truncated" },
+          },
+        ],
+      }),
+    /leading_text must be at most 512 UTF-8 bytes/,
+  );
   assert.throws(
     () =>
       decodeWebImportEntryWindow({

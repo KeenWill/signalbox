@@ -259,6 +259,21 @@ impl ImportedConversationRepository {
         let declared_raw_record_count =
             usize_to_u64(encoded.raws.len(), "declared raw-record count")?;
         let declared_entry_count = usize_to_u64(encoded.entries.len(), "declared entry count")?;
+        let raw_source_bytes = encoded_size(
+            encoded.raws.iter().map(|raw| raw.bytes.len()),
+            "raw source bytes",
+        )?;
+        let normalized_source_record_bytes = encoded_size(
+            encoded.raws.iter().map(|raw| raw.normalized.len()),
+            "normalized source-record bytes",
+        )?;
+        let normalized_entry_bytes = encoded_size(
+            encoded
+                .entries
+                .iter()
+                .flat_map(|entry| [entry.content.len(), entry.source.len()]),
+            "normalized entry bytes",
+        )?;
         let mut transaction = self.pool.begin().await?;
         if let Some(existing) = resolve_existing_snapshot(
             &mut transaction,
@@ -278,8 +293,9 @@ impl ImportedConversationRepository {
                 (imported_conversation_id, storage_version, source_format,
                  converter_version, source_digest, source_session_id,
                  declared_raw_record_count, declared_entry_count,
+                 raw_source_bytes, normalized_source_record_bytes, normalized_entry_bytes,
                  display_title, display_title_state)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
              ON CONFLICT DO NOTHING",
         )
         .bind(candidate_id.into_uuid())
@@ -290,6 +306,9 @@ impl ImportedConversationRepository {
         .bind(encoded.source_session_id.as_deref())
         .bind(Decimal::from(declared_raw_record_count))
         .bind(Decimal::from(declared_entry_count))
+        .bind(Decimal::from(raw_source_bytes))
+        .bind(Decimal::from(normalized_source_record_bytes))
+        .bind(Decimal::from(normalized_entry_bytes))
         .bind(encoded.display_title.as_deref())
         .bind(resolved_display_title_state(
             encoded.display_title.as_deref(),
@@ -425,6 +444,18 @@ impl EncodedConversation {
             entries,
         })
     }
+}
+
+fn encoded_size(
+    mut lengths: impl Iterator<Item = usize>,
+    field: &'static str,
+) -> Result<u64, ImportedConversationRepositoryError> {
+    lengths.try_fold(0_u64, |total, length| {
+        let length = usize_to_u64(length, field)?;
+        total
+            .checked_add(length)
+            .ok_or_else(|| invalid_ordinal(field))
+    })
 }
 
 /// Maps a derived-or-absent display title to its closed resolved state.

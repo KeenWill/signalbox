@@ -187,10 +187,36 @@ const correlateEntryWindow = (
     firstPosition > anchorPosition ||
     lastPosition < anchorPosition ||
     lastPosition - firstPosition + 1n !== BigInt(window.items.length) ||
+    returnedBefore > requestedBefore ||
+    returnedAfter > requestedAfter ||
     (window.has_before && returnedBefore !== requestedBefore) ||
     (window.has_after && returnedAfter !== requestedAfter) ||
+    (anchorPosition === 1n && window.has_before) ||
+    (request.anchor === 'latest' && window.has_after) ||
     !positionsCorrelate ||
     !window.items.some((entry) => entry.frontier.position === window.anchor_position)
+  ) {
+    throw new ImportWindowCorrelationError()
+  }
+  return window
+}
+
+export const correlateEntryWindowWithDescriptor = (
+  request: WebImportEntryWindowRequest,
+  window: WebImportEntryWindow,
+  descriptor: WebImportDescriptor,
+): WebImportEntryWindow => {
+  const entryCount = decimalPosition(descriptor.entry_count)
+  const firstPosition = decimalPosition(window.first_position)
+  const lastPosition = decimalPosition(window.last_position)
+  const anchorPosition = decimalPosition(window.anchor_position)
+  if (
+    firstPosition > entryCount ||
+    lastPosition > entryCount ||
+    anchorPosition > entryCount ||
+    (window.has_before ? firstPosition === 1n : firstPosition !== 1n) ||
+    (window.has_after ? lastPosition === entryCount : lastPosition !== entryCount) ||
+    (request.anchor === 'latest' && anchorPosition !== entryCount)
   ) {
     throw new ImportWindowCorrelationError()
   }

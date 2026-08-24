@@ -1700,6 +1700,12 @@ function assertSha256(value, path) {
   }
 }
 
+function assertImportEvidenceBytes(value, path) {
+  if (utf8.encode(value).byteLength > 512) {
+    fail(path, "at most 512 UTF-8 bytes");
+  }
+}
+
 function validateWebImportFrontier(value, path) {
   assertUuid(value.imported_conversation_id, `${path}.imported_conversation_id`);
   assertUuid(value.imported_entry_id, `${path}.imported_entry_id`);
@@ -1707,8 +1713,13 @@ function validateWebImportFrontier(value, path) {
 }
 
 function validateWebImportListPage(value) {
-  value.items.forEach((item, index) =>
-    assertCanonicalNonnegativeU64(item.entry_count, `import_list_page.items[${index}].entry_count`));
+  value.items.forEach((item, index) => {
+    const path = `import_list_page.items[${index}]`;
+    assertCanonicalU64(item.entry_count, `${path}.entry_count`);
+    if (item.source_session_id !== undefined && item.source_session_id !== null) {
+      assertImportEvidenceBytes(item.source_session_id.leading_text, `${path}.source_session_id.leading_text`);
+    }
+  });
 }
 
 function validateWebImportDescriptor(value) {
@@ -1720,6 +1731,9 @@ function validateWebImportDescriptor(value) {
   assertCanonicalNonnegativeU64(value.sizes.normalized_entry_bytes, "import_descriptor.sizes.normalized_entry_bytes");
   validateWebImportFrontier(value.timeline.first, "import_descriptor.timeline.first");
   validateWebImportFrontier(value.timeline.latest, "import_descriptor.timeline.latest");
+  if (value.source.source_session_id !== undefined && value.source.source_session_id !== null) {
+    assertImportEvidenceBytes(value.source.source_session_id.leading_text, "import_descriptor.source.source_session_id.leading_text");
+  }
 }
 
 function validateWebImportEntryWindowRequest(value) {
@@ -1740,6 +1754,9 @@ function validateWebImportEntryWindow(value) {
     const hasText = item.text !== undefined && item.text !== null;
     if ((item.content_kind === "text") !== hasText) {
       throw new TypeError(`${path}.text must be present exactly for text content`);
+    }
+    if (item.text?.kind === "attested") {
+      assertImportEvidenceBytes(item.text.leading_text, `${path}.text.leading_text`);
     }
   });
 }
