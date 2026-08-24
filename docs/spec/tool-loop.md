@@ -51,14 +51,16 @@ against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 verified through PR #258 (`agent/signalboxd-rename`), and the Tier 0 catalog
 extension through PR #265 (`agent/tool-batch-tier0`). The Tier 1 code-host
 catalog extension is verified through PR #270 (`agent/tool-batch-tier1`), the
-deterministic review-slog extension through PR #306 (`agent/review-slog-tools`),
-the failed-attempt operator event together with the credential-shaped code-host
-detail through PR #285 (`agent/dev-instance-code-host-credential`), the client
-decision surface through PR #291 (`agent/turn-control-verbs`), and
-runner-protocol batch reconstitution through PR #260
-(`agent/runner-protocol-domain`). Template-derived blanket creation was verified
-through PR #311 (`agent/session-templates-spec`), and the exact-origin
-`web_fetch` egress policy and complete bounded file-patch lookup through PR #330
+review-thread aggregate retention bound through this PR
+(`agent/daemon-live-review-thread-result-budget`), the deterministic review-slog
+extension through PR #306 (`agent/review-slog-tools`), the failed-attempt
+operator event together with the credential-shaped code-host detail through PR
+#285 (`agent/dev-instance-code-host-credential`), the client decision surface
+through PR #291 (`agent/turn-control-verbs`), and runner-protocol batch
+reconstitution through PR #260 (`agent/runner-protocol-domain`).
+Template-derived blanket creation was verified through PR #311
+(`agent/session-templates-spec`), and the exact-origin `web_fetch` egress policy
+and complete bounded file-patch lookup through PR #330
 (`agent/audit-verified-fixes`). The exact-revision repository-read extension is
 verified through PR #348 (`agent/repository-read-tools`) at implementation ref
 `2a55dbb65440dfae31b339b6726fe5ace6dab24c`. The runner executable stack rooted
@@ -1087,7 +1089,11 @@ The declarations and compact result objects are:
 - `change_request_review_threads` accepts `repository` and `number`; it returns
   the first 100 threads and, within each, the first 100 comments. A thread
   carries opaque id, resolution and outdated posture, path, optional line,
-  comments, and `comments_truncated`; the outer result carries `truncated`.
+  comments, and `comments_truncated`; the outer result carries `truncated`. The
+  configured code-host result-text byte bound applies to the complete encoded
+  result. Exhausting it retains an ordered thread-and-comment prefix, marks a
+  shortened comment page with `comments_truncated`, and marks an omitted thread
+  suffix with outer `truncated`.
 - `change_request_thread_reply` accepts `repository`, `number`, an opaque
   `thread_id`, and nonempty `body`; it returns the created comment node id and
   URL. The named change request is the mutation's authority target: an opaque

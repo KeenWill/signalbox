@@ -430,12 +430,12 @@ impl ReviewThreadComment {
         })
     }
 
-    fn into_value(self) -> Value {
+    fn to_value(&self) -> Value {
         json!({
             "author": self.author,
             "body": self.body,
             "id": self.id,
-            "url": self.url.into_string(),
+            "url": self.url.as_str(),
         })
     }
 }
@@ -488,9 +488,9 @@ impl ReviewThread {
         })
     }
 
-    fn into_value(self) -> Value {
+    fn to_value(&self) -> Value {
         json!({
-            "comments": self.comments.into_iter().map(ReviewThreadComment::into_value).collect::<Vec<_>>(),
+            "comments": self.comments.iter().map(ReviewThreadComment::to_value).collect::<Vec<_>>(),
             "comments_truncated": self.comments_truncated,
             "id": self.id,
             "line": self.line,
@@ -515,17 +515,59 @@ impl ReviewThreadsResult {
         threads: Vec<ReviewThread>,
         completeness: CodeHostResultCompleteness,
     ) -> Option<Self> {
-        bounds.permits_result_items(threads.len()).then_some(Self {
-            threads,
+        if !bounds.permits_result_items(threads.len()) {
+            return None;
+        }
+        let text_budget = bounds
+            .result_text_bytes()
+            .map_or(MAX_ENCODED_RESULT_BYTES, |configured| {
+                configured.min(MAX_ENCODED_RESULT_BYTES)
+            });
+
+        let mut result = Self {
+            threads: Vec::with_capacity(threads.len()),
             completeness,
+        };
+        if !result.fits_text_budget(text_budget)? {
+            return None;
+        }
+
+        for thread in threads {
+            result.threads.push(thread);
+            loop {
+                if result.fits_text_budget(text_budget)? {
+                    break;
+                }
+
+                let last = result.threads.last_mut()?;
+                if last.comments.pop().is_some() {
+                    last.comments_truncated = true;
+                    continue;
+                }
+
+                result.threads.pop();
+                result.completeness = CodeHostResultCompleteness::Truncated;
+                return Some(result);
+            }
+        }
+
+        Some(result)
+    }
+
+    fn fits_text_budget(&self, text_budget: usize) -> Option<bool> {
+        let encoded = serde_json::to_vec(&self.to_value()).ok()?;
+        Some(encoded.len() <= text_budget)
+    }
+
+    fn to_value(&self) -> Value {
+        json!({
+            "threads": self.threads.iter().map(ReviewThread::to_value).collect::<Vec<_>>(),
+            "truncated": self.completeness.is_truncated(),
         })
     }
 
     fn into_value(self) -> Value {
-        json!({
-            "threads": self.threads.into_iter().map(ReviewThread::into_value).collect::<Vec<_>>(),
-            "truncated": self.completeness.is_truncated(),
-        })
+        self.to_value()
     }
 }
 
@@ -688,5 +730,148 @@ impl CodeHostResult {
             Self::ThreadInventory(result) => super::review_slog::inventory_into_value(result),
             Self::ReviewGateCheck(result) => super::review_slog::gate_into_value(result),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn comment(id: &str, body: &str) -> ReviewThreadComment {
+        ReviewThreadComment::try_new(
+            crate::code_host::test_numeric_bounds(),
+            id.to_owned(),
+            Some(String::from("reviewer")),
+            body.to_owned(),
+            format!("https://github.example/comments/{id}"),
+        )
+        .expect("fixture comment is valid")
+    }
+
+    fn thread(
+        id: &str,
+        comments: Vec<ReviewThreadComment>,
+        comments_truncated: bool,
+    ) -> ReviewThread {
+        ReviewThread::try_new(
+            crate::code_host::test_numeric_bounds(),
+            ReviewThreadFields {
+                id: id.to_owned(),
+                resolved: false,
+                outdated: false,
+                path: String::from("src/lib.rs"),
+                line: Some(17),
+                comments,
+                comments_truncated,
+            },
+        )
+        .expect("fixture thread is valid")
+    }
+
+    fn fixture_result(
+        threads: Vec<ReviewThread>,
+        completeness: CodeHostResultCompleteness,
+    ) -> Value {
+        ReviewThreadsResult::try_new(
+            crate::code_host::test_numeric_bounds(),
+            threads,
+            completeness,
+        )
+        .expect("fixture result is valid")
+        .into_value()
+    }
+
+    fn encoded_len(value: &Value) -> usize {
+        serde_json::to_vec(value)
+            .expect("fixture result encodes")
+            .len()
+    }
+
+    /// The configured text ceiling applies to the complete encoded result
+    /// while a retained thread reports its shortened comment page locally.
+    #[test]
+    fn review_threads_result_bounds_nested_comments_without_inventing_a_thread_suffix() {
+        let complete_prefix = fixture_result(
+            vec![thread(
+                "PRRT_first",
+                vec![comment("PRRC_first", "first finding")],
+                false,
+            )],
+            CodeHostResultCompleteness::Complete,
+        );
+        let encoded_limit = encoded_len(&complete_prefix);
+        let bounds =
+            CodeHostNumericBounds::new(None, None, None, Some(encoded_limit), Some(100), None);
+        let actual = ReviewThreadsResult::try_new(
+            bounds,
+            vec![thread(
+                "PRRT_first",
+                vec![
+                    comment("PRRC_first", "first finding"),
+                    comment("PRRC_second", "second finding"),
+                ],
+                false,
+            )],
+            CodeHostResultCompleteness::Complete,
+        )
+        .expect("a bounded prefix remains representable")
+        .into_value();
+        let expected = fixture_result(
+            vec![thread(
+                "PRRT_first",
+                vec![comment("PRRC_first", "first finding")],
+                true,
+            )],
+            CodeHostResultCompleteness::Complete,
+        );
+
+        assert_eq!(actual, expected);
+        assert!(encoded_len(&actual) <= encoded_limit);
+    }
+
+    /// An aggregate ceiling that cannot retain the next thread marks the outer
+    /// page truncated without rewriting the retained thread's comment posture.
+    #[test]
+    fn review_threads_result_marks_an_omitted_thread_suffix() {
+        let complete_prefix = fixture_result(
+            vec![thread(
+                "PRRT_first",
+                vec![comment("PRRC_first", "first finding")],
+                false,
+            )],
+            CodeHostResultCompleteness::Complete,
+        );
+        let encoded_limit = encoded_len(&complete_prefix);
+        let bounds =
+            CodeHostNumericBounds::new(None, None, None, Some(encoded_limit), Some(100), None);
+        let actual = ReviewThreadsResult::try_new(
+            bounds,
+            vec![
+                thread(
+                    "PRRT_first",
+                    vec![comment("PRRC_first", "first finding")],
+                    false,
+                ),
+                thread(
+                    "PRRT_second",
+                    vec![comment("PRRC_second", "second finding")],
+                    false,
+                ),
+            ],
+            CodeHostResultCompleteness::Complete,
+        )
+        .expect("a bounded thread prefix remains representable")
+        .into_value();
+        let expected = fixture_result(
+            vec![thread(
+                "PRRT_first",
+                vec![comment("PRRC_first", "first finding")],
+                false,
+            )],
+            CodeHostResultCompleteness::Truncated,
+        );
+
+        assert_eq!(actual, expected);
+        assert!(encoded_len(&actual) <= encoded_limit);
     }
 }
