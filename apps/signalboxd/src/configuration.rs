@@ -1544,6 +1544,10 @@ impl HubModelConfiguration {
     }
 
     /// Derives a labeled USD figure from widened aggregate token totals.
+    ///
+    /// Every reported axis must price exactly; when any reported axis cannot
+    /// be represented by exact decimal arithmetic, the whole derivation is
+    /// absent rather than an understated partial total.
     pub(crate) fn derive_usage_aggregate_cost(
         &self,
         target: ResolvedProviderTarget,
@@ -1572,7 +1576,7 @@ impl HubModelConfiguration {
             },
             ProcessModelCallInputTokenSemantics::CacheExclusive => input_tokens,
         };
-        let amount_usd = fold_usage_aggregate_cost([
+        let amount_usd = fold_reported_cost([
             (ordinary_input_tokens, rates.input),
             (output_tokens, rates.output),
             (cache_creation_input_tokens, rates.cache_creation_input),
@@ -2614,38 +2618,6 @@ fn fold_reported_cost(axes: [(Option<u128>, Decimal); 4]) -> Option<Decimal> {
         amount = next_amount;
     }
     reported.then(|| amount.normalize())
-}
-
-fn fold_usage_aggregate_cost(axes: [(Option<u128>, Decimal); 4]) -> Option<Decimal> {
-    const TOKENS_PER_MILLION: u64 = 1_000_000;
-    let divisor = Decimal::from(TOKENS_PER_MILLION);
-    let mut amount = Decimal::ZERO;
-    let mut priced = false;
-    for (tokens, rate) in axes {
-        let Some(tokens) = tokens else {
-            continue;
-        };
-        let Some(numerator) = exact_rate_token_product(rate, tokens) else {
-            continue;
-        };
-        let Some(axis_cost) = numerator.checked_div(divisor) else {
-            continue;
-        };
-        if axis_cost.checked_mul(divisor) != Some(numerator) {
-            continue;
-        }
-        let Some(next_amount) = amount.checked_add(axis_cost) else {
-            continue;
-        };
-        if next_amount.checked_sub(amount) != Some(axis_cost)
-            || next_amount.checked_sub(axis_cost) != Some(amount)
-        {
-            continue;
-        }
-        amount = next_amount;
-        priced = true;
-    }
-    priced.then(|| amount.normalize())
 }
 
 fn exact_rate_token_product(rate: Decimal, tokens: u128) -> Option<Decimal> {
@@ -5712,19 +5684,17 @@ selection_id = "10000000-0000-4000-8000-000000000001"
     }
 
     #[test]
-    fn widened_usage_aggregate_cost_preserves_an_independently_priceable_axis() {
+    fn widened_usage_aggregate_cost_fails_whole_when_one_reported_axis_is_unpriceable() {
         let configuration =
             HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
-        let cost = configuration
-            .derive_usage_aggregate_cost(
-                configured_target(&configuration),
-                "anthropic-primary",
-                ProcessModelCallInputTokenSemantics::CacheExclusive,
-                [Some(u128::MAX), Some(1_000_000), None, None],
-            )
-            .expect("the representable output axis remains priceable");
+        let cost = configuration.derive_usage_aggregate_cost(
+            configured_target(&configuration),
+            "anthropic-primary",
+            ProcessModelCallInputTokenSemantics::CacheExclusive,
+            [Some(u128::MAX), Some(1_000_000), None, None],
+        );
 
-        assert_eq!(cost.amount_usd().to_string(), "15");
+        assert_eq!(cost, None, "an unpriceable input axis must not be dropped");
     }
 
     #[test]
