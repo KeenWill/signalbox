@@ -1,5 +1,6 @@
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
 import { useCallback, useEffect, useMemo, useSyncExternalStore } from 'react'
 import {
   type CommandContext,
@@ -49,6 +50,7 @@ function useCommandHotkeys(context: CommandContext) {
 }
 
 export function Workspace({ scenarioId }: { scenarioId: string }) {
+  const navigate = useNavigate()
   const focusWorkspace = useCallback((node: HTMLElement | null) => {
     node?.focus()
   }, [])
@@ -95,8 +97,9 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
         if (active instanceof HTMLElement) active.blur()
         document.querySelector<HTMLElement>('[aria-label="Session timeline"]')?.focus()
       },
+      navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
     }),
-    [dispatch, timelineIds],
+    [dispatch, navigate, timelineIds],
   )
   useCommandHotkeys(commandContext)
 

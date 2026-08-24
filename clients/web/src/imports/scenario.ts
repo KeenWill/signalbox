@@ -102,7 +102,7 @@ const entryAt = (conversation: string, position: number): WebImportedEntry => {
 
 export class ScenarioImportApi implements ImportApi {
   private logicalTotal = SCENARIO_IMPORT_TOTAL
-  private nextSessionIdentity = 9_000_000
+  private nextSessionIdentity: number | null = null
   private readonly continuationSessions = new Map<string, string>()
 
   injectConcurrentImport(): void {
@@ -202,8 +202,10 @@ export class ScenarioImportApi implements ImportApi {
   ): Promise<WebImportContinuationResponse> {
     let sessionId = this.continuationSessions.get(request.command_id)
     if (sessionId === undefined) {
-      sessionId = fixtureUuid(this.nextSessionIdentity)
-      this.nextSessionIdentity += 1
+      const sessionIdentity =
+        this.nextSessionIdentity ?? 9_000_000 + request.frontier.position
+      sessionId = fixtureUuid(sessionIdentity)
+      this.nextSessionIdentity = sessionIdentity + 1
       this.continuationSessions.set(request.command_id, sessionId)
     }
     return {
